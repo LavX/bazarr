@@ -662,6 +662,7 @@ validators = [
     # Validate new credential input before assignment, never interpolate a stored secret.
     Validator('discover.tmdb_access_token', default=''),
     Validator('discover.locale', default='en-US'),
+    Validator('general.metadata_language', default=''),
 ]
 
 
@@ -985,6 +986,7 @@ def _get_settings():
     settings_to_return.setdefault("discover", {}).update({
         "tmdb_configured": bool(metadata_config.token), "tmdb_token_stored": reader_token_stored(),
         "metadata_revision": metadata_config.revision})
+    settings_to_return.setdefault("general", {})["metadata_language"] = metadata_config.locale
     return settings_to_return
 
 
@@ -1106,10 +1108,11 @@ def _require_provider_order_for_custom_routing(settings_items):
 
 def validate_metadata_settings(settings_items):
     from discover.metadata import validate_token
-    allowed = {"settings-discover-tmdb_access_token", "settings-discover-locale"}
+    allowed = {"settings-discover-tmdb_access_token", "settings-discover-locale",
+               "settings-general-metadata_language"}
     seen = set()
     for key, values in settings_items:
-        if not key.lower().startswith("settings-discover-"):
+        if not key.lower().startswith("settings-discover-") and key.lower() != "settings-general-metadata_language":
             continue
         if key not in allowed or key in seen:
             raise ValidationError("Invalid Discover setting.")
@@ -1180,16 +1183,21 @@ def save_settings(settings_items):
 
     from discover.metadata import CONFIG_LOCK, invalidate_metadata
     with CONFIG_LOCK:
-        if not any(key.startswith("settings-discover-") for key, _ in items):
+        if not any(key.startswith("settings-discover-") or key == "settings-general-metadata_language"
+                   for key, _ in items):
             return _save_settings_with_native(items)
         previous = dict(settings.discover)
+        previous_language = settings.get("general.metadata_language", "")
+        effective_language = previous_language
         effective = dict(previous)
         for key, values in items:
+            if key == "settings-general-metadata_language":
+                effective_language = values[0]
             if key.startswith("settings-discover-"):
                 field = key.removeprefix("settings-discover-")
                 if field != "tmdb_access_token" or values[0] != "***":
                     effective[field] = values[0]
-        changed = effective != previous
+        changed = effective != previous or effective_language != previous_language
         persisted = False
 
         def metadata_persisted():
@@ -1206,6 +1214,7 @@ def save_settings(settings_items):
                     "Discover settings were saved, but application refresh failed. Reload settings before retrying."
                 ) from None
             settings.set("discover", previous)
+            settings.set("general.metadata_language", previous_language)
             raise
 
 

@@ -842,11 +842,11 @@ def test_source_cutoff_is_rechecked_at_provider_admission(authenticated_client, 
     elif stage == "creator_coverage":
         original = discover_search._coverage
         calls = []
-        def coverage(*args):
+        def coverage(*args, **kwargs):
             calls.append(True)
             if len(calls) == 2:
                 advance()
-            return original(*args)
+            return original(*args, **kwargs)
         monkeypatch.setattr(discover_search, "_coverage", coverage)
     else:
         original = service._build_video

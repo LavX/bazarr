@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import datetime as dt
 import hashlib
 import json
+import os
 import re
 import time
 import uuid
@@ -220,7 +221,7 @@ def _pool_state(pool):
         return pool._discover_state
 
 
-def _coverage(pool, state):
+def _coverage(pool, state, *, has_file=False):
     # Registration performs catalog validation. Check the actual class too:
     # historical registration IDs can outlive a removed/rejected installation.
     available = set(get_providers.get_providers_sorted() or [])
@@ -248,7 +249,13 @@ def _coverage(pool, state):
             status, reason = "setup_required", "provider_unavailable"
         elif not issubclass(cls, registry.HubProxyProvider) or name not in trusted:
             status, reason = "skipped", "not_catalog_provider"
-        elif name in service._SKIP_FOR_VIRTUAL_VIDEO:
+        elif any(
+                field not in pool.provider_configs.get(name, {})
+                or pool.provider_configs[name][field] is None
+                or pool.provider_configs[name][field] == ""
+                for field in getattr(getattr(cls, "manifest", None), "config_schema", {}).get("required", [])):
+            status, reason = "setup_required", "missing_configuration"
+        elif name in service._SKIP_FOR_VIRTUAL_VIDEO and not has_file:
             status, reason = "skipped", "requires_file"
         elif name in cooldowns and cooldowns[name][0] > now:
             until, prior = cooldowns[name]
@@ -352,12 +359,12 @@ def _result(sub, video, context, search_id, checked_at, ttl, parsed=None):
     }
 
 
-def search(request: SearchRequest) -> dict:
+def search(request: SearchRequest, on_progress=None) -> dict:
     context, refresh = request.context, request.refresh
     pool = service._get_compat_pool(restore_available=True)
     state = _pool_state(pool)
     language = _language(context["language"])
-    planned, initial = _coverage(pool, state)
+    planned, initial = _coverage(pool, state, has_file=bool(request.copy and os.path.isfile(request.copy["path"])))
     key = "discover:" + state["namespace"] + ":" + cache.build_key(
         context.get("media_type"), context.get("imdb_id"), context.get("season"), context.get("episode"),
         [language], sorted(set(settings.general.enabled_providers or [])),
@@ -387,7 +394,7 @@ def search(request: SearchRequest) -> dict:
         created = True
         # Recompute under the cache creator lock so a preceding search's
         # cooldown applies even to a concurrent explicit refresh.
-        providers, outcomes = _coverage(pool, state)
+        providers, outcomes = _coverage(pool, state, has_file=bool(request.copy and os.path.isfile(request.copy["path"])))
         now = time.time()
         checked = _iso(now)
         search_id = uuid.uuid4().hex
@@ -404,6 +411,14 @@ def search(request: SearchRequest) -> dict:
             # hash and release description. Confirmed identity is untouched.
             service.refine_video_with_copy(video, request.copy)
 
+        def report_progress():
+            if on_progress is not None:
+                on_progress({"phase": "searching", "providers": [
+                    outcomes.get(name, {"provider": name, "status": "pending", "result_count": 0})
+                    for name in sorted(set(providers) | set(outcomes))]})
+
+        report_progress()
+
         def on_outcome(outcome, elapsed):
             if outcome.provider not in providers:
                 return
@@ -411,6 +426,11 @@ def search(request: SearchRequest) -> dict:
             item = {"provider": outcome.provider, "status": "unverified" if unverified else outcome.status,
                     "reason": "query_support_unverified" if unverified else outcome.reason,
                     "result_count": len(outcome.subtitles), "elapsed_ms": elapsed, "retry_at": None}
+            manifest = getattr(provider_registry[outcome.provider], "manifest", None)
+            if outcome.reason == "unsupported_media" and manifest is not None:
+                item["supported_media"] = list(manifest.supported_media)
+            if outcome.reason == "unsupported_language" and manifest is not None:
+                item["supported_languages"] = list(manifest.languages)
             if outcome.status not in _COMPLETE and outcome.status != "skipped":
                 delay = outcome.retry_after or (300 if outcome.status in {"authentication_required", "setup_required"}
                                                 else 60)
@@ -419,6 +439,7 @@ def search(request: SearchRequest) -> dict:
                 with _STATE_LOCK:
                     state["cooldowns"][outcome.provider] = (until, dict(item))
             outcomes[outcome.provider] = item
+            report_progress()
 
         # This is admission to one provider operation. Cache-creator and
         # preparation waits precede it; admitted work may finish after expiry.
@@ -437,10 +458,12 @@ def search(request: SearchRequest) -> dict:
         # Successful empty searches replace their earlier results.
         if previous_exists:
             rows.extend({**row, "stale": True} for row in previous["results"]
-                        if outcomes.get(row["provider"], {}).get("status") not in _COMPLETE
+                        if row["provider"] in outcomes
+                        and outcomes[row["provider"]]["status"] not in _COMPLETE | {"skipped"}
                         and resolve_result(row["id"]) is not None)
         completed = sum(item["status"] in _COMPLETE for item in outcomes.values())
-        incomplete = len(outcomes) - completed
+        incomplete = sum(item["status"] not in _COMPLETE | {"skipped"}
+                         for item in outcomes.values())
         status = "complete" if completed and not incomplete else "partial" if completed or rows else "failed"
         stale = any(row["stale"] for row in rows)
         return {

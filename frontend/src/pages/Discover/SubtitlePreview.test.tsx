@@ -194,27 +194,34 @@ beforeEach(() => {
     ),
   );
 });
-it("uses the real modal, literal cues and retained forced-row identity for preview and download", async () => {
+it("renders an inline preview with literal cues and retained forced-row identity for download", async () => {
   const { user } = renderPreview();
   const opener = await open(user);
   const modal = within(
-    await screen.findByRole("dialog", { name: "Subtitle preview" }),
+    await screen.findByRole("region", { name: "Text preview" }),
   );
   expect(await modal.findByText(cue)).toBeInTheDocument();
   expect(modal.getByText(/Northern Light S02 E01/)).toBeInTheDocument();
-  expect(modal.getByText("Northern.Light.S02E01.forced")).toBeInTheDocument();
-  expect(modal.getByText(/does not verify timing/)).toBeInTheDocument();
+  expect(
+    modal.getAllByText(/Northern\.Light\.S02E01\.forced/)[0],
+  ).toBeInTheDocument();
+  expect(
+    modal.getByText(/Timing against your video has not been checked/),
+  ).toBeInTheDocument();
   expect(modal.getByText(cue)).toContainHTML(
     "Hello &lt;script&gt;alert(1)&lt;/script&gt;",
   );
   expect(previewRequests).toEqual([
     { result: "exact-forced", search: "original-search", authenticated: true },
   ]);
-  await user.click(modal.getByRole("button", { name: "Download SRT" }));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  await user.click(forcedRow().getByRole("button", { name: "Download SRT" }));
   await waitFor(() => expect(save).toHaveBeenCalledOnce());
-  await user.keyboard("{Escape}");
+  await user.click(modal.getByRole("button", { name: "Close preview" }));
   await waitFor(() =>
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    expect(
+      screen.queryByRole("region", { name: "Text preview" }),
+    ).not.toBeInTheDocument(),
   );
   await waitFor(() => expect(opener).toHaveFocus());
 });
@@ -224,15 +231,21 @@ it("preserves ready preview across theme and local navigation and closes exactly
   await screen.findByText(cue);
   act(() => changeTheme());
   await act(() => router.navigate("/activity"));
-  expect(screen.getByText(cue)).toBeInTheDocument();
+  expect(screen.queryByText(cue)).not.toBeInTheDocument();
   await act(() => router.navigate("/discover"));
+  expect(screen.getByText(cue)).toBeInTheDocument();
   await user.click(
-    within(screen.getByRole("dialog")).getByRole("button", {
-      name: "Close preview",
-    }),
+    within(screen.getByRole("region", { name: "Text preview" })).getByRole(
+      "button",
+      {
+        name: "Close preview",
+      },
+    ),
   );
   await waitFor(() =>
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    expect(
+      screen.queryByRole("region", { name: "Text preview" }),
+    ).not.toBeInTheDocument(),
   );
   expect(forcedRow().getByRole("button", { name: "Preview" })).toHaveFocus();
   expect(previewRequests).toHaveLength(1);
@@ -291,7 +304,9 @@ it.each(changes)(
       ).toBe(0),
     );
     await waitFor(() =>
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+      expect(
+        screen.queryByRole("region", { name: "Text preview" }),
+      ).not.toBeInTheDocument(),
     );
     expect(screen.queryByText(cue)).not.toBeInTheDocument();
     expect(
@@ -305,7 +320,9 @@ it("clears preview on authentication loss", async () => {
   await screen.findByText(cue);
   act(() => setAuthenticated(false));
   await waitFor(() =>
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    expect(
+      screen.queryByRole("region", { name: "Text preview" }),
+    ).not.toBeInTheDocument(),
   );
   expect(screen.queryByText(cue)).not.toBeInTheDocument();
 });
@@ -328,9 +345,16 @@ it("shows parser recovery without invented cues and retires an expired row", asy
   );
   await user.click(screen.getByRole("button", { name: "Retry preview" }));
   expect(await screen.findByText(/result has expired/)).toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: "Close preview" }));
+  await user.click(
+    within(screen.getByRole("region", { name: "Text preview" })).getByRole(
+      "button",
+      { name: "Close preview" },
+    ),
+  );
   await waitFor(() =>
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    expect(
+      screen.queryByRole("region", { name: "Text preview" }),
+    ).not.toBeInTheDocument(),
   );
   expect(forcedRow().getByRole("button", { name: "Preview" })).toBeDisabled();
 });
@@ -356,7 +380,7 @@ it("retires a pending download when preview discovers that the same handle expir
   await user.click(forcedRow().getByRole("button", { name: "Download SRT" }));
   await waitFor(() => expect(finish).toBeDefined());
   await user.click(forcedRow().getByRole("button", { name: "Preview" }));
-  await screen.findByRole("dialog");
+  await screen.findByRole("region", { name: "Text preview" });
   await screen.findByText(
     "This result has expired. Search again for the same selection.",
   );
@@ -366,9 +390,16 @@ it("retires a pending download when preview discovers that the same handle expir
       queryClient.isMutating({ mutationKey: [QueryKeys.Discover, "preview"] }),
     ).toBe(0),
   );
-  await user.click(screen.getByRole("button", { name: "Close preview" }));
+  await user.click(
+    within(screen.getByRole("region", { name: "Text preview" })).getByRole(
+      "button",
+      { name: "Close preview" },
+    ),
+  );
   await waitFor(() =>
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    expect(
+      screen.queryByRole("region", { name: "Text preview" }),
+    ).not.toBeInTheDocument(),
   );
   expect(
     forcedRow("full").getByRole("button", { name: "Download SRT" }),
@@ -384,7 +415,9 @@ it.each(changes)(
     await screen.findByText(cue);
     act(() => changeDraft(changes));
     await waitFor(() =>
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+      expect(
+        screen.queryByRole("region", { name: "Text preview" }),
+      ).not.toBeInTheDocument(),
     );
     expect(screen.queryByText(cue)).not.toBeInTheDocument();
   },
@@ -411,7 +444,9 @@ it("never reopens a preview closed while its bytes were pending", async () => {
   const opener = await open(user);
   await waitFor(() => expect(finish).toBeDefined());
   await user.click(
-    await screen.findByRole("button", { name: "Close preview" }),
+    within(
+      await screen.findByRole("region", { name: "Text preview" }),
+    ).getByRole("button", { name: "Close preview" }),
   );
   finish?.();
   await waitFor(() =>
@@ -420,7 +455,9 @@ it("never reopens a preview closed while its bytes were pending", async () => {
     ).toBe(0),
   );
   await waitFor(() =>
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    expect(
+      screen.queryByRole("region", { name: "Text preview" }),
+    ).not.toBeInTheDocument(),
   );
   expect(opener).toHaveFocus();
   expect(screen.queryByText(cue)).not.toBeInTheDocument();
@@ -463,7 +500,9 @@ it("retains raw preview during inactive episode updates and invalidates it on qu
   expect(screen.getByText(cue)).toBeInTheDocument();
   act(() => changeDraft({ query: "Northern.Light.S02E02" }));
   await waitFor(() =>
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    expect(
+      screen.queryByRole("region", { name: "Text preview" }),
+    ).not.toBeInTheDocument(),
   );
 });
 
@@ -481,7 +520,9 @@ it("clears actual preview state after the authenticated client receives 401", as
     ).toBe(0),
   );
   await waitFor(() =>
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    expect(
+      screen.queryByRole("region", { name: "Text preview" }),
+    ).not.toBeInTheDocument(),
   );
   expect(screen.queryByText(cue)).not.toBeInTheDocument();
 });
@@ -519,7 +560,21 @@ it("retains the preview on failed refresh but discards it when refreshed results
   );
   await act(() => findSubtitles(true));
   await waitFor(() =>
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    expect(
+      screen.queryByRole("region", { name: "Text preview" }),
+    ).not.toBeInTheDocument(),
   );
   expect(screen.queryByText(cue)).not.toBeInTheDocument();
+});
+
+it("closes the inline preview with Escape and returns focus to its result", async () => {
+  const { user } = renderPreview();
+  const opener = await open(user);
+  await screen.findByText(cue);
+  expect(screen.getByText("Text preview")).toHaveFocus();
+  await user.keyboard("{Escape}");
+  expect(
+    screen.queryByRole("region", { name: "Text preview" }),
+  ).not.toBeInTheDocument();
+  expect(opener).toHaveFocus();
 });

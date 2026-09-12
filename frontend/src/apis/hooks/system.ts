@@ -75,7 +75,12 @@ export function useSettingsMutation(retryingMetadataRefresh = false) {
   const retireMetadata = (changes: LooseObject, retrying = false) => {
     const names = Object.keys(changes);
     const tmdbChanged =
-      retrying || names.some((key) => key.startsWith("settings-discover-"));
+      retrying ||
+      names.some(
+        (key) =>
+          key.startsWith("settings-discover-") ||
+          key === "settings-general-metadata_language",
+      );
     const omdbChanged = names.includes("settings-omdb-apikey");
     if (!tmdbChanged && !omdbChanged) return;
     const filters = {

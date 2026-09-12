@@ -7,8 +7,9 @@ import { afterEach, beforeEach, expect, it } from "vitest";
 import { AllProviders } from "@/providers";
 import { act, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
+import { readableFeedDate } from "./feedText";
 import { selectInput } from "./selectTestHelpers";
-import Discover from ".";
+import Discover from "./testHarness";
 import styles from "./Discover.module.scss";
 
 const day = () => new Date().toISOString().slice(0, 10);
@@ -188,10 +189,11 @@ it("browses true recent episode dates and partial coverage without provider requ
   expect(
     await screen.findByRole("button", { name: /Northern Light.*Home/ }),
   ).toBeEnabled();
-  expect(screen.getByText(/Incomplete episode coverage/)).toBeInTheDocument();
-  expect(screen.getByText(/not a complete schedule/)).toBeInTheDocument();
+  expect(
+    screen.queryByLabelText("Episode source and freshness"),
+  ).not.toBeInTheDocument();
   await user.click(
-    screen.getByRole("button", { name: "Refresh recent episodes" }),
+    screen.getByRole("button", { name: "Refresh new episodes" }),
   );
   expect(searches).toEqual([]);
 });
@@ -235,7 +237,7 @@ it("keeps a source date whole rather than breaking it across lines", async () =>
   const item = await screen.findByRole("button", {
     name: /Northern Light.*Home/,
   });
-  const stamp = within(item).getByText(day());
+  const stamp = within(item).getByText(readableFeedDate(day()));
   expect(stamp.tagName).toBe("TIME");
   expect(stamp).toHaveAttribute("datetime", day());
   expect(stamp).toHaveClass(styles.dateValue);
@@ -245,7 +247,7 @@ it("opens the exact source episode and retains date, explicit target mapping and
   await user.click(
     await screen.findByRole("button", { name: /Northern Light.*Home/ }),
   );
-  await screen.findByText(/Verified TVDB default order: season 3, episode 7/);
+  await screen.findByDisplayValue("1. Home");
   expect(screen.getByLabelText("Selected recent episode")).toHaveTextContent(
     day(),
   );
@@ -302,15 +304,15 @@ it.each(["unverified", "conflict"])(
     await user.click(
       await screen.findByRole("button", { name: /Northern Light.*Home/ }),
     );
-    await screen.findByLabelText("Selected episode");
+    await screen.findByDisplayValue("1. Home");
     expect(
       screen.getByRole("button", { name: "Find subtitles" }),
     ).toBeDisabled();
     if (identityStatus === "unverified") {
       await user.click(
-        screen.getByRole("button", { name: "Enter a manual episode" }),
+        screen.getByRole("button", { name: "Enter episode numbers manually" }),
       );
-      await user.type(screen.getByLabelText("Season"), "3");
+      await user.type(screen.getByRole("textbox", { name: "Season" }), "3");
       await user.type(screen.getByRole("textbox", { name: "Episode" }), "7");
       expect(
         screen.getByRole("button", { name: "Find subtitles" }),
@@ -328,7 +330,9 @@ it.each(["unverified", "conflict"])(
       });
     } else {
       expect(
-        screen.getByText(/Source episode identities conflict/),
+        screen.getByText(
+          /Episode numbering does not match between metadata sources/,
+        ),
       ).toBeInTheDocument();
       expect(searches).toEqual([]);
     }
@@ -408,11 +412,11 @@ it.each(["empty", "unavailable", "authentication_failed", "cached", "expired"])(
     if (status === "empty")
       await screen.findByText(/No qualifying episodes were found/);
     if (status === "unavailable" || status === "expired")
-      await screen.findByText(/Recent episodes are temporarily unavailable/);
+      await screen.findByText(/New episodes are temporarily unavailable/);
     if (status === "authentication_failed")
       await screen.findByText(/TMDB rejected the key Discover is using/);
     if (status === "cached")
-      await screen.findByText(/Cached TMDB episode records/);
+      await screen.findByText(/Some source checks are unavailable/);
     if (status !== "cached")
       expect(
         screen.queryByRole("button", { name: /Northern Light.*Home/ }),
@@ -433,7 +437,7 @@ it.each([
     ),
   );
   browse();
-  await screen.findByText(/Recent episodes are temporarily unavailable/);
+  await screen.findByText(/New episodes are temporarily unavailable/);
   expect(
     screen.queryByRole("button", { name: /Northern Light.*Home/ }),
   ).not.toBeInTheDocument();

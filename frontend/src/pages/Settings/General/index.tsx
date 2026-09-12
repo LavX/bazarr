@@ -28,6 +28,7 @@ import {
   Text,
 } from "@/pages/Settings/components";
 import { useBaseInput } from "@/pages/Settings/utilities/hooks";
+import { useSettings } from "@/pages/Settings/utilities/SettingsProvider";
 import { Environment, toggleState } from "@/utilities";
 import ExternalWebhookSelector from "./ExternalWebhookSelector";
 import { branchOptions, proxyOptions, securityOptions } from "./options";
@@ -116,6 +117,55 @@ const generateApiKey = () => {
     .join("");
 };
 
+export function MetadataLanguage() {
+  const settings = useSettings();
+  const locale =
+    settings?.general.metadata_language || settings?.discover?.locale;
+  return (
+    <Selector
+      label="Metadata language"
+      searchable
+      settingKey="settings-general-metadata_language"
+      settingOptions={{
+        onLoaded: (settings) =>
+          settings.general.metadata_language ||
+          settings.discover?.locale ||
+          "en-US",
+      }}
+      options={[
+        { value: "en-US", label: "English (United States)" },
+        { value: "en-GB", label: "English (United Kingdom)" },
+        { value: "hu-HU", label: "Hungarian" },
+        { value: "de-DE", label: "German" },
+        { value: "fr-FR", label: "French" },
+        { value: "es-ES", label: "Spanish" },
+        { value: "it-IT", label: "Italian" },
+        { value: "pt-BR", label: "Portuguese (Brazil)" },
+        { value: "ja-JP", label: "Japanese" },
+        { value: "ko-KR", label: "Korean" },
+        { value: "zh-CN", label: "Chinese (Simplified)" },
+      ].concat(
+        locale &&
+          ![
+            "en-US",
+            "en-GB",
+            "hu-HU",
+            "de-DE",
+            "fr-FR",
+            "es-ES",
+            "it-IT",
+            "pt-BR",
+            "ja-JP",
+            "ko-KR",
+            "zh-CN",
+          ].includes(locale)
+          ? [{ value: locale, label: locale }]
+          : [],
+      )}
+    />
+  );
+}
+
 const SettingsGeneralView: FunctionComponent = () => {
   const { data: status } = useSystemStatus();
   const [copied, setCopy] = useState(false);
@@ -155,6 +205,13 @@ const SettingsGeneralView: FunctionComponent = () => {
         <Message>
           Hostname or IP address to access Bazarr (ie: bazarr.mydomain.local or
           192.168.0.100). Required for webhook security.
+        </Message>
+      </Section>
+      <Section header="Metadata">
+        <MetadataLanguage />
+        <Message>
+          Preferred language for titles and descriptions across Bazarr+.
+          Subtitle languages are managed separately.
         </Message>
       </Section>
       <Section header="Media">

@@ -35,7 +35,6 @@ import MovieView from "@/pages/Movies";
 import MovieDetailView from "@/pages/Movies/Details";
 import SeriesView from "@/pages/Series";
 import SettingsConnectionsView from "@/pages/Settings/Connections";
-import SettingsDiscoverView from "@/pages/Settings/Discover";
 import SettingsGeneralView from "@/pages/Settings/General";
 import SettingsLanguagesView from "@/pages/Settings/Languages";
 import SettingsNotificationsView from "@/pages/Settings/Notifications";
@@ -211,8 +210,13 @@ function useRoutes(): CustomRouteObject[] {
             children: [
               {
                 path: "discover",
-                name: "Discover",
-                element: <SettingsDiscoverView></SettingsDiscoverView>,
+                hidden: true,
+                element: (
+                  <Navigate
+                    to="/subtitle-hub?tab=my-providers#metadata"
+                    replace
+                  />
+                ),
               },
               {
                 path: "connections",

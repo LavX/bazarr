@@ -9,9 +9,13 @@ import { AllProviders } from "@/providers";
 import { act, fireEvent, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import type { TrendingFeed, TrendingTitle } from "@/types/discover";
-import { findSelectInput, pickOption, selectInput } from "./selectTestHelpers";
-import Discover from ".";
-import styles from "./Discover.module.scss";
+import {
+  findSelectInput,
+  openReleaseSearch,
+  openSearchOptions,
+  pickOption,
+} from "./selectTestHelpers";
+import Discover from "./testHarness";
 
 const movie: TrendingTitle = {
   source_id: "tmdb:movie:42",
@@ -61,12 +65,67 @@ function envelope(kind: string): TrendingFeed {
       : [],
   };
 }
+function summaryEnvelope() {
+  return {
+    generated_at: "2026-09-01T12:00:00Z",
+    state: "quiet",
+    activity: {
+      availability: "available",
+      observed_at: "2026-09-01T12:00:00Z",
+      complete: true,
+      truncated: false,
+      unknown_sources: [],
+      running_count: 0,
+      queued_count: 0,
+      scheduled_count: 0,
+      running: [],
+      queued: [],
+      scheduled: [],
+    },
+    wanted: {
+      availability: "available",
+      observed_at: "2026-09-01T12:00:00Z",
+      requirements: 0,
+      episode_requirements: 0,
+      movie_requirements: 0,
+      media_count: 0,
+      unknown_media_count: 0,
+      complete: true,
+      qualifications: [],
+      by_instance: [],
+    },
+    arrivals: [],
+    arrivals_status: {
+      availability: "available",
+      observed_at: "2026-09-01T12:00:00Z",
+      complete: true,
+      truncated: false,
+      candidate_limit: 25,
+      display_limit: 4,
+      qualifications: [],
+    },
+    attention: {
+      availability: "available",
+      observed_at: "2026-09-01T12:00:00Z",
+      complete: true,
+      unknown_sources: [],
+      items: [],
+    },
+    onboarding: {
+      availability: "available",
+      observed_at: "2026-09-01T12:00:00Z",
+      complete: true,
+      items: [],
+    },
+  };
+}
 function browse(initial = "/discover", fixedShell = false) {
   const router = createMemoryRouter(
     [
       { path: "/discover", element: <Discover /> },
       { path: "/system/tasks", element: <div>Local activity</div> },
-      { path: "/settings/discover", element: <div>Metadata setup</div> },
+      { path: "/history/series", element: <div>Local history</div> },
+      { path: "/subtitle-hub", element: <div>Metadata setup</div> },
     ],
     { initialEntries: [initial] },
   );
@@ -161,6 +220,9 @@ beforeEach(() => {
       searches.push(await request.json());
       return new HttpResponse(null, { status: 503 });
     }),
+    http.get("/api/discover/summary", () =>
+      HttpResponse.json(summaryEnvelope()),
+    ),
   );
 });
 
@@ -172,31 +234,31 @@ it("shows sourced weekly global titles without local media or subtitle language"
   expect(
     await screen.findByRole("button", { name: "Explore Northern Light" }),
   ).toBeEnabled();
-  expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
-  expect(selectInput("Subtitle language")).toHaveValue("");
-  expect(screen.getByRole("img", { name: "TMDB" })).toBeInTheDocument();
+  // The homepage carries no retrieval controls. Language and Find live in
+  // detail once a title is selected.
+  expect(
+    screen.queryByRole("button", { name: "Find subtitles" }),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("Subtitle language")).not.toBeInTheDocument();
+  expect(screen.queryByRole("img", { name: "TMDB" })).not.toBeInTheDocument();
   expect(searches).toEqual([]);
 });
 
-it("keeps the metadata caveat visible while the homepage carries one source attribution", async () => {
+it("keeps source attribution out of the dashboard flow", async () => {
   browse();
   await screen.findByRole("button", { name: "Explore Northern Light" });
-  // The homepage renders the shared attribution once and suppresses the search
-  // section's copy of that one sentence by name. The availability caveat is a
-  // separate statement and is not part of that suppression.
+  // The search section carries no attribution copy of its own: the homepage
+  // renders the shared attribution once, and no availability caveat.
   expect(
-    screen.getByText(
+    screen.queryByText(
+      /This product uses the TMDB API but is not endorsed or certified by TMDB/,
+    ),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByText(
       /Metadata does not establish subtitle availability or compatibility/,
     ),
-  ).toBeInTheDocument();
-  const attributions = screen.getAllByText(
-    /This product uses the TMDB API but is not endorsed or certified by TMDB/,
-  );
-  expect(
-    attributions.some((node) =>
-      node.classList.contains(styles.sourceAttribution),
-    ),
-  ).toBe(true);
+  ).toBeNull();
 });
 it("keeps filtering, metadata refresh and movie selection separate from explicit provider submission", async () => {
   const { user } = browse();
@@ -242,7 +304,9 @@ it("selects TMDB series identity and requires explicit episode selection", async
   expect(
     await screen.findByRole("heading", { name: "The Long Winter" }),
   ).toBeInTheDocument();
-  expect(await findSelectInput("Choose season")).toHaveValue("");
+  const season = await findSelectInput("Season");
+  await waitFor(() => expect(season).toHaveValue("Season 1"));
+  expect(await findSelectInput("Episode")).toHaveValue("");
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
   expect(searches).toEqual([]);
 });
@@ -266,7 +330,7 @@ it("restores the global filter and card focus after details and normal navigatio
     await router.navigate("/system/tasks");
   });
   await act(async () => {
-    await router.navigate("/discover");
+    await router.navigate(-1);
   });
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "Movies" })).toHaveAttribute(
@@ -275,6 +339,28 @@ it("restores the global filter and card focus after details and normal navigatio
     ),
   );
   expect(searches).toEqual([]);
+});
+
+it("restores a cycled featured title and its focus after closing details", async () => {
+  const { user } = browse();
+  await screen.findByRole("button", { name: "Explore Northern Light" });
+  await user.click(
+    screen.getByRole("button", { name: "Show next featured title" }),
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Explore The Long Winter" }),
+  );
+  await screen.findByRole("heading", { name: "The Long Winter" });
+  await user.click(screen.getByRole("button", { name: "Back to Discover" }));
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Explore The Long Winter" }),
+    ).toHaveFocus(),
+  );
+  expect(screen.getByRole("button", { name: "All media" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
 });
 
 it.each(["empty", "unavailable", "authentication_failed", "cached"] as const)(
@@ -298,12 +384,12 @@ it.each(["empty", "unavailable", "authentication_failed", "cached"] as const)(
       await user.click(
         await screen.findByRole("link", { name: "Set up Discover" }),
       );
-      expect(router.state.location.pathname).toBe("/settings/discover");
+      expect(router.state.location.pathname).toBe("/subtitle-hub");
     }
     if (value === "cached")
       expect(
-        await screen.findByText(/dated cached feed is retained/),
-      ).toBeInTheDocument();
+        await screen.findByRole("button", { name: "Explore Northern Light" }),
+      ).toBeVisible();
     expect(searches).toEqual([]);
   },
 );
@@ -313,7 +399,7 @@ it("does not request trending when metadata is unconfigured", async () => {
   browse();
   expect(
     await screen.findByRole("link", { name: "Set up Discover" }),
-  ).toHaveAttribute("href", "/settings/discover");
+  ).toHaveAttribute("href", "/subtitle-hub?tab=my-providers#metadata");
   expect(requests).toEqual([]);
   expect(searches).toEqual([]);
 });
@@ -367,12 +453,13 @@ it("preserves retrieval-route focus separately from the original trending-card r
   await waitFor(() =>
     expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0080274"),
   );
+  await openSearchOptions(user);
   await user.click(screen.getByLabelText("IMDb ID"));
   await act(async () => {
     await router.navigate("/system/tasks");
   });
   await act(async () => {
-    await router.navigate("/discover");
+    await router.navigate(-1);
   });
   await waitFor(() => expect(screen.getByLabelText("IMDb ID")).toHaveFocus());
   await user.click(screen.getByRole("button", { name: "Back to Discover" }));
@@ -389,13 +476,11 @@ it("restores release retrieval focus after the destination has mounted", async (
   await user.click(
     await screen.findByRole("button", { name: "Explore Northern Light" }),
   );
-  await user.click(
-    screen.getByRole("button", { name: "Search providers by release name" }),
-  );
+  await openReleaseSearch(user);
   const input = screen.getByLabelText("Release name");
   await user.type(input, "Northern.Light.2008.WEB-DL");
-  await user.click(screen.getByRole("link", { name: "Activity" }));
-  await screen.findByText("Local activity");
+  await user.click(await screen.findByRole("link", { name: "History" }));
+  await screen.findByText("Local history");
   expect(screen.queryByLabelText("Release name")).not.toBeInTheDocument();
   await act(async () => {
     await router.navigate(-1);
@@ -421,7 +506,9 @@ it("keeps the current card position when its scroll event is still pending and r
     // which distinguishes a resolved poster from an unresolved one. jsdom never
     // loads images, so a text assertion here would hold either way and prove
     // nothing.
-    const card = screen.getByRole("button", { name: /Northern Light.*Film/ });
+    const card = screen.getByRole("button", {
+      name: /The Long Winter.*Series/,
+    });
     Object.defineProperty(window, "scrollY", {
       configurable: true,
       value: 1162,
@@ -433,12 +520,12 @@ it("keeps the current card position when its scroll event is still pending and r
       value: 1083,
     });
     fireEvent.click(card);
-    await screen.findByRole("heading", { name: "Northern Light" });
+    await screen.findByRole("heading", { name: "The Long Winter" });
     scrollTo.mockClear();
     await user.click(screen.getByRole("button", { name: "Back to Discover" }));
     await waitFor(() =>
       expect(
-        screen.getByRole("button", { name: /Northern Light.*Film/ }),
+        screen.getByRole("button", { name: /The Long Winter.*Series/ }),
       ).toHaveFocus(),
     );
     expect(scrollTo).toHaveBeenLastCalledWith({
@@ -519,11 +606,7 @@ it.each([
         await screen.findByRole("button", { name: "Explore Northern Light" }),
       );
       if (mode === "release") {
-        await user.click(
-          screen.getByRole("button", {
-            name: "Search providers by release name",
-          }),
-        );
+        await openReleaseSearch(user);
         await user.type(
           screen.getByLabelText("Release name"),
           "Northern.Light.2008.WEB-DL",
@@ -532,6 +615,7 @@ it.each([
         await waitFor(() =>
           expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0080274"),
         );
+      if (mode === "title") await openSearchOptions(user);
       Object.defineProperty(window, "scrollY", {
         configurable: true,
         value: savedScroll,
@@ -539,8 +623,8 @@ it.each([
       await user.click(
         screen.getByLabelText(mode === "release" ? "Release name" : "IMDb ID"),
       );
-      await user.click(screen.getByRole("link", { name: "Activity" }));
-      await screen.findByText("Local activity");
+      await user.click(await screen.findByRole("link", { name: "History" }));
+      await screen.findByText("Local history");
       scrollTo.mockClear();
       await act(async () => {
         await router.navigate(-1);
@@ -549,6 +633,7 @@ it.each([
         mode === "release" ? "Release name" : "IMDb ID",
       );
       await waitFor(() => expect(input).toHaveFocus());
+      expect(input).toBeVisible();
       const bounds = input.getBoundingClientRect();
       expect(bounds.top).toBeGreaterThanOrEqual(shell);
       expect(bounds.bottom).toBeLessThanOrEqual(viewport);
@@ -582,20 +667,17 @@ it.each(["title", "release"])(
       await screen.findByRole("button", { name: "Explore Northern Light" }),
     );
     if (mode === "release") {
-      await user.click(
-        screen.getByRole("button", {
-          name: "Search providers by release name",
-        }),
-      );
+      await openReleaseSearch(user);
       await user.type(screen.getByLabelText("Release name"), "Northern.WEB-DL");
     } else
       await waitFor(() =>
         expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0080274"),
       );
+    if (mode === "title") await openSearchOptions(user);
     const label = mode === "release" ? "Release name" : "IMDb ID";
     await user.click(screen.getByLabelText(label));
-    await user.click(screen.getByRole("link", { name: "Activity" }));
-    await screen.findByText("Local activity");
+    await user.click(await screen.findByRole("link", { name: "History" }));
+    await screen.findByText("Local history");
     const scrollDescriptor = Object.getOwnPropertyDescriptor(window, "scrollY");
     const heightDescriptor = Object.getOwnPropertyDescriptor(
       window,
@@ -652,6 +734,7 @@ it.each(["title", "release"])(
       setScroll(0);
       paint();
       expect(input).toHaveFocus();
+      expect(input).toBeVisible();
       expect(input.getBoundingClientRect().top).toBeGreaterThanOrEqual(112);
       expect(input.getBoundingClientRect().bottom).toBeLessThanOrEqual(568);
       expect(input).toHaveValue(
@@ -696,6 +779,14 @@ it("tells a resolved poster from one that never resolves", async () => {
         items: [
           { ...movie, poster_url: null },
           { ...show, poster_url: "https://image.tmdb.org/t/p/w342/show.jpg" },
+          {
+            ...movie,
+            source_id: "tmdb:movie:43",
+            id: 43,
+            title: "Without artwork",
+            rank: 4,
+            poster_url: null,
+          },
         ],
       }),
     ),
@@ -705,7 +796,7 @@ it("tells a resolved poster from one that never resolves", async () => {
     name: /The Long Winter/,
   });
   const withoutArt = screen.getByRole("button", {
-    name: /Northern Light.*Film/,
+    name: /Without artwork.*Film/,
   });
   expect(within(withArt).getByRole("presentation")).toHaveAttribute(
     "src",
@@ -717,4 +808,34 @@ it("tells a resolved poster from one that never resolves", async () => {
   // Both carry the treatment underneath; only the unresolved one has nothing
   // over it. That is the state the reader actually meets.
   expect(withoutArt).toHaveTextContent("Artwork unavailable");
+});
+
+it("keeps the selected feed scope through featured navigation", async () => {
+  const { user } = browse();
+  await screen.findByRole("button", { name: "Explore Northern Light" });
+  // Scope tabs filter the browsing feed. Universal search remains available
+  // without opening its suggestions or submitting a provider search.
+  await user.click(screen.getByRole("button", { name: "Series" }));
+  expect(screen.getByRole("button", { name: "Series" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  expect(screen.getByLabelText("Search")).toBeEnabled();
+  expect(screen.getByLabelText("Search")).toBeInTheDocument();
+  // Featured-title navigation adopts the title without clearing the filter.
+  await user.click(
+    await screen.findByRole("button", { name: "Explore The Long Winter" }),
+  );
+  expect(
+    await screen.findByRole("heading", { name: "The Long Winter" }),
+  ).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Back to Discover" }));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Series" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    ),
+  );
+  expect(screen.getByLabelText("Search")).toBeEnabled();
+  expect(searches).toEqual([]);
 });

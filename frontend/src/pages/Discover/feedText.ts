@@ -21,3 +21,27 @@ export function readableTime(value: string): string {
         timeStyle: "short",
       });
 }
+
+/**
+ * A calendar day from a feed record ("2026-09-09") in the reader's own date
+ * words ("Sep 9, 2026"). Parsed as a local day so timezones cannot move it,
+ * and returned untouched when it is not a plain day: inventing a nicer
+ * reading of an unknown value would be worse than the raw one.
+ */
+export function readableFeedDate(value: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+  if (!match) return value;
+  const day = new Date(
+    Number(match[1]),
+    Number(match[2]) - 1,
+    Number(match[3]),
+  );
+  if (
+    Number.isNaN(day.getTime()) ||
+    day.getFullYear() !== Number(match[1]) ||
+    day.getMonth() !== Number(match[2]) - 1 ||
+    day.getDate() !== Number(match[3])
+  )
+    return value;
+  return day.toLocaleDateString(undefined, { dateStyle: "medium" });
+}

@@ -1,15 +1,13 @@
 import { useEffect, useRef } from "react";
-import { Badge, Button, Group, Stack, Text } from "@mantine/core";
-import { useReducedMotion } from "@mantine/hooks";
-import { modals } from "@mantine/modals";
+import { ActionIcon, Button, Group, Stack, Text } from "@mantine/core";
+import { faClosedCaptioning, faXmark } from "@fortawesome/free-solid-svg-icons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import type {
-  DiscoverDownloadFeedback,
   DiscoverPreviewFeedback,
   DiscoverSubtitleResult,
 } from "@/types/discover";
+import { renderSubtitleHtml } from "@/utilities/subtitleText";
 import styles from "./Discover.module.scss";
-
-const MODAL_ID = "discover-subtitle-preview";
 
 export function previewSourceId(row: DiscoverSubtitleResult) {
   return `discover-preview-${encodeURIComponent(JSON.stringify([row.search_id, row.id]))}`;
@@ -17,11 +15,9 @@ export function previewSourceId(row: DiscoverSubtitleResult) {
 
 interface PreviewProps {
   preview: DiscoverPreviewFeedback;
-  download: DiscoverDownloadFeedback | null;
   searching: boolean;
   close: () => void;
   retry: (row: DiscoverSubtitleResult) => Promise<void>;
-  downloadSubtitle: (row: DiscoverSubtitleResult) => Promise<void>;
   searchAgain: () => Promise<void>;
 }
 
@@ -32,11 +28,9 @@ function timestamp(milliseconds: number) {
 
 export default function SubtitlePreview({
   preview,
-  download,
   searching,
   close,
   retry,
-  downloadSubtitle,
   searchAgain,
 }: PreviewProps) {
   const { context, row, data, status } = preview;
@@ -44,36 +38,71 @@ export default function SubtitlePreview({
     context.mode === "release"
       ? `${context.query} (unverified release query)`
       : `${context.title ?? context.imdb_id}${context.media_type === "episode" ? ` S${String(context.season).padStart(2, "0")} E${String(context.episode).padStart(2, "0")}` : context.year ? ` (${context.year})` : ""}`;
-  const downloading = download?.status === "pending";
+  const heading = useRef<HTMLParagraphElement>(null);
+  useEffect(() => {
+    heading.current?.focus({ preventScroll: true });
+    heading.current
+      ?.closest("section")
+      ?.scrollIntoView?.({ block: "start", behavior: "instant" });
+  }, [row.id, row.search_id, status]);
+  const dismiss = () => {
+    close();
+    const button = document.getElementById(previewSourceId(row));
+    const opener =
+      button instanceof HTMLButtonElement && button.disabled
+        ? button.closest("article")
+        : button;
+    opener?.focus({ preventScroll: true });
+  };
   return (
     <Stack
+      component="section"
+      id="discover-subtitle-preview"
+      role="region"
+      aria-labelledby="discover-preview-heading"
+      aria-describedby="discover-preview-identity"
       gap="lg"
-      style={{
-        overflowWrap: "anywhere",
-        color: "var(--bz-text-primary)",
-        minWidth: 0,
+      className={styles.previewCard}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.stopPropagation();
+          dismiss();
+        }
       }}
     >
-      <div>
-        <Text fw={650} size="lg">
-          {target}
-        </Text>
-        <Text mt={4}>{row.release ?? "Release information unavailable"}</Text>
-        <Group mt="sm" gap="xs">
-          <Badge variant="light">{row.language}</Badge>
-          <Badge variant="outline" color="gray">
-            {row.scope === "forced"
-              ? "Forced"
-              : row.scope === "full"
-                ? "Full subtitles"
-                : "Scope unknown"}
-          </Badge>
-          <Text size="sm">{row.provider}</Text>
-        </Group>
-      </div>
-      <Text size="sm" c="var(--bz-text-secondary)">
-        Cue text does not verify timing for your video. Download uses the same
-        subtitle content.
+      <Group
+        justify="space-between"
+        wrap="nowrap"
+        className={styles.previewHeading}
+      >
+        <div className={styles.previewHeadingText}>
+          <Text
+            id="discover-preview-heading"
+            ref={heading}
+            tabIndex={-1}
+            fw={650}
+          >
+            <FontAwesomeIcon icon={faClosedCaptioning} aria-hidden="true" />{" "}
+            Text preview
+          </Text>
+          <Text className={styles.previewSource}>{row.provider} · SRT</Text>
+        </div>
+        <ActionIcon
+          variant="subtle"
+          color="gray"
+          size={44}
+          aria-label="Close preview"
+          onClick={dismiss}
+        >
+          <FontAwesomeIcon icon={faXmark} />
+        </ActionIcon>
+      </Group>
+      <Text id="discover-preview-identity" className={styles.visuallyHidden}>
+        {target} · {row.release ?? "Release information unavailable"} ·{" "}
+        {row.language} · {row.provider}
+      </Text>
+      <Text className={styles.previewRelease} title={row.release ?? undefined}>
+        {row.release ?? target}
       </Text>
       {status === "pending" && (
         <Text role="status">Loading subtitle preview...</Text>
@@ -106,151 +135,46 @@ export default function SubtitlePreview({
       )}
       {status === "ready" && data && (
         <>
-          <Text size="sm">
-            {data.truncated
-              ? `Preview limited to ${data.cues.length} cues. Download contains all ${data.total_cues} complete cues.`
-              : `${data.total_cues} ${data.total_cues === 1 ? "cue" : "cues"}.`}
-          </Text>
+          <div className={styles.previewStats}>
+            <span>
+              {data.truncated
+                ? `${data.cues.length} of ${data.total_cues} cues`
+                : `${data.total_cues} cues`}
+            </span>
+            {data.truncated && <span>Full subtitle included in download</span>}
+          </div>
           <ol
             aria-label="Subtitle cues"
-            style={{
-              listStyle: "none",
-              padding: 0,
-              margin: 0,
-              maxHeight: "min(38dvh, 340px)",
-              overflowY: "auto",
-              scrollbarColor:
-                "var(--bz-text-secondary) var(--bz-surface-overlay)",
-            }}
+            className={styles.cueList}
             tabIndex={0}
           >
             {data.cues.map((cue, index) => (
-              <li
-                key={index}
-                style={{
-                  paddingBlock: 12,
-                  borderBottom: "1px solid var(--bz-border-card)",
-                }}
-              >
-                <Text
-                  size="sm"
-                  c="var(--bz-text-secondary)"
-                  style={{ fontVariantNumeric: "tabular-nums" }}
-                >
-                  {timestamp(cue.start_ms)} to {timestamp(cue.end_ms)}
+              <li key={index} className={styles.cueRow}>
+                <Text className={styles.cueTime}>
+                  <span className={styles.cueNumber}>
+                    {String(index + 1).padStart(2, "0")}
+                  </span>
+                  <time
+                    title={`${timestamp(cue.start_ms)} to ${timestamp(cue.end_ms)}`}
+                  >
+                    {timestamp(cue.start_ms).split(".")[0]}
+                  </time>
                 </Text>
                 <Text
-                  mt={4}
-                  style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
-                >
-                  {cue.text}
-                </Text>
+                  component="div"
+                  className={styles.cueText}
+                  dangerouslySetInnerHTML={{
+                    __html: renderSubtitleHtml(cue.text),
+                  }}
+                />
               </li>
             ))}
           </ol>
         </>
       )}
-      {download?.row.id === row.id && download.status === "started" && (
-        <Text role="status">Download started.</Text>
-      )}
-      {download?.row.id === row.id && download.status === "failed" && (
-        <Text role="alert">
-          Download failed. Retry or choose another subtitle.
-        </Text>
-      )}
-      <Group justify="space-between" wrap="wrap" gap="sm">
-        <Button
-          variant="default"
-          mih={44}
-          aria-label="Close preview"
-          onClick={close}
-        >
-          Close
-        </Button>
-        <Button
-          variant="filled"
-          mih={44}
-          color="brand"
-          disabled={status === "expired" || downloading}
-          loading={downloading && download.row.id === row.id}
-          onClick={() => void downloadSubtitle(row)}
-        >
-          Download SRT
-        </Button>
-      </Group>
+      <Text size="sm" className={styles.previewNote}>
+        Text preview only. Timing against your video has not been checked.
+      </Text>
     </Stack>
   );
-}
-
-export function DiscoverPreviewModal(
-  props: Omit<PreviewProps, "preview"> & {
-    preview: DiscoverPreviewFeedback | null;
-  },
-) {
-  const reducedMotion = useReducedMotion();
-  const opened = useRef(false);
-  const source = useRef<string | null>(null);
-  useEffect(() => {
-    if (!props.preview) {
-      if (opened.current) modals.close(MODAL_ID);
-      opened.current = false;
-      return;
-    }
-    source.current = previewSourceId(props.preview.row);
-    const children = <SubtitlePreview {...props} preview={props.preview} />;
-    if (opened.current) {
-      modals.updateModal({ modalId: MODAL_ID, children });
-      return;
-    }
-    opened.current = true;
-    modals.open({
-      modalId: MODAL_ID,
-      title: "Subtitle preview",
-      size: "lg",
-      trapFocus: true,
-      returnFocus: false,
-      closeOnEscape: true,
-      transitionProps: { duration: reducedMotion ? 0 : 200 },
-      closeOnClickOutside: false,
-      closeButtonProps: { "aria-label": "Close subtitle preview", size: 44 },
-      // The page's one action fill, carried into the portal so Download SRT
-      // here and Download SRT in the results list are the same colour.
-      classNames: { content: styles.previewModal },
-      styles: {
-        content: {
-          maxWidth: "calc(100vw - 24px)",
-          background: "var(--bz-surface-overlay)",
-          border: "1px solid var(--bz-border-card)",
-          borderRadius: "var(--bz-radius-lg)",
-        },
-        header: { background: "transparent" },
-        body: { background: "transparent" },
-        overlay: { background: "rgba(0, 0, 0, 0.6)" },
-        title: { fontWeight: 650 },
-        close: { minWidth: 44, minHeight: 44 },
-      },
-      onClose: props.close,
-      onExitTransitionEnd: () => {
-        const button = source.current
-          ? document.getElementById(source.current)
-          : null;
-        const opener =
-          button instanceof HTMLButtonElement && button.disabled
-            ? button.closest("article")
-            : button;
-        if (opener) {
-          opener.scrollIntoView?.({ block: "nearest" });
-          opener.focus({ preventScroll: true });
-        }
-      },
-      children,
-    });
-  }, [props, reducedMotion]);
-  useEffect(
-    () => () => {
-      modals.close(MODAL_ID);
-    },
-    [],
-  );
-  return null;
 }

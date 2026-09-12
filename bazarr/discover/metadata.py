@@ -59,7 +59,7 @@ def configuration():
         stored = settings.get("discover.tmdb_access_token", "")
         stored = stored if isinstance(stored, str) and not stored.startswith("enc:") else ""
         token = api_key(stored)
-        locale = settings.get("discover.locale", "en-US")
+        locale = settings.get("general.metadata_language", "") or settings.get("discover.locale", "en-US")
         if not isinstance(locale, str) or not re.fullmatch(r"[a-z]{2,3}(?:-[A-Z]{2})?", locale):
             locale = "en-US"
         if _current is None or (_current.token, _current.locale) != (token, locale):

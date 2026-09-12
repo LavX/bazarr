@@ -1,0 +1,325 @@
+.shell {
+  background: var(--bz-surface-ground);
+  .main {
+    background: var(--bz-surface-base);
+    border: 0;
+    border-radius: 0;
+    margin: 0;
+  }
+  .rail {
+    background: var(--bz-surface-raised);
+    border-right: 1px solid var(--bz-border-interactive);
+    padding: 0;
+  }
+  .appHeader {
+    padding: 0 !important;
+    background: var(--bz-surface-base) !important;
+    border: 0 !important;
+    backdrop-filter: none;
+  }
+}
+.headerLayout {
+  height: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, min(720px, 54%)) minmax(
+      0,
+      1fr
+    );
+  align-items: center;
+  gap: 24px;
+  padding: 14px 26px;
+  color: var(--bz-text-primary);
+}
+.headerIdentity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.pageName {
+  font-size: 24px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.headerSearch {
+  flex: 1;
+  min-width: 0;
+  max-width: 720px;
+  width: 100%;
+}
+.railContent {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  height: 100%;
+  min-height: 0;
+  color: var(--bz-text-tertiary);
+}
+.logo {
+  flex-shrink: 0;
+  width: 54px;
+  height: 72px;
+  display: grid;
+  place-items: center;
+}
+.railScroll {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  padding: 0 8px;
+}
+.railGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-block: 2px;
+}
+
+.railLink {
+  appearance: none;
+  position: relative;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  gap: 4px;
+  width: 54px;
+  min-height: 52px;
+  padding: 5px 2px;
+  color: var(--bz-text-tertiary);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.25;
+  text-align: center;
+  text-decoration: none;
+  cursor: pointer;
+  svg {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+  }
+  .menuChevron {
+    position: absolute;
+    width: 6px;
+    height: 8px;
+    top: 11px;
+    right: 4px;
+  }
+  &:hover {
+    background: var(--bz-hover-bg-emphasis);
+    color: var(--bz-text-primary);
+  }
+  &[aria-current="page"] {
+    color: light-dark(
+      var(--mantine-color-brand-7),
+      var(--mantine-color-brand-5)
+    );
+    background: light-dark(rgba(230, 138, 0, 0.08), rgba(230, 138, 0, 0.12));
+  }
+}
+.railBottom {
+  flex-shrink: 0;
+  padding: 8px;
+  border-top: 1px solid var(--bz-border-interactive);
+}
+.railLink,
+.logo,
+.expandedControls {
+  &:focus-visible {
+    outline: 2px solid var(--mantine-color-brand-5);
+    outline-offset: -2px;
+  }
+}
+.navigationMenu {
+  width: 240px;
+  max-height: min(650px, calc(100dvh - 24px));
+  overflow-y: auto;
+}
+.navigationMenu :global(.mantine-Menu-item) {
+  min-height: 40px;
+}
+.navigationMenu :global(.mantine-Menu-item)[aria-current="page"] {
+  background: var(--bz-hover-bg-emphasis);
+  color: light-dark(var(--mantine-color-brand-7), var(--mantine-color-brand-5));
+}
+.expandedControls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  background: var(--bz-hover-bg);
+  padding: 8px 12px;
+  color: var(--bz-text-primary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+}
+.mobileNavigation {
+  nav {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+  a,
+  button {
+    min-height: 44px;
+  }
+  :focus-visible {
+    outline: 2px solid var(--mantine-color-brand-5);
+    outline-offset: -2px;
+  }
+}
+.navigationBody {
+  overflow: hidden;
+}
+@media (max-width: 47.99em) {
+  .headerLayout {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 18px;
+  }
+  .headerIdentity {
+    width: 100%;
+  }
+  .headerIdentity button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .pageName {
+    font-size: 22px;
+  }
+  .headerSearch {
+    flex-basis: 100%;
+    max-width: none;
+  }
+}
+@media (pointer: coarse) {
+  .navigationMenu :global(.mantine-Menu-item) {
+    min-height: 44px;
+  }
+}
+
+.railIcon {
+  position: relative;
+  display: inline-flex;
+  width: 24px;
+  justify-content: center;
+}
+.railBadge {
+  position: absolute;
+  top: -5px;
+  left: 18px;
+  border-radius: 5px;
+  padding: 1px 3px;
+  background: light-dark(
+    var(--mantine-color-brand-1),
+    var(--mantine-color-brand-9)
+  );
+  color: light-dark(var(--mantine-color-brand-9), var(--mantine-color-brand-2));
+  font-size: 11px;
+  font-weight: 700;
+  min-width: 16px;
+  text-align: center;
+  line-height: 16px;
+}
+.connectionDot {
+  position: absolute;
+  top: -2px;
+  left: 22px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--mantine-color-green-6);
+}
+.connectionDot[data-status="DOWN"] {
+  background: var(--mantine-color-red-6);
+}
+
+.jobsButton {
+  margin-bottom: 6px;
+  min-height: 60px;
+  &:focus-visible {
+    outline: 2px solid var(--mantine-color-brand-5);
+    outline-offset: -2px;
+  }
+  &[data-active="true"] {
+    color: light-dark(
+      var(--mantine-color-brand-7),
+      var(--mantine-color-brand-5)
+    );
+  }
+}
+.jobCaption {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.jobStatus {
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--bz-text-tertiary);
+}
+.jobActivity {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  width: 26px;
+  height: 24px;
+  flex-shrink: 0;
+}
+.jobTrack {
+  position: relative;
+  display: block;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--bz-border-interactive);
+  > span {
+    display: block;
+    height: 100%;
+    background: currentColor;
+    transition: width 200ms ease-out;
+  }
+  &[data-running="false"] > span {
+    width: 0;
+  }
+  &[data-indeterminate="true"] > span {
+    width: 45%;
+    animation: job-work 1.5s ease-in-out infinite;
+  }
+  &:nth-child(2) > span {
+    animation-delay: -0.5s;
+  }
+  &:nth-child(3) > span {
+    animation-delay: -1s;
+  }
+}
+@keyframes job-work {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(240%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .jobTrack > span {
+    animation: none !important;
+    transition: none;
+  }
+}

@@ -34,6 +34,7 @@ interface Settings {
 
 declare namespace Settings {
   interface General {
+    metadata_language?: string;
     adaptive_searching: boolean;
     adaptive_searching_delay: string;
     adaptive_searching_delta: string;

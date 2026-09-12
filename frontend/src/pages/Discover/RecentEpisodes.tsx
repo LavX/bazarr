@@ -1,22 +1,39 @@
 /* eslint-disable camelcase -- API context retains source field names. */
 import { useEffect, useRef, useState } from "react";
-import { Link, useLocation } from "react-router";
-import { Alert, Anchor, Button, Stack, Text, Title } from "@mantine/core";
-import { faArrowsRotate } from "@fortawesome/free-solid-svg-icons";
+import { Link, useLocation, useNavigate } from "react-router";
+import {
+  ActionIcon,
+  Alert,
+  Anchor,
+  Button,
+  Stack,
+  Text,
+  Title,
+} from "@mantine/core";
+import { useMediaQuery } from "@mantine/hooks";
+import {
+  faArrowsRotate,
+  faChevronDown,
+  faChevronRight,
+  faChevronUp,
+} from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useDiscoverRecentEpisodes } from "@/apis/hooks/discover";
 import { useDiscover } from "@/contexts/Discover";
 import type { RecentEpisode } from "@/types/discover";
-import { plural, readableTime } from "./feedText";
+import { plural, readableFeedDate } from "./feedText";
 import MediaPoster from "./MediaPoster";
+import { discoverTitlePath } from "./navigation";
 import styles from "./Discover.module.scss";
 
 export default function RecentEpisodes() {
   const { state, updateBrowsing, updateDraft } = useDiscover();
+  const navigate = useNavigate();
   const { browsing } = state;
   const feed = useDiscoverRecentEpisodes();
   const data = feed.data;
   const location = useLocation();
+  const [expanded, setExpanded] = useState(false);
   const [clock, setClock] = useState(Date.now);
   useEffect(() => {
     const timers = [data?.expires_at, data?.stale_until]
@@ -64,6 +81,15 @@ export default function RecentEpisodes() {
         window: data!.window,
       },
     });
+    void navigate(
+      discoverTitlePath(
+        "tmdb",
+        "show",
+        item.show_id,
+        item.season,
+        item.episode,
+      ),
+    );
     updateDraft({
       mode: "title",
       mediaType: "episode",
@@ -92,36 +118,42 @@ export default function RecentEpisodes() {
     data?.status === "unavailable" ||
     (feed.isSuccess && !data);
   const items = expired || setup ? [] : (data?.items ?? []);
+  const returnedIndex = items.findIndex(
+    (item) => browsing.focusId === `discover-recent-${item.source_id}`,
+  );
+  const wide = useMediaQuery("(min-width: 1600px)");
+  const medium = useMediaQuery("(min-width: 1100px)");
+  const previewCount = wide ? 8 : medium ? 6 : 4;
+  const showAll = expanded || returnedIndex >= previewCount;
+  const visibleItems = showAll ? items : items.slice(0, previewCount);
   return (
-    <section className={styles.trending} aria-labelledby="recent-title">
+    <section
+      id="bh-episode-section"
+      className={`${styles.trending} ${styles.compactFeed}`}
+      aria-labelledby="recent-title"
+    >
       <div className={styles.sectionHead}>
         <div>
           <Title order={2} id="recent-title">
-            Recent episodes
+            New episodes
           </Title>
-          <Text component="p" className={styles.sectionMeta}>
-            Original air dates · Last 30 days
-          </Text>
         </div>
         {feed.configured && (
           <div className={styles.sectionTools}>
-            <Button
+            <ActionIcon
               id="discover-recent-refresh"
               variant="subtle"
+              className={styles.refreshButton}
               loading={feed.isFetching}
-              leftSection={<FontAwesomeIcon icon={faArrowsRotate} />}
               onClick={() => void feed.refetch()}
+              aria-label="Refresh new episodes"
+              title="Refresh new episodes"
             >
-              Refresh recent episodes
-            </Button>
+              <FontAwesomeIcon icon={faArrowsRotate} />
+            </ActionIcon>
           </div>
         )}
       </div>
-      <Text component="p" className={styles.caveat}>
-        A selection from weekly trending shows, not a complete schedule or a
-        ranking of episode popularity. Subtitle availability and exact episode
-        ownership are unchecked. Verify episode identity in details.
-      </Text>
       <Stack
         role="status"
         aria-live="polite"
@@ -140,7 +172,7 @@ export default function RecentEpisodes() {
             </Text>
             <Anchor
               component={Link}
-              to="/settings/discover"
+              to="/subtitle-hub?tab=my-providers#metadata"
               className={styles.settingsLink}
             >
               Set up recent episodes
@@ -151,7 +183,7 @@ export default function RecentEpisodes() {
           <Alert color="yellow">
             {feed.settingsError
               ? "Discover settings could not be loaded. Reload this page to retry."
-              : "Recent episodes are temporarily unavailable. Retry with Refresh recent episodes."}
+              : "New episodes are temporarily unavailable. Retry with Refresh new episodes."}
           </Alert>
         )}
         {data?.service_status === "unavailable" && !expired && (
@@ -160,34 +192,20 @@ export default function RecentEpisodes() {
             original observation time.
           </Text>
         )}
-        {data && !data.coverage.complete && !expired && !setup && (
-          <Text size="sm">
-            Incomplete episode coverage. The counts are in Episode source and
-            freshness below.
-          </Text>
-        )}
         {data?.status === "empty" && !expired && (
           <Text>
             No qualifying episodes were found in the checked records. Unchecked
             seasons may contain other releases.
           </Text>
         )}
-        {data?.fetched_at && !expired && (
-          <Text component="p" className={styles.stamp}>
-            {data.status === "cached" ||
-            (data.expires_at && Date.parse(data.expires_at) <= clock)
-              ? "Cached TMDB episode records"
-              : "Checked TMDB episode records"}{" "}
-            ·{" "}
-            <time className={styles.dateValue} dateTime={data.fetched_at}>
-              {readableTime(data.fetched_at)}
-            </time>
-          </Text>
-        )}
       </Stack>
       {items.length > 0 && (
-        <ul className={styles.episodeList} aria-label="Recent episodes">
-          {items.map((item) => (
+        <ul
+          id="bh-new-episodes"
+          className={styles.episodeList}
+          aria-label="New episodes"
+        >
+          {visibleItems.map((item) => (
             <li key={item.source_id}>
               <button
                 type="button"
@@ -200,7 +218,7 @@ export default function RecentEpisodes() {
                 </span>
                 <span className={styles.episodeFacts}>
                   <strong>{item.show_title}</strong>
-                  <span>
+                  <span className={styles.episodeName}>
                     <span className={styles.episodeCode}>
                       {item.season === 0 ? "Special" : `S${item.season}`} E
                       {item.episode}
@@ -214,65 +232,45 @@ export default function RecentEpisodes() {
                     </span>
                   )}
                   <span>
-                    Original air date{" "}
-                    <time className={styles.dateValue} dateTime={item.air_date}>
-                      {item.air_date}
+                    <time
+                      className={styles.dateValue}
+                      dateTime={item.air_date ?? undefined}
+                    >
+                      {item.air_date === null
+                        ? "release date to be announced"
+                        : readableFeedDate(item.air_date)}
                     </time>
                   </span>
                 </span>
+                <FontAwesomeIcon
+                  icon={faChevronRight}
+                  className={styles.episodeChevron}
+                  aria-hidden="true"
+                />
               </button>
             </li>
           ))}
         </ul>
       )}
-      {data?.last_success && (
-        <details className={styles.feedDates}>
-          <summary>Episode source and freshness</summary>
-          <Text size="xs">
-            TMDB weekly trending shows and original season records. Up to{" "}
-            {data.coverage.show_limit} shows, {data.coverage.season_limit}{" "}
-            seasons per show including specials, and{" "}
-            {data.coverage.episode_limit} records per season. Up to{" "}
-            {data.coverage.output_limit} qualifying episodes. Dates run from{" "}
-            {data.window.start} through {data.window.end}, inclusive, using UTC
-            today.
-          </Text>
-          {!data.coverage.complete && (
-            <Text size="xs">
-              Checked {data.coverage.shows_checked} of{" "}
-              {plural(data.coverage.shows, "show")} and{" "}
-              {data.coverage.seasons_checked} of{" "}
-              {plural(data.coverage.seasons, "season")}.{" "}
-              {plural(data.coverage.failed, "check")} failed, and{" "}
-              {plural(data.coverage.missing_dates, "date")}{" "}
-              {data.coverage.missing_dates === 1 ? "was" : "were"} missing or
-              invalid.
-              {data.coverage.truncated
-                ? " Additional source records are outside this bounded selection."
-                : ""}
-            </Text>
-          )}
-          <dl>
-            {[
-              ["Oldest source observation", data.last_success],
-              ["Fresh until", data.expires_at],
-              ["Cached fallback until", data.stale_until],
-              ["Last request", data.attempted_at],
-            ].map(
-              ([label, value]) =>
-                value && (
-                  <div key={label}>
-                    <dt>{label}</dt>
-                    <dd>
-                      <time dateTime={value}>
-                        {new Date(value).toLocaleString()}
-                      </time>
-                    </dd>
-                  </div>
-                ),
-            )}
-          </dl>
-        </details>
+      {items.length > previewCount && (
+        <Button
+          variant="default"
+          className={styles.showMore}
+          aria-expanded={showAll}
+          aria-controls="bh-new-episodes"
+          rightSection={
+            <FontAwesomeIcon icon={showAll ? faChevronUp : faChevronDown} />
+          }
+          id="discover-recent-more"
+          onClick={() => {
+            setExpanded(!showAll);
+            updateBrowsing({ focusId: "discover-recent-more" });
+          }}
+        >
+          {showAll
+            ? "Show fewer episodes"
+            : `Show all ${items.length} episodes`}
+        </Button>
       )}
     </section>
   );
