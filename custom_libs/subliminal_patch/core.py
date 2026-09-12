@@ -320,7 +320,11 @@ class SZProviderPool(ProviderPool):
         self.adoption_gate = adoption_gate
 
         if not self.throttle_callback:
-            self.throttle_callback = lambda x, y, ids=None, language=None: x
+            # Mirrors the prod callback shape (see provider_throttle), which
+            # Sports invokes with sports_context. The default is a no-op, so
+            # accepting and ignoring the extra keyword keeps the classifier
+            # chain intact for callers that never configure a callback.
+            self.throttle_callback = lambda x, y, ids=None, language=None, sports_context=None: x
 
         #: Provider configuration
         self.provider_configs = _ProviderConfigs(self)
