@@ -1,5 +1,5 @@
 import { FunctionComponent, useCallback, useMemo } from "react";
-import { Button, TextInput } from "@mantine/core";
+import { Button } from "@mantine/core";
 import { faArrowCircleRight, faTrash } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
@@ -91,31 +91,16 @@ export const PathMappingTable: FunctionComponent<TableProps> = ({ type }) => {
         header: capitalize(type),
         accessorKey: "from",
         cell: ({ row: { original, index } }) => {
-          // Sportarr has no remote browse endpoint, so its remote column is a
-          // plain text field. That matches the per-instance sports path editor,
-          // which has never had a browser either. Offering the Bazarr browser
-          // here instead would suggest local paths for a remote server.
-          if (type === "sports") {
-            return (
-              <TextInput
-                value={original.from}
-                placeholder="/sports"
-                onChange={(event) => {
-                  action.mutate(index, {
-                    ...original,
-                    from: event.currentTarget.value,
-                  });
-                }}
-              ></TextInput>
-            );
-          }
+          // These are the GLOBAL (Phase-12-gated) path-mapping settings, so
+          // the browse intentionally targets the DEFAULT server (instanceId
+          // unset, #156). For a sports mapping that is the default Sportarr
+          // instance, whose browser seeds its initial listing with the root
+          // folders that have already been synced. When a per-instance
+          // path-mapping UI lands, pass the selected instance id here so it
+          // browses that instance's server.
           return (
-            // These are the GLOBAL (Phase-12-gated) path-mapping settings, so
-            // the browse intentionally targets the DEFAULT server (instanceId
-            // unset, #156). When a per-instance path-mapping UI lands, pass the
-            // selected instance id here so it browses that instance's server.
             <FileBrowser
-              type={type}
+              type={type === "sports" ? "sportarr" : type}
               defaultValue={original.from}
               onChange={(path) => {
                 action.mutate(index, { ...original, from: path });

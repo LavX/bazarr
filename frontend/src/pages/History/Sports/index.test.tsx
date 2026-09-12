@@ -1,4 +1,5 @@
 /* eslint-disable camelcase */
+import { createMemoryRouter, RouterProvider } from "react-router";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { expect, it } from "vitest";
@@ -7,7 +8,8 @@ import {
   sportarr,
   sportarrSibling,
 } from "@/pages/Settings/Connections/__tests__/fixtures";
-import { customRender, screen, waitFor, within } from "@/tests";
+import { AllProviders } from "@/providers";
+import { customRender, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 
 function owners(enabled = true) {
@@ -197,6 +199,28 @@ it("does not request history when every owner is disabled", async () => {
     ),
   ).toBeInTheDocument();
   expect(calls).toBe(0);
+});
+
+it("narrows the history to the league the toolbox opened the page for", async () => {
+  owners();
+  let leagueFilter = "";
+  server.use(
+    http.get("/api/sports/history", ({ request }) => {
+      leagueFilter = new URL(request.url).searchParams.get("league_id") ?? "";
+      return HttpResponse.json({ data: [record], total: 1 });
+    }),
+  );
+  const router = createMemoryRouter(
+    [{ path: "/history/sports", element: <SportsHistoryView /> }],
+    { initialEntries: ["/history/sports?instance=42&league=7"] },
+  );
+  rawRender(
+    <AllProviders>
+      <RouterProvider router={router} />
+    </AllProviders>,
+  );
+  await screen.findByText("Final", undefined, { timeout: 8000 });
+  expect(leagueFilter).toBe("7");
 });
 
 it("renders the Match popover for a record with recorded criteria", async () => {

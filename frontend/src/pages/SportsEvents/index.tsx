@@ -343,7 +343,8 @@ const SportsEventsView: FunctionComponent = () => {
               icon={faHistory}
               onClick={() =>
                 navigateApp(
-                  `/history/sports?instance=${league?.arr_instance_id ?? ""}`,
+                  `/history/sports?instance=${league?.arr_instance_id ?? ""}` +
+                    `&league=${league?.id ?? ""}`,
                 )
               }
             >

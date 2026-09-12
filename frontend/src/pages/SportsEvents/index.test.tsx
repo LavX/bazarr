@@ -8,6 +8,7 @@ import { AllProviders } from "@/providers";
 import { rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import * as files from "@/utilities/files";
+import { registerAppNavigate } from "@/utilities/whatsNew";
 import SportsEvents from ".";
 
 function renderDetail() {
@@ -895,6 +896,55 @@ describe("sports event detail", () => {
     // No languages or format: a sports composition follows its league
     // profile's rule, and the engine refuses an override alongside it.
     await waitFor(() => expect(combined).toEqual({}));
+  });
+
+  it("opens league-scoped history from the toolbox", async () => {
+    let target = "";
+    registerAppNavigate((to) => {
+      target = to;
+    });
+    server.use(
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([sportarr]),
+      ),
+      http.get("/api/sports/leagues/51", () =>
+        HttpResponse.json({
+          id: 51,
+          arr_instance_id: 42,
+          title: "Fixture League",
+          eventCount: 1,
+          eventFileCount: 1,
+        }),
+      ),
+      http.get("/api/sports/leagues/51/events", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: 61,
+              arr_instance_id: 42,
+              league_id: 51,
+              title: "Event",
+              path: "/sports/event.mkv",
+              hasFile: true,
+              subtitles: [],
+              missing_subtitles: [],
+            },
+          ],
+          total: 1,
+        }),
+      ),
+    );
+    renderDetail();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "History" }),
+    );
+    // The history page narrows its query to this league; it used to open
+    // filtered by instance only, so every other league's events appeared.
+    expect(target).toMatch(/^\/history\/sports\?/);
+    const search = new URL(target, "http://localhost").searchParams;
+    expect(search.get("instance")).toBe("42");
+    expect(search.get("league")).toBe("51");
+    registerAppNavigate(null);
   });
 
   it("does not load events for a disabled owner", async () => {

@@ -63,6 +63,7 @@ def list_records(
     kind,
     arr_instance_id=None,
     event_id=None,
+    league_id=None,
     start=0,
     length=100,
     language=None,
@@ -95,6 +96,11 @@ def list_records(
     if event_id is not None:
         resolve_event_in_session(session, event_id, arr_instance_id)
         query = query.where(table.event_id == event_id)
+    if league_id is not None:
+        # The league-scoped history the league toolbox opens: only the rows whose
+        # event belongs to this league. Both tables carry league_id, so the same
+        # filter serves the blacklist listing too.
+        query = query.where(table.league_id == league_id)
     if language:
         query = query.where(table.language == language)
     if provider:

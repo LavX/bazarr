@@ -457,8 +457,11 @@ def _excluded_profile_tags(kind):
     """Tags that mean "no profile", or an empty set when tag handling is off."""
     from app.config import settings
 
-    enabled = (settings.general.serie_tag_enabled if kind == "sonarr"
-               else settings.general.movie_tag_enabled)
+    enabled = {
+        "sonarr": settings.general.serie_tag_enabled,
+        "radarr": settings.general.movie_tag_enabled,
+        "sportarr": settings.general.sports_tag_enabled,
+    }.get(kind, False)
     if not enabled:
         return frozenset()
 

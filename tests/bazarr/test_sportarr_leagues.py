@@ -24,9 +24,10 @@ def library(migration_engine, monkeypatch):  # noqa: F811
 
 
 def payload(name='League', **kwargs):
+    tags = kwargs.pop('tags', [])
     return dict(id=7, name=name, description='Native description', path=None, monitored=True,
                 sport='Football', posterUrl='https://images.example/poster.jpg',
-                bannerUrl='https://images.example/banner.jpg', tags=[], **kwargs)
+                bannerUrl='https://images.example/banner.jpg', tags=tags, **kwargs)
 
 
 def remote(monkeypatch, leagues, data, status=200):
@@ -553,3 +554,107 @@ def test_sync_leaves_the_global_off(library, monkeypatch):
     leagues.sync_leagues(1)
 
     assert _synced_league_profile(session) is None
+
+
+# --------------------------------------------------------------------------
+# Tag-based automatic profile selection for leagues, mirroring the Series and
+# Movies matching. The sync stores a League's tag labels; when the Languages
+# tag rule is on, a matching profile tag stamps that profile on the league,
+# and a remove tag clears it.
+# --------------------------------------------------------------------------
+
+
+def remote_tags(monkeypatch, leagues, leagues_data, tag_data):
+    """A client whose /api/leagues and /api/tag answers differ."""
+    calls = []
+
+    def get(path):
+        calls.append(path)
+        if path == '/api/tag':
+            return SimpleNamespace(status_code=200, json=lambda: tag_data)
+        return SimpleNamespace(status_code=200, json=lambda: leagues_data)
+
+    monkeypatch.setattr(leagues.ArrClientFactory, 'from_row', lambda *a: SimpleNamespace(get=get))
+    return calls
+
+
+def test_sync_assigns_the_tag_profile_to_a_tagged_league(library, monkeypatch):
+    from app.database import TableLanguagesProfiles
+    from app.config import settings
+    session, leagues = library
+    session.execute(sa.insert(TableLanguagesProfiles).values(
+        profileId=3, name='F1', items='[]', tag='f1'))
+    monkeypatch.setattr(settings.general, 'sports_tag_enabled', True)
+    remote_tags(monkeypatch, leagues, [payload(tags=[3])], [{'id': 3, 'label': 'f1'}])
+
+    leagues.sync_leagues(1)
+
+    # With no global default at all, the profile can only come from the tag.
+    assert _synced_league_profile(session) == 3
+
+
+def test_sync_repeats_tag_matching_when_the_tag_list_changes(library, monkeypatch):
+    """A renamed tag repeats the matching process, exactly as the series and
+    movies parsers do: the profile follows the tag, and a league whose only
+    matching tag disappears keeps the profile it already has."""
+    from app.database import TableLanguagesProfiles, TableSportsLeagues
+    from app.config import settings
+    session, leagues = library
+    session.execute(sa.insert(TableLanguagesProfiles).values(
+        profileId=3, name='F1', items='[]', tag='f1'))
+    monkeypatch.setattr(settings.general, 'sports_tag_enabled', True)
+    remote_tags(monkeypatch, leagues, [payload(tags=[3])], [{'id': 3, 'label': 'f1'}])
+    leagues.sync_leagues(1)
+    # The operator assigned a different profile in the UI; the tag now wins.
+    session.execute(sa.update(TableSportsLeagues).values(profileId=2))
+    remote_tags(monkeypatch, leagues, [payload(tags=[3])], [{'id': 3, 'label': 'f1'}])
+    leagues.sync_leagues(1)
+    assert _synced_league_profile(session) == 3
+    # The tag disappears: the league keeps its last profile rather than being
+    # reset by the sync (Series and Movies behave the same way).
+    remote(monkeypatch, leagues, [payload(tags=[])])
+    leagues.sync_leagues(1)
+    assert _synced_league_profile(session) == 3
+
+
+def test_sync_remove_tags_win_over_a_matching_tag_profile(library, monkeypatch):
+    from app.database import TableLanguagesProfiles
+    from app.config import settings
+    session, leagues = library
+    session.execute(sa.insert(TableLanguagesProfiles).values(
+        profileId=3, name='F1', items='[]', tag='f1'))
+    _set_global_sports_default(monkeypatch, True, 1)
+    monkeypatch.setattr(settings.general, 'sports_tag_enabled', True)
+    monkeypatch.setattr(settings.general, 'remove_profile_tags', ['banned'])
+    # One tag matches a profile, the other is on the remove list: removal wins.
+    remote_tags(monkeypatch, leagues, [payload(tags=[3, 4])],
+                [{'id': 3, 'label': 'f1'}, {'id': 4, 'label': 'banned'}])
+
+    leagues.sync_leagues(1)
+
+    # Removal wins over both the tag profile and the global default.
+    assert _synced_league_profile(session) is None
+
+
+def test_apply_default_profile_respects_the_sports_tag_filter(schema_session, monkeypatch):
+    """The bulk "apply to unset" action skips a league a tag rule excluded, the
+    same way the Series and Movies action does: an excluded league is "kept
+    out" by the sync, not "unset yet" for this action to fill in."""
+    from app.database import TableSportsLeagues, TableLanguagesProfiles
+    from arr_instances.repository import ArrInstanceRepository
+    from arr_instances.service import apply_default_profile
+    from app.config import settings
+    repo = ArrInstanceRepository(schema_session)
+    owner = repo.create('sportarr', 'One', options=json.dumps({'media_defaults': {'default_enabled': True, 'default_profile': 1}}))
+    schema_session.execute(sa.insert(TableLanguagesProfiles).values(profileId=1, name='One', items='[]'))
+    schema_session.execute(sa.insert(TableSportsLeagues), [
+        dict(id=51, arr_instance_id=owner.id, sportarrLeagueId=7, title='Plain', tags='[]'),
+        dict(id=52, arr_instance_id=owner.id, sportarrLeagueId=8, title='Excluded', tags="['banned']"),
+    ])
+    monkeypatch.setattr(settings.general, 'sports_tag_enabled', True)
+    monkeypatch.setattr(settings.general, 'remove_profile_tags', ['banned'])
+    body, status = apply_default_profile(schema_session, owner.id)
+    assert status == 200 and body['updated'] == 1
+    assert schema_session.execute(
+        sa.select(TableSportsLeagues.profileId).order_by(TableSportsLeagues.id)
+    ).scalars().all() == [1, None]

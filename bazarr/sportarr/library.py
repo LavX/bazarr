@@ -129,12 +129,21 @@ def apply_instance_default_profile(session, arr_instance_id):
         _, profile = instance_default_profile(read_media_defaults(instance.options))
         if profile is None or transaction.get(TableLanguagesProfiles, profile) is None:
             raise ValueError('This instance has no valid default language profile to apply.')
-        ids = transaction.execute(select(TableSportsLeagues.id).where(
+        # A league a tag rule deliberately excluded is not "unset yet", it is
+        # "kept out" by the sync, exactly as the Series and Movies bulk action
+        # treats their tag-excluded rows. Filling those in here would silently
+        # undo the rule the user configured, on their whole library at once.
+        from arr_instances.service import _excluded_profile_tags, _tags_exclude_a_profile
+        excluded_tags = _excluded_profile_tags('sportarr')
+        targets = transaction.execute(select(TableSportsLeagues.id, TableSportsLeagues.tags).where(
             TableSportsLeagues.arr_instance_id == arr_instance_id,
-            TableSportsLeagues.profileId.is_(None))).scalars().all()
+            TableSportsLeagues.profileId.is_(None))).all()
+        ids = [league_id for league_id, tags in targets
+               if not _tags_exclude_a_profile(tags, excluded_tags)]
         transaction.execute(update(TableSportsLeagues).where(
             TableSportsLeagues.arr_instance_id == arr_instance_id,
-            TableSportsLeagues.profileId.is_(None)).values(profileId=profile))
+            TableSportsLeagues.profileId.is_(None),
+            TableSportsLeagues.id.in_(ids)).values(profileId=profile))
     return {'updated': len(ids), 'profileId': profile, 'kind': 'sportarr', 'upstream_ids': ids}
 
 

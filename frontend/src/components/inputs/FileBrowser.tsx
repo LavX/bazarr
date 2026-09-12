@@ -30,11 +30,11 @@ function extractPath(raw: string) {
 }
 
 export type FileBrowserProps = Omit<AutocompleteProps, "data"> & {
-  type: "sonarr" | "radarr" | "bazarr";
-  // instanceId (#156) routes the sonarr/radarr browse at the owning instance's
-  // server. Undefined => default server. The global (Phase-12-gated) path-
-  // mapping settings leave this unset; a per-instance path-mapping UI will pass
-  // the selected instance id when it lands.
+  type: "sonarr" | "radarr" | "bazarr" | "sportarr";
+  // instanceId (#156) routes the sonarr/radarr/sportarr browse at the owning
+  // instance's server. Undefined => default server. The global (Phase-12-
+  // gated) path-mapping settings leave this unset; a per-instance path-mapping
+  // UI will pass the selected instance id when it lands.
   instanceId?: number;
 };
 

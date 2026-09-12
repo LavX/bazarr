@@ -5,7 +5,7 @@ import logging
 from sqlalchemy import delete, select
 
 from app.config import settings
-from app.database import database, TableArrInstances, TableSportsLeagues
+from app.database import database, TableArrInstances, TableLanguagesProfiles, TableSportsLeagues
 from arr_instances.client import ArrClientFactory
 from arr_instances.resolution import resolve_default_profile
 from sportarr.db import sports_transaction
@@ -83,6 +83,32 @@ def sync_leagues(arr_instance_id, *, cancel=None, expected_connection=None, http
         return _sync_leagues(arr_instance_id, cancel, expected_connection, http_get)
 
 
+def _language_profiles(session):
+    """The (profileId, name, tag) rows the tag matcher walks, once per sync.
+
+    The Sonarr and Radarr parsers hoist the same lookup out of their loops; a
+    per-league fetch would be 3N queries for a sync that only needs one pass.
+    """
+    return session.execute(
+        select(TableLanguagesProfiles.profileId, TableLanguagesProfiles.name,
+               TableLanguagesProfiles.tag)).all()
+
+
+def get_matching_profile(tags, language_profiles):
+    """The FIRST language profile whose tag is one of this league's tags.
+
+    Mirrors the Sonarr and Radarr matchers exactly: first profile whose tag is
+    in the media's tags wins, and no tag matching means no profile from tags.
+    """
+    matching_profile = None
+    if len(tags) > 0:
+        for profileId, name, tag in language_profiles:
+            if tag in tags:
+                matching_profile = profileId
+                break
+    return matching_profile
+
+
 def _sync_leagues(arr_instance_id, cancel, expected_connection, http_get):
     """Return synced local league IDs, after complete owner-scoped reconciliation."""
     instance = require_sportarr(database, arr_instance_id)
@@ -112,6 +138,16 @@ def _sync_leagues(arr_instance_id, cancel, expected_connection, http_get):
             session=session)
         existing = {row.sportarrLeagueId: row for row in session.execute(
             select(TableSportsLeagues).where(TableSportsLeagues.arr_instance_id == arr_instance_id)).scalars()}
+        # The tag rules the Languages page configures, hoisted once per sync.
+        # Without them the default profile only reaches brand-new leagues, the
+        # same insert-only behaviour Series and Movies use.
+        language_profiles = (
+            _language_profiles(session) if settings.general.sports_tag_enabled else None
+        )
+        remove_profile_tags = (
+            set(settings.general.remove_profile_tags or ())
+            if settings.general.sports_tag_enabled else set()
+        )
         kept = []
         for item, tags in parsed:
             if options['sync_only_monitored_leagues'] and not item['monitored']:
@@ -124,6 +160,18 @@ def _sync_leagues(arr_instance_id, cancel, expected_connection, http_get):
                                          sportarrLeagueId=item['id'], profileId=profile,
                                          created_at_timestamp=now)
                 session.add(row)
+            if language_profiles is not None:
+                # Mirrors the Series and Movies parsers: a matching profile tag
+                # wins over the default (and over a UI-assigned profile, so a
+                # renamed tag visibly changes the league), and a tag on the
+                # remove list wins over everything. No tag matches and no
+                # remove tag means the existing profile is kept as-is.
+                if set(tags) & remove_profile_tags:
+                    row.profileId = None
+                else:
+                    tag_profile = get_matching_profile(tags, language_profiles)
+                    if tag_profile:
+                        row.profileId = tag_profile
             row.externalId = item.get('externalId')
             row.path = item.get('path')
             row.title = row.sortTitle = item['name']

@@ -28,6 +28,9 @@ def _filters():
         event_id=_owner(request.args["event_id"])
         if "event_id" in request.args
         else None,
+        league_id=_league_id(request.args["league_id"])
+        if "league_id" in request.args
+        else None,
         start=int(request.args.get("start", 0)),
         length=int(request.args.get("length", 100)),
         language=request.args.get("language"),
@@ -41,6 +44,22 @@ def _filters():
             else False
         ),
     )
+
+
+def _league_id(value):
+    """A local sports league id from a query string, or None when omitted.
+
+    A local league id is a primary key and already unique across instances, so
+    the history and blacklist listings accept it on its own, exactly as they do
+    an event_id.
+    """
+    if value is None or value == '':
+        return None
+    if isinstance(value, str) and value.isdecimal():
+        value = int(value)
+    if type(value) is not int or value <= 0:
+        raise ValueError('league_id must be a positive integer')
+    return value
 
 
 def _queued(job_id):

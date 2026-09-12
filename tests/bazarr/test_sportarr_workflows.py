@@ -1155,3 +1155,79 @@ def test_a_single_manual_download_requests_one_rescan(manual_library, monkeypatc
     time.sleep(0.05)
     assert requested == [1]
     assert (folder / "1/event.en.srt").exists()
+
+
+# --------------------------------------------------------------------------
+# The league-scoped history: the league toolbox opens /history/sports with a
+# league id, the request carries it through, and list_records narrows the query
+# to that league's events.
+# --------------------------------------------------------------------------
+
+
+def _seed_second_league(session):
+    from app.database import TableSportsEvents, TableSportsLeagues, TableHistorySports
+    from datetime import datetime
+
+    session.execute(sa.insert(TableSportsLeagues).values(
+        id=53, arr_instance_id=1, sportarrLeagueId=9, title='Second'))
+    session.execute(sa.insert(TableSportsEvents).values(
+        id=63, arr_instance_id=1, league_id=53, sportarrEventId=10, file_id=11,
+        path='/sports/second.mkv', title='Second card', file_size=0,
+        audio_language='[]', subtitles='[]', missing_subtitles='[]',
+        failedAttempts='[]'))
+    session.execute(sa.insert(TableHistorySports), [
+        dict(id=1, arr_instance_id=1, league_id=51, event_id=61, language='en',
+             provider='p1', action=1, timestamp=datetime(2026, 1, 1)),
+        dict(id=2, arr_instance_id=1, league_id=53, event_id=63, language='fr',
+             provider='p2', action=1, timestamp=datetime(2026, 1, 2)),
+    ])
+
+
+def test_history_listing_scopes_to_one_league(indexed_library):
+    from sportarr.history import list_records
+
+    session, folder = indexed_library
+    _seed_second_league(session)
+    rows = list_records(session, 'history', arr_instance_id=1, league_id=51, length=100)
+    assert rows['total'] == 1
+    assert [item['event_id'] for item in rows['data']] == [61]
+
+
+def test_sports_history_route_accepts_the_league_filter(indexed_library, monkeypatch):
+    import importlib.util
+    from pathlib import Path
+    import sys
+    from types import ModuleType
+    from flask import Flask
+    from flask_restx import Api
+    from app.config import settings
+
+    session, folder = indexed_library
+    _seed_second_league(session)
+    root = Path(__file__).resolve().parents[2] / "bazarr/api"
+    for name in ("_sports_workflows_api", "_sports_workflows_api.sports"):
+        package = ModuleType(name)
+        package.__path__ = []
+        monkeypatch.setitem(sys.modules, name, package)
+    for name, path in [
+        ("utils", "utils.py"),
+        ("sports.leagues", "sports/leagues.py"),
+        ("sports.workflows", "sports/workflows.py"),
+    ]:
+        spec = importlib.util.spec_from_file_location(
+            "_sports_workflows_api." + name, root / path
+        )
+        routes = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, spec.name, routes)
+        spec.loader.exec_module(routes)
+    monkeypatch.setattr(routes, "database", session)
+    app = Flask(__name__)
+    Api(app).add_namespace(routes.api_ns_sports_workflows, path="/api")
+    client = app.test_client()
+    headers = {"X-API-KEY": settings.auth.apikey}
+    response = client.get(
+        "/api/sports/history?arr_instance_id=1&league_id=51", headers=headers
+    )
+    assert response.status_code == 200
+    assert response.json["total"] == 1
+    assert [item["event_id"] for item in response.json["data"]] == [61]

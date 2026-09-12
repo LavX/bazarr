@@ -62,3 +62,18 @@ def list_rootfolders(session, arr_instance_id):
                      for row in session.execute(select(TableSportsLeaguesRootfolder).where(
                          TableSportsLeaguesRootfolder.arr_instance_id == arr_instance_id)
                          .order_by(TableSportsLeaguesRootfolder.id)).scalars()]}
+
+
+def list_rootfolder_paths(session, arr_instance_id):
+    """The remote root folder paths known for one owner, in sync order.
+
+    The file browser seeds its initial listing from these: the first thing a
+    path-mapping editor asks for is the set of roots Sportarr already knows,
+    which is exactly what a mapping is drawn between. Empty when the root
+    folders have not been synced yet, so the browser falls back to a live
+    filesystem listing.
+    """
+    return [row for row in session.execute(
+        select(TableSportsLeaguesRootfolder.path)
+        .where(TableSportsLeaguesRootfolder.arr_instance_id == arr_instance_id)
+        .order_by(TableSportsLeaguesRootfolder.id)).scalars().all() if row]

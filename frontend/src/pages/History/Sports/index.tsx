@@ -67,6 +67,11 @@ const SportsHistoryView: FunctionComponent = () => {
   const eventId = params.get("event_id")
     ? Number(params.get("event_id"))
     : undefined;
+  // The league toolbox opens History scoped to its own league, so the page
+  // carries the filter through to the backend the same way it does the owner.
+  const leagueId = params.get("league")
+    ? Number(params.get("league"))
+    : undefined;
 
   const [language, setLanguage] = useState("");
   const [provider, setProvider] = useState("");
@@ -79,6 +84,7 @@ const SportsHistoryView: FunctionComponent = () => {
   const query = useSportsHistoryPagination({
     owner,
     eventId,
+    leagueId,
     language,
     provider,
     action: action ?? undefined,

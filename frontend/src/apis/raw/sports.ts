@@ -141,6 +141,8 @@ export interface SportsJobStatus {
 export interface SportsFilters {
   owner?: number;
   eventId?: number;
+  /** Restrict to one league's events; the league toolbox History button sets it. */
+  leagueId?: number;
   language?: string;
   provider?: string;
   action?: string;
@@ -170,6 +172,7 @@ class SportsApi extends BaseApi {
       {
         arr_instance_id: filters.owner,
         event_id: filters.eventId,
+        league_id: filters.leagueId,
         language: filters.language || undefined,
         provider: filters.provider || undefined,
         action: filters.action || undefined,
