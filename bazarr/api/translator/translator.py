@@ -6,12 +6,20 @@ from flask import request as flask_request
 from flask_restx import Resource, Namespace
 
 from app.config import settings
+from app import activity
 from app.jobs_queue import jobs_queue
 from subtitles.tools.translate.services.auth import get_translator_auth_headers
-from subtitles.tools.translate.services.openrouter_translator import build_provider_config
+from subtitles.tools.translate.services.openrouter_translator import (build_routing_config,
+                                                                     ProviderRoutingError,
+                                                                     TRANSLATOR_SERVICE_ID)
 from ..utils import authenticate
 
 api_ns_translator = Namespace('Translator', description='AI Subtitle Translator service operations')
+
+# This host submits an editor translation and then stops following it: the
+# browser polls the service directly. The observation therefore carries an
+# expiry rather than claiming the work runs until this process restarts.
+EDITOR_OBSERVATION_TTL_SECONDS = 600
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +30,25 @@ def get_service_url():
     if url:
         return url.rstrip('/')
     return None
+
+
+def _observe_editor_submission(submitted, payload):
+    """Record an editor translation this host submitted, with editor scope.
+
+    No library owner is known on this path, so none is guessed. The remote job
+    identity is retained so a later observation of the same job attaches to this
+    submission instead of looking like separate work.
+    """
+    remote_job_id = submitted.get('jobId') if isinstance(submitted, dict) else None
+    if not remote_job_id:
+        return
+    identity = activity.register(
+        activity.new_activity_id('translation'), operation='translation', scope_kind='editor',
+        ttl_seconds=EDITOR_OBSERVATION_TTL_SECONDS,
+        title=payload.get('title') or None, language=payload.get('targetLanguage') or None,
+        source_language=payload.get('sourceLanguage') or None)
+    activity.note_remote_submission(identity, service_id=TRANSLATOR_SERVICE_ID,
+                                    remote_job_id=remote_job_id)
 
 
 @api_ns_translator.route('translator/status')
@@ -105,6 +132,11 @@ class TranslatorJobs(Resource):
         if not data.get("lines") or not data.get("targetLanguage"):
             return {"error": "Missing required fields: lines, targetLanguage"}, 400
 
+        try:
+            model, provider = build_routing_config()
+        except ProviderRoutingError as error:
+            return {"error": str(error)}, 400
+
         from subtitles.tools.translate.services.encryption import encrypt_api_key
 
         api_key = settings.translator.openrouter_api_key
@@ -123,9 +155,9 @@ class TranslatorJobs(Resource):
             "mediaType": data.get("mediaType", ""),
             "config": {
                 "apiKey": api_key,
-                "model": settings.translator.openrouter_model,
+                "model": model,
                 "temperature": settings.translator.openrouter_temperature,
-                "provider": build_provider_config(),
+                "provider": provider,
             }
         }
 
@@ -137,7 +169,9 @@ class TranslatorJobs(Resource):
                 timeout=30
             )
             if response.status_code == 200:
-                return response.json(), 200
+                submitted = response.json()
+                _observe_editor_submission(submitted, payload)
+                return submitted, 200
             else:
                 return {"error": f"Service returned {response.status_code}"}, 502
         except requests.exceptions.ConnectionError:

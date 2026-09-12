@@ -59,7 +59,7 @@ def test_keep_lyrics_still_drops_bare_music_symbol_lines(languages):
 def test_keep_lyrics_drops_decorated_symbol_only_lines(languages):
     """Symbol-only lines decorated with dashes/spaces carry no words, so they are
     still dropped while a real lyric in the same file is kept. Regression for the
-    Codex review on https://github.com/LavX/bazarr/pull/229
+    review on https://github.com/LavX/bazarr/pull/229
     """
     srt = (
         "1\n00:00:01,000 --> 00:00:02,000\n- ♪♪\n\n"
@@ -78,7 +78,7 @@ def test_keep_lyrics_preserves_all_music_note_text_lines(languages):
     it looks like a description: a sung lyric and a cue cannot be told apart
     reliably, and over-removing was the bug being fixed (the heuristic dropped
     all-caps lyrics like "HAPPY BIRTHDAY" and lyrics containing "music").
-    See the Codex review on https://github.com/LavX/bazarr/pull/229
+    See the review on https://github.com/LavX/bazarr/pull/229
     """
     srt = (
         "1\n00:00:01,000 --> 00:00:02,000\n♪ HAPPY BIRTHDAY TO YOU ♪\n\n"
@@ -94,7 +94,7 @@ def test_keep_lyrics_preserves_all_music_note_text_lines(languages):
 def test_keep_lyrics_leaves_non_music_letterless_lines(languages):
     """Lines without a music symbol are outside this processor's scope and must
     survive even when they have no letters (e.g. a year). Regression for the
-    Codex review on https://github.com/LavX/bazarr/pull/229
+    review on https://github.com/LavX/bazarr/pull/229
     """
     srt = (
         "1\n00:00:01,000 --> 00:00:02,000\n1939\n\n"
@@ -109,7 +109,7 @@ def test_keep_lyrics_leaves_non_music_letterless_lines(languages):
 def test_music_processor_strips_override_tags_for_content_check():
     """SSA/ASS override tags ({\\i1}, {\\an8}, ...) must not count as lyric
     content: a tag-wrapped decoration line is dropped, a tag-wrapped lyric is
-    kept, and a non-music line is left untouched. Regression for the Codex review
+    kept, and a non-music line is left untouched. Regression for the review
     on https://github.com/LavX/bazarr/pull/229
     """
     import re as _re
@@ -130,7 +130,7 @@ def test_music_processor_strips_override_tags_for_content_check():
 
 def test_keep_lyrics_preserves_numeric_music_lines(languages):
     """A music-note line whose content is numeric (e.g. a count-in) is real
-    content, not pure decoration, so it is preserved. Regression for the Codex
+    content, not pure decoration, so it is preserved. Regression for the
     review on https://github.com/LavX/bazarr/pull/229
     """
     srt = (
@@ -146,7 +146,7 @@ def test_keep_lyrics_preserves_numeric_music_lines(languages):
 def test_keep_lyrics_drops_symbol_line_within_multiline_event(languages):
     """A symbol-only line sharing a multi-line cue with a lyric is dropped on its
     own; the lyric line in the same cue must survive (not be dragged into the
-    entry-wide removal). Regression for the Codex review on
+    entry-wide removal). Regression for the review on
     https://github.com/LavX/bazarr/pull/229
     """
     srt = "1\n00:00:01,000 --> 00:00:02,000\n♪ We are the champions ♪\n♪♪\n"

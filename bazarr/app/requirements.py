@@ -97,7 +97,7 @@ RUNTIME_REQUIREMENTS = {
     "setuptools": ("setuptools", ">=84.0.0"),
     "aiohttp": ("aiohttp", ">=3.14.3"),
     "alembic": ("alembic", "==1.19.1"),
-    "apprise": ("apprise", "==1.13.0"),
+    "apprise": ("apprise", "==1.13.1"),
     "apscheduler": ("apscheduler", "==3.11.3"),
     "babelfish": ("babelfish", "==0.6.1"),
     "bs4": ("beautifulsoup4", "==4.15.0"),

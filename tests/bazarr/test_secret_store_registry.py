@@ -45,6 +45,13 @@ def test_system_secrets_never_user_visible():
     assert not overlap_lists, f"list keys must not be in SYSTEM: {overlap_lists}"
 
 
+def test_tmdb_credential_has_a_disjoint_encrypted_write_only_tier():
+    from secret_store import registry
+    tier = getattr(registry, "WRITE_ONLY_SECRETS", frozenset())
+    assert "discover.tmdb_access_token" in tier
+    assert not tier & (USER_VISIBLE_SECRETS | SYSTEM_SECRETS | USER_VISIBLE_SECRET_LISTS)
+
+
 def test_system_includes_master_and_signing_keys():
     """Every cryptographic primitive (anything used to sign / encrypt
     OTHER secrets) must be SYSTEM, never visible to the frontend."""

@@ -41,10 +41,14 @@ import CriticalError from "@/pages/errors/CriticalError";
 import { useOnboardingState } from "@/pages/Setup/useOnboardingState";
 import { RouterNames } from "@/Router/RouterNames";
 import { Environment } from "@/utilities";
+import {
+  readSessionValue,
+  removeSessionValue,
+} from "@/utilities/browserStorage";
 import { consumeRestartReloadPending } from "@/utilities/restart";
 import { registerAppNavigate } from "@/utilities/whatsNew";
 import AppHeader from "./Header";
-import styleVars from "@/assets/_variables.module.scss";
+import shellStyles from "./AppShell.module.scss";
 
 interface SupervisorStatus {
   state: "starting" | "running" | "crashed" | "stopping";
@@ -160,14 +164,14 @@ const App: FunctionComponent = () => {
   }, []);
 
   useEffect(() => {
-    const token = sessionStorage.getItem("password_upgrade_token");
+    const token = readSessionValue("password_upgrade_token");
     if (token) {
       setUpgradeModalOpen(true);
     }
   }, []);
 
   const handleUpgradeAccept = useCallback(async () => {
-    const token = sessionStorage.getItem("password_upgrade_token");
+    const token = readSessionValue("password_upgrade_token");
     if (!token) return;
     setUpgrading(true);
     try {
@@ -183,14 +187,14 @@ const App: FunctionComponent = () => {
         notification.warn("Upgrade failed", "Could not upgrade password hash"),
       );
     } finally {
-      sessionStorage.removeItem("password_upgrade_token");
+      removeSessionValue("password_upgrade_token");
       setUpgradeModalOpen(false);
       setUpgrading(false);
     }
   }, []);
 
   const handleUpgradeDecline = useCallback(() => {
-    sessionStorage.removeItem("password_upgrade_token");
+    removeSessionValue("password_upgrade_token");
     setUpgradeModalOpen(false);
   }, []);
 
@@ -284,17 +288,19 @@ const App: FunctionComponent = () => {
       <NavbarProvider value={{ showed: navbar, show: setNavbar }}>
         <OnlineProvider value={{ online, setOnline }}>
           <AppShell
+            className={shellStyles.shell}
+            layout="alt"
             navbar={{
-              width: styleVars.navBarWidth,
+              width: 72,
               breakpoint: "sm",
-              collapsed: { mobile: !navbar },
+              collapsed: { mobile: true },
             }}
-            header={{ height: { base: styleVars.headerHeight } }}
+            header={{ height: { base: 134, sm: 82 } }}
             padding={0}
           >
-            <AppHeader></AppHeader>
+            <AppHeader />
             <AppNavbar></AppNavbar>
-            <AppShell.Main>
+            <AppShell.Main className={shellStyles.main}>
               {!online && hasConnected && (
                 <Alert
                   color="yellow"
@@ -308,7 +314,7 @@ const App: FunctionComponent = () => {
                   </Text>
                 </Alert>
               )}
-              <Outlet></Outlet>
+              <Outlet />
             </AppShell.Main>
           </AppShell>
           <Modal

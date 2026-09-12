@@ -1,5 +1,7 @@
 .header {
   box-shadow: none;
+  // The band's frosted ground lives with the other shell rules in
+  // assets/_bazarr.scss, which owns the header background.
 }
 
 .headerInner {

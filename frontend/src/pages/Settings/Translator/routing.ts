@@ -2,9 +2,11 @@ import { SelectorOption } from "@/components/inputs/Selector";
 
 // Which OpenRouter provider serves the model. Mirrors the backend validator for
 // translator.openrouter_provider_routing; the sidecar turns nitro and floor into
-// the OpenRouter slug shortcuts and the rest into provider.sort.
+// OpenRouter slug shortcuts; SmartFast and Custom are sent through the translator API.
 export const aiTranslatorProviderRoutingOptions: SelectorOption<string>[] = [
-  { label: "Fastest (Default)", value: "throughput" },
+  { label: "SmartFast (speed + price, Default)", value: "smartfast" },
+  { label: "Custom (selected providers)", value: "custom" },
+  { label: "Fastest", value: "throughput" },
   { label: "Fastest + priority tier (:nitro)", value: "nitro" },
   { label: "Cheapest", value: "price" },
   { label: "Cheapest + flex tier (:floor)", value: "floor" },
@@ -12,10 +14,10 @@ export const aiTranslatorProviderRoutingOptions: SelectorOption<string>[] = [
   { label: "OpenRouter default (load balanced)", value: "default" },
 ];
 
-// The two OpenRouter shortcuts that can be appended to a model id. Every other
+// Routing shortcuts that can be appended to a model id. Every other
 // variant, :free, :thinking, :online, :extended, :exacto and :batch among them,
 // names a different model rather than a way to route to the same one.
-const ROUTING_SUFFIXES = ["nitro", "floor"] as const;
+const ROUTING_SUFFIXES = ["nitro", "floor", "smartfast"] as const;
 
 export type RoutingSuffix = (typeof ROUTING_SUFFIXES)[number];
 
@@ -32,24 +34,28 @@ export interface SplitModelId {
 // the id would contradict the selector, because both the Bazarr backend and the
 // sidecar read a shortcut off the model id and let it beat the configured sort.
 export function splitRoutingSuffix(rawModelId: string): SplitModelId {
-  let modelId = (rawModelId ?? "").trim();
-  let routing: RoutingSuffix | null = null;
-
-  for (;;) {
-    const colon = modelId.lastIndexOf(":");
-    if (colon <= 0) {
-      return { modelId, routing };
-    }
-
-    const tail = modelId.slice(colon + 1).toLowerCase();
-    const found = ROUTING_SUFFIXES.find((suffix) => suffix === tail);
-    if (!found) {
-      return { modelId, routing };
-    }
-
-    routing = routing ?? found;
-    modelId = modelId.slice(0, colon);
+  const trimmed = (rawModelId ?? "").trim();
+  const colon = trimmed.indexOf(":");
+  if (colon <= 0) {
+    return { modelId: trimmed, routing: null };
   }
+
+  // Every position is examined, not just the tail. A shortcut sitting in front of a
+  // genuine variant, as in model:nitro:free, is still a shortcut, and the Bazarr
+  // backend removes it from anywhere; stopping at the first non-routing tail here
+  // left the two disagreeing about which model the request is even for.
+  const asSuffix = (part: string) =>
+    ROUTING_SUFFIXES.find((suffix) => suffix === part.toLowerCase()) ?? null;
+  const variants = trimmed.slice(colon + 1).split(":");
+  const shortcuts = variants.map(asSuffix).filter((s) => s !== null);
+
+  return {
+    modelId: [
+      trimmed.slice(0, colon),
+      ...variants.filter((p) => !asSuffix(p)),
+    ].join(":"),
+    routing: shortcuts.length ? shortcuts[shortcuts.length - 1] : null,
+  };
 }
 
 export function routingLabel(value: string): string {
