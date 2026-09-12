@@ -30,6 +30,7 @@ import {
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useTestArrInstanceById, useUpdateArrInstance } from "@/apis/hooks";
 import type { ArrInstance } from "@/apis/raw/arrInstances";
+import { isTestEnv } from "@/utilities/env";
 import { ARR_META, buildHostUrl, buildWebhookUrl } from "./meta";
 import styles from "./Connections.module.scss";
 
@@ -277,7 +278,17 @@ const InstanceCard: FunctionComponent<Props> = ({
           >
             Edit
           </Button>
-          <Menu position="bottom-end" withArrow>
+          {/* Mantine's hideDetached (default on) hides the dropdown when the
+              trigger looks clipped to the viewport. Under jsdom's zero
+              geometry the Floating middleware intermittently classifies the
+              trigger as fully clipped, mounting the menu with display:none,
+              so the test suite could not find its items. Tests run with it
+              off; production keeps the default behavior. */}
+          <Menu
+            position="bottom-end"
+            withArrow
+            hideDetached={isTestEnv ? false : undefined}
+          >
             <Menu.Target>
               <ActionIcon
                 type="button"

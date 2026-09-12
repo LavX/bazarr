@@ -596,26 +596,15 @@ describe("Sportarr Connections", () => {
         }),
       );
       customRender(<SettingsConnectionsView />);
+      // Settle the settings query before grabbing the action button: its
+      // resolution re-renders the section, and capturing the button earlier
+      // left the test clicking a node the re-render had replaced.
+      await settingsLoaded();
       const moreActions = await screen.findByRole("button", {
         name: "More actions for Main Sportarr",
       });
-      await settingsLoaded();
       await user.click(moreActions);
-      // Two separate races here. settingsLoaded above stops the settings query
-      // re-rendering the tree and closing the menu; this waits for Mantine to
-      // actually mount the dropdown, which it does lazily into a portal behind
-      // a transition and which under coverage outruns findBy's 1s default.
-      // Removing either one brings the intermittent failure back.
-      await waitFor(() =>
-        expect(moreActions).toHaveAttribute("aria-expanded", "true"),
-      );
-      await user.click(
-        await screen.findByRole(
-          "menuitem",
-          { name: "Delete" },
-          { timeout: 5000 },
-        ),
-      );
+      await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
       const modal = await screen.findByRole("dialog", {
         name: "Delete instance",
       });
