@@ -7,16 +7,6 @@
 // the stage to the margins, where it can be read without being in the way.
 
 .discover {
-  // One primary fill per theme, for every filled action on this page and in
-  // the preview modal it opens. Mantine picks a darker shade for filled
-  // buttons in night, which on navy reads as inert; the hero used to carry
-  // its own brighter amber as an exception. Now there is no exception.
-  // Day values first; the night block below overrides them. Values switch on
-  // Mantine's scheme attribute rather than through light-dark(), which here
-  // followed the operating system rather than the reader's chosen appearance.
-  --discover-action-bg: var(--mantine-color-brand-7);
-  --discover-action-bg-hover: var(--mantine-color-brand-8);
-  --discover-action-fg: #ffffff;
   --discover-link: var(--mantine-color-brand-7);
   --discover-stage: #0b0c15;
   --discover-poster-shadow: 0 10px 24px -10px rgba(18, 17, 37, 0.35);
@@ -65,28 +55,6 @@
     }
   }
 
-  button[data-variant="filled"]:not(:disabled):not([data-disabled]) {
-    // Mantine writes these three on the element's style attribute, so only an
-    // important declaration in a stylesheet outranks them.
-    --button-bg: var(--discover-action-bg) !important;
-    --button-hover: var(--discover-action-bg-hover) !important;
-    --button-color: var(--discover-action-fg) !important;
-    color: var(--discover-action-fg);
-    font-weight: 600;
-  }
-
-  // A primary action that is waiting for input keeps its colour at reduced
-  // strength. Mantine's grey disabled fill reads as a control that is broken,
-  // which on the one button this page exists for is the wrong message.
-  button[data-variant="filled"]:disabled:not([data-loading]),
-  button[data-variant="filled"][data-disabled]:not([data-loading]) {
-    background: var(--discover-action-bg);
-    border: 1px solid transparent;
-    color: var(--discover-action-fg);
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
   // Checkboxes and radios are drawn boxes, not text fields: stretching one to
   // 44px turns it into a 20 by 44 bar. Their target floor is carried by the
   // full-width label below, which is what a pointer or finger actually hits.
@@ -122,36 +90,7 @@
   }
 }
 
-// The preview modal is portalled outside the page, so it declares the same
-// action fill itself: Download SRT in the modal and Download SRT in the
-// results list are one control to the reader and must be one colour.
-.previewModal {
-  --discover-action-bg: var(--mantine-color-brand-7);
-  --discover-action-bg-hover: var(--mantine-color-brand-8);
-  --discover-action-fg: #ffffff;
-  --discover-wait-ring: rgba(179, 107, 0, 0.55);
-  --discover-wait-text: #8a5a00;
-  button[data-variant="filled"]:disabled:not([data-loading]),
-  button[data-variant="filled"][data-disabled]:not([data-loading]) {
-    background-color: transparent;
-    border: 1px dashed var(--discover-wait-ring);
-    color: var(--discover-wait-text);
-    opacity: 1;
-    cursor: not-allowed;
-  }
-  button[data-variant="filled"]:not(:disabled):not([data-disabled]) {
-    --button-bg: var(--discover-action-bg) !important;
-    --button-hover: var(--discover-action-bg-hover) !important;
-    --button-color: var(--discover-action-fg) !important;
-    color: var(--discover-action-fg);
-    font-weight: 600;
-  }
-}
-
 :global([data-mantine-color-scheme="dark"]) .discover {
-  --discover-action-bg: var(--mantine-color-brand-5);
-  --discover-action-bg-hover: var(--mantine-color-brand-4);
-  --discover-action-fg: var(--mantine-color-dark-9);
   --discover-link: var(--mantine-color-brand-4);
   --discover-poster-shadow: 0 14px 30px -12px rgba(0, 0, 0, 0.7);
   --discover-poster-ring: rgba(255, 248, 240, 0.16);
@@ -165,51 +104,11 @@
   --rail-accent: var(--mantine-color-brand-5);
   --rail-track: var(--bz-hover-bg-emphasis);
 }
-:global([data-mantine-color-scheme="dark"]) .previewModal {
-  --discover-action-bg: var(--mantine-color-brand-5);
-  --discover-action-bg-hover: var(--mantine-color-brand-4);
-  --discover-action-fg: var(--mantine-color-dark-9);
-  --discover-wait-ring: rgba(242, 181, 96, 0.5);
-  --discover-wait-text: rgba(242, 181, 96, 0.8);
-}
 
 // The text preview card inside the modal, per the approved concept: an
 // amber tabular cue time beside the dialogue, and the muted sync
 // disclaimer underneath. The modal shell carries the panel and the 9px
 // radius; these carry the type.
-.previewModal .previewCard {
-  min-width: 0;
-}
-
-.previewModal .cueList {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-}
-
-.previewModal .cueRow {
-  padding-block: 12px;
-  border-bottom: 1px solid var(--bz-border-card);
-}
-
-.previewModal .cueTime {
-  font-size: 0.6875rem;
-  color: var(--discover-action-bg);
-  font-variant-numeric: tabular-nums;
-}
-
-.previewModal .cueText {
-  font-size: 0.875rem;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  margin-top: 4px;
-}
-
-.previewModal .previewNote {
-  font-size: 0.6875rem;
-  color: var(--bz-text-tertiary);
-}
 
 .visuallyHidden {
   position: absolute !important;
@@ -1205,12 +1104,12 @@
 // the concept pairs them. The download control keeps its filled amber.
 .resultPreview[data-variant="subtle"] {
   border-color: transparent;
-  color: var(--discover-action-bg);
+  color: var(--bz-action-bg);
   font-weight: 600;
   white-space: nowrap;
   &:hover {
     background: var(--bz-hover-bg);
-    color: var(--discover-action-bg-hover);
+    color: var(--bz-action-hover);
   }
 }
 
@@ -1792,43 +1691,6 @@
   margin-bottom: 8px;
 }
 
-.appHeader {
-  button,
-  :global(.mantine-ActionIcon-root) {
-    min-height: 44px !important;
-    min-width: 44px !important;
-  }
-  :focus-visible {
-    outline: 2px solid var(--mantine-color-brand-5);
-    outline-offset: 2px;
-  }
-}
-.brandHome {
-  display: flex;
-  align-items: center;
-  min-width: 44px;
-  min-height: 44px;
-}
-.mobileNavigation {
-  nav {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    min-height: 0;
-  }
-  a,
-  button {
-    min-height: 44px;
-  }
-  :focus-visible {
-    outline: 2px solid var(--mantine-color-brand-5);
-    outline-offset: -2px;
-  }
-}
-.navigationBody {
-  overflow: hidden;
-}
-
 // ---------------------------------------------------------------------------
 // Breakpoints
 // ---------------------------------------------------------------------------
@@ -2010,16 +1872,6 @@
   .targetFields,
   .targetFields:has(.episodeFields) {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 47.99em) {
-  .librarySearch {
-    display: none;
-  }
-  .appHeader > div {
-    padding: 8px;
-    margin-right: 0;
   }
 }
 

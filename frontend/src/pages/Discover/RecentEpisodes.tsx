@@ -21,7 +21,7 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useDiscoverRecentEpisodes } from "@/apis/hooks/discover";
 import { useDiscover } from "@/contexts/Discover";
 import type { RecentEpisode } from "@/types/discover";
-import { plural, readableFeedDate } from "./feedText";
+import { readableFeedDate } from "./feedText";
 import MediaPoster from "./MediaPoster";
 import { discoverTitlePath } from "./navigation";
 import styles from "./Discover.module.scss";

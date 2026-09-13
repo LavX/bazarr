@@ -346,7 +346,7 @@ it.each([
       }),
     ),
   );
-  const { user } = browse();
+  browse();
   await screen.findByRole("heading", { name: "Recent digital releases" });
   const section = within(
     screen.getByRole("region", { name: "Recent digital releases" }),
@@ -390,7 +390,7 @@ it.each([
       HttpResponse.json({ ...feed("US"), ...overrides }),
     ),
   );
-  const { user } = browse();
+  browse();
   await screen.findByRole("heading", { name: "Recent digital releases" });
   await screen.findByText(/Digital releases are temporarily unavailable/);
   expect(
@@ -449,7 +449,7 @@ it("does not request regional metadata when TMDB is unconfigured", async () => {
       }),
     ),
   );
-  const { user } = browse();
+  browse();
   await screen.findByRole("heading", { name: "Recent digital releases" });
   await screen.findByText("Connect TMDB to browse regional digital releases.");
   expect(regions).toEqual([]);

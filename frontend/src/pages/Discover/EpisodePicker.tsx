@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useNavigate } from "react-router";
 import { Alert, Button, Stack, Text } from "@mantine/core";
 import { useDiscoverMetadata } from "@/apis/hooks/discover";
@@ -108,7 +108,7 @@ export default function EpisodePicker({
       season: "",
       episode: "",
     });
-  const seasonRows = show.seasons ?? [];
+  const seasonRows = useMemo(() => show.seasons ?? [], [show.seasons]);
   const episodeRows =
     seasons.data?.season?.season === season ? seasons.data.season.episodes : [];
   // A single season has no meaningful choice. Keep that default in the URL

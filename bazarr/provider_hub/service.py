@@ -303,6 +303,35 @@ def _catalog_source_error_message(error: Exception) -> str:
     if isinstance(error, requests.exceptions.HTTPError):
         response = getattr(error, "response", None)
         status_code = getattr(response, "status_code", None)
+        headers = getattr(response, "headers", {}) or {}
+        secondary_limit = False
+        if status_code == 403 and len(getattr(response, "content", b"") or b"") <= 8192:
+            try:
+                payload = response.json()
+                message = payload.get("message", "") if isinstance(payload, dict) else ""
+                secondary_limit = isinstance(message, str) and message.lower().startswith(
+                    "you have exceeded a secondary rate limit")
+            except (ValueError, TypeError):
+                pass
+        limited = status_code in (403, 429) and (
+            status_code == 429 or secondary_limit or headers.get("x-ratelimit-remaining") == "0"
+            or headers.get("retry-after") is not None
+        )
+        if limited:
+            retry_at = None
+            try:
+                if headers.get("retry-after") is not None:
+                    retry_at = time.time() + max(0, int(headers["retry-after"]))
+                elif headers.get("x-ratelimit-remaining") == "0" and headers.get("x-ratelimit-reset") is not None:
+                    retry_at = int(headers["x-ratelimit-reset"])
+                reset = datetime.fromtimestamp(retry_at, timezone.utc) if retry_at is not None else None
+            except (ValueError, TypeError, OverflowError, OSError):
+                reset = None
+            recovery = (f"Retry after {reset:%Y-%m-%d %H:%M:%S} UTC."
+                        if reset is not None else "GitHub did not provide a reset time. Retry later.")
+            return f"GitHub temporarily limited catalog requests. {recovery} Your cached catalog is unchanged."
+        if status_code == 403:
+            return "GitHub denied access to this catalog source. Check the repository URL and access permissions."
         if status_code:
             return f"GitHub returned HTTP {status_code} while refreshing this catalog source."
         return "GitHub returned an error while refreshing this catalog source."
@@ -463,7 +492,9 @@ def _catalog_needs_auto_refresh(state: dict[str, Any]) -> bool:
     for source in (state.get("catalog_sources") or {}).values():
         if not isinstance(source, dict):
             continue
-        if source.get("enabled", True) and source.get("last_checked_at") is None:
+        if (source.get("enabled", True)
+                and source.get("last_checked_at") is None
+                and source.get("last_attempted_at") is None):
             return True
     return False
 
@@ -614,12 +645,13 @@ def refresh_catalog(source_ids: set[str] | None = None) -> dict[str, Any]:
                 if source_ids is not None and source.get("id") not in source_ids:
                     continue
                 sources_count += 1
-                source["last_checked_at"] = now
+                source["last_attempted_at"] = now
                 try:
                     catalog, commit = _fetch_github_catalog(
                         source["url"], override_ref=source.get("dev_ref")
                     )
                     source["resolved_commit"] = commit
+                    source["last_checked_at"] = now
                     source["last_error"] = None
                     refreshed_sources.add(source.get("id") or source["name"])
                 except Exception as error:

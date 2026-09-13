@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ActionIcon, Button, Group, Stack, Text } from "@mantine/core";
 import { faClosedCaptioning, faXmark } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
@@ -6,7 +6,7 @@ import type {
   DiscoverPreviewFeedback,
   DiscoverSubtitleResult,
 } from "@/types/discover";
-import { renderSubtitleHtml } from "@/utilities/subtitleText";
+import SubtitleCueText from "./SubtitleCueText";
 import styles from "./Discover.module.scss";
 
 export function previewSourceId(row: DiscoverSubtitleResult) {
@@ -34,6 +34,7 @@ export default function SubtitlePreview({
   searchAgain,
 }: PreviewProps) {
   const { context, row, data, status } = preview;
+  const [raw, setRaw] = useState(false);
   const target =
     context.mode === "release"
       ? `${context.query} (unverified release query)`
@@ -87,15 +88,27 @@ export default function SubtitlePreview({
           </Text>
           <Text className={styles.previewSource}>{row.provider} · SRT</Text>
         </div>
-        <ActionIcon
-          variant="subtle"
-          color="gray"
-          size={44}
-          aria-label="Close preview"
-          onClick={dismiss}
-        >
-          <FontAwesomeIcon icon={faXmark} />
-        </ActionIcon>
+        <Group gap="xs" wrap="nowrap">
+          {status === "ready" && (
+            <Button
+              variant="subtle"
+              size="compact-sm"
+              aria-pressed={raw}
+              onClick={() => setRaw(!raw)}
+            >
+              Raw text
+            </Button>
+          )}
+          <ActionIcon
+            variant="subtle"
+            color="gray"
+            size={44}
+            aria-label="Close preview"
+            onClick={dismiss}
+          >
+            <FontAwesomeIcon icon={faXmark} />
+          </ActionIcon>
+        </Group>
       </Group>
       <Text id="discover-preview-identity" className={styles.visuallyHidden}>
         {target} · {row.release ?? "Release information unavailable"} ·{" "}
@@ -160,13 +173,9 @@ export default function SubtitlePreview({
                     {timestamp(cue.start_ms).split(".")[0]}
                   </time>
                 </Text>
-                <Text
-                  component="div"
-                  className={styles.cueText}
-                  dangerouslySetInnerHTML={{
-                    __html: renderSubtitleHtml(cue.text),
-                  }}
-                />
+                <Text component="div" className={styles.cueText}>
+                  {raw ? cue.text : <SubtitleCueText text={cue.text} />}
+                </Text>
               </li>
             ))}
           </ol>

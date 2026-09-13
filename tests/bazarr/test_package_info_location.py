@@ -144,3 +144,55 @@ def test_get_args_imports_under_the_root_launcher():
         timeout=60,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_test_process_configuration_is_private_by_default():
+    import concurrent.futures
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    env = dict(os.environ)
+    env.pop("BAZARR_CONFIG_DIR", None)
+    script = "import runpy, os; scope = runpy.run_path('tests/conftest.py'); print(os.environ['BAZARR_CONFIG_DIR'])"
+
+    def probe(_):
+        return subprocess.check_output([sys.executable, "-c", script], cwd=root, env=env, text=True).strip()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        first, second = pool.map(probe, range(2))
+    assert first != second
+    assert Path(first).name.startswith("bazarr-test-")
+    assert Path(second).name.startswith("bazarr-test-")
+    assert first != str(root / "data")
+
+
+def test_test_configuration_respects_explicit_lane_directory(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    env = dict(os.environ, BAZARR_CONFIG_DIR=str(tmp_path))
+    script = "import runpy, os; scope = runpy.run_path('tests/conftest.py'); print(os.environ['BAZARR_CONFIG_DIR'])"
+    result = subprocess.check_output([sys.executable, "-c", script], cwd=root, env=env, text=True).strip()
+    assert result == str(tmp_path)
+
+
+def test_runtime_configuration_precedence_and_normalization(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    script = "from bazarr.app.get_args import args; print(args.config_dir)"
+    env = dict(os.environ, NO_CLI="false", NO_UPDATE="false")
+    env.pop("BAZARR_CONFIG_DIR", None)
+    default = subprocess.check_output([sys.executable, "-c", script], cwd=root, env=env, text=True).strip()
+    assert default == str(root / "data")
+    env["BAZARR_CONFIG_DIR"] = "relative-config/../selected-config"
+    selected = subprocess.check_output([sys.executable, "-c", script], cwd=root, env=env, text=True).strip()
+    assert selected == str(root / "selected-config")
+    explicit = subprocess.check_output([sys.executable, "-c", script, "--config", str(tmp_path)], cwd=root, env=env, text=True).strip()
+    assert explicit == str(tmp_path)

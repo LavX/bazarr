@@ -97,8 +97,8 @@ $cream: #fff8e1;
   border-radius: 20px;
   // Glassmorphism: semi-opaque dark bg + blur + subtle border.
   background: rgba(26, 25, 48, 0.55);
-  backdrop-filter: blur(18px) saturate(1.2);
   -webkit-backdrop-filter: blur(18px) saturate(1.2);
+  backdrop-filter: blur(18px) saturate(1.2);
   border: 1px solid rgba(255, 255, 255, 0.1);
   box-shadow:
     0 20px 60px rgba(0, 0, 0, 0.55),
