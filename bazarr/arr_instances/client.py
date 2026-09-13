@@ -60,7 +60,7 @@ class ArrClient:
     def _session_get(self, url, **kwargs):
         return self._session().get(url, **kwargs)
 
-    def get(self, path):
+    def get(self, path, *, params=None):
         """GET an absolute API path (e.g. '/api/v3/series/1') against this
         instance and return the raw requests.Response. Mirrors the legacy
         url_*() + shared-session call so default-instance behaviour is identical.
@@ -72,6 +72,7 @@ class ArrClient:
             timeout=int(self.http_timeout),
             verify=self.verify_ssl,
             **({"allow_redirects": False} if self.kind == "sportarr" else {}),
+            **({"params": params} if params is not None else {}),
         )
 
     def _session_post(self, url, **kwargs):

@@ -16,14 +16,24 @@ from subtitles.indexer.sports import sports_full_scan_subtitles
 
 
 def configure_sports_jobs(aps_scheduler, session):
-    # The master toggle mirrors __sonarr_update_task: off means no sports jobs
-    # at all. An empty instance list is the existing "nothing to sync" path, so
-    # the cancellation below already removes anything previously registered,
-    # including the event-stream job.
-    if settings.general.use_sportarr:
-        instances = ArrInstanceRepository(session).list("sportarr", enabled_only=True)
-    else:
-        instances = []
+    # Network, subtitle-search and stream jobs follow the Sports master toggle.
+    # Local Hub lookup already supports enabled owners independently of that
+    # toggle, so its derived recording index follows local-serving availability.
+    from sportarr.hash_index import indexing_enabled, refresh_recording_index
+    available = ArrInstanceRepository(session).list("sportarr", enabled_only=True) if indexing_enabled() else []
+    instances = available if settings.general.use_sportarr else []
+    index_instances = available
+    index_ids = {f"refresh_recording_index_{instance.id}" for instance in index_instances}
+    for job in aps_scheduler.get_jobs():
+        if job.id.startswith("refresh_recording_index_") and job.id not in index_ids:
+            aps_scheduler.remove_job(job.id)
+    for instance in index_instances:
+        aps_scheduler.add_job(
+            refresh_recording_index, "interval", minutes=5, next_run_time=datetime.now(),
+            id=f"refresh_recording_index_{instance.id}", name=f"Index Sports Recordings ({instance.name})",
+            max_instances=1, coalesce=True, replace_existing=True,
+            kwargs={"arr_instance_id": instance.id, "scheduled": True},
+        )
     cancel_disabled_jobs({instance.id for instance in instances})
     prefixes = (
         "update_sports_",

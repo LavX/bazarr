@@ -91,6 +91,11 @@ def remote(monkeypatch, module, data, *, page_size=1000, change=None):
         from urllib.parse import parse_qs, urlsplit
 
         calls.append(path)
+        if path == '/api/events':
+            return SimpleNamespace(status_code=200, json=lambda: data)
+        if path.startswith('/api/events/'):
+            found = next((item for item in data if item['id'] == int(path.rsplit('/', 1)[-1])), None)
+            return SimpleNamespace(status_code=200 if found else 404, json=lambda: found)
         query = parse_qs(urlsplit(path).query)
         assert query["showAll"] == ["true"]
         page = int(query["page"][0])
@@ -937,3 +942,248 @@ def test_listing_batches_owned_sync_state_with_bounded_queries(library, monkeypa
     assert (running.reads, pending.reads) == (1, 1)
     assert len(statements) <= 8
     assert sum('table_history_sports' in statement for statement in statements) == 1
+
+
+@pytest.mark.parametrize('first', [51, 53])
+def test_cross_league_move_preserves_owned_event_history(library, monkeypatch, first):
+    from app.database import TableSportsLeagues, TableHistorySports, TableBlacklistSports
+
+    session, sync = library
+    remote(monkeypatch, sync, [event()])
+    original = sync.sync_events(51, 1)[0]
+    other_owner = sync.sync_events(52, 2)[0]
+    session.execute(sa.insert(TableSportsLeagues).values(id=53, arr_instance_id=1, sportarrLeagueId=9, title='Destination'))
+    session.execute(sa.insert(TableHistorySports).values(id=900, event_id=original, arr_instance_id=1, league_id=51,
+                                                         artifact='stale proof'))
+    session.execute(sa.insert(TableBlacklistSports).values(event_id=original, arr_instance_id=1, league_id=51))
+    calls = []
+    moved = event(leagueId=9)
+    def get(path):
+        calls.append(path)
+        if path == '/api/events/8':
+            return SimpleNamespace(status_code=200, json=lambda: moved)
+        if path == '/api/events':
+            return SimpleNamespace(status_code=200, json=lambda: [moved])
+        data = [moved] if '/leagues/9/' in path else []
+        return SimpleNamespace(status_code=200, json=lambda: dict(page=1, pageSize=1000, totalRecords=len(data),
+                                                                  totalPages=len(data), records=data))
+    monkeypatch.setattr(sync.ArrClientFactory, 'from_row', lambda *a: SimpleNamespace(get=get))
+    sync.sync_events(first, 1)
+    session.expire_all()
+    owned = [row for row in rows(session) if row.arr_instance_id == 1]
+    assert [(row.id, row.league_id, row.file_id) for row in owned] == [(original, 53, 9)]
+    for table in (TableHistorySports, TableBlacklistSports):
+        row = session.execute(sa.select(table)).scalar_one()
+        assert (row.event_id, row.league_id, row.arr_instance_id) == (original, 53, 1)
+    assert session.get(TableHistorySports, 900).artifact == 'stale proof'
+    assert [row.id for row in rows(session) if row.arr_instance_id == 2] == [other_owner]
+    assert len(calls) <= 3
+    calls.clear()
+    assert sync.sync_events(53, 1) == [original]
+    assert len(calls) == 1
+
+
+def _move_remote(monkeypatch, sync, snapshots, *, failure=None, cancel=None):
+    calls = []
+    def get(path):
+        calls.append(path)
+        if cancel is not None and '/leagues/9/' in path:
+            cancel.set()
+        if failure == 'partial' and '/leagues/7/' in path:
+            return SimpleNamespace(status_code=500, json=lambda: {})
+        if path == '/api/events':
+            payload = [item for items in snapshots.values() for item in items]
+            if failure == 'owner-contradiction':
+                payload = []
+            return SimpleNamespace(status_code=200, json=lambda: payload)
+        if path.startswith('/api/events/'):
+            upstream = int(path.rsplit('/', 1)[-1])
+            found = next((item for items in snapshots.values() for item in items if item['id'] == upstream), None)
+            if failure == 'locator-contradiction' and upstream == 8:
+                found = event(files=[], hasFile=False, leagueId=9)
+            return SimpleNamespace(status_code=200 if found else 404, json=lambda: found)
+        league = int(path.split('/')[3])
+        data = snapshots[league]
+        return SimpleNamespace(status_code=200, json=lambda: dict(page=1, pageSize=1000, totalRecords=len(data),
+                                                                  totalPages=1 if data else 0, records=data))
+    monkeypatch.setattr(sync.ArrClientFactory, 'from_row', lambda *a: SimpleNamespace(get=get))
+    return calls
+
+
+@pytest.mark.parametrize('scenario', ['source', 'destination', 'full', 'swap', 'reassign',
+                                      'partial', 'contradiction', 'empty-source-claim', 'owner-contradiction', 'cancel',
+                                      'cancel-write', 'locator-contradiction'])
+def test_migrated_cross_league_reconciliation_preserves_artifact_proofs(library, monkeypatch, tmp_path, scenario):
+    from threading import Event
+    from app.database import TableArrInstances, TableSportsLeagues, TableSportsEvents, TableHistorySports, TableBlacklistSports
+    from app.config import settings
+    from sportarr.artifacts import capture_artifact
+    from sportarr.identity import resolve_event_in_session
+    from sportarr.subtitles import candidate_signature
+    from test_sportarr_kind_migration import _run
+
+    session, sync = library
+    engine = session.get_bind()
+    monkeypatch.setattr(settings.general, 'subfolder', 'current')
+    monkeypatch.setattr(settings.general, 'subfolder_custom', '')
+    folder = tmp_path / 'media'
+    folder.mkdir()
+    for number in (9, 10):
+        (folder / f'part-{number}.mkv').write_bytes(b'\0' * 131072)
+        (folder / f'part-{number}.en.srt').write_text(f'1\n00:00:00,000 --> 00:00:01,000\nRecording {number}\n')
+    session.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 1).values(
+        path_mappings=json.dumps([['/sports', str(folder)]])))
+    session.execute(sa.insert(TableSportsLeagues).values(id=53, arr_instance_id=1, sportarrLeagueId=9, title='Second'))
+    # Construct the real preceding FK schema, then apply the new migration over
+    # populated histories, including an upgrade link and invalid artifact proof.
+    session.close()
+    _run(engine, 'stamp', 'a6d8f2b9c103')
+    _run(engine, 'downgrade', 'f4a7c9d2e105')
+    initial = {7: [event()], 9: [event([file(10, eventId=10)], id=10, leagueId=9)]}
+    _move_remote(monkeypatch, sync, initial)
+    ids = sync.sync_event_leagues([51, 53], 1, complete=True)
+    first, second = ids[51][0], ids[53][0]
+    contexts = {local: resolve_event_in_session(session, local, 1) for local in (first, second)}
+    proofs = {local: capture_artifact(context, context.mapped_path.replace('.mkv', '.en.srt'),
+                                     candidate_signature(context, session)) for local, context in contexts.items()}
+    for local in (first, second):
+        session.execute(sa.insert(TableHistorySports).values(id=local, event_id=local, league_id=contexts[local].league_id,
+                                                             arr_instance_id=1, artifact=proofs[local], language='en'))
+        session.execute(sa.insert(TableBlacklistSports).values(event_id=local, league_id=contexts[local].league_id, arr_instance_id=1))
+    session.execute(sa.insert(TableHistorySports).values(id=999, event_id=first, league_id=51, arr_instance_id=1,
+                                                         artifact='invalid proof', upgradedFromId=first))
+    stale_proof = json.dumps(dict(json.loads(proofs[first]), video='0' * 64))
+    session.execute(sa.insert(TableHistorySports).values(id=1000, event_id=first, league_id=51, arr_instance_id=1,
+                                                         artifact=stale_proof))
+    invalid_shapes = ['[]', 'null', '42', '"stale"'] + [
+        json.dumps(dict(json.loads(proofs[first]), **change)) for change in (
+            {'sha256': None}, {'sha256': 'not a digest'}, {'version': True}, {'stat': [True] * 5}, {'path': 42})]
+    for offset, proof in enumerate(invalid_shapes, 1001):
+        session.execute(sa.insert(TableHistorySports).values(id=offset, event_id=first, league_id=51, arr_instance_id=1,
+                                                             artifact=proof))
+    session.close()
+    _run(engine, 'upgrade', 'a6d8f2b9c103')
+    before = [(row.id, row.league_id, row.file_id, row.sportarrEventId) for row in rows(session)]
+    destination = event(leagueId=9)
+    snapshots = {7: [], 9: [destination, initial[9][0]]}
+    if scenario == 'swap':
+        snapshots = {7: [event([file(10, eventId=10)], id=10)], 9: [destination]}
+    if scenario in ('reassign', 'owner-contradiction'):
+        snapshots = {7: [], 9: [event([file(9, eventId=20)], id=20, leagueId=9), initial[9][0]]}
+    if scenario == 'owner-contradiction':
+        snapshots[7] = [event([file(11, eventId=30)], id=30)]
+    if scenario == 'empty-source-claim':
+        snapshots[7] = [event(files=[], hasFile=False)]
+    if scenario == 'contradiction':
+        snapshots[7] = initial[7]
+    cancelled = Event() if scenario in ('cancel', 'cancel-write') else None
+    calls = _move_remote(monkeypatch, sync, snapshots, failure=scenario,
+                         cancel=cancelled if scenario == 'cancel' else None)
+    if scenario == 'cancel-write':
+        rebind = sync._rebind_artifacts
+
+        def cancel_after_rebind(*args, **kwargs):
+            rebind(*args, **kwargs)
+            cancelled.set()
+
+        monkeypatch.setattr(sync, '_rebind_artifacts', cancel_after_rebind)
+    failure = scenario in ('partial', 'contradiction', 'empty-source-claim', 'owner-contradiction', 'cancel',
+                           'cancel-write', 'locator-contradiction')
+    def run():
+        if scenario in ('full', 'swap'):
+            return sync.sync_event_leagues([53, 51], 1, complete=True)
+        return sync.sync_events(53 if scenario in ('destination', 'partial', 'contradiction', 'empty-source-claim') else 51, 1, cancel=cancelled)
+    if failure:
+        with pytest.raises(ValueError):
+            run()
+        assert [(row.id, row.league_id, row.file_id, row.sportarrEventId) for row in rows(session)] == before
+        assert session.get(TableHistorySports, first, populate_existing=True).artifact == proofs[first]
+        assert session.get(TableHistorySports, 999, populate_existing=True).artifact == 'invalid proof'
+        assert session.get(TableHistorySports, 1000, populate_existing=True).artifact == stale_proof
+        for offset, proof in enumerate(invalid_shapes, 1001):
+            assert session.get(TableHistorySports, offset, populate_existing=True).artifact == proof
+        assert session.execute(sa.select(TableBlacklistSports.league_id).where(
+            TableBlacklistSports.event_id == first)).scalar_one() == 51
+        return
+    run()
+    session.expire_all()
+    assert session.get(TableSportsEvents, first).league_id == 53
+    assert session.get(TableSportsEvents, second).league_id == (51 if scenario == 'swap' else 53)
+    for local in (first, second):
+        context = resolve_event_in_session(session, local, 1)
+        current = capture_artifact(context, context.mapped_path.replace('.mkv', '.en.srt'), candidate_signature(context, session))
+        assert session.get(TableHistorySports, local, populate_existing=True).artifact == current
+        proof_before, proof_after = json.loads(proofs[local]), json.loads(current)
+        assert {key: value for key, value in proof_before.items() if key != 'video'} == {
+            key: value for key, value in proof_after.items() if key != 'video'}
+    assert session.get(TableHistorySports, 999).artifact == 'invalid proof'
+    assert session.get(TableHistorySports, 999).upgradedFromId == first
+    assert session.get(TableHistorySports, 1000).artifact == stale_proof
+    for offset, proof in enumerate(invalid_shapes, 1001):
+        assert session.get(TableHistorySports, offset).artifact == proof
+    assert len(calls) <= (4 if scenario == 'reassign' else 3)
+    calls.clear()
+    sync.sync_event_leagues([51, 53], 1, complete=True)
+    assert len(calls) == 2
+    assert session.execute(sa.select(sa.func.count()).select_from(TableHistorySports)).scalar_one() == 4 + len(invalid_shapes)
+
+
+def test_plain_parsed_list_cannot_authorize_destructive_reconciliation(library, monkeypatch):
+    session, sync = library
+    remote(monkeypatch, sync, [event()])
+    original = sync.sync_events(51, 1)
+    monkeypatch.setattr(sync, 'read_events', lambda *args, **kwargs: [])
+    with pytest.raises(ValueError, match='complete Sportarr event snapshot'):
+        sync.sync_events(51, 1)
+    assert [row.id for row in rows(session)] == original
+
+
+@pytest.mark.parametrize('phase', ['hash', 'publish'])
+def test_recording_index_races_do_not_starve_later_files(library, monkeypatch, tmp_path, phase):
+    from app.database import TableArrInstances, TableSportsEvents, TableSportsFileIndex
+    from sportarr import hash_index
+
+    session, _ = library
+    folder = tmp_path / 'media'
+    folder.mkdir()
+    for number in (1, 2):
+        (folder / f'file-{number}.mkv').write_bytes(b'\0' * 131072)
+        session.execute(sa.insert(TableSportsEvents).values(id=number, arr_instance_id=1, league_id=51,
+            sportarrEventId=number, file_id=number, path=f'/sports/file-{number}.mkv', title='Recording'))
+    session.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 1).values(
+        path_mappings=json.dumps([['/sports', str(folder)]])))
+    original_hash, original_revalidate = hash_index.recording_hash, hash_index.revalidate
+    calls, pending = [], []
+
+    def grow(path):
+        with open(path, 'ab') as stream:
+            stream.write(b'\0')
+
+    def changing(path, stamp, cancel=None):
+        result = original_hash(path, stamp, cancel)
+        calls.append(path)
+        if path.endswith('file-1.mkv'):
+            if phase == 'hash':
+                grow(path)
+            else:
+                pending.append(path)
+        return result
+
+    def changing_before_publish(*args, **kwargs):
+        owner = original_revalidate(*args, **kwargs)
+        if pending:
+            grow(pending.pop())
+        return owner
+
+    monkeypatch.setattr(hash_index, 'recording_hash', changing)
+    monkeypatch.setattr(hash_index, 'revalidate', changing_before_publish)
+    for _ in range(2):
+        start = len(calls)
+        hash_index.refresh_recording_index(1, session=session)
+        assert sum(path.endswith('file-1.mkv') for path in calls[start:]) == 2
+        assert session.get(TableSportsFileIndex, 1, populate_existing=True) is None
+        assert session.get(TableSportsFileIndex, 2, populate_existing=True).moviehash is not None
+    assert sum(path.endswith('file-2.mkv') for path in calls) == 1
+    monkeypatch.setattr(hash_index, 'recording_hash', original_hash)
+    hash_index.refresh_recording_index(1, session=session)
+    assert session.get(TableSportsFileIndex, 1, populate_existing=True).moviehash is not None

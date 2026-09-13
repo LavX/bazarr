@@ -18,7 +18,7 @@ def test_sports_schema_upgrade_fresh_constraints_and_safe_downgrade(
     engine = migration_engine
     metadata = sa.MetaData()
     for table in Base.metadata.sorted_tables:
-        if fresh or table.name not in SPORTS:
+        if table.name != "table_sports_file_index" and (fresh or table.name not in SPORTS):
             table.to_metadata(metadata)
     if "table_history_sports" in metadata.tables:
         history = metadata.tables["table_history_sports"]
@@ -235,3 +235,45 @@ def test_existing_foreign_key_delete_mismatch_is_not_adopted(
             == "c9e4a6b2d701"
         )
     assert "table_sports_leagues_rootfolder" not in sa.inspect(engine).get_table_names()
+
+
+def test_recording_index_and_move_migration_preserve_owned_history(migration_engine):  # noqa: F811
+    from app.database import Base, TableArrInstances, TableSportsLeagues, TableSportsEvents, TableHistorySports
+
+    metadata = sa.MetaData()
+    for table in Base.metadata.sorted_tables:
+        if table.name != 'table_sports_file_index':
+            table.to_metadata(metadata)
+    for name in ('table_history_sports', 'table_blacklist_sports'):
+        for constraint in metadata.tables[name].foreign_key_constraints:
+            if constraint.name == f'fk_{name}_event_league_owner':
+                constraint.onupdate = None
+    metadata.create_all(migration_engine)
+    with migration_engine.connect() as conn:
+        conn.execute(sa.insert(TableArrInstances).values(id=1, kind='sportarr', name='One', stable_key='one', port=1867))
+        conn.execute(sa.insert(TableSportsLeagues), [dict(id=i, arr_instance_id=1, sportarrLeagueId=i, title=str(i)) for i in (1, 2)])
+        conn.execute(sa.insert(TableSportsEvents).values(id=1, arr_instance_id=1, league_id=1,
+                                                       sportarrEventId=8, file_id=9, path='/same.mkv', title='Same'))
+        conn.execute(sa.insert(TableHistorySports).values(id=1, arr_instance_id=1, league_id=1, event_id=1, artifact='preserved proof'))
+        conn.execute(sa.insert(TableHistorySports).values(id=2, arr_instance_id=1, league_id=1, event_id=1, upgradedFromId=1))
+        conn.execute(sa.text('INSERT INTO table_blacklist_sports (id,arr_instance_id,league_id,event_id) VALUES (1,1,1,1)'))
+        before = conn.execute(sa.select(TableHistorySports).order_by(TableHistorySports.id)).all()
+    _run(migration_engine, 'stamp', 'f4a7c9d2e105')
+    _run(migration_engine, 'upgrade', 'a6d8f2b9c103')
+    _run(migration_engine, 'stamp', 'f4a7c9d2e105')
+    _run(migration_engine, 'upgrade', 'a6d8f2b9c103')
+    with migration_engine.connect() as conn:
+        assert conn.execute(sa.select(TableHistorySports).order_by(TableHistorySports.id)).all() == before
+        assert conn.execute(sa.text('SELECT count(*) FROM table_sports_file_index')).scalar_one() == 0
+        conn.execute(sa.update(TableSportsEvents).values(league_id=2))
+        assert conn.execute(sa.select(TableHistorySports.league_id)).scalars().all() == [2, 2]
+        assert conn.execute(sa.text('SELECT league_id FROM table_blacklist_sports')).scalar_one() == 2
+        assert conn.execute(sa.select(TableHistorySports.artifact).where(TableHistorySports.id == 1)).scalar_one() == 'preserved proof'
+        if migration_engine.dialect.name == 'sqlite':
+            assert conn.execute(sa.text('PRAGMA foreign_keys')).scalar_one() == 1
+            assert conn.execute(sa.text('PRAGMA foreign_key_check')).all() == []
+    for name in ('table_history_sports', 'table_blacklist_sports'):
+        foreign_key = next(item for item in sa.inspect(migration_engine).get_foreign_keys(name)
+                           if item['name'] == f'fk_{name}_event_league_owner')
+        assert foreign_key['options']['onupdate'] == 'CASCADE'
+        assert foreign_key['options']['ondelete'] == 'CASCADE'

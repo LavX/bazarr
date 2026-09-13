@@ -152,3 +152,61 @@ def test_excluded_search_neither_throttles_nor_discards(registry):
         _FakeProvider.languages = set()
     assert throttled == []
     assert "beta" not in pool.discarded_providers
+
+
+@pytest.mark.parametrize("sports", [False, True])
+@pytest.mark.parametrize("error_type", [core.APIThrottled, OSError])
+@pytest.mark.parametrize("callback_kind", ["legacy", "context", "keyword_only", "kwargs", "varargs", "positional_only"])
+@pytest.mark.parametrize("operation", ["search", "download"])
+def test_provider_errors_keep_legacy_and_context_throttle_callbacks(monkeypatch, sports, error_type, callback_kind, operation):
+    from types import SimpleNamespace
+    from subzero.language import Language
+
+    language = Language("eng")
+    error = error_type("fixture provider error")
+    class Provider(_FakeProvider):
+        languages = {language}
+        def list_subtitles(self, video, languages):
+            raise error
+        def download_subtitle(self, subtitle):
+            raise error
+    monkeypatch.setattr(core, "provider_registry", {"alpha": Provider})
+    calls = []
+    def legacy(name, exc, ids=None, language=None):
+        calls.append((name, exc, ids, language, None))
+    def context(name, exc, ids=None, language=None, sports_context=None):
+        calls.append((name, exc, ids, language, sports_context))
+    def keyword_only(name, exc, *, ids=None, language=None, sports_context=None):
+        calls.append((name, exc, ids, language, sports_context))
+    def varargs(name, exc, *sports_context, ids=None, language=None):
+        assert sports_context == ()
+        calls.append((name, exc, ids, language, None))
+    def positional_only(name, exc, sports_context=None, /, ids=None, language=None):
+        assert sports_context is None
+        calls.append((name, exc, ids, language, None))
+    def keywords(name, exc, **kwargs):
+        calls.append((name, exc, kwargs["ids"], kwargs["language"], kwargs.get("sports_context")))
+    pool = core.SZProviderPool(["alpha"], {}, throttle_callback={
+        "legacy": legacy, "context": context, "keyword_only": keyword_only,
+        "kwargs": keywords, "varargs": varargs, "positional_only": positional_only}[callback_kind])
+    video = SimpleNamespace(sports_context="owned fixture" if sports else None)
+    if operation == "search":
+        result = pool.list_subtitles_provider("alpha", video, {language}, detailed=True)
+        assert result.status != "success"
+    else:
+        subtitle = SimpleNamespace(provider_name="alpha", language=language, sports_context=video.sports_context)
+        assert pool.download_subtitle(subtitle) is False
+    assert len(calls) == 1
+    assert calls[0][0:2] == ("alpha", error)
+    assert calls[0][-1] == ("owned fixture" if sports and callback_kind in ("context", "keyword_only", "kwargs") else None)
+
+
+def test_throttle_callback_internal_typeerror_is_not_retried():
+    calls = []
+    def callback(name, exc, ids=None, language=None):
+        calls.append(name)
+        raise TypeError("inside callback")
+    pool = core.SZProviderPool([], {}, throttle_callback=callback)
+    with pytest.raises(TypeError, match="inside callback"):
+        pool.throttle_callback("alpha", OSError(), sports_context=object())
+    assert calls == ["alpha"]

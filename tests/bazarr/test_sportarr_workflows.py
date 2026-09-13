@@ -1444,8 +1444,28 @@ def test_provider_upgrades_and_replacements_do_not_translate_existing_sources(
         assert result['replacement']['status'] == 'no_result'
 
 
+@pytest.fixture
+def batch_api(monkeypatch):
+    """Load the real batch endpoint without registering a second global API."""
+    from pathlib import Path
+    from types import ModuleType
+    import sys
+
+    root = Path(__file__).resolve().parents[2] / 'bazarr/api'
+    for name in ('_sports_batch_api', '_sports_batch_api.subtitles'):
+        package = ModuleType(name)
+        package.__path__ = []
+        monkeypatch.setitem(sys.modules, name, package)
+    for name, path in [('utils', 'utils.py'), ('subtitles.batch', 'subtitles/batch.py')]:
+        spec = importlib.util.spec_from_file_location('_sports_batch_api.' + name, root / path)
+        module = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, spec.name, module)
+        spec.loader.exec_module(module)
+    return module
+
+
 @pytest.mark.parametrize('manual', [False, True])
-def test_translated_null_score_upgrades_use_zero_baseline_and_keep_owned_selection(workflow_library, monkeypatch, manual):
+def test_translated_null_score_upgrades_use_zero_baseline_and_keep_owned_selection(workflow_library, monkeypatch, manual, batch_api):
     from app.config import settings
     from app.database import TableHistorySports
 
@@ -1456,6 +1476,12 @@ def test_translated_null_score_upgrades_use_zero_baseline_and_keep_owned_selecti
     for event_id, owner in [(61, 1), (62, 2)]:
         automatic.search_event(event_id, owner)
     session.execute(sa.update(TableHistorySports).values(action=6, score=None))
+    batch = batch_api
+    monkeypatch.setattr(batch, "database", session)
+    monkeypatch.setattr(settings.general, "use_sportarr", True)
+    markers = batch.get_upgradable_media_ids()
+    assert markers["sportsKeys"] == ([{"sportsLeagueId": 51, "arr_instance_id": 1},
+                                       {"sportsLeagueId": 52, "arr_instance_id": 2}] if manual else [])
     records = session.execute(sa.select(TableHistorySports)).scalars().all()
     first = next(row for row in records if row.arr_instance_id == 1)
     expected = {row.id for row in records} if manual else set()
@@ -1512,3 +1538,111 @@ def test_translated_upgrade_support_keeps_other_upgrade_exclusions(workflow_libr
     ids = session.execute(sa.select(TableHistorySports.id)).scalars().all()
     assert workflows.upgradable_history_ids(session, ids) == set()
     assert workflows.upgrade_rows(session) == []
+
+
+def test_wanted_page_bounds_queries_and_serialization(workflow_library, monkeypatch, record_property):
+    from app.database import TableSportsEvents
+
+    _, _, workflows, _, session, _ = workflow_library
+    session.execute(sa.insert(TableSportsEvents), [dict(
+        id=1000+i, arr_instance_id=1, league_id=51, sportarrEventId=1000+i,
+        file_id=1000+i, partNumber=0, path=f'/sports/{i}.mkv', title=str(i),
+        monitored='True', missing_subtitles="['en', 'hu']") for i in range(5200)])
+    statements, serialized = [], []
+    def count(*args):
+        statements.append(args[2])
+    original = workflows._serialize_event
+    def serialize(row):
+        serialized.append(row[0].id)
+        return original(row)
+    monkeypatch.setattr(workflows, '_serialize_event', serialize)
+    sa.event.listen(session.get_bind(), 'before_cursor_execute', count)
+    try:
+        result = workflows.list_wanted(session, 1, start=5100, length=25)
+    finally:
+        sa.event.remove(session.get_bind(), 'before_cursor_execute', count)
+    assert result['total'] == 5201
+    assert len(result['data']) == 25
+    assert serialized == [row['id'] for row in result['data']]
+    record_property('wanted_5201_events_sql_count', len(statements))
+    record_property('wanted_5201_events_serialized', len(serialized))
+    assert len(statements) <= 10, len(statements)
+    assert [row['id'] for row in result['data']] == list(range(6099, 6124))
+
+
+def test_zero_owner_score_reaches_the_actual_search_threshold(workflow_library, monkeypatch):
+    from app.database import TableArrInstances
+    from sportarr.settings import merge_sports_settings
+
+    automatic, _, _, _, session, _ = workflow_library
+    row = session.get(TableArrInstances, 1, populate_existing=True)
+    row.options = merge_sports_settings(row.options, {'minimum_score': 0})
+    session.flush()
+    received = []
+    def result(video, languages, pool, minimum, *args, **kwargs):
+        received.append(minimum)
+        return []
+    monkeypatch.setattr(automatic, '_provider_result', result)
+    automatic.search_event(61, 1)
+    assert received == [0]
+
+
+def test_wanted_many_leagues_and_escaped_tags_keep_bounded_queries(workflow_library, monkeypatch):
+    from app.database import TableSportsEvents, TableSportsLeagues, TableArrInstances
+    from app.config import settings
+
+    _, _, workflows, _, session, _ = workflow_library
+    blocked = "a'quoted\\tag"
+    monkeypatch.setattr(settings.sportarr, 'excluded_tags', [blocked])
+    session.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 1).values(options='{}'))
+    leagues, events = [], []
+    for number in range(5200):
+        local = 20000 + number
+        leagues.append(dict(id=local, arr_instance_id=1, sportarrLeagueId=local, title=str(local),
+                            profileId=1, monitored='True', tags=repr([blocked if number % 2 else str(local)])))
+        events.append(dict(id=local, arr_instance_id=1, league_id=local, sportarrEventId=local,
+                           file_id=local, path=f'/sports/{local}.mkv', title=str(local), monitored='True',
+                           missing_subtitles="['en']"))
+    session.execute(sa.insert(TableSportsLeagues), leagues)
+    session.execute(sa.insert(TableSportsEvents), events)
+    calls = []
+    def count(conn, cursor, statement, parameters, context, many):
+        calls.append((statement, len(parameters)))
+    sa.event.listen(session.get_bind(), 'before_cursor_execute', count)
+    try:
+        result = workflows.list_wanted(session, 1, 2580, 25)
+    finally:
+        sa.event.remove(session.get_bind(), 'before_cursor_execute', count)
+    assert result['total'] == 2601
+    assert len(result['data']) == 21
+    assert all(row['id'] % 2 == 0 for row in result['data'])
+    assert len(calls) <= 10
+    assert max(parameters for _, parameters in calls) < 100
+
+
+@pytest.mark.parametrize('kind,args', [('sports', (0,)), ('movie', (0,)), ('series', (None, 0))])
+def test_explicit_zero_score_keeps_native_and_sports_thresholds(kind, args):
+    from subtitles.utils import _get_scores
+    assert _get_scores(kind, *args)[0] == 0
+    assert _get_scores(kind)[0] > 0
+
+
+@pytest.mark.parametrize('later_action,later_score', [(7, None), (6, 177), (1, None)])
+def test_sports_upgrade_marker_uses_the_latest_history_row_including_ties(workflow_library, monkeypatch, later_action, later_score, batch_api):
+    from datetime import datetime
+    from app.config import settings
+    from app.database import TableHistorySports
+    batch = batch_api
+
+    _, _, workflows, _, session, _ = workflow_library
+    monkeypatch.setattr(batch, 'database', session)
+    monkeypatch.setattr(settings.general, 'use_sportarr', True)
+    monkeypatch.setattr(settings.general, 'upgrade_subs', True)
+    monkeypatch.setattr(settings.general, 'upgrade_manual', True)
+    monkeypatch.setattr(settings.general, 'days_to_upgrade_subs', 30)
+    now = datetime.now()
+    for ident, action, score in [(100, 6, None), (101, later_action, later_score)]:
+        session.execute(sa.insert(TableHistorySports).values(id=ident, event_id=61, league_id=51, arr_instance_id=1,
+                                                             action=action, score=score, language='en', timestamp=now))
+    assert batch.get_upgradable_media_ids()['sportsKeys'] == []
+    assert workflows.upgrade_rows(session, 1) == []

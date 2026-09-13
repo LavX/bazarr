@@ -201,7 +201,7 @@ def update_sports_for_instance(arr_instance_id, job_id=None, *, cancel=None, exp
     "no missing subtitles".
     """
     from sportarr.rootfolder import sync_rootfolders
-    from sportarr.sync.events import sync_events
+    from sportarr.sync.events import sync_event_leagues
     with owner_sync_lock(arr_instance_id, cancel, timeout=lock_timeout):
         expected = expected_connection or connection_identity(require_sportarr(database, arr_instance_id))
         # The lock is re-entrant and already held here, so the nested calls
@@ -209,7 +209,6 @@ def update_sports_for_instance(arr_instance_id, job_id=None, *, cancel=None, exp
         kwargs = dict(cancel=cancel, expected_connection=expected, http_get=http_get)
         sync_rootfolders(arr_instance_id, **kwargs)
         ids = sync_leagues(arr_instance_id, **kwargs)
-        for league_id in ids:
-            check_cancelled(cancel)
-            sync_events(league_id, arr_instance_id, **kwargs, is_signalr=is_signalr)
+        check_cancelled(cancel)
+        sync_event_leagues(ids, arr_instance_id, **kwargs, is_signalr=is_signalr, complete=True)
         return ids

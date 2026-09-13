@@ -290,6 +290,26 @@ class ProviderExcludedError(KeyError):
     exception REPLACES an existing long backoff with the 10-minute default."""
 
 
+
+def _adapt_throttle_callback(callback):
+    """Negotiate the optional context once, without retrying callback failures."""
+    import inspect
+    from functools import wraps
+
+    try:
+        parameters = inspect.signature(callback).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    context = parameters.get("sports_context")
+    if ((context is not None and context.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY))
+            or any(item.kind == inspect.Parameter.VAR_KEYWORD for item in parameters.values())):
+        return callback
+
+    @wraps(callback)
+    def legacy(*args, sports_context=None, **kwargs):
+        return callback(*args, **kwargs)
+    return legacy
+
 class SZProviderPool(ProviderPool):
     @staticmethod
     def _dedupe_provider_names(providers):
@@ -335,6 +355,8 @@ class SZProviderPool(ProviderPool):
             # accepting and ignoring the extra keyword keeps the classifier
             # chain intact for callers that never configure a callback.
             self.throttle_callback = lambda x, y, ids=None, language=None, sports_context=None: x
+
+        self.throttle_callback = _adapt_throttle_callback(self.throttle_callback)
 
         #: Provider configuration
         self.provider_configs = _ProviderConfigs(self)

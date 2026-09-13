@@ -229,6 +229,7 @@ def subtitles():
     query_filename = args.get("query") or None
     from .sports import valid_moviehash
     from .service import SportsSelectionChanged
+    from sportarr.hash_index import SportsIndexPending
     # A bare moviehash is admitted on purpose, so a sports client with no imdb
     # or tmdb id to offer can be served. A review flagged the cost of that on
     # an install with no sports library, where the request builds a nameless
@@ -344,6 +345,8 @@ def subtitles():
                                 exclude_providers=eff_exclude or None,
                                 timeout_seconds=eff_timeout,
                                 only_providers=only_arg)
+    except SportsIndexPending:
+        return compat_error("sports recording index is updating, retry", 503, "upstream")
     except SportsSelectionChanged:
         # A purely local race: someone re-indexed the sports file while this
         # search was in flight. It shares 503 with a genuine provider outage

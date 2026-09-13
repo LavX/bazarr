@@ -795,11 +795,35 @@ class TableSportsEvents(Base):
         return {column.name: getattr(self, column.name) for column in self.__table__.columns}
 
 
+class TableSportsFileIndex(Base):
+    __tablename__ = 'table_sports_file_index'
+    __table_args__ = (
+        ForeignKeyConstraint(['event_id', 'arr_instance_id'], ['table_sports_events.id', 'table_sports_events.arr_instance_id'],
+                             ondelete='CASCADE', name='fk_sports_file_index_event_owner'),
+        Index('ix_sports_file_index_hash', 'moviehash'),
+        Index('ix_sports_file_index_original_name', 'original_name'),
+        Index('ix_sports_file_index_mapped_name', 'mapped_name'),
+        Index('ix_sports_file_index_release_name', 'release_name'),
+    )
+    event_id = mapped_column(Integer, primary_key=True)
+    arr_instance_id = mapped_column(Integer, nullable=False)
+    file_id = mapped_column(Integer, nullable=False)
+    original_path = mapped_column(Text, nullable=False)
+    scene_name = mapped_column(Text)
+    connection = mapped_column(Text, nullable=False)
+    original_name = mapped_column(Text, nullable=False)
+    mapped_name = mapped_column(Text, nullable=False)
+    release_name = mapped_column(Text, nullable=False)
+    physical_path = mapped_column(Text, nullable=False)
+    stamp = mapped_column(Text)
+    moviehash = mapped_column(Text)
+
+
 class TableHistorySports(Base):
     __tablename__ = 'table_history_sports'
     __table_args__ = (
         Index('ix_table_history_sports_owner_event', 'arr_instance_id', 'event_id'),
-        ForeignKeyConstraint(['event_id', 'league_id', 'arr_instance_id'], ['table_sports_events.id', 'table_sports_events.league_id', 'table_sports_events.arr_instance_id'], ondelete='CASCADE', name='fk_table_history_sports_event_league_owner'),
+        ForeignKeyConstraint(['event_id', 'league_id', 'arr_instance_id'], ['table_sports_events.id', 'table_sports_events.league_id', 'table_sports_events.arr_instance_id'], ondelete='CASCADE', onupdate='CASCADE', name='fk_table_history_sports_event_league_owner'),
         UniqueConstraint('id', 'arr_instance_id', name='uq_history_sports_id_owner'),
         ForeignKeyConstraint(['upgradedFromId', 'arr_instance_id'], ['table_history_sports.id', 'table_history_sports.arr_instance_id'], name='fk_history_sports_upgrade_owner'),
     )
@@ -831,7 +855,7 @@ class TableBlacklistSports(Base):
     __tablename__ = 'table_blacklist_sports'
     __table_args__ = (
         Index('ix_table_blacklist_sports_owner_event', 'arr_instance_id', 'event_id'),
-        ForeignKeyConstraint(['event_id', 'league_id', 'arr_instance_id'], ['table_sports_events.id', 'table_sports_events.league_id', 'table_sports_events.arr_instance_id'], ondelete='CASCADE', name='fk_table_blacklist_sports_event_league_owner'),
+        ForeignKeyConstraint(['event_id', 'league_id', 'arr_instance_id'], ['table_sports_events.id', 'table_sports_events.league_id', 'table_sports_events.arr_instance_id'], ondelete='CASCADE', onupdate='CASCADE', name='fk_table_blacklist_sports_event_league_owner'),
     )
 
     id = mapped_column(Integer, primary_key=True, autoincrement=True)

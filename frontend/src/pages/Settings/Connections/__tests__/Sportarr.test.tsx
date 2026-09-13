@@ -735,7 +735,7 @@ describe("Sportarr Connections", () => {
     const score = dialog.getByRole("textbox", { name: "Minimum score" });
     expect(score).toHaveValue("80");
     await user.clear(score);
-    await user.type(score, "95");
+    await user.type(score, "0");
 
     // Turning a row's switch off drops the key entirely, so the instance goes
     // back to inheriting the global value rather than freezing a copy of it.
@@ -745,7 +745,7 @@ describe("Sportarr Connections", () => {
       expect(body).toMatchObject({
         sports_settings: {
           sports_sync: 180,
-          minimum_score: 95,
+          minimum_score: 0,
           excluded_sports: ["Golf"],
         },
         media_defaults: { default_enabled: true, default_profile: 3 },

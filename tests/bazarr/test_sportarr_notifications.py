@@ -14,6 +14,7 @@ import pytest
 from test_sportarr_kind_migration import migration_engine  # noqa: F401
 from test_sportarr_indexer import indexed_library, sports  # noqa: F401
 from test_sportarr_manual import manual_library  # noqa: F401
+from test_sportarr_events import library as library
 
 
 def test_a_sports_notifier_exists_alongside_the_series_and_movie_ones():
@@ -124,19 +125,24 @@ def test_the_league_fully_subtitled_sender_exists():
     assert hasattr(notifier, "send_notifications_sports_league")
 
 
-def test_the_sync_found_nothing_emission_is_gated_exactly_like_sonarr_and_radarr():
+@pytest.mark.parametrize('is_signalr', [False, True])
+@pytest.mark.parametrize('enabled', [False, True])
+def test_the_sync_found_nothing_emission_is_gated_exactly_like_sonarr_and_radarr(library, monkeypatch, is_signalr, enabled):
     """The sync path emits the found-nothing notification only for a live
     sync, and only when the option is on, the same condition the Sonarr and
     Radarr sync paths use."""
-    import inspect
+    from app import notifier
+    from app.config import settings
+    from test_sportarr_events import event, remote
 
-    from sportarr.sync import events
-
-    source = inspect.getsource(events.sync_events)
-    assert "is_signalr and settings.general.notify_if_nothing_is_missing_for_signalr_event" in source
-    helper = inspect.getsource(events._notify_league_fully_subtitled)
-    assert '"There are no missing subtitles in this league."' in helper
-    assert "send_notifications_sports_league(" in helper
+    _, events = library
+    monkeypatch.setattr(settings.general, 'notify_if_nothing_is_missing_for_signalr_event', enabled)
+    remote(monkeypatch, events, [event()])
+    sent = []
+    monkeypatch.setattr(notifier, 'send_notifications_sports_league',
+                        lambda league, message, owner: sent.append((league, message, owner)))
+    events.sync_events(51, 1, is_signalr=is_signalr)
+    assert sent == ([(51, 'There are no missing subtitles in this league.', 1)] if enabled and is_signalr else [])
 
 
 def test_the_found_nothing_notification_fires_only_when_nothing_is_missing(schema_session, monkeypatch):

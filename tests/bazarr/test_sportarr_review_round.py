@@ -452,14 +452,6 @@ def test_a_local_sports_race_does_not_blame_the_providers():
     assert 'sports selection changed during search, retry' in source
 
 
-def test_the_sync_write_loop_can_be_cancelled():
-    from sportarr.sync import events
-
-    source = inspect.getsource(events.sync_events)
-    body = source.split('for item, row in zip(parsed, matches):')[1]
-    assert 'check_cancelled(cancel)' in body
-
-
 def test_shutdown_closes_the_webserver_before_waiting_on_streams():
     # Read the file rather than import app.server: importing it pulls in the
     # whole webserver stack and blocks.

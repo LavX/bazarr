@@ -819,3 +819,20 @@ def test_audio_parsing_changes_rescan_sports_and_refresh_native_libraries(monkey
     effects.clear()
     config.save_settings([('settings-general-instance_name', ['Bazarr'])])
     assert effects == []
+
+
+@pytest.mark.parametrize('key', ['enabled', 'serve_local_subs'])
+def test_hub_local_availability_refreshes_recording_schedule_after_save(monkeypatch, key):
+    from app import config
+
+    calls = []
+    monkeypatch.setattr(config, 'write_config', lambda: True)
+    monkeypatch.setattr(config, 'validate_log_regex', lambda: None)
+    monkeypatch.setattr(config.settings.validators, 'validate', lambda: None)
+    monkeypatch.setitem(sys.modules, 'app.database', SimpleNamespace(
+        database=SimpleNamespace(execute=lambda statement: None), update=lambda model: _FakeUpdate(), System=object))
+    monkeypatch.setitem(sys.modules, 'app.scheduler', SimpleNamespace(scheduler=SimpleNamespace(
+        update_configurable_tasks=lambda: calls.append(bool(getattr(config.settings.compat_endpoint, key))))))
+    monkeypatch.setitem(sys.modules, 'app.event_handler', SimpleNamespace(event_stream=lambda **kwargs: None))
+    config.save_settings([(f'settings-compat_endpoint-{key}', [True])])
+    assert calls == [True]

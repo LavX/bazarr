@@ -164,8 +164,10 @@ def test_validate_rejects_unknown_and_malformed_overrides():
         validate_sports_settings({"sync_interval": 60})
     with pytest.raises(ValueError):
         validate_sports_settings({"full_update": "Hourly"})
-    with pytest.raises(ValueError):
-        validate_sports_settings({"minimum_score": 0})
+    assert validate_sports_settings({"minimum_score": 0}) == {"minimum_score": 0}
+    for invalid in (-1, 101, True, False, 0.0, "0"):
+        with pytest.raises(ValueError):
+            validate_sports_settings({"minimum_score": invalid})
     with pytest.raises(ValueError):
         validate_sports_settings({"excluded_tags": "notalist"})
     with pytest.raises(ValueError):

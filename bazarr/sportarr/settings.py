@@ -50,7 +50,7 @@ _BOUNDS = {
     "sports_sync": (1, None),
     "full_update_day": (0, 6),
     "full_update_hour": (0, 23),
-    "minimum_score": (1, 100),
+    "minimum_score": (0, 100),
     "wanted_search_frequency": (1, 876000),
 }
 

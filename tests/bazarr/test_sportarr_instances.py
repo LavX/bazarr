@@ -306,10 +306,11 @@ def test_sportarr_crud_through_existing_http_wrappers(schema_session, monkeypatc
         assert response.status_code == 200
         assert response.json["error"] == "unauthorized"
     response = client.patch(f"/system/arr-instances/{instance_id}", headers=headers,
-                            json={"name": "Updated", "enabled": False})
+                            json={"name": "Updated", "enabled": False, "sports_settings": {"minimum_score": 0}})
     assert response.status_code == 200
     assert response.json["enabled"] is False
     assert response.json["name"] == "Updated"
+    assert response.json["sports_settings"] == {"minimum_score": 0}
     assert ArrInstanceRepository(schema_session).get_decrypted_api_key(instance_id) == "fixture-secret"
     response = client.delete(f"/system/arr-instances/{instance_id}", headers=headers)
     assert response.status_code == 204
@@ -350,3 +351,26 @@ def test_sportarr_malformed_json_is_a_redacted_error():
     result = _client(http_get=lambda *a, **k: MalformedResponse()).test_connection()
     assert result["error"] == "bad_response"
     assert "fixture-secret" not in str(result)
+
+
+@pytest.mark.parametrize("path", ["/sports/A&B#C?D E/árvíz", r"C:\Sports\A&B#C?D E\árvíz"])
+def test_filesystem_encodes_exact_owner_path_in_prepared_request(path):
+    from urllib.parse import parse_qs, urlsplit
+    import requests
+    from sportarr.filesystem import browse_sportarr_filesystem
+
+    prepared = []
+    def get(url, **kwargs):
+        request = requests.Request("GET", url, headers=kwargs["headers"], params=kwargs.get("params")).prepare()
+        prepared.append(request)
+        response = requests.Response()
+        response.status_code = 200
+        response._content = b'{"directories": []}'
+        return response
+    client = _client(ip="owner.local", port=8443, base_url="/sports", ssl=True, http_get=get)
+    assert browse_sportarr_filesystem(path, client) == {"directories": []}
+    request = prepared[0]
+    url = urlsplit(request.url)
+    assert (url.scheme, url.netloc, url.path, url.fragment) == ("https", "owner.local:8443", "/sports/api/filesystem", "")
+    assert parse_qs(url.query) == {"path": [path], "allowFoldersWithoutTrailingSlashes": ["true"], "includeFiles": ["false"]}
+    assert request.headers["X-Api-Key"] == client.api_key

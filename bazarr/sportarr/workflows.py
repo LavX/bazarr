@@ -4,7 +4,7 @@ import ast
 import logging
 import time
 
-from sqlalchemy import select
+from sqlalchemy import select, and_, or_, func, false, literal_column
 
 from app.config import settings
 from app.database import (
@@ -70,73 +70,75 @@ class SportsJobSignal:
         return self.is_set()
 
 
-def wanted_rows(session, arr_instance_id=None, league_id=None):
+def _wanted_query(session, arr_instance_id=None, league_id=None):
+    """Compile owner/league rules once, then count and page event rows in SQL."""
+    from sportarr.settings import get_sports_settings
+
     if arr_instance_id is not None:
         require_sportarr(session, arr_instance_id)
-    if (
-        league_id is not None
-        and get_league(session, league_id, arr_instance_id) is None
-    ):
+    if league_id is not None and get_league(session, league_id, arr_instance_id) is None:
         raise SportsNotFound("Sports league not found for this owner")
+    owners_query = select(TableArrInstances).where(TableArrInstances.kind == "sportarr",
+                                                   TableArrInstances.enabled == 1)
+    if arr_instance_id is not None:
+        owners_query = owners_query.where(TableArrInstances.id == arr_instance_id)
+    owners = {row.id: get_sports_settings(row) for row in session.execute(
+        owners_query.execution_options(populate_existing=True)).scalars()}
+    # Tags are stored as Python list literals, including quote escaping. Parse
+    # only the league dimension, never every missing file or substring matches.
+    excluded = {owner: [] for owner in owners}
+    tag_owners = [owner for owner, options in owners.items() if options['excluded_tags']]
+    if tag_owners:
+        for owner, local_id, tags in session.execute(select(
+                TableSportsLeagues.arr_instance_id, TableSportsLeagues.id, TableSportsLeagues.tags)
+                .where(TableSportsLeagues.arr_instance_id.in_(tag_owners))):
+            if set(str(tag) for tag in ast.literal_eval(tags or "[]")) & set(owners[owner]['excluded_tags']):
+                excluded[owner].append(local_id)
+    conditions = []
+    for owner, options in owners.items():
+        condition = TableSportsEvents.arr_instance_id == owner
+        if options['only_monitored']:
+            condition = and_(condition, TableSportsEvents.monitored == "True", TableSportsLeagues.monitored == "True")
+        if options['excluded_sports']:
+            condition = and_(condition, or_(TableSportsLeagues.sport.is_(None),
+                                            TableSportsLeagues.sport.not_in(options['excluded_sports'])))
+        if excluded[owner]:
+            # IDs come from typed database columns. Literal integers avoid a
+            # database parameter ceiling for owners with many excluded leagues.
+            condition = and_(condition, TableSportsLeagues.id.not_in(
+                [literal_column(str(int(local_id))) for local_id in excluded[owner]]))
+        conditions.append(condition)
     query = _event_query(arr_instance_id).where(
-        TableSportsEvents.missing_subtitles.is_not(None),
-        TableSportsEvents.missing_subtitles != "[]",
+        or_(*conditions) if conditions else false(),
+        TableSportsEvents.missing_subtitles.is_not(None), TableSportsEvents.missing_subtitles != "[]",
+        TableSportsLeagues.profileId != 0,
+        TableSportsLeagues.profileId.in_(select(TableLanguagesProfiles.profileId)),
     )
-    if league_id is not None:
-        query = query.where(TableSportsEvents.league_id == league_id)
-    result = []
-    for row in session.execute(query.order_by(TableSportsEvents.id)):
-        context = resolve_event_in_session(session, row[0].id, row[0].arr_instance_id)
-        if not eligibility(session, context):
-            result.append(_serialize_event(row))
-    return result
+    return query.where(TableSportsEvents.league_id == league_id) if league_id is not None else query
+
+
+def wanted_rows(session, arr_instance_id=None, league_id=None):
+    query = _wanted_query(session, arr_instance_id, league_id)
+    return [_serialize_event(row) for row in session.execute(query.order_by(TableSportsEvents.id))]
 
 
 def list_wanted(session, arr_instance_id=None, start=0, length=100):
     limit = validate_page(start, length)
-    rows = wanted_rows(session, arr_instance_id)
-    page = rows[start:] if limit is None else rows[start : start + limit]
-    # The same flag the episodes and movies wanted endpoints carry, so a
-    # "subtitles exist but only for another release" diagnosis reaches the
-    # sports page instead of being recorded and never shown.
+    query = _wanted_query(session, arr_instance_id)
+    total = session.execute(select(func.count()).select_from(query.subquery())).scalar_one()
+    page = [_serialize_event(row) for row in session.execute(
+        query.order_by(TableSportsEvents.id).offset(start).limit(limit))]
     from subtitles.mismatch import flagged_media_ids
 
     mismatched = flagged_media_ids(session, "sports", [row["id"] for row in page])
     for row in page:
         row["release_mismatch"] = row["id"] in mismatched
-    return {"data": page, "total": len(rows)}
+    return {"data": page, "total": total}
 
 
 def wanted_badge(session):
-    from sportarr.automatic import eligibility_reason
-    from sportarr.settings import get_sports_settings
-
-    owners = {
-        instance.id: get_sports_settings(instance)
-        for instance in session.execute(select(TableArrInstances).where(
-            TableArrInstances.kind == "sportarr", TableArrInstances.enabled == 1
-        ).execution_options(populate_existing=True)).scalars()
-    }
-    if not owners:
-        return 0
-    profiles = set(session.execute(select(TableLanguagesProfiles.profileId)).scalars())
-    rows = session.execute(select(
-        TableSportsEvents.arr_instance_id, TableSportsEvents.monitored,
-        TableSportsLeagues.monitored, TableSportsLeagues.tags,
-        TableSportsLeagues.sport, TableSportsLeagues.profileId,
-        TableSportsEvents.missing_subtitles,
-    ).join(TableSportsLeagues,
-           (TableSportsEvents.league_id == TableSportsLeagues.id)
-           & (TableSportsEvents.arr_instance_id == TableSportsLeagues.arr_instance_id))
-      .where(TableSportsEvents.arr_instance_id.in_(owners),
-             TableSportsEvents.missing_subtitles.is_not(None),
-             TableSportsEvents.missing_subtitles != "[]"))
-    return sum(
-        len(parse_stored_list(missing))
-        for owner, monitored, league_monitored, tags, sport, profile, missing in rows
-        if not eligibility_reason(monitored, league_monitored, tags, sport,
-                                  bool(profile and profile in profiles), owners[owner])
-    )
+    query = _wanted_query(session).with_only_columns(TableSportsEvents.missing_subtitles)
+    return sum(len(parse_stored_list(missing)) for missing in session.execute(query).scalars())
 
 
 def _run_events(rows, job_id, adaptive=False, language=None):

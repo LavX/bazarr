@@ -20,9 +20,9 @@ def browse_sportarr_filesystem(path='', arr_client=None):
         logging.warning(
             "BAZARR Skipping Sportarr filesystem browse: no instance client")
         return None
-    suffix = f"filesystem?path={path}&allowFoldersWithoutTrailingSlashes=true&includeFiles=false"
     try:
-        r = arr_client.get(f"/api/{suffix}")
+        r = arr_client.get("/api/filesystem", params={
+            "path": path, "allowFoldersWithoutTrailingSlashes": "true", "includeFiles": "false"})
         r.raise_for_status()
     except requests.exceptions.HTTPError:
         logging.exception("BAZARR Error trying to get filesystem from Sportarr. Http error.")

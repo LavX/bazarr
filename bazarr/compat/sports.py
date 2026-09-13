@@ -1,14 +1,12 @@
 """Exact owned sports-library lookup for the OpenSubtitles-compatible Hub."""
 
 from dataclasses import dataclass
-from functools import lru_cache
 import hashlib
 import json
 import logging
 import os
 import re
 import stat
-import unicodedata
 
 from . import local_subs as local
 
@@ -17,22 +15,6 @@ logger = logging.getLogger(__name__)
 
 def valid_moviehash(value):
     return bool(re.fullmatch(r"[0-9a-fA-F]{16}", str(value or "").strip()))
-
-
-def _basename(value):
-    if not isinstance(value, str):
-        return ""
-    return unicodedata.normalize(
-        "NFC", value.replace("\\", "/").rsplit("/", 1)[-1].strip()
-    ).casefold()
-
-
-@lru_cache(maxsize=5000)
-def _hash_file(path, stamp):
-    value = local._opensubtitles_hash(path)
-    if tuple(_file_stat(os.stat(path))) != stamp:
-        raise ValueError("Sports file changed during hash lookup")
-    return value
 
 
 def _digest(value):
@@ -116,68 +98,69 @@ def resolve_for_request(
         return None
     if moviehash_match == "only" and not valid_moviehash(moviehash):
         return None
-    from app.database import database, select, TableArrInstances, TableSportsEvents
+    from app.database import database, select, TableArrInstances, TableSportsEvents, TableSportsFileIndex
+    from sqlalchemy import and_, or_, not_, case
     from sportarr.identity import resolve_event_in_session
     from sportarr.subtitles import candidate_signature
-    from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
+    from sportarr.hash_index import basename, connection_fingerprint, SportsIndexPending
 
     try:
-        rows = database.execute(
-            select(
-                TableSportsEvents.id,
-                TableSportsEvents.path,
-                TableSportsEvents.sceneName,
-                TableArrInstances.id.label("owner_id"),
-                TableArrInstances.path_mappings,
-                TableArrInstances.is_default,
-                TableArrInstances.stable_key,
-            )
-            .join(
-                TableArrInstances,
-                TableSportsEvents.arr_instance_id == TableArrInstances.id,
-            )
-            .where(TableArrInstances.kind == "sportarr", TableArrInstances.enabled == 1)
-        ).all()
         target = str(moviehash).strip().lower() if valid_moviehash(moviehash) else None
-        filename = _basename(query)
-        hits = []
-        for row in rows:
-            try:
-                mapped = apply_sports_mapping(
-                    row.path, read_sports_mappings(row.path_mappings)
-                )
-                agrees = bool(
-                    filename
-                    and filename
-                    in {
-                        _basename(row.path),
-                        _basename(mapped),
-                        _basename(row.sceneName),
-                    }
-                )
-                if not target and not agrees:
-                    continue
-                if not os.path.isfile(mapped):
-                    continue
-                physical = os.path.realpath(mapped)
-                stamp = tuple(_file_stat(os.stat(physical)))
-                hashed = bool(target and _hash_file(physical, stamp) == target)
-            except (OSError, ValueError):
-                # An unavailable recording must not hide other owners' files.
-                continue
-            if not hashed and (not agrees or moviehash_match == "only"):
-                continue
-            order = (
-                not hashed,
-                not agrees,
-                not bool(row.is_default),
-                row.stable_key,
-                row.id,
-            )
-            hits.append((order, row, hashed, physical, stamp))
-        if not hits:
+        filename = basename(query)
+        owners = database.execute(select(TableArrInstances).where(
+            TableArrInstances.kind == "sportarr", TableArrInstances.enabled == 1)
+            .execution_options(populate_existing=True)).scalars().all()
+        if not owners:
             return None
-        _, row, hashed, physical, stamp = min(hits, key=lambda hit: hit[0])
+        current_owner = or_(*(and_(TableSportsEvents.arr_instance_id == owner.id,
+                                  TableSportsFileIndex.connection == connection_fingerprint(owner))
+                              for owner in owners))
+        current_index = and_(TableSportsFileIndex.event_id.is_not(None), current_owner,
+                             TableSportsFileIndex.file_id == TableSportsEvents.file_id,
+                             TableSportsFileIndex.original_path == TableSportsEvents.path,
+                             TableSportsFileIndex.scene_name.is_not_distinct_from(TableSportsEvents.sceneName))
+        incomplete = database.execute(select(TableSportsEvents.id).outerjoin(
+            TableSportsFileIndex, TableSportsEvents.id == TableSportsFileIndex.event_id).where(
+                TableSportsEvents.arr_instance_id.in_([owner.id for owner in owners]),
+                or_(TableSportsFileIndex.event_id.is_(None), not_(current_index))).limit(1)).first()
+        if incomplete:
+            # Unknown hashes can outrank the apparent winner. Retry after the
+            # background index completes, before provider work or cache creation.
+            raise SportsIndexPending("Sports recording index is updating, retry")
+        name_match = or_(TableSportsFileIndex.original_name == filename,
+                         TableSportsFileIndex.mapped_name == filename,
+                         TableSportsFileIndex.release_name == filename) if filename else False
+        hash_match = TableSportsFileIndex.moviehash == target if target else False
+        query_rows = select(TableSportsEvents.id, TableSportsEvents.arr_instance_id.label("owner_id"),
+                            TableSportsFileIndex.physical_path, TableSportsFileIndex.stamp,
+                            TableSportsFileIndex.moviehash).join(
+            TableSportsFileIndex, TableSportsEvents.id == TableSportsFileIndex.event_id).join(
+                TableArrInstances, TableSportsEvents.arr_instance_id == TableArrInstances.id).where(
+                    current_index, TableSportsFileIndex.stamp.is_not(None),
+                    hash_match if moviehash_match == "only" else or_(hash_match, name_match))
+        query_rows = query_rows.order_by(case((hash_match, 0), else_=1), case((name_match, 0), else_=1),
+                                        TableArrInstances.is_default.desc(), TableArrInstances.stable_key,
+                                        TableSportsEvents.id)
+        selected = None
+        # Stream indexed candidates in priority order, stopping at the first
+        # available recording. No whole-library disk walk or request hashing.
+        for indexed in database.execute(query_rows.execution_options(yield_per=50)):
+            if indexed.stamp is None:
+                continue
+            candidate = resolve_event_in_session(database, indexed.id, indexed.owner_id)
+            try:
+                physical = os.path.realpath(candidate.mapped_path)
+                stamp = tuple(_file_stat(os.stat(candidate.mapped_path)))
+            except OSError as exc:
+                raise SportsIndexPending("Sports recording became unavailable, retry after indexing") from exc
+            if physical != indexed.physical_path or list(stamp) != json.loads(indexed.stamp):
+                raise SportsIndexPending("Sports recording changed, retry after indexing")
+            selected = indexed
+            break
+        if selected is None:
+            return None
+        row = selected
+        hashed = bool(target and row.moviehash == target)
         context = resolve_event_in_session(database, row.id, row.owner_id)
         row = database.execute(
             select(TableSportsEvents)
@@ -198,6 +181,8 @@ def resolve_for_request(
         date = row.eventDate or row.broadcastDate or ""
         year = int(str(date)[:4]) if str(date)[:4].isdigit() else 0
         return SportsMatch(context, signature, row.title, year, hashed, candidates)
+    except SportsIndexPending:
+        raise
     except (OSError, ValueError):
         return None
     except Exception:

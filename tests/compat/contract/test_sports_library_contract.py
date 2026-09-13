@@ -118,6 +118,10 @@ def library(compat_db, tmp_path, monkeypatch):
             subtitles=repr([["en", str(native / "Native.2020.en.srt")]]),
         )
     )
+    from sportarr.hash_index import refresh_recording_index
+    for owner in (101, 202):
+        refresh_recording_index(owner, session=database)
+
     app = Flask(__name__)
     app.config["TESTING"] = True
     app.register_blueprint(compat_bp, url_prefix="/api/v1")
@@ -260,6 +264,8 @@ def test_hash_filename_and_duplicate_ordering(library, query, expected, matched)
 
 def test_true_hash_outranks_exact_filename(library):
     (library.root / "101/Alpha.Final.2026.mkv").write_bytes(b"\x01" + b"\0" * 131071)
+    from sportarr.hash_index import refresh_recording_index
+    refresh_recording_index(101, session=library.db)
     _, token = key(allowed_providers=["local"])
     response = search(library, token, moviehash=OTHER_HASH, query="Zulu.Final.2026.mkv")
     assert_stream(library, link(download(library, token, file_id(response))), owner=101)
@@ -497,6 +503,8 @@ def test_signed_sports_link_revalidates_current_owner_and_file(library, change):
             delete(TableSportsEvents).where(TableSportsEvents.id == 2021)
         )
     elif change == "owner":
+        from app.database import TableSportsFileIndex
+        library.db.execute(delete(TableSportsFileIndex).where(TableSportsFileIndex.event_id == 2021))
         library.db.execute(
             delete(TableHistorySports).where(TableHistorySports.event_id == 2021)
         )
@@ -597,6 +605,10 @@ def test_replaced_video_cannot_reuse_stale_hash(library):
         replacement.write_bytes(b"\x01" + b"\0" * 131071)
         os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
         replacement.replace(video)
+    assert search(library, token, moviehash=HASH, moviehash_match="only").status_code == 503
+    from sportarr.hash_index import refresh_recording_index
+    for owner in (101, 202):
+        refresh_recording_index(owner, session=library.db)
     assert entries(search(library, token, moviehash=HASH, moviehash_match="only")) == []
     response = search(library, token, moviehash=OTHER_HASH, moviehash_match="only")
     assert entries(response)[0]["attributes"]["moviehash_match"] is True
@@ -623,6 +635,8 @@ def test_equal_hashes_within_owner_use_stable_local_event_id(library):
             subtitles=repr([["en", "/recordings/Earlier.Final.2026.en.srt"]]),
         )
     )
+    from sportarr.hash_index import refresh_recording_index
+    refresh_recording_index(202, session=library.db)
     response = search(library, token, moviehash=HASH)
     assert (
         entries(response)[0]["attributes"]["feature_details"]["title"]
@@ -674,67 +688,42 @@ def test_native_signed_payload_bytes_remain_unchanged(monkeypatch):
     assert raw[:-33] == b'{"exp":2000000300,"fid":42,"t":"s"}'
 
 
-def test_hash_match_cannot_survive_replacement_before_context_resolution(
-    library, monkeypatch
-):
-    from compat import local_subs, sports
+def test_hash_match_cannot_survive_replacement_before_context_resolution(library, monkeypatch):
+    from compat import sports
+    from sportarr import identity
+    from sportarr.hash_index import SportsIndexPending
 
-    hash_file = sports._hash_file
+    original = identity.resolve_event_in_session
+    changed = False
+    def replace_before_resolution(*args, **kwargs):
+        nonlocal changed
+        result = original(*args, **kwargs)
+        if not changed:
+            changed = True
+            with open(result.mapped_path, "r+b") as stream:
+                stream.write(b"\x01")
+        return result
+    monkeypatch.setattr(identity, "resolve_event_in_session", replace_before_resolution)
+    with pytest.raises(SportsIndexPending):
+        sports.resolve_for_request(None, None, None, "movie", None, HASH, "only")
 
-    def replace_after_hash(path, stamp):
-        value = hash_file(path, stamp)
-        with open(path, "r+b") as stream:
-            stream.write(b"\x01")
-        return value
 
-    monkeypatch.setattr(sports, "_hash_file", replace_after_hash)
-    result = local_subs.search_local(
-        None, None, None, "movie", ["en"], moviehash=HASH, moviehash_match="only"
-    )
-    assert result == []
-
-
-@pytest.mark.parametrize("failure", ["unreadable", "stat-race", "hash-change"])
-def test_unavailable_neighbor_does_not_hide_healthy_sports_match(
-    library, monkeypatch, failure
-):
-    import builtins
+@pytest.mark.parametrize("failure", ["unreadable", "stat-race", "unindexed-unavailable"])
+def test_unavailable_neighbor_does_not_hide_healthy_sports_match(library, monkeypatch, failure):
     from compat import sports, meter
-
-    sports._hash_file.cache_clear()
+    from sportarr.hash_index import refresh_recording_index
     neighbor = library.root / "101/Alpha.Final.2026.mkv"
-    if failure == "unreadable":
-        original = builtins.open
-
-        def unavailable(path, *args, **kwargs):
-            if str(path) == str(neighbor):
-                raise PermissionError("Fixture neighbor is not readable")
-            return original(path, *args, **kwargs)
-
-        monkeypatch.setattr(sports.local, "open", unavailable, raising=False)
-    elif failure == "stat-race":
-        original = os.stat
-        calls = 0
-
-        def unavailable(path, *args, **kwargs):
-            nonlocal calls
-            if str(path) == str(neighbor):
-                calls += 1
-                if calls % 2 == 0:
-                    raise OSError("Fixture neighbor disappeared after isfile")
-            return original(path, *args, **kwargs)
-
-        monkeypatch.setattr(sports.os, "stat", unavailable)
-    else:
-        original = sports._hash_file
-
-        def unavailable(path, stamp):
-            value = original(path, stamp)
-            if str(path) == str(neighbor):
-                raise ValueError("Fixture neighbor changed during hashing")
-            return value
-
-        monkeypatch.setattr(sports, "_hash_file", unavailable)
+    original = os.stat
+    def unavailable(path, *args, **kwargs):
+        if str(path) == str(neighbor):
+            raise OSError("Fixture neighbor is unavailable")
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(sports.os, "stat", unavailable)
+    if failure != "stat-race":
+        if failure == "unindexed-unavailable":
+            from app.database import delete, TableSportsFileIndex
+            library.db.execute(delete(TableSportsFileIndex).where(TableSportsFileIndex.event_id == 1011))
+        refresh_recording_index(101, session=library.db)
 
     kid, token = key(allowed_providers=["local"])
     query = dict(moviehash=HASH, query="Zulu.Final.2026.mkv", moviehash_match="only")
@@ -988,3 +977,257 @@ def test_hub_with_many_unrelated_windows_subtitle_records(library):
     _, token = key(allowed_providers=["local"])
     fid = file_id(search(library, token, query="Zulu.Final.2026.mkv"))
     assert_stream(library, link(download(library, token, fid)))
+
+
+def test_cold_index_fails_before_fanout_then_survives_restart_without_recording_reads(library, monkeypatch):
+    from app.database import delete, TableSportsFileIndex
+    from compat import service, sports, cache
+    from sportarr import hash_index
+
+    library.db.execute(delete(TableSportsFileIndex))
+    monkeypatch.setattr(service, '_do_fanout', lambda *a, **k: pytest.fail('Cold index entered provider fanout'))
+    _, token = key(allowed_providers=['local'])
+    assert search(library, token, moviehash=HASH).status_code == 503
+    with pytest.raises(hash_index.SportsIndexPending):
+        sports.resolve_for_request(None, None, None, 'movie', None, HASH)
+    for owner in (101, 202):
+        hash_index.refresh_recording_index(owner, session=library.db)
+    # New ORM identity map and empty response cache model a restarted request
+    # worker. Re-indexing must reuse persisted physical fingerprints as well.
+    library.db.remove()
+    cache.invalidate_all()
+    monkeypatch.setattr(hash_index, 'recording_hash', lambda *a, **k: pytest.fail('Restart rehashed an unchanged recording'))
+    for owner in (101, 202):
+        hash_index.refresh_recording_index(owner, session=library.db)
+    assert sports.resolve_for_request(None, None, None, 'movie', None, HASH).context.event_id == 2021
+
+
+def test_hash_selection_bounds_recording_io_above_previous_lru_capacity(library, monkeypatch, record_property):
+    import sqlalchemy as sa
+    import builtins
+    from app.database import TableSportsEvents, TableSportsFileIndex, TableArrInstances
+    from compat import sports
+    from sportarr import hash_index
+
+    folder = library.root / '101'
+    event_rows, index_rows = [], []
+    owner = library.db.get(TableArrInstances, 101)
+    fingerprint = hash_index.connection_fingerprint(owner)
+    # Real distinct sparse files, with known size-plus-first-word hash values.
+    # Seed the persisted index exactly as a prior background scan would leave it.
+    for number in range(5200):
+        name = f'unrelated-{number}.mkv'
+        path = folder / name
+        with path.open('wb') as stream:
+            stream.write((number+100).to_bytes(8, 'little'))
+            stream.truncate(131072)
+        event_id = 10000 + number
+        event_rows.append(dict(id=event_id, arr_instance_id=101, league_id=101, sportarrEventId=event_id,
+                               file_id=event_id, path='/recordings/'+name, title=name))
+        index_rows.append(dict(event_id=event_id, arr_instance_id=101, file_id=event_id,
+                               original_path='/recordings/'+name, scene_name=None, connection=fingerprint,
+                               original_name=name, mapped_name=name, release_name='', physical_path=str(path),
+                               stamp=json.dumps(hash_index.file_stat(path.stat())), moviehash=f'{131072+number+100:016x}'))
+    library.db.execute(sa.insert(TableSportsEvents), event_rows)
+    library.db.execute(sa.insert(TableSportsFileIndex), index_rows)
+    counts = {'stat': 0, 'recording_read': 0, 'sql': 0}
+    original_stat = os.stat
+    original_open = os.open
+    original_builtin_open = builtins.open
+    def stat_call(*args, **kwargs):
+        counts['stat'] += 1
+        return original_stat(*args, **kwargs)
+    def open_call(path, *args, **kwargs):
+        if str(path).endswith('.mkv'):
+            counts['recording_read'] += 1
+        return original_open(path, *args, **kwargs)
+    def builtin_open(path, *args, **kwargs):
+        if str(path).endswith(".mkv"):
+            counts["recording_read"] += 1
+        return original_builtin_open(path, *args, **kwargs)
+    def sql_call(*args):
+        counts['sql'] += 1
+    monkeypatch.setattr(os, 'stat', stat_call)
+    monkeypatch.setattr(os, 'open', open_call)
+    monkeypatch.setattr(builtins, 'open', builtin_open)
+    monkeypatch.setattr(hash_index, 'recording_hash', lambda *a, **k: pytest.fail('Request hashed recording'))
+    sa.event.listen(library.db.get_bind(), 'before_cursor_execute', sql_call)
+    try:
+        for _ in range(4):
+            for query in ('Zulu.Final.2026.mkv', None):
+                match = sports.resolve_for_request(None, None, None, 'movie', query, HASH)
+                assert match.context.event_id == 2021
+    finally:
+        sa.event.remove(library.db.get_bind(), 'before_cursor_execute', sql_call)
+    record_property('lookup_metrics_5202_recordings_8_requests', json.dumps(counts))
+    assert counts['recording_read'] == 0
+    assert counts['stat'] < 600, counts
+    assert counts['sql'] < 500, counts
+
+    # Thousands of colliding Unicode-normalized release names still select a
+    # single stable row, and a stale higher-priority row cannot silently lose.
+    scene = 'De\u0301rby.mkv'
+    library.db.execute(sa.update(TableSportsEvents).where(TableSportsEvents.id >= 10000).values(sceneName=scene))
+    library.db.execute(sa.update(TableSportsFileIndex).where(TableSportsFileIndex.event_id >= 10000).values(
+        scene_name=scene, release_name=hash_index.basename(scene)))
+    counts['stat'] = 0
+    match = sports.resolve_for_request(None, None, None, 'movie', 'DÉRBY.MKV', None)
+    assert match.context.event_id == 10000
+    assert counts['stat'] < 30
+    saved = library.db.get(TableSportsFileIndex, 10000)
+    saved = {column.name: getattr(saved, column.name) for column in TableSportsFileIndex.__table__.columns}
+    library.db.execute(sa.delete(TableSportsFileIndex).where(TableSportsFileIndex.event_id == 10000))
+    counts['stat'] = 0
+    with pytest.raises(hash_index.SportsIndexPending):
+        sports.resolve_for_request(None, None, None, 'movie', 'DÉRBY.MKV', None)
+    assert counts['stat'] == 0
+    library.db.execute(sa.insert(TableSportsFileIndex).values(**saved))
+    (folder / 'unrelated-0.mkv').unlink()
+    counts['stat'] = 0
+    with pytest.raises(hash_index.SportsIndexPending):
+        sports.resolve_for_request(None, None, None, 'movie', 'DÉRBY.MKV', None)
+    assert counts['stat'] <= 1
+    hash_index.refresh_recording(10000, 101, session=library.db)
+    match = sports.resolve_for_request(None, None, None, 'movie', 'DÉRBY.MKV', None)
+    assert match.context.event_id == 10001
+
+
+def test_background_hash_revalidates_mapping_and_file_before_publish(library, monkeypatch):
+    from app.database import TableSportsFileIndex, TableArrInstances, update
+    from sportarr import hash_index
+
+    video = library.root / '101/Alpha.Final.2026.mkv'
+    video.write_bytes(b'\x01' + b'\0' * 131071)
+    before = library.db.get(TableSportsFileIndex, 1011).moviehash
+    original = hash_index.recording_hash
+    def changed(path, stamp, cancel=None):
+        value = original(path, stamp, cancel)
+        library.db.execute(update(TableArrInstances).where(TableArrInstances.id == 101).values(path_mappings='[]'))
+        return value
+    monkeypatch.setattr(hash_index, 'recording_hash', changed)
+    with pytest.raises(ValueError, match='connection changed'):
+        hash_index.refresh_recording(1011, 101, session=library.db)
+    assert library.db.get(TableSportsFileIndex, 1011, populate_existing=True).moviehash == before
+
+
+def test_master_off_hash_only_hub_becomes_ready_after_local_background_maintenance(library, monkeypatch):
+    from app.config import settings
+    from app.database import delete, TableSportsFileIndex
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from sportarr.scheduler import configure_sports_jobs
+
+    monkeypatch.setattr(settings.general, 'use_sportarr', False)
+    monkeypatch.setattr(settings.compat_endpoint, 'enabled', True)
+    monkeypatch.setattr(settings.compat_endpoint, 'serve_local_subs', True)
+    library.db.execute(delete(TableSportsFileIndex))
+    _, token = key(allowed_providers=['local'])
+    assert search(library, token, moviehash=HASH).status_code == 503
+    scheduler = BackgroundScheduler()
+    configure_sports_jobs(scheduler, library.db)
+    jobs = scheduler.get_jobs()
+    assert {job.id for job in jobs} == {'refresh_recording_index_101', 'refresh_recording_index_202'}
+    for job in jobs:
+        job.func(**job.kwargs, session=library.db)
+    assert_stream(library, link(download(library, token, file_id(search(library, token, moviehash=HASH)))))
+
+
+def test_disabling_local_serving_cancels_background_hash_before_publication(library, monkeypatch):
+    from app.config import settings
+    from app.database import TableSportsFileIndex
+    from sportarr import hash_index
+
+    monkeypatch.setattr(settings.general, 'use_sportarr', False)
+    monkeypatch.setattr(settings.compat_endpoint, 'enabled', True)
+    monkeypatch.setattr(settings.compat_endpoint, 'serve_local_subs', True)
+    video = library.root / '101/Alpha.Final.2026.mkv'
+    video.write_bytes(b'\x01' + b'\0' * 131071)
+    original = hash_index.recording_hash
+    def disable(path, stamp, cancel=None):
+        value = original(path, stamp, cancel)
+        monkeypatch.setattr(settings.compat_endpoint, 'serve_local_subs', False)
+        return value
+    monkeypatch.setattr(hash_index, 'recording_hash', disable)
+    with pytest.raises(ValueError, match='stopped'):
+        hash_index.refresh_recording_index(101, session=library.db, scheduled=True)
+    assert library.db.get(TableSportsFileIndex, 1011, populate_existing=True).moviehash == HASH
+
+
+def test_recording_races_keep_hub_pending_until_a_stable_scan(library, monkeypatch):
+    from app.database import insert, TableSportsEvents, TableSportsFileIndex
+    from sportarr import hash_index
+    from compat import service
+
+    _, token = key(allowed_providers=['local'])
+    assert search(library, token, moviehash=HASH).status_code == 200
+    early = library.root / '101/Alpha.Final.2026.mkv'
+    early.write_bytes(b'\x01' + b'\0' * 131071)
+    later = library.root / '101/Later.mkv'
+    later.write_bytes(b'\x02' + b'\0' * 131071)
+    library.db.execute(insert(TableSportsEvents).values(id=1012, arr_instance_id=101, league_id=101,
+        sportarrEventId=52, file_id=78, path='/recordings/Later.mkv', title='Later'))
+    original = hash_index.recording_hash
+    calls = []
+
+    def changing(path, stamp, cancel=None):
+        result = original(path, stamp, cancel)
+        calls.append(path)
+        if path == str(early):
+            with open(path, 'ab') as stream:
+                stream.write(b'\0')
+        return result
+
+    monkeypatch.setattr(hash_index, 'recording_hash', changing)
+    monkeypatch.setattr(service, '_do_fanout', lambda *args, **kwargs: pytest.fail('Unknown hash index reached provider fanout'))
+    for _ in range(2):
+        start = len(calls)
+        hash_index.refresh_recording_index(101, session=library.db)
+        assert calls[start:].count(str(early)) == 2
+        assert library.db.get(TableSportsFileIndex, 1011, populate_existing=True) is None
+        assert library.db.get(TableSportsFileIndex, 1012, populate_existing=True).moviehash is not None
+        response = search(library, token, moviehash=HASH)
+        assert response.status_code == 503
+        assert response.headers['X-Reason'] == 'upstream'
+    monkeypatch.setattr(hash_index, 'recording_hash', original)
+    hash_index.refresh_recording_index(101, session=library.db)
+    assert library.db.get(TableSportsFileIndex, 1011, populate_existing=True).moviehash is not None
+    response = search(library, token, moviehash=HASH)
+    assert_stream(library, link(download(library, token, file_id(response))))
+
+
+@pytest.mark.parametrize('failure', ['connection', 'mapping', 'disabled', 'metadata', 'reassigned', 'cancel'])
+def test_recording_races_do_not_hide_owner_or_cancellation_failures(library, monkeypatch, failure):
+    from threading import Event
+    from app.database import delete, update, TableArrInstances, TableSportsEvents, TableSportsFileIndex
+    from sportarr import hash_index
+
+    early = library.root / '101/Alpha.Final.2026.mkv'
+    early.write_bytes(b'\x01' + b'\0' * 131071)
+    original = hash_index.recording_hash
+    cancel = Event()
+    calls = []
+
+    def changing(path, stamp, signal=None):
+        result = original(path, stamp, signal)
+        calls.append(path)
+        with open(path, 'ab') as stream:
+            stream.write(b'\0')
+        if failure in ('connection', 'mapping', 'disabled'):
+            values = {'connection': {'port': 1868}, 'mapping': {'path_mappings': '[]'}, 'disabled': {'enabled': 0}}[failure]
+            library.db.execute(update(TableArrInstances).where(TableArrInstances.id == 101).values(**values))
+        elif failure == 'metadata':
+            library.db.execute(update(TableSportsEvents).where(TableSportsEvents.id == 1011).values(file_id=88))
+        elif failure == 'reassigned':
+            library.db.execute(delete(TableSportsFileIndex).where(TableSportsFileIndex.event_id == 1011))
+            library.db.execute(update(TableSportsEvents).where(TableSportsEvents.id == 1011).values(
+                arr_instance_id=202, league_id=202, sportarrEventId=52, file_id=88))
+        else:
+            cancel.set()
+        return result
+
+    monkeypatch.setattr(hash_index, 'recording_hash', changing)
+    with pytest.raises(ValueError):
+        hash_index.refresh_recording_index(101, session=library.db, cancel=cancel)
+    assert len(calls) == 1
+    indexed = library.db.get(TableSportsFileIndex, 1011, populate_existing=True)
+    assert indexed is None if failure == 'reassigned' else indexed.moviehash == HASH
+    assert library.db.get(TableSportsFileIndex, 2021, populate_existing=True).moviehash == HASH

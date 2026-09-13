@@ -36,6 +36,7 @@ def test_no_jobs_are_registered_while_the_toggle_is_off(schema_session, monkeypa
     ArrInstanceRepository(schema_session).create("sportarr", "Main", api_key="k")
     monkeypatch.setattr(settings.general, "use_sportarr", False)
 
+    monkeypatch.setattr(settings.compat_endpoint, "enabled", False)
     scheduler = FakeScheduler()
     configure_sports_jobs(scheduler, schema_session)
     assert scheduler.jobs == {}
@@ -47,6 +48,7 @@ def test_turning_the_toggle_off_removes_jobs_already_registered(schema_session, 
     from sportarr.scheduler import configure_sports_jobs
 
     instance = ArrInstanceRepository(schema_session).create("sportarr", "Main", api_key="k")
+    monkeypatch.setattr(settings.compat_endpoint, "enabled", False)
     scheduler = FakeScheduler()
 
     monkeypatch.setattr(settings.general, "use_sportarr", True)
@@ -127,3 +129,30 @@ def test_reconcile_ignores_a_disabled_instance(schema_session, monkeypatch):
 
     assert reconcile_sportarr_enable_flag(schema_session) is False
     assert settings.general.use_sportarr is False
+
+
+def test_master_off_hub_index_is_local_only_and_tracks_runtime_toggles(schema_session, monkeypatch):
+    from app.config import settings
+    from arr_instances.repository import ArrInstanceRepository
+    from sportarr.scheduler import configure_sports_jobs
+
+    repo = ArrInstanceRepository(schema_session)
+    owner = repo.create('sportarr', 'One')
+    disabled = repo.create('sportarr', 'Disabled')
+    repo.update(disabled.id, enabled=False)
+    monkeypatch.setattr(settings.general, 'use_sportarr', False)
+    monkeypatch.setattr(settings.compat_endpoint, 'enabled', True)
+    monkeypatch.setattr(settings.compat_endpoint, 'serve_local_subs', True)
+    scheduler = FakeScheduler()
+    configure_sports_jobs(scheduler, schema_session)
+    assert set(scheduler.jobs) == {f'refresh_recording_index_{owner.id}'}
+    for key in ('enabled', 'serve_local_subs'):
+        monkeypatch.setattr(settings.compat_endpoint, key, False)
+        configure_sports_jobs(scheduler, schema_session)
+        assert scheduler.jobs == {}
+        monkeypatch.setattr(settings.compat_endpoint, key, True)
+        configure_sports_jobs(scheduler, schema_session)
+        assert set(scheduler.jobs) == {f'refresh_recording_index_{owner.id}'}
+    repo.update(owner.id, enabled=False)
+    configure_sports_jobs(scheduler, schema_session)
+    assert scheduler.jobs == {}

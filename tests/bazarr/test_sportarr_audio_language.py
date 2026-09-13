@@ -9,6 +9,9 @@ populated and the audio_exclude / audio_only_include profile rules were inert
 for every sports event.
 """
 import pytest
+import sqlalchemy as sa
+from test_sportarr_events import library as library
+from test_sportarr_kind_migration import migration_engine  # noqa: F401
 
 
 @pytest.fixture
@@ -72,22 +75,36 @@ def test_empty_and_missing_metadata_are_survivable():
     assert audio_languages_from_metadata({"ffprobe": {}}, "/media/race.mkv") == []
 
 
-def test_sync_does_not_clobber_what_the_indexer_derived():
+@pytest.mark.parametrize('indexer_owns_audio', [True, False])
+@pytest.mark.parametrize('changed_file', [False, True])
+def test_sync_does_not_clobber_what_the_indexer_derived(library, monkeypatch, indexer_owns_audio, changed_file):
     """The parser can only ever offer '[]', because Sportarr sends nothing.
 
     Letting the sync write that back erased the ffprobe result, and because
     audio_language took part in the new-file comparison it also made the next
     sync judge the file new and wipe the whole subtitle index with it.
     """
-    import inspect
+    from app.config import settings
+    from app.database import TableSportsEvents
+    from test_sportarr_events import event, file, remote
 
-    from sportarr.sync import events
-
-    source = inspect.getsource(events.sync_events)
-    assert "indexer_owns_audio" in source
-    assert "if key == 'audio_language' and indexer_owns_audio and not new_file" in source
-    # audio_language is only compared when the arr payload actually owns it.
-    assert "compared += ('audio_language',)" in source
+    session, events = library
+    monkeypatch.setattr(settings.general, 'parse_embedded_audio_track', indexer_owns_audio)
+    remote(monkeypatch, events, [event()])
+    local_id = events.sync_events(51, 1)[0]
+    indexed = dict(audio_language="['English']", ffprobe_cache=b'ffprobe result',
+                   subtitles="[['en', '/sports/part-9.en.srt']]", missing_subtitles="['hu']",
+                   failedAttempts="['previous attempt']")
+    session.execute(sa.update(TableSportsEvents).where(TableSportsEvents.id == local_id).values(**indexed))
+    remote(monkeypatch, events, [event([file(languages=[], size=100001 if changed_file else 100000)])])
+    assert events.sync_events(51, 1) == [local_id]
+    current = session.get(TableSportsEvents, local_id, populate_existing=True)
+    if indexer_owns_audio and not changed_file:
+        assert {name: getattr(current, name) for name in indexed} == indexed
+    else:
+        assert current.audio_language == '[]'
+        assert current.ffprobe_cache is None
+        assert (current.subtitles, current.missing_subtitles, current.failedAttempts) == ('[]', '[]', '[]')
 
 
 def test_indexer_writes_audio_language_before_computing_missing():

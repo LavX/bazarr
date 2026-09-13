@@ -4,7 +4,7 @@ import ast
 import logging
 from datetime import datetime
 
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, select
 
 from app.database import database, TableSportsEvents, TableSportsLeagues
 from arr_instances.client import ArrClientFactory
@@ -16,6 +16,18 @@ from sportarr.settings import get_sports_settings
 from sportarr.sync.leagues import notify, require_sportarr
 from utilities.sql_limits import in_chunks
 from sportarr.errors import SportsNotFound
+
+
+class EventSnapshot(list):
+    """Playable rows plus complete upstream identity evidence, including no-file events."""
+
+    def __init__(self, records, upstream_league_id):
+        super().__init__(parse_events(records, upstream_league_id))
+        self.records = records
+        self.upstream_league_id = upstream_league_id
+        self.event_ids = {item['id'] for item in records}
+        self.file_claims = {item['id']: (event['id'], item['filePath'], item['exists'], item['size'])
+                            for event in records for item in event['files']}
 
 
 def read_events(client, upstream_league_id, page_size=1000, cancel=None):
@@ -52,7 +64,7 @@ def read_events(client, upstream_league_id, page_size=1000, cancel=None):
             raise ValueError('Incomplete Sportarr event page')
         records.extend(payload['records'])
         if page >= pages:
-            return parse_events(records, upstream_league_id)
+            return EventSnapshot(records, upstream_league_id)
         page += 1
 
 
@@ -90,6 +102,8 @@ def _prune_events(session, league_id, owner, keep):
 
 def refresh_event_files(event_ids, arr_instance_id, cancel=None):
     """Post-commit hook for the subtitle indexer, using exact local file-row IDs."""
+    from sportarr.hash_index import refresh_recording_index
+    refresh_recording_index(arr_instance_id, event_ids, session=database, cancel=cancel)
     from subtitles.indexer.sports import refresh_sports_files
 
     refresh_sports_files(event_ids, arr_instance_id, cancel=cancel)
@@ -135,83 +149,232 @@ def sync_one_league(league_id, arr_instance_id, job_id=None, *, cancel=None):
     return sync_events(league_id, arr_instance_id, cancel=cancel)
 
 
-def sync_events(league_id, arr_instance_id, *, page_size=1000, cancel=None, expected_connection=None,
-                http_get=None, lock_timeout=None, is_signalr=False):
+def _validate_snapshots(snapshots):
+    files, paths, events = set(), set(), set()
+    for snapshot in snapshots.values():
+        if not isinstance(snapshot, EventSnapshot):
+            raise ValueError("A complete Sportarr event snapshot is required")
+        if events & snapshot.event_ids or files & snapshot.file_claims.keys():
+            raise ValueError('Contradictory Sportarr league snapshots')
+        events.update(snapshot.event_ids)
+        files.update(snapshot.file_claims)
+        claimed_paths = {claim[1] for claim in snapshot.file_claims.values()}
+        if paths & claimed_paths:
+            raise ValueError('Contradictory Sportarr league snapshots')
+        paths.update(claimed_paths)
+
+
+def _same_snapshot(first, second):
+    return (first.event_ids == second.event_ids and first.file_claims == second.file_claims
+            and sorted(first, key=lambda item: item['file_id']) == sorted(second, key=lambda item: item['file_id']))
+
+
+def _expanded_snapshots(client, league_ids, owner, page_size, cancel, complete):
+    leagues = dict(database.execute(select(TableSportsLeagues.id, TableSportsLeagues.sportarrLeagueId).where(
+        TableSportsLeagues.arr_instance_id == owner)).all())
+    if not set(league_ids) <= set(leagues):
+        raise SportsNotFound('Sports league not found for this owner')
+    by_upstream = {upstream: local for local, upstream in leagues.items()}
+    snapshots = {}
+    def fetch(local):
+        if local not in snapshots:
+            snapshots[local] = read_events(client, leagues[local], page_size, cancel)
+    for local in league_ids:
+        fetch(local)
+    stored = database.execute(select(TableSportsEvents).where(
+        TableSportsEvents.arr_instance_id == owner)).scalars().all()
+    located = set()
+    while True:
+        _validate_snapshots(snapshots)
+        parsed = [item for items in snapshots.values() for item in items]
+        file_ids = {item['file_id'] for item in parsed}
+        event_ids = {item['sportarrEventId'] for item in parsed}
+        paths = {item['path'] for item in parsed}
+        conflicts = {row.league_id for row in stored if row.league_id not in snapshots
+                     and (row.file_id in file_ids or row.sportarrEventId in event_ids or row.path in paths)}
+        if conflicts:
+            for local in sorted(conflicts):
+                fetch(local)
+            continue
+        if complete:
+            break
+        affected = [row for row in stored if row.league_id in snapshots]
+        matched = {row.id for row in _match_events(affected, parsed) if row is not None}
+        missing = [row for row in affected if row.id not in matched]
+        if not missing:
+            break
+        expanded = False
+        for row in missing:
+            check_cancelled(cancel)
+            if row.sportarrEventId in located:
+                continue
+            located.add(row.sportarrEventId)
+            try:
+                response = client.get(f'/api/events/{row.sportarrEventId}')
+                if response.status_code == 404:
+                    continue
+                if response.status_code != 200:
+                    raise ValueError()
+                payload = response.json()
+                if (not isinstance(payload, dict) or payload.get('id') != row.sportarrEventId
+                        or not positive_id(payload.get('leagueId'))):
+                    raise ValueError()
+                destination = by_upstream.get(payload['leagueId'])
+                if destination is None:
+                    raise ValueError()
+                locator_items = EventSnapshot([payload], payload['leagueId'])
+            except Exception:
+                raise ValueError('Could not resolve the current Sportarr event owner') from None
+            if destination not in snapshots:
+                fetch(destination)
+                expanded = True
+            if not _same_snapshot(locator_items, EventSnapshot(
+                    [item for item in snapshots[destination].records if item['id'] == row.sportarrEventId],
+                    payload['leagueId'])):
+                raise ValueError('Sportarr event changed during reconciliation')
+        if expanded:
+            continue
+        # A vanished event does not prove its recording was deleted: a file can
+        # be reassigned to another event. Only this exceptional disappearance
+        # path needs the complete owner event list. Ordinary callbacks do not.
+        from sportarr.sync.leagues import _get_list
+        raw = _get_list(client, '/api/events')
+        grouped = {local: [] for local in leagues}
+        for item in raw:
+            if not isinstance(item, dict) or not positive_id(item.get('leagueId')):
+                if isinstance(item, dict) and item.get('leagueId') is None and not item.get('hasFile') and not item.get('files'):
+                    continue
+                raise ValueError('Incomplete Sportarr owner event snapshot')
+            local = by_upstream.get(item['leagueId'])
+            if local is None:
+                # Unknown destinations require league reconciliation first.
+                if item.get('hasFile') or item.get('files'):
+                    raise ValueError('Sportarr destination league is not synchronized')
+                continue
+            grouped[local].append(item)
+        all_snapshots = {local: EventSnapshot(items, leagues[local]) for local, items in grouped.items()}
+        _validate_snapshots(all_snapshots)
+        if any(not _same_snapshot(items, all_snapshots[local]) for local, items in snapshots.items()):
+            raise ValueError('Sportarr owner snapshot contradicts the league snapshot')
+        snapshots = all_snapshots
+        break
+    return snapshots, leagues
+
+
+def _artifact_signatures(session, row, instance):
+    from sportarr.identity import resolve_event_in_session
+    from sportarr.subtitles import _signature
+    try:
+        return _signature(resolve_event_in_session(session, row.id, row.arr_instance_id), instance)
+    except (OSError, ValueError):
+        return None
+
+
+def _rebind_artifacts(session, row, before, instance):
+    import hashlib
+    import json
+    from app.database import TableHistorySports
+    from sportarr.artifacts import validate_artifact_stat
+    if before is None:
+        return
+    after = _artifact_signatures(session, row, instance)
+    if after is None or before[1:] != after[1:]:
+        return
+    old_digest = hashlib.sha256(repr(before).encode()).hexdigest()
+    new_digest = hashlib.sha256(repr(after).encode()).hexdigest()
+    for history in session.execute(select(TableHistorySports).where(
+            TableHistorySports.event_id == row.id, TableHistorySports.arr_instance_id == row.arr_instance_id)
+            .execution_options(populate_existing=True)).scalars():
+        try:
+            proof = json.loads(history.artifact)
+            if (not isinstance(proof, dict) or type(proof.get('version')) is not int or proof['version'] != 1
+                    or proof.get('video') != old_digest or not isinstance(proof.get('path'), str)
+                    or not isinstance(proof.get('stat'), list) or len(proof['stat']) != 5
+                    or any(type(value) is not int for value in proof['stat'])
+                    or not isinstance(proof.get('sha256'), str) or len(proof['sha256']) != 64
+                    or any(character not in '0123456789abcdef' for character in proof['sha256'])):
+                continue
+            validate_artifact_stat(history.artifact, proof['path'])
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
+        proof['video'] = new_digest
+        history.artifact = json.dumps(proof, sort_keys=True)
+
+
+def sync_event_leagues(league_ids, arr_instance_id, *, page_size=1000, cancel=None, expected_connection=None,
+                      http_get=None, lock_timeout=None, is_signalr=False, complete=False):
     with owner_sync_lock(arr_instance_id, cancel, timeout=lock_timeout):
         instance = require_sportarr(database, arr_instance_id)
         expected = connection_identity(instance)
         if expected_connection is not None and expected_connection != expected:
             raise ValueError('Sportarr connection changed during synchronization')
-        league = _league(database, league_id, arr_instance_id)
-        upstream_id = league.sportarrLeagueId
         factory = ArrClientFactory()
         client = factory.from_row(instance, http_get=http_get) if http_get else factory.from_row(instance)
-        parsed = read_events(client, upstream_id, page_size, cancel)
-        ids = []
+        snapshots, leagues = _expanded_snapshots(client, league_ids, arr_instance_id, page_size, cancel, complete)
+        ids_by_league = {local: [] for local in snapshots}
         with sports_transaction(database) as transaction:
             instance = revalidate(transaction, arr_instance_id, expected, cancel)
-            if get_sports_settings(instance)['sync_only_monitored_events']:
-                parsed = [item for item in parsed if item['monitored'] == 'True']
-            if _league(transaction, league_id, arr_instance_id).sportarrLeagueId != upstream_id:
-                raise ValueError('Sports league changed during synchronization')
+            for local in snapshots:
+                if _league(transaction, local, arr_instance_id).sportarrLeagueId != leagues[local]:
+                    raise ValueError('Sports league changed during synchronization')
+            options = get_sports_settings(instance)
+            parsed = [(local, item) for local, items in snapshots.items() for item in items
+                      if not options['sync_only_monitored_events'] or item['monitored'] == 'True']
             existing = transaction.execute(select(TableSportsEvents).where(
                 TableSportsEvents.arr_instance_id == arr_instance_id,
-                TableSportsEvents.league_id == league_id)).scalars().all()
-            for batch in in_chunks(parsed, size=200):
-                conflict = transaction.execute(select(TableSportsEvents.id).where(
-                    TableSportsEvents.arr_instance_id == arr_instance_id,
-                    TableSportsEvents.league_id != league_id,
-                    or_(TableSportsEvents.file_id.in_([item['file_id'] for item in batch]),
-                        TableSportsEvents.sportarrEventId.in_([item['sportarrEventId'] for item in batch]),
-                        TableSportsEvents.path.in_([item['path'] for item in batch]))).limit(1)).first()
-                if conflict:
-                    raise ValueError('Sportarr file belongs to another local league')
-            matches = _match_events(existing, parsed)
-            # Vacate positional keys together before applying swaps. File IDs take
-            # precedence, keeping subtitle history attached to the same physical file.
-            for row in existing:
-                row.partNumber = -row.id
-            transaction.flush()
-            # With embedded audio parsing on, audio_language belongs to the
-            # indexer: Sportarr reports no audio metadata, so the parser can
-            # only ever offer '[]'. Letting the sync write that back would both
-            # erase what ffprobe found AND, because the column takes part in the
-            # new_file comparison below, make the next sync judge the file to be
-            # new and wipe the subtitle index with it.
+                TableSportsEvents.league_id.in_(list(snapshots)))).scalars().all()
+            matches = _match_events(existing, [item for _, item in parsed])
             indexer_owns_audio = settings.general.parse_embedded_audio_track
-            compared = ('file_id', 'path', 'file_size', 'format', 'resolution',
-                        'video_codec', 'audio_codec', 'sceneName')
+            compared = ('file_id', 'path', 'file_size', 'format', 'resolution', 'video_codec', 'audio_codec', 'sceneName')
             if not indexer_owns_audio:
                 compared += ('audio_language',)
-            for item, row in zip(parsed, matches):
-                # Per row, not just once before the loop. A league with
-                # thousands of events flushes once per row here, and without
-                # this a restart or a disabled instance had to wait for the
-                # whole loop to drain before the thread could notice.
+            old_values = {row.id: {key: getattr(row, key) for key in compared} for row in existing}
+            moving = {row.id: _artifact_signatures(transaction, row, instance) for (local, item), row in zip(parsed, matches)
+                      if row is not None and (row.league_id != local or row.sportarrEventId != item['sportarrEventId']
+                                              or row.file_id != item['file_id'] or row.path != item['path'])}
+            # Vacate every unique file and positional key before applying swaps.
+            for row in existing:
+                row.partNumber = -row.id
+                row.file_id = -row.id
+            transaction.flush()
+            for (local, item), row in zip(parsed, matches):
                 check_cancelled(cancel)
                 now = datetime.now()
-                new_file = row is None or any(getattr(row, key) != item[key] for key in compared)
+                new_file = row is None or any(old_values[row.id][key] != item[key] for key in compared)
                 if row is None:
-                    row = TableSportsEvents(arr_instance_id=arr_instance_id, league_id=league_id,
-                                            created_at_timestamp=now)
+                    row = TableSportsEvents(arr_instance_id=arr_instance_id, league_id=local, created_at_timestamp=now)
                     transaction.add(row)
                 if new_file:
                     row.ffprobe_cache = None
                     row.subtitles = row.missing_subtitles = row.failedAttempts = '[]'
+                row.league_id = local
                 for key, value in item.items():
                     if key == 'audio_language' and indexer_owns_audio and not new_file:
                         continue
                     setattr(row, key, value)
                 row.updated_at_timestamp = now
                 transaction.flush()
-                ids.append(row.id)
-            _prune_events(transaction, league_id, arr_instance_id, ids)
-        if ids:
-            refresh_event_files(ids, arr_instance_id, cancel=cancel)
-        notify(ids)
+                if row.id in moving:
+                    _rebind_artifacts(transaction, row, moving[row.id], instance)
+                ids_by_league[local].append(row.id)
+            for local, ids in ids_by_league.items():
+                _prune_events(transaction, local, arr_instance_id, ids)
+            check_cancelled(cancel)
+        all_ids = [local_id for ids in ids_by_league.values() for local_id in ids]
+        if all_ids:
+            refresh_event_files(all_ids, arr_instance_id, cancel=cancel)
+        notify(all_ids)
         if is_signalr and settings.general.notify_if_nothing_is_missing_for_signalr_event:
-            _notify_league_fully_subtitled(database, league_id, arr_instance_id)
-        return ids
+            for local in snapshots:
+                _notify_league_fully_subtitled(database, local, arr_instance_id)
+        return ids_by_league
+
+
+def sync_events(league_id, arr_instance_id, *, page_size=1000, cancel=None, expected_connection=None,
+                http_get=None, lock_timeout=None, is_signalr=False):
+    return sync_event_leagues([league_id], arr_instance_id, page_size=page_size, cancel=cancel,
+                             expected_connection=expected_connection, http_get=http_get, lock_timeout=lock_timeout,
+                             is_signalr=is_signalr)[league_id]
 
 
 def _notify_league_fully_subtitled(session, league_id, owner):

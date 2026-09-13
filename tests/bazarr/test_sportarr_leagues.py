@@ -174,6 +174,8 @@ def test_jobs_only_enabled_sportarr_and_stale_removal(schema_session, monkeypatc
     disabled = repo.create('sportarr', 'Disabled', enabled=False)
     configure_sports_jobs(aps, schema_session)
     assert {j.id for j in aps.get_jobs()} == {f'update_sports_{first.id}', f'update_sports_{second.id}',
+                                             f'refresh_recording_index_{first.id}',
+                                             f'refresh_recording_index_{second.id}',
                                              f'sports_full_scan_subtitles_{first.id}',
                                              f'sports_full_scan_subtitles_{second.id}',
                                              f'wanted_search_missing_subtitles_sports_{first.id}',
@@ -188,6 +190,7 @@ def test_jobs_only_enabled_sportarr_and_stale_removal(schema_session, monkeypatc
     repo.update(disabled.id, enabled=True)
     configure_sports_jobs(aps, schema_session)
     assert {j.id for j in aps.get_jobs()} == {f'update_sports_{disabled.id}',
+                                             f'refresh_recording_index_{disabled.id}',
                                              f'sports_full_scan_subtitles_{disabled.id}',
                                              f'wanted_search_missing_subtitles_sports_{disabled.id}',
                                              f'upgrade_sports_subtitles_{disabled.id}', 'sportarr_clients'}

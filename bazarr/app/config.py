@@ -1526,6 +1526,9 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             if settings_keys[1] in active_provider_hub_provider_ids:
                 reset_compat_pool = True
 
+        if key in ('settings-compat_endpoint-enabled', 'settings-compat_endpoint-serve_local_subs'):
+            update_schedule = True
+
         if key in ('settings-compat_endpoint-fanout_max_workers',
                    'settings-compat_endpoint-max_concurrent_fanouts'):
             # Defer the reset until AFTER all values in this batch are

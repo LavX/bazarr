@@ -222,17 +222,13 @@ def get_upgradable_media_ids():
     # Sports, keyed on the league the way series are keyed on the show: the
     # library page marks a league, and its rows are events. Same latest-row
     # logic, restricted to enabled sportarr owners.
-    max_sports_ts = select(
-        TableHistorySports.event_id,
-        TableHistorySports.arr_instance_id.label('arr_instance_id'),
-        TableHistorySports.language,
-        func.max(TableHistorySports.timestamp).label('timestamp')
-    ).where(
-        TableHistorySports.action.in_(query_actions)
-    ).group_by(
-        TableHistorySports.event_id,
-        TableHistorySports.arr_instance_id,
-        TableHistorySports.language,
+    latest_sports = select(
+        TableHistorySports.id,
+        func.row_number().over(
+            partition_by=(TableHistorySports.event_id, TableHistorySports.arr_instance_id,
+                          TableHistorySports.language),
+            order_by=(TableHistorySports.timestamp.desc(), TableHistorySports.id.desc()),
+        ).label('position'),
     ).subquery()
 
     sports_results = database.execute(
@@ -248,17 +244,15 @@ def get_upgradable_media_ids():
             TableArrInstances.kind == 'sportarr',
             TableArrInstances.enabled == 1,
         ))
-        .join(max_sports_ts, onclause=and_(
-            TableHistorySports.event_id == max_sports_ts.c.event_id,
-            TableHistorySports.arr_instance_id == max_sports_ts.c.arr_instance_id,
-            TableHistorySports.language == max_sports_ts.c.language,
-            TableHistorySports.timestamp == max_sports_ts.c.timestamp,
+        .join(latest_sports, onclause=and_(
+            TableHistorySports.id == latest_sports.c.id,
+            latest_sports.c.position == 1,
         ))
         .where(and_(
             TableHistorySports.action.in_(query_actions),
             TableHistorySports.timestamp > minimum_timestamp,
-            TableHistorySports.score.is_not(None),
-            TableHistorySports.score < func.coalesce(TableHistorySports.score_out_of, 180) - 3,
+            or_(TableHistorySports.score.is_not(None), TableHistorySports.action == 6),
+            func.coalesce(TableHistorySports.score, 0) < func.coalesce(TableHistorySports.score_out_of, 180) - 3,
         ))
     ).all() if settings.general.use_sportarr else []
     sports_ids = [r.league_id for r in sports_results]

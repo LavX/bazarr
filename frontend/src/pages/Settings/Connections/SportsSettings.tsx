@@ -56,7 +56,7 @@ const OverrideControl: FunctionComponent<ControlProps> = ({
           size="xs"
           aria-label={field.label}
           w={110}
-          min={1}
+          min={0}
           max={100}
           allowDecimal={false}
           value={typeof value === "number" ? value : 70}

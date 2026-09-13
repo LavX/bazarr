@@ -7,6 +7,10 @@ exist, but only for a different release" diagnosis, its notification and its
 Wanted flag were all unavailable for sports.
 """
 
+import pytest
+import sqlalchemy as sa
+from test_sportarr_events import library as library
+from test_sportarr_kind_migration import migration_engine  # noqa: F401
 
 def test_the_sports_search_collects_the_candidates_it_scored():
     """Without the sink there is no evidence of what the providers hold, and
@@ -94,18 +98,30 @@ def test_the_wanted_endpoint_carries_the_flag():
     assert 'row["release_mismatch"]' in source
 
 
-def test_the_flag_is_computed_for_the_page_not_the_whole_library():
+@pytest.mark.parametrize('length, expected', [(1, [2]), (-1, [2, 3]), (1001, [2, 3])])
+def test_the_flag_is_computed_for_the_page_not_the_whole_library(library, monkeypatch, length, expected):
     """wanted_rows can be long; flagging every row would query ids the caller
     never returns."""
-    import inspect
-
+    from app.database import TableLanguagesProfiles, TableSportsEvents, TableSportsLeagues
     from sportarr import workflows
+    from subtitles import mismatch
 
-    source = inspect.getsource(workflows.list_wanted)
-    # The slice is taken first, whatever its exact shape: it now has to handle
-    # a fetch-all page, where the limit is None and the slice runs to the end.
-    page_at = source.index("page = rows[")
-    flag_at = source.index("flagged_media_ids(")
-    assert page_at < flag_at
-    assert 'for row in page' in source
-    assert 'rows[start:]' in source and 'rows[start : start + limit]' in source
+    session, _ = library
+    session.execute(sa.insert(TableLanguagesProfiles).values(profileId=1, name='English', items='[]'))
+    session.execute(sa.update(TableSportsLeagues).where(TableSportsLeagues.id == 51).values(profileId=1, monitored='True'))
+    session.execute(sa.insert(TableSportsEvents), [dict(id=number, league_id=51, arr_instance_id=1,
+        sportarrEventId=number, file_id=number, path=f'/sports/{number}.mkv', title=str(number),
+        monitored='True', missing_subtitles="['en']") for number in (1, 2, 3)])
+    calls = []
+
+    def flagged(db, media_type, ids):
+        assert db is session
+        calls.append((media_type, list(ids)))
+        return {2}
+
+    monkeypatch.setattr(mismatch, 'flagged_media_ids', flagged)
+    page = workflows.list_wanted(session, 1, start=1, length=length)
+    assert page['total'] == 3
+    assert [row['id'] for row in page['data']] == expected
+    assert calls == [('sports', expected)]
+    assert [row['release_mismatch'] for row in page['data']] == [ident == 2 for ident in expected]
