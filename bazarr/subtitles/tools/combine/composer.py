@@ -1,8 +1,10 @@
 # coding=utf-8
 
 import logging
+from codecs import BOM_UTF8, BOM_UTF16_BE, BOM_UTF16_LE, BOM_UTF32_BE, BOM_UTF32_LE
 from copy import copy
 from io import StringIO
+from pathlib import Path
 
 import pysubs2
 
@@ -10,18 +12,25 @@ from .aligner import detect_mode
 
 
 def _load_subtitle(path):
-    """Load a subtitle, detecting its on-disk encoding rather than assuming UTF-8.
-    Bazarr indexes legacy-encoded externals (Windows-1250/1252, Latin-1) elsewhere,
-    and a hard utf-8 load raised UnicodeDecodeError and failed the whole combine."""
-    encoding = "utf-8"
-    try:
-        from charset_normalizer import from_path
-        match = from_path(path).best()
-        if match and match.encoding:
-            encoding = match.encoding
-    except Exception:
-        logging.debug("BAZARR combine could not detect encoding for %s, using utf-8", path)
-    return pysubs2.load(path, encoding=encoding)
+    """Prefer declared Unicode encodings and valid UTF-8 over legacy guesses."""
+    raw = Path(path).read_bytes()
+    # UTF-32 LE shares the UTF-16 LE prefix, so check its longer BOM first.
+    if raw.startswith((BOM_UTF32_LE, BOM_UTF32_BE)):
+        text = raw.decode("utf-32")
+    elif raw.startswith((BOM_UTF16_LE, BOM_UTF16_BE)):
+        text = raw.decode("utf-16")
+    elif raw.startswith(BOM_UTF8):
+        text = raw.decode("utf-8-sig")
+    else:
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            from charset_normalizer import from_bytes
+            match = from_bytes(raw).best()
+            if not match or not match.encoding:
+                raise
+            text = raw.decode(match.encoding)
+    return pysubs2.SSAFile.from_file(StringIO(text, newline=None))
 
 
 def compose(primary_path, secondary_paths, format):

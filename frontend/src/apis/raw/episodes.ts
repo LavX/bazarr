@@ -51,7 +51,7 @@ class EpisodeApi extends BaseApi {
       "/history",
       // Detail views need the Embedded Source rows the paginated history
       // hides by default: the movie table reads their score and provider.
-      { id, include_embedded: true },
+      { id, include_embedded: true, length: -1 },
     );
     return response.data;
   }
