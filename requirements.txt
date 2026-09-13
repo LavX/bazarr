@@ -71,7 +71,7 @@ srt==3.5.3
 subliminal[rar]==2.6.0
 textdistance==4.6.3
 tld==0.13.2
-tomlkit>=0.15.0
+tomlkit>=0.15.1
 tzlocal==5.4.4
 unidecode==1.4.0
 urllib3==2.7.0
