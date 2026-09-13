@@ -237,7 +237,8 @@ def test_existing_foreign_key_delete_mismatch_is_not_adopted(
     assert "table_sports_leagues_rootfolder" not in sa.inspect(engine).get_table_names()
 
 
-def test_recording_index_and_move_migration_preserve_owned_history(migration_engine):  # noqa: F811
+@pytest.mark.parametrize('constraint_name', ['canonical', 'custom', None])
+def test_recording_index_and_move_migration_preserve_owned_history(migration_engine, constraint_name):  # noqa: F811
     from app.database import Base, TableArrInstances, TableSportsLeagues, TableSportsEvents, TableHistorySports
 
     metadata = sa.MetaData()
@@ -248,6 +249,8 @@ def test_recording_index_and_move_migration_preserve_owned_history(migration_eng
         for constraint in metadata.tables[name].foreign_key_constraints:
             if constraint.name == f'fk_{name}_event_league_owner':
                 constraint.onupdate = None
+                if constraint_name != 'canonical':
+                    constraint.name = f'adopted_{name}_owner' if constraint_name else None
     metadata.create_all(migration_engine)
     with migration_engine.connect() as conn:
         conn.execute(sa.insert(TableArrInstances).values(id=1, kind='sportarr', name='One', stable_key='one', port=1867))
@@ -258,7 +261,8 @@ def test_recording_index_and_move_migration_preserve_owned_history(migration_eng
         conn.execute(sa.insert(TableHistorySports).values(id=2, arr_instance_id=1, league_id=1, event_id=1, upgradedFromId=1))
         conn.execute(sa.text('INSERT INTO table_blacklist_sports (id,arr_instance_id,league_id,event_id) VALUES (1,1,1,1)'))
         before = conn.execute(sa.select(TableHistorySports).order_by(TableHistorySports.id)).all()
-    _run(migration_engine, 'stamp', 'f4a7c9d2e105')
+    # Exercise the structural adoption check before the later FK replacement.
+    _run(migration_engine, 'stamp', 'c9e4a6b2d701')
     _run(migration_engine, 'upgrade', 'a6d8f2b9c103')
     _run(migration_engine, 'stamp', 'f4a7c9d2e105')
     _run(migration_engine, 'upgrade', 'a6d8f2b9c103')
@@ -276,4 +280,10 @@ def test_recording_index_and_move_migration_preserve_owned_history(migration_eng
         foreign_key = next(item for item in sa.inspect(migration_engine).get_foreign_keys(name)
                            if item['name'] == f'fk_{name}_event_league_owner')
         assert foreign_key['options']['onupdate'] == 'CASCADE'
+        assert foreign_key['options']['ondelete'] == 'CASCADE'
+    _run(migration_engine, 'downgrade', 'f4a7c9d2e105')
+    for name in ('table_history_sports', 'table_blacklist_sports'):
+        foreign_key = next(item for item in sa.inspect(migration_engine).get_foreign_keys(name)
+                           if item['name'] == f'fk_{name}_event_league_owner')
+        assert foreign_key['options'].get('onupdate') is None
         assert foreign_key['options']['ondelete'] == 'CASCADE'

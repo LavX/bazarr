@@ -47,6 +47,11 @@ def check_health(job_id=None, wait_for_completion=False):
                                         arr_client=client_for_instance(database, inst.id))
         else:
             check_radarr_rootfolder()
+    if settings.general.use_sportarr:
+        from sportarr.rootfolder import sync_rootfolders
+
+        for inst in repo.list('sportarr', enabled_only=True):
+            sync_rootfolders(inst.id)
     event_stream(type='badges')
 
     from .backup import backup_rotation

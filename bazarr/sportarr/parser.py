@@ -1,5 +1,6 @@
 """Strict native event parsing, one record for each playable file."""
 from constants import MINIMUM_VIDEO_SIZE
+from app.config import settings
 
 
 def positive_id(value):
@@ -48,7 +49,8 @@ def parse_events(events, upstream_league_id):
             file_ids.add(file['id'])
             parts.add(key)
             paths.add(file['filePath'])
-            if not file['exists'] or file['size'] <= MINIMUM_VIDEO_SIZE:
+            strm = settings.general.enable_strm_support and file['filePath'].lower().endswith('.strm')
+            if not file['exists'] or (file['size'] <= MINIMUM_VIDEO_SIZE and not strm):
                 continue
             quality = (file.get('quality') or '').split('-', 1)
             result.append(dict(

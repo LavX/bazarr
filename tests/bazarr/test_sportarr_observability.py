@@ -7,6 +7,57 @@ checks when something looks wrong.
 """
 
 
+def test_health_refreshes_enabled_sports_roots_and_preserves_disabled_owner(schema_session, monkeypatch, tmp_path):
+    import json
+    from types import SimpleNamespace
+    from app import database as app_database
+    from app.database import TableArrInstances, TableSportsLeaguesRootfolder
+    from sportarr import rootfolder
+    from utilities import backup, health
+
+    for owner in (1, 2, 3):
+        schema_session.add(TableArrInstances(id=owner, kind='sportarr', name=str(owner),
+                                             stable_key=str(owner), port=1867, enabled=int(owner != 2),
+                                             path_mappings=json.dumps([['/sports', str(tmp_path / str(owner))]])))
+    schema_session.flush()
+    for owner in (1, 2, 3):
+        schema_session.add(TableSportsLeaguesRootfolder(arr_instance_id=owner, rootfolder_id=7,
+                                                       path='/sports', accessible=int(owner == 3), error='stale'))
+    schema_session.commit()
+    (tmp_path / '1').mkdir()
+    for module in (health, rootfolder, app_database):
+        monkeypatch.setattr(module, 'database', schema_session)
+    monkeypatch.setattr(health.settings.general, 'use_sportarr', True)
+    monkeypatch.setattr(health.settings.general, 'use_sonarr', False)
+    monkeypatch.setattr(health.settings.general, 'use_radarr', False)
+    monkeypatch.setattr(health, 'event_stream', lambda **kwargs: None)
+    monkeypatch.setattr(rootfolder, 'notify', lambda *args: None)
+    monkeypatch.setattr(backup, 'backup_rotation', lambda: None)
+    monkeypatch.setattr(health.jobs_queue, 'update_job_name', lambda **kwargs: None)
+    fetched = []
+
+    def from_row(self, row):
+        fetched.append(row.id)
+        return SimpleNamespace(get=lambda path: SimpleNamespace(
+            status_code=200, json=lambda: [{'id': 7, 'path': '/sports'}]))
+
+    monkeypatch.setattr(rootfolder.ArrClientFactory, 'from_row', from_row)
+    health.check_health(job_id=7)
+    assert fetched == [1, 3]
+    schema_session.expire_all()
+    roots = {row.arr_instance_id: row for row in schema_session.query(TableSportsLeaguesRootfolder)}
+    assert roots[1].accessible == 1 and roots[1].error == ''
+    assert roots[2].accessible == 0 and roots[2].error == 'stale'
+    assert roots[3].accessible == 0 and 'not accessible' in roots[3].error
+    issues = health.get_health_issues()
+    assert any(item['object'] == str(tmp_path / '3') for item in issues)
+    assert not any(item['object'] in (str(tmp_path / '1'), str(tmp_path / '2')) for item in issues)
+    fetched.clear()
+    monkeypatch.setattr(health.settings.general, 'use_sportarr', False)
+    health.check_health(job_id=7)
+    assert fetched == []
+
+
 def test_a_broken_sports_root_folder_becomes_a_health_issue():
     """sportarr/rootfolder.py already wrote accessible and error per league
     root. Nothing read them, so a broken path mapping produced no health issue

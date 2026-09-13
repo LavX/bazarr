@@ -323,6 +323,23 @@ def test_search_missing_runs_per_event_and_per_league():
         assert download.call_args.args == (51, 42)
 
 
+def test_cancelled_event_search_stops_before_resolving_or_publishing(monkeypatch):
+    from app.jobs_queue import JobCancelled
+    from sportarr import automatic, workflows
+    from subtitles.mass_operations import _search_sports
+
+    def cancelled(job_id, **kwargs):
+        assert job_id == 7
+        raise JobCancelled()
+
+    monkeypatch.setattr(workflows.jobs_queue, 'update_job_progress', cancelled)
+    with patch.object(automatic, 'resolve_event_in_session') as resolve:
+        with pytest.raises(JobCancelled):
+            _search_sports({'type': 'sports', 'sportsEventId': 61,
+                            'arr_instance_id': 42}, job_id=7)
+        resolve.assert_not_called()
+
+
 def test_upgrade_runs_once_per_owner_not_once_per_row():
     """The sports upgrade job builds its own candidate list from history and
     takes an instance, not a media filter, so five selected events from one

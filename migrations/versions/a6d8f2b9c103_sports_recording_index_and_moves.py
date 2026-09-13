@@ -16,11 +16,19 @@ def _move_constraints(onupdate):
     bind = op.get_bind()
     for table in ('table_history_sports', 'table_blacklist_sports'):
         name = f'fk_{table}_event_league_owner'
-        current = next(item for item in sa.inspect(bind).get_foreign_keys(table) if item['name'] == name)
+        current = next((item for item in sa.inspect(bind).get_foreign_keys(table)
+                        if item['constrained_columns'] == ['event_id', 'league_id', 'arr_instance_id']
+                        and item['referred_table'] == 'table_sports_events'
+                        and item['referred_columns'] == ['id', 'league_id', 'arr_instance_id']
+                        and item.get('options', {}).get('ondelete', '').upper() == 'CASCADE'), None)
+        if current is None:
+            raise ValueError(f'Missing verified event ownership foreign key for {table}')
         if current.get('options', {}).get('onupdate') == onupdate:
             continue
-        with op.batch_alter_table(table) as batch:
-            batch.drop_constraint(name, type_='foreignkey')
+        convention = {'fk': 'fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s'}
+        current_name = current['name'] or f'fk_{table}_event_id_table_sports_events'
+        with op.batch_alter_table(table, naming_convention=convention) as batch:
+            batch.drop_constraint(current_name, type_='foreignkey')
             batch.create_foreign_key(name, 'table_sports_events', ['event_id', 'league_id', 'arr_instance_id'],
                                      ['id', 'league_id', 'arr_instance_id'], ondelete='CASCADE', onupdate=onupdate)
 

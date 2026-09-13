@@ -171,6 +171,76 @@ def test_file_identity_swaps_replacements_and_owned_pruning(library, monkeypatch
     assert [row.id for row in rows(session)] == b
 
 
+def test_stable_sync_retains_all_rows_but_searches_only_changed_recordings(library, monkeypatch):
+    from app.database import TableSportsEvents
+
+    session, sync = library
+    monkeypatch.setattr(sync.settings.general, 'parse_embedded_audio_track', False)
+    refreshes = []
+    monkeypatch.setattr(sync, 'refresh_event_files', lambda ids, owner, **kwargs:
+                        refreshes.append((list(ids), owner, kwargs.get('search_event_ids'))))
+    data = [event([file(9, 1), file(10, 2)])]
+    remote(monkeypatch, sync, data)
+    owned = sync.sync_events(51, 1)
+    other = sync.sync_events(52, 2)
+    assert refreshes == [(owned, 1, owned), (other, 2, other)]
+    session.execute(sa.update(TableSportsEvents).where(TableSportsEvents.id.in_(owned))
+                    .values(missing_subtitles="['en']", failedAttempts="[['en', 2]]"))
+    session.commit()
+    refreshes.clear()
+    assert sync.sync_events(51, 1) == owned
+    assert refreshes == [(owned, 1, [])]
+    assert {row.id for row in rows(session)} == set(owned + other)
+    assert all(row.failedAttempts == "[['en', 2]]" for row in rows(session) if row.id in owned)
+
+    data[0]['files'][0]['quality'] = 'WEBDL-2160p'
+    data[0]['files'].append(file(11, 3))
+    refreshes.clear()
+    changed = sync.sync_events(51, 1)
+    assert changed[:2] == owned
+    assert refreshes == [(changed, 1, [owned[0], changed[2]])]
+    assert all(row.resolution == '1080p' for row in rows(session) if row.id in other)
+
+
+def test_recording_refresh_searches_only_explicit_changed_ids(monkeypatch):
+    from sportarr import hash_index, workflows
+    from sportarr.sync.events import refresh_event_files
+    from subtitles.indexer import sports
+
+    calls = []
+    monkeypatch.setattr(hash_index, 'refresh_recording_index', lambda owner, ids, **kwargs:
+                        calls.append(('recordings', list(ids), owner)))
+    monkeypatch.setattr(sports, 'refresh_sports_files', lambda ids, owner, **kwargs:
+                        calls.append(('subtitles', list(ids), owner)))
+    monkeypatch.setattr(workflows, 'search_after_sync', lambda session, ids, owner, **kwargs:
+                        calls.append(('search', list(ids), owner)))
+    refresh_event_files([61, 62], 1, search_event_ids=[62])
+    assert calls == [('recordings', [61, 62], 1), ('subtitles', [61, 62], 1), ('search', [62], 1)]
+    calls.clear()
+    refresh_event_files([61, 62], 1, search_event_ids=[])
+    assert calls == [('recordings', [61, 62], 1), ('subtitles', [61, 62], 1)]
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+def test_strm_pointer_support_preserves_owned_sync_rows(library, monkeypatch, enabled):
+    session, sync = library
+    monkeypatch.setattr(sync.settings.general, 'enable_strm_support', enabled)
+    remote(monkeypatch, sync, [event([file(9, 1, filePath='/sports/card.STRM', size=80),
+                                    file(10, 2, filePath='/sports/missing.strm', size=80, exists=False),
+                                    file(11, 3, size=80)])])
+    owned = sync.sync_events(51, 1)
+    other = sync.sync_events(52, 2)
+    assert len(owned) == len(other) == int(enabled)
+    assert set(owned).isdisjoint(other)
+    assert sync.sync_events(51, 1) == owned
+    assert {row.id for row in rows(session)} == set(owned + other)
+    if enabled:
+        assert all(row.path == '/sports/card.STRM' and row.file_size == 80 for row in rows(session))
+        monkeypatch.setattr(sync.settings.general, 'enable_strm_support', False)
+        assert sync.sync_events(51, 1) == []
+        assert [row.id for row in rows(session)] == other
+
+
 def test_complete_pages_null_numbers_and_playable_files(library, monkeypatch):
     session, sync = library
     data = [

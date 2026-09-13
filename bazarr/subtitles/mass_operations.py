@@ -1072,7 +1072,7 @@ def _scan_sports(item):
 def _search_sports(item, job_id):
     """Search the missing languages of a selected event, or of a whole league."""
     from sportarr.automatic import search_event
-    from sportarr.workflows import sports_download_subtitles
+    from sportarr.workflows import SportsJobSignal, sports_download_subtitles
 
     arr_instance_id = item.get('arr_instance_id')
     if not arr_instance_id:
@@ -1081,7 +1081,8 @@ def _search_sports(item, job_id):
         event_id = item.get('sportsEventId')
         if not event_id:
             return False
-        search_event(event_id, arr_instance_id, job_id=job_id)
+        search_event(event_id, arr_instance_id, job_id=job_id,
+                     cancel=SportsJobSignal(arr_instance_id, job_id))
         return True
     league_id = item.get('sportsLeagueId')
     if not league_id:

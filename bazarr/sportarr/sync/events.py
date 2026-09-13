@@ -100,7 +100,7 @@ def _prune_events(session, league_id, owner, keep):
             TableSportsEvents.id.in_(batch)))
 
 
-def refresh_event_files(event_ids, arr_instance_id, cancel=None):
+def refresh_event_files(event_ids, arr_instance_id, cancel=None, *, search_event_ids=()):
     """Post-commit hook for the subtitle indexer, using exact local file-row IDs."""
     from sportarr.hash_index import refresh_recording_index
     refresh_recording_index(arr_instance_id, event_ids, session=database, cancel=cancel)
@@ -109,7 +109,8 @@ def refresh_event_files(event_ids, arr_instance_id, cancel=None):
     refresh_sports_files(event_ids, arr_instance_id, cancel=cancel)
     from sportarr.workflows import search_after_sync
 
-    search_after_sync(database, event_ids, arr_instance_id, cancel=cancel)
+    if search_event_ids:
+        search_after_sync(database, search_event_ids, arr_instance_id, cancel=cancel)
 
 
 def _match_events(existing, parsed):
@@ -312,6 +313,7 @@ def sync_event_leagues(league_ids, arr_instance_id, *, page_size=1000, cancel=No
         client = factory.from_row(instance, http_get=http_get) if http_get else factory.from_row(instance)
         snapshots, leagues = _expanded_snapshots(client, league_ids, arr_instance_id, page_size, cancel, complete)
         ids_by_league = {local: [] for local in snapshots}
+        search_event_ids = []
         with sports_transaction(database) as transaction:
             instance = revalidate(transaction, arr_instance_id, expected, cancel)
             for local in snapshots:
@@ -357,12 +359,14 @@ def sync_event_leagues(league_ids, arr_instance_id, *, page_size=1000, cancel=No
                 if row.id in moving:
                     _rebind_artifacts(transaction, row, moving[row.id], instance)
                 ids_by_league[local].append(row.id)
+                if new_file:
+                    search_event_ids.append(row.id)
             for local, ids in ids_by_league.items():
                 _prune_events(transaction, local, arr_instance_id, ids)
             check_cancelled(cancel)
         all_ids = [local_id for ids in ids_by_league.values() for local_id in ids]
         if all_ids:
-            refresh_event_files(all_ids, arr_instance_id, cancel=cancel)
+            refresh_event_files(all_ids, arr_instance_id, cancel=cancel, search_event_ids=search_event_ids)
         notify(all_ids)
         if is_signalr and settings.general.notify_if_nothing_is_missing_for_signalr_event:
             for local in snapshots:
