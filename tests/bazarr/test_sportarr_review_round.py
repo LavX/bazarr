@@ -530,23 +530,47 @@ def test_a_manual_sports_save_clears_the_badge_it_resolved():
     assert 'clear_mismatch_after_manual_save' in source
 
 
-def test_the_shared_test_database_is_not_cleared_between_sessions():
-    """Clearing it looks right and is not.
+def test_the_shared_test_database_is_not_cleared_between_sessions(tmp_path):
+    """Explicit lanes retain their schema and rows across pytest processes."""
+    import os
+    from pathlib import Path
+    import sqlite3
+    import subprocess
+    import sys
 
-    The directory is shared, so a second local run inherits the rows the first
-    one wrote and the compat contract suite fails on a duplicate movie id. But
-    CI's third pytest step runs one file per process, and create_all builds
-    only the tables whose models that process imported, so a session starting
-    from an empty file gets a partial schema and depends on the fully
-    populated database the earlier step left behind. Clearing it made
-    test_threading_followup fail on a missing table. The local papercut is the
-    cheaper of the two.
-    """
-    import pathlib
+    conftest = Path(__file__).resolve().parents[1] / 'conftest.py'
+    config_dir = tmp_path / 'shared-config'
+    (config_dir / 'db').mkdir(parents=True)
+    database_path = config_dir / 'db' / 'bazarr.db'
+    with sqlite3.connect(database_path) as connection:
+        connection.execute('CREATE TABLE fixture_state (id INTEGER PRIMARY KEY, payload TEXT NOT NULL)')
+        schema = connection.execute("SELECT sql FROM sqlite_schema WHERE name = 'fixture_state'").fetchone()
 
-    source = pathlib.Path('tests/conftest.py').read_text()
-    assert 'os.remove(_stale)' not in source
-    assert 'deliberately NOT cleared' in source
+    # Run away from the checkout to exercise external test bundles too.
+    runner_dir = tmp_path / 'runner'
+    runner_dir.mkdir()
+    script = (
+        'import os, runpy, sys; scope = runpy.run_path(sys.argv[1]); '
+        'assert os.environ["BAZARR_CONFIG_DIR"] == sys.argv[2]'
+    )
+    expected_rows = []
+    for session, selected_path in enumerate((str(config_dir), os.path.relpath(config_dir, runner_dir)), start=1):
+        expected_rows.append((session, f'preserved from session {session}'))
+        with sqlite3.connect(database_path) as connection:
+            connection.execute('INSERT INTO fixture_state VALUES (?, ?)', expected_rows[-1])
+
+        result = subprocess.run(
+            [sys.executable, '-I', '-B', '-c', script, str(conftest), selected_path],
+            cwd=runner_dir,
+            env=dict(os.environ, BAZARR_CONFIG_DIR=selected_path),
+            capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert all((config_dir / name).is_dir()
+                   for name in ('backup', 'cache', 'config', 'db', 'log', 'restore'))
+        with sqlite3.connect(f'{database_path.as_uri()}?mode=ro', uri=True) as connection:
+            assert connection.execute("SELECT sql FROM sqlite_schema WHERE name = 'fixture_state'").fetchone() == schema
+            assert connection.execute('SELECT id, payload FROM fixture_state ORDER BY id').fetchall() == expected_rows
 
 
 # --------------------------------------------------------------------------

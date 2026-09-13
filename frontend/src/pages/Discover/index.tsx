@@ -42,6 +42,7 @@ import SubtitleResults from "./SubtitleResults";
 import TitleDetails, { TitleEpisodePicker, TitleNotes } from "./TitleDetails";
 import Trending from "./Trending";
 import styles from "./Discover.module.scss";
+import buttonClasses from "@/assets/button.module.scss";
 
 /** Where a reader can install or enable a catalog provider. */
 const HUB_ROUTE = "/subtitle-hub?tab=marketplace";
@@ -609,7 +610,7 @@ export default function Discover() {
   return (
     <section
       id="bazarr-discover-home"
-      className={styles.discover}
+      className={`${styles.discover} ${buttonClasses.primaryScope}`}
       aria-labelledby="discover-title"
       data-theme={colorScheme === "light" ? "day" : "night"}
       data-density="cinematic"

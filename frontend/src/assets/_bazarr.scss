@@ -133,6 +133,9 @@ body::after {
 }
 
 :root[data-mantine-color-scheme="dark"] {
+  --bz-action-bg: var(--mantine-color-brand-5);
+  --bz-action-hover: var(--mantine-color-brand-4);
+  --bz-action-fg: var(--mantine-color-dark-9);
   --bz-surface-ground: #121125;
   --bz-surface-base: #121125;
   --bz-surface-raised: #1a1a2e;
@@ -169,6 +172,9 @@ body::after {
 }
 
 :root[data-mantine-color-scheme="light"] {
+  --bz-action-bg: var(--mantine-color-brand-7);
+  --bz-action-hover: var(--mantine-color-brand-8);
+  --bz-action-fg: #ffffff;
   --bz-text-primary: #12121f;
   --bz-text-secondary: #343a40;
   --bz-text-tertiary: #656d76;

@@ -52,6 +52,7 @@ def upstream(monkeypatch):
 
 @pytest.fixture
 def authenticated_client(upstream, monkeypatch):
+    monkeypatch.setattr("app.check_update._fetch_repo_releases", lambda *args, **kwargs: [])
     from api import api_bp
     from app.config import settings
     from compat import service
@@ -618,3 +619,16 @@ def test_malformed_image_refresh_keeps_metadata_and_its_stale_fallback_safe(auth
     assert stale["service_status"] == "unavailable"
     assert stale["item"] == fresh["item"]
     assert stale["fetched_at"] == fresh["fetched_at"]
+
+
+@pytest.mark.parametrize("stored", ["", "5ecafe00cafe00cafe00cafe00cafe00"])
+def test_masked_override_error_does_not_require_a_saved_token(authenticated_client, stored):
+    from app.config import settings
+    settings.discover.tmdb_access_token = stored
+    response = authenticated_client.post(
+        "/api/discover/metadata/test", json={"token": "***"},
+        headers={"X-API-KEY": "metadata-test-key"})
+    assert response.status_code == 400
+    assert response.json["message"] == (
+        "Enter an optional TMDB override, or omit it to check the configured connection.")
+    assert settings.discover.tmdb_access_token == stored

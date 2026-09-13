@@ -217,7 +217,7 @@ describe("Discover retrieval", () => {
   it.each(["Movies", "Series"])(
     "searches movies and shows while the %s feed is selected",
     async (scope) => {
-      const { user, router } = renderDiscover();
+      const { user } = renderDiscover();
       await user.click(screen.getByRole("button", { name: scope }));
       await user.type(screen.getByLabelText("Search"), "light");
       expect(
@@ -240,7 +240,7 @@ describe("Discover retrieval", () => {
         return HttpResponse.json({ data: { ...envelope, items: [movie] } });
       }),
     );
-    const { user, router } = renderDiscover();
+    const { user } = renderDiscover();
     await user.type(screen.getByLabelText("Search"), "light");
     expect(
       await screen.findByRole("button", { name: "The Matrix (1999)" }),
@@ -252,7 +252,7 @@ describe("Discover retrieval", () => {
   });
 
   it("keeps IMDb edits in retrieval until returning to Discover", async () => {
-    const { user, router } = renderDiscover();
+    const { user } = renderDiscover();
     await selectTarget(user);
     await openSearchOptions(user);
     await user.clear(screen.getByLabelText("IMDb ID"));
@@ -268,7 +268,7 @@ describe("Discover retrieval", () => {
   });
 
   it("keeps manual episode controls available after changing a movie's media type", async () => {
-    const { user, router } = renderDiscover();
+    const { user } = renderDiscover();
     await selectTarget(user);
     await openSearchOptions(user);
     await user.click(screen.getByRole("radio", { name: "Episode" }));
@@ -291,7 +291,7 @@ describe("Discover retrieval", () => {
           }),
         ),
       );
-      const { user, router } = renderDiscover();
+      const { user } = renderDiscover();
       await user.type(screen.getByLabelText("Search"), "missing");
       expect(screen.queryByLabelText("IMDb ID")).toBeNull();
       expect(screen.queryByLabelText("Release name")).toBeNull();
@@ -323,7 +323,7 @@ describe("Discover retrieval", () => {
   );
 
   it("shows only feeds belonging to the selected media scope", async () => {
-    const { user, router } = renderDiscover();
+    const { user } = renderDiscover();
     expect(
       screen.getByRole("heading", { name: "Recent digital releases" }),
     ).toBeInTheDocument();
@@ -388,7 +388,7 @@ describe("Discover retrieval", () => {
         return HttpResponse.json(snapshot());
       }),
     );
-    const { user, router } = renderDiscover();
+    const { user } = renderDiscover();
     expect(screen.queryByLabelText("IMDb ID")).toBeNull();
     expect(screen.queryByLabelText("Subtitle language")).toBeNull();
     expect(screen.queryByRole("button", { name: "Find subtitles" })).toBeNull();
@@ -460,7 +460,7 @@ describe("Discover retrieval", () => {
           : HttpResponse.json({ message: "Unavailable" }, { status: 503 });
       }),
     );
-    const { user, router } = renderDiscover();
+    const { user } = renderDiscover();
     await selectTarget(user);
     await user.click(screen.getByRole("button", { name: "Find subtitles" }));
     await screen.findByText("The.Matrix.1999.1080p");
@@ -508,7 +508,7 @@ describe("Discover retrieval", () => {
         );
       }),
     );
-    const { user, router } = renderDiscover();
+    const { user } = renderDiscover();
     await selectTarget(user);
     await user.click(screen.getByRole("button", { name: "Find subtitles" }));
     await screen.findByText("Evicted result");
@@ -544,7 +544,7 @@ describe("Discover retrieval", () => {
             : HttpResponse.json({}, { status: 503 });
         }),
       );
-      const { user, router } = renderDiscover();
+      const { user } = renderDiscover();
       await selectTarget(user);
       await user.click(screen.getByRole("button", { name: "Find subtitles" }));
       await screen.findByText("Expired result");
@@ -618,7 +618,7 @@ describe("Discover retrieval", () => {
         return HttpResponse.json(snapshot());
       }),
     );
-    const { user, router } = renderDiscover();
+    const { user } = renderDiscover();
     await selectTarget(user);
     await user.click(screen.getByRole("button", { name: "Find subtitles" }));
     await waitFor(() => expect(release).toBeDefined());
@@ -636,7 +636,7 @@ describe("Discover retrieval", () => {
   });
 
   it("blocks malformed IMDb identity and incomplete exact episodes", async () => {
-    const { user, router } = renderDiscover();
+    const { user } = renderDiscover();
     expect(screen.queryByLabelText("IMDb ID")).toBeNull();
     expect(screen.queryByLabelText("Subtitle language")).toBeNull();
     expect(screen.queryByRole("button", { name: "Find subtitles" })).toBeNull();
@@ -736,7 +736,7 @@ it("distinguishes successful empty, partial, failed and provider setup states", 
       HttpResponse.json(responses.shift()),
     ),
   );
-  const { user, router } = renderDiscover();
+  const { user } = renderDiscover();
   await selectTarget(user);
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
   expect(await screen.findByText(/No subtitles matched/)).toBeInTheDocument();
@@ -824,7 +824,7 @@ it("says a seeded language is session-only once the search tries to remember it"
       original.call(this, key, value);
     });
   try {
-    const { user, router } = renderDiscover();
+    const { user } = renderDiscover();
     await selectTitle(user);
     await waitFor(() =>
       expect(selectInput("Subtitle language")).toHaveValue("English"),
@@ -842,7 +842,7 @@ it("says a seeded language is session-only once the search tries to remember it"
 
 it("restores an explicit preference without deriving one from enabled library languages", async () => {
   localStorage.setItem("bazarr.discover.subtitle-language", "eng");
-  const { user, router } = renderDiscover();
+  const { user } = renderDiscover();
   expect(screen.queryByLabelText("IMDb ID")).toBeNull();
   expect(screen.queryByRole("button", { name: "Find subtitles" })).toBeNull();
   await selectTitle(user);
@@ -886,7 +886,7 @@ it("does not restore a logged-out task when its last request finishes", async ()
       return HttpResponse.json(snapshot());
     }),
   );
-  const { user, router } = renderDiscover();
+  const { user } = renderDiscover();
   await selectTarget(user);
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
   await waitFor(() => expect(finish).toBeDefined());
@@ -900,7 +900,7 @@ it("does not restore a logged-out task when its last request finishes", async ()
 });
 
 it("keeps identified title retrieval focused on language and search", async () => {
-  const { user, router } = renderDiscover();
+  const { user } = renderDiscover();
   await selectTitle(user);
   expect(screen.getByLabelText("Search")).toBeVisible();
   expect(screen.getByLabelText("IMDb ID")).not.toBeVisible();

@@ -177,7 +177,6 @@ const summary = {
 
 let searches: unknown[] = [];
 let copyRequests: string[] = [];
-let summaryReads = 0;
 let copyPayload: {
   items: unknown[];
   truncated: boolean;
@@ -188,7 +187,6 @@ beforeEach(() => {
   localStorage.clear();
   searches = [];
   copyRequests = [];
-  summaryReads = 0;
   copyPayload = { items: [copyA, copyB], truncated: false, owning_titles: 2 };
   server.use(
     http.get("/api/system/settings", () =>
@@ -227,7 +225,6 @@ beforeEach(() => {
       HttpResponse.json({ data: { ...envelope, item: movieDetail } }),
     ),
     http.get("/api/discover/summary", () => {
-      summaryReads += 1;
       return HttpResponse.json(summary);
     }),
     http.get("/api/discover/copies", ({ request }) => {

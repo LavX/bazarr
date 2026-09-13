@@ -22,6 +22,7 @@ def authenticated_client(monkeypatch):
         raise AssertionError("Unexpected network access during deterministic API tests")
 
     monkeypatch.setattr(requests.Session, "request", upstream_fixture)
+    monkeypatch.setattr("app.check_update._fetch_repo_releases", lambda *args, **kwargs: [])
     from api import api_bp
     from app.config import settings
 

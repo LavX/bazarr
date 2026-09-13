@@ -1,3 +1,4 @@
+/* eslint-disable camelcase -- API fixtures retain transport field names. */
 import { createMemoryRouter, RouterProvider } from "react-router";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";

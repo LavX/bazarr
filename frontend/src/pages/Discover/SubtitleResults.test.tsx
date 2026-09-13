@@ -228,7 +228,7 @@ beforeEach(() => {
 
 describe("Discover attachments", () => {
   it("downloads only the clicked forced row with its exact identifiers and device filename", async () => {
-    const { user, router } = renderDiscover();
+    const { user } = renderDiscover();
     await search(user);
     expect(requests).toEqual([]);
     await user.click(row().getByRole("button", { name: "Download SRT" }));
@@ -262,7 +262,7 @@ describe("Discover attachments", () => {
   });
 
   it("retires a 410 handle and recovers by searching the exact captured episode context", async () => {
-    const { user, router } = renderDiscover();
+    const { user } = renderDiscover();
     await search(user);
     server.use(
       http.get("/api/discover/download", () =>
@@ -310,7 +310,7 @@ describe("Discover attachments", () => {
   });
 
   it("downloads a usable retained row using its original search ID after partial refresh", async () => {
-    const { user, router } = renderDiscover();
+    const { user } = renderDiscover();
     await search(user);
     server.use(
       http.post("/api/discover/search", () =>
@@ -348,7 +348,7 @@ describe("Discover attachments", () => {
   });
 
   it("keeps a usable handle after transport failure but never revives a known expired one", async () => {
-    const { user, router } = renderDiscover();
+    const { user } = renderDiscover();
     await search(user);
     server.use(
       http.get("/api/discover/download", () =>
@@ -371,7 +371,7 @@ describe("Discover attachments", () => {
   it.each(["Episode", "Subtitle language", "IMDb ID"])(
     "retires feedback and handles on a change to %s",
     async (field) => {
-      const { user, router } = renderDiscover();
+      const { user } = renderDiscover();
       await search(user);
       await user.click(row().getByRole("button", { name: "Download SRT" }));
       await screen.findByText(/Download started for/);
@@ -415,7 +415,7 @@ describe("Discover attachments", () => {
           });
         }),
       );
-      const { user, router } = renderDiscover();
+      const { user } = renderDiscover();
       await search(user);
       await user.click(row().getByRole("button", { name: "Download SRT" }));
       await waitFor(() => expect(finish).toBeDefined());
@@ -465,7 +465,7 @@ describe("Discover attachments", () => {
             : HttpResponse.json({ message: "Could not download" }, { status }),
         ),
       );
-      const { user, router } = renderDiscover();
+      const { user } = renderDiscover();
       await search(user);
       await user.click(row().getByRole("button", { name: "Download SRT" }));
       await waitFor(() =>
@@ -498,7 +498,7 @@ it("releases pending download state when transport refresh retires its expired r
       });
     }),
   );
-  const { user, router } = renderDiscover();
+  const { user } = renderDiscover();
   await search(user);
   await user.click(row().getByRole("button", { name: "Download SRT" }));
   await waitFor(() => expect(finish).toBeDefined());
@@ -582,7 +582,7 @@ describe("Discover results against a chosen library copy", () => {
         return HttpResponse.json(copySnapshot());
       }),
     );
-    const { user, router } = renderDiscover();
+    const { user } = renderDiscover();
     await search(user);
     expect(
       row("full").getByText(/Search context: Sonarr HD/),
@@ -601,7 +601,7 @@ describe("Discover results against a chosen library copy", () => {
         return HttpResponse.json(copySnapshot());
       }),
     );
-    const { user, router } = renderDiscover();
+    const { user } = renderDiscover();
     await search(user);
     expect(row("full").getByText("Matches this copy")).toBeInTheDocument();
     expect(
@@ -623,7 +623,7 @@ describe("Discover results against a chosen library copy", () => {
         return HttpResponse.json(copySnapshot());
       }),
     );
-    const { user, router } = renderDiscover();
+    const { user } = renderDiscover();
     // One update that both moves to a new target and names a copy is naming a
     // copy for a target that did not exist when the copy was resolved.
     await user.click(
@@ -652,7 +652,7 @@ describe("Discover results against a chosen library copy", () => {
         ),
       ),
     );
-    const { user, router } = renderDiscover();
+    const { user } = renderDiscover();
     await searchWithCopy(user);
     expect(searches[0]).toMatchObject({ copy_id: chosenCopy.copy_id });
     await user.click(row().getByRole("button", { name: "Download SRT" }));

@@ -4412,3 +4412,122 @@ def test_pool_drops_subtitles_whose_language_is_not_a_language_object(monkeypatc
     out = pool.list_subtitles_provider("fakeguard", movie, {Language("eng")})
 
     assert out == [good]
+
+
+@pytest.mark.parametrize("status", [403, 429])
+def test_catalog_rate_limit_preserves_cached_source(tmp_path, monkeypatch, status):
+    import requests
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    checked = "2026-09-12T12:00:00+00:00"
+    state_file = tmp_path / "state.json"
+    entry = {"source": "community", "provider_id": "example", "version": "1.0.0", "trusted": False}
+    state_file.write_text(json.dumps({
+        "catalog_sources": {"community": {
+            "id": "community", "name": "community", "url": "https://github.com/example/providers/blob/main/catalog.json",
+            "last_checked_at": checked,
+        }}, "catalog_entries": {"community:example:1.0.0": entry}, "jobs": [],
+    }))
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    response = requests.Response()
+    response.status_code = status
+    response.headers.update({"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1789228800"})
+
+    def limited(*args, **kwargs):
+        raise requests.HTTPError(response=response)
+
+    monkeypatch.setattr(service, "_fetch_github_catalog", limited)
+    service.refresh_catalog()
+    saved = load_state()
+    source = saved["catalog_sources"]["community"]
+    assert source["last_checked_at"] == checked
+    assert source["last_attempted_at"]
+    assert "2026-09-12 16:00:00 UTC" in source["last_error"]
+    assert "temporarily limited" in source["last_error"]
+    assert saved["catalog_entries"]["community:example:1.0.0"] == entry
+
+
+def test_catalog_forbidden_is_not_presented_as_rate_limiting():
+    import requests
+    from provider_hub.service import _catalog_source_error_message
+    response = requests.Response()
+    response.status_code = 403
+    response.headers["x-ratelimit-remaining"] = "20"
+    message = _catalog_source_error_message(requests.HTTPError(response=response))
+    assert "denied access" in message
+    assert "temporarily" not in message
+
+
+@pytest.mark.parametrize("reset", ["invalid", "9999999999999999999999999"])
+def test_catalog_malformed_rate_limit_time_is_recoverable(reset):
+    import requests
+    from provider_hub.service import _catalog_source_error_message
+    response = requests.Response()
+    response.status_code = 429
+    response.headers["x-ratelimit-remaining"] = "0"
+    response.headers["x-ratelimit-reset"] = reset
+    assert "did not provide a reset time" in _catalog_source_error_message(requests.HTTPError(response=response))
+
+
+def test_catalog_secondary_limit_without_retry_header_is_temporary():
+    import requests
+    from provider_hub.service import _catalog_source_error_message
+    response = requests.Response()
+    response.status_code = 403
+    response.headers["x-ratelimit-remaining"] = "20"
+    response.headers["x-ratelimit-reset"] = "1789228800"
+    response._content = b'{"message":"You have exceeded a secondary rate limit. Please wait before you try again."}'
+    message = _catalog_source_error_message(requests.HTTPError(response=response))
+    assert "temporarily limited" in message
+    assert "permissions" not in message
+    assert "did not provide a reset time" in message
+    assert "2026-09-12" not in message
+
+
+def test_catalog_retry_after_has_precedence(monkeypatch):
+    import requests
+    from provider_hub import service
+    monkeypatch.setattr(service.time, "time", lambda: 1789228800)
+    response = requests.Response()
+    response.status_code = 429
+    response.headers.update({"retry-after": "60", "x-ratelimit-reset": "1789228800", "x-ratelimit-remaining": "0"})
+    message = service._catalog_source_error_message(requests.HTTPError(response=response))
+    assert "2026-09-12 16:01:00 UTC" in message
+
+
+@pytest.mark.parametrize("failure", ["rate_limit", "timeout"])
+def test_failed_initial_catalog_refresh_waits_for_explicit_retry(tmp_path, monkeypatch, failure):
+    import requests
+    from provider_hub import service
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+    attempts = []
+    response = requests.Response()
+    response.status_code = 429
+    response.headers["Retry-After"] = "60"
+
+    def fetch(*args, **kwargs):
+        attempts.append(args)
+        if len(attempts) == 1:
+            if failure == "rate_limit":
+                raise requests.HTTPError(response=response)
+            raise requests.Timeout("Catalog request timed out")
+        return {"providers": []}, "f" * 40
+
+    monkeypatch.setattr(service, "_fetch_github_catalog", fetch)
+    first = service.list_catalog(auto_refresh=True)
+    source = first["sources"][0]
+    assert len(attempts) == 1
+    assert source["last_checked_at"] is None
+    assert source["last_attempted_at"]
+    assert source["last_error"]
+    for _ in range(3):
+        assert service.list_catalog(auto_refresh=True) == first
+    assert len(attempts) == 1
+
+    service.refresh_catalog()
+    recovered = service.list_catalog(auto_refresh=True)["sources"][0]
+    assert len(attempts) == 2
+    assert recovered["last_checked_at"]
+    assert recovered["last_error"] is None

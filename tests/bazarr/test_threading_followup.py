@@ -250,6 +250,7 @@ def test_store_subtitles_uses_instance_path_mapping(schema_session, monkeypatch)
 
     monkeypatch.setattr(si, "database", schema_session)
     monkeypatch.setattr("app.database.database", schema_session)
+    monkeypatch.setattr("languages.get_languages.database", schema_session)
 
     # Instance 3 maps /local3 <-> /remote3 (series). Global maps /g/local <-> /g/remote.
     schema_session.add(TableArrInstances(
@@ -285,7 +286,9 @@ def test_store_subtitles_uses_instance_path_mapping(schema_session, monkeypatch)
     # Make the external-subtitle search return one en subtitle under /local3.
     sub_local = "/local3/show/e.en.srt"
 
-    monkeypatch.setattr(si.os.path, "exists", lambda p: True)
+    real_exists = si.os.path.exists
+    monkeypatch.setattr(si.os.path, "exists",
+                        lambda p: str(p) in {"/local3/show/e.mkv", sub_local} or real_exists(p))
     monkeypatch.setattr(si, "embedded_subs_reader", lambda *a, **k: [])
     monkeypatch.setattr(si.settings, "general",
                         SimpleNamespace(use_embedded_subs=False, single_language=False,
@@ -319,11 +322,11 @@ def test_store_subtitles_uses_instance_path_mapping(schema_session, monkeypatch)
     # does it at session finish through pathlib, which on 3.13+ passes
     # follow_symlinks and hits a lambda that takes one argument. The result is
     # a crash in pytest's shutdown rather than a test failure.
-    _real_stat = si.os.stat
+    real_stat = si.os.stat
     monkeypatch.setattr(
         si.os, "stat",
-        lambda p, *args, **kwargs: (SimpleNamespace(st_size=10) if p == sub_local
-                                    else _real_stat(p, *args, **kwargs)))
+        lambda p, *args, **kwargs: (SimpleNamespace(st_size=10) if str(p) == sub_local
+                                    else real_stat(p, *args, **kwargs)))
     monkeypatch.setattr(si, "list_missing_subtitles", lambda **k: None)
     monkeypatch.setattr(si, "_log_embedded_history", lambda *a, **k: None)
 
