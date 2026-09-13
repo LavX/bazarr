@@ -5,6 +5,7 @@ import hashlib
 import os
 import re
 import tempfile
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 from media_servers.events import publication_callback
 
@@ -940,7 +941,37 @@ def _get_subtitle_content(media_type, media_id, language_code, arr_instance_id=N
 
 
 def _save_subtitle_content(media_type, media_id, language_code, arr_instance_id=None):
-    """Shared handler for saving edited subtitle content."""
+    """Pin Sports identity before resolving any subtitle paths for the edit."""
+    if media_type != 'sports':
+        return _save_subtitle_content_guarded(media_type, media_id, language_code, arr_instance_id)
+
+    from sportarr.errors import SportsNotFound
+    from sportarr.subtitles import sports_manual_operation
+
+    if not _is_valid_language_code(language_code):
+        return 'Invalid language code', 400
+
+    try:
+        with sports_manual_operation(media_id, arr_instance_id) as operation:
+            try:
+                return _save_subtitle_content_guarded(
+                    media_type, media_id, language_code, operation[0].arr_instance_id,
+                    sports_operation=operation)
+            except (ValueError, FileNotFoundError) as exc:
+                # The event existed when the edit began. Losing it or its
+                # signature during this request is a publication conflict.
+                return str(exc), 409
+    except SportsNotFound:
+        return 'Media not found', 404
+    except FileNotFoundError:
+        return 'Sports video file not found', 404
+    except ValueError as exc:
+        return str(exc), 409
+
+
+def _save_subtitle_content_guarded(media_type, media_id, language_code, arr_instance_id=None,
+                                   sports_operation=None):
+    """Shared editor write, with the optional owned Sports publication boundary."""
     result = resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=arr_instance_id)
     if isinstance(result[1], int):
         return result[0], result[1]
@@ -965,8 +996,9 @@ def _save_subtitle_content(media_type, media_id, language_code, arr_instance_id=
     if len(encoded) > MAX_FILE_SIZE:
         return f'Content too large ({len(encoded)} bytes, max {MAX_FILE_SIZE})', 413
 
-    video_path = path_mappings.path_replace_instance(
-        metadata['mediaPath'], metadata.get('arrInstanceId', arr_instance_id), media_type)
+    video_path = (sports_operation[3] if sports_operation is not None else
+                  path_mappings.path_replace_instance(
+                      metadata['mediaPath'], metadata.get('arrInstanceId', arr_instance_id), media_type))
     try:
         with subtitle_write_locks(video_path, subtitle_path):
             if not os.path.isfile(subtitle_path):
@@ -975,11 +1007,15 @@ def _save_subtitle_content(media_type, media_id, language_code, arr_instance_id=
             if if_match and if_match.strip('"') != generate_etag(subtitle_path):
                 return 'Subtitle file has been modified since last read', 412
             with subtitle_mutation(video_path, subtitle_path):
-                _write_bytes_atomically(subtitle_path, encoded)
-                publication_callback(media_type, video_path, 'edit', metadata.get('arrInstanceId'))(subtitle_path)
-                _apply_subtitle_chmod(subtitle_path)
+                with (sports_operation[2](output_path=subtitle_path)
+                      if sports_operation is not None else nullcontext()):
+                    _write_bytes_atomically(subtitle_path, encoded)
+                    publication_callback(media_type, video_path, 'edit', metadata.get('arrInstanceId'))(subtitle_path)
+                    _apply_subtitle_chmod(subtitle_path)
             new_etag = generate_etag(subtitle_path)
     except FileNotFoundError:
+        if sports_operation is not None:
+            return 'Sports file changed. Please try again.', 409
         return 'Subtitle file or directory not found', 404
     except PermissionError:
         return 'Permission denied when writing subtitle file', 409

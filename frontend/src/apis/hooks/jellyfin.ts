@@ -25,6 +25,7 @@ export const useJellyfinLibrariesQuery = (
   url?: string,
   apikey?: string,
   verifySsl?: boolean,
+  includeAll: boolean = false,
 ) => {
   return useQuery({
     queryKey: [
@@ -33,8 +34,9 @@ export const useJellyfinLibrariesQuery = (
       url,
       apikeyFingerprint(apikey),
       verifySsl,
+      includeAll,
     ],
-    queryFn: () => api.jellyfin.libraries(url, apikey, verifySsl),
+    queryFn: () => api.jellyfin.libraries(url, apikey, verifySsl, includeAll),
     enabled,
     staleTime: 1000 * 60 * 5,
     refetchOnWindowFocus: false,

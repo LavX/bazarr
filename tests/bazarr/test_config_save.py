@@ -793,6 +793,7 @@ def test_audio_parsing_changes_rescan_sports_and_refresh_native_libraries(monkey
     monkeypatch.setattr(config.settings.general, 'parse_embedded_audio_track', not enabled)
     monkeypatch.setattr(config.settings.general, 'use_sonarr', True)
     monkeypatch.setattr(config.settings.general, 'use_radarr', True)
+    monkeypatch.setattr(config.settings.general, 'use_sportarr', True)
     monkeypatch.setitem(sys.modules, 'app.database', SimpleNamespace(
         database=SimpleNamespace(execute=lambda statement: None),
         update=lambda model: _FakeUpdate(), System=object))

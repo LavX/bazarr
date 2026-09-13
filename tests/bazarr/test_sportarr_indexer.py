@@ -900,7 +900,8 @@ def test_profiles_cutoffs_variants_and_audio_rules(
         module.list_missing_subtitles_sports(league_id=51, arr_instance_id=2)
 
 
-def test_global_embedded_setting_refreshes_sports_missing(indexed_library, monkeypatch):
+@pytest.mark.parametrize('master_enabled', [True, False])
+def test_global_embedded_setting_refreshes_sports_missing(indexed_library, monkeypatch, master_enabled):
     import sys
     from types import SimpleNamespace
     from app import config, database as db
@@ -940,9 +941,14 @@ def test_global_embedded_setting_refreshes_sports_missing(indexed_library, monke
     monkeypatch.setattr(
         jobs_queue, "feed_jobs_pending_queue", lambda **kw: queued.append(kw)
     )
+    monkeypatch.setattr(config.settings.general, 'use_sportarr', master_enabled)
     config.save_settings([("settings-general-use_embedded_subs", ["false"])])
-    assert queued[0]["func"] == "sports_full_scan_subtitles"
-    assert row(session, 61).missing_subtitles == "['fr']"
+    if master_enabled:
+        assert queued[0]["func"] == "sports_full_scan_subtitles"
+        assert row(session, 61).missing_subtitles == "['fr']"
+    else:
+        assert queued == []
+        assert row(session, 61).missing_subtitles == "[]"
 
 
 def test_shared_embedded_readers_accept_exact_sports_identity(
@@ -1039,6 +1045,7 @@ def test_audio_setting_save_repairs_indexed_rows_and_preserves_upstream_fallback
     monkeypatch.setattr(config.settings.validators, 'validate', lambda: None)
     monkeypatch.setattr(config.settings.general, 'use_sonarr', False)
     monkeypatch.setattr(config.settings.general, 'use_radarr', False)
+    monkeypatch.setattr(config.settings.general, 'use_sportarr', True)
     monkeypatch.setattr(config.settings.general, 'parse_embedded_audio_track', not enabled)
     monkeypatch.setattr(config.settings.general, 'use_embedded_subs', False)
     monkeypatch.setitem(sys.modules, 'app.scheduler', SimpleNamespace(scheduler=None))
@@ -1143,6 +1150,7 @@ def queued_audio_refresh(indexed_library, monkeypatch):
     monkeypatch.setattr(config.settings.validators, 'validate', lambda: None)
     monkeypatch.setattr(config.settings.general, 'use_sonarr', False)
     monkeypatch.setattr(config.settings.general, 'use_radarr', False)
+    monkeypatch.setattr(config.settings.general, 'use_sportarr', True)
     monkeypatch.setattr(config.settings.general, 'use_embedded_subs', False)
     monkeypatch.setattr(config.settings.general, 'parse_embedded_audio_track', True)
     monkeypatch.setitem(sys.modules, 'app.scheduler', SimpleNamespace(scheduler=None))
@@ -1299,3 +1307,29 @@ def test_ordinary_scan_cancellation_reaches_the_indexer_before_publication(queue
     assert current.missing_subtitles == before['missing_subtitles']
     # An interrupted scan remains retryable, with no completed index flag.
     assert not current.ffprobe_cache or not pickle.loads(current.ffprobe_cache)['sports_indexed']
+
+
+@pytest.mark.parametrize('master_enabled', [False, True])
+@pytest.mark.parametrize('enabled', [False, True])
+def test_audio_save_honors_sports_master_with_retained_enabled_owner(
+    queued_audio_refresh, monkeypatch, master_enabled, enabled
+):
+    config, module, session, queue, calls, _ = queued_audio_refresh
+    from app.database import TableArrInstances
+
+    monkeypatch.setattr(config.settings.general, 'use_sportarr', master_enabled)
+    monkeypatch.setattr(config.settings.general, 'parse_embedded_audio_track', not enabled)
+    module.store_subtitles_sports(61, 1)
+    before = row(session, 61).audio_language
+    assert session.get(TableArrInstances, 1).enabled == 1
+    config.save_settings([('settings-general-parse_embedded_audio_track', [str(enabled).lower()])])
+    assert len(queue.jobs_pending_queue) == int(master_enabled)
+    run_pending_audio_jobs(queue)
+    assert config.settings.general.parse_embedded_audio_track is enabled
+    if master_enabled:
+        assert row(session, 61).audio_language == ("['English']" if enabled else "['French']")
+        assert bool(calls) is (not enabled)
+    else:
+        assert row(session, 61).audio_language == before
+        assert calls == []
+    assert row(session, 62).audio_language == "['French']"

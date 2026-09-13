@@ -1073,3 +1073,189 @@ def test_interleaved_sports_history_dates_align_with_the_other_chart_series(inde
     counts = {entry['date']: entry['count'] for entry in result['sports']}
     assert [counts[day.strftime('%Y-%m-%d')] for day in days] == expected
     assert sum(counts.values()) == sum(expected)
+
+
+@pytest.mark.parametrize('kind, enabled, assigned_owner, warning', [
+    ('sportarr', 0, 2, True),
+    ('sonarr', 1, 2, True),
+    ('radarr', 1, 2, True),
+    ('sportarr', 1, 2, False),
+    ('sportarr', 0, 1, False),
+])
+def test_profile_health_counts_only_enabled_sports_owners(
+    indexed_library, monkeypatch, kind, enabled, assigned_owner, warning  # noqa: F811
+):
+    from app import database as db
+    from app.config import settings
+    from utilities import health
+
+    session, _ = indexed_library
+    monkeypatch.setattr(health, 'database', session)
+    monkeypatch.setattr(settings.general, 'use_sportarr', True)
+    monkeypatch.setattr(settings.general, 'use_sonarr', False)
+    monkeypatch.setattr(settings.general, 'use_radarr', False)
+    monkeypatch.setattr(settings.general, 'sports_default_enabled', True)
+    monkeypatch.setattr(settings.general, 'sports_default_profile', '')
+    session.execute(sa.insert(db.TableLanguagesProfiles).values(profileId=5, name='English', items='[]'))
+    session.execute(sa.update(db.TableArrInstances).where(db.TableArrInstances.id == 2)
+                    .values(kind=kind, enabled=enabled))
+    session.execute(sa.update(db.TableSportsLeagues)
+                    .where(db.TableSportsLeagues.arr_instance_id == assigned_owner).values(profileId=5))
+    # Both owners retain upstream league 7. Only an enabled Sports owner's
+    # assignment can settle the otherwise unassigned active library.
+    issues = health.get_health_issues()
+    assert any(issue['object'] == 'No assigned languages profile' for issue in issues) is warning
+
+
+@pytest.fixture
+def sports_editor_publication(indexed_library, monkeypatch):  # noqa: F811
+    from api.subtitles import content
+    from app.config import settings
+    from media_servers import events
+    from sportarr import subtitles as service
+    from test_sportarr_indexer import sports
+
+    session, folder = indexed_library
+    indexer = sports(monkeypatch, session)
+    indexer.store_subtitles_sports(61, 1)
+    monkeypatch.setattr(content, 'database', session)
+    monkeypatch.setattr(service, 'database', session)
+    monkeypatch.setattr(settings.general, 'chmod_enabled', False)
+    monkeypatch.setattr(content, 'event_stream', lambda **kw: None)
+    notifications = []
+    monkeypatch.setattr(events, 'notify_subtitle_mutation', notifications.append)
+    return content, session, folder, notifications
+
+
+def _put_sports_editor(content, owner=1, **kwargs):
+    from flask import Flask
+
+    query = '' if owner is None else f'?arr_instance_id={owner}'
+    with Flask(__name__).test_request_context(
+        f'/sports/events/61/subtitles/en:hi/content{query}', method='PUT',
+        json={'content': '1\n00:00:00,000 --> 00:00:01,000\nEdited sporting event.\n'}, **kwargs,
+    ):
+        response = content.SportsEventSubtitleContent.put.__wrapped__(
+            content.SportsEventSubtitleContent(), 61, 'en:hi')
+    return (response[1] if isinstance(response, tuple) else response.status_code), response
+
+
+@pytest.mark.parametrize('change', ['file_id', 'path', 'mapping', 'video', 'deleted', 'disabled'])
+def test_sports_editor_rejects_recording_change_after_path_resolution(
+    sports_editor_publication, monkeypatch, change
+):
+    from app.database import TableArrInstances, TableSportsEvents
+
+    content, session, folder, notifications = sports_editor_publication
+    original = content.resolve_subtitle_path
+    source = folder / '1/event.en.hi.srt'
+    before = source.read_bytes()
+    sibling = (folder / '2/event.de.forced.srt').read_bytes()
+    refreshes = []
+    monkeypatch.setattr(content, '_refresh_media_subtitles', lambda *a: refreshes.append(a))
+
+    def racing_resolve(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if change == 'file_id':
+            session.execute(sa.update(TableSportsEvents).where(TableSportsEvents.id == 61).values(file_id=99))
+        elif change == 'path':
+            (folder / '1/moved.mkv').write_bytes((folder / '1/event.mkv').read_bytes())
+            session.execute(sa.update(TableSportsEvents).where(TableSportsEvents.id == 61)
+                            .values(path='/sports/moved.mkv'))
+        elif change == 'mapping':
+            session.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 1)
+                            .values(path_mappings='[]'))
+        elif change == 'video':
+            (folder / '1/event.mkv').write_bytes(b'replaced recording')
+        elif change == 'deleted':
+            session.execute(sa.delete(TableSportsEvents).where(TableSportsEvents.id == 61))
+        else:
+            session.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 1).values(enabled=0))
+        session.commit()
+        return result
+
+    monkeypatch.setattr(content, 'resolve_subtitle_path', racing_resolve)
+    status, _ = _put_sports_editor(content)
+    assert status == 409
+    assert source.read_bytes() == before
+    assert (folder / '2/event.de.forced.srt').read_bytes() == sibling
+    assert refreshes == []
+    assert notifications == []
+
+
+@pytest.mark.parametrize('owner', [1, None, 2])
+def test_sports_editor_keeps_owned_save_and_conditional_write_semantics(sports_editor_publication, owner):
+    from app.database import TableSportsEvents
+
+    content, session, folder, notifications = sports_editor_publication
+    source = folder / '1/event.en.hi.srt'
+    before = source.read_bytes()
+    stale_status, _ = _put_sports_editor(content, owner, headers={'If-Match': 'outdated'})
+    assert stale_status == (404 if owner == 2 else 412)
+    assert source.read_bytes() == before
+    assert notifications == []
+    status, response = _put_sports_editor(content, owner, headers={'If-Match': content.generate_etag(source)})
+    if owner == 2:
+        assert status == 404
+        assert source.read_bytes() == before
+    else:
+        assert status == 204
+        assert b'Edited sporting event.' in source.read_bytes()
+        assert response.headers['ETag'] == f'"{content.generate_etag(source)}"'
+        assert len(notifications) == 1
+        session.expire_all()
+        assert '/sports/event.en.hi.srt' in session.get(TableSportsEvents, 61).subtitles
+    assert session.get(TableSportsEvents, 62).subtitles == '[]'
+
+
+@pytest.mark.parametrize('in_subfolder', [False, True])
+def test_sports_editor_validates_actual_source_with_configured_subfolder(
+    sports_editor_publication, monkeypatch, in_subfolder
+):
+    from app.config import settings
+    from app.database import TableSportsEvents
+
+    content, session, folder, _ = sports_editor_publication
+    monkeypatch.setattr(settings.general, 'subfolder', 'relative')
+    monkeypatch.setattr(settings.general, 'subfolder_custom', 'subs')
+    destination = folder / '1/subs'
+    destination.mkdir()
+    source = folder / '1/event.en.hi.srt'
+    if in_subfolder:
+        moved = destination / source.name
+        source.rename(moved)
+        source = moved
+        session.execute(sa.update(TableSportsEvents).where(TableSportsEvents.id == 61)
+                        .values(subtitles="[['en:hi', '/sports/subs/event.en.hi.srt']]"))
+        session.commit()
+    status, _ = _put_sports_editor(content)
+    assert status == 204
+    assert b'Edited sporting event.' in source.read_bytes()
+    assert (folder / '2/event.de.forced.srt').is_file()
+
+
+def test_sports_editor_mutation_preserves_obsolete_sync_bytes(sports_editor_publication):
+    content, _, folder, _ = sports_editor_publication
+    output = folder / '1/event.en.hi.ffsubsync.srt'
+    output.write_bytes(b'previous synchronized subtitle')
+    status, _ = _put_sports_editor(content)
+    assert status == 204
+    assert not output.exists()
+    backups = list((folder / '1').glob('.bazarr-sync-obsolete-*.bak'))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == b'previous synchronized subtitle'
+
+
+def test_sports_editor_rejects_another_basename_in_the_allowed_directory(sports_editor_publication):
+    from app.database import TableSportsEvents
+
+    content, session, folder, notifications = sports_editor_publication
+    source = folder / '1/unrelated.en.srt'
+    source.write_bytes(b'unrelated subtitle')
+    session.execute(sa.update(TableSportsEvents).where(TableSportsEvents.id == 61)
+                    .values(subtitles="[['en:hi', '/sports/unrelated.en.srt']]"))
+    session.commit()
+    status, _ = _put_sports_editor(content)
+    assert status == 409
+    assert source.read_bytes() == b'unrelated subtitle'
+    assert notifications == []

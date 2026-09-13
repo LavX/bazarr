@@ -1582,8 +1582,9 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
         if settings.general.use_radarr:
             list_missing_subtitles_movies()
 
-        from subtitles.indexer.sports import list_missing_subtitles_sports
-        list_missing_subtitles_sports()
+        if settings.general.use_sportarr:
+            from subtitles.indexer.sports import list_missing_subtitles_sports
+            list_missing_subtitles_sports()
 
     if undefined_subtitles_track_default_changed:
         from .scheduler import scheduler
@@ -1594,7 +1595,8 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
         if settings.general.use_radarr:
             movies_full_scan_subtitles(use_cache=True)
 
-    if undefined_subtitles_track_default_changed or use_embedded_subs_changed or audio_tracks_parsing_changed:
+    if settings.general.use_sportarr and (undefined_subtitles_track_default_changed or
+                                         use_embedded_subs_changed or audio_tracks_parsing_changed):
         from subtitles.indexer.sports import sports_full_scan_subtitles
         sports_full_scan_subtitles(refresh_audio=audio_tracks_parsing_changed,
                                   audio_mode=bool(settings.general.parse_embedded_audio_track)

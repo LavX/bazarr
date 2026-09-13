@@ -35,6 +35,7 @@ const LibrarySelector: FunctionComponent<LibrarySelectorProps> = (props) => {
     jellyfinUrl ?? undefined,
     jellyfinApikey ?? undefined,
     verifySsl ?? undefined,
+    libraryType === "all",
   );
 
   const libraries = librariesData ?? [];

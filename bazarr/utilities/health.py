@@ -214,8 +214,12 @@ def get_health_issues():
                                            .where(TableShows.profileId.is_not(None))).scalar()
     movies_with_profile = database.execute(select(func.count(TableMovies.radarrId))
                                            .where(TableMovies.profileId.is_not(None))).scalar()
-    sports_with_profile = database.execute(select(func.count(TableSportsLeagues.id))
-                                           .where(TableSportsLeagues.profileId.is_not(None))).scalar()
+    sports_with_profile = database.execute(
+        select(func.count(TableSportsLeagues.id))
+        .join(TableArrInstances, TableSportsLeagues.arr_instance_id == TableArrInstances.id)
+        .where(TableSportsLeagues.profileId.is_not(None),
+               TableArrInstances.kind == 'sportarr',
+               TableArrInstances.enabled == 1)).scalar()
     default_series_profile_empty = series_default_profile_is_missing()
     default_movies_profile_empty = movie_default_profile_is_missing()
     default_sports_profile_empty = sports_default_profile_is_missing()

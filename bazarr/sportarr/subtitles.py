@@ -197,8 +197,8 @@ def sports_manual_operation(event_id, arr_instance_id, cancel=None):
         return instance
 
     @contextmanager
-    def publication_guard():
-        with sports_file_publication(context, signature, cancel) as guard:
+    def publication_guard(*, output_path=None):
+        with sports_file_publication(context, signature, cancel, output_path=output_path) as guard:
             yield guard
 
     yield context, validate, publication_guard, context.mapped_path

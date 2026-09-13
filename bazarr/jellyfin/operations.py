@@ -146,8 +146,8 @@ def jellyfin_refresh_all_libraries() -> dict:
 
 
 def jellyfin_get_libraries(url: str = None, apikey: str = None,
-                           verify_ssl: bool = None) -> dict:
-    """Get movie and series libraries from the configured Jellyfin server.
+                           verify_ssl: bool = None, include_all: bool = False) -> dict:
+    """Get movie/series libraries, or all types for a Sports selector.
 
     Returns a structured result so the API layer can distinguish "no
     libraries exist" from "we couldn't reach the server." Collapsing both
@@ -172,7 +172,7 @@ def jellyfin_get_libraries(url: str = None, apikey: str = None,
                     'type': (lib.get('CollectionType') or '').lower(),
                 }
                 for lib in libraries
-                if (lib.get('CollectionType') or '').lower() in ('movies', 'tvshows')
+                if include_all or (lib.get('CollectionType') or '').lower() in ('movies', 'tvshows')
             ],
             'error_code': None,
         }
