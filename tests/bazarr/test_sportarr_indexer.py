@@ -951,6 +951,85 @@ def test_global_embedded_setting_refreshes_sports_missing(indexed_library, monke
         assert row(session, 61).missing_subtitles == "[]"
 
 
+@pytest.mark.parametrize('master_enabled', [True, False])
+def test_embedded_parser_setting_queues_sports_reindex(indexed_library, monkeypatch, master_enabled):
+    from app import config
+    from app.jobs_queue import jobs_queue
+
+    session, _ = indexed_library
+    module = sports(monkeypatch, session)
+    module.store_subtitles_sports(61, 1)
+    monkeypatch.setattr(config, 'write_config', lambda: True)
+    monkeypatch.setattr(config.settings.validators, 'validate', lambda: None)
+    monkeypatch.setattr(config.settings.general, 'use_sonarr', False)
+    monkeypatch.setattr(config.settings.general, 'use_radarr', False)
+    monkeypatch.setattr(config.settings.general, 'use_sportarr', master_enabled)
+    monkeypatch.setattr(config.settings.sportarr, 'full_update', 'Manually')
+    queued = []
+    monkeypatch.setattr(jobs_queue, 'feed_jobs_pending_queue', lambda **kw: queued.append(kw))
+
+    config.save_settings([('settings-general-embedded_subtitles_parser', ['mediainfo'])])
+
+    assert config.settings.general.embedded_subtitles_parser == 'mediainfo'
+    assert [job['func'] for job in queued] == (['sports_full_scan_subtitles'] if master_enabled else [])
+    if master_enabled:
+        assert queued[0]['kwargs']['arr_instance_id'] is None
+        assert queued[0]['kwargs']['refresh_audio'] is False
+    count = len(queued)
+    config.save_settings([('settings-general-embedded_subtitles_parser', ['mediainfo'])])
+    assert len(queued) == count
+
+
+def test_changed_parser_reindexes_files_already_processed_by_running_scan(indexed_library, monkeypatch):
+    from app import config
+    from app.database import TableArrInstances
+    from sportarr.sync import events
+    from test_sportarr_workflows import private_queue
+
+    session, _ = indexed_library
+    module = sports(monkeypatch, session)
+    queue = private_queue(monkeypatch)
+    monkeypatch.setattr(module, 'jobs_queue', queue)
+    monkeypatch.setattr(config, 'write_config', lambda: True)
+    monkeypatch.setattr(config.settings.validators, 'validate', lambda: None)
+    monkeypatch.setattr(config.settings.general, 'use_sonarr', False)
+    monkeypatch.setattr(config.settings.general, 'use_radarr', False)
+    monkeypatch.setattr(config.settings.general, 'use_sportarr', True)
+    monkeypatch.setattr(config.settings.general, 'parse_embedded_audio_track', False)
+    monkeypatch.setattr(config.settings.sportarr, 'full_update', 'Manually')
+    session.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 2).values(enabled=0))
+    session.commit()
+    sibling = row(session, 62).to_dict()
+    monkeypatch.setattr(events, 'sync_events', lambda *a, **kw: pytest.fail('Parser edit refreshed upstream audio'))
+    original_store = module.store_subtitles_sports
+
+    def change_parser_after_index(*args, **kwargs):
+        result = original_store(*args, **kwargs)
+        cached = pickle.loads(row(session, 61).ffprobe_cache)
+        assert cached.get('ffprobe') and cached['sports_indexed']
+        config.save_settings([('settings-general-embedded_subtitles_parser', ['mediainfo'])])
+        return result
+
+    monkeypatch.setattr(module, 'store_subtitles_sports', change_parser_after_index)
+    assert module.sports_full_scan_subtitles()
+    running = queue.jobs_pending_queue.popleft()
+    queue.jobs_running_queue.append(running)
+    assert queue._run_job(running)
+    assert len(queue.jobs_pending_queue) == 1, 'Parser change lost the required follow-up scan'
+
+    monkeypatch.setattr(module, 'store_subtitles_sports', original_store)
+    monkeypatch.setattr(module, 'parse_video_metadata', lambda *a, **kw:
+                        {'mediainfo': {'subtitle': [], 'audio': [], 'video': [{}]}})
+    followup = queue.jobs_pending_queue.popleft()
+    assert followup.kwargs['refresh_audio'] is False
+    queue.jobs_running_queue.append(followup)
+    assert queue._run_job(followup)
+    cached = pickle.loads(row(session, 61).ffprobe_cache)
+    assert cached.get('mediainfo') and not cached.get('ffprobe') and cached['sports_indexed']
+    assert row(session, 62).to_dict() == sibling
+    assert not queue.jobs_pending_queue and not queue.jobs_running_queue and not queue.jobs_failed_queue
+
+
 def test_shared_embedded_readers_accept_exact_sports_identity(
     indexed_library, monkeypatch
 ):

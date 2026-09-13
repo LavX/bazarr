@@ -243,7 +243,9 @@ def test_sportarr_runtime_refresh_has_no_scalar_or_legacy_scheduler_effects(monk
     from arr_instances import service
     from sportarr import scheduler as sports_scheduler
     refreshes = []
+    emissions = []
     monkeypatch.setattr(sports_scheduler, "refresh_sports_runtime", lambda: refreshes.append(True))
+    monkeypatch.setattr(service, "event_stream", lambda **kw: emissions.append(kw))
 
     def unexpected(*args, **kwargs):
         pytest.fail("Sportarr registration changed legacy runtime state")
@@ -255,6 +257,7 @@ def test_sportarr_runtime_refresh_has_no_scalar_or_legacy_scheduler_effects(monk
     service.refresh_runtime("sportarr", instance_id=1)
     service.refresh_runtime("sportarr", instance_id=1, removed=True)
     assert refreshes == [True, True]
+    assert emissions == [{'type': 'sports'}, {'type': 'sports'}]
 
 
 def _load_endpoints(monkeypatch):
@@ -272,6 +275,39 @@ def _load_endpoints(monkeypatch):
         monkeypatch.setitem(sys.modules, name, module)
         spec.loader.exec_module(module)
     return module
+
+
+@pytest.mark.parametrize('override', [
+    {'excluded_tags': ['archive']}, {'excluded_sports': ['Football']}, {'only_monitored': True},
+])
+def test_sportarr_eligibility_edit_invalidates_sports_root(schema_session, monkeypatch, override):
+    from flask import Flask
+    from flask_restx import Api
+    from app.config import settings
+    from arr_instances import service
+    from arr_instances.repository import ArrInstanceRepository, to_safe_dict
+    from sportarr import scheduler
+
+    repo = ArrInstanceRepository(schema_session)
+    owner = repo.create('sportarr', 'First')
+    sibling = repo.create('sportarr', 'Second')
+    schema_session.commit()
+    emissions = []
+    monkeypatch.setattr(service, 'event_stream', lambda **kw: emissions.append(kw))
+    monkeypatch.setattr(scheduler, 'refresh_sports_runtime', lambda: None)
+    endpoints = _load_endpoints(monkeypatch)
+    monkeypatch.setattr(endpoints, 'database', schema_session)
+    app = Flask(__name__)
+    Api(app).add_namespace(endpoints.api_ns_system_arr_instances, path='/')
+
+    response = app.test_client().patch(
+        f'/system/arr-instances/{owner.id}', headers={'X-API-KEY': settings.auth.apikey},
+        json={'sports_settings': override})
+
+    assert response.status_code == 200
+    assert response.json['sports_settings'] == override
+    assert to_safe_dict(repo.get(sibling.id))['sports_settings'] == {}
+    assert emissions == [{'type': 'sports'}]
 
 
 def test_sportarr_crud_through_existing_http_wrappers(schema_session, monkeypatch, scheduler_runtime):

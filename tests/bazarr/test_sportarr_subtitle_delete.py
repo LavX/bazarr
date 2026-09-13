@@ -6,6 +6,71 @@ all, so a bad sports subtitle could not be removed through Bazarr: the only way
 out was deleting the file by hand and waiting for a re-index to notice.
 """
 
+import pytest
+import sqlalchemy as sa
+
+from test_sportarr_kind_migration import migration_engine  # noqa: F401
+from test_sportarr_indexer import indexed_library  # noqa: F401
+
+
+@pytest.mark.parametrize('failure', ['reindex', 'remove', 'guard'])
+def test_sports_deletion_finalizes_only_after_file_removal(indexed_library, monkeypatch, failure):  # noqa: F811
+    from flask import Flask
+    from api.sports import events
+    from app.config import settings
+    from app.database import TableHistorySports
+    from media_servers import events as publication
+    from sportarr import history, notify
+    from subtitles.indexer import sports
+    from subtitles.tools import delete
+
+    session, folder = indexed_library
+    monkeypatch.setattr(events, 'database', session)
+    monkeypatch.setattr(history, 'database', session)
+    monkeypatch.setattr(settings.general, 'use_plex', False)
+    monkeypatch.setattr(settings.general, 'use_jellyfin', False)
+    emissions, rescans, notifications, webhooks = [], [], [], []
+    monkeypatch.setattr(delete, 'event_stream', lambda **kw: emissions.append(kw))
+    monkeypatch.setattr(notify, 'notify_rescan', rescans.append)
+    monkeypatch.setattr(publication, 'notify_subtitle_mutation', notifications.append)
+    monkeypatch.setattr(delete, 'call_external_webhook', lambda **kw: webhooks.append(kw))
+
+    def broken_index(event_id, owner):
+        assert (event_id, owner) == (61, 1)
+        raise OSError('fixture reindex unavailable')
+
+    monkeypatch.setattr(sports, 'store_subtitles_sports', broken_index)
+    source = folder / '1/event.en.hi.srt'
+    sibling = folder / '2/event.de.forced.srt'
+    sibling_before = sibling.read_bytes()
+    if failure == 'remove':
+        source.unlink()
+        monkeypatch.setattr(sports, 'store_subtitles_sports', lambda *a: None)
+    elif failure == 'guard':
+        def stopped_removal(*args, **kwargs):
+            raise ValueError('fixture stopped before removal')
+        monkeypatch.setattr(delete, '_delete_subtitle_file', stopped_removal)
+
+    with Flask(__name__).test_request_context(
+        '/sports/events/61/subtitles', method='DELETE',
+        json={'arr_instance_id': 1, 'language': 'en', 'hi': True, 'path': '/sports/event.en.hi.srt'},
+    ):
+        body, status = events.SportsEventSubtitles.delete.__wrapped__(events.SportsEventSubtitles(), 61)
+
+    assert status == {'reindex': 204, 'remove': 409, 'guard': 400}[failure], body
+    assert source.exists() is (failure == 'guard')
+    assert sibling.read_bytes() == sibling_before
+    rows = session.execute(sa.select(TableHistorySports)).scalars().all()
+    if failure == 'reindex':
+        assert len(rows) == 1
+        assert (rows[0].event_id, rows[0].arr_instance_id, rows[0].action) == (61, 1, 0)
+        assert rows[0].subtitles_path == '/sports/event.en.hi.srt'
+        assert rescans == [1]
+        assert emissions == [{'type': 'sports', 'action': 'update', 'payload': 61}]
+        assert len(notifications) == len(webhooks) == 1
+    else:
+        assert rows == rescans == emissions == notifications == webhooks == []
+
 
 def test_the_route_exists():
     """On api.sports.events, which owns that path.

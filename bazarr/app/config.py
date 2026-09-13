@@ -1288,6 +1288,7 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
     radarr_exclusion_updated = False
     sportarr_exclusion_updated = False
     use_embedded_subs_changed = False
+    embedded_subtitles_parser_changed = False
     undefined_audio_track_default_changed = False
     undefined_subtitles_track_default_changed = False
     audio_tracks_parsing_changed = False
@@ -1356,6 +1357,9 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
         if key in ['settings-general-use_embedded_subs', 'settings-general-ignore_pgs_subs',
                    'settings-general-ignore_vobsub_subs', 'settings-general-ignore_ass_subs']:
             use_embedded_subs_changed = True
+
+        if key == 'settings-general-embedded_subtitles_parser':
+            embedded_subtitles_parser_changed = value != settings.general.embedded_subtitles_parser
 
         if key == 'settings-general-adaptive_searching_max_age':
             if value != settings.general.adaptive_searching_max_age:
@@ -1599,12 +1603,14 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             movies_full_scan_subtitles(use_cache=True)
 
     if settings.general.use_sportarr and (undefined_subtitles_track_default_changed or
-                                         use_embedded_subs_changed or audio_tracks_parsing_changed):
+                                         use_embedded_subs_changed or audio_tracks_parsing_changed or
+                                         embedded_subtitles_parser_changed):
         from subtitles.indexer.sports import sports_full_scan_subtitles
         sports_full_scan_subtitles(refresh_audio=audio_tracks_parsing_changed,
                                   audio_mode=bool(settings.general.parse_embedded_audio_track)
                                   if audio_tracks_parsing_changed else None,
-                                  audio_refresh_id=secrets.token_hex(16) if audio_tracks_parsing_changed else None)
+                                  audio_refresh_id=secrets.token_hex(16)
+                                  if audio_tracks_parsing_changed or embedded_subtitles_parser_changed else None)
 
     if audio_tracks_parsing_changed:
         from .scheduler import scheduler

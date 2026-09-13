@@ -117,9 +117,14 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
 
         removed = _delete_subtitle_file(media_path, pr(subtitles_path),
                                         publication_callback(media_type, media_path, 'delete', arr_instance_id))
-        store_subtitles_sports(sports_event_id, arr_instance_id)
         if not removed:
+            store_subtitles_sports(sports_event_id, arr_instance_id)
             return False
+        try:
+            store_subtitles_sports(sports_event_id, arr_instance_id)
+        except Exception:
+            logging.exception('Sports subtitle deleted, but reindex failed for event %s and owner %s',
+                              sports_event_id, arr_instance_id)
         sports_history_log(0, sports_event_id, arr_instance_id, result)
         event_stream(type='sports', action='update', payload=sports_event_id)
 

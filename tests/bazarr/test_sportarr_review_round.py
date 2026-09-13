@@ -186,17 +186,37 @@ def test_the_sync_routes_return_the_job_shape_the_client_declares():
 # Owner resolution on the shared endpoints.
 # --------------------------------------------------------------------------
 
-def test_the_episode_create_subtitle_select_carries_its_owner():
-    """_create_subtitle reads row.arr_instance_id whenever the caller omitted
-    the parameter. The movie and sports branches selected it; the episode
-    branch selected only (id, path), so a SQLAlchemy Row raised AttributeError
-    and POST /api/episodes/<id>/subtitles answered 500 instead of 201. The
-    sports work broke an existing series path."""
+def test_the_episode_create_subtitle_select_carries_its_owner(schema_session, monkeypatch, tmp_path):
+    from flask import Flask
     from api.subtitles import content
+    from app.config import settings
+    from app.database import TableArrInstances, TableEpisodes, TableShows
 
-    source = inspect.getsource(content._create_subtitle)
-    episode_branch = source.split("elif media_type == 'movie'")[0]
-    assert 'TableEpisodes.arr_instance_id' in episode_branch
+    schema_session.add(TableArrInstances(id=3, kind='sonarr', name='TV', stable_key='tv', port=8989))
+    schema_session.flush()
+    schema_session.add(TableShows(id=701, sonarrSeriesId=9, arr_instance_id=3,
+                                  path=str(tmp_path), title='Show', tags='[]'))
+    schema_session.flush()
+    video = tmp_path / 'Episode 1.mkv'
+    video.write_bytes(b'fixture video')
+    schema_session.add(TableEpisodes(id=801, series_id=701, sonarrEpisodeId=55, sonarrSeriesId=9,
+                                    arr_instance_id=3, path=str(video), title='Episode', season=1,
+                                    episode=1, monitored='True', subtitles='[]'))
+    schema_session.flush()
+    monkeypatch.setattr(content, 'database', schema_session)
+    monkeypatch.setattr(content.path_mappings, 'path_replace_instance', lambda path, *_: path)
+    monkeypatch.setattr(settings.general, 'subfolder', 'current')
+    monkeypatch.setattr(settings.general, 'chmod_enabled', False)
+    indexed = []
+    monkeypatch.setattr(content, 'store_subtitles', lambda *a, **kw: indexed.append((a, kw)))
+    monkeypatch.setattr(content, 'publication_callback', lambda *a: lambda path: None)
+    monkeypatch.setattr(content, 'event_stream', lambda **kw: None)
+    with Flask(__name__).test_request_context('/episodes/55/subtitles', method='POST',
+                                             json={'content': 'Hello', 'language': 'en', 'format': 'srt'}):
+        body, status = content._create_subtitle('episode', 55)
+    assert status == 201, body
+    assert (tmp_path / 'Episode 1.en.srt').read_text() == 'Hello'
+    assert indexed == [((str(video), str(video)), {'use_cache': False, 'arr_instance_id': 3})]
 
 
 def test_a_row_select_without_the_column_raises_attribute_error(schema_session):
@@ -228,7 +248,6 @@ def test_the_manual_toolbox_takes_the_sports_owner_off_the_row():
 # so a disabled owner costs it nothing.
 @pytest.mark.parametrize('module_name, function_name', [
     ('api.subtitles.content', 'resolve_subtitle_path'),
-    ('api.subtitles.content', '_create_subtitle'),
     ('api.editor.editor', None),
 ])
 def test_the_shared_sports_reads_require_an_enabled_owner(module_name, function_name):
@@ -1154,6 +1173,79 @@ def _put_sports_editor(content, owner=1, **kwargs):
         response = content.SportsEventSubtitleContent.put.__wrapped__(
             content.SportsEventSubtitleContent(), 61, 'en:hi')
     return (response[1] if isinstance(response, tuple) else response.status_code), response
+
+
+def _post_sports_editor(content, owner=1):
+    from flask import Flask
+
+    with Flask(__name__).test_request_context(
+        '/sports/events/61/subtitles', method='POST',
+        json={'content': '1\n00:00:00,000 --> 00:00:01,000\nCreated sporting event.\n',
+              'language': 'en', 'format': 'srt'},
+    ):
+        return content._create_subtitle('sports', 61, arr_instance_id=owner)
+
+
+@pytest.mark.parametrize('change', ['path', 'video'])
+def test_sports_create_rejects_recording_change_before_publication(
+    sports_editor_publication, monkeypatch, change
+):
+    from app.database import TableSportsEvents
+
+    content, session, folder, notifications = sports_editor_publication
+    original = content.get_target_folder
+
+    def racing_folder(video_path):
+        target = original(video_path)
+        if change == 'path':
+            (folder / '1/moved.mkv').write_bytes((folder / '1/event.mkv').read_bytes())
+            session.execute(sa.update(TableSportsEvents).where(TableSportsEvents.id == 61)
+                            .values(path='/sports/moved.mkv'))
+            session.commit()
+        else:
+            (folder / '1/event.mkv').write_bytes(b'replaced recording')
+        return target
+
+    monkeypatch.setattr(content, 'get_target_folder', racing_folder)
+    body, status = _post_sports_editor(content)
+    assert status == 409, body
+    assert not (folder / '1/event.en.srt').exists()
+    assert not (folder / '1/moved.en.srt').exists()
+    assert not (folder / '2/event.en.srt').exists()
+    assert notifications == []
+
+
+@pytest.mark.parametrize('owner', [1, None, 2])
+def test_sports_create_keeps_owner_and_existing_file_semantics(sports_editor_publication, owner):
+    from app.database import TableSportsEvents
+
+    content, session, folder, notifications = sports_editor_publication
+    body, status = _post_sports_editor(content, owner)
+    if owner == 2:
+        assert status == 404
+        assert not (folder / '1/event.en.srt').exists()
+        assert notifications == []
+    else:
+        assert status == 201, body
+        assert body == {'path': str(folder / '1/event.en.srt'), 'language': 'en'}
+        assert b'Created sporting event.' in (folder / '1/event.en.srt').read_bytes()
+        session.expire_all()
+        assert '/sports/event.en.srt' in session.get(TableSportsEvents, 61).subtitles
+        assert len(notifications) == 1
+        assert _post_sports_editor(content, owner)[1] == 409
+        assert len(notifications) == 1
+    assert session.get(TableSportsEvents, 62).subtitles == '[]'
+
+
+def test_sports_create_refuses_disabled_owner(sports_editor_publication):
+    from app.database import TableArrInstances
+
+    content, session, folder, notifications = sports_editor_publication
+    session.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 1).values(enabled=0))
+    session.commit()
+    assert _post_sports_editor(content)[1] == 404
+    assert not (folder / '1/event.en.srt').exists()
+    assert notifications == []
 
 
 @pytest.mark.parametrize('change', ['file_id', 'path', 'mapping', 'video', 'deleted', 'disabled'])

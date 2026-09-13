@@ -130,6 +130,7 @@ def refresh_runtime(kind, instance_id=None, removed=False):
     if kind == "sportarr":
         from sportarr.scheduler import refresh_sports_runtime
         refresh_sports_runtime()
+        event_stream(type="sports")
         return
     if kind not in ("sonarr", "radarr"):
         return

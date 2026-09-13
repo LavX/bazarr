@@ -1192,6 +1192,29 @@ class MovieSubtitleSyncStatus(Resource):
 
 
 def _create_subtitle(media_type, media_id, arr_instance_id=None):
+    """Pin Sports identity before resolving the destination for a new subtitle."""
+    if media_type != 'sports':
+        return _create_subtitle_guarded(media_type, media_id, arr_instance_id)
+
+    from sportarr.errors import SportsNotFound
+    from sportarr.subtitles import sports_manual_operation
+
+    try:
+        with sports_manual_operation(media_id, arr_instance_id) as operation:
+            try:
+                return _create_subtitle_guarded(
+                    media_type, media_id, operation[0].arr_instance_id, sports_operation=operation)
+            except (ValueError, FileNotFoundError) as exc:
+                return str(exc), 409
+    except SportsNotFound:
+        return 'Media not found', 404
+    except FileNotFoundError:
+        return 'Sports video file not found', 404
+    except ValueError as exc:
+        return str(exc), 409
+
+
+def _create_subtitle_guarded(media_type, media_id, arr_instance_id=None, sports_operation=None):
     """Shared handler for creating a new subtitle file."""
     data = request.get_json()
     if not data:
@@ -1260,7 +1283,8 @@ def _create_subtitle(media_type, media_id, arr_instance_id=None):
     # instance, so a caller that omitted arr_instance_id would otherwise get no
     # mapping at all, and every re-index below now gets the correct owner too.
     arr_instance_id = row.arr_instance_id
-    video_path = path_mappings.path_replace_instance(row.path, arr_instance_id, media_type)
+    video_path = (sports_operation[3] if sports_operation is not None else
+                  path_mappings.path_replace_instance(row.path, arr_instance_id, media_type))
 
     # Build the subtitle filename. `language` was already validated against
     # r'^[a-zA-Z]{2,3}$' above, `ext` comes from the FORMAT_TO_EXT whitelist,
@@ -1301,11 +1325,15 @@ def _create_subtitle(media_type, media_id, arr_instance_id=None):
             if os.path.isfile(subtitle_path):
                 return 'Subtitle file already exists', 409
             with subtitle_mutation(video_path, subtitle_path):
-                _write_bytes_atomically(subtitle_path, encoded)
-                publication_callback(media_type, video_path, 'edit', arr_instance_id)(subtitle_path)
-                _apply_subtitle_chmod(subtitle_path)
+                with (sports_operation[2](output_path=subtitle_path)
+                      if sports_operation is not None else nullcontext()):
+                    _write_bytes_atomically(subtitle_path, encoded)
+                    publication_callback(media_type, video_path, 'edit', arr_instance_id)(subtitle_path)
+                    _apply_subtitle_chmod(subtitle_path)
 
     except FileNotFoundError:
+        if sports_operation is not None:
+            return 'Sports file changed. Please try again.', 409
         return 'Target directory not found', 404
     except PermissionError:
         return 'Permission denied when writing subtitle file', 409
