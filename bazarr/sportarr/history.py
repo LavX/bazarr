@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from datetime import datetime
 
 from sqlalchemy import delete, func, insert, select
+from sqlalchemy.exc import OperationalError
 
 from app.database import (
     database,
@@ -222,32 +223,38 @@ def sports_history_log(action, event_id, arr_instance_id, result):
 
 
 def blacklist_log_sports(context, provider, subs_id, language):
-    """Record a release a provider demanded be excluded from a sports search.
-
-    The provider throttle callback runs inside a pool worker thread with no
-    publication boundary, so unlike blacklist_history this is a plain insert:
-    the event the search just named exists, so the foreign key holds, and the
-    excluded page reads the row straight out of the table. notify([]) refreshes
-    that page the way the owned exclusion flow does, so a release the operator
-    excluded during a search disappears from later searches by the same owner
-    without any search-side change.
-    """
+    """Record one provider exclusion per owner, including overlapping callbacks."""
     event_id = getattr(context, "event_id", None)
     league_id = getattr(context, "league_id", None)
     arr_instance_id = getattr(context, "arr_instance_id", None)
     if not event_id or not league_id or not arr_instance_id:
         raise ValueError("A resolved sports event context is required")
-    database.execute(
-        insert(TableBlacklistSports).values(
-            event_id=event_id,
-            league_id=league_id,
-            arr_instance_id=arr_instance_id,
-            language=language,
-            provider=provider,
-            subs_id=subs_id,
-        )
-    )
-    database.commit()
+    for attempt in range(3):
+        try:
+            with sports_transaction(database) as session:
+                # SQLite takes BEGIN IMMEDIATE; PostgreSQL locks the owner,
+                # sharing the publication boundary used by history exclusions.
+                require_sportarr(session, arr_instance_id)
+                current = resolve_event_in_session(session, event_id, arr_instance_id)
+                if current.league_id != league_id:
+                    raise ValueError("Sports event league changed before exclusion")
+                exists = session.execute(select(TableBlacklistSports.id).where(
+                    TableBlacklistSports.arr_instance_id == arr_instance_id,
+                    TableBlacklistSports.provider == provider,
+                    TableBlacklistSports.subs_id == subs_id,
+                )).first()
+                if exists:
+                    return
+                session.execute(insert(TableBlacklistSports).values(
+                    event_id=event_id, league_id=league_id, arr_instance_id=arr_instance_id,
+                    language=language, provider=provider, subs_id=subs_id,
+                ))
+            break
+        except OperationalError as exc:
+            # A PostgreSQL SERIALIZABLE snapshot may predate the competing
+            # callback's commit. Retry that transaction with a fresh snapshot.
+            if getattr(exc.orig, "sqlstate", None) != "40001" or attempt == 2:
+                raise
     notify([])
 
 

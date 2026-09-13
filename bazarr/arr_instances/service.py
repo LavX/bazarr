@@ -128,9 +128,15 @@ def refresh_runtime(kind, instance_id=None, removed=False):
     clear_media_defaults_cache()
 
     if kind == "sportarr":
-        from sportarr.scheduler import refresh_sports_runtime
-        refresh_sports_runtime()
-        event_stream(type="sports")
+        try:
+            from sportarr.scheduler import refresh_sports_runtime
+            refresh_sports_runtime()
+        except Exception:
+            logging.exception("BAZARR failed to refresh Sportarr runtime after instance change")
+        try:
+            event_stream(type="sports")
+        except Exception:
+            logging.exception("BAZARR failed to notify Sportarr clients after instance change")
         return
     if kind not in ("sonarr", "radarr"):
         return

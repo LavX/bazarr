@@ -107,7 +107,7 @@ class WebHooksSportarr(Resource):
     @api_ns_webhooks_sportarr.response(401, "Not Authenticated")
     def post(self, stable_key=None):
         """Index and search subtitles for the sports files Sportarr just imported."""
-        from sportarr.automatic import search_event
+        from sportarr.workflows import automatic_search_sports
         from subtitles.indexer.sports import store_subtitles_sports
 
         args = api_ns_webhooks_sportarr.payload
@@ -174,7 +174,7 @@ class WebHooksSportarr(Resource):
         for event_id in local_ids:
             try:
                 store_subtitles_sports(event_id, arr_instance_id)
-                search_event(event_id, arr_instance_id)
+                automatic_search_sports(event_id, arr_instance_id)
             except Exception:
                 # One unreadable file must not cost the rest of the batch.
                 logging.exception("Sportarr webhook processing failed for event %s.", event_id)

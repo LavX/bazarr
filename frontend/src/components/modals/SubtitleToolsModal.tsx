@@ -27,6 +27,7 @@ import {
   isCombinedOutputSubtitle,
   isSyncOutputSubtitle,
 } from "@/utilities/subtitles";
+import { SportsSearchModal } from "./SportsSearchModal";
 
 // A sports event in the shape this modal reads. Its subtitles arrive as
 // [language, path, size] tuples rather than Subtitle objects, so the caller
@@ -109,8 +110,7 @@ const SubtitleToolView: FunctionComponent<SubtitleToolViewProps> = ({
     useEpisodeSubtitleModification();
   const { download: downloadMovie, remove: removeMovie } =
     useMovieSubtitleModification();
-  const { download: downloadSports, remove: removeSports } =
-    useSportsSubtitleModification();
+  const { remove: removeSports } = useSportsSubtitleModification();
   const fileDownload = useSubtitleFileDownload();
   const modals = useModals();
 
@@ -251,6 +251,9 @@ const SubtitleToolView: FunctionComponent<SubtitleToolViewProps> = ({
       <Group>
         <SubtitleToolsMenu
           selections={selections}
+          allowSearchExisting={selections.every(
+            (item) => item.type === "sports",
+          )}
           onAction={async (action) => {
             if (action === "download") {
               // Sequential on purpose: parallel programmatic anchor clicks
@@ -272,6 +275,9 @@ const SubtitleToolView: FunctionComponent<SubtitleToolViewProps> = ({
               modals.closeAll();
               return;
             }
+            // Close the tools before opening replacement searches, otherwise
+            // closeAll would also dismiss the newly opened search modals.
+            if (action === "search") modals.closeAll();
             selections.forEach(async (selection) => {
               if (selection.type === "sports") {
                 // Sports routes take the local event id and its owner, not the
@@ -279,9 +285,16 @@ const SubtitleToolView: FunctionComponent<SubtitleToolViewProps> = ({
                 const owner = selection.arr_instance_id;
                 if (owner === undefined) return;
                 if (action === "search") {
-                  await downloadSports.mutateAsync({
-                    eventId: selection.id,
-                    owner,
+                  modals.openContextModal(SportsSearchModal, {
+                    item: {
+                      id: selection.id,
+                      // eslint-disable-next-line camelcase
+                      arr_instance_id: owner,
+                      profileId: null,
+                    },
+                    language: selection.language,
+                    hi: fromPython(selection.hi),
+                    forced: fromPython(selection.forced),
                   });
                 } else if (action === "delete" && selection.path) {
                   await removeSports.mutateAsync({
@@ -326,7 +339,7 @@ const SubtitleToolView: FunctionComponent<SubtitleToolViewProps> = ({
                 await remove.mutateAsync(actionPayload);
               }
             });
-            modals.closeAll();
+            if (action !== "search") modals.closeAll();
           }}
         >
           <Button disabled={selections.length === 0} variant="light">

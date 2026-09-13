@@ -54,12 +54,12 @@ def _handler():
 def _post(monkeypatch, namespace, calls, payload, stable_key=None):
     from api.webhooks import sportarr
     from subtitles.indexer import sports as indexer
-    from sportarr import automatic
+    from sportarr import workflows
 
     namespace.payload = payload
     monkeypatch.setattr(indexer, 'store_subtitles_sports',
                         lambda event_id, owner, **kw: calls.append(('index', event_id, owner)))
-    monkeypatch.setattr(automatic, 'search_event',
+    monkeypatch.setattr(workflows, 'automatic_search_sports',
                         lambda event_id, owner, **kw: calls.append(('search', event_id, owner)))
     return _handler()(sportarr.WebHooksSportarr(), stable_key)
 
@@ -179,8 +179,8 @@ def test_one_unreadable_file_does_not_cost_the_rest_of_the_batch(webhook, monkey
     namespace.payload = {'eventType': 'Download',
                          'episodeFiles': [{'id': 71}, {'id': 72}]}
     monkeypatch.setattr(indexer, 'store_subtitles_sports', _index)
-    from sportarr import automatic
-    monkeypatch.setattr(automatic, 'search_event',
+    from sportarr import workflows
+    monkeypatch.setattr(workflows, 'automatic_search_sports',
                         lambda event_id, owner, **kw: calls.append(('search', event_id, owner)))
     from api.webhooks import sportarr
 

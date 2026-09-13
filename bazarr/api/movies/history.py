@@ -30,11 +30,13 @@ class MoviesHistory(Resource):
 
     data_model = api_ns_movies_history.model('history_movies_data_model', {
         'id': fields.Integer(),
+        'history_id': fields.Integer(),
         # Owning instance (#156) so secondary actions (blacklist) can route.
         'arr_instance_id': fields.Integer(),
         'action': fields.Integer(),
         'title': fields.String(),
         'timestamp': fields.String(),
+        'timestamp_iso': fields.String(),
         'description': fields.String(),
         'radarrId': fields.Integer(),
         'monitored': fields.Boolean(),
@@ -120,7 +122,7 @@ class MoviesHistory(Resource):
                              func.coalesce(blacklisted_subtitles.c.arr_instance_id, -1))),
                   isouter=True) \
             .where(reduce(operator.and_, query_conditions)) \
-            .order_by(TableHistoryMovie.timestamp.desc())
+            .order_by(TableHistoryMovie.timestamp.desc(), TableHistoryMovie.id.desc())
         if length > 0:
             stmt = stmt.limit(length).offset(start)
         movie_history = [{
@@ -130,6 +132,7 @@ class MoviesHistory(Resource):
             'action': x.action,
             'title': x.title,
             'timestamp': x.timestamp,
+            'timestamp_iso': x.timestamp.isoformat() if x.timestamp else None,
             'description': x.description,
             'radarrId': x.radarrId,
             'monitored': x.monitored,
@@ -172,7 +175,6 @@ class MoviesHistory(Resource):
             del item['video_path']
             del item['external_subtitles']
             del item['profileId']
-            del item['history_id']
 
             if item['score']:
                 item['score'] = f"{round((int(item['score']) * 100 / item['score_out_of']), 2)}%"

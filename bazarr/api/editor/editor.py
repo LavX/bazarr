@@ -700,22 +700,24 @@ class EditorHls(Resource):
             if not os.path.isfile(target):
                 return 'Encoding starting, retry shortly', 503
 
-            # Native HLS clients (Safari / iOS) can't inject custom request
-            # headers on segment requests, so the apikey has to ride in the
-            # URL. The manifest's segment lines and #EXT-X-MAP URI are
-            # relative paths that resolve without the playlist URL's query
-            # string, so we rewrite them server-side to carry the apikey when
-            # the request authenticated via query. Header-auth paths (hls.js
-            # with xhrSetup) don't include apikey on the request and skip
-            # this branch, keeping the manifest clean.
+            # Relative segment and #EXT-X-MAP URLs do not inherit the
+            # playlist query string. Carry the validated instance scope so
+            # every request resolves the same media and stream cache. Native
+            # HLS clients also need query authentication because they cannot
+            # inject headers into segment requests.
+            resource_query = []
+            if arr_instance_id is not None:
+                resource_query.append(f'arr_instance_id={arr_instance_id}')
             apikey_query = request.args.get('apikey')
             if apikey_query:
+                resource_query.append(f'apikey={quote(apikey_query, safe="")}')
+            if resource_query:
                 try:
                     with open(target) as f:
                         manifest = f.read()
                 except OSError:
                     return 'Encoding starting, retry shortly', 503
-                encoded = quote(apikey_query, safe='')
+                query_string = '&'.join(resource_query)
                 rewritten = []
                 for line in manifest.splitlines(keepends=True):
                     stripped = line.rstrip('\n').rstrip('\r')
@@ -723,13 +725,13 @@ class EditorHls(Resource):
                         rewritten.append(
                             re.sub(
                                 r'URI="([^"?]+)"',
-                                f'URI="\\1?apikey={encoded}"',
+                                f'URI="\\1?{query_string}"',
                                 line,
                             )
                         )
                     elif stripped and not stripped.startswith('#'):
                         sep = '\n' if line.endswith('\n') else ''
-                        rewritten.append(f'{stripped}?apikey={encoded}{sep}')
+                        rewritten.append(f'{stripped}?{query_string}{sep}')
                     else:
                         rewritten.append(line)
                 response = Response(

@@ -17,8 +17,13 @@ import { ManualSearchView } from "./ManualSearchModal";
 // the profile it offers languages from. Typed to that rather than to a full
 // SportsEvent so a caller holding a row rather than an event, the wanted page,
 // can open it without inventing the fields it never reads.
-export type SportsSearchTarget = SportsEventReference & {
+export type SportsSearchTarget = Pick<
+  SportsEventReference,
+  "id" | "arr_instance_id"
+> & {
   profileId: number | null;
+  /** Shown as the resource hint when the caller has the recording path. */
+  path?: string;
   /** Shown as the release hint when the indexer recorded one. */
   sceneName?: string;
 };
@@ -128,7 +133,12 @@ function SportsSearchView({
 }
 
 export const SportsSearchModal = withModal(
-  SportsSearchView,
+  (props: Parameters<typeof SportsSearchView>[0]) => (
+    <SportsSearchView
+      key={`${props.item.arr_instance_id}:${props.item.id}:${props.language}:${props.hi}:${props.forced}`}
+      {...props}
+    />
+  ),
   "sports-manual-search",
   {
     title: "Search Subtitles",

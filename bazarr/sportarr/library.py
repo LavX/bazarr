@@ -170,7 +170,9 @@ def apply_instance_default_profile(session, arr_instance_id):
     return {'updated': len(ids), 'profileId': profile, 'kind': 'sportarr', 'upstream_ids': ids}
 
 
-def refresh_league_profiles(league_ids, arr_instance_id, job_id=None):
+def refresh_league_profiles(league_ids, arr_instance_id, job_id=None, refresh_id=None):
+    # A new committed assignment must retain its refresh even when a previous
+    # job for the same leagues is already running against the old profile.
     from subtitles.indexer.sports import list_missing_subtitles_sports
     for league_id in league_ids:
         list_missing_subtitles_sports(league_id=league_id, arr_instance_id=arr_instance_id)

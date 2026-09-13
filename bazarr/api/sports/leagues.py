@@ -1,4 +1,7 @@
 """Authenticated sports library API using local IDs and explicit owners."""
+import logging
+from uuid import uuid4
+
 from flask import request
 from flask_restx import Namespace, Resource
 
@@ -139,7 +142,12 @@ class SportsLeagueProfiles(Resource):
         for league_id, owner in updated:
             by_owner.setdefault(owner, []).append(league_id)
         for owner, league_ids in by_owner.items():
-            library.refresh_league_profiles(league_ids, owner)
+            try:
+                _queue('refresh_league_profiles', {
+                    'league_ids': league_ids, 'arr_instance_id': owner,
+                    'refresh_id': uuid4().hex})
+            except Exception:
+                logging.exception('Could not queue sports profile refresh for owner %s', owner)
         return {'updated': len(updated), 'requested': len(assignments)}, 200
 
 

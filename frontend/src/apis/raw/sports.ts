@@ -242,7 +242,7 @@ class SportsApi extends BaseApi {
     return this.postRaw("/leagues/sync", { arr_instance_id: owner });
   }
   async searchSubtitles(
-    event: SportsEventReference,
+    event: Pick<SportsEventReference, "id" | "arr_instance_id">,
     language: string,
     hi: boolean,
     forced: boolean,
@@ -259,7 +259,7 @@ class SportsApi extends BaseApi {
     return response.data.data;
   }
   async downloadSubtitle(
-    event: SportsEventReference,
+    event: Pick<SportsEventReference, "id" | "arr_instance_id">,
     candidate: SearchResultType,
   ) {
     const response = await this.postRaw<SportsDownloadResult>(

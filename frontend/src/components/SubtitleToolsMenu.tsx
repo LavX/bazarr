@@ -153,6 +153,7 @@ interface Props {
   children?: ReactElement;
   menu?: Omit<MenuProps, "children">;
   canSync?: boolean;
+  allowSearchExisting?: boolean;
   onAction?: (
     action:
       | "delete"
@@ -187,6 +188,7 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
   children,
   menu,
   canSync = true,
+  allowSearchExisting = false,
   onAction,
   canCompareSyncOutputs = false,
   isCombinedOutput = false,
@@ -401,7 +403,7 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
         {!isCombinedOutput && (
           <Menu.Item
             disabled={
-              selections.length !== 0 ||
+              (selections.length !== 0 && !allowSearchExisting) ||
               onAction === undefined ||
               isTranslateOnlyMode
             }
