@@ -382,6 +382,7 @@ jobs:
             tests/bazarr/test_sportarr_events.py \
             tests/bazarr/test_sportarr_manual.py \
             tests/bazarr/test_sportarr_profile_hooks.py \
+            tests/bazarr/test_sportarr_review_callbacks.py \
             tests/bazarr/test_sportarr_output.py \
             tests/bazarr/test_subtitle_ownership_revision.py \
             tests/bazarr/test_sportarr_workflows.py \
