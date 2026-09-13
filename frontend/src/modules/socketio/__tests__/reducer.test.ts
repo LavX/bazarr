@@ -478,3 +478,16 @@ describe("jobs reducer (inline progress_value path)", () => {
     expect(queryClientMock.setQueryData).not.toHaveBeenCalled();
   });
 });
+
+describe("sports reducer", () => {
+  it("any event invalidates every cached sports query, wanted included", () => {
+    any("sports");
+
+    expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: [QueryKeys.Sports],
+    });
+    expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: [QueryKeys.Badges],
+    });
+  });
+});

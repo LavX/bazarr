@@ -14,17 +14,35 @@ import {
   useMovieSubtitleModification,
   useSubtitleFileDownload,
 } from "@/apis/hooks";
+import { useSportsSubtitleModification } from "@/apis/hooks/sports";
 import Language from "@/components/bazarr/Language";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
 import SimpleTable from "@/components/tables/SimpleTable";
 import { useModals, withModal } from "@/modules/modals";
 import { fromPython, isMovie, toPython } from "@/utilities";
-import { buildSubtitleLanguageKey } from "@/utilities/subtitles";
+import {
+  buildSubtitleLanguageKey,
+  getCombinedLabel,
+  getSyncEngineLabel,
+  isCombinedOutputSubtitle,
+  isSyncOutputSubtitle,
+} from "@/utilities/subtitles";
 
-type SupportType = Item.Episode | Item.Movie;
+// A sports event in the shape this modal reads. Its subtitles arrive as
+// [language, path, size] tuples rather than Subtitle objects, so the caller
+// maps them; everything else the modal needs is already on the event.
+export type SportsToolsItem = {
+  id: number;
+  title: string;
+  arr_instance_id: number;
+  subtitles: Subtitle[];
+  isSports: true;
+};
+
+type SupportType = Item.Episode | Item.Movie | SportsToolsItem;
 
 type TableColumnType = FormType.ModifySubtitle & {
-  raw_language: Language.Info;
+  raw_language: Subtitle;
   seriesId: number;
   name: string;
   isMovie: boolean;
@@ -33,13 +51,29 @@ type TableColumnType = FormType.ModifySubtitle & {
 type LocalisedType = {
   id: number;
   seriesId: number;
-  type: "movie" | "episode";
+  type: "movie" | "episode" | "sports";
   name: string;
   isMovie: boolean;
   arr_instance_id?: number;
 };
 
+function isSports(item: SupportType): item is SportsToolsItem {
+  return (item as SportsToolsItem).isSports === true;
+}
+
 function getLocalisedValues(item: SupportType): LocalisedType {
+  if (isSports(item)) {
+    return {
+      seriesId: 0,
+      // The local event id, which is what every sports route is keyed on.
+      id: item.id,
+      type: "sports",
+      name: item.title,
+      isMovie: false,
+      // eslint-disable-next-line camelcase
+      arr_instance_id: item.arr_instance_id,
+    };
+  }
   if (isMovie(item)) {
     return {
       seriesId: 0,
@@ -75,6 +109,8 @@ const SubtitleToolView: FunctionComponent<SubtitleToolViewProps> = ({
     useEpisodeSubtitleModification();
   const { download: downloadMovie, remove: removeMovie } =
     useMovieSubtitleModification();
+  const { download: downloadSports, remove: removeSports } =
+    useSportsSubtitleModification();
   const fileDownload = useSubtitleFileDownload();
   const modals = useModals();
 
@@ -111,9 +147,35 @@ const SubtitleToolView: FunctionComponent<SubtitleToolViewProps> = ({
             original: { raw_language: rawLanguage },
           },
         }) => (
-          <Badge color="secondary">
-            <Language.Text value={rawLanguage} long></Language.Text>
-          </Badge>
+          // The language name alone cannot tell two rows of the same language
+          // apart: a sync or combined output carries the base language and
+          // flags of the subtitle it was made from, so the variant rides along
+          // in a second badge, the way the episode and movie tables show it.
+          <Group gap={4} wrap="nowrap">
+            <Badge color="secondary">
+              <Language.Text value={rawLanguage} long></Language.Text>
+            </Badge>
+            {isSyncOutputSubtitle(rawLanguage) && (
+              <Badge
+                color="gray"
+                size="xs"
+                variant="light"
+                style={{ whiteSpace: "nowrap" }}
+              >
+                {getSyncEngineLabel(rawLanguage.modifier)}
+              </Badge>
+            )}
+            {isCombinedOutputSubtitle(rawLanguage) && (
+              <Badge
+                color="gray"
+                size="xs"
+                variant="light"
+                style={{ whiteSpace: "nowrap" }}
+              >
+                {getCombinedLabel(rawLanguage)}
+              </Badge>
+            )}
+          </Group>
         ),
       },
       {
@@ -200,9 +262,7 @@ const SubtitleToolView: FunctionComponent<SubtitleToolViewProps> = ({
                   await fileDownload.mutateAsync({
                     type: selection.type,
                     mediaId: selection.id,
-                    language: buildSubtitleLanguageKey(
-                      selection.raw_language as Subtitle,
-                    ),
+                    language: buildSubtitleLanguageKey(selection.raw_language),
                     arrInstanceId: selection.arr_instance_id,
                   });
                 } catch {
@@ -213,6 +273,30 @@ const SubtitleToolView: FunctionComponent<SubtitleToolViewProps> = ({
               return;
             }
             selections.forEach(async (selection) => {
+              if (selection.type === "sports") {
+                // Sports routes take the local event id and its owner, not the
+                // series/movie id pair the other two build below.
+                const owner = selection.arr_instance_id;
+                if (owner === undefined) return;
+                if (action === "search") {
+                  await downloadSports.mutateAsync({
+                    eventId: selection.id,
+                    owner,
+                  });
+                } else if (action === "delete" && selection.path) {
+                  await removeSports.mutateAsync({
+                    eventId: selection.id,
+                    owner,
+                    form: {
+                      language: selection.language,
+                      path: selection.path,
+                      hi: fromPython(selection.hi),
+                      forced: fromPython(selection.forced),
+                    },
+                  });
+                }
+                return;
+              }
               const actionPayload = {
                 form: {
                   language: selection.language,

@@ -124,11 +124,17 @@ class Server:
             pass
 
     def close_all(self):
-        print("Closing database...")
-        close_database()
+        # The webserver first, so a slow stream teardown cannot hold the UI
+        # open and unresponsive, then the streams, then the database. Stopping
+        # the streams first meant a restart appeared to hang: the server was
+        # still accepting requests that blocked on the stream manager's lock.
+        from sportarr.sse_client import stop_sportarr_clients
         if self.server:
             print("Closing webserver...")
             self.server.close()
+        stop_sportarr_clients()
+        print("Closing database...")
+        close_database()
 
     def shutdown(self, status=EXIT_NORMAL):
         self.close_all()
@@ -140,4 +146,3 @@ class Server:
 
 
 webserver = Server()
-

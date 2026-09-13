@@ -3,6 +3,7 @@
 import os
 import sys
 import logging
+from contextlib import nullcontext
 
 from subliminal_patch.subtitle import Subtitle
 from subliminal_patch.core import get_subtitle_path
@@ -99,7 +100,8 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
     try:
         subtitles_apply_mods(language=language, subtitle_path=subtitle_path,
                              mods=mods, video_path=video_path,
-                             arr_instance_id=arr_instance_id, media_type=media_type)
+                             arr_instance_id=arr_instance_id, media_type=media_type,
+                             **({'sports_event_id': media_id} if media_type == 'sports' else {}))
     except Exception:
         jobs_queue.update_job_name(
             job_id=job_id,
@@ -148,13 +150,22 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
     )
 
 
-def subtitles_apply_mods(language, subtitle_path, mods, video_path, arr_instance_id=None, media_type=None):
+def subtitles_apply_mods(language, subtitle_path, mods, video_path, arr_instance_id=None, media_type=None,
+                         *, sports_event_id=None, cancel=None):
     destination = os.path.join(get_target_folder(video_path, create=False) or os.path.dirname(video_path), '.destination')
-    with subtitle_write_locks(video_path, subtitle_path, destination):
-        return _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_id, media_type)
+    with subtitle_write_locks(video_path, subtitle_path, destination, cancel=cancel):
+        publication_guard = None
+        if media_type == 'sports':
+            from sportarr.subtitles import sports_modification_guard
+
+            publication_guard = sports_modification_guard(
+                sports_event_id, arr_instance_id, video_path, subtitle_path, cancel)
+        return _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_id, media_type,
+                                  publication_guard=publication_guard)
 
 
-def _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_id, media_type=None):
+def _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_id, media_type=None,
+                       *, publication_guard=None):
     # The mod list is user-chosen here, so only the keep-lyrics preference is
     # instance-relevant: resolve it against the media's owning instance (#227).
     # A None owner keeps the legacy global-only behaviour (single-instance).
@@ -197,7 +208,8 @@ def _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_i
         else:
             modded_subtitles_path = subtitle_path
 
-        with subtitle_mutation(video_path, subtitle_path, modded_subtitles_path):
+        with (publication_guard(modded_subtitles_path) if publication_guard else nullcontext(),
+              subtitle_mutation(video_path, subtitle_path, modded_subtitles_path)):
             if os.path.exists(subtitle_path):
                 os.remove(subtitle_path)
 
@@ -221,3 +233,4 @@ def _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_i
             else:
                 logging.debug('BAZARR mod on %s published nothing: no media type was given',
                               video_path)
+        return modded_subtitles_path

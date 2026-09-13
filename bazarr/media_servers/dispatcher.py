@@ -226,7 +226,7 @@ class RefreshDispatcher:
 
     def notify(self, event):
         media_type = {"series": "episode", "movies": "movie"}.get(event.media_type, event.media_type)
-        if media_type not in {"movie", "episode"} or event.operation not in _OPERATIONS:
+        if media_type not in {"movie", "episode", "sports"} or event.operation not in _OPERATIONS:
             return
         event = SubtitleMutation(media_type, str(_media_path(event.video_path)), event.subtitle_path,
                                  event.operation, event.arr_instance_id)
@@ -302,7 +302,13 @@ class RefreshDispatcher:
                 libraries = client.get_libraries()
                 library = next((row for row in libraries if row["id"].lstrip("0") ==
                                 mapped["library_id"].lstrip("0")), None)
-                if (library is None or library["type"] != ("movies" if event.media_type == "movie" else "series")
+                # Silo only knows movie and series library types. A sports root
+                # lives inside one of those, so the type it declares cannot be
+                # checked for a sports publication; the library still has to
+                # exist and hold the file.
+                if (library is None
+                        or (event.media_type != "sports"
+                            and library["type"] != ("movies" if event.media_type == "movie" else "series"))
                         or not any(_media_path(mapped["path"]).is_relative_to(_media_path(root))
                                    for root in library["paths"])):
                     raise MediaServerError("library_invalid")
@@ -324,6 +330,18 @@ class RefreshDispatcher:
         rather than carried through every publication callback, and the rungs
         that need them disappear when they cannot be read.
         """
+        if event.media_type == "sports":
+            # A sports event carries no identifiers and no item type either
+            # server indexes, so the only rung that can answer is the library
+            # the mapped path points into. The scan is scoped to that library,
+            # exactly as the movie and episode library rungs are.
+            if server == "emby":
+                return [(resolution.LIBRARY, lambda: client.refresh_library(
+                    event.media_type, mapped["path"], ensure_current=guard,
+                    coalesce=coalesce), "requested")]
+            return [(resolution.LIBRARY, lambda: client.refresh_library(
+                mapped["library_id"], ensure_current=guard,
+                coalesce=coalesce), "requested")]
         supported = set(getattr(client, "REFRESH_STEPS", ()) or ())
         metadata = (self.metadata_factory(event)
                     if supported & {resolution.PROVIDER_ID, resolution.TITLE_YEAR} else None)

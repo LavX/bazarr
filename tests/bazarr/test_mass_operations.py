@@ -147,6 +147,9 @@ class TestProcessSubtitleItem:
             radarr_id=None,
             metadata=item['metadata'],
             arr_instance_id=None,
+            # None for the two native media types; a sports item binds a real
+            # one, without which translate_subtitles_file refuses the write.
+            sports_operation=None,
         )
 
     @patch('subtitles.tools.translate.main.translate_subtitles_file', return_value=True)

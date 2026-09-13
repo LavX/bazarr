@@ -22,8 +22,8 @@ from sonarr.history import history_log
 from radarr.history import history_log_movie
 from sonarr.notify import notify_sonarr
 from radarr.notify import notify_radarr
-from plex.operations import plex_refresh_item
-from jellyfin.operations import jellyfin_refresh_item
+from plex.operations import plex_refresh_item, plex_update_sports_library
+from jellyfin.operations import jellyfin_refresh_item, jellyfin_update_sports_library
 
 
 def _delete_subtitle_file(media_path, subtitle_path, on_publish=None):
@@ -44,7 +44,8 @@ def _delete_subtitle_file(media_path, subtitle_path, on_publish=None):
 
 
 def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_path, sonarr_series_id=None,
-                     sonarr_episode_id=None, radarr_id=None, arr_instance_id=None):
+                     sonarr_episode_id=None, radarr_id=None, arr_instance_id=None,
+                     sports_event_id=None):
     if not subtitles_path:
         logging.error('No subtitles to delete.')
         return False
@@ -66,7 +67,17 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
     # secondary instance can have a different on-disk prefix, so the delete /
     # re-index must resolve paths through that instance's mapping. arr_instance_id
     # None => global mapping (the default/single-instance path), unchanged.
-    if media_type == 'series':
+    if media_type == 'sports':
+        def pr(p):
+            return path_mappings.path_replace_instance(p, arr_instance_id, "sports")
+
+        def prr(p):
+            return path_mappings.path_replace_reverse_instance(p, arr_instance_id, "sports")
+
+        # A sports event has no imdb or tvdb id to refresh a media server with,
+        # so nothing is looked up here.
+        metadata = None
+    elif media_type == 'series':
         def pr(p):
             return path_mappings.path_replace_instance(p, arr_instance_id, "series")
 
@@ -99,6 +110,46 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
                                     subtitle_id=None,
                                     reversed_subtitles_path=prr(subtitles_path),
                                     hearing_impaired=None)
+
+    if media_type == 'sports':
+        from sportarr.history import sports_history_log
+        from subtitles.indexer.sports import store_subtitles_sports
+
+        removed = _delete_subtitle_file(media_path, pr(subtitles_path),
+                                        publication_callback(media_type, media_path, 'delete', arr_instance_id))
+        store_subtitles_sports(sports_event_id, arr_instance_id)
+        if not removed:
+            return False
+        sports_history_log(0, sports_event_id, arr_instance_id, result)
+        event_stream(type='sports', action='update', payload=sports_event_id)
+
+        # One whole-library Sportarr rescan per affected owner, behind the
+        # per-instance transport and non-blocking; Sportarr exposes only that
+        # untargeted scan. The media servers refresh their configured sports
+        # libraries instead of an item the event carries no identifier for.
+        from sportarr.notify import notify_rescan
+        notify_rescan(arr_instance_id)
+        if settings.general.use_plex:
+            sports_library = settings.plex.sports_library
+            if isinstance(sports_library, str):
+                sports_library = [sports_library] if sports_library else []
+            if sports_library:
+                plex_update_sports_library()
+        if settings.general.use_jellyfin:
+            sports_library_ids = settings.jellyfin.sports_library_ids
+            if isinstance(sports_library_ids, str):
+                sports_library_ids = [sports_library_ids] if sports_library_ids else []
+            if sports_library_ids:
+                jellyfin_update_sports_library()
+
+        call_external_webhook(
+            subtitle_path=subtitles_path,
+            media_path=media_path,
+            language=language_log,
+            media_type=media_type
+        )
+
+        return True
 
     if media_type == 'series':
         removed = _delete_subtitle_file(media_path, pr(subtitles_path),

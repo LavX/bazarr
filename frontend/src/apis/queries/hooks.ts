@@ -35,6 +35,7 @@ export function usePaginationQuery<
   queryFn: RangeQuery<TObject>,
   cacheIndividual = true,
   fetchAll = false,
+  enabled = true,
 ): UsePaginationQueryResult<TObject> {
   const client = useQueryClient();
 
@@ -73,6 +74,7 @@ export function usePaginationQuery<
   const length = fetchAll ? -1 : pageSize;
 
   const results = useQuery({
+    enabled,
     queryKey: fetchAll
       ? [...queryKey, QueryKeys.Range, { all: true }]
       : [...queryKey, QueryKeys.Range, { start, size: pageSize }],

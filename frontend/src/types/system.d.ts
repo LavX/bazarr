@@ -38,6 +38,7 @@ declare namespace System {
     package_version: string;
     python_version: string;
     radarr_version: string;
+    sportarr_version: string;
     sonarr_version: string;
     start_time: number;
     timezone: string;

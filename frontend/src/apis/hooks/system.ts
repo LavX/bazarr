@@ -20,11 +20,12 @@ export function useBadges() {
 }
 
 export function useFileSystem(
-  type: "bazarr" | "sonarr" | "radarr",
+  type: "bazarr" | "sonarr" | "radarr" | "sportarr",
   path: string,
   enabled: boolean,
-  // instanceId (#156) routes a sonarr/radarr browse at the owning instance's
-  // server. Undefined => default server (the legacy single-instance behaviour).
+  // instanceId (#156) routes a sonarr/radarr/sportarr browse at the owning
+  // instance's server. Undefined => default server (the legacy
+  // single-instance behaviour, which for sportarr means the default instance).
   instanceId?: number,
 ) {
   return useQuery({
@@ -37,6 +38,8 @@ export function useFileSystem(
         return api.files.radarr(path, instanceId);
       } else if (type === "sonarr") {
         return api.files.sonarr(path, instanceId);
+      } else if (type === "sportarr") {
+        return api.files.sportarr(path, instanceId);
       }
 
       return [];
@@ -121,6 +124,14 @@ export function useSettingsMutation(retryingMetadataRefresh = false) {
 
       void client.invalidateQueries({
         queryKey: [QueryKeys.Wanted],
+      });
+
+      // The sports wanted rows are computed live against the exclusion and
+      // monitoring settings, so saving them refreshes the cached sports
+      // queries (wanted included) the same way the ones above do for series
+      // and movies.
+      void client.invalidateQueries({
+        queryKey: [QueryKeys.Sports],
       });
 
       void client.invalidateQueries({

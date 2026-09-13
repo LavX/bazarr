@@ -7,7 +7,7 @@ import styles from "./LibrarySelector.module.scss";
 
 export type LibrarySelectorProps = BaseInput<string[]> & {
   label: string;
-  libraryType: "movies" | "tvshows";
+  libraryType: "movies" | "tvshows" | "all";
   settingKeyIds?: string;
   description?: string;
 };
@@ -38,7 +38,12 @@ const LibrarySelector: FunctionComponent<LibrarySelectorProps> = (props) => {
   );
 
   const libraries = librariesData ?? [];
-  const filtered = libraries.filter((lib) => lib.type === libraryType);
+  // Jellyfin has no sports library type, so the sports selection offers every
+  // library; the other selectors restrict to their own type.
+  const filtered =
+    libraryType === "all"
+      ? libraries
+      : libraries.filter((lib) => lib.type === libraryType);
   const normalizedValue = Array.isArray(value) ? value : value ? [value] : [];
 
   const availableLibraries = filtered.map((lib) => lib.name);
@@ -79,6 +84,8 @@ const LibrarySelector: FunctionComponent<LibrarySelectorProps> = (props) => {
 
   const libraryNoun = libraryType === "movies" ? "movie" : "TV show";
 
+  const unidentifiedNoun = libraryType === "all" ? "supported" : libraryNoun;
+
   return (
     <div className={styles.librarySelector}>
       <Stack gap="xs">
@@ -107,8 +114,8 @@ const LibrarySelector: FunctionComponent<LibrarySelectorProps> = (props) => {
         )}
         {!error && !isLoading && selectData.length === 0 && (
           <Alert color="gray" variant="light" className={styles.alertMessage}>
-            No {libraryNoun} libraries found on this Jellyfin server. Make sure
-            at least one is visible to the API key's user account.
+            No {unidentifiedNoun} libraries found on this Jellyfin server. Make
+            sure at least one is visible to the API key's user account.
           </Alert>
         )}
       </Stack>

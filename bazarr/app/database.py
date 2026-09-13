@@ -10,7 +10,7 @@ import flask_migrate
 from dogpile.cache import make_region
 from datetime import datetime
 
-from sqlalchemy import create_engine, inspect, CheckConstraint, DateTime, ForeignKey, Index, Integer, LargeBinary, Text, func, text, BigInteger
+from sqlalchemy import event, create_engine, inspect, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, UniqueConstraint, Index, Integer, LargeBinary, Text, func, text, BigInteger
 # importing here to be indirectly imported in other modules later
 from sqlalchemy import update, delete, select, func  # noqa: F401, F811
 from sqlalchemy.orm import scoped_session, sessionmaker, mapped_column, close_all_sessions, declarative_base
@@ -19,6 +19,7 @@ from alembic.migration import MigrationContext
 
 from flask_sqlalchemy import SQLAlchemy
 
+from .ownership_revision import metadata_created, install_ownership_revision
 from .config import settings
 from .get_args import args
 from .upstream_adoption import (adopt_upstream_database, explain_unknown_revision,
@@ -258,7 +259,7 @@ class TableArrInstances(Base):
     # its Fernet-at-rest encryption.
     __tablename__ = 'arr_instances'
     __table_args__ = (
-        CheckConstraint("kind IN ('sonarr', 'radarr')", name='ck_arr_instances_kind'),
+        CheckConstraint("kind IN ('sonarr', 'radarr', 'sportarr')", name='ck_arr_instances_kind'),
         CheckConstraint("enabled IN (0, 1)", name='ck_arr_instances_enabled'),
         CheckConstraint("is_default IN (0, 1)", name='ck_arr_instances_is_default'),
         CheckConstraint("is_default = 0 OR enabled = 1", name='ck_arr_instances_default_enabled'),
@@ -720,6 +721,149 @@ class TableShowsRootfolder(Base):
     path = mapped_column(Text)
 
 
+class TableSportsLeagues(Base):
+    __tablename__ = 'table_sports_leagues'
+    __table_args__ = (
+        Index('ux_sports_leagues_owner_upstream', 'arr_instance_id', 'sportarrLeagueId', unique=True),
+        UniqueConstraint('id', 'arr_instance_id', name='uq_sports_leagues_id_owner'),
+    )
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    arr_instance_id = mapped_column(Integer, ForeignKey('arr_instances.id', ondelete='CASCADE'), nullable=False)
+    sportarrLeagueId = mapped_column(Integer, nullable=False)
+    externalId = mapped_column(Text)
+    path = mapped_column(Text)
+    title = mapped_column(Text, nullable=False)
+    sortTitle = mapped_column(Text)
+    overview = mapped_column(Text)
+    poster = mapped_column(Text)
+    fanart = mapped_column(Text)
+    sport = mapped_column(Text)
+    monitored = mapped_column(Text)
+    tags = mapped_column(Text)
+    audio_language = mapped_column(Text)
+    profileId = mapped_column(Integer, ForeignKey('table_languages_profiles.profileId', ondelete='SET NULL'), index=True)
+    created_at_timestamp = mapped_column(DateTime)
+    updated_at_timestamp = mapped_column(DateTime)
+
+    def to_dict(self):
+        return {column.name: getattr(self, column.name) for column in self.__table__.columns}
+
+
+class TableSportsEvents(Base):
+    __tablename__ = 'table_sports_events'
+    __table_args__ = (
+        Index('ux_sports_events_owner_event_part', 'arr_instance_id', 'sportarrEventId', 'partNumber', unique=True),
+        Index('ux_sports_events_owner_file', 'arr_instance_id', 'file_id', unique=True),
+        Index('ix_sports_events_league_owner', 'league_id', 'arr_instance_id'),
+        UniqueConstraint('id', 'arr_instance_id', name='uq_sports_events_id_owner'),
+        UniqueConstraint('id', 'league_id', 'arr_instance_id', name='uq_sports_events_id_league_owner'),
+        ForeignKeyConstraint(['league_id', 'arr_instance_id'], ['table_sports_leagues.id', 'table_sports_leagues.arr_instance_id'], ondelete='CASCADE', name='fk_sports_events_league_owner'),
+    )
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    arr_instance_id = mapped_column(Integer, ForeignKey('arr_instances.id', ondelete='CASCADE'), nullable=False)
+    league_id = mapped_column(Integer, nullable=False)
+    sportarrEventId = mapped_column(Integer, nullable=False)
+    file_id = mapped_column(Integer, nullable=False)
+    sportarrLeagueId = mapped_column(Integer)
+    externalId = mapped_column(Text)
+    season = mapped_column(Integer)
+    episode = mapped_column(Integer)
+    partNumber = mapped_column(Integer, nullable=False, server_default='0')
+    partName = mapped_column(Text)
+    eventDate = mapped_column(Text)
+    broadcastDate = mapped_column(Text)
+    path = mapped_column(Text, nullable=False)
+    title = mapped_column(Text, nullable=False)
+    sceneName = mapped_column(Text)
+    audio_codec = mapped_column(Text)
+    video_codec = mapped_column(Text)
+    format = mapped_column(Text)
+    resolution = mapped_column(Text)
+    audio_language = mapped_column(Text)
+    monitored = mapped_column(Text)
+    subtitles = mapped_column(Text)
+    missing_subtitles = mapped_column(Text)
+    failedAttempts = mapped_column(Text)
+    file_size = mapped_column(BigInteger)
+    ffprobe_cache = mapped_column(LargeBinary)
+    created_at_timestamp = mapped_column(DateTime)
+    updated_at_timestamp = mapped_column(DateTime)
+
+    def to_dict(self):
+        return {column.name: getattr(self, column.name) for column in self.__table__.columns}
+
+
+class TableHistorySports(Base):
+    __tablename__ = 'table_history_sports'
+    __table_args__ = (
+        Index('ix_table_history_sports_owner_event', 'arr_instance_id', 'event_id'),
+        ForeignKeyConstraint(['event_id', 'league_id', 'arr_instance_id'], ['table_sports_events.id', 'table_sports_events.league_id', 'table_sports_events.arr_instance_id'], ondelete='CASCADE', name='fk_table_history_sports_event_league_owner'),
+        UniqueConstraint('id', 'arr_instance_id', name='uq_history_sports_id_owner'),
+        ForeignKeyConstraint(['upgradedFromId', 'arr_instance_id'], ['table_history_sports.id', 'table_history_sports.arr_instance_id'], name='fk_history_sports_upgrade_owner'),
+    )
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    arr_instance_id = mapped_column(Integer, ForeignKey('arr_instances.id', ondelete='CASCADE'), nullable=False)
+    league_id = mapped_column(Integer, nullable=False)
+    event_id = mapped_column(Integer, nullable=False)
+    language = mapped_column(Text)
+    provider = mapped_column(Text)
+    subs_id = mapped_column(Text)
+    timestamp = mapped_column(DateTime, default=datetime.now)
+    action = mapped_column(Integer)
+    description = mapped_column(Text)
+    score = mapped_column(Integer)
+    score_out_of = mapped_column(Integer)
+    subtitles_path = mapped_column(Text)
+    video_path = mapped_column(Text)
+    matched = mapped_column(Text)
+    not_matched = mapped_column(Text)
+    artifact = mapped_column(Text)
+    upgradedFromId = mapped_column(Integer)
+
+    def to_dict(self):
+        return {column.name: getattr(self, column.name) for column in self.__table__.columns}
+
+
+class TableBlacklistSports(Base):
+    __tablename__ = 'table_blacklist_sports'
+    __table_args__ = (
+        Index('ix_table_blacklist_sports_owner_event', 'arr_instance_id', 'event_id'),
+        ForeignKeyConstraint(['event_id', 'league_id', 'arr_instance_id'], ['table_sports_events.id', 'table_sports_events.league_id', 'table_sports_events.arr_instance_id'], ondelete='CASCADE', name='fk_table_blacklist_sports_event_league_owner'),
+    )
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    arr_instance_id = mapped_column(Integer, ForeignKey('arr_instances.id', ondelete='CASCADE'), nullable=False)
+    league_id = mapped_column(Integer, nullable=False)
+    event_id = mapped_column(Integer, nullable=False)
+    language = mapped_column(Text)
+    provider = mapped_column(Text)
+    subs_id = mapped_column(Text)
+    timestamp = mapped_column(DateTime, default=datetime.now)
+
+    def to_dict(self):
+        return {column.name: getattr(self, column.name) for column in self.__table__.columns}
+
+
+class TableSportsLeaguesRootfolder(Base):
+    __tablename__ = 'table_sports_leagues_rootfolder'
+    __table_args__ = (
+        Index('ux_sports_rootfolder_owner_upstream', 'arr_instance_id', 'rootfolder_id', unique=True),
+    )
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    arr_instance_id = mapped_column(Integer, ForeignKey('arr_instances.id', ondelete='CASCADE'), nullable=False)
+    rootfolder_id = mapped_column(Integer, nullable=False)
+    path = mapped_column(Text, nullable=False)
+    accessible = mapped_column(Integer)
+    error = mapped_column(Text)
+
+    def to_dict(self):
+        return {column.name: getattr(self, column.name) for column in self.__table__.columns}
+
+
 class TableProviderHubCatalogSource(Base):
     __tablename__ = 'provider_hub_catalog_sources'
 
@@ -811,6 +955,10 @@ class TableProviderHubInstallEvent(Base):
     created_at = mapped_column(DateTime, nullable=False, default=datetime.now)
 
 
+# Database triggers include direct SQL and bulk native imports in publication checks.
+event.listen(Base.metadata, "after_create", metadata_created)
+
+
 def init_db():
     # Idempotent: bazarr can end up importing `init` under both `bazarr.init`
     # and `init` aliases when tests cross module-namespace boundaries
@@ -831,6 +979,12 @@ def init_db():
         pass
 
     # Create tables if they don't exist.
+    # table_history_sports used to be excluded here, because the sports
+    # adoption guard compared its column set for exact equality and the
+    # artifact column that create_all builds is added by a later migration, so
+    # a created-then-verified history table aborted every fresh install. The
+    # guard is a subset test now, so this can create every table like any
+    # other and the special case is gone.
     metadata.create_all(engine)
 
     # Resolve the DB engine/version and current migration revision once, at startup, and
@@ -975,6 +1129,16 @@ def migrate_db(app):
     except Exception:
         logging.exception("Scalar-config reconcile from default instances failed; continuing startup")
 
+    # Sportarr's master toggle is new: before it, the Sports pages were derived
+    # from "any enabled Sportarr instance exists". Turn it on once for an
+    # install that already had a working Sportarr server, so sports do not
+    # silently vanish on upgrade. Guarded so a hiccup never blocks startup.
+    try:
+        from arr_instances.service import reconcile_sportarr_enable_flag
+        reconcile_sportarr_enable_flag(database)
+    except Exception:
+        logging.exception("Sportarr enable-flag reconcile failed; continuing startup")
+
     # And heal installs that deleted a language profile before deletion started
     # clearing what pointed at it. A dangling reference makes every save of that
     # instance fail validation with a 400, and it would silently adopt an
@@ -984,6 +1148,10 @@ def migrate_db(app):
         forget_dangling_language_profile_references(database)
     except Exception:
         logging.exception("Language profile reference reconcile failed; continuing startup")
+
+    # Batch migrations can rebuild tables and discard their triggers.
+    with engine.begin() as connection:
+        install_ownership_revision(connection)
 
     optimize_sqlite_database(engine)
 

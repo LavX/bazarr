@@ -1,10 +1,14 @@
 interface Badge {
   episodes: number;
   movies: number;
+  sports?: number;
   providers: number;
   status: number;
   sonarr_signalr: string;
   radarr_signalr: string;
+  /** Live state of the Sportarr event stream, the sports counterpart of the
+   *  SignalR indicators above. */
+  sportarr_sse?: string;
   announcements: number;
 }
 
@@ -273,6 +277,7 @@ declare namespace History {
   type Stat = {
     movies: StatItem[];
     series: StatItem[];
+    sports?: StatItem[];
   };
 
   type TimeFrameOptions = "week" | "month" | "trimester" | "year";
@@ -447,6 +452,11 @@ type ItemSearchResult = Partial<SeriesIdType> &
     title: string;
     year: string;
     poster: string | null;
+    id?: number;
+    arr_instance_id?: number;
+    /** Present on a sports league. A league has a sport, not a year. */
+    sportarrLeagueId?: number;
+    sport?: string | null;
   };
 
 type BackendError = {

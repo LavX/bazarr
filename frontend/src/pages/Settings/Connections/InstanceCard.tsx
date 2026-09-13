@@ -30,6 +30,7 @@ import {
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useTestArrInstanceById, useUpdateArrInstance } from "@/apis/hooks";
 import type { ArrInstance } from "@/apis/raw/arrInstances";
+import { isTestEnv } from "@/utilities/env";
 import { ARR_META, buildHostUrl, buildWebhookUrl } from "./meta";
 import styles from "./Connections.module.scss";
 
@@ -110,7 +111,7 @@ const InstanceCard: FunctionComponent<Props> = ({
       data-default={instance.is_default || undefined}
       data-disabled={!instance.enabled || undefined}
     >
-      <Group justify="space-between" align="flex-start" wrap="nowrap" gap="md">
+      <div className={styles.cardLayout}>
         <Group
           className={styles.dimmable}
           align="flex-start"
@@ -123,7 +124,11 @@ const InstanceCard: FunctionComponent<Props> = ({
           </ThemeIcon>
           <Stack gap={6} style={{ flex: 1, minWidth: 0 }}>
             <Group gap="xs" wrap="wrap">
-              <Text fw={600} size="sm">
+              <Text
+                fw={600}
+                size="sm"
+                style={{ overflowWrap: "anywhere", minWidth: 0 }}
+              >
                 {instance.name}
               </Text>
               {instance.display_name &&
@@ -171,44 +176,46 @@ const InstanceCard: FunctionComponent<Props> = ({
                 </>
               )}
             </Group>
-            <Group gap={6} wrap="nowrap" style={{ minWidth: 0 }}>
-              <Tooltip
-                label={`Optional: add this URL as a Connect webhook in ${instance.name}'s Settings → Connect (On Grab / On Import) so its grabs trigger this instance.`}
-                w={320}
-                multiline
-                withArrow
-              >
-                <Text size="xs" c="dimmed" style={{ whiteSpace: "nowrap" }}>
-                  <FontAwesomeIcon icon={faPlugCircleBolt} /> Webhook
-                </Text>
-              </Tooltip>
-              <Code
-                style={{
-                  minWidth: 0,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {webhookUrl}
-              </Code>
-              <Tooltip
-                label={clipboard.copied ? "Copied!" : "Copy webhook URL"}
-                withArrow
-              >
-                <ActionIcon
-                  size="xs"
-                  variant="subtle"
-                  color="gray"
-                  aria-label="Copy webhook URL"
-                  onClick={() => clipboard.copy(webhookUrl)}
+            {webhookUrl !== null && (
+              <Group gap={6} wrap="nowrap" style={{ minWidth: 0 }}>
+                <Tooltip
+                  label={`Optional: add this URL as a Connect webhook in ${instance.name}'s Settings → Connect (On Grab / On Import) so its grabs trigger this instance.`}
+                  w={320}
+                  multiline
+                  withArrow
                 >
-                  <FontAwesomeIcon
-                    icon={clipboard.copied ? faCircleCheck : faCopy}
-                  />
-                </ActionIcon>
-              </Tooltip>
-            </Group>
+                  <Text size="xs" c="dimmed" style={{ whiteSpace: "nowrap" }}>
+                    <FontAwesomeIcon icon={faPlugCircleBolt} /> Webhook
+                  </Text>
+                </Tooltip>
+                <Code
+                  style={{
+                    minWidth: 0,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {webhookUrl}
+                </Code>
+                <Tooltip
+                  label={clipboard.copied ? "Copied!" : "Copy webhook URL"}
+                  withArrow
+                >
+                  <ActionIcon
+                    size="xs"
+                    variant="subtle"
+                    color="gray"
+                    aria-label="Copy webhook URL"
+                    onClick={() => clipboard.copy(webhookUrl)}
+                  >
+                    <FontAwesomeIcon
+                      icon={clipboard.copied ? faCircleCheck : faCopy}
+                    />
+                  </ActionIcon>
+                </Tooltip>
+              </Group>
+            )}
             {status && (
               <div className={styles.testResult} data-tone={status.tone}>
                 {status.icon}
@@ -232,7 +239,7 @@ const InstanceCard: FunctionComponent<Props> = ({
           </Stack>
         </Group>
 
-        <Group gap="xs" wrap="nowrap">
+        <Group className={styles.cardActions} gap="xs" wrap="nowrap">
           <Tooltip
             label={instance.enabled ? "Disable instance" : "Enable instance"}
             withArrow
@@ -271,7 +278,17 @@ const InstanceCard: FunctionComponent<Props> = ({
           >
             Edit
           </Button>
-          <Menu position="bottom-end" withArrow>
+          {/* Mantine's hideDetached (default on) hides the dropdown when the
+              trigger looks clipped to the viewport. Under jsdom's zero
+              geometry the Floating middleware intermittently classifies the
+              trigger as fully clipped, mounting the menu with display:none,
+              so the test suite could not find its items. Tests run with it
+              off; production keeps the default behavior. */}
+          <Menu
+            position="bottom-end"
+            withArrow
+            hideDetached={isTestEnv ? false : undefined}
+          >
             <Menu.Target>
               <ActionIcon
                 type="button"
@@ -306,7 +323,7 @@ const InstanceCard: FunctionComponent<Props> = ({
             </Menu.Dropdown>
           </Menu>
         </Group>
-      </Group>
+      </div>
     </div>
   );
 };

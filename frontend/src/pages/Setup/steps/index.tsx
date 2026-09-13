@@ -31,6 +31,15 @@ export const ONBOARDING_STEPS: WizardStepDef[] = [
     Component: (p) => <ArrStep kind="radarr" {...p} />,
   },
   {
+    // Optional like Radarr. A Sportarr user had to finish the wizard and then
+    // find Settings > Connections, because the wizard offered no way to
+    // connect one at all.
+    key: "sportarr",
+    label: "Sportarr",
+    optional: true,
+    Component: (p) => <ArrStep kind="sportarr" {...p} />,
+  },
+  {
     key: "media-servers",
     label: "Media Servers",
     optional: true,

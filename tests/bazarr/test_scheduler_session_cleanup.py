@@ -6,7 +6,7 @@ scoped_session after every job. See bazarr/app/scheduler.py
 from unittest.mock import MagicMock, patch
 
 
-def test_release_session_listener_calls_database_remove():
+def test_release_session_listener_calls_database_remove(scheduler_runtime):
     """The listener must call database.remove() exactly once when a job
     fires the EVENT_JOB_EXECUTED event."""
     from app import scheduler as scheduler_module
@@ -18,7 +18,7 @@ def test_release_session_listener_calls_database_remove():
     assert mock_db.remove.call_count == 1
 
 
-def test_release_session_listener_swallows_remove_errors():
+def test_release_session_listener_swallows_remove_errors(scheduler_runtime):
     """database.remove() raising must not propagate. APScheduler logs
     listener exceptions itself, but a swallowed error in the listener
     keeps the event bus quiet and lets the next job's listener retry

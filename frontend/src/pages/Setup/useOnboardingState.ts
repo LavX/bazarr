@@ -28,6 +28,10 @@ export function useOnboardingState(): {
     !hasInstances &&
     !general?.use_sonarr &&
     !general?.use_radarr &&
+    // Sports counts as prior configuration too. Left out, a user who had
+    // turned Sportarr on and nothing else was still shown the first-run
+    // wizard as though the install were untouched.
+    !general?.use_sportarr &&
     !hasProviders;
 
   return { needsOnboarding, isLoading };

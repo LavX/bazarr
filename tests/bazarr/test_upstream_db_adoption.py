@@ -445,6 +445,13 @@ def _looks_like_upstream(engine):
     rebuild = engine.connect().execution_options(isolation_level='AUTOCOMMIT')
     try:
         rebuild.execute(sa.text('PRAGMA foreign_keys=OFF'))
+        # The upstream revision predates this fork's owned sports schema. Keeping
+        # today's sports history (including later artifact columns) while stamping
+        # an older revision constructs a schema that never existed upstream.
+        for table in ('table_blacklist_sports', 'table_history_sports',
+                      'table_sports_events', 'table_sports_leagues_rootfolder',
+                      'table_sports_leagues'):
+            rebuild.execute(sa.text(f'DROP TABLE IF EXISTS {table}'))
         _restore_the_upstream_primary_key(rebuild, 'table_shows', 'sonarrSeriesId')
         _restore_the_upstream_primary_key(rebuild, 'table_episodes', 'sonarrEpisodeId')
         _restore_the_upstream_primary_key(rebuild, 'table_movies', 'radarrId')
@@ -1020,6 +1027,10 @@ def test_a_previously_stamped_adoption_still_gets_its_columns_repaired(tmp_path,
         connection.execute(sa.text('DELETE FROM alembic_version'))
         connection.execute(sa.text(
             f"INSERT INTO alembic_version (version_num) VALUES ('{FORK_SHARED_ANCESTOR}')"))
+        for table in ('table_blacklist_sports', 'table_history_sports',
+                      'table_sports_events', 'table_sports_leagues_rootfolder',
+                      'table_sports_leagues'):
+            connection.execute(sa.text(f'DROP TABLE IF EXISTS {table}'))
         connection.execute(sa.text('ALTER TABLE table_shows DROP COLUMN overview'))
 
     monkeypatch.setattr(db_module, 'engine', engine)

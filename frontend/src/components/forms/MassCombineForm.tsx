@@ -58,10 +58,23 @@ const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
     setSelected(next);
   };
 
-  const canSubmit = selected.length >= 2 && items.length > 0 && !running;
+  const sportsCount = items.filter(
+    (item) => item.type === "sports" || item.type === "sportsLeague",
+  ).length;
+  const sportsOnly = sportsCount > 0 && sportsCount === items.length;
+
+  // A sports composition publishes under the owned-file guard, which is
+  // captured from the event's assigned profile, so the engine refuses an
+  // ad-hoc override alongside it. A sports-only selection therefore needs no
+  // language picked here, and picking one changes nothing.
+  const canSubmit =
+    (sportsOnly || selected.length >= 2) && items.length > 0 && !running;
 
   const submit = async () => {
-    if (selected.length < 2) return;
+    // Same condition as canSubmit. Gating on selected.length alone left the
+    // sports-only case with an enabled button that did nothing at all: the
+    // notice above says no language is needed, then the click returned here.
+    if (!sportsOnly && selected.length < 2) return;
 
     if (items.length >= 50) {
       const confirmed = window.confirm(
@@ -79,7 +92,9 @@ const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
       let scope:
         | { kind: "movie"; radarrId: number; arrInstanceId?: number }
         | { kind: "episode"; episodeId: number; arrInstanceId?: number }
-        | { kind: "series"; seriesId: number; arrInstanceId?: number };
+        | { kind: "series"; seriesId: number; arrInstanceId?: number }
+        | { kind: "sports"; eventId: number; arrInstanceId?: number }
+        | { kind: "sportsLeague"; leagueId: number; arrInstanceId?: number };
 
       if (item.type === "movie") {
         scope = {
@@ -93,6 +108,18 @@ const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
           seriesId: item.sonarrSeriesId,
           arrInstanceId: itemArrInstanceId(item),
         };
+      } else if (item.type === "sports") {
+        scope = {
+          kind: "sports",
+          eventId: item.sportsEventId,
+          arrInstanceId: itemArrInstanceId(item),
+        };
+      } else if (item.type === "sportsLeague") {
+        scope = {
+          kind: "sportsLeague",
+          leagueId: item.sportsLeagueId,
+          arrInstanceId: itemArrInstanceId(item),
+        };
       } else {
         scope = {
           kind: "episode",
@@ -102,9 +129,15 @@ const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
       }
 
       try {
+        // A sports composition publishes under the owned-file guard captured
+        // from the event's profile, and the engine refuses an ad-hoc language
+        // override alongside it, so send no override for sports scopes. This
+        // matches what the league-level combine in SportsEvents already does.
+        const sportsScope =
+          scope.kind === "sports" || scope.kind === "sportsLeague";
         const result = await mutateAsync({
           scope,
-          body: { languages: selected, format },
+          body: sportsScope ? {} : { languages: selected, format },
         });
 
         if (result.status === "batch_complete") {
@@ -167,6 +200,17 @@ const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
         <Text size="sm" c="var(--bz-text-tertiary)">
           {items.length} items selected
         </Text>
+      )}
+
+      {sportsCount > 0 && (
+        <Alert color="yellow">
+          <Text size="sm">
+            {sportsOnly ? "This selection is" : `${sportsCount} of these are`}{" "}
+            sports, which follow the combine rule on their league&apos;s
+            language profile. The languages and format chosen here do not apply
+            to them.
+          </Text>
+        </Alert>
       )}
 
       <Text size="sm" fw={500}>

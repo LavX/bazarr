@@ -1,0 +1,234 @@
+"""Local-ID sports library operations shared by the HTTP boundary."""
+import ast
+
+from sqlalchemy import case, func, select, update
+
+from app.database import TableArrInstances, TableSportsLeagues, TableSportsEvents, TableLanguagesProfiles
+from arr_instances.media_defaults import instance_default_profile, read_media_defaults
+from sportarr.db import sports_transaction
+from sportarr.sync.leagues import require_sportarr
+from sportarr.pagination import validate_page
+from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
+from sportarr.errors import SportsNotFound
+
+
+def _query():
+    counts = select(
+        TableSportsEvents.league_id,
+        TableSportsEvents.arr_instance_id,
+        func.count(func.distinct(TableSportsEvents.sportarrEventId)).label('eventCount'),
+        func.count(TableSportsEvents.id).label('eventFileCount'),
+        # The D4 league-list indicator: how many of a league's EVENTS still
+        # have at least one missing language, from a clean aggregate. The
+        # stored missing_subtitles is a Python list literal, so an event with
+        # nothing missing holds '' or '[]' and everything else has entries.
+        # Counted on the distinct event id like eventCount, not on file-rows:
+        # one two-part event with both parts missing is one event, not two.
+        func.count(func.distinct(case(
+            (TableSportsEvents.missing_subtitles.notin_(('', '[]')),
+             TableSportsEvents.sportarrEventId),
+            else_=None))).label('missingLanguageCount'),
+    ).group_by(TableSportsEvents.league_id, TableSportsEvents.arr_instance_id).subquery()
+    return select(TableSportsLeagues, counts.c.eventCount, counts.c.eventFileCount,
+                  counts.c.missingLanguageCount).join(
+        TableArrInstances, TableArrInstances.id == TableSportsLeagues.arr_instance_id).outerjoin(
+        counts, (counts.c.league_id == TableSportsLeagues.id) &
+        (counts.c.arr_instance_id == TableSportsLeagues.arr_instance_id)).where(
+            TableArrInstances.kind == 'sportarr', TableArrInstances.enabled == 1)
+
+
+def _serialize(row):
+    league, event_count, file_count, missing_count = row
+    result = league.to_dict()
+    for field in ('created_at_timestamp', 'updated_at_timestamp'):
+        if result[field] is not None:
+            result[field] = result[field].isoformat()
+    for field in ('tags', 'audio_language'):
+        try:
+            value = ast.literal_eval(result[field] or '[]')
+        except (SyntaxError, ValueError):
+            value = []
+        result[field] = value if isinstance(value, list) else []
+    result['monitored'] = result['monitored'] == 'True'
+    return result | {'eventCount': event_count or 0, 'eventFileCount': file_count or 0,
+                     'missingLanguageCount': missing_count or 0}
+
+
+def list_leagues(session, arr_instance_id=None, start=0, length=100):
+    limit = validate_page(start, length)
+    query = _query()
+    if arr_instance_id is not None:
+        require_sportarr(session, arr_instance_id)
+        query = query.where(TableSportsLeagues.arr_instance_id == arr_instance_id)
+    total = session.execute(select(func.count()).select_from(query.subquery())).scalar_one()
+    rows = session.execute(query.order_by(TableSportsLeagues.sortTitle, TableSportsLeagues.id)
+                           .offset(start).limit(limit)).all()
+    data = [_serialize(row) for row in rows]
+    _league_audio_languages(session, data)
+    return {'data': data, 'total': total}
+
+
+def get_league(session, league_id, arr_instance_id=None):
+    query = _query().where(TableSportsLeagues.id == league_id)
+    if arr_instance_id is not None:
+        require_sportarr(session, arr_instance_id)
+        query = query.where(TableSportsLeagues.arr_instance_id == arr_instance_id)
+    row = session.execute(query).first()
+    if row is None:
+        return None
+    result = _serialize(row)
+    _league_audio_languages(session, [result])
+    return result
+
+
+def _league_audio_languages(session, leagues):
+    if not leagues:
+        return
+    targets = {(row['arr_instance_id'], row['id']): row for row in leagues}
+    audios = {key: set() for key in targets}
+    # One bounded query for the returned leagues, including their exact owners.
+    from sqlalchemy import tuple_
+    query = select(TableSportsEvents.arr_instance_id, TableSportsEvents.league_id,
+                   TableSportsEvents.audio_language).where(
+        tuple_(TableSportsEvents.arr_instance_id, TableSportsEvents.league_id).in_(targets))
+    for owner, league_id, raw in session.execute(query):
+        audios[owner, league_id].update(value for value in parse_stored_list(raw)
+                                      if isinstance(value, str) and value)
+    for key, row in targets.items():
+        row['audio_language'] = sorted(audios[key])
+
+
+def assign_profile(session, league_id, arr_instance_id, profile_id):
+    if profile_id is not None and (type(profile_id) is not int or profile_id <= 0):
+        raise ValueError('profileId must be a positive language profile ID or null')
+    with sports_transaction(session) as transaction:
+        require_sportarr(transaction, arr_instance_id)
+        if profile_id is not None and transaction.get(TableLanguagesProfiles, profile_id) is None:
+            raise ValueError('Language profile does not exist')
+        result = transaction.execute(update(TableSportsLeagues).where(
+            TableSportsLeagues.id == league_id,
+            TableSportsLeagues.arr_instance_id == arr_instance_id).values(profileId=profile_id))
+        return result.rowcount == 1
+
+
+def assign_profiles(session, assignments):
+    """Assign profiles to many leagues in ONE transaction.
+
+    Mass-editing from the library page fired one PATCH per league, each opening
+    its own transaction and its own re-index, so 200 leagues meant 200 requests
+    and a partial failure left the selection half-applied with no aggregate
+    status. ``assignments`` is an iterable of (league_id, arr_instance_id,
+    profile_id); the whole batch commits or none of it does.
+
+    Returns the (league_id, arr_instance_id) pairs actually updated, so the
+    caller can re-index exactly those against their own owners.
+    """
+    assignments = list(assignments)
+    if not assignments:
+        return []
+    updated = []
+    with sports_transaction(session) as transaction:
+        owners = {owner for _, owner, _ in assignments}
+        for owner in owners:
+            require_sportarr(transaction, owner)
+        profiles = {profile for _, _, profile in assignments if profile is not None}
+        for profile_id in profiles:
+            if type(profile_id) is not int or profile_id <= 0:
+                raise ValueError('profileId must be a positive language profile ID or null')
+            if transaction.get(TableLanguagesProfiles, profile_id) is None:
+                raise ValueError('Language profile does not exist')
+        for league_id, owner, profile_id in assignments:
+            result = transaction.execute(update(TableSportsLeagues).where(
+                TableSportsLeagues.id == league_id,
+                TableSportsLeagues.arr_instance_id == owner).values(profileId=profile_id))
+            if result.rowcount == 1:
+                updated.append((league_id, owner))
+    return updated
+
+
+def apply_instance_default_profile(session, arr_instance_id):
+    with sports_transaction(session) as transaction:
+        instance = require_sportarr(transaction, arr_instance_id)
+        _, profile = instance_default_profile(read_media_defaults(instance.options))
+        if profile is None or transaction.get(TableLanguagesProfiles, profile) is None:
+            raise ValueError('This instance has no valid default language profile to apply.')
+        # A league a tag rule deliberately excluded is not "unset yet", it is
+        # "kept out" by the sync, exactly as the Series and Movies bulk action
+        # treats their tag-excluded rows. Filling those in here would silently
+        # undo the rule the user configured, on their whole library at once.
+        from arr_instances.service import _excluded_profile_tags, _tags_exclude_a_profile
+        excluded_tags = _excluded_profile_tags('sportarr')
+        targets = transaction.execute(select(TableSportsLeagues.id, TableSportsLeagues.tags).where(
+            TableSportsLeagues.arr_instance_id == arr_instance_id,
+            TableSportsLeagues.profileId.is_(None))).all()
+        ids = [league_id for league_id, tags in targets
+               if not _tags_exclude_a_profile(tags, excluded_tags)]
+        transaction.execute(update(TableSportsLeagues).where(
+            TableSportsLeagues.arr_instance_id == arr_instance_id,
+            TableSportsLeagues.profileId.is_(None),
+            TableSportsLeagues.id.in_(ids)).values(profileId=profile))
+    return {'updated': len(ids), 'profileId': profile, 'kind': 'sportarr', 'upstream_ids': ids}
+
+
+def refresh_league_profiles(league_ids, arr_instance_id, job_id=None):
+    from subtitles.indexer.sports import list_missing_subtitles_sports
+    for league_id in league_ids:
+        list_missing_subtitles_sports(league_id=league_id, arr_instance_id=arr_instance_id)
+
+
+def _event_query(arr_instance_id=None, enabled_only=True):
+    query = select(TableSportsEvents, TableSportsLeagues.profileId, TableArrInstances.path_mappings).join(
+        TableSportsLeagues, (TableSportsEvents.league_id == TableSportsLeagues.id) &
+        (TableSportsEvents.arr_instance_id == TableSportsLeagues.arr_instance_id)).join(
+        TableArrInstances, TableSportsEvents.arr_instance_id == TableArrInstances.id).where(
+        TableArrInstances.kind == 'sportarr')
+    if enabled_only:
+        query = query.where(TableArrInstances.enabled == 1)
+    if arr_instance_id is not None:
+        query = query.where(TableArrInstances.id == arr_instance_id)
+    return query
+
+
+def parse_stored_list(raw):
+    try:
+        value = ast.literal_eval(raw or '[]')
+    except (SyntaxError, ValueError):
+        return []
+    return value if isinstance(value, list) else []
+
+
+def _serialize_event(row):
+    event, profile, mappings = row
+    result = event.to_dict()
+    result.pop('ffprobe_cache')
+    for name in ('created_at_timestamp', 'updated_at_timestamp'):
+        if result[name] is not None:
+            result[name] = result[name].isoformat()
+    for name in ('audio_language', 'subtitles', 'missing_subtitles', 'failedAttempts'):
+        result[name] = parse_stored_list(result[name])
+    result['monitored'] = result['monitored'] == 'True'
+    result['partNumber'] = result['partNumber'] or None
+    return result | {'profileId': profile, 'hasFile': True,
+                     'mapped_path': apply_sports_mapping(event.path, read_sports_mappings(mappings))}
+
+
+def list_events(session, league_id, arr_instance_id=None, start=0, length=100):
+    limit = validate_page(start, length)
+    league = get_league(session, league_id, arr_instance_id)
+    if league is None:
+        raise SportsNotFound('League not found for this owner')
+    query = _event_query(league['arr_instance_id']).where(TableSportsEvents.league_id == league_id)
+    count = session.execute(select(func.count()).select_from(query.subquery())).scalar_one()
+    rows = session.execute(query.order_by(TableSportsEvents.eventDate.desc(), TableSportsEvents.sportarrEventId,
+                                         TableSportsEvents.partNumber, TableSportsEvents.id)
+                           .offset(start).limit(limit)).all()
+    from sportarr.sync_status import add_sync_status
+    data = [_serialize_event(row) for row in rows]
+    add_sync_status(session, rows, data)
+    return {'data': data, 'total': count}
+
+
+def get_event(session, event_id, arr_instance_id=None, enabled_only=True):
+    row = session.execute(_event_query(arr_instance_id, enabled_only).where(
+        TableSportsEvents.id == event_id)).first()
+    return _serialize_event(row) if row else None

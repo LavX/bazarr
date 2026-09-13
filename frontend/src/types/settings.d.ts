@@ -13,6 +13,7 @@ interface Settings {
   subsync: Settings.Subsync;
   sonarr: Settings.Sonarr;
   radarr: Settings.Radarr;
+  sportarr: Settings.Sportarr;
   backup: Settings.Backup;
   translator: Settings.Translator;
   // Anitcaptcha
@@ -58,6 +59,7 @@ declare namespace Settings {
     multithreading: boolean;
     minimum_score: number;
     minimum_score_movie: number;
+    minimum_score_sports: number;
     movie_default_enabled: boolean;
     movie_default_profile?: number;
     serie_default_enabled: boolean;
@@ -67,6 +69,7 @@ declare namespace Settings {
     setup_complete?: boolean;
     path_mappings: [string, string][];
     path_mappings_movie: [string, string][];
+    path_mappings_sports: [string, string][];
     page_size: number;
     theme: string;
     port: number;
@@ -93,6 +96,7 @@ declare namespace Settings {
     use_postprocessing_threshold: boolean;
     use_postprocessing_threshold_movie: boolean;
     use_radarr: boolean;
+    use_sportarr: boolean;
     use_scenename: boolean;
     use_sonarr: boolean;
     utf8_encode: boolean;
@@ -101,6 +105,7 @@ declare namespace Settings {
     provider_score_modifiers?: Record<string, number> | string;
     wanted_search_frequency: number;
     wanted_search_frequency_movie: number;
+    wanted_search_frequency_sports: number;
     use_external_webhook?: boolean;
     external_webhook_url?: string;
     external_webhook_username?: string;
@@ -195,6 +200,20 @@ declare namespace Settings {
     only_monitored: boolean;
     movies_sync: number;
     excluded_tags: string[];
+  }
+
+  interface Sportarr {
+    sports_sync: number;
+    full_update: FullUpdateOptions;
+    full_update_day: number;
+    full_update_hour: number;
+    only_monitored: boolean;
+    sync_only_monitored_leagues: boolean;
+    sync_only_monitored_events: boolean;
+    excluded_tags: string[];
+    excluded_sports: string[];
+    search_on_sync: boolean;
+    use_ffprobe_cache: boolean;
   }
 
   interface Translator {

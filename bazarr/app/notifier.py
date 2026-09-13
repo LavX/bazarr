@@ -5,7 +5,8 @@ import logging
 import re
 from urllib.parse import quote
 
-from .database import TableSettingsNotifier, TableEpisodes, TableShows, TableMovies, database, insert, delete, select
+from .database import (TableSettingsNotifier, TableEpisodes, TableShows, TableMovies, TableSportsEvents,
+                       TableSportsLeagues, database, insert, delete, select)
 from arr_instances.resolution import scoped
 
 
@@ -212,6 +213,121 @@ def send_notifications_movie(radarr_id, message, arr_instance_id=None):
         title='Bazarr notification',
         body=f"{movie_title}{movie_year_suffix} : {message}",
     )
+
+
+def send_notifications_sports(sports_event_id, message, arr_instance_id=None):
+    # Mirrors send_notifications_movie. Scoped to the OWNING instance for the
+    # same reason: sports event ids are per-instance, so an unscoped lookup
+    # could expand another Sportarr's title into a custom-notifier URL.
+    providers = get_notifier_providers()
+    if not len(providers):
+        return
+
+    custom_notifier_used = _has_custom_notifier(providers)
+
+    if custom_notifier_used:
+        event = database.execute(
+            scoped(
+                select(TableSportsEvents)
+                .where(TableSportsEvents.id == sports_event_id),
+                TableSportsEvents.arr_instance_id, arr_instance_id))\
+            .scalars()\
+            .first()
+        if not event:
+            return
+        event_title = event.title
+        league_title = _sports_league_title(event.league_id, arr_instance_id)
+        media_variables = _build_media_variables(event, 'sports')
+    else:
+        # Same reason the series/movies paths avoid SELECT *: the sports row
+        # carries the heavy ffprobe_cache blob and the body needs two columns.
+        event_row = database.execute(
+            scoped(
+                select(TableSportsEvents.title, TableSportsEvents.league_id)
+                .where(TableSportsEvents.id == sports_event_id),
+                TableSportsEvents.arr_instance_id, arr_instance_id))\
+            .first()
+        if not event_row:
+            return
+        event_title, league_id = event_row
+        league_title = _sports_league_title(league_id, arr_instance_id)
+        media_variables = None  # not consulted on this path
+
+    prefix = f"{league_title} - " if league_title else ""
+
+    asset = AppriseAsset(async_mode=False)
+
+    apobj = Apprise(asset=asset)
+
+    for provider in providers:
+        if provider.name in _CUSTOM_NOTIFIER_NAMES:
+            apobj.add(_expand_notifier_url(provider.url, media_variables))
+        else:
+            apobj.add(provider.url)
+
+    apobj.notify(
+        title='Bazarr notification',
+        body=f"{prefix}{event_title} : {message}",
+    )
+
+
+def send_notifications_sports_league(league_id, message, arr_instance_id=None):
+    """League-level sports notification, for syncs that found nothing missing.
+
+    Mirrors ``send_notifications_sports`` at league granularity: the missing
+    subtitle check runs per league on the sports sync path, so the notification
+    names the league rather than one of its events. Scoped to the OWNING
+    instance for the same reason the event variant is.
+    """
+    providers = get_notifier_providers()
+    if not len(providers):
+        return
+
+    custom_notifier_used = _has_custom_notifier(providers)
+
+    if custom_notifier_used:
+        league = database.execute(
+            scoped(
+                select(TableSportsLeagues)
+                .where(TableSportsLeagues.id == league_id),
+                TableSportsLeagues.arr_instance_id, arr_instance_id))\
+            .scalars()\
+            .first()
+        if not league:
+            return
+        league_title = league.title
+        media_variables = _build_media_variables(league, 'sports')
+    else:
+        league_title = _sports_league_title(league_id, arr_instance_id)
+        if not league_title:
+            return
+        media_variables = None  # not consulted on this path
+
+    asset = AppriseAsset(async_mode=False)
+
+    apobj = Apprise(asset=asset)
+
+    for provider in providers:
+        if provider.name in _CUSTOM_NOTIFIER_NAMES:
+            apobj.add(_expand_notifier_url(provider.url, media_variables))
+        else:
+            apobj.add(provider.url)
+
+    apobj.notify(
+        title='Bazarr notification',
+        body=f"{league_title} : {message}",
+    )
+
+
+def _sports_league_title(league_id, arr_instance_id=None):
+    if league_id is None:
+        return None
+    return database.execute(
+        scoped(
+            select(TableSportsLeagues.title)
+            .where(TableSportsLeagues.id == league_id),
+            TableSportsLeagues.arr_instance_id, arr_instance_id))\
+        .scalar()
 
 
 def _build_media_variables(record, prefix):

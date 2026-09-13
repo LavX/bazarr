@@ -4,7 +4,8 @@ from flask_restx import Resource, Namespace, reqparse
 from unidecode import unidecode
 
 from app.config import base_url, settings
-from app.database import TableShows, TableMovies, database, select
+from app.database import (TableArrInstances, TableShows, TableMovies, TableSportsLeagues,
+                          database, select)
 
 from ..utils import authenticate, image_proxy_path_with_instance
 
@@ -60,13 +61,37 @@ class Searches(Resource):
                     .order_by(TableMovies.title)) \
                     .all()
 
+            if settings.general.use_sportarr:
+                # Sports leagues were absent from the global search entirely,
+                # so a Sportarr user's library was unreachable from the search
+                # bar even though the tab existed in the nav.
+                # Filtered to enabled owners, the way the sports library and
+                # detail queries are. A disabled instance keeps its league
+                # rows, so an unfiltered search kept offering them while the
+                # pages they link to refuse to load, giving the user a result
+                # that goes nowhere.
+                search_list += database.execute(
+                    select(TableSportsLeagues.title,
+                           TableSportsLeagues.id,
+                           TableSportsLeagues.arr_instance_id,
+                           TableSportsLeagues.sportarrLeagueId,
+                           TableSportsLeagues.poster,
+                           TableSportsLeagues.sport)
+                    .join(TableArrInstances,
+                          TableSportsLeagues.arr_instance_id == TableArrInstances.id)
+                    .where(TableArrInstances.kind == 'sportarr',
+                           TableArrInstances.enabled == 1)
+                    .order_by(TableSportsLeagues.title)) \
+                    .all()
+
         results = []
 
         for x in search_list:
             if query in unidecode(x.title).lower():
                 result = {
                     'title': x.title,
-                    'year': x.year,
+                    # A league has a sport, not a year.
+                    'year': getattr(x, 'year', None),
                     # Canonical local id + owning instance (#156); the frontend
                     # routes by id, id == upstream id on a single instance.
                     'id': x.id,
@@ -76,6 +101,13 @@ class Searches(Resource):
                 if hasattr(x, 'sonarrSeriesId'):
                     result['sonarrSeriesId'] = x.sonarrSeriesId
                     result['poster'] = _poster_url('series', x.poster, x.arr_instance_id)
+
+                elif hasattr(x, 'sportarrLeagueId'):
+                    result['sportarrLeagueId'] = x.sportarrLeagueId
+                    result['sport'] = x.sport
+                    # Sportarr serves its own poster URLs, so there is no local
+                    # proxy path to build the way series and movies have.
+                    result['poster'] = x.poster
 
                 else:
                     result['radarrId'] = x.radarrId

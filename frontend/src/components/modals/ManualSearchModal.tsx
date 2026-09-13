@@ -22,17 +22,23 @@ import { ColumnDef } from "@tanstack/react-table";
 import { isString } from "lodash";
 import { Action } from "@/components";
 import Language from "@/components/bazarr/Language";
+import type { SportsSearchTarget } from "@/components/modals/SportsSearchModal";
 import StateIcon from "@/components/StateIcon";
 import PageTable from "@/components/tables/PageTable";
 import { withModal } from "@/modules/modals";
 import { GetItemId } from "@/utilities";
 
-type SupportType = Item.Movie | Item.Episode;
+// A sports caller may hold only the ids and the profile, not a whole event:
+// the wanted page opens this from a row. It reads sceneName optionally and
+// keys on league_id, both of which survive the narrower shape.
+type SupportType = Item.Movie | Item.Episode | SportsSearchTarget;
 
 interface Props<T extends SupportType> {
   download: (item: T, result: SearchResultType) => Promise<void>;
   query: (id?: number) => UseQueryResult<SearchResultType[] | undefined>;
   item: T;
+  searchDisabled?: boolean;
+  preventRepeatDownload?: boolean;
 }
 
 // Stable identity for a search result. SearchResultType has no id field, so we
@@ -81,12 +87,15 @@ const ReleaseInfoCell = React.memo(
 );
 ReleaseInfoCell.displayName = "ReleaseInfoCell";
 
-function ManualSearchView<T extends SupportType>(props: Props<T>) {
+export function ManualSearchView<T extends SupportType>(props: Props<T>) {
   const { download, query: useSearch, item } = props;
 
   const [searchStarted, setSearchStarted] = useState(false);
 
-  const itemId = useMemo(() => GetItemId(item), [item]);
+  const itemId = useMemo(
+    () => ("league_id" in item ? item.id : GetItemId(item)),
+    [item],
+  );
 
   const results = useSearch(searchStarted ? itemId : undefined);
 
@@ -99,6 +108,8 @@ function ManualSearchView<T extends SupportType>(props: Props<T>) {
   }, [results]);
 
   const [downloadedKey, setDownloadedKey] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState(false);
 
   const columns = useMemo<ColumnDef<SearchResultType>[]>(
     () => [
@@ -208,19 +219,31 @@ function ManualSearchView<T extends SupportType>(props: Props<T>) {
               label="Download"
               icon={isDownloaded ? faCloudDownloadAlt : faDownload}
               color={isDownloaded ? "brand" : "gray"}
-              disabled={item === null}
+              disabled={
+                item === null ||
+                downloading ||
+                (props.preventRepeatDownload && isDownloaded)
+              }
               onClick={async () => {
                 if (!item) return;
 
-                setDownloadedKey(resultKey);
-                await download(item, result);
+                setDownloading(true);
+                setDownloadError(false);
+                try {
+                  await download(item, result);
+                  setDownloadedKey(resultKey);
+                } catch {
+                  setDownloadError(true);
+                } finally {
+                  setDownloading(false);
+                }
               }}
             ></Action>
           );
         },
       },
     ],
-    [download, item, downloadedKey],
+    [download, item, downloadedKey, downloading, props.preventRepeatDownload],
   );
 
   const bSceneNameAvailable =
@@ -253,8 +276,19 @@ function ManualSearchView<T extends SupportType>(props: Props<T>) {
           data={results.data ?? []}
         ></PageTable>
       </Collapse>
+      {downloadError && (
+        <Alert color="red">Download failed. Search again and retry.</Alert>
+      )}
+      {results.isError && (
+        <Alert color="red">Search failed. Please try again.</Alert>
+      )}
       <Divider></Divider>
-      <Button loading={results.isFetching} fullWidth onClick={search}>
+      <Button
+        disabled={props.searchDisabled}
+        loading={results.isFetching}
+        fullWidth
+        onClick={search}
+      >
         {searchButtonText}
       </Button>
     </Stack>

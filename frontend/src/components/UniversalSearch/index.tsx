@@ -134,6 +134,7 @@ export default function UniversalSearch() {
     { title: "Discover", path: "/discover", terms: "browse catalog" },
     { title: "Series", path: libraryPage("series"), terms: "shows library" },
     { title: "Movies", path: libraryPage("movies"), terms: "films library" },
+    { title: "Sports", path: libraryPage("sports"), terms: "events library" },
     { title: "Providers", path: "/subtitle-hub", terms: "subtitles providers" },
     {
       title: "Settings",
@@ -147,6 +148,7 @@ export default function UniversalSearch() {
           "/discover",
           "/series",
           "/movies",
+          "/sports",
           "/subtitle-hub",
           "/settings/general",
           "/system/tasks",

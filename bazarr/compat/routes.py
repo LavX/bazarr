@@ -227,8 +227,20 @@ def subtitles():
     imdb = args.get("imdb_id") or ""
     tmdb = args.get("tmdb_id") or ""
     query_filename = args.get("query") or None
-    if not imdb and not query_filename and not tmdb:
-        return compat_error("imdb_id, tmdb_id, or query required", 400, "bad-request")
+    from .sports import valid_moviehash
+    from .service import SportsSelectionChanged
+    # A bare moviehash is admitted on purpose, so a sports client with no imdb
+    # or tmdb id to offer can be served. A review flagged the cost of that on
+    # an install with no sports library, where the request builds a nameless
+    # video and runs a full provider fanout that is metered against the key's
+    # quota. It is left as designed: the contract tests pin a hash that
+    # resolves to nothing as 200 with an empty list, and one of them disables
+    # every sports instance and still expects admission, because the library
+    # may appear while the request is in flight. Narrowing the gate to a
+    # resolved match, to a configured library, or to use_sportarr each break
+    # that contract, and this is an external API other clients speak.
+    if not imdb and not query_filename and not tmdb and not valid_moviehash(args.get("moviehash")):
+        return compat_error("imdb_id, tmdb_id, query, or valid moviehash required", 400, "bad-request")
     if not imdb and tmdb:
         imdb = _resolve_tmdb_to_imdb(tmdb)
     moviehash = args.get("moviehash") or None
@@ -332,6 +344,16 @@ def subtitles():
                                 exclude_providers=eff_exclude or None,
                                 timeout_seconds=eff_timeout,
                                 only_providers=only_arg)
+    except SportsSelectionChanged:
+        # A purely local race: someone re-indexed the sports file while this
+        # search was in flight. It shares 503 with a genuine provider outage
+        # because the status is a pinned contract here, and the x-reason set is
+        # a closed allowlist mirroring the OpenSubtitles conventions that
+        # external clients read; inventing a new status or reason for this
+        # would change the API those clients speak. The message is not part of
+        # that contract, so say what actually happened rather than blaming
+        # providers that were never asked.
+        return compat_error("sports selection changed during search, retry", 503, "upstream")
     except Exception:
         return compat_error("upstream providers unavailable", 503, "upstream")
     page = max(1, args.get("page", default=1, type=int) or 1)

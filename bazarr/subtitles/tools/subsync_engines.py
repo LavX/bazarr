@@ -120,12 +120,26 @@ def release_unqueued_subtitle_publication(version, queue):
 
 
 @contextmanager
-def subtitle_write_locks(video_path, *paths):
+def subtitle_write_locks(video_path, *paths, cancel=None):
     """Acquire participating subtitle directories in stable order."""
     directories = sorted({os.path.normcase(os.path.realpath(os.path.dirname(path))) for path in (video_path, *paths)})
     with ExitStack() as stack:
-        states = {directory: stack.enter_context(subtitle_write_lock(video_path, directory))
-                  for directory in directories}
+        states = {}
+        for directory in directories:
+            state = subtitle_write_lock(video_path, directory)
+            if cancel is None:
+                # Store the entered value. A substituted lock, like a test
+                # double, can be a generator context manager whose __enter__
+                # yields a different object than the raw call returned.
+                states[directory] = stack.enter_context(state)
+            else:
+                while not cancel.is_set():
+                    if state.lock.acquire(timeout=0.05):
+                        stack.callback(state.lock.release)
+                        break
+                if cancel.is_set():
+                    raise ValueError('Subtitle indexing stopped')
+                states[directory] = state
         yield states
 
 
@@ -151,9 +165,13 @@ def subtitle_mutation(video_path, *paths, invalidate_outputs=True):
 
 @contextmanager
 def staged_subtitle_write(video_path, destination, before_publish=None, allow_empty=False,
-                          source_paths=(), after_publish=None, on_publish=None):
+                          source_paths=(), after_publish=None, on_publish=None,
+                          publication_guard=None, cancel=None, expected_versions=(),
+                          after_write=None):
     """Compute privately, then publish only while source and destination are current."""
-    with subtitle_write_locks(video_path, destination, *source_paths) as states:
+    with subtitle_write_locks(video_path, destination, *source_paths,
+                              **({} if cancel is None else {'cancel': cancel})) as states:
+        validate_subtitle_versions(expected_versions)
         def version(path):
             directory = os.path.normcase(os.path.realpath(os.path.dirname(path)))
             return (states[directory].revision(path), subtitle_source_version(path))
@@ -169,20 +187,27 @@ def staged_subtitle_write(video_path, destination, before_publish=None, allow_em
             return
         if not os.path.isfile(temporary) or os.path.getsize(temporary) == 0:
             raise OSError('Subtitle writer did not produce a nonempty file')
-        with subtitle_write_locks(video_path, destination, *source_paths):
+        with subtitle_write_locks(video_path, destination, *source_paths,
+                                  **({} if cancel is None else {'cancel': cancel})):
             with subtitle_mutation(video_path, destination):
-                if before_publish:
-                    before_publish()
-                if destination_version != version(destination):
-                    raise SubtitleDestinationChanged('Subtitle changed during processing')
-                if any(expected[1] is None or expected != version(path) for path, expected in source_versions.items()):
-                    raise SubtitleSourceChanged('Source subtitle changed during processing')
-                if os.path.isfile(destination):
-                    shutil.copymode(destination, temporary)
-                os.replace(temporary, destination)
-                _report_subtitle_publication(on_publish, destination)
-                if after_publish:
-                    after_publish()
+                with publication_guard() if publication_guard is not None else nullcontext():
+                    validate_subtitle_versions(expected_versions)
+                    if before_publish:
+                        before_publish()
+                    if destination_version != version(destination):
+                        raise SubtitleDestinationChanged('Subtitle changed during processing')
+                    if any(expected[1] is None or expected != version(path) for path, expected in source_versions.items()):
+                        raise SubtitleSourceChanged('Source subtitle changed during processing')
+                    if os.path.isfile(destination):
+                        shutil.copymode(destination, temporary)
+                    os.replace(temporary, destination)
+                    _report_subtitle_publication(on_publish, destination)
+                    if after_publish:
+                        after_publish()
+            # Mutation revisions are settled. This still holds the coordinator,
+            # but the optional publication writer transaction has ended.
+            if after_write:
+                after_write()
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -196,10 +221,37 @@ def _report_subtitle_publication(callback, path):
             logging.warning('BAZARR subtitle publication notification failed')
 
 
-def write_subtitle_file(video_path, destination, content, written_paths=None, on_publish=None):
+@dataclass(frozen=True)
+class SubtitleFileSnapshot:
+    path: str
+    revision: int
+    version: tuple | None
+    state: object = field(compare=False, repr=False)
+
+
+def capture_subtitle_versions(video_path, paths, cancel=None):
+    """Retain immutable file versions and their coordinators across queue waits."""
+    with subtitle_write_locks(video_path, *paths, cancel=cancel) as states:
+        return tuple(SubtitleFileSnapshot(
+            path, states[os.path.normcase(os.path.realpath(os.path.dirname(path)))].revision(path),
+            subtitle_source_version(path),
+            states[os.path.normcase(os.path.realpath(os.path.dirname(path)))],
+        ) for path in paths)
+
+
+def validate_subtitle_versions(snapshots):
+    for snapshot in snapshots:
+        if (os.path.islink(snapshot.path)
+                or snapshot.state.revision(snapshot.path) != snapshot.revision
+                or subtitle_source_version(snapshot.path) != snapshot.version):
+            raise SubtitleSourceChanged('Queued subtitle input or destination changed')
+
+
+def write_subtitle_file(video_path, destination, content, written_paths=None,
+                        on_publish=None, publication_guard=None, after_write=None):
     """Write one saver output atomically and record that exact successful path."""
-    with staged_subtitle_write(video_path, destination,
-                              on_publish=on_publish,
+    with staged_subtitle_write(video_path, destination, on_publish=on_publish,
+                              publication_guard=publication_guard, after_write=after_write,
                               after_publish=(lambda: written_paths.append(destination))
                               if written_paths is not None else None) as temporary:
         with open(temporary, 'wb') as handle:
@@ -223,21 +275,32 @@ class SyncOutputOwnerIndex:
 
     @staticmethod
     def _load_owners():
-        from app.database import database, select, TableEpisodes, TableMovies
+        from app.database import database, select, TableEpisodes, TableMovies, TableSportsEvents, TableArrInstances
         from app.config import settings
         from utilities.path_mappings import path_mappings
+        from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
 
         subfolder = settings.general.subfolder
         custom_folder = settings.general.subfolder_custom
         absolute_folder = (os.path.normcase(os.path.realpath(custom_folder))
                            if subfolder == 'absolute' else None)
         owners = {}
-        for table, media_type in ((TableEpisodes, 'episode'), (TableMovies, 'movie')):
-            for row in database.execute(select(table.path, table.arr_instance_id)).all():
+        for table, media_type in ((TableEpisodes, 'episode'), (TableMovies, 'movie'),
+                                  (TableSportsEvents, 'sports')):
+            query = select(table.path, table.arr_instance_id)
+            if media_type == 'sports':
+                query = query.add_columns(TableArrInstances.path_mappings).join(
+                    TableArrInstances, table.arr_instance_id == TableArrInstances.id).where(
+                    TableArrInstances.kind == 'sportarr')
+            for row in database.execute(query).all():
                 if not row.path:
                     continue
-                mapped = os.path.normcase(os.path.realpath(path_mappings.path_replace_instance(
-                    row.path, row.arr_instance_id, media_type)))
+                # Disabled sports owners retain physical files. They still reserve
+                # shared outputs, without authorizing any operation on those rows.
+                mapped_path = (apply_sports_mapping(row.path, read_sports_mappings(row.path_mappings))
+                               if media_type == 'sports' else path_mappings.path_replace_instance(
+                                   row.path, row.arr_instance_id, media_type))
+                mapped = os.path.normcase(os.path.realpath(mapped_path))
                 folders = {os.path.dirname(mapped)}
                 if subfolder == 'absolute':
                     folders.add(absolute_folder)
@@ -751,7 +814,8 @@ class SubsyncEngineRunner:
         return output_stat.st_size > 0 and output_stat.st_mtime_ns >= source_stat.st_mtime_ns
 
     def run(self, srt_path, output_mode, enabled_engines, execute_engine, force_sync=False,
-            source_version=None, before_publish=None, publication_lock=None, after_publish=None, on_publish=None):
+            source_version=None, before_publish=None, publication_lock=None, after_publish=None,
+            on_publish=None, publication_guard=None):
         output_mode = normalize_output_mode(output_mode)
         result = self.result = SyncRunResult(source_path=srt_path, output_mode=output_mode)
 
@@ -818,24 +882,25 @@ class SubsyncEngineRunner:
                 generated_path = str(output_path)
                 final_output_path = output_path
                 with publication_lock or nullcontext() as state:
-                    if before_publish:
-                        before_publish()
-                    if source_version is not None and not source_is_unchanged(srt_path, source_version):
-                        raise SubtitleSourceChanged()
-                    if (output_mode == OUTPUT_MODE_KEEP_ALL and isinstance(source_version, SubtitlePublication)
-                            and not source_version.destination_unchanged(final_engine_output_path)):
-                        raise SubtitleDestinationChanged()
-                    if output_mode == OUTPUT_MODE_OVERWRITE:
-                        os.replace(str(output_path), srt_path)
-                        final_output_path = Path(srt_path)
-                        generated_path = None
-                    else:
-                        os.replace(str(output_path), str(final_engine_output_path))
-                        final_output_path = final_engine_output_path
-                        generated_path = str(final_engine_output_path)
-                    _report_subtitle_publication(on_publish, final_output_path)
-                    if hasattr(state, 'changed'):
-                        state.changed(final_output_path)
+                    with publication_guard() if publication_guard is not None else nullcontext():
+                        if before_publish:
+                            before_publish()
+                        if source_version is not None and not source_is_unchanged(srt_path, source_version):
+                            raise SubtitleSourceChanged()
+                        if (output_mode == OUTPUT_MODE_KEEP_ALL and isinstance(source_version, SubtitlePublication)
+                                and not source_version.destination_unchanged(final_engine_output_path)):
+                            raise SubtitleDestinationChanged()
+                        if output_mode == OUTPUT_MODE_OVERWRITE:
+                            os.replace(str(output_path), srt_path)
+                            final_output_path = Path(srt_path)
+                            generated_path = None
+                        else:
+                            os.replace(str(output_path), str(final_engine_output_path))
+                            final_output_path = final_engine_output_path
+                            generated_path = str(final_engine_output_path)
+                        _report_subtitle_publication(on_publish, final_output_path)
+                        if hasattr(state, 'changed'):
+                            state.changed(final_output_path)
                     if after_publish:
                         after_publish()
 

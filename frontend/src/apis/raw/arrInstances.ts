@@ -1,6 +1,6 @@
 import BaseApi from "./base";
 
-export type ArrKind = "sonarr" | "radarr";
+export type ArrKind = "sonarr" | "radarr" | "sportarr";
 
 // Per-instance subtitle setting overrides (#227). A present key overrides the
 // corresponding global setting for media owned by this instance; an absent key
@@ -41,6 +41,24 @@ export interface ArrMediaDefaults {
   default_profile?: number | null;
 }
 
+export interface ArrSportsSettings {
+  minimum_score?: number;
+  wanted_search_frequency?: number;
+  sports_sync?: number;
+  full_update?: "Manually" | "Daily" | "Weekly";
+  full_update_day?: number;
+  full_update_hour?: number;
+  only_monitored?: boolean;
+  sync_only_monitored_leagues?: boolean;
+  sync_only_monitored_events?: boolean;
+  excluded_tags?: string[];
+  excluded_sports?: string[];
+  search_on_sync?: boolean;
+  use_ffprobe_cache?: boolean;
+}
+
+export type ArrPathMapping = [remote: string, local: string];
+
 export interface ArrInstance {
   id: number;
   kind: ArrKind;
@@ -59,6 +77,8 @@ export interface ArrInstance {
   api_key_set: boolean;
   subtitle_settings?: ArrSubtitleSettings;
   media_defaults?: ArrMediaDefaults;
+  sports_settings?: ArrSportsSettings;
+  path_mappings?: ArrPathMapping[];
 }
 
 export interface ArrInstanceCreate {
@@ -75,6 +95,8 @@ export interface ArrInstanceCreate {
   is_default?: boolean;
   subtitle_settings?: ArrSubtitleSettings;
   media_defaults?: ArrMediaDefaults;
+  sports_settings?: ArrSportsSettings;
+  path_mappings?: ArrPathMapping[];
 }
 
 export type ArrInstanceUpdate = Partial<{
@@ -92,6 +114,8 @@ export type ArrInstanceUpdate = Partial<{
   is_default: boolean;
   subtitle_settings: ArrSubtitleSettings;
   media_defaults: ArrMediaDefaults;
+  sports_settings: ArrSportsSettings;
+  path_mappings: ArrPathMapping[];
 }>;
 
 export interface ArrInstanceTest {

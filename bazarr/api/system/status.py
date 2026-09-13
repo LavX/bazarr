@@ -9,6 +9,7 @@ from flask_restx import Resource, Namespace
 from tzlocal import get_localzone_name
 
 from radarr.info import get_radarr_info
+from sportarr.info import get_sportarr_info
 from sonarr.info import get_sonarr_info
 from app.get_args import args
 from init import startTime
@@ -42,6 +43,7 @@ class SystemStatus(Resource):
         system_status.update({'package_version': package_version})
         system_status.update({'sonarr_version': get_sonarr_info.version()})
         system_status.update({'radarr_version': get_radarr_info.version()})
+        system_status.update({'sportarr_version': get_sportarr_info.version()})
         system_status.update({'operating_system': platform.platform()})
         
         # Check if JIT is enabled (Python 3.13+)

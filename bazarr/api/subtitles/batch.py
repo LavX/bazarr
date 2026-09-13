@@ -5,7 +5,8 @@ from flask_restx import Resource, Namespace, fields
 from sqlalchemy import and_, or_, func
 
 from app.config import settings
-from app.database import TableHistory, TableHistoryMovie, TableEpisodes, TableMovies, database, select
+from app.database import (TableArrInstances, TableEpisodes, TableHistory, TableHistoryMovie,
+                          TableHistorySports, TableMovies, TableSportsEvents, database, select)
 from app.jobs_queue import jobs_queue
 from subtitles.mass_operations import mass_batch_operation, VALID_ACTIONS  # noqa: F401
 from ..utils import authenticate
@@ -88,8 +89,11 @@ class BatchOperation(Resource):
         if not items:
             return {'error': 'Empty items list'}, 400
 
-        VALID_ITEM_KEYS = {'type', 'sonarrSeriesId', 'sonarrEpisodeId', 'radarrId', 'arr_instance_id'}
-        VALID_TYPES = {'episode', 'movie', 'series'}
+        VALID_ITEM_KEYS = {'type', 'sonarrSeriesId', 'sonarrEpisodeId', 'radarrId',
+                           'sportsEventId', 'sportsLeagueId', 'arr_instance_id'}
+        # 'sports' names an event, as it does everywhere else in the sports
+        # code, and 'sportsLeague' names a league the way 'series' names a show.
+        VALID_TYPES = {'episode', 'movie', 'series', 'sports', 'sportsLeague'}
 
         sanitized_items = []
         for item in items:
@@ -133,7 +137,8 @@ def get_upgradable_media_ids():
     false positives from old history entries that have already been superseded.
     """
     if not settings.general.upgrade_subs:
-        return {'movies': [], 'series': []}
+        return {'movies': [], 'series': [], 'sports': [],
+                'movieKeys': [], 'seriesKeys': [], 'sportsKeys': []}
 
     from subtitles.upgrade import get_queries_condition_parameters
     minimum_timestamp, query_actions = get_queries_condition_parameters()
@@ -214,7 +219,56 @@ def get_upgradable_media_ids():
         for r in series_results
     ]
 
-    return {'movies': movie_ids, 'series': series_ids, 'movieKeys': movie_keys, 'seriesKeys': series_keys}
+    # Sports, keyed on the league the way series are keyed on the show: the
+    # library page marks a league, and its rows are events. Same latest-row
+    # logic, restricted to enabled sportarr owners.
+    max_sports_ts = select(
+        TableHistorySports.event_id,
+        TableHistorySports.arr_instance_id.label('arr_instance_id'),
+        TableHistorySports.language,
+        func.max(TableHistorySports.timestamp).label('timestamp')
+    ).where(
+        TableHistorySports.action.in_(query_actions)
+    ).group_by(
+        TableHistorySports.event_id,
+        TableHistorySports.arr_instance_id,
+        TableHistorySports.language,
+    ).subquery()
+
+    sports_results = database.execute(
+        select(TableSportsEvents.league_id, TableSportsEvents.arr_instance_id)
+        .distinct()
+        .select_from(TableHistorySports)
+        .join(TableSportsEvents, onclause=and_(
+            TableHistorySports.event_id == TableSportsEvents.id,
+            TableHistorySports.arr_instance_id == TableSportsEvents.arr_instance_id,
+        ))
+        .join(TableArrInstances, onclause=and_(
+            TableSportsEvents.arr_instance_id == TableArrInstances.id,
+            TableArrInstances.kind == 'sportarr',
+            TableArrInstances.enabled == 1,
+        ))
+        .join(max_sports_ts, onclause=and_(
+            TableHistorySports.event_id == max_sports_ts.c.event_id,
+            TableHistorySports.arr_instance_id == max_sports_ts.c.arr_instance_id,
+            TableHistorySports.language == max_sports_ts.c.language,
+            TableHistorySports.timestamp == max_sports_ts.c.timestamp,
+        ))
+        .where(and_(
+            TableHistorySports.action.in_(query_actions),
+            TableHistorySports.timestamp > minimum_timestamp,
+            TableHistorySports.score.is_not(None),
+            TableHistorySports.score < func.coalesce(TableHistorySports.score_out_of, 180) - 3,
+        ))
+    ).all() if settings.general.use_sportarr else []
+    sports_ids = [r.league_id for r in sports_results]
+    sports_keys = [
+        {'sportsLeagueId': r.league_id, 'arr_instance_id': r.arr_instance_id}
+        for r in sports_results
+    ]
+
+    return {'movies': movie_ids, 'series': series_ids, 'sports': sports_ids,
+            'movieKeys': movie_keys, 'seriesKeys': series_keys, 'sportsKeys': sports_keys}
 
 
 @api_ns_batch.route('subtitles/upgradable')

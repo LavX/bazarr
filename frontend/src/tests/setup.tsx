@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-empty-function */
 
-import { configure } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
 import { http } from "msw";
 import { HttpResponse } from "msw";
 import { vi, vitest } from "vitest";
@@ -83,10 +83,14 @@ beforeEach(() => {
   );
 });
 
-afterEach(() => {
-  server.resetHandlers();
-
+afterEach(async () => {
+  // Vitest unwinds hooks in reverse registration order. Unmount before
+  // clearing shared state so active observers cannot refill the next test's
+  // settings cache using handlers that have already been reset.
+  cleanup();
+  await queryClient.cancelQueries();
   queryClient.clear();
+  server.resetHandlers();
 });
 
 afterAll(() => server.close());

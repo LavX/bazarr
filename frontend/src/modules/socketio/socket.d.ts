@@ -9,6 +9,7 @@ declare namespace SocketIO {
     | "movie-wanted";
 
   type NullEventType =
+    | "sports"
     | "connect"
     | "connect_error"
     | "disconnect"

@@ -171,7 +171,7 @@ interface Props {
   missingLanguage?: Subtitle;
   translationSources?: Subtitle[];
   mediaId?: number;
-  mediaType?: "episode" | "movie";
+  mediaType?: "episode" | "movie" | "sports";
   // Owning Sonarr/Radarr instance id (#156) for the missing-subtitle translate
   // path, which builds its ModifySubtitle form explicitly from mediaId/mediaType.
   arrInstanceId?: number;

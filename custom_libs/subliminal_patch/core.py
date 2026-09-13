@@ -330,7 +330,11 @@ class SZProviderPool(ProviderPool):
         self.adoption_gate = adoption_gate
 
         if not self.throttle_callback:
-            self.throttle_callback = lambda x, y, ids=None, language=None: x
+            # Mirrors the prod callback shape (see provider_throttle), which
+            # Sports invokes with sports_context. The default is a no-op, so
+            # accepting and ignoring the extra keyword keeps the classifier
+            # chain intact for callers that never configure a callback.
+            self.throttle_callback = lambda x, y, ids=None, language=None, sports_context=None: x
 
         #: Provider configuration
         self.provider_configs = _ProviderConfigs(self)
@@ -569,6 +573,10 @@ class SZProviderPool(ProviderPool):
                     s.radarrId = video.radarrId if hasattr(video, 'radarrId') else None
                     s.sonarrSeriesId = video.sonarrSeriesId if hasattr(video, 'sonarrSeriesId') else None
                     s.sonarrEpisodeId = video.sonarrEpisodeId if hasattr(video, 'sonarrEpisodeId') else None
+                    # Sports carries its event context on the video; the
+                    # callback needs it at download time, when only the
+                    # subtitle is in scope.
+                    s.sports_context = getattr(video, 'sports_context', None)
 
                     s.plex_media_fps = float(video.fps) if video.fps else None
                     out.append(s)
@@ -586,7 +594,8 @@ class SZProviderPool(ProviderPool):
                 'sonarrEpisodeId': video.sonarrEpisodeId if hasattr(video, 'sonarrEpisodeId') else None,
             }
             logger.warning('Provider %r throttled: %s', provider, e)
-            self.throttle_callback(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None)
+            self.throttle_callback(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None,
+                                   sports_context=getattr(video, 'sports_context', None))
             if detailed:
                 return provider_search_failure(provider, e)
 
@@ -597,7 +606,8 @@ class SZProviderPool(ProviderPool):
                 'sonarrEpisodeId': video.sonarrEpisodeId if hasattr(video, 'sonarrEpisodeId') else None,
             }
             logger.exception('Unexpected error in provider %r: %s', provider, traceback.format_exc())
-            self.throttle_callback(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None)
+            self.throttle_callback(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None,
+                                   sports_context=getattr(video, 'sports_context', None))
             if detailed:
                 return provider_search_failure(provider, e)
 
@@ -788,16 +798,19 @@ class SZProviderPool(ProviderPool):
                     requests.Timeout,
                     socket.timeout) as e:
                 logger.error('Provider %r connection error', subtitle.provider_name)
-                self.throttle_callback(subtitle.provider_name, e, ids=ids, language=subtitle.language)
+                self.throttle_callback(subtitle.provider_name, e, ids=ids, language=subtitle.language,
+                                       sports_context=getattr(subtitle, 'sports_context', None))
 
             except (rarfile.BadRarFile, MustGetBlacklisted) as e:
-                self.throttle_callback(subtitle.provider_name, e, ids=ids, language=subtitle.language)
+                self.throttle_callback(subtitle.provider_name, e, ids=ids, language=subtitle.language,
+                                       sports_context=getattr(subtitle, 'sports_context', None))
                 return False
 
             except Exception as e:
                 logger.exception('Unexpected error in provider %r, Traceback: %s', subtitle.provider_name,
                                  traceback.format_exc())
-                self.throttle_callback(subtitle.provider_name, e, ids=ids, language=subtitle.language)
+                self.throttle_callback(subtitle.provider_name, e, ids=ids, language=subtitle.language,
+                                       sports_context=getattr(subtitle, 'sports_context', None))
                 self.discarded_providers.add(subtitle.provider_name)
                 return False
 

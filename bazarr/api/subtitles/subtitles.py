@@ -2,11 +2,14 @@
 
 import logging
 import os
+from contextlib import nullcontext
 import sys
 
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
 
-from app.database import TableShows, TableEpisodes, TableMovies, database, select
+from app.database import (TableShows, TableEpisodes, TableMovies, TableSportsEvents,
+                          database, select)
+from sportarr.subtitles import sports_manual_operation
 from arr_instances.resolution import scoped
 from languages.get_languages import alpha3_from_alpha2
 from utilities.path_mappings import path_mappings
@@ -46,10 +49,13 @@ class Subtitles(Resource):
         "radarrMovieId", type=int, required=False, help="Radarr Movie ID"
     )
     get_request_parser.add_argument(
+        "sportsEventId", type=int, required=False, help="Local sports event id"
+    )
+    get_request_parser.add_argument(
         "arr_instance_id",
         type=int,
         required=False,
-        help="Owning Sonarr/Radarr instance id (#156)",
+        help="Owning Sonarr/Radarr/Sportarr instance id",
     )
 
     audio_tracks_data_model = api_ns_subtitles.model(
@@ -103,12 +109,14 @@ class Subtitles(Resource):
         subtitlesPath = args.get("subtitlesPath")
         episodeId = args.get("sonarrEpisodeId", None)
         movieId = args.get("radarrMovieId", None)
+        sportsEventId = args.get("sportsEventId", None)
         arr_instance_id = args.get("arr_instance_id")
 
         result = subtitles_sync_references(
             subtitles_path=subtitlesPath,
             sonarr_episode_id=episodeId,
             radarr_movie_id=movieId,
+            sports_event_id=sportsEventId,
             arr_instance_id=arr_instance_id,
         )
 
@@ -149,16 +157,18 @@ class Subtitles(Resource):
         help='Forced flag of the embedded source track from ["True", "False"]',
     )
     patch_request_parser.add_argument(
-        "type", type=str, required=True, help='Media type from ["episode", "movie"]'
+        "type", type=str, required=True,
+        help='Media type from ["episode", "movie", "sports"]'
     )
     patch_request_parser.add_argument(
-        "id", type=int, required=True, help="Media ID (episodeId, radarrId)"
+        "id", type=int, required=True,
+        help="Media ID (episodeId, radarrId, or the local sports event id)"
     )
     patch_request_parser.add_argument(
         "arr_instance_id",
         type=int,
         required=False,
-        help="Owning Sonarr/Radarr instance id (#156)",
+        help="Owning Sonarr/Radarr/Sportarr instance id",
     )
     patch_request_parser.add_argument(
         "forced",
@@ -264,7 +274,29 @@ class Subtitles(Resource):
             )
 
             # Resolve the video path from the DB using the media ID
-            if media_type == "episode":
+            if media_type == "sports":
+                sports_stmt = scoped(
+                    select(
+                        TableSportsEvents.path, TableSportsEvents.arr_instance_id
+                    ).where(TableSportsEvents.id == id),
+                    TableSportsEvents.arr_instance_id,
+                    arr_instance_id,
+                )
+                sports_meta = database.execute(sports_stmt).first()
+                if not sports_meta:
+                    return "Sports event not found", 404
+                # Take the owner off the row when the caller did not send one,
+                # for the same reason the metadata lookup below does: the
+                # sports mapping has no global fallback and needs an enabled
+                # owner, so an unset arr_instance_id raised out of the handler.
+                arr_instance_id = arr_instance_id or sports_meta.arr_instance_id
+                # The owning instance's mapping, like the non-embedded sports
+                # branch below: extraction reverses this path with
+                # path_replace_reverse_instance, and the two only round-trip
+                # when the same mapping made both.
+                embedded_video_path = path_mappings.path_replace_instance(
+                    sports_meta.path, arr_instance_id, 'sports')
+            elif media_type == "episode":
                 ep_stmt = scoped(
                     select(TableEpisodes.path).where(
                         TableEpisodes.sonarrEpisodeId == id
@@ -308,13 +340,49 @@ class Subtitles(Resource):
                 )
             subtitles_path = extracted
 
-        if not subtitles_path or not os.path.exists(subtitles_path):
+        if media_type != "sports" and (not subtitles_path or not os.path.exists(subtitles_path)):
             return "Subtitles file not found. Path mapping issue?", 500
 
         if action == "sync" and is_sync_engine_output(subtitles_path):
             return "Generated sync output files cannot be synchronized again.", 400
 
-        if media_type == "episode":
+        if media_type == "sports":
+            # The manual toolbox was unreachable for sports: this endpoint fell
+            # through to the movie branch and answered "Movie not found" for a
+            # perfectly valid sports event.
+            sports_metadata_stmt = scoped(
+                select(
+                    TableSportsEvents.path,
+                    TableSportsEvents.subtitles,
+                    TableSportsEvents.league_id,
+                    TableSportsEvents.arr_instance_id,
+                ).where(TableSportsEvents.id == id),
+                TableSportsEvents.arr_instance_id,
+                arr_instance_id,
+            )
+            metadata = database.execute(sports_metadata_stmt).first()
+
+            if not metadata:
+                return "Sports event not found", 404
+
+            # Take the owner off the row when the caller did not send one.
+            # arr_instance_id is optional on this parser and scoped() is a
+            # no-op for None, so the row was found and then the sports mapping,
+            # which requires an enabled owner, raised ValueError out of the
+            # handler as a 500. The local event id already identifies the row
+            # uniquely, so the row's own owner is the right one, and every
+            # sports branch in content.py, editor.py and download.py resolves
+            # it this way. Binding it here also fixes the owner that the
+            # sports operation, sync and translate guards below compare
+            # against.
+            arr_instance_id = arr_instance_id or metadata.arr_instance_id
+
+            video_path = path_mappings.path_replace_instance(
+                metadata.path, arr_instance_id, 'sports')
+            if user_supplied_path:
+                subtitles_path = path_mappings.path_replace_instance(
+                    subtitles_path, arr_instance_id, 'sports')
+        elif media_type == "episode":
             metadata_stmt = scoped(
                 select(
                     TableEpisodes.path,
@@ -374,6 +442,19 @@ class Subtitles(Resource):
         ):
             return "Subtitle path is outside the media library.", 403
 
+        if media_type == "sports":
+            if user_supplied_path:
+                indexed_paths = {
+                    os.path.realpath(path_mappings.path_replace_instance(
+                        entry[1], arr_instance_id, 'sports'))
+                    for entry in get_array_from(metadata.subtitles)
+                    if len(entry) >= 2 and entry[1]
+                }
+                if os.path.realpath(subtitles_path) not in indexed_paths:
+                    return "Subtitle path does not belong to the sports event.", 403
+            if not subtitles_path or not os.path.exists(subtitles_path):
+                return "Subtitles file not found. Path mapping issue?", 500
+
         if action == "sync":
             try:
 
@@ -383,42 +464,61 @@ class Subtitles(Resource):
                         arr_instance_id=arr_instance_id
                     )
 
-                sync_subtitles(
-                    video_path=video_path,
-                    srt_path=subtitles_path,
-                    srt_lang=language,
-                    hi=hi,
-                    forced=forced,
-                    percent_score=0,  # make sure to always sync when requested manually
-                    reference=args.get("reference")
-                    if args.get("reference") not in empty_values
-                    else video_path,
-                    # Fall back to None (not the global value) so an unset Max
-                    # Offset resolves the owning instance's per-instance override
-                    # inside sync_subtitles (#227), mirroring enabled_engines below.
-                    max_offset_seconds=args.get("max_offset_seconds")
-                    if args.get("max_offset_seconds") not in empty_values
-                    else None,
-                    no_fix_framerate=args.get("no_fix_framerate") == "True",
-                    gss=args.get("gss") == "True",
-                    output_mode=args.get("output_mode")
-                    if args.get("output_mode") not in empty_values
-                    else None,
-                    enabled_engines=args.get("enabled_engines")
-                    if args.get("enabled_engines") not in empty_values
-                    else None,
-                    sonarr_series_id=metadata.sonarrSeriesId
-                    if media_type == "episode"
-                    else None,
-                    sonarr_episode_id=id if media_type == "episode" else None,
-                    radarr_id=id if media_type == "movie" else None,
-                    force_sync=True,
-                    callback=postprocess_callback,
-                    # Thread the owning instance (#156) so the subsync
-                    # original-language lookup reads the exact owner, not the
-                    # default-preferred instance on an upstream-id collision.
-                    arr_instance_id=arr_instance_id,
+                # Sports publishes under an owned boundary that pins the file
+                # signature, so an operation that started before a resync
+                # replaced the recording cannot write over the new file.
+                sports_op = (
+                    sports_manual_operation(id, arr_instance_id)
+                    if media_type == "sports" else nullcontext((None, None, None, None))
                 )
+                with sports_op as (sports_context, sports_validate,
+                                   sports_guard, sports_path):
+                    if media_type == "sports":
+                        video_path = sports_path
+                    sync_subtitles(
+                        video_path=video_path,
+                        srt_path=subtitles_path,
+                        srt_lang=language,
+                        hi=hi,
+                        forced=forced,
+                        percent_score=0,  # make sure to always sync when requested manually
+                        reference=args.get("reference")
+                        if args.get("reference") not in empty_values
+                        else video_path,
+                        # Fall back to None (not the global value) so an unset Max
+                        # Offset resolves the owning instance's per-instance override
+                        # inside sync_subtitles (#227), mirroring enabled_engines below.
+                        max_offset_seconds=args.get("max_offset_seconds")
+                        if args.get("max_offset_seconds") not in empty_values
+                        else None,
+                        no_fix_framerate=args.get("no_fix_framerate") == "True",
+                        gss=args.get("gss") == "True",
+                        output_mode=args.get("output_mode")
+                        if args.get("output_mode") not in empty_values
+                        else None,
+                        enabled_engines=args.get("enabled_engines")
+                        if args.get("enabled_engines") not in empty_values
+                        else None,
+                        sonarr_series_id=metadata.sonarrSeriesId
+                        if media_type == "episode"
+                        else None,
+                        sonarr_episode_id=id if media_type == "episode" else None,
+                        radarr_id=id if media_type == "movie" else None,
+                        force_sync=True,
+                        # Sports finalizes the verified output paths inside sync,
+                        # including partial results from a cancelled engine run.
+                        callback=postprocess_callback if media_type != "sports" else None,
+                        # Thread the owning instance (#156) so the subsync
+                        # original-language lookup reads the exact owner, not the
+                        # default-preferred instance on an upstream-id collision.
+                        arr_instance_id=arr_instance_id,
+                        # Sports runs the same owned publication boundary
+                        # the provider path uses; the other two pass None
+                        # and keep their existing behaviour untouched.
+                        context=sports_context,
+                        validate=sports_validate,
+                        publication_guard=sports_guard,
+                    )
             except OSError:
                 return "Unable to edit subtitles file. Check logs.", 409
         elif action == "translate":
@@ -449,6 +549,18 @@ class Subtitles(Resource):
                 return "Invalid source language code", 400
 
             try:
+                # A sports translation publishes under the owned boundary and
+                # carries no native media metadata; translate_subtitles_file
+                # refuses one without a bound operation, so this request used
+                # to be accepted and then die inside the queued job.
+                sports_operation = None
+                if media_type == "sports":
+                    from sportarr.profile_hooks import manual_translation_operation
+
+                    sports_operation = manual_translation_operation(
+                        id, arr_instance_id, subtitles_path, dest_language,
+                        from_language=from_language, forced=forced, hi=hi,
+                    )
                 translate_subtitles_file(
                     video_path=video_path,
                     source_srt_file=subtitles_path,
@@ -462,14 +574,17 @@ class Subtitles(Resource):
                     else None,
                     sonarr_episode_id=id if media_type == "episode" else None,
                     radarr_id=id if media_type == "movie" else None,
-                    metadata=metadata,
+                    metadata=None if media_type == "sports" else metadata,
                     arr_instance_id=arr_instance_id,
+                    sports_operation=sports_operation,
                 )
+            except ValueError as exc:
+                return str(exc), 409
             except OSError:
                 return "Unable to edit subtitles file. Check logs.", 409
         else:
             try:
-                subtitles_apply_mods(
+                output_path = subtitles_apply_mods(
                     language=language,
                     subtitle_path=subtitles_path,
                     mods=[action],
@@ -477,11 +592,19 @@ class Subtitles(Resource):
                     # Resolve keep-lyrics against the owning instance (#227).
                     arr_instance_id=arr_instance_id,
                     media_type=media_type,
+                    **({'sports_event_id': id} if media_type == 'sports' else {}),
                 )
+                if media_type == "sports" and not output_path:
+                    return "Unable to modify subtitles file. Check logs.", 409
                 postprocess_subtitles(
-                    subtitles_path, video_path, media_type, metadata, id,
+                    output_path if media_type == "sports" else subtitles_path,
+                    video_path, media_type, metadata, id,
                     arr_instance_id=arr_instance_id
                 )
+            except ValueError as exc:
+                if media_type != "sports":
+                    raise
+                return str(exc), 409
             except OSError:
                 return "Unable to edit subtitles file. Check logs.", 409
 
@@ -520,6 +643,22 @@ def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id, 
             logging.warning(
                 "BAZARR refusing to chmod a subtitle outside the video's subtitle folder: %s",
                 subtitles_path)
+
+    if media_type == "sports":
+        from sportarr.notify import notify_rescan
+        from subtitles.indexer.sports import store_subtitles_sports
+        from subtitles.processing import refresh_sports_media_servers
+
+        try:
+            store_subtitles_sports(id, arr_instance_id)
+        finally:
+            # Sync and mods already dispatch the individual file publication.
+            # Only the whole-library destinations need a refresh here.
+            refresh_sports_media_servers(
+                video_path, subtitles_path, arr_instance_id, publish_notification=False)
+            notify_rescan(arr_instance_id)
+        event_stream(type="sports", payload=id)
+        return
 
     if media_type == "episode":
         store_subtitles(path_mappings.path_replace_reverse_instance(video_path, arr_instance_id, 'episode'), video_path, arr_instance_id=arr_instance_id)

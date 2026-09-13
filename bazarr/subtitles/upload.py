@@ -24,7 +24,8 @@ from sonarr.history import history_log
 from arr_instances.resolution import scoped, client_for_instance
 from sonarr.notify import notify_sonarr
 from languages.custom_lang import CustomLanguage
-from app.database import (TableEpisodes, TableMovies, TableShows, get_profiles_list, get_audio_profile_languages,
+from app.database import (TableEpisodes, TableMovies, TableShows,
+                         get_profiles_list, get_audio_profile_languages,
                           database, select)
 from app.jobs_queue import jobs_queue
 from app.event_handler import event_stream
@@ -36,8 +37,9 @@ from subtitles.tools.subsync_engines import (SubtitlePublication, write_subtitle
 
 from .sync import sync_subtitles, _index_keep_all_outputs
 from .post_processing import postprocessing
-from plex.operations import plex_set_movie_added_date_now, plex_set_episode_added_date_now, plex_refresh_item
-from jellyfin.operations import jellyfin_refresh_item
+from plex.operations import (plex_set_movie_added_date_now, plex_set_episode_added_date_now, plex_refresh_item,
+                             plex_update_sports_library)
+from jellyfin.operations import jellyfin_refresh_item, jellyfin_update_sports_library
 
 
 def _refresh_uploaded_subtitles(video_path, subtitle_path, sonarr_series_id=None, sonarr_episode_id=None,
@@ -56,6 +58,33 @@ def _notify_upload(consumer, callback, *args, **kwargs):
 
 def _refresh_upload_consumers(media_type, metadata, arr_instance_id):
     callbacks = []
+    if media_type == 'sports':
+        # Sportarr offers only an untargeted whole-library scan, so one rescan
+        # per affected owner is requested behind the per-instance transport,
+        # non-blocking. The media servers key their library refresh on an
+        # identifier a sports event has not got, so their configured sports
+        # libraries are scanned instead. The event re-index is what makes the
+        # upload visible.
+        from sportarr.notify import notify_rescan
+        if settings.general.use_plex:
+            sports_library = settings.plex.sports_library
+            if isinstance(sports_library, str):
+                sports_library = [sports_library] if sports_library else []
+            if sports_library:
+                callbacks.append(('Plex', plex_update_sports_library))
+        if settings.general.use_jellyfin:
+            sports_library_ids = settings.jellyfin.sports_library_ids
+            if isinstance(sports_library_ids, str):
+                sports_library_ids = [sports_library_ids] if sports_library_ids else []
+            if sports_library_ids:
+                callbacks.append(('Jellyfin', jellyfin_update_sports_library))
+        notify_rescan(arr_instance_id)
+        for consumer, callback in callbacks:
+            try:
+                callback()
+            except Exception as exc:
+                logging.warning('BAZARR upload refresh failed for %s (%s)', consumer, type(exc).__name__)
+        return
     if media_type == 'series':
         callbacks.append(('Sonarr', lambda: notify_sonarr(
             metadata.sonarrSeriesId,
@@ -105,9 +134,15 @@ def _profile_original_format(profile_id):
 
 
 def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, filename, audio_language, job_id=None,
-                           sonarrSeriesId=None, sonarrEpisodeId=None, radarrId=None, arr_instance_id=None):
+                           sonarrSeriesId=None, sonarrEpisodeId=None, radarrId=None, arr_instance_id=None,
+                           sportsEventId=None):
     if not job_id:
         return jobs_queue.add_job_from_function(f"Uploading {filename}", is_progress=False)
+
+    if media_type == 'sports':
+        from sportarr.upload import upload_sports_subtitle
+        return upload_sports_subtitle(sportsEventId, arr_instance_id, language, forced, hi,
+                                      subtitle, filename, job_id)
 
     logging.debug(f'BAZARR Manually uploading subtitles: {filename}')  # noqa: G004
 
@@ -333,8 +368,10 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
                 if settings.plex.set_movie_added:
                     _notify_upload("Plex added date", plex_set_movie_added_date_now, movie_metadata)
 
-    refresh_consumers = partial(_refresh_upload_consumers, media_type,
-                                episode_metadata if media_type == 'series' else movie_metadata, arr_instance_id)
+    refresh_consumers = partial(
+        _refresh_upload_consumers, media_type,
+        episode_metadata if media_type == 'series' else movie_metadata,
+        arr_instance_id)
     refresh_consumers()
     if source_publication is not None:
         sync_subtitles(video_path=path, srt_path=subtitle_path, srt_lang=uploaded_language_code2,

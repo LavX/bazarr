@@ -118,7 +118,10 @@ function submitForm(submitButtonName: string | RegExp): void {
   fireEvent.submit(form);
 }
 
-function renderAdd(kind: "sonarr" | "radarr" = "sonarr", onClose = vi.fn()) {
+function renderAdd(
+  kind: "sonarr" | "radarr" | "sportarr" = "sonarr",
+  onClose = vi.fn(),
+) {
   customRender(
     <InstanceFormModal opened kind={kind} instance={null} onClose={onClose} />,
   );
@@ -485,12 +488,15 @@ describe("InstanceFormModal, edit mode", () => {
 // ---------------------------------------------------------------------------
 
 describe("InstanceFormModal, default language profile", () => {
-  it("starts on the explicit global-default choice for a new instance", () => {
-    renderAdd("sonarr");
-    expect(
-      screen.getByRole("combobox", { name: /profile for newly synced/i }),
-    ).toHaveValue("Use the global default");
-  });
+  it.each(["sonarr", "radarr", "sportarr"] as const)(
+    "starts on the global-default choice for %s",
+    (kind) => {
+      renderAdd(kind);
+      expect(
+        screen.getByRole("combobox", { name: /profile for newly synced/i }),
+      ).toHaveValue("Use the global default");
+    },
+  );
 
   it("omits media_defaults from the create payload when nothing is picked", async () => {
     const user = userEvent.setup();

@@ -33,11 +33,18 @@ export type BatchAction =
   | "upgrade";
 
 export interface BatchItem {
-  type: "episode" | "movie" | "series";
+  // "sports" names an event, as it does everywhere else in the sports code,
+  // and "sportsLeague" names a league the way "series" names a show.
+  type: "episode" | "movie" | "series" | "sports" | "sportsLeague";
   sonarrSeriesId?: number;
   sonarrEpisodeId?: number;
   radarrId?: number;
-  // Owning Sonarr/Radarr instance id (#156) so the batch routes per instance.
+  // Local ids, not upstream ones: sports rows are addressed by primary key.
+  sportsEventId?: number;
+  sportsLeagueId?: number;
+  // Owning Sonarr/Radarr/Sportarr instance id (#156) so the batch routes per
+  // instance. Required for sports: a sports path mapping is always per
+  // instance, with no global mapping to fall back on.
   arr_instance_id?: number;
 }
 
@@ -92,11 +99,18 @@ interface UpgradableSeriesKey {
   arr_instance_id?: number | null;
 }
 
+export interface UpgradableSportsKey {
+  sportsLeagueId: number;
+  arr_instance_id?: number | null;
+}
+
 export interface UpgradableResponse {
   movies: number[];
   series: number[];
+  sports?: number[];
   movieKeys?: UpgradableMovieKey[];
   seriesKeys?: UpgradableSeriesKey[];
+  sportsKeys?: UpgradableSportsKey[];
 }
 
 export interface ArchiveExtractedFile {
@@ -109,6 +123,15 @@ export interface ArchiveExtractResponse {
   files: ArchiveExtractedFile[];
   count: number;
 }
+
+// One place mapping a media type to its subtitle route segment. It used to be
+// an inline "episode ? episodes : movies" in each caller, which silently sent
+// a sports event to the movies route.
+const SUBTITLE_ROUTE_BASE: Record<string, string> = {
+  episode: "episodes",
+  movie: "movies",
+  sports: "sports/events",
+};
 
 class SubtitlesApi extends BaseApi {
   constructor() {
@@ -151,6 +174,19 @@ class SubtitlesApi extends BaseApi {
     return response.data;
   }
 
+  async getRefTracksBySportsEventId(
+    subtitlesPath: string,
+    sportsEventId: number,
+    arrInstanceId?: number,
+  ) {
+    const response = await this.get<DataWrapper<Item.RefTracks>>("", {
+      subtitlesPath,
+      sportsEventId,
+      arr_instance_id: arrInstanceId,
+    });
+    return response.data;
+  }
+
   async info(names: string[]) {
     const response = await this.get<DataWrapper<SubtitleInfo[]>>(`/info`, {
       filenames: names,
@@ -181,13 +217,15 @@ class SubtitlesApi extends BaseApi {
   }
 
   async downloadFile(
-    mediaType: "episode" | "movie",
+    mediaType: "episode" | "movie" | "sports",
     mediaId: number,
     language: string,
     arrInstanceId?: number,
   ) {
     // language is the viewer/editor language key ("en", "en:hi", ...).
-    const base = mediaType === "episode" ? "episodes" : "movies";
+    // mediaId is the upstream id for episodes and movies, the local event id
+    // for sports.
+    const base = SUBTITLE_ROUTE_BASE[mediaType];
     return client.axios.get<Blob>(
       `/${base}/${mediaId}/subtitles/${encodeURIComponent(language)}/download`,
       { params: { arr_instance_id: arrInstanceId }, responseType: "blob" },
@@ -200,7 +238,7 @@ class SubtitlesApi extends BaseApi {
     language: string,
     arrInstanceId?: number,
   ) {
-    const base = mediaType === "episode" ? "episodes" : "movies";
+    const base = SUBTITLE_ROUTE_BASE[mediaType] ?? "movies";
     const url = `/${base}/${mediaId}/subtitles/${encodeURIComponent(language)}/content`;
     const response = await client.axios.get<SubtitleContentResponse>(url, {
       params: { arr_instance_id: arrInstanceId },
@@ -220,7 +258,7 @@ class SubtitlesApi extends BaseApi {
     etag?: string,
     arrInstanceId?: number,
   ) {
-    const base = mediaType === "episode" ? "episodes" : "movies";
+    const base = SUBTITLE_ROUTE_BASE[mediaType] ?? "movies";
     const url = `/${base}/${mediaId}/subtitles/${encodeURIComponent(language)}/content`;
     const headers: Record<string, string> = {};
     if (etag) {
@@ -241,7 +279,7 @@ class SubtitlesApi extends BaseApi {
     sourceLanguage: string,
     arrInstanceId?: number,
   ) {
-    const base = mediaType === "episode" ? "episodes" : "movies";
+    const base = SUBTITLE_ROUTE_BASE[mediaType] ?? "movies";
     const url = `/${base}/${mediaId}/subtitles/${encodeURIComponent(targetLanguage)}/promote`;
     const response = await client.axios.post<{
       sourceLanguage: string;
@@ -257,7 +295,7 @@ class SubtitlesApi extends BaseApi {
     language: string,
     arrInstanceId?: number,
   ): Promise<SubtitleSyncStatus> {
-    const base = mediaType === "episode" ? "episodes" : "movies";
+    const base = SUBTITLE_ROUTE_BASE[mediaType] ?? "movies";
     const url = `/${base}/${mediaId}/subtitles/${encodeURIComponent(language)}/sync-status`;
     const response = await client.axios.get<SubtitleSyncStatus>(url, {
       params: { arr_instance_id: arrInstanceId },
@@ -275,8 +313,11 @@ class SubtitlesApi extends BaseApi {
     hi: boolean,
     arrInstanceId?: number,
   ) {
-    const base = mediaType === "episode" ? "episodes" : "movies";
-    const url = `/${base}/${mediaId}/subtitles`;
+    const base = SUBTITLE_ROUTE_BASE[mediaType] ?? "movies";
+    // /sports/events/<id>/subtitles is the indexer's own POST, so creating a
+    // subtitle there needs its own path rather than a second handler on that one.
+    const suffix = mediaType === "sports" ? "subtitles/create" : "subtitles";
+    const url = `/${base}/${mediaId}/${suffix}`;
     const response = await client.axios.post<{
       path: string;
       language: string;

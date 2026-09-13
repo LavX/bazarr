@@ -43,8 +43,9 @@ declare namespace FormType {
   }
 
   interface ModifySubtitle {
+    /** episodeId, radarrId, or the local sports event id. */
     id: number;
-    type: "episode" | "movie";
+    type: "episode" | "movie" | "sports";
     language: string;
     /** File path. Empty string signals an embedded track, backend extracts it. */
     path: string;

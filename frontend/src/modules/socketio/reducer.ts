@@ -14,6 +14,13 @@ import { setOnlineStatus } from "@/utilities/event";
 export function createDefaultReducer(): SocketIO.Reducer[] {
   return [
     {
+      key: "sports",
+      any: () => {
+        void queryClient.invalidateQueries({ queryKey: [QueryKeys.Sports] });
+        void queryClient.invalidateQueries({ queryKey: [QueryKeys.Badges] });
+      },
+    },
+    {
       key: "connect",
       any: () => setOnlineStatus(true),
     },

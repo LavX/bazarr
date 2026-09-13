@@ -170,6 +170,7 @@ validators = [
     Validator('general.external_webhook_password', must_exist=True, default='', is_type_of=str),
     Validator('general.use_sonarr', must_exist=True, default=False, is_type_of=bool),
     Validator('general.use_radarr', must_exist=True, default=False, is_type_of=bool),
+    Validator('general.use_sportarr', must_exist=True, default=False, is_type_of=bool),
     Validator('general.use_plex', must_exist=True, default=False, is_type_of=bool),
     Validator('general.use_jellyfin', must_exist=True, default=False, is_type_of=bool),
     Validator('general.use_emby', must_exist=True, default=False, is_type_of=bool),
@@ -178,19 +179,24 @@ validators = [
     # never auto-triggers again. Defaults False on a fresh install.
     Validator('general.setup_complete', must_exist=True, default=False, is_type_of=bool),
     Validator('general.path_mappings_movie', must_exist=True, default=[], is_type_of=list),
+    Validator('general.path_mappings_sports', must_exist=True, default=[], is_type_of=list),
     Validator('general.serie_tag_enabled', must_exist=True, default=False, is_type_of=bool),
     Validator('general.movie_tag_enabled', must_exist=True, default=False, is_type_of=bool),
+    Validator('general.sports_tag_enabled', must_exist=True, default=False, is_type_of=bool),
     Validator('general.remove_profile_tags', must_exist=True, default=[], is_type_of=list, condition=validate_tags),
     Validator('general.serie_default_enabled', must_exist=True, default=False, is_type_of=bool),
     Validator('general.serie_default_profile', must_exist=True, default='', is_type_of=(int, str)),
     Validator('general.movie_default_enabled', must_exist=True, default=False, is_type_of=bool),
     Validator('general.movie_default_profile', must_exist=True, default='', is_type_of=(int, str)),
+    Validator('general.sports_default_enabled', must_exist=True, default=False, is_type_of=bool),
+    Validator('general.sports_default_profile', must_exist=True, default='', is_type_of=(int, str)),
     Validator('general.page_size', must_exist=True, default=25, is_type_of=int,
               is_in=[25, 50, 100, 250, 500, 1000]),
     Validator('general.theme', must_exist=True, default='auto', is_type_of=str,
               is_in=['auto', 'light', 'dark']),
     Validator('general.show_live_badge', must_exist=True, default=True, is_type_of=bool),
     Validator('general.minimum_score_movie', must_exist=True, default=70, is_type_of=int, gte=0, lte=100),
+    Validator('general.minimum_score_sports', must_exist=True, default=70, is_type_of=int, gte=0, lte=100),
     Validator('general.use_embedded_subs', must_exist=True, default=True, is_type_of=bool),
     Validator('general.embedded_subs_show_desired', must_exist=True, default=True, is_type_of=bool),
     Validator('general.utf8_encode', must_exist=True, default=True, is_type_of=bool),
@@ -231,6 +237,8 @@ validators = [
     Validator('general.wanted_search_frequency', must_exist=True, default=6, is_type_of=int, 
               is_in=[6, 12, 24, 168, ONE_HUNDRED_YEARS_IN_HOURS]),
     Validator('general.wanted_search_frequency_movie', must_exist=True, default=6, is_type_of=int,
+              is_in=[6, 12, 24, 168, ONE_HUNDRED_YEARS_IN_HOURS]),
+    Validator('general.wanted_search_frequency_sports', must_exist=True, default=6, is_type_of=int,
               is_in=[6, 12, 24, 168, ONE_HUNDRED_YEARS_IN_HOURS]),
     Validator('general.subzero_mods', must_exist=True, default='', is_type_of=str),
     Validator('general.subzero_mods_keep_lyrics', must_exist=True, default=False, is_type_of=bool),
@@ -352,6 +360,27 @@ validators = [
     Validator('radarr.sync_only_monitored_movies', must_exist=True, default=False, is_type_of=bool),
     Validator('radarr.verify_ssl', must_exist=True, default=False, is_type_of=bool),
 
+    # sportarr section. Behavioural and schedule settings only: connection
+    # details live exclusively in the arr_instances table, because Sportarr has
+    # no single-instance compat path that reads scalars the way sonarr and
+    # radarr do.
+    Validator('sportarr.sports_sync', must_exist=True, default=60, is_type_of=int,
+              is_in=[15, 60, 180, 360, 720, 1440, 10080, ONE_HUNDRED_YEARS_IN_MINUTES]),
+    Validator('sportarr.full_update', must_exist=True, default='Daily', is_type_of=str,
+              is_in=['Manually', 'Daily', 'Weekly']),
+    Validator('sportarr.full_update_day', must_exist=True, default=6, is_type_of=int, gte=0, lte=6),
+    Validator('sportarr.full_update_hour', must_exist=True, default=4, is_type_of=int, gte=0, lte=23),
+    Validator('sportarr.only_monitored', must_exist=True, default=False, is_type_of=bool),
+    Validator('sportarr.sync_only_monitored_leagues', must_exist=True, default=False, is_type_of=bool),
+    Validator('sportarr.sync_only_monitored_events', must_exist=True, default=False, is_type_of=bool),
+    Validator('sportarr.excluded_tags', must_exist=True, default=[], is_type_of=list, condition=validate_tags),
+    Validator('sportarr.excluded_sports', must_exist=True, default=[], is_type_of=list),
+    Validator('sportarr.search_on_sync', must_exist=True, default=True, is_type_of=bool),
+    Validator('sportarr.use_ffprobe_cache', must_exist=True, default=True, is_type_of=bool),
+    # Marker for the one-time enable-flag reconcile in app/database.py. Not a
+    # user setting and not surfaced in the UI.
+    Validator('sportarr.enable_reconciled', must_exist=True, default=False, is_type_of=bool),
+
     # plex section
     Validator('plex.ip', must_exist=True, default='127.0.0.1', is_type_of=str),
     Validator('plex.port', must_exist=True, default=32400, is_type_of=int, gte=1, lte=65535),
@@ -361,6 +390,8 @@ validators = [
     Validator('plex.series_library', must_exist=True, default=[], is_type_of=(str, list)),
     Validator('plex.movie_library_ids', must_exist=True, default=[], is_type_of=list),
     Validator('plex.series_library_ids', must_exist=True, default=[], is_type_of=list),
+    Validator('plex.sports_library', must_exist=True, default=[], is_type_of=(str, list)),
+    Validator('plex.sports_library_ids', must_exist=True, default=[], is_type_of=list),
     Validator('plex.set_movie_added', must_exist=True, default=False, is_type_of=bool),
     Validator('plex.set_episode_added', must_exist=True, default=False, is_type_of=bool),
     Validator('plex.update_movie_library', must_exist=True, default=False, is_type_of=bool),
@@ -403,6 +434,8 @@ validators = [
     Validator('jellyfin.series_library', must_exist=True, default=[], is_type_of=list),
     Validator('jellyfin.movie_library_ids', must_exist=True, default=[], is_type_of=list),
     Validator('jellyfin.series_library_ids', must_exist=True, default=[], is_type_of=list),
+    Validator('jellyfin.sports_library', must_exist=True, default=[], is_type_of=list),
+    Validator('jellyfin.sports_library_ids', must_exist=True, default=[], is_type_of=list),
     Validator('jellyfin.update_movie_library', must_exist=True, default=False, is_type_of=bool),
     Validator('jellyfin.update_series_library', must_exist=True, default=False, is_type_of=bool),
     Validator('jellyfin.refresh_method', must_exist=True, default='immediate', is_type_of=str,
@@ -883,6 +916,8 @@ array_keys = ['excluded_tags',
               'openrouter_provider_order',
               'path_mappings',
               'path_mappings_movie',
+              'path_mappings_sports',
+              'excluded_sports',
               'remove_profile_tags',
               'language_equals',
               'blacklisted_languages',
@@ -890,7 +925,9 @@ array_keys = ['excluded_tags',
               'movie_library',
               'series_library',
               'movie_library_ids',
-              'series_library_ids']
+              'series_library_ids',
+              'sports_library',
+              'sports_library_ids']
 
 empty_values = ['', 'None', 'null', 'undefined', None, []]
 
@@ -1243,11 +1280,13 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
     update_schedule = False
     sonarr_changed = False
     radarr_changed = False
+    sportarr_changed = False
     update_path_map = False
     configure_proxy = False
     exclusion_updated = False
     sonarr_exclusion_updated = False
     radarr_exclusion_updated = False
+    sportarr_exclusion_updated = False
     use_embedded_subs_changed = False
     undefined_audio_track_default_changed = False
     undefined_subtitles_track_default_changed = False
@@ -1298,7 +1337,7 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             value = []
 
         # Handle path mappings settings since they are array in array
-        if settings_keys[-1] in ['path_mappings', 'path_mappings_movie']:
+        if settings_keys[-1] in ['path_mappings', 'path_mappings_movie', 'path_mappings_sports']:
             value = [x.split(',') for x in value if isinstance(x, str)]
 
         if value == 'true':
@@ -1354,11 +1393,16 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             configure_captcha = True
 
         if key in ['update_schedule', 'settings-general-use_sonarr', 'settings-general-use_radarr',
+                   'settings-general-use_sportarr',
                    'settings-general-auto_update', 'settings-general-upgrade_subs',
                    'settings-sonarr-series_sync', 'settings-radarr-movies_sync',
+                   'settings-sportarr-sports_sync',
                    'settings-sonarr-full_update', 'settings-sonarr-full_update_day', 'settings-sonarr-full_update_hour',
                    'settings-radarr-full_update', 'settings-radarr-full_update_day', 'settings-radarr-full_update_hour',
+                   'settings-sportarr-full_update', 'settings-sportarr-full_update_day',
+                   'settings-sportarr-full_update_hour',
                    'settings-general-wanted_search_frequency', 'settings-general-wanted_search_frequency_movie',
+                   'settings-general-wanted_search_frequency_sports',
                    'settings-general-upgrade_frequency', 'settings-backup-frequency', 'settings-backup-day',
                    'settings-backup-hour']:
             update_schedule = True
@@ -1371,7 +1415,16 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
                    'settings-radarr-base_url', 'settings-radarr-ssl', 'settings-radarr-apikey']:
             radarr_changed = True
 
-        if key in ['settings-general-path_mappings', 'settings-general-path_mappings_movie']:
+        # Sports has no scalar connection block: its instances live in
+        # arr_instances and their own edits already refresh the runtime. The
+        # master toggle is the one sports setting that does not, and without
+        # this the event streams kept running after it was switched off, until
+        # a restart or an unrelated instance edit happened to refresh them.
+        if key == 'settings-general-use_sportarr':
+            sportarr_changed = True
+
+        if key in ['settings-general-path_mappings', 'settings-general-path_mappings_movie',
+                   'settings-general-path_mappings_sports']:
             update_path_map = True
 
         if key in ['settings-proxy-type', 'settings-proxy-url', 'settings-proxy-port', 'settings-proxy-username',
@@ -1380,8 +1433,14 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
 
         if key in ['settings-sonarr-excluded_tags', 'settings-sonarr-only_monitored',
                    'settings-sonarr-excluded_series_types', 'settings-sonarr-exclude_season_zero',
-                   'settings-radarr-excluded_tags', 'settings-radarr-only_monitored']:
+                   'settings-radarr-excluded_tags', 'settings-radarr-only_monitored',
+                   'settings-sportarr-excluded_tags', 'settings-sportarr-excluded_sports',
+                   'settings-sportarr-only_monitored']:
             exclusion_updated = True
+
+        if key in ['settings-sportarr-excluded_tags', 'settings-sportarr-excluded_sports',
+                   'settings-sportarr-only_monitored']:
+            sportarr_exclusion_updated = True
 
         if key in ['settings-sonarr-excluded_tags', 'settings-sonarr-only_monitored',
                    'settings-sonarr-excluded_series_types', 'settings-sonarr-exclude_season_zero']:
@@ -1523,6 +1582,9 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
         if settings.general.use_radarr:
             list_missing_subtitles_movies()
 
+        from subtitles.indexer.sports import list_missing_subtitles_sports
+        list_missing_subtitles_sports()
+
     if undefined_subtitles_track_default_changed:
         from .scheduler import scheduler
         from subtitles.indexer.series import series_full_scan_subtitles
@@ -1531,6 +1593,10 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             series_full_scan_subtitles(use_cache=True)
         if settings.general.use_radarr:
             movies_full_scan_subtitles(use_cache=True)
+
+    if undefined_subtitles_track_default_changed or use_embedded_subs_changed:
+        from subtitles.indexer.sports import sports_full_scan_subtitles
+        sports_full_scan_subtitles()
 
     if audio_tracks_parsing_changed:
         from .scheduler import scheduler
@@ -1641,6 +1707,16 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             except Exception:
                 pass
 
+        if sportarr_changed:
+            # Streams and jobs together: configure_sports_jobs is gated on the
+            # same toggle, so leaving it out would stop the streams and leave
+            # the scheduled sports jobs registered.
+            from sportarr.scheduler import refresh_sports_runtime
+            try:
+                refresh_sports_runtime()
+            except Exception:
+                pass
+
         if update_path_map:
             from utilities.path_mappings import path_mappings
             path_mappings.update()
@@ -1655,6 +1731,12 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
                 event_stream(type='reset-episode-wanted')
             if radarr_exclusion_updated:
                 event_stream(type='reset-movie-wanted')
+            # The sports wanted list is computed live against the exclusion
+            # settings, so saving them has to invalidate the client's cached
+            # sports rows. The 'sports' event is the one the socketio reducer
+            # maps to the whole sports query root, wanted included.
+            if sportarr_exclusion_updated:
+                event_stream(type='sports')
 
 
 def get_array_from(property):
