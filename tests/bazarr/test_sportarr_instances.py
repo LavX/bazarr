@@ -315,8 +315,11 @@ def test_sportarr_crud_through_existing_http_wrappers(schema_session, monkeypatc
     from flask_restx import Api
     from app.config import settings
     import secret_store
+    from arr_instances import service
     from arr_instances.repository import ArrInstanceRepository
 
+    emissions = []
+    monkeypatch.setattr(service, 'event_stream', lambda **kw: emissions.append(kw))
     endpoints = _load_endpoints(monkeypatch)
     monkeypatch.setattr(endpoints, "database", schema_session)
     monkeypatch.setattr(secret_store, "persist_master_key", lambda: None)
@@ -328,6 +331,7 @@ def test_sportarr_crud_through_existing_http_wrappers(schema_session, monkeypatc
     response = client.post("/system/arr-instances", headers=headers, json={
         "kind": "sportarr", "name": "Sports", "api_key": "fixture-secret"})
     assert response.status_code == 201
+    assert emissions == [{'type': 'sports'}]
     instance_id = response.json["id"]
     assert response.json["port"] == 1867
     assert "fixture-secret" not in response.get_data(as_text=True)
@@ -344,6 +348,7 @@ def test_sportarr_crud_through_existing_http_wrappers(schema_session, monkeypatc
     response = client.patch(f"/system/arr-instances/{instance_id}", headers=headers,
                             json={"name": "Updated", "enabled": False, "sports_settings": {"minimum_score": 0}})
     assert response.status_code == 200
+    assert emissions == [{'type': 'sports'}, {'type': 'sports'}]
     assert response.json["enabled"] is False
     assert response.json["name"] == "Updated"
     assert response.json["sports_settings"] == {"minimum_score": 0}
@@ -351,6 +356,7 @@ def test_sportarr_crud_through_existing_http_wrappers(schema_session, monkeypatc
     response = client.delete(f"/system/arr-instances/{instance_id}", headers=headers)
     assert response.status_code == 204
     assert ArrInstanceRepository(schema_session).get(instance_id) is None
+    assert emissions == [{'type': 'sports'}, {'type': 'sports'}, {'type': 'sports'}]
 
 
 def test_sportarr_queued_profile_reindex_does_not_use_movie_indexer(monkeypatch, schema_session):
