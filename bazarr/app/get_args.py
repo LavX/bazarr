@@ -45,8 +45,9 @@ parser.register('type', bool, strtobool)
 # a test run beside a running instance from the same tree, silently operate on
 # one database and delete each other's rows. Absent this variable the behaviour
 # is exactly what it was.
-config_dir = os.environ.get('BAZARR_CONFIG_DIR', '').strip() or os.path.realpath(
-    os.path.join(os.path.dirname(os.path.dirname(__file__)), '..', 'data'))
+config_dir = os.path.realpath(
+    os.environ.get('BAZARR_CONFIG_DIR', '').strip()
+    or os.path.join(os.path.dirname(os.path.dirname(__file__)), '..', 'data'))
 parser.add_argument('-c', '--config', default=config_dir, type=str, metavar="DIR",
                     dest="config_dir", help="Directory containing the configuration (default: %s)" % config_dir)
 parser.add_argument('-p', '--port', type=int, metavar="PORT", dest="port",

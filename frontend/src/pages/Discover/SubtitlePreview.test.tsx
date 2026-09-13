@@ -102,6 +102,7 @@ const snapshot: DiscoverSearchSnapshot = {
   })),
 };
 const cue = "Hello <script>alert(1)</script>";
+const displayedCue = "Hello alert(1)";
 let changeDraft: ReturnType<typeof useDiscover>["updateDraft"];
 let changeTheme: () => void;
 let findSubtitles: ReturnType<typeof useDiscover>["findSubtitles"];
@@ -194,13 +195,13 @@ beforeEach(() => {
     ),
   );
 });
-it("renders an inline preview with literal cues and retained forced-row identity for download", async () => {
+it("renders safe inline cues with a raw view and retains forced-row download identity", async () => {
   const { user } = renderPreview();
   const opener = await open(user);
   const modal = within(
     await screen.findByRole("region", { name: "Text preview" }),
   );
-  expect(await modal.findByText(cue)).toBeInTheDocument();
+  expect(await modal.findByText(displayedCue)).toBeInTheDocument();
   expect(modal.getByText(/Northern Light S02 E01/)).toBeInTheDocument();
   expect(
     modal.getAllByText(/Northern\.Light\.S02E01\.forced/)[0],
@@ -208,9 +209,14 @@ it("renders an inline preview with literal cues and retained forced-row identity
   expect(
     modal.getByText(/Timing against your video has not been checked/),
   ).toBeInTheDocument();
+  expect(modal.getByText(displayedCue)).toContainHTML("Hello alert(1)");
+  await user.click(modal.getByRole("button", { name: "Raw text" }));
+  expect(modal.getByText(cue)).toHaveTextContent(cue);
   expect(modal.getByText(cue)).toContainHTML(
     "Hello &lt;script&gt;alert(1)&lt;/script&gt;",
   );
+  await user.click(modal.getByRole("button", { name: "Raw text" }));
+  expect(modal.getByText(displayedCue)).toBeVisible();
   expect(previewRequests).toEqual([
     { result: "exact-forced", search: "original-search", authenticated: true },
   ]);
@@ -228,12 +234,12 @@ it("renders an inline preview with literal cues and retained forced-row identity
 it("preserves ready preview across theme and local navigation and closes exactly once", async () => {
   const { user, router } = renderPreview();
   await open(user);
-  await screen.findByText(cue);
+  await screen.findByText(displayedCue);
   act(() => changeTheme());
   await act(() => router.navigate("/activity"));
-  expect(screen.queryByText(cue)).not.toBeInTheDocument();
+  expect(screen.queryByText(displayedCue)).not.toBeInTheDocument();
   await act(() => router.navigate("/discover"));
-  expect(screen.getByText(cue)).toBeInTheDocument();
+  expect(screen.getByText(displayedCue)).toBeInTheDocument();
   await user.click(
     within(screen.getByRole("region", { name: "Text preview" })).getByRole(
       "button",
@@ -308,7 +314,7 @@ it.each(changes)(
         screen.queryByRole("region", { name: "Text preview" }),
       ).not.toBeInTheDocument(),
     );
-    expect(screen.queryByText(cue)).not.toBeInTheDocument();
+    expect(screen.queryByText(displayedCue)).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Preview" }),
     ).not.toBeInTheDocument();
@@ -317,14 +323,14 @@ it.each(changes)(
 it("clears preview on authentication loss", async () => {
   const { user } = renderPreview();
   await open(user);
-  await screen.findByText(cue);
+  await screen.findByText(displayedCue);
   act(() => setAuthenticated(false));
   await waitFor(() =>
     expect(
       screen.queryByRole("region", { name: "Text preview" }),
     ).not.toBeInTheDocument(),
   );
-  expect(screen.queryByText(cue)).not.toBeInTheDocument();
+  expect(screen.queryByText(displayedCue)).not.toBeInTheDocument();
 });
 it("shows parser recovery without invented cues and retires an expired row", async () => {
   server.use(
@@ -337,7 +343,7 @@ it("shows parser recovery without invented cues and retires an expired row", asy
   expect(
     await screen.findByText(/valid subtitle for preview/),
   ).toBeInTheDocument();
-  expect(screen.queryByText(cue)).not.toBeInTheDocument();
+  expect(screen.queryByText(displayedCue)).not.toBeInTheDocument();
   server.use(
     http.get("/api/discover/preview", () =>
       HttpResponse.json({ reason: "result_expired" }, { status: 410 }),
@@ -412,14 +418,14 @@ it.each(changes)(
   async (_name, changes) => {
     const { user } = renderPreview();
     await open(user);
-    await screen.findByText(cue);
+    await screen.findByText(displayedCue);
     act(() => changeDraft(changes));
     await waitFor(() =>
       expect(
         screen.queryByRole("region", { name: "Text preview" }),
       ).not.toBeInTheDocument(),
     );
-    expect(screen.queryByText(cue)).not.toBeInTheDocument();
+    expect(screen.queryByText(displayedCue)).not.toBeInTheDocument();
   },
 );
 
@@ -460,7 +466,7 @@ it("never reopens a preview closed while its bytes were pending", async () => {
     ).not.toBeInTheDocument(),
   );
   expect(opener).toHaveFocus();
-  expect(screen.queryByText(cue)).not.toBeInTheDocument();
+  expect(screen.queryByText(displayedCue)).not.toBeInTheDocument();
 });
 
 it("retains raw preview during inactive episode updates and invalidates it on query changes", async () => {
@@ -492,12 +498,12 @@ it("retains raw preview during inactive episode updates and invalidates it on qu
   await act(() => findSubtitles());
   await screen.findByRole("heading", { name: "Northern.Light.S02E01.forced" });
   await user.click(forcedRow().getByRole("button", { name: "Preview" }));
-  await screen.findByText(cue);
+  await screen.findByText(displayedCue);
   expect(screen.getByText(/unverified release query/)).toBeInTheDocument();
   act(() =>
     changeDraft({ episodeIdentity: { ...episode, id: 402 }, showTvdbId: 102 }),
   );
-  expect(screen.getByText(cue)).toBeInTheDocument();
+  expect(screen.getByText(displayedCue)).toBeInTheDocument();
   act(() => changeDraft({ query: "Northern.Light.S02E02" }));
   await waitFor(() =>
     expect(
@@ -524,7 +530,7 @@ it("clears actual preview state after the authenticated client receives 401", as
       screen.queryByRole("region", { name: "Text preview" }),
     ).not.toBeInTheDocument(),
   );
-  expect(screen.queryByText(cue)).not.toBeInTheDocument();
+  expect(screen.queryByText(displayedCue)).not.toBeInTheDocument();
 });
 
 it("rejects a preview response for a different exact result", async () => {
@@ -543,16 +549,16 @@ it("rejects a preview response for a different exact result", async () => {
   const { user } = renderPreview();
   await open(user);
   await screen.findByText(/valid subtitle for preview/);
-  expect(screen.queryByText(cue)).not.toBeInTheDocument();
+  expect(screen.queryByText(displayedCue)).not.toBeInTheDocument();
 });
 
 it("retains the preview on failed refresh but discards it when refreshed results remove its row", async () => {
   const { user } = renderPreview();
   await open(user);
-  await screen.findByText(cue);
+  await screen.findByText(displayedCue);
   server.use(http.post("/api/discover/search", () => HttpResponse.error()));
   await act(() => findSubtitles(true));
-  expect(screen.getByText(cue)).toBeInTheDocument();
+  expect(screen.getByText(displayedCue)).toBeInTheDocument();
   server.use(
     http.post("/api/discover/search", () =>
       HttpResponse.json({ ...snapshot, search_id: "replacement", results: [] }),
@@ -564,13 +570,13 @@ it("retains the preview on failed refresh but discards it when refreshed results
       screen.queryByRole("region", { name: "Text preview" }),
     ).not.toBeInTheDocument(),
   );
-  expect(screen.queryByText(cue)).not.toBeInTheDocument();
+  expect(screen.queryByText(displayedCue)).not.toBeInTheDocument();
 });
 
 it("closes the inline preview with Escape and returns focus to its result", async () => {
   const { user } = renderPreview();
   const opener = await open(user);
-  await screen.findByText(cue);
+  await screen.findByText(displayedCue);
   expect(screen.getByText("Text preview")).toHaveFocus();
   await user.keyboard("{Escape}");
   expect(

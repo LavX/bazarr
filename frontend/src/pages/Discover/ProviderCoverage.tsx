@@ -10,8 +10,8 @@ const outcomeLabels: Record<DiscoverProviderOutcome["status"], string> = {
   empty: "No matches",
   unverified:
     "No results returned for this unverified query. Provider query support could not be confirmed.",
-  authentication_required: "Sign in to this provider in provider settings",
-  setup_required: "Provider setup required",
+  ["authentication_required"]: "Sign in to this provider in provider settings",
+  ["setup_required"]: "Provider setup required",
   cooldown: "Provider is cooling down",
   unreachable: "Provider could not be reached",
   timeout: "Provider search timed out",
@@ -24,14 +24,14 @@ const outcomeLabels: Record<DiscoverProviderOutcome["status"], string> = {
 // provider that Discover cannot use is enabled and was skipped, so it is not
 // told to be enabled; it is told why it was skipped.
 const skipLabels: Record<string, string> = {
-  missing_configuration:
+  ["missing_configuration"]:
     "Required settings are missing. Configure this provider in the Subtitle Hub.",
-  automated_requests_blocked: "Website blocked automated requests",
-  requires_file:
+  ["automated_requests_blocked"]: "Website blocked automated requests",
+  ["requires_file"]:
     "Extracts subtitles from a local video. Select a library copy to use this provider.",
-  not_catalog_provider:
+  ["not_catalog_provider"]:
     "Built-in provider, skipped. Discover searches trusted catalog providers only.",
-  provider_unavailable:
+  ["provider_unavailable"]:
     "Not installed or not loaded, skipped. Check it in the Subtitle Hub.",
 };
 

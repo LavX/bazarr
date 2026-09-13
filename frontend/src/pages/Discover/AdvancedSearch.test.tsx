@@ -225,7 +225,7 @@ beforeEach(() => {
 });
 
 it("keeps metadata setup visible and requires explicit valid release query and language", async () => {
-  const { user, router } = renderDiscover();
+  const { user } = renderDiscover();
   await user.click(screen.getByLabelText("Search"));
   await screen.findByRole("button", {
     name: "Search providers by release name",
@@ -267,7 +267,7 @@ it("keeps metadata setup visible and requires explicit valid release query and l
 });
 
 it("downloads the exact raw row and recovers 410 with the original query and language", async () => {
-  const { user, router } = renderDiscover();
+  const { user } = renderDiscover();
   await rawSearch(user);
   await user.click(screen.getByRole("button", { name: "Download SRT" }));
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
@@ -305,7 +305,7 @@ it("downloads the exact raw row and recovers 410 with the original query and lan
 });
 
 it("preserves both mode inputs and retires incompatible results and feedback", async () => {
-  const { user, router } = renderDiscover();
+  const { user } = renderDiscover();
   await user.click(screen.getByRole("button", { name: "Select title" }));
   await screen.findByRole("heading", { name: "Find the subtitles you need" });
   await user.click(
@@ -337,7 +337,7 @@ it("preserves both mode inputs and retires incompatible results and feedback", a
 });
 
 it("keeps the active release draft and handles when accepted metadata reconciles", async () => {
-  const { user, router } = renderDiscover();
+  const { user } = renderDiscover();
   await rawSearch(user);
   await user.click(
     screen.getByRole("button", { name: "Accept fresh metadata" }),
@@ -368,7 +368,7 @@ it.each(["mode", "query"])(
         return HttpResponse.json(snapshot(context, "late"));
       }),
     );
-    const { user, router } = renderDiscover();
+    const { user } = renderDiscover();
     if (change === "mode") {
       await user.click(screen.getByRole("button", { name: "Select title" }));
       await screen.findByRole("heading", {
@@ -414,7 +414,7 @@ it("rejects a late raw download after switching mode away and back", async () =>
       });
     }),
   );
-  const { user, router } = renderDiscover();
+  const { user } = renderDiscover();
   await rawSearch(user);
   await user.click(screen.getByRole("button", { name: "Download SRT" }));
   await waitFor(() => expect(finish).toBeDefined());
@@ -457,7 +457,7 @@ it("keeps ambiguous release input and shows the server recovery message", async 
       ),
     ),
   );
-  const { user, router } = renderDiscover();
+  const { user } = renderDiscover();
   await releaseMode(user);
   await user.clear(screen.getByLabelText("Release name"));
   await user.type(screen.getByLabelText("Release name"), "Example.Show.E03");
@@ -494,7 +494,7 @@ it("does not label empty unverified provider output as no matches", async () => 
       }),
     ),
   );
-  const { user, router } = renderDiscover();
+  const { user } = renderDiscover();
   await releaseMode(user);
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
   await user.click(

@@ -25,7 +25,7 @@ class MetadataTest(Resource):
             return {"message": "Invalid connection check."}, 400
         try:
             if body.get("token") == "***":
-                raise ValueError("Enter a replacement token or test the saved token.")
+                return {"message": "Enter an optional TMDB override, or omit it to check the configured connection."}, 400
             return metadata.connection_status(body.get("token"), use_saved="token" not in body)
         except ValueError:
             return {"message": "Invalid TMDB access token."}, 400

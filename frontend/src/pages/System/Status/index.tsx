@@ -60,13 +60,21 @@ function Row(props: InfoProps): JSX.Element {
   const { title, children } = props;
   return (
     <Grid columns={10}>
-      <Grid.Col span={2}>
-        <Text size="sm" ta="right" fw="bold">
+      <Grid.Col span={{ base: 4, sm: 2 }} style={{ minWidth: 0 }}>
+        <Text
+          size="sm"
+          ta="right"
+          fw="bold"
+          style={{ overflowWrap: "anywhere" }}
+        >
           {title}
         </Text>
       </Grid.Col>
-      <Grid.Col span={3}>
-        <Text size="sm"> {children}</Text>
+      <Grid.Col span={{ base: 6, sm: 3 }} style={{ minWidth: 0 }}>
+        <Text component="div" size="sm" style={{ overflowWrap: "anywhere" }}>
+          {" "}
+          {children}
+        </Text>
       </Grid.Col>
     </Grid>
   );
