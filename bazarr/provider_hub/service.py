@@ -492,7 +492,9 @@ def _catalog_needs_auto_refresh(state: dict[str, Any]) -> bool:
     for source in (state.get("catalog_sources") or {}).values():
         if not isinstance(source, dict):
             continue
-        if source.get("enabled", True) and source.get("last_checked_at") is None:
+        if (source.get("enabled", True)
+                and source.get("last_checked_at") is None
+                and source.get("last_attempted_at") is None):
             return True
     return False
 

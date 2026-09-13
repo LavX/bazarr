@@ -52,6 +52,7 @@ def upstream(monkeypatch):
 
 @pytest.fixture
 def authenticated_client(upstream, monkeypatch):
+    monkeypatch.setattr("app.check_update._fetch_repo_releases", lambda *args, **kwargs: [])
     from api import api_bp
     from app.config import settings
     from compat import service
