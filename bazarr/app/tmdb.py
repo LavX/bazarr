@@ -8,7 +8,7 @@ rule exist, here, so the two surfaces can never drift apart.
 
 The key stays server side. It travels as a v3 `api_key` query parameter on the
 outbound request and never reaches a browser, a DTO, a log line or a cache key.
-A reader who wants their own key can set one in Discover settings, and the
+A reader who wants their own key can set one in Subtitle Hub, and the
 environment override exists for a deployment that wants a dedicated key without
 touching settings at all.
 """

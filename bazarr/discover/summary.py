@@ -502,7 +502,9 @@ def _history_candidates(connection, kind, instances, qualifications):
                             TableEpisodes.arr_instance_id.label("media_owner"),
                             TableEpisodes.season, TableEpisodes.episode,
                             TableEpisodes.title.label("episode_title"),
-                            TableShows.title.label("show_title"))
+                            TableShows.id.label("library_id"),
+                            TableShows.title.label("show_title"),
+                            TableShows.poster.label("poster_url"))
                      .select_from(TableHistory)
                      .outerjoin(TableEpisodes, TableHistory.episode_id == TableEpisodes.id)
                      .outerjoin(TableShows, TableHistory.series_id == TableShows.id)
@@ -515,7 +517,9 @@ def _history_candidates(connection, kind, instances, qualifications):
                             TableHistoryMovie.language, TableHistoryMovie.provider,
                             TableHistoryMovie.timestamp, TableHistoryMovie.arr_instance_id,
                             TableMovies.arr_instance_id.label("media_owner"),
-                            TableMovies.title.label("movie_title"))
+                            TableMovies.id.label("library_id"),
+                            TableMovies.title.label("movie_title"),
+                            TableMovies.poster.label("poster_url"))
                      .select_from(TableHistoryMovie)
                      .outerjoin(TableMovies, TableHistoryMovie.movie_id == TableMovies.id)
                      .where(and_(TableHistoryMovie.action != 7,
@@ -545,7 +549,8 @@ def _history_candidates(connection, kind, instances, qualifications):
         owner = row.arr_instance_id if row.arr_instance_id is not None else row.media_owner
         arrivals.append({
             "kind": kind, "event_id": f"{kind}:{row.id}", "status": "success",
-            "action": row.action, "title": title,
+            "action": row.action, "title": title, "poster_url": row.poster_url,
+            "library_id": row.library_id,
             "season": row.season if kind == "episode" else None,
             "episode": row.episode if kind == "episode" else None,
             "episode_title": row.episode_title if kind == "episode" else None,

@@ -878,3 +878,62 @@ def test_rootfolder_exact_mapping_checks_the_actual_root(library, monkeypatch):
 
     assert row.accessible == int(os.path.isdir("/") and os.access("/", os.W_OK))
     assert rootfolder.list_rootfolders(session, 1)["data"][0]["mapped_path"] == "/"
+
+
+def test_listing_batches_owned_sync_state_with_bounded_queries(library, monkeypatch, tmp_path):
+    from datetime import datetime
+    from app.database import TableArrInstances, TableSportsEvents, TableHistorySports
+    from app.config import settings
+    from sportarr import library as views, sync_status
+
+    session, _ = library
+    monkeypatch.setattr(settings.general, 'subfolder', 'current')
+    owner_folder = tmp_path / 'owner'
+    owner_folder.mkdir()
+    session.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 1).values(
+        path_mappings=json.dumps([['/sports', str(owner_folder)]])))
+    session.execute(sa.insert(TableSportsEvents), [dict(id=i, arr_instance_id=1 if i < 100 else 2,
+        league_id=51 if i < 100 else 52, sportarrEventId=i, file_id=i, path=f'/sports/event-{i}.mkv',
+        title=f'Event {i}', subtitles=str([['en', f'/sports/event-{i}.en.srt'],
+                                         ['fr:hi', f'/sports/event-{i}.fr.hi.srt']])) for i in range(1, 1100)])
+    for i in range(1, 100):
+        for language in ['en', 'fr.hi']:
+            path = owner_folder / f'event-{i}.{language}.srt'
+            path.write_text('subtitle')
+            import os
+            os.utime(path, (100, 100))
+    session.execute(sa.insert(TableHistorySports), [dict(arr_instance_id=owner,
+        league_id=51 if owner == 1 else 52, event_id=event_id, action=5,
+        subtitles_path=path, timestamp=datetime.fromtimestamp(timestamp)) for owner, event_id, path, timestamp in [
+            (1, 1, '/sports/event-1.en.srt', 110),
+            (1, 2, '/sports/event-2.en.srt', 90),
+            (2, 100, '/sports/event-3.en.srt', 110),
+        ]])
+    class CountedQueue(list):
+        reads = 0
+        def __iter__(self):
+            self.reads += 1
+            return super().__iter__()
+    running = CountedQueue([SimpleNamespace(status='running', job_id=9,
+        kwargs={'arr_instance_id': 1, 'sports_event_id': 1,
+                'srt_path': str(owner_folder / 'event-1.fr.hi.srt')})])
+    pending = CountedQueue()
+    monkeypatch.setattr(sync_status, 'jobs_queue', SimpleNamespace(
+        jobs_running_queue=running, jobs_pending_queue=pending))
+    statements = []
+    def count(conn, cursor, statement, parameters, context, many):
+        statements.append(statement)
+    sa.event.listen(session.get_bind(), 'before_cursor_execute', count)
+    try:
+        result = views.list_events(session, 51, 1, length=-1)
+    finally:
+        sa.event.remove(session.get_bind(), 'before_cursor_execute', count)
+    data = {row['id']: row for row in result['data']}
+    assert len(data) == 99
+    assert data[1]['sync_status']['en']['confirmed'] is True
+    assert data[1]['sync_status']['fr:hi']['jobStatus'] == 'running'
+    assert data[2]['sync_status']['en']['editedAfterSync'] is True
+    assert data[3]['sync_status']['en']['synced'] is False
+    assert (running.reads, pending.reads) == (1, 1)
+    assert len(statements) <= 8
+    assert sum('table_history_sports' in statement for statement in statements) == 1

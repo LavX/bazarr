@@ -1,5 +1,10 @@
 /* eslint-disable camelcase -- API fixtures retain transport field names. */
-import { createMemoryRouter, Link, RouterProvider } from "react-router";
+import {
+  createMemoryRouter,
+  Link,
+  RouterProvider,
+  useNavigate,
+} from "react-router";
 import { Button } from "@mantine/core";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
@@ -11,8 +16,12 @@ import { AllProviders } from "@/providers";
 import { rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import * as files from "@/utilities/files";
-import { pickOption, selectInput } from "./selectTestHelpers";
-import Discover from ".";
+import {
+  openReleaseSearch,
+  pickOption,
+  selectInput,
+} from "./selectTestHelpers";
+import Discover from "./testHarness";
 
 const query = "Example.Movie.2024.1080p.WEB-DL";
 const srt = "1\n00:00:03,000 --> 00:00:04,000\nRaw translation\n\n";
@@ -93,6 +102,24 @@ function ReconcileMetadata() {
     </Button>
   );
 }
+function SelectTitle() {
+  const navigate = useNavigate();
+  const { updateBrowsing } = useDiscover();
+  return (
+    <Button
+      onClick={() => {
+        void navigate("/discover?movie=42");
+        updateBrowsing({
+          selectedId: 42,
+          selectedType: "movie",
+          selectedSource: "tmdb",
+        });
+      }}
+    >
+      Select title
+    </Button>
+  );
+}
 function renderDiscover() {
   const router = createMemoryRouter(
     [
@@ -100,13 +127,14 @@ function renderDiscover() {
         path: "/discover",
         element: (
           <>
+            <SelectTitle />
             <ReconcileMetadata />
             <Discover />
           </>
         ),
       },
       {
-        path: "/settings/discover",
+        path: "/subtitle-hub",
         element: (
           <DiscoverSetupReturn>
             <Link to="/discover">Back</Link>
@@ -121,12 +149,16 @@ function renderDiscover() {
       <RouterProvider router={router} />
     </AllProviders>,
   );
-  return { user: userEvent.setup() };
+  return { user: userEvent.setup(), router };
+}
+async function enterReleasePage(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole("button", { name: "Select title" }));
+  await screen.findByRole("heading", { name: "Find the subtitles you need" });
+  await openReleaseSearch(user);
+  await screen.findByLabelText("Release name");
 }
 async function releaseMode(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(
-    screen.getByRole("button", { name: "Search providers by release name" }),
-  );
+  await enterReleasePage(user);
   await user.type(screen.getByLabelText("Release name"), query);
   await pickOption(user, "Subtitle language", "English");
 }
@@ -143,6 +175,16 @@ beforeEach(() => {
   save = vi.spyOn(files, "saveBlobAs").mockImplementation(() => undefined);
   save.mockClear();
   server.use(
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({
+        general: { theme: "auto" },
+        discover: {
+          tmdb_configured: false,
+          metadata_revision: "no-key",
+          locale: "en-US",
+        },
+      }),
+    ),
     http.get("/api/system/languages", () =>
       HttpResponse.json([
         { code3: "eng", name: "English" },
@@ -183,11 +225,15 @@ beforeEach(() => {
 });
 
 it("keeps metadata setup visible and requires explicit valid release query and language", async () => {
-  const { user } = renderDiscover();
-  await screen.findByText(/Set up TMDB/);
-  await user.click(
-    screen.getByRole("button", { name: "Search providers by release name" }),
-  );
+  const { user, router } = renderDiscover();
+  await user.click(screen.getByLabelText("Search"));
+  await screen.findByRole("button", {
+    name: "Search providers by release name",
+  });
+  await user.click(screen.getByRole("button", { name: "Select title" }));
+  await screen.findByRole("heading", { name: "Find the subtitles you need" });
+  await openReleaseSearch(user);
+  await screen.findByLabelText("Release name");
   expect(screen.getByText(/Advanced release-name search/)).toBeVisible();
   expect(screen.getByText(/Set up TMDB/)).toBeVisible();
   expect(
@@ -216,11 +262,12 @@ it("keeps metadata setup visible and requires explicit valid release query and l
   expect(searches).toEqual([
     { mode: "release", query, language: "eng", refresh: false },
   ]);
+  await user.click(screen.getByText("Search details", { selector: "summary" }));
   expect(screen.getByText(/Sign in to this provider/)).toBeVisible();
 });
 
 it("downloads the exact raw row and recovers 410 with the original query and language", async () => {
-  const { user } = renderDiscover();
+  const { user, router } = renderDiscover();
   await rawSearch(user);
   await user.click(screen.getByRole("button", { name: "Download SRT" }));
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
@@ -241,7 +288,9 @@ it("downloads the exact raw row and recovers 410 with the original query and lan
   await user.click(screen.getByRole("button", { name: "Download SRT" }));
   await screen.findByText(/This result has expired/);
   expect(screen.getByRole("button", { name: "Download SRT" })).toBeDisabled();
-  await user.click(screen.getByRole("button", { name: "Search again" }));
+  await user.click(
+    screen.getByRole("button", { name: "Search again for expired result" }),
+  );
   await waitFor(() => expect(searches).toHaveLength(2));
   expect(searches[1]).toEqual({
     mode: "release",
@@ -256,29 +305,39 @@ it("downloads the exact raw row and recovers 410 with the original query and lan
 });
 
 it("preserves both mode inputs and retires incompatible results and feedback", async () => {
-  const { user } = renderDiscover();
-  await user.type(screen.getByLabelText("IMDb ID"), "tt0903747");
-  await rawSearch(user);
+  const { user, router } = renderDiscover();
+  await user.click(screen.getByRole("button", { name: "Select title" }));
+  await screen.findByRole("heading", { name: "Find the subtitles you need" });
+  await user.click(
+    screen.getByRole("button", { name: "Accept fresh metadata" }),
+  );
+  expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0133093");
+  await openReleaseSearch(user);
+  await screen.findByLabelText("Release name");
+  await user.type(screen.getByLabelText("Release name"), query);
+  await pickOption(user, "Subtitle language", "English");
+  await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+  await screen.findByRole("heading", { name: `${query}.forced` });
   await user.click(screen.getByRole("button", { name: "Download SRT" }));
   await screen.findByText(/Download started for/);
   await user.click(
     screen.getByRole("button", { name: "Return to identified title" }),
   );
-  expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0903747");
+  await screen.findByRole("heading", { name: "Find the subtitles you need" });
+  expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0133093");
   expect(
     screen.queryByRole("button", { name: "Download SRT" }),
   ).not.toBeInTheDocument();
   expect(screen.queryByText(/Download started for/)).not.toBeInTheDocument();
-  await user.click(
-    screen.getByRole("button", { name: "Search providers by release name" }),
-  );
+  await openReleaseSearch(user);
+  await screen.findByLabelText("Release name");
   expect(screen.getByLabelText("Release name")).toHaveValue(query);
   expect(selectInput("Subtitle language")).toHaveValue("English");
   expect(searches).toHaveLength(1);
 });
 
 it("keeps the active release draft and handles when accepted metadata reconciles", async () => {
-  const { user } = renderDiscover();
+  const { user, router } = renderDiscover();
   await rawSearch(user);
   await user.click(
     screen.getByRole("button", { name: "Accept fresh metadata" }),
@@ -291,6 +350,7 @@ it("keeps the active release draft and handles when accepted metadata reconciles
   await user.click(
     screen.getByRole("button", { name: "Return to identified title" }),
   );
+  await screen.findByRole("heading", { name: "Find the subtitles you need" });
   expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0133093");
 });
 
@@ -308,15 +368,24 @@ it.each(["mode", "query"])(
         return HttpResponse.json(snapshot(context, "late"));
       }),
     );
-    const { user } = renderDiscover();
+    const { user, router } = renderDiscover();
     if (change === "mode") {
-      await user.type(screen.getByLabelText("IMDb ID"), "tt0133093");
+      await user.click(screen.getByRole("button", { name: "Select title" }));
+      await screen.findByRole("heading", {
+        name: "Find the subtitles you need",
+      });
+      await user.click(
+        screen.getByRole("button", { name: "Accept fresh metadata" }),
+      );
       await pickOption(user, "Subtitle language", "English");
     } else await releaseMode(user);
     await user.click(screen.getByRole("button", { name: "Find subtitles" }));
     await waitFor(() => expect(finish).toBeDefined());
-    if (change === "mode") await releaseMode(user);
-    else await user.type(screen.getByLabelText("Release name"), ".Other");
+    if (change === "mode") {
+      await openReleaseSearch(user);
+      await screen.findByLabelText("Release name");
+      await user.type(screen.getByLabelText("Release name"), query);
+    } else await user.type(screen.getByLabelText("Release name"), ".Other");
     finish?.();
     await waitFor(() =>
       expect(
@@ -345,16 +414,16 @@ it("rejects a late raw download after switching mode away and back", async () =>
       });
     }),
   );
-  const { user } = renderDiscover();
+  const { user, router } = renderDiscover();
   await rawSearch(user);
   await user.click(screen.getByRole("button", { name: "Download SRT" }));
   await waitFor(() => expect(finish).toBeDefined());
   await user.click(
     screen.getByRole("button", { name: "Return to identified title" }),
   );
-  await user.click(
-    screen.getByRole("button", { name: "Search providers by release name" }),
-  );
+  await screen.findByRole("heading", { name: "Find the subtitles you need" });
+  await openReleaseSearch(user);
+  await screen.findByLabelText("Release name");
   finish?.();
   await waitFor(() =>
     expect(
@@ -366,10 +435,12 @@ it("rejects a late raw download after switching mode away and back", async () =>
 });
 
 it("returns from settings to the preserved raw query without searching", async () => {
-  const { user } = renderDiscover();
+  const { user, router } = renderDiscover();
   await releaseMode(user);
-  await user.click(screen.getByRole("link", { name: "Discover settings" }));
-  await user.click(screen.getByRole("link", { name: "Return to Discover" }));
+  await user.click(screen.getByRole("link", { name: "Subtitle Hub" }));
+  await screen.findByRole("link", { name: "Back" });
+  await router.navigate(-1);
+  await screen.findByLabelText("Release name");
   expect(screen.getByLabelText("Release name")).toHaveValue(query);
   expect(searches).toEqual([]);
 });
@@ -386,15 +457,14 @@ it("keeps ambiguous release input and shows the server recovery message", async 
       ),
     ),
   );
-  const { user } = renderDiscover();
+  const { user, router } = renderDiscover();
   await releaseMode(user);
   await user.clear(screen.getByLabelText("Release name"));
   await user.type(screen.getByLabelText("Release name"), "Example.Show.E03");
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+  const region = screen.getByRole("region", { name: "Discover" });
   expect(
-    await within(screen.getByRole("region", { name: "Discover" })).findByText(
-      /Use one explicitly numbered episode/,
-    ),
+    await within(region).findByText(/Use one explicitly numbered episode/),
   ).toBeVisible();
   expect(screen.getByLabelText("Release name")).toHaveValue("Example.Show.E03");
 });
@@ -424,9 +494,15 @@ it("does not label empty unverified provider output as no matches", async () => 
       }),
     ),
   );
-  const { user } = renderDiscover();
+  const { user, router } = renderDiscover();
   await releaseMode(user);
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+  await user.click(
+    await screen.findByText("Search details", { selector: "summary" }),
+  );
+  await user.click(
+    screen.getByText(/Unverified searches/, { selector: "summary" }),
+  );
   expect(
     await screen.findByText(/No results returned for this unverified query/),
   ).toBeVisible();

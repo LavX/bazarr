@@ -7,16 +7,17 @@ import { METADATA_QUERY_KEY } from "@/apis/hooks/discover";
 import queryClient from "@/apis/queries";
 import { DiscoverSetupReturn } from "@/contexts/Discover";
 import { AllProviders } from "@/providers";
-import { rawRender, screen, waitFor } from "@/tests";
+import { act, rawRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import * as files from "@/utilities/files";
 import {
-  chooseSegment,
   findSelectInput,
+  openReleaseSearch,
+  openSearchOptions,
   pickOption,
   selectInput,
 } from "./selectTestHelpers";
-import Discover from ".";
+import Discover from "./testHarness";
 
 const envelope = {
   source: "tmdb",
@@ -125,7 +126,7 @@ function browse(initial = "/discover") {
     [
       { path: "/discover", element: <Discover /> },
       {
-        path: "/settings/discover",
+        path: "/subtitle-hub",
         element: (
           <DiscoverSetupReturn>
             <div>Settings</div>
@@ -147,9 +148,7 @@ it("opens an exact episode link with original name, number and date without sear
   expect(
     await screen.findByRole("heading", { name: "Northern Light" }),
   ).toBeInTheDocument();
-  expect(
-    await screen.findByText("Original air date: 2026-09-01"),
-  ).toBeInTheDocument();
+  expect(await screen.findByDisplayValue("1. Home")).toBeInTheDocument();
   expect(requests).toEqual([]);
   await pickOption(user, "Subtitle language", "English");
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
@@ -166,12 +165,16 @@ it("opens an exact episode link with original name, number and date without sear
 });
 it("adopts a show without selecting an episode and offers its real season list", async () => {
   const { user } = browse();
-  await chooseSegment(user, "Series");
-  await user.type(screen.getByLabelText("Search series titles"), "Northern");
+  // The search mock answers with the show whatever the scope, so no tab
+  // switch is needed to reach it here. Scope switching lives in the
+  // trending tab test.
+  await user.type(screen.getByLabelText("Search"), "Northern");
   await user.click(
     await screen.findByRole("button", { name: "Northern Light (2020)" }),
   );
-  expect(await findSelectInput("Choose season")).toHaveValue("");
+  const season = await findSelectInput("Season");
+  await waitFor(() => expect(season).toHaveValue("Season 2"));
+  expect(await findSelectInput("Episode")).toHaveValue("");
   await pickOption(user, "Subtitle language", "English");
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
   expect(requests).toEqual([]);
@@ -187,12 +190,12 @@ it("distinguishes an empty season from a metadata outage and offers confirmed ma
   );
   const { user } = browse("/discover?show=100&season=2");
   expect(
-    await screen.findByText(/This does not mean the season is empty/),
+    await screen.findByText(/Episodes could not be loaded/),
   ).toBeInTheDocument();
   await user.click(
-    screen.getByRole("button", { name: "Enter a manual episode" }),
+    screen.getByRole("button", { name: "Enter episode numbers manually" }),
   );
-  await user.type(screen.getByLabelText("Season"), "0");
+  await user.type(screen.getByRole("textbox", { name: "Season" }), "0");
   await user.type(screen.getByRole("textbox", { name: "Episode" }), "3");
   await pickOption(user, "Subtitle language", "English");
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
@@ -232,12 +235,14 @@ it("keeps conflicts blocked and preserves original source numbering for manual r
   );
   const { user } = browse("/discover?show=100&season=2&episode=1");
   expect(
-    await screen.findByText(/Source episode identities conflict/),
+    await screen.findByText(
+      /Episode numbering does not match between metadata sources/,
+    ),
   ).toBeInTheDocument();
   await pickOption(user, "Subtitle language", "English");
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
   expect(
-    screen.queryByRole("button", { name: "Enter a manual episode" }),
+    screen.queryByRole("button", { name: "Enter episode numbers manually" }),
   ).not.toBeInTheDocument();
   expect(requests).toEqual([]);
 });
@@ -277,12 +282,13 @@ it("retires results and pending responses when an exact episode changes while re
     }),
   );
   const { user } = browse("/discover?show=100&season=2&episode=1");
-  await screen.findByText("Original air date: 2026-09-01");
+  await screen.findByDisplayValue("1. Home");
   await pickOption(user, "Subtitle language", "English");
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
   await waitFor(() => expect(finish).toBeDefined());
-  await user.click(screen.getByRole("link", { name: "S2 E2: Home" }));
-  await screen.findByText("Original air date unavailable");
+  await pickOption(user, "Episode", "2. Home");
+  await screen.findByDisplayValue("2. Home");
+  await openSearchOptions(user);
   expect(screen.getByRole("textbox", { name: "Episode" })).toHaveValue("2");
   expect(selectInput("Subtitle language")).toHaveValue("English");
   finish?.();
@@ -291,9 +297,7 @@ it("retires results and pending responses when an exact episode changes while re
       screen.queryByRole("heading", { name: "Subtitle results" }),
     ).not.toBeInTheDocument(),
   );
-  expect(
-    screen.queryByText("Original air date: 2026-09-01"),
-  ).not.toBeInTheDocument();
+  expect(screen.queryByDisplayValue("1. Home")).not.toBeInTheDocument();
 });
 
 it("ignores a late episode metadata response after an exact link change", async () => {
@@ -322,21 +326,28 @@ it("ignores a late episode metadata response after an exact link change", async 
   );
   const { user } = browse("/discover?show=100&season=2&episode=1");
   await waitFor(() => expect(finish).toBeDefined());
-  await user.click(await screen.findByRole("link", { name: "S2 E2: Home" }));
-  await screen.findByText("Original air date unavailable");
+  await pickOption(user, "Episode", "2. Home");
+  await screen.findByDisplayValue("2. Home");
   finish?.();
+  await openSearchOptions(user);
   expect(screen.getByRole("textbox", { name: "Episode" })).toHaveValue("2");
   expect(requests).toEqual([]);
 });
 
 it("keeps an active raw query isolated from episode-link adoption", async () => {
   const { user, router } = browse();
+  // The homepage carries no retrieval controls, so the release entry lives on
+  // the detail. Enter the detail first via title search, then switch modes.
+  // The search mock answers with the show whatever the scope.
+  await user.type(screen.getByLabelText("Search"), "Northern");
   await user.click(
-    screen.getByRole("button", { name: "Search providers by release name" }),
+    await screen.findByRole("button", { name: "Northern Light (2020)" }),
   );
+  await screen.findByRole("button", { name: "Search options" });
+  await openReleaseSearch(user);
   await user.type(screen.getByLabelText("Release name"), "Other.Movie.2024");
   await pickOption(user, "Subtitle language", "English");
-  await router.navigate("/discover?show=100&season=2&episode=1");
+  await router.navigate("/discover?show=100&season=2&episode=1&mode=release");
   expect(screen.getByLabelText("Release name")).toHaveValue("Other.Movie.2024");
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
   await waitFor(() => expect(requests).toHaveLength(1));
@@ -349,9 +360,7 @@ it("keeps an active raw query isolated from episode-link adoption", async () => 
   await user.click(
     screen.getByRole("button", { name: "Return to identified title" }),
   );
-  expect(
-    await screen.findByText("Original air date: 2026-09-01"),
-  ).toBeInTheDocument();
+  expect(await screen.findByDisplayValue("1. Home")).toBeInTheDocument();
 });
 
 it.each([
@@ -363,18 +372,24 @@ it.each([
   async (suffix) => {
     browse(`/discover${suffix}`);
     expect(
-      await screen.findByText(/This episode link is incomplete or invalid/),
+      await screen.findByText(
+        /This title or episode link is incomplete or invalid/,
+      ),
     ).toBeInTheDocument();
+    // The homepage carries no retrieval controls, so there is no Find button
+    // to disable. The pin is that an invalid link never searches providers.
     expect(
-      screen.getByRole("button", { name: "Find subtitles" }),
-    ).toBeDisabled();
+      screen.queryByRole("button", { name: "Find subtitles" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Subtitle language")).toBeNull();
+    expect(screen.queryByLabelText("IMDb ID")).toBeNull();
     expect(requests).toEqual([]);
   },
 );
 
 it("preserves the exact episode through source outages and settings return", async () => {
-  const { user } = browse("/discover?show=100&season=2&episode=1");
-  await screen.findByText("Original air date: 2026-09-01");
+  const { user, router } = browse("/discover?show=100&season=2&episode=1");
+  await screen.findByDisplayValue("1. Home");
   await pickOption(user, "Subtitle language", "English");
   server.use(
     http.get("/api/discover/metadata/shows/100", () =>
@@ -389,12 +404,15 @@ it("preserves the exact episode through source outages and settings return", asy
     ),
   );
   await queryClient.invalidateQueries({ queryKey: METADATA_QUERY_KEY });
-  expect(screen.getByText("Original air date: 2026-09-01")).toBeInTheDocument();
-  await user.click(screen.getByRole("link", { name: "Discover settings" }));
-  await user.click(screen.getByRole("link", { name: "Return to Discover" }));
-  expect(
-    await screen.findByText("Original air date: 2026-09-01"),
-  ).toBeInTheDocument();
+  expect(screen.getByDisplayValue("1. Home")).toBeInTheDocument();
+  // The application shell owns settings navigation; this fixture renders
+  // only the page and the real interrupted-task return.
+  await router.navigate("/subtitle-hub");
+  await act(async () => {
+    await router.navigate(-1);
+  });
+  expect(await screen.findByDisplayValue("1. Home")).toBeInTheDocument();
+  await openSearchOptions(user);
   expect(screen.getByRole("textbox", { name: "Episode" })).toHaveValue("1");
   expect(selectInput("Subtitle language")).toHaveValue("English");
   expect(requests).toEqual([]);
@@ -474,12 +492,15 @@ it.each([
     );
     try {
       const { user } = browse("/discover?show=100&season=2&episode=1");
-      await screen.findByText("Original air date: 2026-09-01");
+      await screen.findByDisplayValue("1. Home");
       if (manual) {
+        await openSearchOptions(user);
         await user.click(
-          screen.getByRole("button", { name: "Enter a manual episode" }),
+          screen.getByRole("button", {
+            name: "Enter episode numbers manually",
+          }),
         );
-        await user.type(screen.getByLabelText("Season"), "0");
+        await user.type(screen.getByRole("textbox", { name: "Season" }), "0");
         await user.type(screen.getByRole("textbox", { name: "Episode" }), "3");
         await user.click(
           screen.getByLabelText(
@@ -493,9 +514,7 @@ it.each([
         await screen.findByRole("button", { name: "Download SRT" }),
       );
       await screen.findByText(/Download started for/);
-      await user.click(
-        screen.getByRole("button", { name: "Refresh subtitles" }),
-      );
+      await user.click(screen.getByRole("button", { name: "Search again" }));
       await waitFor(() => expect(finish).toBeDefined());
       server.use(
         http.get("/api/discover/metadata/shows/100", () =>
@@ -528,13 +547,13 @@ it.each([
       expect(
         screen.queryByText(/Verified TVDB default order/),
       ).not.toBeInTheDocument();
-      expect(screen.getByText(/The show identity changed/)).toBeInTheDocument();
+      expect(screen.getByText(/Show details changed/)).toBeInTheDocument();
       expect(
-        screen.queryByRole("button", { name: "Enter a manual episode" }),
+        screen.queryByRole("button", {
+          name: "Enter episode numbers manually",
+        }),
       ).not.toBeInTheDocument();
-      expect(
-        screen.getByText("Original air date: 2026-09-01"),
-      ).toBeInTheDocument();
+      expect(screen.getByDisplayValue("1. Home")).toBeInTheDocument();
       expect(selectInput("Subtitle language")).toHaveValue("English");
       finish?.();
       await waitFor(() =>
@@ -583,12 +602,15 @@ it.each([
     );
     try {
       const { user } = browse("/discover?show=100&season=2&episode=1");
-      await screen.findByText("Original air date: 2026-09-01");
+      await screen.findByDisplayValue("1. Home");
       if (manual) {
+        await openSearchOptions(user);
         await user.click(
-          screen.getByRole("button", { name: "Enter a manual episode" }),
+          screen.getByRole("button", {
+            name: "Enter episode numbers manually",
+          }),
         );
-        await user.type(screen.getByLabelText("Season"), "0");
+        await user.type(screen.getByRole("textbox", { name: "Season" }), "0");
         await user.type(screen.getByRole("textbox", { name: "Episode" }), "3");
         await user.click(
           screen.getByLabelText(
@@ -602,9 +624,7 @@ it.each([
         await screen.findByRole("button", { name: "Download SRT" }),
       );
       await screen.findByText(/Download started for/);
-      await user.click(
-        screen.getByRole("button", { name: "Refresh subtitles" }),
-      );
+      await user.click(screen.getByRole("button", { name: "Search again" }));
       await waitFor(() => expect(finish).toBeDefined());
       server.use(
         http.get("/api/discover/metadata/shows/100", () =>
@@ -644,7 +664,9 @@ it.each([
             "I confirm this series IMDb ID and the manual season and episode numbers",
           ),
         ).toBeChecked();
-        expect(screen.getByLabelText("Season")).toHaveValue("0");
+        expect(screen.getByRole("textbox", { name: "Season" })).toHaveValue(
+          "0",
+        );
         expect(screen.getByRole("textbox", { name: "Episode" })).toHaveValue(
           "3",
         );

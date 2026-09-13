@@ -8,8 +8,12 @@ import { QueryKeys } from "@/apis/queries/keys";
 import { AllProviders } from "@/providers";
 import { act, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
-import { pickOption, selectInput } from "./selectTestHelpers";
-import Discover from ".";
+import {
+  openSearchOptions,
+  pickOption,
+  selectInput,
+} from "./selectTestHelpers";
+import Discover from "./testHarness";
 
 let regions: string[] = [];
 let searches: unknown[] = [];
@@ -155,7 +159,8 @@ beforeEach(() => {
 });
 
 it("browses recent digital films in US without changing the explicit subtitle language", async () => {
-  browse();
+  const { user } = browse();
+  await screen.findByRole("heading", { name: "Recent digital releases" });
   expect(
     await screen.findByRole("heading", { name: "Recent digital releases" }),
   ).toBeInTheDocument();
@@ -163,29 +168,58 @@ it("browses recent digital films in US without changing the explicit subtitle la
     await screen.findByRole("button", { name: /Digital North US/ }),
   ).toBeEnabled();
   expect(selectInput("Film region")).toHaveValue("United States (US)");
-  expect(selectInput("Subtitle language")).toHaveValue("Hungarian");
+  // The homepage carries no retrieval controls. The remembered language is
+  // asserted in detail after selecting the release.
+  expect(screen.queryByLabelText("Subtitle language")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Find subtitles" }),
+  ).not.toBeInTheDocument();
   expect(searches).toEqual([]);
+  await user.click(
+    await screen.findByRole("button", { name: /Digital North US/ }),
+  );
+  await waitFor(() =>
+    expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0080274"),
+  );
+  expect(selectInput("Subtitle language")).toHaveValue("Hungarian");
 });
 
 it("changes only film region and caches independent region queries without provider submission", async () => {
   const { user } = browse();
+  await screen.findByRole("heading", { name: "Recent digital releases" });
   await screen.findByRole("button", { name: /Digital North US/ });
   await pickOption(user, "Film region", /\(GB\)/);
   await screen.findByRole("button", { name: /Digital North GB/ });
   expect(
     screen.queryByRole("button", { name: /Digital North US/ }),
   ).not.toBeInTheDocument();
-  expect(selectInput("Subtitle language")).toHaveValue("Hungarian");
+  // The homepage carries no retrieval controls while regions change.
+  expect(screen.queryByLabelText("Subtitle language")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Find subtitles" }),
+  ).not.toBeInTheDocument();
   expect(localStorage.getItem("bazarr.discover.subtitle-language")).toBe("hun");
-  expect(screen.getByRole("radio", { name: "Movies" })).toBeChecked();
+  // Film region changes preserve the shared All media search scope.
+  expect(screen.getByRole("button", { name: "All media" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
   await pickOption(user, "Film region", /\(US\)/);
   await screen.findByRole("button", { name: /Digital North US/ });
   expect(regions).toEqual(["US", "GB"]);
   expect(searches).toEqual([]);
+  await user.click(
+    await screen.findByRole("button", { name: /Digital North US/ }),
+  );
+  await waitFor(() =>
+    expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0080274"),
+  );
+  expect(selectInput("Subtitle language")).toHaveValue("Hungarian");
 });
 
 it("preserves exact date/type/region through details, explicit retrieval, route return and back focus", async () => {
   const { user, router } = browse();
+  await screen.findByRole("heading", { name: "Recent digital releases" });
   await screen.findByRole("button", { name: /Digital North US/ });
   await pickOption(user, "Film region", /\(HU\)/);
   await user.click(
@@ -194,10 +228,11 @@ it("preserves exact date/type/region through details, explicit retrieval, route 
   await waitFor(() =>
     expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0080274"),
   );
-  expect(screen.getByLabelText("Selected digital release")).toHaveTextContent(
-    `Digital · HU · ${day()} · TMDB regional release record`,
-  );
+  expect(
+    screen.queryByLabelText("Selected digital release"),
+  ).not.toBeInTheDocument();
   expect(searches).toEqual([]);
+  await openSearchOptions(user);
   await user.click(screen.getByLabelText("IMDb ID"));
   await act(async () => {
     await router.navigate("/system/tasks");
@@ -206,9 +241,9 @@ it("preserves exact date/type/region through details, explicit retrieval, route 
     await router.navigate(-1);
   });
   await waitFor(() => expect(screen.getByLabelText("IMDb ID")).toHaveFocus());
-  expect(screen.getByLabelText("Selected digital release")).toHaveTextContent(
-    `Digital · HU · ${day()}`,
-  );
+  expect(
+    screen.queryByLabelText("Selected digital release"),
+  ).not.toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
   await waitFor(() => expect(searches).toHaveLength(1));
   expect(searches[0]).toMatchObject({
@@ -223,7 +258,22 @@ it("preserves exact date/type/region through details, explicit retrieval, route 
       screen.getByRole("button", { name: /Digital North HU/ }),
     ).toHaveFocus(),
   );
+  expect(
+    screen.getByRole("button", { name: /Digital North HU/ }),
+  ).toBeVisible();
   expect(selectInput("Film region")).toHaveValue("Hungary (HU)");
+  // Back lands on the homepage, which carries no retrieval controls. Re-enter
+  // the release to confirm the remembered language survived the round trip.
+  expect(screen.queryByLabelText("Subtitle language")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Find subtitles" }),
+  ).not.toBeInTheDocument();
+  await user.click(
+    await screen.findByRole("button", { name: /Digital North HU/ }),
+  );
+  await waitFor(() =>
+    expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0080274"),
+  );
   expect(selectInput("Subtitle language")).toHaveValue("Hungarian");
 });
 
@@ -243,6 +293,7 @@ it("ignores a late prior-region completion", async () => {
     }),
   );
   const { user } = browse();
+  await screen.findByRole("heading", { name: "Recent digital releases" });
   await waitFor(() => expect(started).toBe(true));
   await pickOption(user, "Film region", /\(GB\)/);
   await screen.findByRole("button", { name: /Digital North GB/ });
@@ -295,29 +346,25 @@ it.each([
       }),
     ),
   );
-  browse();
+  const { user } = browse();
+  await screen.findByRole("heading", { name: "Recent digital releases" });
   const section = within(
     screen.getByRole("region", { name: "Recent digital releases" }),
   );
   if (status === "empty")
-    await section.findByText(/No verified digital releases in US/);
+    await section.findByText(/No recent digital releases found in US/);
   if (status === "unavailable" || status === "expired")
     await section.findByText(/Digital releases are temporarily unavailable/);
   if (status === "authentication_failed")
     await section.findByText(/TMDB rejected/);
   if (status === "partial") {
-    // The visible line names the gap; the counts live in the freshness
-    // disclosure directly below it, where the telemetry belongs.
-    await section.findByText(
-      /Incomplete regional coverage\. The counts are in Digital release source and freshness below\./,
-    );
     expect(
-      section.getByText(/1 of 2 candidates checked, 0 missing US records/),
-    ).toBeInTheDocument();
+      section.queryByText(/Digital release source and freshness/),
+    ).not.toBeInTheDocument();
     await section.findByRole("button", { name: /Digital North US/ });
   }
   if (status === "cached")
-    await section.findByText(/Cached TMDB regional records/);
+    await section.findByRole("button", { name: /Digital North US/ });
   if (
     ["empty", "unavailable", "authentication_failed", "expired"].includes(
       status,
@@ -327,8 +374,8 @@ it.each([
       section.queryByRole("button", { name: /Digital North US/ }),
     ).not.toBeInTheDocument();
   expect(
-    section.getByText(/does not confirm subtitle availability/),
-  ).toBeInTheDocument();
+    section.queryByText(/does not confirm subtitle availability/),
+  ).not.toBeInTheDocument();
   expect(searches).toEqual([]);
 });
 
@@ -343,7 +390,8 @@ it.each([
       HttpResponse.json({ ...feed("US"), ...overrides }),
     ),
   );
-  browse();
+  const { user } = browse();
+  await screen.findByRole("heading", { name: "Recent digital releases" });
   await screen.findByText(/Digital releases are temporarily unavailable/);
   expect(
     screen.queryByRole("button", { name: /Digital North US/ }),
@@ -353,6 +401,7 @@ it.each([
 
 it("retains region while metadata configuration rotates and rejects the old revision", async () => {
   const { user } = browse();
+  await screen.findByRole("heading", { name: "Recent digital releases" });
   await screen.findByRole("button", { name: /Digital North US/ });
   await pickOption(user, "Film region", /\(HU\)/);
   await screen.findByRole("button", { name: /Digital North HU/ });
@@ -378,7 +427,12 @@ it("retains region while metadata configuration rotates and rejects the old revi
     screen.queryByRole("button", { name: /Digital North HU/ }),
   ).not.toBeInTheDocument();
   expect(selectInput("Film region")).toHaveValue("Hungary (HU)");
-  expect(selectInput("Subtitle language")).toHaveValue("Hungarian");
+  // The rotated homepage carries no retrieval controls, so the remembered
+  // language is absent here rather than preserved in a visible field.
+  expect(screen.queryByLabelText("Subtitle language")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Find subtitles" }),
+  ).not.toBeInTheDocument();
   expect(searches).toEqual([]);
 });
 
@@ -395,7 +449,8 @@ it("does not request regional metadata when TMDB is unconfigured", async () => {
       }),
     ),
   );
-  browse();
+  const { user } = browse();
+  await screen.findByRole("heading", { name: "Recent digital releases" });
   await screen.findByText("Connect TMDB to browse regional digital releases.");
   expect(regions).toEqual([]);
   expect(searches).toEqual([]);
@@ -414,10 +469,11 @@ it("does not attach a previous digital date when the same movie is opened from t
     ),
   );
   const { user } = browse();
+  await screen.findByRole("heading", { name: "Recent digital releases" });
   await user.click(
     await screen.findByRole("button", { name: /Digital North US/ }),
   );
-  await screen.findByLabelText("Selected digital release");
+  await screen.findByRole("heading", { name: "Digital North US" });
   await user.click(screen.getByRole("button", { name: /Back to/ }));
   await user.click(
     await screen.findByRole("button", { name: "Explore Trending North" }),

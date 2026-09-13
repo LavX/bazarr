@@ -63,7 +63,9 @@ def list_leagues(session, arr_instance_id=None, start=0, length=100):
     total = session.execute(select(func.count()).select_from(query.subquery())).scalar_one()
     rows = session.execute(query.order_by(TableSportsLeagues.sortTitle, TableSportsLeagues.id)
                            .offset(start).limit(limit)).all()
-    return {'data': [_serialize(row) for row in rows], 'total': total}
+    data = [_serialize(row) for row in rows]
+    _league_audio_languages(session, data)
+    return {'data': data, 'total': total}
 
 
 def get_league(session, league_id, arr_instance_id=None):
@@ -72,7 +74,28 @@ def get_league(session, league_id, arr_instance_id=None):
         require_sportarr(session, arr_instance_id)
         query = query.where(TableSportsLeagues.arr_instance_id == arr_instance_id)
     row = session.execute(query).first()
-    return _serialize(row) if row is not None else None
+    if row is None:
+        return None
+    result = _serialize(row)
+    _league_audio_languages(session, [result])
+    return result
+
+
+def _league_audio_languages(session, leagues):
+    if not leagues:
+        return
+    targets = {(row['arr_instance_id'], row['id']): row for row in leagues}
+    audios = {key: set() for key in targets}
+    # One bounded query for the returned leagues, including their exact owners.
+    from sqlalchemy import tuple_
+    query = select(TableSportsEvents.arr_instance_id, TableSportsEvents.league_id,
+                   TableSportsEvents.audio_language).where(
+        tuple_(TableSportsEvents.arr_instance_id, TableSportsEvents.league_id).in_(targets))
+    for owner, league_id, raw in session.execute(query):
+        audios[owner, league_id].update(value for value in parse_stored_list(raw)
+                                      if isinstance(value, str) and value)
+    for key, row in targets.items():
+        row['audio_language'] = sorted(audios[key])
 
 
 def assign_profile(session, league_id, arr_instance_id, profile_id):
@@ -199,7 +222,10 @@ def list_events(session, league_id, arr_instance_id=None, start=0, length=100):
     rows = session.execute(query.order_by(TableSportsEvents.eventDate.desc(), TableSportsEvents.sportarrEventId,
                                          TableSportsEvents.partNumber, TableSportsEvents.id)
                            .offset(start).limit(limit)).all()
-    return {'data': [_serialize_event(row) for row in rows], 'total': count}
+    from sportarr.sync_status import add_sync_status
+    data = [_serialize_event(row) for row in rows]
+    add_sync_status(session, rows, data)
+    return {'data': data, 'total': count}
 
 
 def get_event(session, event_id, arr_instance_id=None, enabled_only=True):

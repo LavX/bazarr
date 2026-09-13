@@ -93,12 +93,22 @@ def provider_search_failure(provider, error):
         status = "unreachable"
     else:
         status = "error"
+    # Keep diagnostics useful without logging provider messages or URLs,
+    # which may contain credentials. Worker classes are untrusted strings.
+    error_type = remote_type or type(error).__name__
+    if not isinstance(error_type, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", error_type):
+        error_type = "UnknownError"
+    reason = status
+    if error_type == "CloudflareBlockedError":
+        status, reason = "unreachable", "automated_requests_blocked"
+    logging.getLogger("provider_search").info("Provider search outcome: provider=%s status=%s exception=%s",
+                   provider, status, error_type)
     retry_after = getattr(error, "retry_after", None)
     try:
         retry_after = max(1, min(86400, float(retry_after))) if retry_after is not None else None
     except (TypeError, ValueError):
         retry_after = None
-    return ProviderSearchResult(provider, status=status, reason=status, retry_after=retry_after)
+    return ProviderSearchResult(provider, status=status, reason=reason, retry_after=retry_after)
 
 
 def parse_for_hi_regex(subtitle_text, alpha3_language):

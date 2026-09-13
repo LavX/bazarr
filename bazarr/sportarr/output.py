@@ -3,9 +3,12 @@
 import ast
 import json
 import os
+from bisect import bisect_left, insort
+from threading import RLock
+from weakref import WeakKeyDictionary
 
 from sqlalchemy import select, text
-from app.ownership_revision import ownership_revision, verify_ownership_protection
+from app.ownership_revision import ownership_revision, ownership_token, verify_ownership_protection
 
 from app.config import settings
 from app.database import (
@@ -159,8 +162,135 @@ def validate_read_path(context, path):
         raise ValueError("Sports subtitle is outside its indexed discovery roots")
 
 
+class _OwnershipSnapshot:
+    def __init__(self, session, configuration, generation, revision):
+        self.configuration, self.generation, self.revision = configuration, generation, revision
+        self.instances = {owner: (kind, raw) for owner, kind, raw in _instance_rows(session)}
+        self.rows, self.by_stem, self.stems, self.invalid = {}, {}, [], set()
+        for table, media_type in MEDIA_TABLES:
+            for row in session.execute(select(table.id, table.arr_instance_id, table.path, table.subtitles)):
+                self.replace(media_type, row)
+
+    def replace(self, media_type, row):
+        local_id, owner, path, subtitles = row
+        identity = (media_type, local_id)
+        raw = self.instances.get(owner, (None, None))[1]
+        mapping = read_sports_mappings(raw) if media_type == 'sports' else _native_mapping(raw, media_type)
+
+        def mapped(path):
+            return (apply_sports_mapping(path, mapping) if media_type == 'sports'
+                    else _apply_mapping(path, mapping, False))
+
+        entries = set()
+        if path:
+            video = mapped(path)
+            folders = {os.path.dirname(video)}
+            folder = get_target_folder(video, create=False)
+            if folder:
+                folders.add(folder)
+            entries.update((_stem(video), folder, False, owner) for folder in folders)
+        self.invalid.discard(identity)
+        try:
+            recorded = ast.literal_eval(subtitles or '[]')
+            if not isinstance(recorded, (list, tuple)):
+                raise ValueError()
+            for item in recorded:
+                if not isinstance(item, (list, tuple)) or len(item) < 2:
+                    raise ValueError()
+                if item[1] is None:
+                    continue
+                if not isinstance(item[1], str):
+                    raise ValueError()
+                subtitle = mapped(item[1])
+                entries.add((_stem(subtitle), os.path.dirname(subtitle), True, owner))
+        except (SyntaxError, TypeError, ValueError):
+            self.invalid.add(identity)
+        previous = self.rows.get(identity, set())
+        for stem, folder, recorded, old_owner in previous - entries:
+            self.by_stem[stem].remove((identity, folder, recorded, old_owner))
+        for stem, folder, recorded, new_owner in entries - previous:
+            if stem not in self.by_stem:
+                self.by_stem[stem] = set()
+                insort(self.stems, stem)
+            self.by_stem[stem].add((identity, folder, recorded, new_owner))
+        for stem in {entry[0] for entry in previous - entries}:
+            if not self.by_stem[stem]:
+                del self.by_stem[stem]
+                self.stems.pop(bisect_left(self.stems, stem))
+        self.rows[identity] = entries
+
+    def conflict(self, context, stem, folder):
+        own = ('sports', context.event_id)
+        if self.invalid - {own}:
+            return 'Subtitle destination ownership record is invalid'
+        candidates = {stem}
+        candidates.update(stem[:index] for index, char in enumerate(stem) if char == '.')
+        start = bisect_left(self.stems, stem + '.')
+        while start < len(self.stems) and self.stems[start].startswith(stem + '.'):
+            candidates.add(self.stems[start])
+            start += 1
+        for candidate in candidates:
+            for identity, candidate_folder, recorded, owner in self.by_stem.get(candidate, ()):
+                if identity == own and owner == context.arr_instance_id:
+                    continue
+                # Resolve plausible folders now, never cache filesystem aliases.
+                if _physical(candidate_folder) == folder:
+                    return ('Subtitle destination is recorded for another owner' if recorded
+                            else 'Subtitle destination is ambiguous between media owners')
+        return None
+
+
+_snapshots = WeakKeyDictionary()
+_snapshot_lock = RLock()
+
+
+def _snapshot(session, configuration, revision):
+    from sportarr.db import needs_sports_transaction
+
+    bind = session.get_bind()
+    # Do not let a snapshot containing uncommitted writes escape its transaction.
+    cacheable = needs_sports_transaction(session)
+    with _snapshot_lock:
+        generation = session.execute(text(
+            "SELECT revision FROM subtitle_ownership_changes WHERE table_name='generation' AND row_id=0"
+        )).scalar_one_or_none()
+        if generation is None:
+            raise ValueError('Subtitle ownership generation is unavailable')
+        cached = _snapshots.get(bind) if cacheable else None
+        try:
+            changes = []
+            if (cached is not None and cached.configuration == configuration
+                    and cached.generation == generation and cached.revision <= revision):
+                changes = session.execute(text(
+                    'SELECT table_name, row_id FROM subtitle_ownership_changes WHERE revision > :revision'
+                ), {'revision': cached.revision}).all()
+                if any(name in ('*', 'arr_instances') for name, _ in changes):
+                    cached = None
+            else:
+                cached = None
+            if cached is None:
+                cached = _OwnershipSnapshot(session, configuration, generation, revision)
+            else:
+                for table, media_type in MEDIA_TABLES:
+                    ids = [row_id for name, row_id in changes if name == table.__tablename__]
+                    if ids:
+                        for row in session.execute(select(table.id, table.arr_instance_id, table.path,
+                                                          table.subtitles).where(table.id.in_(ids))):
+                            cached.replace(media_type, row)
+            if revision != ownership_revision(session) or configuration != _configuration():
+                raise ValueError('Subtitle destination ownership changed. Please retry.')
+            cached.revision = revision
+            if cacheable:
+                _snapshots[bind] = cached
+            return cached
+        except BaseException:
+            if cacheable:
+                _snapshots.pop(bind, None)
+            raise
+
+
 class SportsOutputNamespace:
-    """A complete outside-lock ownership snapshot with a constant-size recheck."""
+    """Versioned ownership preparation with a constant-size publication recheck."""
 
     def __init__(self, context, session, *, read_path=None):
         self.context = context
@@ -170,81 +300,17 @@ class SportsOutputNamespace:
         if read_path is not None:
             validate_read_path(context, read_path)
         self.folder = _physical(
-            os.path.dirname(read_path)
-            if read_path is not None
-            else get_target_folder(context.mapped_path, create=False)
-            or os.path.dirname(context.mapped_path)
+            os.path.dirname(read_path) if read_path is not None
+            else get_target_folder(context.mapped_path, create=False) or os.path.dirname(context.mapped_path)
         )
         self.stem = _stem(context.mapped_path)
-        instances = {owner: (kind, raw) for owner, kind, raw in _instance_rows(session)}
-        self.mappings = {}
-        self.conflict = None
-        for table, media_type in MEDIA_TABLES:
-            for local_id, owner, path, subtitles in session.execute(
-                select(table.id, table.arr_instance_id, table.path, table.subtitles)
-            ):
-                if (
-                    media_type == "sports"
-                    and local_id == context.event_id
-                    and owner == context.arr_instance_id
-                ):
-                    continue
-                if (media_type, owner) not in self.mappings:
-                    raw = instances.get(owner, (None, None))[1]
-                    self.mappings[media_type, owner] = (
-                        read_sports_mappings(raw)
-                        if media_type == "sports"
-                        else _native_mapping(raw, media_type)
-                    )
-                if path:
-                    mapped = self._mapped(path, media_type, owner)
-                    if _overlaps(self.stem, _stem(mapped)):
-                        folders = {os.path.dirname(mapped)}
-                        folder = get_target_folder(mapped, create=False)
-                        if folder:
-                            folders.add(folder)
-                        if any(_physical(folder) == self.folder for folder in folders):
-                            self.conflict = (
-                                "Subtitle destination is ambiguous between media owners"
-                            )
-                try:
-                    recorded = ast.literal_eval(subtitles or "[]")
-                    if not isinstance(recorded, (list, tuple)):
-                        raise ValueError()
-                    for item in recorded:
-                        if not isinstance(item, (list, tuple)) or len(item) < 2:
-                            raise ValueError()
-                        subtitle_path = item[1]
-                        if subtitle_path is None:
-                            continue
-                        if not isinstance(subtitle_path, str):
-                            raise ValueError()
-                        mapped = self._mapped(subtitle_path, media_type, owner)
-                        # Do not touch unrelated mounts, even for encoded names.
-                        if (
-                            _overlaps(self.stem, _stem(mapped))
-                            and _physical(os.path.dirname(mapped)) == self.folder
-                        ):
-                            self.conflict = (
-                                "Subtitle destination is recorded for another owner"
-                            )
-                except (SyntaxError, TypeError, ValueError):
-                    self.conflict = "Subtitle destination ownership record is invalid"
+        snapshot = _snapshot(session, self.configuration, self.revision)
+        self.generation = snapshot.generation
+        self.conflict = snapshot.conflict(context, self.stem, self.folder)
         self.validate(session)
 
-    def _mapped(self, path, media_type, owner):
-        mapping = self.mappings[media_type, owner]
-        return (
-            apply_sports_mapping(path, mapping)
-            if media_type == "sports"
-            else _apply_mapping(path, mapping, False)
-        )
-
     def validate(self, session):
-        if (
-            self.revision != ownership_revision(session)
-            or self.configuration != _configuration()
-        ):
-            raise ValueError("Subtitle destination ownership changed. Please retry.")
+        if (self.revision, self.generation) != ownership_token(session) or self.configuration != _configuration():
+            raise ValueError('Subtitle destination ownership changed. Please retry.')
         if self.conflict:
             raise ValueError(self.conflict)

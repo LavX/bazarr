@@ -1439,3 +1439,18 @@ def test_history_commit_acknowledgement_loss_keeps_committed_bytes_and_history(
     assert session.execute(sa.select(TableHistorySports)).scalar_one().event_id == 61
     assert (folder / "1/event.en.srt").read_bytes()
     assert "lost history commit acknowledgement" in caplog.text
+
+
+def test_second_publication_refreshes_cached_destination_ownership(manual_library):
+    from app.database import TableMovies
+    service, session, folder = manual_library
+    selected = service.manual_search_sports(61, 'en', arr_instance_id=1)[0]
+    service.manual_download_sports(61, selected, arr_instance_id=1)
+    destination = folder / '1/event.en.srt'
+    published = destination.read_bytes()
+    session.execute(sa.insert(TableMovies).values(id=81, radarrId=81, tmdbId='81',
+        title='Other owner', path=str(folder / '1/event.mkv')))
+    selected = service.manual_search_sports(61, 'en', arr_instance_id=1)[0]
+    with pytest.raises(ValueError, match='ambiguous|recorded'):
+        service.manual_download_sports(61, selected, arr_instance_id=1)
+    assert destination.read_bytes() == published

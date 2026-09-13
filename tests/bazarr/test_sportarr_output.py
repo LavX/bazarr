@@ -478,3 +478,90 @@ def test_namespace_rejects_an_inherited_global_sports_mapping_change(output_libr
     monkeypatch.setattr(settings.general, 'path_mappings_sports', [['/foreign', str(folder)]])
     with pytest.raises(ValueError, match='ownership changed'):
         namespace.validate(session)
+
+
+def test_ownership_snapshot_reloads_only_changed_rows(output_library, monkeypatch):
+    from app.database import TableMovies
+    from sportarr import output
+    session, folder = output_library
+    session.execute(sa.insert(TableMovies), [dict(id=i, radarrId=i, tmdbId=str(i),
+        title='Unrelated', path=f'/unrelated/movie-{i}.mkv', subtitles="[['en', '/unrelated/a.srt']]")
+        for i in range(100, 600)])
+    context = SimpleNamespace(mapped_path=str(folder / 'event.mkv'), event_id=61, arr_instance_id=1)
+    parsed = []
+    parse = output.ast.literal_eval
+    def counted(value):
+        parsed.append(value)
+        return parse(value)
+    monkeypatch.setattr(output.ast, 'literal_eval', counted)
+    output.SportsOutputNamespace(context, session)
+    parsed.clear()
+    statements = []
+    def count(conn, cursor, statement, parameters, context, many):
+        statements.append(statement)
+    sa.event.listen(session.get_bind(), 'before_cursor_execute', count)
+    for i in range(5):
+        session.execute(sa.update(TableMovies).where(TableMovies.id == 100).values(title=str(i)))
+        output.SportsOutputNamespace(context, session).validate(session)
+    sa.event.remove(session.get_bind(), 'before_cursor_execute', count)
+    assert len(parsed) <= 5
+    media_reads = [statement for statement in statements if statement.startswith('SELECT table_movies.id')]
+    assert len(media_reads) == 5 and all('WHERE table_movies.id IN' in statement for statement in media_reads)
+    session.execute(sa.update(TableMovies).where(TableMovies.id == 101).values(path=str(folder / 'event.mkv')))
+    with pytest.raises(ValueError, match='ambiguous|recorded'):
+        output.SportsOutputNamespace(context, session)
+    session.execute(sa.delete(TableMovies).where(TableMovies.id == 101))
+    output.SportsOutputNamespace(context, session).validate(session)
+
+
+def test_concurrent_change_during_incremental_reload_fails_closed(output_library, monkeypatch):
+    from app.database import TableMovies
+    from sportarr import output
+    session, folder = output_library
+    context = SimpleNamespace(mapped_path=str(folder / 'event.mkv'), event_id=61, arr_instance_id=1)
+    session.execute(sa.insert(TableMovies).values(id=100, radarrId=100, tmdbId='100',
+        title='Original', path='/unrelated/film.mkv'))
+    output.SportsOutputNamespace(context, session)
+    session.execute(sa.update(TableMovies).where(TableMovies.id == 100).values(title='Changed'))
+    replace = output._OwnershipSnapshot.replace
+    changed = []
+    def racing(snapshot, media_type, row):
+        if not changed:
+            changed.append(True)
+            with Session(session.get_bind()) as other:
+                other.execute(sa.insert(TableMovies).values(id=101, radarrId=101, tmdbId='101',
+                    title='New conflict', path=str(folder / 'event.mkv')))
+        return replace(snapshot, media_type, row)
+    monkeypatch.setattr(output._OwnershipSnapshot, 'replace', racing)
+    with pytest.raises(ValueError, match='ownership changed'):
+        output.SportsOutputNamespace(context, session)
+    with pytest.raises(ValueError, match='ambiguous|recorded'):
+        output.SportsOutputNamespace(context, session)
+
+
+def test_new_database_generation_cannot_reuse_an_engine_snapshot(output_library):
+    from app.database import TableMovies
+    from app.ownership_revision import install_ownership_revision
+    from sportarr import output
+    session, folder = output_library
+    context = SimpleNamespace(mapped_path=str(folder / 'event.mkv'), event_id=61, arr_instance_id=1)
+    namespace = output.SportsOutputNamespace(context, session)
+    # Replacing a database can reuse both the engine and its old counter value.
+    session.execute(sa.text('DROP TABLE subtitle_ownership_changes'))
+    install_ownership_revision(session.connection())
+    session.execute(sa.insert(TableMovies).values(id=100, radarrId=100, tmdbId='100',
+        title='New database', path=str(folder / 'event.mkv')))
+    session.execute(sa.text('UPDATE subtitle_ownership_revision SET revision=:revision WHERE id=1'),
+                    {'revision': namespace.revision})
+    with pytest.raises(ValueError, match='ambiguous|recorded'):
+        output.SportsOutputNamespace(context, session)
+
+
+def test_prepared_guard_rejects_replaced_database_with_matching_counter(output_library):
+    from sportarr.output import SportsOutputNamespace
+    session, folder = output_library
+    namespace = SportsOutputNamespace(SimpleNamespace(mapped_path=str(folder / 'event.mkv'),
+        event_id=61, arr_instance_id=1), session)
+    session.execute(sa.text("UPDATE subtitle_ownership_changes SET revision=revision-1 WHERE table_name='generation'"))
+    with pytest.raises(ValueError, match='ownership changed'):
+        namespace.validate(session)

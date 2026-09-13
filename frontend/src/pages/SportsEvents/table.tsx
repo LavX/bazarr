@@ -19,7 +19,7 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef, Table as TableInstance } from "@tanstack/react-table";
-import { useSubtitleFileDownload, useSubtitleSyncStatus } from "@/apis/hooks";
+import { useSubtitleFileDownload } from "@/apis/hooks";
 import { useCombineSubtitles } from "@/apis/hooks/combine";
 import { useShowOnlyDesired } from "@/apis/hooks/site";
 import { useSportsSubtitleModification } from "@/apis/hooks/sports";
@@ -382,7 +382,7 @@ const ActiveSyncIcon: FunctionComponent<{ label: string }> = ({ label }) => (
 );
 
 // One subtitle's sync status, the sports counterpart of the movie Status cell:
-// the same shared hook and presentation, so the spinner, the unconfirmed
+// the shared presentation with listing-provided status, so the spinner, the unconfirmed
 // state and the sync history icon mean the same thing on both media types.
 const EventSubtitleStatus: FunctionComponent<{
   event: SportsEvent;
@@ -391,21 +391,15 @@ const EventSubtitleStatus: FunctionComponent<{
   const languageKey = buildSubtitleLanguageKey(subtitle);
   const canCheckSyncStatus =
     !!subtitle.path && !isCombinedOutputSubtitle(subtitle);
-  const syncStatus = useSubtitleSyncStatus(
-    "sports",
-    event.id,
-    languageKey,
-    canCheckSyncStatus,
-    event.arr_instance_id,
-  );
-  const presentation = syncStatus.data
-    ? getSubtitleSyncStatusPresentation(syncStatus.data)
+  const syncStatus = event.sync_status?.[languageKey];
+  const presentation = syncStatus
+    ? getSubtitleSyncStatusPresentation(syncStatus)
     : null;
 
   if (!canCheckSyncStatus) {
     return null;
   }
-  if (syncStatus.isError) {
+  if (!syncStatus) {
     return <UnconfirmedSyncIcon label="Sync status could not be verified" />;
   }
   if (presentation?.icon === "running") {
@@ -424,9 +418,9 @@ const EventSubtitleStatus: FunctionComponent<{
 // Status column lines up with the language it describes. Movies render one
 // row per subtitle; an event holds its subtitles in one cell, so the column
 // here is a group of the per-subtitle states instead.
-const EventSubtitleStatuses: FunctionComponent<{ event: SportsEvent }> = ({
-  event,
-}) => {
+export const EventSubtitleStatuses: FunctionComponent<{
+  event: SportsEvent;
+}> = ({ event }) => {
   const presentSubtitles = useMemo(
     () => (event.subtitles ?? []).map(toSportsSubtitle),
     [event.subtitles],

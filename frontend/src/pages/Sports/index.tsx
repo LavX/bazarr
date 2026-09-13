@@ -30,6 +30,7 @@ import {
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef } from "@tanstack/react-table";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
+import { useAudioLanguages } from "@/apis/hooks/languages";
 import { useInstanceName } from "@/apis/hooks/site";
 import {
   SportsLeagueRow,
@@ -171,6 +172,11 @@ const LeagueRowActions: FunctionComponent<{ league: SportsLeagueRow }> = ({
 
 const Sports: FunctionComponent = () => {
   const { instances, enabled, isLoading } = useSportsAvailability();
+  const { data: audioCatalogue } = useAudioLanguages();
+  const nameToCode = useMemo(
+    () => new Map(audioCatalogue?.map(({ name, code2 }) => [name, code2])),
+    [audioCatalogue],
+  );
   const modals = useModals();
 
   const [search, setSearch] = useState("");
@@ -194,7 +200,7 @@ const Sports: FunctionComponent = () => {
     audioLanguages.length > 0 ||
     excludeLanguages.length > 0 ||
     instanceFilter.length > 0;
-  const query = useSportsLeaguesPagination(hasActiveFilter);
+  const query = useSportsLeaguesPagination(hasActiveFilter, nameToCode);
   // The same low-score marker Series and Movies show. Sports had no way to
   // consume /api/subtitles/upgradable because the endpoint sent no sports key,
   // so a league whose subtitles would benefit from an upgrade looked identical

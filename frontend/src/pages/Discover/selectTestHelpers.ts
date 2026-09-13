@@ -22,6 +22,11 @@ export async function openSelect(actor: Actor, label: string | RegExp) {
       element instanceof HTMLInputElement,
   );
   if (!input) throw new Error(`No select input labelled ${String(label)}`);
+  const disclosure = input.closest<HTMLDetailsElement>("details");
+  if (disclosure && !disclosure.open) {
+    const summary = disclosure.querySelector("summary");
+    if (summary) await actor.click(summary);
+  }
   await actor.click(input);
   if (input.getAttribute("aria-expanded") !== "true")
     await actor.keyboard("{ArrowDown}");
@@ -42,7 +47,27 @@ export async function pickOption(
 
 /** A segmented pair is a radio group; choosing is pressing the named radio. */
 export async function chooseSegment(actor: Actor, name: string | RegExp) {
+  await openSearchOptions(actor);
   await actor.click(screen.getByRole("radio", { name }));
+}
+
+/** Reveal the secondary retrieval controls through their visible action. */
+export async function openSearchOptions(actor: Actor) {
+  const options = screen.queryByRole("button", { name: "Search options" });
+  if (options && options.getAttribute("aria-expanded") !== "true")
+    await actor.click(options);
+}
+
+/** Open the current title's release search, or the global manual fallback. */
+export async function openReleaseSearch(actor: Actor) {
+  if (screen.queryByRole("button", { name: "Search options" }))
+    await openSearchOptions(actor);
+  else await actor.click(screen.getByLabelText("Search any movie or show..."));
+  await actor.click(
+    await screen.findByRole("button", {
+      name: "Search providers by release name",
+    }),
+  );
 }
 
 /**

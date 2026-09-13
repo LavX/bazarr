@@ -110,12 +110,21 @@ export type DiscoverProviderStatus =
   | "saturated";
 
 export interface DiscoverProviderOutcome {
+  supported_media?: ("movie" | "episode")[];
+  supported_languages?: string[];
   provider: string;
   status: DiscoverProviderStatus;
   reason: string | null;
   result_count: number;
   elapsed_ms: number;
   retry_at: string | null;
+}
+
+export interface DiscoverSearchProgress {
+  phase: "preparing" | "searching" | "finished";
+  providers: (Pick<DiscoverProviderOutcome, "provider" | "result_count"> & {
+    status: DiscoverProviderStatus | "pending";
+  })[];
 }
 
 export interface DiscoverSubtitleResult {
@@ -540,6 +549,8 @@ export interface DiscoverWantedComponent {
 }
 
 export interface DiscoverArrival {
+  library_id?: number | null;
+  poster_url?: string | null;
   kind: "episode" | "movie" | "translation";
   event_id: string;
   status: "success";

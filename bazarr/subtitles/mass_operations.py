@@ -225,10 +225,10 @@ def _get_synced_movie_paths():
 def _get_synced_sports_paths():
     """Get set of subtitle paths that have been synced (action=5) from sports history."""
     results = database.execute(
-        select(TableHistorySports.subtitles_path)
+        select(TableHistorySports.arr_instance_id, TableHistorySports.subtitles_path)
         .where(TableHistorySports.action == 5)
     ).all()
-    return {r.subtitles_path for r in results if r.subtitles_path}
+    return {(r.arr_instance_id, r.subtitles_path) for r in results if r.subtitles_path}
 
 
 def _sports_event_ids_for_leagues(league_ids, league_instance):
@@ -856,7 +856,7 @@ def _collect_sports(event_ids=None, action='sync', force_resync=False,
             if action == 'sync' and not force_resync:
                 reversed_path = path_mappings.path_replace_reverse_instance(
                     mapped_sub_path, event.arr_instance_id, 'sports')
-                if reversed_path in synced_paths:
+                if (event.arr_instance_id, reversed_path) in synced_paths:
                     skipped += 1
                     continue
 
@@ -1110,22 +1110,28 @@ def _process_media_action(items, action, job_id):
                                  if i.get('type') in ('series', 'episode') and i.get('sonarrSeriesId')]
         radarr_filters = [(i.get('radarrId'), i.get('arr_instance_id')) for i in items
                           if i.get('type') == 'movie' and i.get('radarrId')]
-        # Sports upgrades run per owner, not per selected row: the sports
-        # upgrade job builds its own candidate list from history and takes an
-        # instance, not a media filter. Deduplicated so selecting five events
-        # from one Sportarr does not run its upgrade five times.
-        sports_owners = sorted({
-            i.get('arr_instance_id') for i in items
-            if i.get('type') in ('sports', 'sportsLeague') and i.get('arr_instance_id')
-        })
+        sports_selections = {}
+        for item in items:
+            owner = item.get('arr_instance_id')
+            if item.get('type') not in ('sports', 'sportsLeague') or not owner:
+                continue
+            event_id, league_id = item.get('sportsEventId'), item.get('sportsLeagueId')
+            if not event_id and not league_id:
+                continue
+            selection = sports_selections.setdefault(owner, {'event_ids': set(), 'league_ids': set()})
+            if event_id:
+                selection['event_ids'].add(event_id)
+            elif league_id:
+                selection['league_ids'].add(league_id)
         try:
             if sonarr_series_filters:
                 upgrade_episodes_subtitles(job_id=job_id, sonarr_series_filters=sonarr_series_filters)
             if radarr_filters:
                 upgrade_movies_subtitles(job_id=job_id, radarr_filters=radarr_filters)
-            for owner in sports_owners:
-                upgrade_sports_subtitles(job_id=job_id, arr_instance_id=owner)
-            queued = len(sonarr_series_filters) + len(radarr_filters) + len(sports_owners)
+            for owner, selection in sorted(sports_selections.items()):
+                upgrade_sports_subtitles(job_id=job_id, arr_instance_id=owner,
+                                        **{key: sorted(ids) for key, ids in selection.items()})
+            queued = len(sonarr_series_filters) + len(radarr_filters) + len(sports_selections)
         except Exception as e:
             logger.error(f'Error during upgrade: {e}')  # noqa: G004
             errors.append(str(e))

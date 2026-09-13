@@ -333,7 +333,7 @@ def upgradable_history_ids(session, history_ids):
     return upgradable
 
 
-def upgrade_rows(session, arr_instance_id=None, job_id=None):
+def upgrade_rows(session, arr_instance_id=None, job_id=None, *, event_ids=None, league_ids=None):
     from subtitles.upgrade import (
         get_queries_condition_parameters,
         _language_still_desired,
@@ -358,6 +358,14 @@ def upgrade_rows(session, arr_instance_id=None, job_id=None):
     )
     if arr_instance_id is not None:
         query = query.where(TableHistorySports.arr_instance_id == arr_instance_id)
+    if event_ids is not None or league_ids is not None:
+        selected_events = select(TableSportsEvents.id).where(
+            (TableSportsEvents.id.in_(event_ids or [])) |
+            (TableSportsEvents.league_id.in_(league_ids or []))
+        )
+        if arr_instance_id is not None:
+            selected_events = selected_events.where(TableSportsEvents.arr_instance_id == arr_instance_id)
+        query = query.where(TableHistorySports.event_id.in_(selected_events))
     seen, rows = set(), []
     for row in session.execute(query).scalars():
         check_cancelled(SportsJobSignal(row.arr_instance_id, job_id))
@@ -401,7 +409,7 @@ def upgrade_rows(session, arr_instance_id=None, job_id=None):
 
 
 def upgrade_sports_subtitles(
-    job_id=None, wait_for_completion=False, arr_instance_id=None
+    job_id=None, wait_for_completion=False, arr_instance_id=None, event_ids=None, league_ids=None
 ):
     if not job_id:
         if not settings.general.upgrade_subs:
@@ -413,7 +421,7 @@ def upgrade_sports_subtitles(
             is_progress=True,
             wait_for_completion=wait_for_completion,
         )
-    rows = upgrade_rows(database, arr_instance_id, job_id)
+    rows = upgrade_rows(database, arr_instance_id, job_id, event_ids=event_ids, league_ids=league_ids)
     outcomes = []
     from sportarr.notify import rescan_batch
 

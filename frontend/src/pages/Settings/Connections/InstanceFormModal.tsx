@@ -202,10 +202,7 @@ const InstanceFormModal: FunctionComponent<Props> = ({
     () => [
       {
         value: GLOBAL_DEFAULT,
-        label:
-          form.values.kind === "sportarr"
-            ? "No default profile"
-            : "Use the global default",
+        label: "Use the global default",
       },
       { value: NO_PROFILE, label: "No profile" },
       ...(languageProfiles ?? []).map((profile) => ({
@@ -213,7 +210,7 @@ const InstanceFormModal: FunctionComponent<Props> = ({
         label: profile.name,
       })),
     ],
-    [languageProfiles, form.values.kind],
+    [languageProfiles],
   );
 
   // The apply action works off the SAVED override, so it stays disabled while

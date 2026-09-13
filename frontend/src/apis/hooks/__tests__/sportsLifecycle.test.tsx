@@ -6,15 +6,21 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   useSportsBlacklistPagination,
+  useSportsEvents,
   useSportsHistoryPagination,
   useSportsJob,
   useSportsLeaguesPagination,
   useSportsWantedPagination,
 } from "@/apis/hooks/sports";
-import sports from "@/apis/raw/sports";
+import sports, { type SportsEvent } from "@/apis/raw/sports";
 
 vi.mock("@/apis/raw/sports", () => ({
-  default: { list: vi.fn(), activity: vi.fn(), jobStatus: vi.fn() },
+  default: {
+    list: vi.fn(),
+    activity: vi.fn(),
+    jobStatus: vi.fn(),
+    events: vi.fn(),
+  },
 }));
 vi.mock("@/apis/raw", () => ({ default: {} }));
 
@@ -163,4 +169,57 @@ it("continues polling running work and stops when it completes", async () => {
     await new Promise((resolve) => setTimeout(resolve, 1200));
   });
   expect(status).toHaveBeenCalledTimes(2);
+});
+
+it("polls the owned event listing once for running syncs and stops when complete", async () => {
+  availability.enabled = true;
+  const row: SportsEvent = {
+    title: "Event",
+    eventDate: null,
+    broadcastDate: null,
+    hasFile: true,
+    monitored: true,
+    mapped_path: "/sports/event.mkv",
+    path: "/sports/event.mkv",
+    file_size: 100,
+    profileId: null,
+    audio_language: [],
+    subtitles: [["en", "/sports/event.en.srt", 40]],
+    missing_subtitles: [],
+    sportarrEventId: 9,
+    file_id: 71,
+    partNumber: null,
+    partName: null,
+    season: null,
+    episode: null,
+    id: 61,
+    arr_instance_id: 42,
+    league_id: 51,
+    sync_status: {
+      en: {
+        synced: false,
+        confirmed: false,
+        editedAfterSync: false,
+        lastModified: 100,
+        lastSyncTimestamp: null,
+        jobStatus: "running" as const,
+      },
+    },
+  };
+  const events = vi
+    .spyOn(sports, "events")
+    .mockResolvedValueOnce({
+      data: [row],
+      total: 1,
+    })
+    .mockResolvedValue({ data: [], total: 0 });
+  const { result } = renderHook(() => useSportsEvents(51, 42), { wrapper });
+  await waitFor(() => expect(result.current.data?.total).toBe(0), {
+    timeout: 3000,
+  });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 2200));
+  });
+  expect(events).toHaveBeenCalledTimes(2);
+  expect(events).toHaveBeenLastCalledWith(51, 42, 0, -1);
 });

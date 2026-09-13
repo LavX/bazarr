@@ -31,7 +31,7 @@ export function useSportsAvailability() {
 }
 // A league in the shape the shared ItemView table expects, so Sports renders
 // through the same component as Series and Movies instead of a bespoke grid.
-// The sports API predates that view: it sends audio_language as bare codes and
+// The sports API sends audio_language as names collected from owned events and
 // omits the fields Item.Base carries for an arr-managed title, so the gap is
 // filled here rather than by widening the shared type for one caller.
 export type SportsLeagueRow = Omit<
@@ -40,7 +40,10 @@ export type SportsLeagueRow = Omit<
 > &
   Item.Base;
 
-export function toSportsLeagueRow(league: SportsLeague): SportsLeagueRow {
+export function toSportsLeagueRow(
+  league: SportsLeague,
+  nameToCode: ReadonlyMap<string, string> = EMPTY_AUDIO_LANGUAGE_MAP,
+): SportsLeagueRow {
   return {
     ...league,
     // ItemOverview reads item.tags.length unguarded, so a league synced
@@ -53,9 +56,9 @@ export function toSportsLeagueRow(league: SportsLeague): SportsLeagueRow {
     imdbId: "",
     alternativeTitles: [],
     year: "",
-    audio_language: (league.audio_language ?? []).map((code) => ({
-      code2: code,
-      name: code,
+    audio_language: (league.audio_language ?? []).map((name) => ({
+      code2: nameToCode.get(name) ?? name,
+      name,
     })),
   };
 }
@@ -63,14 +66,24 @@ export function toSportsLeagueRow(league: SportsLeague): SportsLeagueRow {
 // The table-backed leagues query. Paginates through the same start/length
 // contract the series and movies endpoints use, so usePaginationQuery drives it
 // unchanged.
-export function useSportsLeaguesPagination(fetchAll = false) {
+export function useSportsLeaguesPagination(
+  fetchAll = false,
+  nameToCode: ReadonlyMap<string, string> = EMPTY_AUDIO_LANGUAGE_MAP,
+) {
   const { instances, enabled } = useSportsAvailability();
   return usePaginationQuery(
-    [QueryKeys.Sports, "leagues", instances.map((instance) => instance.id)],
+    [
+      QueryKeys.Sports,
+      "leagues",
+      instances.map((instance) => instance.id),
+      Array.from(nameToCode.entries()).sort(([a], [b]) => a.localeCompare(b)),
+    ],
     async (param) => {
       const response = await sports.list(undefined, param.start, param.length);
       return {
-        data: response.data.map(toSportsLeagueRow),
+        data: response.data.map((league) =>
+          toSportsLeagueRow(league, nameToCode),
+        ),
         total: response.total,
       };
     },
@@ -162,6 +175,16 @@ export function useSportsEvents(id: number, owner?: number, page = 1) {
     // from every one of them. -1 is the fetch-all length the shared endpoints
     // already speak.
     queryFn: () => sports.events(id, owner!, (page - 1) * 100, -1),
+    refetchInterval: (query) =>
+      query.state.status !== "error" &&
+      query.state.data?.data.some((event) =>
+        Object.values(event.sync_status ?? {}).some(
+          (status) =>
+            status.jobStatus === "pending" || status.jobStatus === "running",
+        ),
+      )
+        ? 2000
+        : false,
     enabled:
       Number.isInteger(id) &&
       id > 0 &&

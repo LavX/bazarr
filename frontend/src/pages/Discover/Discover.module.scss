@@ -14,8 +14,8 @@
   // Day values first; the night block below overrides them. Values switch on
   // Mantine's scheme attribute rather than through light-dark(), which here
   // followed the operating system rather than the reader's chosen appearance.
-  --discover-action-bg: #b36b00;
-  --discover-action-bg-hover: #995c00;
+  --discover-action-bg: var(--mantine-color-brand-7);
+  --discover-action-bg-hover: var(--mantine-color-brand-8);
   --discover-action-fg: #ffffff;
   --discover-link: var(--mantine-color-brand-7);
   --discover-stage: #0b0c15;
@@ -28,10 +28,15 @@
   --discover-conflict: #8a5a00;
   --discover-wait-ring: rgba(179, 107, 0, 0.55);
   --discover-wait-text: #8a5a00;
+  // The local rail follows the approved concept's own palette: a warm amber
+  // accent on a quiet track. Day values first; the night block below
+  // overrides them, keyed to the reader's chosen scheme like the rest.
+  --rail-accent: var(--mantine-color-brand-7);
+  --rail-track: var(--bz-hover-bg-emphasis);
 
   max-width: 1200px;
   margin-inline: auto;
-  padding: clamp(16px, 3vw, 40px);
+  padding: 26px;
   color: var(--bz-text-primary);
   caret-color: var(--mantine-color-brand-5);
   accent-color: var(--mantine-color-brand-5);
@@ -47,12 +52,12 @@
   }
 
   // Mantine's subtle variant is transparent with no resting border, so the
-  // refresh controls, the search-mode switch and "Back to shows" rendered as
+  // refresh controls, the search-mode switch and "Back to Discover" rendered as
   // plain bold text on a page whose other actions are amber. A resting border
   // and the link colour make them controls again without promoting them past
   // the one filled action.
   button[data-variant="subtle"] {
-    border: 1px solid var(--bz-border-interactive);
+    border: 0;
     color: var(--bz-text-secondary);
     &:hover {
       background: var(--bz-hover-bg);
@@ -75,13 +80,10 @@
   // which on the one button this page exists for is the wrong message.
   button[data-variant="filled"]:disabled:not([data-loading]),
   button[data-variant="filled"][data-disabled]:not([data-loading]) {
-    // Hollow: the amber outline says which action this will be, the empty
-    // fill says it is not yet available. Distinct from the filled primary,
-    // from the neutral secondaries, and from any muddy half-amber.
-    background-color: transparent;
-    border: 1px dashed var(--discover-wait-ring);
-    color: var(--discover-wait-text);
-    opacity: 1;
+    background: var(--discover-action-bg);
+    border: 1px solid transparent;
+    color: var(--discover-action-fg);
+    opacity: 0.5;
     cursor: not-allowed;
   }
 
@@ -124,8 +126,8 @@
 // action fill itself: Download SRT in the modal and Download SRT in the
 // results list are one control to the reader and must be one colour.
 .previewModal {
-  --discover-action-bg: #b36b00;
-  --discover-action-bg-hover: #995c00;
+  --discover-action-bg: var(--mantine-color-brand-7);
+  --discover-action-bg-hover: var(--mantine-color-brand-8);
   --discover-action-fg: #ffffff;
   --discover-wait-ring: rgba(179, 107, 0, 0.55);
   --discover-wait-text: #8a5a00;
@@ -147,9 +149,9 @@
 }
 
 :global([data-mantine-color-scheme="dark"]) .discover {
-  --discover-action-bg: #f2b560;
-  --discover-action-bg-hover: #fac77f;
-  --discover-action-fg: #21190e;
+  --discover-action-bg: var(--mantine-color-brand-5);
+  --discover-action-bg-hover: var(--mantine-color-brand-4);
+  --discover-action-fg: var(--mantine-color-dark-9);
   --discover-link: var(--mantine-color-brand-4);
   --discover-poster-shadow: 0 14px 30px -12px rgba(0, 0, 0, 0.7);
   --discover-poster-ring: rgba(255, 248, 240, 0.16);
@@ -160,13 +162,53 @@
   --discover-conflict: #ffd166;
   --discover-wait-ring: rgba(242, 181, 96, 0.5);
   --discover-wait-text: rgba(242, 181, 96, 0.8);
+  --rail-accent: var(--mantine-color-brand-5);
+  --rail-track: var(--bz-hover-bg-emphasis);
 }
 :global([data-mantine-color-scheme="dark"]) .previewModal {
-  --discover-action-bg: #f2b560;
-  --discover-action-bg-hover: #fac77f;
-  --discover-action-fg: #21190e;
+  --discover-action-bg: var(--mantine-color-brand-5);
+  --discover-action-bg-hover: var(--mantine-color-brand-4);
+  --discover-action-fg: var(--mantine-color-dark-9);
   --discover-wait-ring: rgba(242, 181, 96, 0.5);
   --discover-wait-text: rgba(242, 181, 96, 0.8);
+}
+
+// The text preview card inside the modal, per the approved concept: an
+// amber tabular cue time beside the dialogue, and the muted sync
+// disclaimer underneath. The modal shell carries the panel and the 9px
+// radius; these carry the type.
+.previewModal .previewCard {
+  min-width: 0;
+}
+
+.previewModal .cueList {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.previewModal .cueRow {
+  padding-block: 12px;
+  border-bottom: 1px solid var(--bz-border-card);
+}
+
+.previewModal .cueTime {
+  font-size: 0.6875rem;
+  color: var(--discover-action-bg);
+  font-variant-numeric: tabular-nums;
+}
+
+.previewModal .cueText {
+  font-size: 0.875rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin-top: 4px;
+}
+
+.previewModal .previewNote {
+  font-size: 0.6875rem;
+  color: var(--bz-text-tertiary);
 }
 
 .visuallyHidden {
@@ -186,24 +228,32 @@
 // Masthead and search
 // ---------------------------------------------------------------------------
 
+// In-page masthead per the approved concept: the word Discover with a muted
+// suffix on a hairline. No links and no explainer; setup lives in the rail.
 .header {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px 24px;
-  flex-wrap: wrap;
-  margin-bottom: 18px;
-  > div {
-    display: flex;
-    align-items: baseline;
-    gap: 14px;
-    flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  min-height: 34px;
+  margin-bottom: 15px;
+  > h1 {
+    flex: 1;
+  }
+  h1 {
+    margin: 0;
+    font-size: 1.5625rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
   }
 }
 
-.intro {
+.mastSuffix {
+  margin-left: 12px;
+  padding-left: 12px;
+  border-left: 1px solid var(--bh-line, var(--bz-border-card));
+  font-size: 0.8125rem;
+  font-weight: 550;
   color: var(--bz-text-tertiary);
-  font-size: 0.9375rem;
 }
 
 .settingsLink {
@@ -218,9 +268,9 @@
   margin-bottom: 20px;
 }
 
-// One bar, two segments: what to search, and the title. Both keep their real
-// labels for assistive technology; the bar carries the visual affordance and
-// one shared focus ring so a keyboard reader sees the whole control light up.
+// One bar, one field, one action. The catalog tabs below the bar own the
+// search scope. The bar carries the visual affordance and one shared focus
+// ring so a keyboard reader sees the whole control light up.
 .searchBar {
   display: flex;
   align-items: stretch;
@@ -257,35 +307,34 @@
   }
 }
 
-.searchScope {
-  flex: 0 0 auto;
-  margin: 0;
-}
-
 .searchField {
   flex: 1 1 auto;
   min-width: 0;
   margin: 0;
 }
 
-.searchFoot {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px 24px;
-  flex-wrap: wrap;
-  margin-top: 8px;
-  padding-inline: 6px;
-  > p {
-    color: var(--bz-text-tertiary);
-    font-size: 0.8125rem;
+// The catalog search submitter. A quiet icon chip inside the bar: amber stays
+// reserved for the filled primary action, so this never reads as one.
+.searchSubmit {
+  flex: 0 0 auto;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 48px;
+  min-height: 48px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--bz-text-secondary);
+  cursor: pointer;
+  &:hover {
+    background: var(--bz-surface-hover);
+    color: var(--bz-text-primary);
   }
-  a {
-    font-size: 0.875rem;
-    min-height: 44px;
-    display: inline-flex;
-    align-items: center;
-    color: var(--discover-link);
+  &:focus-visible {
+    outline: 2px solid var(--mantine-color-brand-5);
+    outline-offset: 2px;
   }
 }
 
@@ -323,13 +372,6 @@
       display: block;
     }
   }
-}
-
-.searchCaveat {
-  color: var(--bz-text-tertiary);
-  font-size: 0.8125rem;
-  margin-top: 0;
-  padding-inline: 6px;
 }
 
 // ---------------------------------------------------------------------------
@@ -397,7 +439,7 @@
     position: absolute;
     inset: -22% -1.5%;
     z-index: -1;
-    background: var(--feature-backdrop) center / cover no-repeat;
+    background: var(--feature-backdrop) center 30% / cover no-repeat;
     filter: blur(44px) saturate(1.8);
     opacity: var(--discover-glow-opacity);
     // closest-side: the ellipse touches all four edges of the box, so the
@@ -432,7 +474,7 @@
     width: 100%;
     height: 100%;
     object-fit: cover;
-    object-position: 50% 22%;
+    object-position: 50% 30%;
     z-index: -2;
     animation: featureIn 1100ms cubic-bezier(0.16, 1, 0.3, 1) both;
   }
@@ -520,10 +562,6 @@
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.01em;
   font-weight: 550;
-}
-
-.featureOverview {
-  max-width: 56ch;
 }
 
 @keyframes featureIn {
@@ -1046,6 +1084,25 @@
   }
 }
 
+// The page footer carries the concept tagline pair below the TMDB
+// attribution, on the home and the selected-title states alike.
+.pageFooter {
+  display: flex;
+  justify-content: space-between;
+  gap: 4px 12px;
+  flex-wrap: wrap;
+  margin-top: 20px;
+  padding-top: 15px;
+  border-top: 1px solid var(--bz-border-card);
+  color: var(--bz-text-tertiary);
+  font-size: 0.8125rem;
+  > span {
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Retrieval form and results
 // ---------------------------------------------------------------------------
@@ -1072,6 +1129,15 @@
   border: 1px solid var(--bz-border-card);
   border-radius: 16px;
   background: var(--bz-surface-raised);
+}
+
+// On the selected-title page the form is not a card but the flat concept
+// flow: sheet, retrieval panel, notes, results. The homepage keeps its card.
+.searchForm[data-page="title"] {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .targetFields {
@@ -1118,13 +1184,34 @@
 }
 
 .result {
-  padding-block: 20px;
-  border-top: 1px solid var(--bz-border-interactive);
+  padding-block: 17px;
+  border-bottom: 1px solid var(--bz-border-card);
 }
 
 .release {
   min-width: 0;
   overflow-wrap: anywhere;
+  h3 {
+    font-size: 0.8125rem;
+    font-weight: 600;
+  }
+  p {
+    font-size: 0.6875rem;
+    color: var(--bz-text-tertiary);
+  }
+}
+
+// Preview reads as amber text beside the filled download action, the way
+// the concept pairs them. The download control keeps its filled amber.
+.resultPreview[data-variant="subtle"] {
+  border-color: transparent;
+  color: var(--discover-action-bg);
+  font-weight: 600;
+  white-space: nowrap;
+  &:hover {
+    background: var(--bz-hover-bg);
+    color: var(--discover-action-bg-hover);
+  }
 }
 
 .downloadAction {
@@ -1208,7 +1295,8 @@
 }
 
 .episodePicker {
-  max-width: 70ch;
+  width: 100%;
+  min-width: 0;
   margin-block: 1.5rem;
   button,
   select,
@@ -1244,8 +1332,12 @@
 
 .homepageLayout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 252px;
-  gap: clamp(20px, 3vw, 40px);
+  // The concept composition: discovery takes the wider column and the reader's
+  // own Bazarr+ a fixed 246px rail, separated by a single column gap. The rail
+  // is not a card but a seam in the same surface, so the page reads as one
+  // sheet rather than a column of panels.
+  grid-template-columns: minmax(0, 1fr) 246px;
+  column-gap: 25px;
   align-items: start;
 }
 
@@ -1253,20 +1345,33 @@
   min-width: 0;
 }
 
+// The approved concept groups the browsable catalog (media filter, hero
+// spotlight, trending grid, new episodes) under one browse node. It is a
+// plain block on desktop so the feeds stack exactly as before.
+:global(#bh-browse) {
+  min-width: 0;
+}
+
 // The reader's own Bazarr+, beside the discovery. A status surface: what is
 // happening now, what arrived, what is waiting, what needs attention, each
 // with its own mark, the numbers carrying the weight in tabular figures.
+// Rendered as the concept's right rail: a seam (hairline border) on the same
+// page surface rather than a card, so it reads as part of the composition.
+// Concept type and spacing throughout: a 16px head, a 12px working title, a
+// 15px current task over an 11px scope line, a 4px amber bar, 11px arrival
+// rows with small tiles, and a Wanted row with its count right aligned.
 .localSummary {
   display: flex;
   flex-direction: column;
-  gap: 0;
-  padding: 18px 18px 8px;
-  border: 1px solid var(--bz-border-card);
-  border-radius: 16px;
-  background: var(--bz-surface-raised);
+  background: transparent;
+  border: 0;
+  border-left: 1px solid var(--bz-border-card);
+  padding: 0 0 0 22px;
   h2 {
-    font-size: 1.125rem;
-    letter-spacing: -0.01em;
+    font-size: 1rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    color: var(--bz-text-primary);
   }
   p {
     color: var(--bz-text-secondary);
@@ -1286,12 +1391,48 @@
   }
 }
 
+// The concept's rail head: the title on the left, the system-details arrow
+// on the right. The refresh control stays beside the arrow, drawn quiet so
+// the head keeps the concept's weight.
 .panelHead {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 8px 12px;
-  flex-wrap: wrap;
+  min-height: 52px;
+  margin-bottom: 17px;
+}
+
+.headActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px 8px;
+  button {
+    font-size: 0.6875rem;
+    color: var(--bz-text-tertiary);
+    &:hover {
+      color: var(--bz-text-primary);
+    }
+  }
+  a {
+    color: var(--bz-text-tertiary);
+    padding: 8px;
+    border-radius: 8px;
+    min-height: 44px;
+    min-width: 44px;
+    justify-content: center;
+    svg {
+      width: 15px;
+      height: 15px;
+      // The concept's details arrow runs diagonal. The icon set carries no
+      // plain diagonal arrow, so the rail's own arrow takes the angle.
+      transform: rotate(-45deg);
+    }
+    &:hover {
+      background: var(--bz-hover-bg);
+      color: var(--bz-text-primary);
+    }
+  }
 }
 
 .panelLink {
@@ -1317,38 +1458,139 @@
   margin-top: 3px;
 }
 
-.nowTile {
-  display: grid;
-  grid-template-columns: 16px minmax(0, 1fr);
-  gap: 12px;
-  padding-block: 10px 14px;
-}
-
-.nowBody {
+// The concept's current-work block: one running task with its scope and
+// measured progress, or the quiet schedule, or the setup call, or an honest
+// unknown. Compact on purpose: on a narrow viewport this is the short summary
+// that sits between search and discovery, above the disclosure. Spacing is
+// carried by each row's own top margin, so the block ends exactly where its
+// last row ends and the next section's hairline sits a concept 22px below.
+.current {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  padding: 10px 0 0;
   > p {
     margin: 0;
   }
+  > :first-child {
+    margin-top: 0;
+  }
 }
 
-.statRow {
+.workingTitle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--bz-text-secondary);
+  .panelIcon {
+    margin-top: 0;
+    width: 15px;
+    height: 15px;
+    color: var(--rail-accent);
+  }
+}
+
+// The running task's own title, scoped by the owning instance and language
+// beneath it.
+.current .taskTitle {
+  margin: 12px 0 0;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  letter-spacing: -0.015em;
+  color: var(--bz-text-primary);
+}
+
+.current .taskScope {
+  margin: 4px 0 0;
+  font-size: 0.6875rem;
+  color: var(--bz-text-tertiary);
+}
+
+// The measured figure sits right aligned above its bar, the way the concept
+// draws the progress line.
+.progressLine {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 5px;
+  margin: 17px 0 0;
+  font-size: 0.6875rem;
+}
+
+.progressLine .progressFigure {
+  margin: 0 0 0 auto;
+  font-size: 0.6875rem;
+  color: var(--bz-text-tertiary);
+}
+
+// Measured progress reads as a hairline bar, the way the concept draws it.
+// The element is native, so assistive technology gets the value without
+// extra wiring.
+.progress {
+  appearance: none;
+  display: block;
+  width: 100%;
+  height: 4px;
+  margin-top: 7px;
+  border: 0;
+  border-radius: 3px;
+  background: var(--rail-track);
+  overflow: hidden;
+  &::-webkit-progress-bar {
+    background: var(--rail-track);
+  }
+  &::-webkit-progress-value {
+    background: var(--rail-accent);
+    border-radius: 3px;
+  }
+  &::-moz-progress-bar {
+    background: var(--rail-accent);
+  }
+}
+
+// Secondary work lines: the waiting note, the overflow count. Small and
+// quiet, below the bar.
+.current .taskMore {
+  margin: 6px 0 0;
+  font-size: 0.6875rem;
+  color: var(--bz-text-tertiary);
+}
+
+// The queue route, drawn as the concept's quiet text link with its arrow.
+.current .queueLink {
+  margin-top: 10px;
+  font-size: 0.6875rem;
+  color: var(--bz-text-tertiary);
+  &:hover {
+    color: var(--rail-accent);
+  }
+}
+
+.current > .panelNote {
+  margin-top: 8px;
+}
+
+// The fallback when no single task leads: three inline figures, each of
+// which can be unknown. Running, queued and scheduled stay three figures;
+// a figure that could not be read says so.
+.countsLine {
   display: flex;
   gap: 4px 16px;
   flex-wrap: wrap;
 }
 
-.stat {
-  display: flex;
-  flex-direction: column;
-  gap: 0;
+.count {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
   min-width: 0;
 }
 
-.statValue {
-  font-size: 1.5rem;
+.countValue {
+  font-size: 1.25rem;
   font-weight: 650;
   line-height: 1.1;
   letter-spacing: -0.02em;
@@ -1357,13 +1599,11 @@
   &[data-unknown="true"] {
     font-size: 0.9375rem;
     font-weight: 600;
-    line-height: 1.2;
-    padding-block: 5px 4px;
     color: var(--bz-text-secondary);
   }
 }
 
-.statLabel {
+.countLabel {
   font-size: 0.75rem;
   color: var(--bz-text-tertiary);
 }
@@ -1372,13 +1612,12 @@
   color: var(--bz-text-tertiary);
 }
 
+// On a wide rail the disclosure stays open and its summary stays out of the
+// way, the way the concept draws the desktop rail: the sections simply
+// follow one another down the seam. On a narrow viewport the summary returns
+// as the visible control it already is, keeping its remembered open state.
 .panelSummary {
-  cursor: pointer;
-  min-height: 44px;
-  align-content: center;
-  color: var(--bz-text-secondary);
-  border-top: 1px solid var(--bz-border-card);
-  font-weight: 550;
+  display: none;
 }
 
 .panelGroup {
@@ -1409,32 +1648,148 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
-  li {
+  li:not(.arrival) {
     margin-bottom: 8px !important;
   }
 }
 
-.wantedLine {
+// The arrivals and Wanted sections carry their own internal layout rather
+// than the icon grid, so they stack full width: each row clears the one
+// above instead of sharing the 16px icon track.
+.panelStack {
   display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0 6px;
+  flex-direction: column;
+  > .wantedRow + * {
+    margin-top: 6px;
+  }
+}
+
+.recentHead {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.recentHead .panelGroupLabel {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--bz-text-primary);
+}
+
+.recentHead .panelLink {
+  font-size: 0.6875rem;
+}
+
+// The arrivals section opens below its own hairline, the concept's recent
+// block: a small head with its History route, then up to three rows of tile,
+// title with episode, and language with live age.
+.panelStack.recent {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--bz-border-card);
+  margin-top: 22px;
+  padding-top: 21px;
+}
+
+.arrival {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.arrivalList > .arrival:last-child {
+  margin-bottom: 0;
+}
+
+// Arrivals carry no artwork in the summary, so the tile is a quiet neutral,
+// never an invented poster.
+.arrivalArt {
+  width: 28px;
+  height: 39px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  background: var(--rail-track);
+  color: var(--bz-text-tertiary);
+  svg {
+    width: 12px;
+    height: 12px;
+  }
+}
+
+.arrivalBody {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.arrival .arrivalTitle {
+  margin: 0;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  color: var(--bz-text-primary);
+}
+
+.arrival .arrivalMeta {
+  margin: 3px 0 0;
+  font-size: 0.6875rem;
+  color: var(--bz-text-tertiary);
+}
+
+// Wanted demand as one row: the plain label on the left, the requirement
+// count on the right, between its own hairlines. A link, not a button: it
+// routes to the real Wanted page in the AppShell and back, rather than
+// opening concept-only content.
+.wantedRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  margin-top: 23px;
+  padding: 15px 0;
+  border-top: 1px solid var(--bz-border-card);
+  border-bottom: 1px solid var(--bz-border-card);
+  color: var(--bz-text-primary);
+  text-align: left;
+  > span:first-child {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    min-width: 0;
+    > strong {
+      font-size: 0.75rem;
+      font-weight: 500;
+    }
+    > small {
+      font-size: 0.6875rem;
+      color: var(--bz-text-tertiary);
+      margin-top: 3px;
+    }
+  }
+}
+
+// The reading's scope and age, in one line. The numbers above are only as
+// fresh as this line says they are.
+.localFoot {
+  font-size: 0.6875rem;
+  color: var(--bz-text-tertiary);
+  margin: 13px 0 4px;
 }
 
 .bigNumber {
-  font-size: 1.625rem;
-  font-weight: 650;
-  line-height: 1.1;
-  letter-spacing: -0.02em;
+  font-size: 1.0625rem;
+  font-weight: 500;
+  line-height: 1.2;
   font-variant-numeric: tabular-nums;
   color: var(--bz-text-primary);
 }
 
 .homepageSearch {
   margin-bottom: 8px;
-  .sourceAttribution {
-    display: none;
-  }
 }
 
 .appHeader {
@@ -1478,15 +1833,16 @@
 // Breakpoints
 // ---------------------------------------------------------------------------
 
-@media (max-width: 1100px) {
+@media (max-width: 900px) {
   // One column. The content wrapper dissolves so its sections and the local
   // summary are siblings in one flex column, and the order is set here:
-  // search, the spotlight, then the local summary, then the feeds. Discovery
-  // leads; the reader's own housekeeping follows it. On the selected-title
+  // search, the compact local summary, the spotlight, then the feeds.
+  // On the selected-title
   // page the summary comes last, because the reader came for the title.
   .homepageLayout {
     display: flex;
     flex-direction: column;
+    align-items: stretch;
     gap: 0;
   }
   // With the wrapper dissolved its children are the flex items, and a flex
@@ -1495,8 +1851,14 @@
   .homepageContent {
     display: contents;
   }
+  // The browse node dissolves with it, so the search, the spotlight, the
+  // feeds and the local summary stay siblings in the one flex column.
+  :global(#bh-browse) {
+    display: contents;
+  }
   .homepageLayout > *,
-  .homepageContent > * {
+  .homepageContent > *,
+  :global(#bh-browse) > * {
     min-width: 0;
     max-width: 100%;
   }
@@ -1504,18 +1866,143 @@
     order: -3;
   }
   .spotlight {
-    order: -2;
+    order: -1;
   }
   .homepageLayout[data-page="home"] .localSummary {
-    order: -1;
+    order: -2;
   }
   .homepageLayout[data-page="title"] .localSummary {
     order: 1;
     margin-top: 24px;
   }
+  // One column, so the rail's left seam would dangle at the screen's margin.
+  // The concept's narrow treatment moves the seam to the bottom, separating
+  // the reader's Bazarr+ from the discovery above it. The disclosure summary
+  // returns here as the visible control it already is, keeping its
+  // remembered open state.
   .localSummary {
     margin-bottom: 36px;
     padding: 14px 16px 4px;
+    border: 0;
+    border-bottom: 1px solid var(--bz-border-card);
+  }
+  .panelSummary {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-height: 30px;
+    margin: 0;
+    padding: 7px 0;
+    border: 0;
+    list-style: none;
+    cursor: pointer;
+    font-size: 0.6875rem;
+    font-weight: 500;
+    color: var(--bz-text-tertiary);
+    &::-webkit-details-marker {
+      display: none;
+    }
+    // The disclosure chevron, drawn in CSS so the summary keeps its exact
+    // label. It points down closed and up open.
+    &::after {
+      content: "";
+      width: 6px;
+      height: 6px;
+      flex: none;
+      margin-bottom: 3px;
+      border-right: 1.5px solid currentColor;
+      border-bottom: 1.5px solid currentColor;
+      transform: rotate(45deg);
+      transition: transform 150ms ease;
+    }
+    &:hover {
+      color: var(--bz-text-primary);
+    }
+  }
+  details[open] > .panelSummary::after {
+    margin-bottom: 0;
+    transform: rotate(225deg);
+  }
+  .panelStack.recent {
+    margin-top: 0;
+    padding-top: 13px;
+  }
+  .wantedRow {
+    margin-top: 13px;
+  }
+  .localFoot {
+    margin-bottom: 14px;
+  }
+}
+
+// The concept's compact rail: a smaller head, a tighter current block, and
+// while work runs, a two column summary where the scope and the queue flank
+// the figure and the bar runs full width beneath. The task title steps aside
+// there; its scope line stays, so nothing about the work is lost.
+@media (max-width: 700px) {
+  .panelHead {
+    min-height: 24px;
+    margin-bottom: 5px;
+  }
+  .localSummary h2 {
+    font-size: 0.8125rem;
+  }
+  .current {
+    padding-bottom: 5px;
+  }
+  .workingTitle {
+    font-size: 0.6875rem;
+  }
+  .current .taskTitle {
+    font-size: 0.8125rem;
+    margin-top: 5px;
+  }
+  .current .taskScope {
+    margin-top: 2px;
+  }
+  .progressLine {
+    margin-top: 8px;
+  }
+  .current .queueLink {
+    margin-top: 5px;
+  }
+  .localSummary[data-system="busy"] .current,
+  .localSummary[data-system="attention"] .current {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 3px 8px;
+    align-items: center;
+    .workingTitle {
+      grid-column: 1;
+      grid-row: 1;
+    }
+    .taskTitle {
+      display: none;
+    }
+    .taskScope {
+      grid-column: 1;
+      grid-row: 2;
+    }
+    .progressLine {
+      grid-column: 2;
+      grid-row: 1;
+      margin: 0;
+    }
+    .queueLink {
+      grid-column: 2;
+      grid-row: 2;
+      margin: 0;
+    }
+    .progress {
+      grid-column: 1 / -1;
+      grid-row: 3;
+      margin-top: 3px;
+    }
+    .taskMore,
+    .panelNote,
+    .countsLine {
+      grid-column: 1 / -1;
+    }
   }
 }
 
@@ -1566,9 +2053,6 @@
 @media (max-width: 600px) {
   .header {
     margin-bottom: 14px;
-  }
-  .intro {
-    font-size: 0.875rem;
   }
   .targetFields,
   .targetFields:has(.episodeFields) {
@@ -1628,10 +2112,6 @@
 @media (max-width: 400px) {
   .searchBar {
     padding: 4px;
-  }
-  .searchScope select {
-    padding-inline: 10px 26px;
-    font-size: 0.875rem;
   }
   .searchField {
     // Mantine reserves a fixed slot for the leading icon; at this width the
@@ -1754,19 +2234,6 @@
   box-shadow: var(--discover-tab-shadow);
 }
 
-.searchScope .segmented {
-  height: 100%;
-  border: 0;
-  background: transparent;
-  padding: 0;
-  display: inline-flex;
-  align-items: stretch;
-  .segmentedLabel {
-    min-height: 48px;
-    height: 100%;
-  }
-}
-
 .field {
   display: flex;
   flex-direction: column;
@@ -1794,58 +2261,36 @@
   }
 }
 
-.titleFeature {
-  aspect-ratio: auto;
-  min-height: 0;
-  max-height: none;
-  align-items: stretch;
-  &[data-artwork="false"] {
-    .titleFeatureCopy {
-      padding-top: clamp(20px, 3vw, 32px);
-    }
+// The concept back control: muted text with an arrow, no resting border and
+// no amber. Leaving the title still retires its pending subtitle work.
+.detailBack[data-variant="subtle"] {
+  border-color: transparent;
+  color: var(--bz-text-tertiary);
+  font-weight: 550;
+  &:hover {
+    background: var(--bz-hover-bg);
+    color: var(--bz-text-primary);
   }
 }
 
-.titleFeatureCopy {
+// The selected title as a sheet, per the approved concept: a 102px poster
+// column beside the title, honest meta, overview and the library line. Day
+// maps to the light scheme and night to dark through the page tokens, the
+// way the concept maps day and night through its own.
+.detailSheet {
   display: grid;
-  grid-template-columns: 132px minmax(0, 1fr);
-  gap: clamp(16px, 3vw, 28px);
-  align-items: end;
-  width: 100%;
-  min-width: 0;
-  padding: clamp(20px, 3.5vw, 32px);
-  padding-top: clamp(44px, 6vw, 72px);
-  animation: riseIn 900ms 140ms cubic-bezier(0.16, 1, 0.3, 1) both;
-  h2 {
-    font-size: clamp(2rem, 1.3rem + 2.8vw, 3.5rem);
-    font-weight: 700;
-    line-height: 1.02;
-    letter-spacing: -0.03em;
-    text-wrap: balance;
-    overflow-wrap: anywhere;
-    text-shadow: 0 2px 28px rgba(0, 0, 0, 0.45);
-    outline-offset: 6px;
-  }
-  > div {
-    min-width: 0;
-  }
-  > div > p {
-    margin-top: 10px;
-    color: rgba(255, 248, 240, 0.86);
-    font-size: 0.9375rem;
-  }
-  .feature[data-artwork="false"] & > div > p {
-    color: var(--bz-text-secondary);
-  }
+  grid-template-columns: 102px minmax(0, 1fr);
+  gap: 19px;
+  align-items: start;
+  padding-top: 17px;
 }
 
-.titlePoster {
+.detailPoster {
   display: grid;
   aspect-ratio: 2 / 3;
-  border-radius: 10px;
+  border-radius: 8px;
   overflow: hidden;
   background: var(--bz-surface-raised);
-  box-shadow: 0 16px 36px -12px rgba(0, 0, 0, 0.7);
   > * {
     grid-area: 1 / 1;
   }
@@ -1855,6 +2300,49 @@
     object-fit: cover;
     display: block;
   }
+}
+
+.detailSheet .detailTitle {
+  font-size: 1.6875rem;
+  font-weight: 600;
+  line-height: 1.12;
+  letter-spacing: -0.025em;
+  overflow-wrap: anywhere;
+  outline-offset: 6px;
+}
+
+.detailMeta {
+  font-size: 0.6875rem;
+  color: var(--bz-text-tertiary);
+  margin-top: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.detailOverview {
+  font-size: 0.75rem;
+  line-height: 1.6;
+  color: var(--bz-text-secondary);
+  margin-top: 11px;
+}
+
+.detailScope {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--bz-stat-completed);
+  font-size: 0.6875rem;
+  font-weight: 550;
+  margin-top: 11px;
+  svg {
+    width: 12px;
+    height: 12px;
+  }
+}
+
+.detailOutside {
+  font-size: 0.6875rem;
+  color: var(--bz-text-tertiary);
+  margin-top: 11px;
 }
 
 // What the metadata can and cannot tell the reader, in the margin of the
@@ -1871,24 +2359,74 @@
   }
 }
 
-// On the selected-title page the language and the one action lead the form.
+// The retrieval panel, per the approved concept: a top hairline, a 17px
+// heading, the episode choice, then language and the one amber action in a
+// wrapping row, with the remembered-language note underneath. The filled
+// amber action itself is untouched.
+.retrievalPanel {
+  margin-top: 26px;
+  padding-top: 22px;
+  border-top: 1px solid var(--bz-border-card);
+}
+
+.retrievalPanel .retrievalTitle {
+  font-size: 1.0625rem;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  margin: 0 0 15px;
+}
+
+.retrievalPanel .episodePicker {
+  margin-block: 0 16px;
+}
+
+.retrievalPanel .selectInput {
+  border-radius: 7px;
+}
+
 .primaryRow {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 12px 16px;
-  align-items: end;
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: flex-end;
   .select {
-    max-width: 28rem;
+    flex: 1 1 155px;
+    min-width: 155px;
+    max-width: none;
   }
-  button {
+  > :is(button, a) {
+    flex: 0 0 auto;
+  }
+  :is(button, a) {
     min-height: 44px;
   }
 }
 
-.primaryHint {
-  margin-top: 10px;
+.searchForm .primaryHint {
+  margin-top: 12px;
   color: var(--bz-text-tertiary);
-  font-size: 0.8125rem;
+  font-size: 0.6875rem;
+}
+
+// Results read as ledger rows under a 15px header: a top hairline, one row
+// per release, muted secondary lines, the release name carrying each row.
+.resultsPanel {
+  margin-top: 24px;
+  border-top: 1px solid var(--bz-border-card);
+  padding-top: 19px;
+}
+
+.resultsPanel .resultsTitle {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.4;
+  margin: 0;
+}
+
+.resultsPanel .resultsNote {
+  font-size: 0.6875rem;
+  color: var(--bz-text-tertiary);
 }
 
 // The identity fields on the selected-title page are context, already
@@ -1957,29 +2495,19 @@
 }
 
 @media (max-width: 700px) {
-  .titleFeatureCopy {
-    grid-template-columns: 92px minmax(0, 1fr);
-    padding-top: clamp(36px, 9vw, 64px);
+  .detailSheet {
+    grid-template-columns: 80px minmax(0, 1fr);
+    gap: 15px;
   }
-  .primaryRow {
-    grid-template-columns: minmax(0, 1fr);
-    .select {
-      max-width: none;
-    }
-    button {
-      width: 100%;
-    }
+  .detailSheet .detailTitle {
+    font-size: 1.4375rem;
+  }
+  .primaryRow > :is(button, a) {
+    width: 100%;
   }
 }
 
 @media (max-width: 400px) {
-  .titleFeatureCopy {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 12px;
-  }
-  .titlePoster {
-    width: 84px;
-  }
   .segmentedLabel {
     padding-inline: 12px;
   }
@@ -2001,4 +2529,2008 @@
   color: var(--discover-link);
   font-weight: 600;
   white-space: nowrap;
+}
+
+// ---------------------------------------------------------------------------
+// Approved concept homepage composition
+// ---------------------------------------------------------------------------
+//
+// Everything below restyles the homepage surface only: search zone, tab row,
+// spotlight, trending grid and episode rows. The rules sit at the end of the
+// sheet and scope under .discover with an extra class so they outrank the
+// earlier blocks without rewriting them, and so the selected-title page and
+// the local rail keep the treatment their own crews own. Copy never changes
+// here; only spacing, type scale, radii and colors move, using the bh tokens
+// below (night values in dark, day values in light).
+
+.discover {
+  --bh-bg: var(--bz-surface-base);
+  --bh-panel: var(--bz-surface-raised);
+  --bh-hover: var(--bz-hover-bg-emphasis);
+  --bh-ink: var(--bz-text-primary);
+  --bh-muted: var(--bz-text-tertiary);
+  --bh-line: var(--bz-border-interactive);
+  --bh-accent: light-dark(
+    var(--mantine-color-brand-7),
+    var(--mantine-color-brand-5)
+  );
+  --bh-selected: light-dark(rgba(230, 138, 0, 0.08), rgba(230, 138, 0, 0.12));
+  --bh-alert: light-dark(
+    var(--mantine-color-orange-8),
+    var(--mantine-color-orange-3)
+  );
+  --bh-alert-bg: light-dark(
+    var(--mantine-color-orange-0),
+    var(--mantine-color-dark-6)
+  );
+}
+
+// One full-width bar: a quiet scope prefix, the title field, and a quiet
+// icon submit chip. Amber stays reserved for the filled primary action, so
+// the chip never reads as one.
+.discover .searchArea {
+  position: relative;
+  z-index: 5;
+}
+
+.discover .searchBar {
+  align-items: center;
+  gap: 8px;
+  padding: 5px 7px;
+  border-radius: 10px;
+  background: var(--bh-panel);
+  border: 1px solid var(--bh-line);
+  box-shadow: none;
+  &:focus-within {
+    border-color: var(--bh-accent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--bh-accent) 30%, transparent);
+  }
+}
+
+.discover .searchBar input {
+  min-height: 40px;
+  font-size: 0.8125rem;
+  color: var(--bh-ink);
+  &::placeholder {
+    color: var(--bh-muted);
+  }
+}
+
+.discover .searchField svg {
+  color: var(--bh-muted);
+}
+
+.discover .searchSubmit {
+  min-width: 40px;
+  min-height: 40px;
+  border-radius: 6px;
+  background: var(--bh-hover);
+  color: var(--bh-ink);
+  &:hover {
+    background: var(--bh-hover);
+    color: var(--bh-accent);
+  }
+}
+
+// Matches float over the catalog in a panel, the way the concept draws them,
+// instead of pushing the spotlight down the page. An empty panel stays out
+// of the layout entirely.
+.discover .candidates {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 8px);
+  margin: 0;
+  max-height: min(60vh, 480px);
+  overflow: auto;
+  background: var(--bh-panel);
+  border: 1px solid var(--bh-line);
+  border-radius: 10px;
+  padding: 7px;
+  box-shadow: 0 15px 30px rgba(0, 0, 0, 0.25);
+  z-index: 6;
+  &:empty {
+    display: none;
+  }
+}
+
+.discover .candidate {
+  grid-template-columns: 40px minmax(0, 1fr);
+  gap: 11px;
+  align-items: center;
+  padding: 9px;
+  border: 0;
+  border-radius: 6px;
+  > span:first-child {
+    border-radius: 3px;
+  }
+  &:hover {
+    background: var(--bh-hover);
+  }
+}
+
+// Catalog filters stay together above the featured artwork.
+.discover .spotlight {
+  margin-block: 0;
+}
+
+.discover .filterRow {
+  align-items: center;
+  min-height: 54px;
+  margin-block: 2px 18px;
+  > p {
+    margin: 0;
+  }
+}
+
+.discover .filterTabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--bz-border-interactive);
+  border-radius: 11px;
+  background: var(--bz-surface-raised);
+  overflow: visible;
+  button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 9px;
+    min-height: 44px;
+    min-width: 106px;
+    padding: 8px 16px;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    background: transparent;
+    box-shadow: none;
+    color: var(--bz-text-secondary);
+    font-size: 13px;
+    font-weight: 550;
+    white-space: nowrap;
+    svg {
+      width: 14px;
+      height: 14px;
+      opacity: 0.75;
+    }
+    &:hover {
+      background: var(--bh-hover);
+      color: var(--bh-ink);
+    }
+    &[aria-pressed="true"] {
+      background: color-mix(in srgb, var(--bh-accent) 17%, transparent);
+      border-color: color-mix(in srgb, var(--bh-accent) 38%, transparent);
+      color: var(--bh-ink);
+      font-weight: 650;
+      svg {
+        color: var(--bh-accent);
+        opacity: 1;
+      }
+    }
+    &:focus-visible {
+      outline: 2px solid var(--bh-accent);
+      outline-offset: 2px;
+    }
+  }
+}
+@media (max-width: 540px) {
+  .discover .filterTabs {
+    width: 100%;
+    button {
+      flex: 1;
+      min-width: 0;
+      padding-inline: 8px;
+      gap: 7px;
+      font-size: 12px;
+    }
+  }
+}
+
+.discover .globalLabel {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--bh-muted);
+  white-space: nowrap;
+  svg {
+    width: 13px;
+    height: 13px;
+  }
+}
+
+// The cinematic card: radius 12, backdrop art under one dark gradient, big
+// title, small meta row, short overview, amber filled CTA. No glow and no
+// entrance motion; the concept frame is the page.
+.discover .spotlight .stage {
+  margin: 0;
+}
+
+.discover .spotlight .stage[data-artwork="true"]::before {
+  display: none;
+}
+
+.discover .spotlight .feature {
+  aspect-ratio: auto;
+  min-height: 230px;
+  max-height: none;
+  border-radius: 12px;
+  background: #29241e;
+  box-shadow: none;
+  > img {
+    object-position: 57% 30%;
+    animation: none;
+  }
+  &::after {
+    background: linear-gradient(
+      0deg,
+      rgba(12, 13, 19, 0.98),
+      rgba(12, 13, 19, 0.48) 46%,
+      rgba(12, 13, 19, 0.04) 90%
+    );
+  }
+  &[data-artwork="false"] {
+    aspect-ratio: auto;
+    min-height: 0;
+    background: var(--bh-panel);
+    border: 1px solid var(--bh-line);
+    box-shadow: none;
+    color: var(--bh-ink);
+    &::after {
+      display: none;
+    }
+  }
+}
+
+.discover .spotlight .feature[data-artwork="false"] .featureCopy {
+  padding-top: clamp(24px, 4vw, 40px);
+  > p {
+    color: var(--bh-muted);
+  }
+  h2 {
+    text-shadow: none;
+  }
+}
+
+.discover .spotlight .featureCopy {
+  padding: 58px 18px 24px;
+  max-width: 100%;
+  animation: none;
+  h2 {
+    font-size: 1.875rem;
+    line-height: 1.06;
+    letter-spacing: -0.035em;
+    font-weight: 540;
+    text-wrap: balance;
+    max-width: 360px;
+  }
+  button {
+    margin-top: 0;
+  }
+}
+
+.discover .spotlight .featureMeta {
+  display: block;
+  margin: 12px 0 16px;
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: #e1dcd5;
+}
+
+.discover .spotlight .featureCta {
+  min-height: 40px;
+  height: 40px;
+  padding-inline: 14px;
+  border-radius: 7px;
+  font-size: 0.75rem;
+  font-weight: 620;
+  svg {
+    width: 15px;
+    height: 15px;
+  }
+}
+
+.discover .spotlight .featureNext {
+  position: absolute;
+  right: 14px;
+  top: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  width: 34px;
+  min-height: 34px;
+  height: 34px;
+  border: 1px solid rgba(255, 255, 255, 0.26);
+  border-radius: 7px;
+  background: rgba(20, 23, 34, 0.91);
+  color: #fff6ed;
+  cursor: pointer;
+  &:hover {
+    background: rgba(32, 36, 52, 0.95);
+  }
+  svg {
+    width: 15px;
+    height: 15px;
+  }
+}
+
+// Section heads in the concept pattern: an 18px title on the left, small
+// muted freshness and quiet refresh tooling on the right.
+.discover .trending {
+  margin-block: 0;
+}
+
+.discover .sectionHead {
+  align-items: center;
+  margin: 27px 0 13px;
+  h2 {
+    font-size: 1.125rem;
+    font-weight: 550;
+    letter-spacing: -0.02em;
+    line-height: 1.3;
+  }
+}
+
+.discover .sectionMeta {
+  font-size: 11px;
+  color: var(--bh-muted);
+}
+
+.discover .feedFreshness {
+  margin: 0;
+  font-size: 11px;
+  color: var(--bh-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.discover .refreshButton {
+  border: 0;
+  background: transparent;
+  color: var(--bh-muted);
+  font-size: 11px;
+  font-weight: 500;
+  min-height: 36px;
+  padding-inline: 8px;
+  &:hover {
+    background: transparent;
+    color: var(--bh-accent);
+  }
+  svg {
+    width: 13px;
+    height: 13px;
+  }
+}
+
+.discover .feedStatus :global(.mantine-Alert-root) {
+  border-radius: 9px;
+}
+
+// The poster wall: four across on desktop, two across when narrow, rounded 8
+// art, compact title and year/kind captions. Ranks stay on the art; library
+// badges are omitted because the trending feed carries no library data.
+.discover .posterGrid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.discover .poster {
+  border-radius: 8px;
+  strong {
+    margin-top: 9px;
+    font-size: 0.75rem;
+    font-weight: 520;
+    line-height: 1.35;
+  }
+  > .captionValues {
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--bh-muted);
+  }
+}
+
+.discover .posterArt {
+  border-radius: 8px;
+}
+
+.discover .rank {
+  top: 6px;
+  left: 6px;
+  min-width: 24px;
+  height: 24px;
+  padding-inline: 6px;
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+// Episode and digital release cards share compact rows and release order.
+.discover .compactFeed .episodeList {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  border: 0;
+  li {
+    border: 0;
+    min-width: 0;
+  }
+}
+.discover .compactFeed .episodeRow {
+  grid-template-columns: 96px minmax(0, 1fr) 12px;
+  gap: 12px;
+  align-items: center;
+  height: 100%;
+  min-height: 102px;
+  padding: 12px;
+  border: 1px solid var(--bz-border-card);
+  border-radius: 9px;
+  background: var(--bz-surface-raised);
+  &:hover {
+    background: var(--bh-hover);
+    border-color: var(--bh-accent);
+  }
+  strong {
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.3;
+  }
+}
+.discover .compactFeed .episodeArt {
+  width: 96px;
+  aspect-ratio: 4 / 3;
+  border-radius: 6px;
+  .missingArt,
+  .artPending {
+    gap: 0;
+    padding: 4px;
+    font-size: 0;
+    svg {
+      width: 14px;
+      height: 14px;
+    }
+  }
+}
+.discover .compactFeed .episodeFacts {
+  gap: 5px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--bh-muted);
+  strong {
+    color: var(--bh-ink);
+  }
+  .episodeName {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .episodeCode {
+    color: var(--bz-text-secondary);
+    font-weight: 600;
+  }
+}
+@media (max-width: 1599px) {
+  .discover .compactFeed .episodeList {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (max-width: 1099px) {
+  .discover .compactFeed .episodeList {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 699px) {
+  .discover .compactFeed .episodeList {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+  .discover .compactFeed .episodeRow {
+    grid-template-columns: 80px minmax(0, 1fr) 12px;
+    min-height: 92px;
+    padding: 10px;
+  }
+  .discover .compactFeed .episodeArt {
+    width: 80px;
+  }
+}
+
+.discover .episodeChevron {
+  margin-left: auto;
+  width: 15px;
+  height: 15px;
+  color: var(--bh-muted);
+}
+
+// The digital releases region picker stays fully functional, drawn small and
+// quiet so the section head keeps the concept pattern.
+.discover .regionSelect {
+  gap: 8px;
+  label {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--bh-muted);
+  }
+  .selectInput {
+    min-height: 36px;
+    font-size: 0.75rem;
+    background: var(--bh-panel);
+    border-color: var(--bh-line);
+    border-radius: 7px;
+    color: var(--bh-ink);
+  }
+}
+
+@media (max-width: 880px) {
+  .discover .posterGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px 12px;
+  }
+  .discover .spotlight .featureCopy h2 {
+    font-size: 2rem;
+  }
+  .discover .spotlight .featureCopy {
+    padding: 60px 20px 20px;
+  }
+  .discover .spotlight .feature {
+    min-height: 279px;
+  }
+  .discover .sectionHead {
+    flex-wrap: wrap;
+    gap: 4px 12px;
+  }
+}
+
+@media (max-width: 660px) {
+  .discover .spotlight .feature {
+    min-height: 278px;
+  }
+  .discover .spotlight .featureCopy h2 {
+    font-size: 2.25rem;
+  }
+  .discover .sectionTools {
+    width: 100%;
+    justify-content: space-between;
+  }
+}
+
+@media (max-width: 600px) {
+  .discover .searchBar input {
+    font-size: 1rem;
+  }
+}
+
+@media (pointer: coarse) {
+  .discover .refreshButton {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  .discover .searchSubmit {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  .discover .spotlight .featureNext {
+    min-height: 44px;
+    min-width: 44px;
+    width: 44px;
+    height: 44px;
+  }
+}
+
+// Shared composition for the approved home and title surfaces.
+.discover {
+  min-height: 100dvh;
+  background: var(--bh-bg);
+  font-size: 13px;
+  .homepageSearch {
+    margin-bottom: 0;
+  }
+  .titleTools {
+    margin-top: 9px;
+    margin-bottom: 0;
+  }
+  .detailBack[data-variant="subtle"] {
+    padding-inline: 0;
+    font-size: 11px;
+    font-weight: 400;
+  }
+  .detailOptions {
+    width: 36px;
+    padding: 0;
+    color: var(--bh-muted);
+  }
+  .detailSheet {
+    padding-top: 0;
+  }
+  .detailMeta {
+    margin-top: 10px;
+  }
+  .detailOverview {
+    margin-top: 10px;
+    font-size: 13px;
+  }
+  .retrievalPanel {
+    margin-top: 26px;
+    padding-top: 22px;
+  }
+  .primaryRow {
+    align-items: end;
+  }
+  .selectDescription {
+    font-size: 11px;
+  }
+  .status:empty {
+    display: none;
+  }
+  .status {
+    margin-block: 12px;
+  }
+  .readiness {
+    margin: 14px 0 0;
+    font-size: 12px;
+    color: var(--bh-muted);
+  }
+  .readiness a {
+    font-size: inherit;
+  }
+  .refreshButton {
+    padding: 0;
+    min-width: 32px;
+    width: 32px;
+    height: 32px;
+    color: var(--bh-muted);
+  }
+  .feedFreshness {
+    font-size: 11px;
+  }
+  .showMore {
+    display: block;
+    margin-left: auto;
+    padding: 0;
+    font-size: 11px;
+    min-height: 30px;
+    font-weight: 400;
+  }
+  .feedDates {
+    font-size: 12px;
+    margin-top: 0;
+    color: var(--bh-muted);
+  }
+  .feedDates summary {
+    min-height: 24px;
+  }
+  .digitalDisclosure {
+    margin-top: 18px;
+    color: var(--bh-muted);
+  }
+  .digitalDisclosure > summary {
+    min-height: 32px;
+    align-content: center;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .digitalDisclosure[open] > summary {
+    margin-bottom: -24px;
+    font-size: 0;
+  }
+  .digitalDisclosure[open] > summary::marker {
+    font-size: 12px;
+  }
+  .attribution {
+    max-width: none;
+    font-size: 11px;
+    margin-block: 12px 0;
+  }
+  .attribution summary {
+    cursor: pointer;
+    min-height: 24px;
+    align-content: center;
+  }
+  .attribution img {
+    width: 80px;
+  }
+  .pageFooter {
+    margin-top: 22px;
+    font-size: 11px;
+    padding-top: 14px;
+  }
+  .providerDisclosure > summary {
+    cursor: pointer;
+    min-height: 32px;
+    align-content: center;
+    font-size: 11px;
+    color: var(--bh-muted);
+  }
+  .titleNotes {
+    margin-top: 12px;
+    font-size: 11px;
+    color: var(--bh-muted);
+  }
+  .headActions {
+    gap: 0;
+  }
+  .headActions button {
+    min-width: 26px;
+    padding: 0;
+    opacity: 0.55;
+  }
+  .headActions a {
+    min-width: 26px;
+  }
+  .localSummary .panelHead {
+    min-height: 32px;
+    margin-bottom: 30px;
+  }
+  .localSummary .panelHead h2 {
+    white-space: nowrap;
+    font-size: 16px;
+  }
+  .current {
+    padding-bottom: 22px;
+  }
+  .workingTitle {
+    font-size: 12px;
+  }
+  .workingTitle span {
+    font-size: 12px;
+  }
+  .wantedDetails:not([open]) {
+    border: 0;
+  }
+  .copyDisclosure {
+    margin-block: 12px;
+    font-size: 11px;
+  }
+}
+@media (max-width: 900px) {
+  .discover {
+    padding: 18px;
+  }
+  .discover .header {
+    margin-bottom: 20px;
+  }
+  .discover .localSummary {
+    padding: 18px 0 12px;
+    margin-bottom: 10px;
+  }
+  .discover .localSummary .panelHead {
+    margin-bottom: 12px;
+  }
+  .discover .current {
+    padding-bottom: 4px;
+  }
+  .discover .spotlight .feature {
+    min-height: 280px;
+  }
+}
+.discover .resultHeader {
+  flex-wrap: nowrap;
+  align-items: center;
+}
+.discover .resultDetails {
+  flex: 1;
+  min-width: 0;
+}
+.discover .resultDetails summary {
+  cursor: pointer;
+  list-style: none;
+}
+.discover .resultDetails summary::-webkit-details-marker {
+  display: none;
+}
+.discover .resultActions {
+  flex-shrink: 0;
+}
+.discover .previewCard {
+  background: var(--bh-panel);
+  padding: 20px;
+  margin-top: 18px;
+  border-radius: 10px;
+}
+.discover .cueRow {
+  display: grid;
+  grid-template-columns: 50px minmax(0, 1fr);
+  gap: 12px;
+}
+.discover .cueTime {
+  color: var(--bh-accent);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.discover .cueText {
+  white-space: pre-wrap;
+  font-size: 14px;
+  line-height: 1.6;
+}
+.discover .primaryRow {
+  align-items: start;
+}
+.discover .primaryRow > :is(button, a) {
+  margin-top: 24px;
+  min-width: 127px;
+  padding-inline: 14px;
+}
+.discover .primaryRow .select label {
+  font-size: 11px;
+  font-weight: 500;
+  margin-bottom: 5px;
+}
+.discover .primaryRow .select :global(.mantine-InputWrapper-description) {
+  margin-top: 12px;
+  font-size: 11px;
+}
+.discover .trending {
+  position: relative;
+}
+.discover .trending .showMore {
+  margin-top: 6px;
+}
+
+.discover .previewNote {
+  color: var(--bh-muted);
+  font-size: 11px;
+}
+.discover .arrivalArt img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+@media (max-width: 600px) {
+  .discover .primaryRow > :is(button, a) {
+    margin-top: 0;
+  }
+}
+.discover .resultPreview[data-variant="subtle"] {
+  background: transparent;
+  color: var(--bh-accent);
+  font-size: 11px;
+  font-weight: 400;
+  padding-inline: 12px;
+}
+.discover .resultsPanel {
+  gap: 12px;
+}
+.discover .resultsPanel .results {
+  margin-top: 0;
+}
+.discover .previewCard {
+  margin-top: 6px;
+}
+.discover .wantedRow {
+  margin-top: 0;
+  border-top: 0;
+}
+.discover .localSummary .panelHead {
+  margin-bottom: 22px;
+}
+.discover .panelStack.recent {
+  margin-top: 0;
+}
+@media (min-width: 901px) {
+  .discover .current {
+    padding-bottom: 10px;
+  }
+  .discover .recentHead .panelLink {
+    min-height: 24px;
+  }
+}
+
+.discover .sectionTools .feedDates {
+  position: relative;
+}
+.discover .sourcePopover {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 30;
+  width: min(320px, calc(100vw - 40px));
+  max-height: 60dvh;
+  overflow: auto;
+  padding: 16px;
+  border: 1px solid var(--bh-line);
+  border-radius: 8px;
+  background: var(--bh-panel);
+  box-shadow: 0 8px 24px #0003;
+  text-align: left;
+}
+.discover .result {
+  padding-block: 9px;
+}
+@media (max-width: 660px) {
+  .discover .sectionTools {
+    width: auto;
+    margin-left: auto;
+  }
+}
+@media (max-width: 360px) {
+  .discover .mastSuffix {
+    display: none;
+  }
+}
+@media (pointer: coarse) {
+  .discover .refreshButton,
+  .discover .spotlight .featureNext {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .discover .feedDates summary {
+    min-height: 44px;
+  }
+}
+
+.episodeSelectors {
+  display: grid;
+  grid-template-columns: minmax(130px, 1fr) minmax(0, 2fr);
+  gap: 12px;
+  > * {
+    min-width: 0;
+    max-width: none;
+  }
+}
+.episodePicker .episodeManual {
+  align-self: flex-start;
+  padding-inline: 0;
+}
+.retrievalPanel > .readiness {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--bz-text-tertiary);
+}
+@media (max-width: 35em) {
+  .episodeSelectors {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+// The dashboard uses the workspace width; selected titles keep their reading width.
+.discover[data-page="home"] {
+  max-width: none;
+  width: 100%;
+  padding: 26px clamp(18px, 2vw, 36px) 32px;
+
+  .homepageLayout {
+    grid-template-columns: minmax(0, 1fr) 246px;
+    column-gap: 32px;
+  }
+
+  .spotlight .stage[data-artwork="true"]::before {
+    display: block;
+    inset: -12px -10px -24px;
+    filter: blur(30px) saturate(1.35);
+    opacity: 0.55;
+    mask-image: none;
+  }
+
+  .spotlight .feature {
+    min-height: clamp(340px, 30vw, 440px);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+  }
+
+  .spotlight .featureCopy {
+    padding: 48px 34px 34px;
+    h2 {
+      max-width: 640px;
+      font-size: clamp(2rem, 3vw, 3rem);
+      font-weight: 620;
+    }
+  }
+  .spotlight .featureMeta {
+    font-size: 13px;
+  }
+  .spotlight .featureCta {
+    height: 44px;
+    padding-inline: 18px;
+    font-size: 13px;
+  }
+}
+
+.libraryActivity {
+  position: relative;
+  margin-bottom: 32px;
+}
+.libraryHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+  h2 {
+    font-size: 20px;
+    font-weight: 650;
+    margin: 0;
+    line-height: 1.3;
+  }
+  p {
+    margin: 5px 0 0;
+    color: var(--bh-muted);
+    font-size: 12px;
+  }
+  > a {
+    color: var(--bh-muted);
+    font-size: 12px;
+    white-space: nowrap;
+    text-decoration: none;
+  }
+  svg {
+    width: 12px;
+    margin-left: 6px;
+  }
+}
+.libraryArrivals {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  li {
+    min-width: 0;
+  }
+}
+.libraryArrival {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  height: 100%;
+  padding: 12px;
+  border: 1px solid var(--bz-border-card);
+  border-radius: 10px;
+  background: var(--bz-surface-raised);
+  color: var(--bh-ink);
+  text-decoration: none;
+  &:hover {
+    background: var(--bh-hover);
+    border-color: var(--bh-line);
+  }
+}
+.libraryArtwork {
+  position: relative;
+  flex: 0 0 64px;
+  height: 96px;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  background: var(--bh-hover);
+  border-radius: 5px;
+  color: var(--bh-muted);
+  img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+}
+.libraryArrivalCopy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--bh-muted);
+  > strong {
+    color: var(--bh-ink);
+    font-size: 14px;
+    font-weight: 600;
+  }
+  > strong,
+  > span {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+  }
+  time {
+    font-size: 11px;
+  }
+  .libraryLanguage {
+    color: var(--bz-text-secondary);
+  }
+}
+.libraryEmpty {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px 20px;
+  border: 1px solid var(--bz-border-card);
+  border-radius: 10px;
+  background: var(--bz-surface-raised);
+  font-size: 13px;
+  > svg {
+    color: var(--bh-accent);
+    width: 20px;
+    flex-shrink: 0;
+  }
+  p {
+    margin: 0;
+    flex: 1;
+    color: var(--bz-text-secondary);
+  }
+  a,
+  button {
+    color: var(--bh-accent);
+    font: inherit;
+    font-weight: 600;
+    white-space: nowrap;
+    text-decoration: none;
+  }
+  button {
+    border: 0;
+    padding: 8px;
+    background: transparent;
+    cursor: pointer;
+  }
+  a svg {
+    width: 12px;
+    margin-left: 6px;
+  }
+}
+@media (min-width: 901px) and (max-width: 1400px) {
+  .libraryArrivals {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 900px) {
+  .discover[data-page="home"] {
+    .homepageContent,
+    :global(#bh-browse) {
+      display: block;
+    }
+    .localSummary {
+      order: 0;
+      margin-top: 32px;
+    }
+    .spotlight .feature {
+      min-height: 320px;
+    }
+    .spotlight .featureCopy {
+      padding: 32px 24px;
+    }
+  }
+  .libraryArrivals {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 540px) {
+  .discover[data-page="home"] {
+    padding-inline: 16px;
+    .spotlight .feature {
+      min-height: 300px;
+    }
+    .spotlight .featureCopy {
+      padding: 28px 22px;
+    }
+  }
+  .libraryArrivals {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+  .libraryArtwork {
+    flex-basis: 50px;
+    height: 75px;
+  }
+  .libraryHeading h2 {
+    font-size: 18px;
+  }
+  .libraryEmpty {
+    flex-wrap: wrap;
+    padding: 16px;
+  }
+  .libraryEmpty p {
+    flex-basis: calc(100% - 34px);
+  }
+  .libraryEmpty > a,
+  .libraryEmpty > button {
+    margin-left: 34px;
+  }
+}
+.libraryHistory {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px 18px;
+  a {
+    color: var(--bh-muted);
+    font-size: 12px;
+    text-decoration: none;
+  }
+  a:hover {
+    color: var(--bh-ink);
+  }
+}
+@media (max-width: 540px) {
+  .libraryArrivals {
+    display: flex;
+    overflow-x: auto;
+    scroll-snap-type: x proximity;
+    padding: 3px 3px 10px;
+    margin: -3px;
+    scrollbar-width: thin;
+    li {
+      flex: 0 0 85%;
+      scroll-snap-align: start;
+    }
+  }
+}
+
+.discover .weeklyTrending {
+  .sectionHead h2 {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 17px;
+    font-weight: 620;
+    svg {
+      width: 14px;
+      color: var(--bh-accent);
+    }
+  }
+  .posterGrid {
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+    gap: 20px 14px;
+  }
+  .posterArt {
+    border: 1px solid var(--bz-border-card);
+    transition:
+      border-color 180ms ease,
+      box-shadow 180ms ease;
+    &::after {
+      content: "";
+      position: absolute;
+      inset: 55% 0 0;
+      background: linear-gradient(transparent, rgba(8, 9, 16, 0.85));
+      pointer-events: none;
+    }
+  }
+  .poster:hover .posterArt,
+  .poster:focus-visible .posterArt {
+    border-color: var(--bh-accent);
+    box-shadow: 0 7px 18px -10px
+      color-mix(in srgb, var(--bh-accent) 70%, transparent);
+  }
+  .poster strong {
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .weeklyRank {
+    position: absolute;
+    z-index: 1;
+    bottom: 7px;
+    left: 10px;
+    font-size: clamp(26px, 2.3vw, 38px);
+    font-weight: 800;
+    line-height: 1;
+    font-style: italic;
+    letter-spacing: -0.07em;
+    color: #fff6e8;
+    text-shadow: 0 2px 7px rgba(0, 0, 0, 0.55);
+    border-bottom: 3px solid var(--bh-accent);
+    padding: 0 5px 5px 0;
+  }
+}
+@media (max-width: 1599px) {
+  .discover .weeklyTrending .posterGrid {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+}
+@media (max-width: 1199px) {
+  .discover .weeklyTrending .posterGrid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+@media (max-width: 540px) {
+  .discover .weeklyTrending .posterGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .discover .weeklyTrending .posterArt,
+  .discover .weeklyTrending .posterArt img {
+    transition: none;
+  }
+  .discover .weeklyTrending .poster:hover img {
+    transform: none;
+  }
+}
+
+// Discover now has one content column; Jobs remains available in navigation.
+.discover .homepageLayout,
+.discover[data-page="home"] .homepageLayout {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.discover[data-page="title"] {
+  max-width: none;
+  width: 100%;
+  padding-inline: clamp(18px, 2vw, 36px);
+  .retrievalPanel {
+    max-width: none;
+  }
+}
+.detailHero {
+  --detail-ink: var(--bz-text-primary);
+  --detail-muted: var(--bz-text-secondary);
+  position: relative;
+  isolation: isolate;
+  margin-bottom: 20px;
+  &[data-artwork="true"] {
+    --detail-ink: #fff9f2;
+    --detail-muted: #dedce5;
+    &::before {
+      content: "";
+      position: absolute;
+      z-index: -1;
+      inset: -8px -8px -20px;
+      background: var(--detail-backdrop) center 30% / cover no-repeat;
+      filter: blur(30px) saturate(1.35);
+      opacity: 0.5;
+      pointer-events: none;
+    }
+    .detailHeroSurface {
+      background: #15141e;
+    }
+    .detailHeroSurface::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(
+          90deg,
+          rgba(12, 12, 20, 0.88),
+          rgba(12, 12, 20, 0.72) 48%,
+          rgba(12, 12, 20, 0.36)
+        ),
+        linear-gradient(0deg, rgba(12, 12, 20, 0.55), transparent 65%);
+      pointer-events: none;
+    }
+  }
+  .detailHeroSurface {
+    position: relative;
+    display: grid;
+    grid-template-columns: 200px minmax(0, 1fr);
+    align-items: center;
+    gap: 36px;
+    min-height: 380px;
+    padding: 36px;
+    border: 1px solid var(--bz-border-card);
+    border-radius: 14px;
+    overflow: hidden;
+    background: var(--bz-surface-raised);
+    color: var(--detail-ink);
+  }
+  .detailBackdrop {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: center 30%;
+  }
+  .detailPoster,
+  .detailHeroCopy {
+    position: relative;
+    z-index: 1;
+  }
+  .detailPoster {
+    border-radius: 8px;
+    box-shadow: 0 14px 30px rgba(0, 0, 0, 0.28);
+  }
+  .detailHeroCopy {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 22px;
+  }
+  .detailTitle {
+    font-size: clamp(30px, 2.6vw, 46px);
+    line-height: 1.12;
+    letter-spacing: -0.025em;
+    font-weight: 650;
+    color: var(--detail-ink);
+    overflow-wrap: anywhere;
+  }
+  .detailMeta {
+    margin-top: 12px;
+    font-size: 13px;
+    color: var(--detail-muted);
+  }
+  .detailOverview {
+    margin: 0;
+    max-width: 960px;
+    font-size: 14px;
+    line-height: 1.65;
+    color: var(--detail-muted);
+  }
+}
+.detailAvailability {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px 22px;
+}
+.libraryStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--detail-muted);
+  background: var(--bz-hover-bg);
+  border: 1px solid var(--bz-border-interactive);
+  &[data-local="true"] {
+    color: var(--bz-stat-completed);
+    border-color: color-mix(in srgb, var(--bz-stat-completed) 35%, transparent);
+    background: color-mix(in srgb, var(--bz-stat-completed) 10%, transparent);
+  }
+}
+.detailHero[data-artwork="true"] .libraryStatus {
+  color: #eeedf3;
+  background: rgba(15, 15, 25, 0.55);
+  border-color: rgba(255, 255, 255, 0.22);
+  &[data-local="true"] {
+    color: #a9e7c2;
+    border-color: rgba(169, 231, 194, 0.35);
+    background: rgba(22, 60, 42, 0.7);
+  }
+}
+.discover .openLibrary {
+  min-height: 42px;
+  border-radius: 7px;
+  font-size: 13px;
+}
+@media (max-width: 900px) {
+  .detailHero .detailHeroSurface {
+    grid-template-columns: 150px minmax(0, 1fr);
+    gap: 24px;
+    padding: 26px;
+    min-height: 330px;
+  }
+}
+@media (max-width: 600px) {
+  .discover[data-page="title"] {
+    padding-inline: 16px;
+  }
+  .detailHero {
+    .detailHeroSurface {
+      grid-template-columns: 88px minmax(0, 1fr);
+      gap: 22px 18px;
+      padding: 22px;
+      min-height: 0;
+    }
+    .detailHeroCopy {
+      display: contents;
+    }
+    .detailHeroHeading {
+      align-self: center;
+    }
+    .detailHeroHeading,
+    .detailOverview,
+    .detailAvailability {
+      position: relative;
+      z-index: 1;
+    }
+    .detailTitle {
+      font-size: 26px;
+    }
+    .detailMeta {
+      margin-top: 10px;
+      font-size: 12px;
+    }
+    .detailOverview,
+    .detailAvailability {
+      grid-column: 1 / -1;
+    }
+    .detailOverview {
+      font-size: 13px;
+    }
+    .detailAvailability {
+      gap: 12px;
+    }
+  }
+}
+
+.discover .spotlight .featureNavigation {
+  position: absolute;
+  z-index: 2;
+  top: 14px;
+  right: 14px;
+  display: flex;
+  gap: 8px;
+  .featureNext {
+    position: static;
+  }
+}
+
+// Icon-only feed actions have no label padding to clip the glyph.
+.discover .sectionTools .refreshButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  min-height: 40px;
+  padding: 0;
+  border: 1px solid var(--bz-border-card);
+  border-radius: 8px;
+  background: var(--bz-surface-raised);
+  color: var(--bz-text-secondary);
+  svg {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+  }
+  &:hover {
+    background: var(--bh-hover);
+    color: var(--bh-accent);
+  }
+}
+.discover .trending .showMore {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  margin: 22px auto 0;
+  min-height: 44px;
+  height: auto;
+  padding: 10px 18px;
+  border: 1px solid var(--bz-border-interactive);
+  border-radius: 8px;
+  background: var(--bz-surface-raised);
+  color: var(--bz-text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  svg {
+    width: 12px;
+    height: 12px;
+  }
+  &:hover {
+    background: var(--bh-hover);
+    border-color: var(--bh-accent);
+  }
+}
+@media (pointer: coarse) {
+  .discover .sectionTools .refreshButton {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+  }
+}
+
+.discover .weeklyTrending .poster[data-featured="true"] {
+  .posterArt {
+    border-color: var(--bh-accent);
+    box-shadow:
+      0 0 0 1px var(--bh-accent),
+      0 6px 20px -10px color-mix(in srgb, var(--bh-accent) 70%, transparent);
+  }
+  strong {
+    color: var(--bh-accent);
+  }
+}
+.featuredBadge {
+  position: absolute;
+  z-index: 2;
+  top: 8px;
+  left: 8px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  background: rgba(18, 17, 25, 0.9);
+  color: #ffd18a;
+  font-size: 10px;
+  line-height: 1.2;
+  font-weight: 650;
+}
+
+.discover .resultsPanel {
+  max-width: none;
+  .resultsTitle {
+    font-size: 20px;
+  }
+  .resultsNote {
+    font-size: 12px;
+  }
+}
+.discover .results {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.discover .result {
+  padding: 18px;
+  border: 1px solid var(--bz-border-interactive);
+  border-radius: 11px;
+  background: var(--bz-surface-raised);
+  &[data-previewed="true"] {
+    border-color: color-mix(in srgb, var(--bh-accent) 65%, transparent);
+  }
+  .resultHeader {
+    display: grid;
+    grid-template-columns: 40px minmax(0, 1fr) auto;
+    gap: 16px;
+    align-items: start;
+  }
+  .release {
+    display: block;
+    width: 100%;
+    min-height: 44px;
+  }
+  .release h3 {
+    font-size: 14px;
+    line-height: 1.5;
+    font-weight: 600;
+  }
+  .resultDetails summary {
+    list-style: none;
+    cursor: pointer;
+  }
+  .resultDetails summary::-webkit-details-marker {
+    display: none;
+  }
+  .resultDetails dl {
+    font-size: 12px;
+    margin-block: 16px;
+  }
+  .resultDetails dl > div {
+    display: grid;
+    grid-template-columns: 140px minmax(0, 1fr);
+    gap: 14px;
+    padding-block: 6px;
+    border-top: 1px solid var(--bz-border-card);
+  }
+  .resultDetails dt {
+    color: var(--bh-muted);
+  }
+  .resultDetails dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+  .resultDetails[open] .matchDetailsHint svg {
+    transform: rotate(180deg);
+  }
+  .resultActions {
+    gap: 8px;
+    padding-top: 2px;
+  }
+}
+.resultDocument {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 44px;
+  border: 1px solid color-mix(in srgb, var(--bh-accent) 20%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bh-accent) 8%, transparent);
+  color: var(--bh-accent);
+  svg {
+    width: 18px;
+    height: 20px;
+  }
+}
+.resultAttributes {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  color: var(--bh-muted);
+  font-size: 11px;
+  > span {
+    padding: 3px 7px;
+    border-radius: 4px;
+    background: var(--bz-hover-bg);
+  }
+  .resultProvider {
+    color: var(--bz-text-primary);
+    font-weight: 600;
+  }
+}
+.matchDetailsHint {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 10px;
+  color: var(--bh-muted);
+  font-size: 11px;
+  svg {
+    width: 9px;
+    height: 9px;
+  }
+}
+.discover .resultPreview,
+.discover .resultDownload {
+  min-height: 44px;
+  height: 44px;
+  padding-inline: 13px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  svg {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+  }
+}
+.discover .resultPreview {
+  background: transparent;
+  border: 1px solid var(--bz-border-interactive);
+  color: var(--bh-ink);
+  &[aria-expanded="true"] {
+    border-color: var(--bh-accent);
+    color: var(--bh-accent);
+  }
+}
+.discover .resultDownload {
+  background: color-mix(in srgb, var(--bh-accent) 17%, transparent);
+  border: 1px solid color-mix(in srgb, var(--bh-accent) 35%, transparent);
+  color: var(--bh-accent);
+}
+.discover .previewCard {
+  gap: 0;
+  padding: 0;
+  margin-top: 18px;
+  border: 1px solid var(--bz-border-interactive);
+  border-top: 2px solid var(--bh-accent);
+  border-radius: 12px;
+  background: var(--bz-surface-raised);
+  overflow: hidden;
+  box-shadow: 0 14px 36px -25px rgba(0, 0, 0, 0.55);
+  > [role="status"],
+  > :global(.mantine-Stack-root) {
+    padding: 20px;
+  }
+  .previewHeading {
+    padding: 18px 20px 10px;
+  }
+  .previewHeadingText > :first-child {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 17px;
+  }
+  .previewHeadingText svg {
+    color: var(--bh-accent);
+    width: 20px;
+  }
+  .previewSource {
+    margin: 6px 0 0 30px;
+    color: var(--bh-muted);
+    font-size: 12px;
+  }
+  .previewRelease {
+    padding: 0 20px 16px;
+    color: var(--bz-text-secondary);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
+  .previewStats {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px 18px;
+    padding: 10px 20px;
+    border-block: 1px solid var(--bz-border-card);
+    color: var(--bh-muted);
+    font-size: 11px;
+    background: var(--bz-hover-bg);
+  }
+  .previewStats > :first-child {
+    color: var(--bh-ink);
+    font-weight: 600;
+  }
+  .cueList {
+    list-style: none;
+    padding: 0 20px;
+    margin: 0;
+    max-height: min(52dvh, 440px);
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--bz-text-tertiary) transparent;
+  }
+  .cueRow {
+    display: grid;
+    grid-template-columns: 100px minmax(0, 1fr);
+    align-items: start;
+    gap: 20px;
+    padding: 15px 0;
+    border-bottom: 1px solid var(--bz-border-card);
+  }
+  .cueRow:last-child {
+    border: 0;
+  }
+  .cueTime {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-top: 2px;
+    font-family: var(--mantine-font-family-monospace);
+    font-size: 11px;
+    color: var(--bh-accent);
+    font-variant-numeric: tabular-nums;
+  }
+  .cueNumber {
+    color: var(--bh-muted);
+    font-size: 10px;
+  }
+  .cueText {
+    font-size: 16px;
+    line-height: 1.65;
+    color: var(--bh-ink);
+    overflow-wrap: anywhere;
+  }
+  .previewNote {
+    padding: 12px 20px;
+    margin: 0;
+    border-top: 1px solid var(--bz-border-card);
+    font-size: 11px;
+    color: var(--bh-muted);
+  }
+}
+@media (max-width: 760px) {
+  .discover .result {
+    padding: 14px;
+    .resultHeader {
+      grid-template-columns: 32px minmax(0, 1fr);
+      gap: 12px;
+    }
+    .resultDocument {
+      width: 32px;
+      height: 38px;
+    }
+    .resultActions {
+      grid-column: 2;
+      flex-wrap: wrap;
+      padding-top: 0;
+    }
+    .resultDetails dl > div {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 3px;
+    }
+  }
+  .discover .previewCard {
+    .previewHeading {
+      padding: 14px 14px 8px;
+    }
+    .previewRelease {
+      padding-inline: 14px;
+    }
+    .previewStats {
+      padding-inline: 14px;
+    }
+    .cueList {
+      padding-inline: 14px;
+    }
+    .cueRow {
+      grid-template-columns: 68px minmax(0, 1fr);
+      gap: 12px;
+    }
+    .cueText {
+      font-size: 14px;
+    }
+    .previewNote {
+      padding-inline: 14px;
+    }
+  }
+}
+
+.discover .resultDetails:not([open]) .release h3 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.discover .previewCard .previewNote,
+.discover .previewCard .previewRelease {
+  max-width: none;
+  width: 100%;
+}
+
+.discover .titleTools .detailBack {
+  min-height: 44px;
+  height: 44px;
+  padding: 0 16px;
+  border: 1px solid color-mix(in srgb, var(--bh-accent) 45%, transparent);
+  border-radius: 8px;
+  background: color-mix(
+    in srgb,
+    var(--bh-accent) 13%,
+    var(--bz-surface-raised)
+  );
+  color: var(--bh-ink);
+  font-size: 14px;
+  font-weight: 650;
+  svg {
+    width: 17px;
+    height: 17px;
+    color: var(--bh-accent);
+    flex-shrink: 0;
+  }
+  &:hover {
+    border-color: var(--bh-accent);
+    background: color-mix(
+      in srgb,
+      var(--bh-accent) 22%,
+      var(--bz-surface-raised)
+    );
+  }
+  &:focus-visible {
+    outline: 2px solid var(--bh-accent);
+    outline-offset: 3px;
+  }
+}
+
+.discover .results > li {
+  min-width: 0;
+}
+.discover .results .previewCard {
+  margin-top: 12px;
+  scroll-margin-top: calc(var(--app-shell-header-height, 84px) + 16px);
+}
+.searchProgress {
+  padding-block: 4px 12px;
+  .searchProgressHeading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  strong {
+    color: var(--bz-text-primary);
+    font-size: 15px;
+  }
+  p {
+    max-width: none;
+    margin-block: 12px 0;
+    font-size: 13px;
+  }
+  progress {
+    display: block;
+    width: 100%;
+    height: 6px;
+    margin-top: 14px;
+    appearance: none;
+    border: 0;
+    border-radius: 4px;
+    overflow: hidden;
+    background: var(--bz-border-interactive);
+    &::-webkit-progress-bar {
+      background: var(--bz-border-interactive);
+    }
+    &::-webkit-progress-value {
+      background: var(--bh-accent);
+    }
+    &::-moz-progress-bar {
+      background: var(--bh-accent);
+    }
+  }
+}
+.providerSummary {
+  color: var(--bz-text-secondary);
+  font-size: 13px;
+}
+.providerGroup {
+  margin-top: 16px;
+  > summary {
+    cursor: pointer;
+    padding-block: 12px;
+    font-weight: 600;
+  }
+  .providerList {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+    gap: 0 24px;
+  }
+  .providerList li {
+    min-width: 0;
+    gap: 12px;
+    padding-block: 12px;
+    align-items: start;
+  }
 }

@@ -8,14 +8,12 @@ import {
   useReducer,
   useRef,
 } from "react";
-import { Link, useLocation } from "react-router";
-import { Anchor, Group, Text } from "@mantine/core";
 import {
   useDiscoverDownload,
   useDiscoverPreview,
   useDiscoverSearch,
 } from "@/apis/hooks/discover";
-import { DiscoverPreviewModal } from "@/pages/Discover/SubtitlePreview";
+import api from "@/apis/raw";
 import type {
   DiscoverContext as SearchContext,
   DiscoverDownloadFeedback,
@@ -40,6 +38,8 @@ import {
 
 interface DiscoverContextValue {
   state: DiscoverState;
+  rememberPage: (key: string, page: DiscoverState) => void;
+  restorePage: (key: string) => boolean;
   updateBrowsing: (changes: Partial<DiscoverBrowsing>) => void;
   updateDraft: (changes: Partial<DiscoverDraft>) => void;
   /**
@@ -52,6 +52,12 @@ interface DiscoverContextValue {
   downloadSubtitle: (row: DiscoverSubtitleResult) => Promise<void>;
   previewSubtitle: (row: DiscoverSubtitleResult) => Promise<void>;
   closePreview: () => void;
+  /**
+   * Retire in-flight search, download and preview responses without touching
+   * filed results. Leaving the title is the owner going away: a response that
+   * lands after it belongs to a selection the reader has already left.
+   */
+  cancelPending: () => void;
   searchAgain: () => Promise<void>;
 }
 
@@ -63,6 +69,13 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
     undefined,
     initialDiscoverState,
   );
+  const pages = useRef(
+    new Map<string, { savedAt: number; state: DiscoverState }>(),
+  );
+  const searches = useRef(
+    new Map<string, { savedAt: number; state: DiscoverState }>(),
+  );
+  const authenticated = useRef(true);
   const generation = useRef(0);
   const draft = useRef(state.draft);
   const currentState = useRef(state);
@@ -78,7 +91,10 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
 
   useEffect(() => {
     const onAuth = (event: WindowEventMap["app-auth-changed"]) => {
+      authenticated.current = event.detail.authenticated;
       if (!event.detail.authenticated) {
+        pages.current.clear();
+        searches.current.clear();
         generation.current += 1;
         downloadSequence.current += 1;
         previewSequence.current += 1;
@@ -93,6 +109,42 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
     return () => window.removeEventListener("app-auth-changed", onAuth);
   }, [reset, resetDownload, resetPreview]);
 
+  const rememberPage = useCallback((key: string, page: DiscoverState) => {
+    if (
+      !authenticated.current ||
+      page.sessionId !== currentState.current.sessionId
+    )
+      return;
+    // Keep only this browser session's recent history, never subtitle handles in storage.
+    const now = Date.now();
+    for (const [id, entry] of pages.current)
+      if (now - entry.savedAt > 30 * 60_000) pages.current.delete(id);
+    pages.current.delete(key);
+    pages.current.set(key, { savedAt: now, state: page });
+    while (pages.current.size > 20)
+      pages.current.delete(pages.current.keys().next().value!);
+  }, []);
+
+  const restorePage = useCallback((key: string) => {
+    const entry = pages.current.get(key);
+    if (
+      !authenticated.current ||
+      !entry ||
+      Date.now() - entry.savedAt > 30 * 60_000
+    )
+      return false;
+    generation.current += 1;
+    downloadSequence.current += 1;
+    previewSequence.current += 1;
+    draft.current = entry.state.draft;
+    dispatch({
+      type: "restore",
+      state: entry.state,
+      generation: generation.current,
+    });
+    return true;
+  }, []);
+
   const updateDraft = useCallback(
     (changes: Partial<DiscoverDraft>) => {
       const merged = { ...draft.current, ...changes };
@@ -105,7 +157,23 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
         copyTargetKey(merged) === copyTargetKey(draft.current)
           ? merged
           : { ...merged, copyId: undefined };
-      if (discoverContextKey(next) !== discoverContextKey(draft.current)) {
+      const nextKey = discoverContextKey(next);
+      const changed = nextKey !== discoverContextKey(draft.current);
+      if (changed) {
+        const current = currentState.current;
+        if (
+          authenticated.current &&
+          current.sessionId === state.sessionId &&
+          current.snapshot &&
+          discoverContextKey(current.draft) ===
+            discoverContextKey(draft.current)
+        ) {
+          const oldKey = discoverContextKey(current.draft);
+          searches.current.delete(oldKey);
+          searches.current.set(oldKey, { savedAt: Date.now(), state: current });
+          while (searches.current.size > 20)
+            searches.current.delete(searches.current.keys().next().value!);
+        }
         generation.current += 1;
         downloadSequence.current += 1;
         previewSequence.current += 1;
@@ -125,11 +193,20 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
         draft: next,
         generation: generation.current,
         storageAvailable,
+        cached:
+          changed &&
+          authenticated.current &&
+          searches.current.get(nextKey)?.state.sessionId ===
+            currentState.current.sessionId &&
+          searches.current.has(nextKey) &&
+          Date.now() - searches.current.get(nextKey)!.savedAt <= 30 * 60_000
+            ? searches.current.get(nextKey)!.state
+            : undefined,
         // A language the reader set by hand is no longer a seeded one.
         ...(changes.language !== undefined ? { languageSeeded: false } : {}),
       });
     },
-    [state.storageAvailable],
+    [state.storageAvailable, state.sessionId],
   );
 
   const seedLanguage = useCallback((language: string) => {
@@ -173,6 +250,29 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
         generation: attempt,
         storageAvailable: stored,
       });
+      // getRandomValues also works on plain HTTP LAN installations.
+      const bytes = crypto.getRandomValues(new Uint8Array(16));
+      const hex = Array.from(bytes, (byte) =>
+        byte.toString(16).padStart(2, "0"),
+      ).join("");
+      const progressId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+      const controller = new AbortController();
+      let pollTimer: ReturnType<typeof setTimeout> | undefined;
+      const poll = async () => {
+        if (controller.signal.aborted || generation.current !== attempt) return;
+        try {
+          const progress = await api.discover.searchProgress(
+            progressId,
+            controller.signal,
+          );
+          dispatch({ type: "progress", generation: attempt, progress });
+        } catch {
+          // Losing observations does not cancel the search or discard results.
+        }
+        if (!controller.signal.aborted && generation.current === attempt)
+          pollTimer = setTimeout(() => void poll(), 600);
+      };
+      pollTimer = setTimeout(() => void poll(), 200);
       try {
         // matching_mode, the resolved copy and its physical revision are all
         // server-owned. Only the opaque copy identity is ever an input.
@@ -184,7 +284,11 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
         delete selection.matching_mode;
         delete selection.copy;
         delete selection.file_revision;
-        const snapshot = await mutateAsync({ context: selection, refresh });
+        const snapshot = await mutateAsync({
+          context: selection,
+          refresh,
+          progressId,
+        });
         dispatch({ type: "success", generation: attempt, key, snapshot });
       } catch (error) {
         const response = (
@@ -205,6 +309,9 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
           key,
           now: Date.now(),
         });
+      } finally {
+        controller.abort();
+        clearTimeout(pollTimer);
       }
     },
     [mutateAsync],
@@ -308,6 +415,12 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
     resetPreview();
   }, [resetPreview]);
 
+  const cancelPending = useCallback(() => {
+    generation.current += 1;
+    downloadSequence.current += 1;
+    previewSequence.current += 1;
+    dispatch({ type: "cancel", generation: generation.current });
+  }, []);
   const previewSubtitle = useCallback(
     async (row: DiscoverSubtitleResult) => {
       const owner = currentState.current;
@@ -403,6 +516,8 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
   const value = useMemo(
     () => ({
       state,
+      rememberPage,
+      restorePage,
       updateBrowsing,
       updateDraft,
       seedLanguage,
@@ -410,10 +525,13 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
       downloadSubtitle,
       previewSubtitle,
       closePreview,
+      cancelPending,
       searchAgain,
     }),
     [
       state,
+      rememberPage,
+      restorePage,
       updateBrowsing,
       updateDraft,
       seedLanguage,
@@ -421,21 +539,13 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
       downloadSubtitle,
       previewSubtitle,
       closePreview,
+      cancelPending,
       searchAgain,
     ],
   );
   return (
     <DiscoverContext.Provider value={value}>
       {children}
-      <DiscoverPreviewModal
-        preview={state.preview}
-        download={state.download}
-        searching={state.status === "searching"}
-        close={closePreview}
-        retry={previewSubtitle}
-        downloadSubtitle={downloadSubtitle}
-        searchAgain={searchAgain}
-      />
     </DiscoverContext.Provider>
   );
 }
@@ -446,44 +556,6 @@ export function useDiscover() {
   return value;
 }
 
-/**
- * The way back to an interrupted Discover task.
- *
- * Every route a reader can be sent to from Discover, whether that is provider
- * setup, Activity, History, Wanted or a library item, owes them a way back to
- * the exact task they left, not native Back and not a fresh page. It is mounted
- * once around the application outlet, so the return is offered wherever the
- * interruption lands rather than only on the two routes that happened to link
- * to it, and it stands down on Discover itself, which is the destination.
- */
 export function DiscoverSetupReturn({ children }: PropsWithChildren) {
-  const { state } = useDiscover();
-  const { pathname } = useLocation();
-  const onDiscover = /^\/discover(?:[/?#]|$)/.test(pathname);
-  return (
-    <>
-      {!onDiscover &&
-        (state.draft.imdbId ||
-          state.draft.query ||
-          state.browsing.query ||
-          state.browsing.returnTarget !== "/discover") && (
-          <Group mx="md" mt="md" mb="md" justify="space-between">
-            <Text size="sm">Your Discover selection is saved.</Text>
-            <Anchor
-              c="light-dark(var(--mantine-color-brand-7), var(--mantine-color-brand-4))"
-              component={Link}
-              to={
-                /^\/discover(?:[/?#]|$)/.test(state.browsing.returnTarget)
-                  ? state.browsing.returnTarget
-                  : "/discover"
-              }
-              py="sm"
-            >
-              Return to Discover
-            </Anchor>
-          </Group>
-        )}
-      {children}
-    </>
-  );
+  return <>{children}</>;
 }

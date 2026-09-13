@@ -1,6 +1,14 @@
-import { CSSProperties, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useLocation } from "react-router";
 import {
+  CSSProperties,
+  MouseEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { Link, useLocation, useNavigate } from "react-router";
+import {
+  ActionIcon,
   Alert,
   Anchor,
   Button,
@@ -8,16 +16,25 @@ import {
   Title,
   VisuallyHidden,
 } from "@mantine/core";
+import { useMediaQuery } from "@mantine/hooks";
 import {
+  faArrowLeft,
   faArrowRight,
   faArrowsRotate,
+  faChevronDown,
+  faChevronUp,
+  faFilm,
+  faFireFlameCurved,
+  faGlobe,
+  faLayerGroup,
+  faTv,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useDiscoverTrending } from "@/apis/hooks/discover";
 import { useDiscover } from "@/contexts/Discover";
 import type { TrendingMediaType, TrendingTitle } from "@/types/discover";
-import { readableTime } from "./feedText";
 import MediaPoster, { Backdrop } from "./MediaPoster";
+import { discoverTitlePath } from "./navigation";
 import styles from "./Discover.module.scss";
 
 const filters: { value: TrendingMediaType; label: string }[] = [
@@ -28,6 +45,7 @@ const filters: { value: TrendingMediaType; label: string }[] = [
 
 export default function Trending() {
   const { state, updateBrowsing, updateDraft } = useDiscover();
+  const navigate = useNavigate();
   const { browsing } = state;
   const feed = useDiscoverTrending(browsing.trendingFilter);
   const location = useLocation();
@@ -52,7 +70,38 @@ export default function Trending() {
     () => (expired ? [] : (data?.items ?? [])),
     [expired, data?.items],
   );
-  const featured = items[0];
+  // The spotlight cycles through the live feed, starting with the top rank.
+  // Featured-title navigation never touches either catalog filter.
+  const featured =
+    items.find((item) => item.source_id === browsing.featuredSourceId) ??
+    items[0];
+  const [expanded, setExpanded] = useState(false);
+  const posterItems = items;
+  const returnedIndex = posterItems.findIndex(
+    (item) => browsing.focusId === `discover-trending-${item.source_id}`,
+  );
+  const wide = useMediaQuery("(min-width: 1600px)");
+  const medium = useMediaQuery("(min-width: 1200px)");
+  const previewCount = wide ? 8 : medium ? 6 : 4;
+  const showAll = expanded || returnedIndex >= previewCount;
+  const previewItems = posterItems.slice(0, previewCount);
+  // Keep the hero's card visible even when cycling beyond the preview row.
+  const visibleItems = showAll
+    ? posterItems
+    : featured &&
+        !previewItems.some((item) => item.source_id === featured.source_id)
+      ? [...previewItems.slice(0, previewCount - 1), featured]
+      : previewItems;
+  const changeFeatured = (event: MouseEvent, direction: number) => {
+    event.preventDefault();
+    if (items.length > 1)
+      updateBrowsing({
+        featuredSourceId:
+          items[
+            (items.indexOf(featured) + direction + items.length) % items.length
+          ].source_id,
+      });
+  };
   const restored = useRef(false);
   useEffect(() => {
     if (restored.current || !browsing.focusId.startsWith("discover-trending-"))
@@ -81,6 +130,15 @@ export default function Trending() {
       scrollY: window.scrollY,
       returnTarget: location.pathname + location.search + location.hash,
     });
+    void navigate(
+      discoverTitlePath(
+        "tmdb",
+        kind,
+        item.id,
+        reopen ? browsing.selectedSeason : null,
+        reopen ? browsing.selectedEpisode : null,
+      ),
+    );
     if (!reopen)
       updateDraft({
         mode: "title",
@@ -122,20 +180,41 @@ export default function Trending() {
               <button
                 key={filter.value}
                 type="button"
+                data-filter={filter.value}
                 aria-pressed={browsing.trendingFilter === filter.value}
                 onClick={() =>
+                  // Filters apply to this feed. Global search keeps all media types.
                   updateBrowsing({
                     trendingFilter: filter.value,
+                    featuredSourceId: null,
+                    ...(filter.value === "movie"
+                      ? { mediaFilter: "movie" as const }
+                      : filter.value === "series"
+                        ? { mediaFilter: "show" as const }
+                        : {}),
                     focusId: `discover-trending-filter-${filter.value}`,
                   })
                 }
                 id={`discover-trending-filter-${filter.value}`}
               >
+                <FontAwesomeIcon
+                  icon={
+                    filter.value === "movie"
+                      ? faFilm
+                      : filter.value === "series"
+                        ? faTv
+                        : faLayerGroup
+                  }
+                  aria-hidden="true"
+                />
                 {filter.label}
               </button>
             ))}
           </div>
-          <Text component="p">Global catalog · Weekly</Text>
+          <Text component="p" className={styles.globalLabel}>
+            <FontAwesomeIcon icon={faGlobe} aria-hidden="true" />
+            Global catalog
+          </Text>
         </div>
         {featured && (
           <div
@@ -161,20 +240,42 @@ export default function Trending() {
                 key={featured.backdrop_url}
                 src={featured.backdrop_url}
               />
+              {items.length > 1 && (
+                <div
+                  className={styles.featureNavigation}
+                  role="group"
+                  aria-label="Featured title navigation"
+                >
+                  <button
+                    type="button"
+                    className={styles.featureNext}
+                    aria-label="Show previous featured title"
+                    onClick={(event) => changeFeatured(event, -1)}
+                  >
+                    <FontAwesomeIcon icon={faArrowLeft} aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.featureNext}
+                    aria-label="Show next featured title"
+                    onClick={(event) => changeFeatured(event, 1)}
+                  >
+                    <FontAwesomeIcon icon={faArrowRight} aria-hidden="true" />
+                  </button>
+                </div>
+              )}
               <div className={styles.featureCopy}>
-                <Title order={2}>{featured.title}</Title>
+                <Title order={2} id="bh-feature-title">
+                  {featured.title}
+                </Title>
                 <Text className={styles.featureMeta}>
                   No. {featured.rank} this week ·{" "}
                   {featured.year ?? "Year unavailable"} ·{" "}
                   {featured.media_type === "series" ? "Series" : "Film"}
                 </Text>
-                {featured.overview && (
-                  <Text className={styles.featureOverview} lineClamp={2}>
-                    {featured.overview}
-                  </Text>
-                )}
                 <Button
                   variant="filled"
+                  className={styles.featureCta}
                   id={`discover-trending-feature-${featured.source_id}`}
                   aria-label={`Explore ${featured.title}`}
                   rightSection={<FontAwesomeIcon icon={faArrowRight} />}
@@ -194,37 +295,31 @@ export default function Trending() {
           </div>
         )}
       </section>
-      <section aria-labelledby="trending-title" className={styles.trending}>
+      <section
+        aria-labelledby="bh-trending-label"
+        className={`${styles.trending} ${styles.weeklyTrending}`}
+      >
         <div className={styles.sectionHead}>
           <div>
-            <Title order={2} id="trending-title">
+            <Title order={2} id="bh-trending-label">
+              <FontAwesomeIcon icon={faFireFlameCurved} aria-hidden="true" />{" "}
               Trending this week
             </Title>
-            {data?.fetched_at && !expired && (
-              <Text component="p" className={styles.sectionMeta}>
-                {data.status === "cached" ||
-                (data.expires_at && Date.parse(data.expires_at) <= clock)
-                  ? "Cached TMDB feed"
-                  : "Fetched from TMDB"}{" "}
-                ·{" "}
-                <time className={styles.dateValue} dateTime={data.fetched_at}>
-                  {readableTime(data.fetched_at)}
-                </time>
-              </Text>
+          </div>
+          <div className={styles.sectionTools}>
+            {feed.configured && (
+              <ActionIcon
+                variant="subtle"
+                className={styles.refreshButton}
+                loading={feed.isFetching}
+                onClick={() => void feed.refetch()}
+                aria-label="Refresh trending"
+                title="Refresh trending"
+              >
+                <FontAwesomeIcon icon={faArrowsRotate} />
+              </ActionIcon>
             )}
           </div>
-          {feed.configured && (
-            <div className={styles.sectionTools}>
-              <Button
-                variant="subtle"
-                loading={feed.isFetching}
-                leftSection={<FontAwesomeIcon icon={faArrowsRotate} />}
-                onClick={() => void feed.refetch()}
-              >
-                Refresh trending
-              </Button>
-            </div>
-          )}
         </div>
         <div role="status" aria-live="polite" className={styles.feedStatus}>
           {(feed.settingsLoading || feed.isFetching) && (
@@ -246,7 +341,7 @@ export default function Trending() {
               </Text>
               <Anchor
                 component={Link}
-                to="/settings/discover"
+                to="/subtitle-hub?tab=my-providers#metadata"
                 className={styles.settingsLink}
               >
                 Set up Discover
@@ -262,8 +357,7 @@ export default function Trending() {
           )}
           {data?.service_status === "unavailable" && !expired && (
             <Text size="sm">
-              TMDB is temporarily unavailable. The dated cached feed is
-              retained.
+              TMDB is temporarily unavailable. Showing saved titles.
             </Text>
           )}
           {data?.status === "empty" && !expired && (
@@ -274,22 +368,33 @@ export default function Trending() {
           )}
         </div>
         {items.length > 0 && (
-          <ul className={styles.posterGrid} aria-label="Weekly trending titles">
-            {items.map((item) => (
+          <ul
+            id="bh-posters"
+            className={styles.posterGrid}
+            aria-label="Weekly trending titles"
+          >
+            {visibleItems.map((item) => (
               <li key={item.source_id}>
                 <button
                   id={`discover-trending-${item.source_id}`}
                   className={styles.poster}
+                  data-featured={item.source_id === featured?.source_id}
+                  aria-current={
+                    item.source_id === featured?.source_id ? "true" : undefined
+                  }
                   type="button"
                   onClick={() =>
                     open(item, `discover-trending-${item.source_id}`)
                   }
                 >
                   <span className={styles.posterArt}>
-                    <span className={styles.rank} aria-hidden="true">
-                      {item.rank}
-                    </span>
                     <MediaPoster key={item.poster_url} src={item.poster_url} />
+                    {item.source_id === featured?.source_id && (
+                      <span className={styles.featuredBadge}>Featured</span>
+                    )}
+                    <span className={styles.weeklyRank} aria-hidden="true">
+                      {String(item.rank).padStart(2, "0")}
+                    </span>
                   </span>
                   <strong>{item.title}</strong>
                   <span className={styles.captionValues}>
@@ -304,34 +409,25 @@ export default function Trending() {
             ))}
           </ul>
         )}
-        {data?.last_success && (
-          <details className={styles.feedDates}>
-            <summary>Feed source and freshness</summary>
-            <Text size="xs">
-              TMDB global weekly ranking, first page. People are excluded.
-              Library membership does not determine this ranking.
-            </Text>
-            <dl>
-              {[
-                ["Last successful fetch", data.last_success],
-                ["Fresh until", data.expires_at],
-                ["Cached fallback until", data.stale_until],
-                ["Last request", data.attempted_at],
-              ].map(
-                ([label, value]) =>
-                  value && (
-                    <div key={label}>
-                      <dt>{label}</dt>
-                      <dd>
-                        <time dateTime={value}>
-                          {new Date(value).toLocaleString()}
-                        </time>
-                      </dd>
-                    </div>
-                  ),
-              )}
-            </dl>
-          </details>
+        {posterItems.length > previewCount && (
+          <Button
+            variant="default"
+            className={styles.showMore}
+            aria-expanded={showAll}
+            aria-controls="bh-posters"
+            rightSection={
+              <FontAwesomeIcon icon={showAll ? faChevronUp : faChevronDown} />
+            }
+            onClick={() => {
+              setExpanded(!showAll);
+              updateBrowsing({ focusId: "discover-trending-more" });
+            }}
+            id="discover-trending-more"
+          >
+            {showAll
+              ? "Show fewer titles"
+              : `Show all ${posterItems.length} titles`}
+          </Button>
         )}
       </section>
     </>

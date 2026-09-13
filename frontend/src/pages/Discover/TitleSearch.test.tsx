@@ -2,19 +2,25 @@ import { createMemoryRouter, RouterProvider } from "react-router";
 import { expect, it } from "vitest";
 import { AllProviders } from "@/providers";
 import { rawRender, screen } from "@/tests";
-import Discover from ".";
+import Discover from "./testHarness";
 
-it("offers global movie browsing without requiring a library or subtitle language", () => {
-  const router = createMemoryRouter(
-    [{ path: "/discover", element: <Discover /> }],
-    { initialEntries: ["/discover"] },
+it("offers global movie browsing without requiring a library or subtitle language", async () => {
+  const { user } = browse();
+  expect(screen.getByLabelText("Search")).toBeEnabled();
+  // The homepage carries no retrieval controls. Language and Find live in
+  // detail once a title is selected.
+  expect(screen.queryByLabelText("Subtitle language")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Find subtitles" }),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("IMDb ID")).not.toBeInTheDocument();
+  await user.type(screen.getByLabelText("Search"), "Shogun");
+  await user.click(
+    await screen.findByRole("button", { name: "Shōgun (1980)" }),
   );
-  rawRender(
-    <AllProviders>
-      <RouterProvider router={router} />
-    </AllProviders>,
-  );
-  expect(screen.getByLabelText("Search movie titles")).toBeEnabled();
+  expect(
+    await screen.findByRole("heading", { name: "Shōgun" }),
+  ).toBeInTheDocument();
   expect(selectInput("Subtitle language")).toHaveValue("");
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
 });
@@ -27,7 +33,7 @@ import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import { DiscoverSetupReturn } from "@/contexts/Discover";
 import DiscoverSettings from "@/pages/Settings/Discover";
-import { waitFor, within } from "@/tests";
+import { waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 
 const movie = {
@@ -59,7 +65,7 @@ function browse(initial = "/discover") {
     [
       { path: "/discover", element: <Discover /> },
       {
-        path: "/settings/discover",
+        path: "/subtitle-hub",
         element: (
           <DiscoverSetupReturn>
             <DiscoverSettings />
@@ -121,7 +127,7 @@ it("debounces title queries, opens mapped movie details, and submits only after 
     }),
   );
   const { user } = browse();
-  await user.type(screen.getByLabelText("Search movie titles"), "...Shōgun!!!");
+  await user.type(screen.getByLabelText("Search"), "...Shōgun!!!");
   expect(lookups).toEqual([]);
   await user.click(
     await screen.findByRole("button", { name: "Shōgun (1980)" }),
@@ -130,7 +136,7 @@ it("debounces title queries, opens mapped movie details, and submits only after 
     await screen.findByRole("heading", { name: "Shōgun" }),
   ).toBeInTheDocument();
   expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0080274");
-  expect(lookups).toEqual(["shogun"]);
+  expect(lookups).toEqual(["shogun", "shogun"]);
   expect(providers).toEqual([]);
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
   await pickOption(user, "Subtitle language", "English");
@@ -148,7 +154,7 @@ it("debounces title queries, opens mapped movie details, and submits only after 
 
 it("closes suggestions once on Escape and never reuses matches for punctuation-only input", async () => {
   const { user, router } = browse();
-  const query = screen.getByLabelText("Search movie titles");
+  const query = screen.getByLabelText("Search");
   await user.type(query, "Shogun");
   await screen.findByRole("button", { name: "Shōgun (1980)" });
   await user.keyboard("{Escape}{Escape}");
@@ -161,7 +167,9 @@ it("closes suggestions once on Escape and never reuses matches for punctuation-o
   expect(
     screen.queryByRole("button", { name: "Shōgun (1980)" }),
   ).not.toBeInTheDocument();
-  expect(screen.getByLabelText("IMDb ID")).toHaveValue("");
+  // The homepage carries no retrieval controls, so punctuation-only input
+  // leaves no IMDb field behind rather than an empty one.
+  expect(screen.queryByLabelText("IMDb ID")).not.toBeInTheDocument();
 });
 
 it("ignores an obsolete lookup response after the query changes", async () => {
@@ -180,7 +188,7 @@ it("ignores an obsolete lookup response after the query changes", async () => {
     }),
   );
   const { user } = browse();
-  const query = screen.getByLabelText("Search movie titles");
+  const query = screen.getByLabelText("Search");
   await user.type(query, "old");
   await waitFor(() => expect(release).toBeDefined());
   await user.clear(query);
@@ -196,15 +204,14 @@ it("ignores an obsolete lookup response after the query changes", async () => {
 it("returns from movie details to the query, browsing position and visible candidate focus", async () => {
   const scrolling = vi.spyOn(window, "scrollTo");
   const { user } = browse("/discover?view=movies#browsing");
-  await user.type(screen.getByLabelText("Search movie titles"), "Shogun");
+  await user.type(screen.getByLabelText("Search"), "Shogun");
   const button = await screen.findByRole("button", { name: "Shōgun (1980)" });
   await user.click(button);
   await screen.findByRole("heading", { name: "Shōgun" });
-  await user.click(screen.getByRole("button", { name: "Back to movies" }));
-  expect(screen.getByLabelText("Search movie titles")).toHaveValue("Shogun");
-  await waitFor(() =>
-    expect(screen.getByRole("button", { name: "Shōgun (1980)" })).toHaveFocus(),
-  );
+  await user.click(screen.getByRole("button", { name: "Back to Discover" }));
+  await user.click(screen.getByLabelText("Search"));
+  expect(screen.getByLabelText("Search")).toHaveValue("Shogun");
+  await waitFor(() => expect(screen.getByLabelText("Search")).toHaveFocus());
   expect(scrolling).toHaveBeenCalled();
   scrolling.mockRestore();
 });
@@ -221,9 +228,10 @@ it("explains unresolved IMDb mapping without keeping an earlier searchable ident
     ),
   );
   const { user } = browse();
-  await user.type(screen.getByLabelText("IMDb ID"), "tt0133093");
-  await pickOption(user, "Subtitle language", "English");
-  await user.type(screen.getByLabelText("Search movie titles"), "Shogun");
+  // The homepage carries no retrieval controls, so there is no earlier
+  // homepage identity to keep. Select the unresolved title, then confirm the
+  // detail clears the identity and stays unsearchable even with a language.
+  await user.type(screen.getByLabelText("Search"), "Shogun");
   await user.click(
     await screen.findByRole("button", { name: "Shōgun (1980)" }),
   );
@@ -231,32 +239,66 @@ it("explains unresolved IMDb mapping without keeping an earlier searchable ident
     await screen.findByText(/TMDB has no resolved IMDb identity/),
   ).toBeInTheDocument();
   expect(screen.getByLabelText("IMDb ID")).toHaveValue("");
+  await pickOption(user, "Subtitle language", "English");
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
 });
 
 it("keeps explicit IMDb retrieval usable without metadata setup", async () => {
+  // Without TMDB the global catalog is unavailable, but a local candidate
+  // still carries a usable title identity. The explicit value below arrives
+  // sourced from the local record rather than typed on the homepage, which
+  // no longer carries retrieval controls.
+  const local = {
+    ...movie,
+    source: "local",
+    source_id: "local:movie:42",
+    imdb_id: "tt0133093",
+    title: "Shōgun",
+  };
   server.use(
     http.get("/api/system/settings", () =>
       HttpResponse.json({
         general: { theme: "auto" },
         discover: {
           tmdb_configured: false,
-          metadata_revision: "empty",
+          metadata_revision: "metadata-one",
           locale: "en-US",
+        },
+      }),
+    ),
+    http.get("/api/discover/metadata/search", () =>
+      HttpResponse.json({ data: { ...envelope, items: [local] } }),
+    ),
+    http.get("/api/discover/metadata/movies/42", ({ request }) =>
+      HttpResponse.json({
+        data: {
+          ...envelope,
+          source: new URL(request.url).searchParams.get("source") ?? "local",
+          item: local,
         },
       }),
     ),
   );
   const { user } = browse();
-  await screen.findByText(/Set up TMDB in Discover settings/);
-  await user.type(screen.getByLabelText("IMDb ID"), "tt0133093");
+  await user.click(screen.getByLabelText("Search"));
+  await user.type(screen.getByLabelText("Search"), "S");
+  await screen.findByText(/Set up TMDB in the Subtitle Hub/);
+  await user.clear(screen.getByLabelText("Search"));
+  expect(screen.queryByLabelText("IMDb ID")).not.toBeInTheDocument();
+  await user.type(screen.getByLabelText("Search"), "Shogun");
+  await user.click(
+    await screen.findByRole("button", { name: "Shōgun (1980)" }),
+  );
+  await waitFor(() =>
+    expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0133093"),
+  );
   await pickOption(user, "Subtitle language", "English");
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeEnabled();
 });
 
 it("retires old metadata on token rotation even while configured remains true", async () => {
   const { user } = browse();
-  await user.type(screen.getByLabelText("Search movie titles"), "Shogun");
+  await user.type(screen.getByLabelText("Search"), "Shogun");
   await screen.findByRole("button", { name: "Shōgun (1980)" });
   server.use(
     http.get("/api/system/settings", () =>
@@ -284,12 +326,14 @@ it("retires old metadata on token rotation even while configured remains true", 
       screen.queryByRole("button", { name: "Shōgun (1980)" }),
     ).not.toBeInTheDocument(),
   );
-  expect(await screen.findByText(/No movies matched/)).toBeInTheDocument();
+  expect(
+    await screen.findByText(/No catalog titles matched/),
+  ).toBeInTheDocument();
 });
 
 it("preserves the selected subtitle identity when metadata credentials are removed", async () => {
   const { user } = browse();
-  await user.type(screen.getByLabelText("Search movie titles"), "Shogun");
+  await user.type(screen.getByLabelText("Search"), "Shogun");
   await user.click(
     await screen.findByRole("button", { name: "Shōgun (1980)" }),
   );
@@ -309,7 +353,7 @@ it("preserves the selected subtitle identity when metadata credentials are remov
     ),
   );
   await queryClient.refetchQueries({ queryKey: [QueryKeys.System] });
-  await screen.findByText(/Set up TMDB in Discover settings to load/);
+  await screen.findByText(/Set up TMDB in the Subtitle Hub to load/);
   expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0080274");
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeEnabled();
 });
@@ -325,41 +369,40 @@ it.each(["IMDb ID", "Media type"])(
       }),
     );
     const { user } = browse();
-    await user.type(screen.getByLabelText("Search movie titles"), "Shogun");
+    await user.type(screen.getByLabelText("Search"), "Shogun");
     await user.click(
       await screen.findByRole("button", { name: "Shōgun (1980)" }),
     );
     await screen.findByRole("heading", { name: "Shōgun" });
     await pickOption(user, "Subtitle language", "English");
     if (field === "IMDb ID") {
+      await openSearchOptions(user);
       await user.clear(screen.getByLabelText(field));
-      await user.type(screen.getByLabelText(field), "tt0133093");
     } else {
       await chooseSegment(user, "Episode");
-      await user.type(screen.getByLabelText("Season"), "1");
-      await user.type(screen.getByRole("textbox", { name: "Episode" }), "2");
-      await user.click(
-        screen.getByLabelText(
-          "I confirm this series IMDb ID and the manual season and episode numbers",
-        ),
-      );
     }
     expect(
       screen.queryByRole("heading", { name: "Shōgun" }),
     ).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Search movie titles")).toHaveValue("Shogun");
+    expect(screen.getByLabelText("Search")).toBeEnabled();
     expect(submitted).toEqual([]);
+    if (field === "IMDb ID") {
+      await user.type(screen.getByLabelText("IMDb ID"), "tt0133093");
+    } else {
+      await user.type(screen.getByRole("textbox", { name: "Season" }), "1");
+      await user.type(screen.getByRole("textbox", { name: "Episode" }), "2");
+      await user.click(
+        screen.getByRole("checkbox", { name: /I confirm this series IMDb ID/ }),
+      );
+    }
     await user.click(screen.getByRole("button", { name: "Find subtitles" }));
     await waitFor(() => expect(submitted).toHaveLength(1));
-    expect(submitted[0]).toEqual({
+    expect(submitted[0]).toMatchObject({
       media_type: field === "IMDb ID" ? "movie" : "episode",
       imdb_id: field === "IMDb ID" ? "tt0133093" : "tt0080274",
       language: "eng",
-      refresh: false,
-      ...(field === "Media type"
-        ? { season: 1, episode: 2, manual_confirmed: true }
-        : {}),
     });
+    expect(submitted[0]).not.toHaveProperty("title");
   },
 );
 
@@ -479,7 +522,7 @@ it.each([
       ),
     );
     const { user } = browse();
-    await user.type(screen.getByLabelText("Search movie titles"), "Shogun");
+    await user.type(screen.getByLabelText("Search"), "Shogun");
     await user.click(
       await screen.findByRole("button", { name: "Shōgun (1980)" }),
     );
@@ -493,10 +536,17 @@ it.each([
     // offers the download.
     await user.click(screen.getByRole("button", { name: "Download SRT" }));
     await screen.findByText(/This result has expired/);
-    await user.click(screen.getByRole("button", { name: "Back to movies" }));
+    await user.click(screen.getByRole("button", { name: "Back to Discover" }));
+    await user.click(screen.getByLabelText("Search"));
+    // The homepage carries no retrieval form or results. The accepted snapshot
+    // stays in context, but its heading and expired notice are hidden until
+    // the same title is selected again.
     expect(
-      screen.getByRole("heading", { name: "Shogun.1980.Web" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("heading", { name: "Shogun.1980.Web" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/This result has expired/),
+    ).not.toBeInTheDocument();
     if (fresh) {
       queryClient.removeQueries({
         queryKey: [QueryKeys.Discover, "metadata", "metadata-one", "movies/42"],
@@ -513,10 +563,7 @@ it.each([
     );
     if (fresh) {
       await waitFor(() => expect(releaseDetails).toBeDefined());
-      expect(
-        screen.getByRole("heading", { name: "Shogun.1980.Web" }),
-      ).toBeInTheDocument();
-      expect(screen.getByLabelText("IMDb ID")).toHaveValue(movie.imdb_id);
+      expect(screen.getByText("Loading movie details.")).toBeInTheDocument();
       releaseDetails?.();
       await waitFor(() =>
         expect(
@@ -564,7 +611,7 @@ it.each([
   },
 );
 
-it("keeps movie and show numeric identities separate when switching the global filter", async () => {
+it("keeps movie and show numeric identities separate across feed filter changes", async () => {
   const show = {
     ...movie,
     source_id: "tmdb:show:42",
@@ -593,21 +640,26 @@ it("keeps movie and show numeric identities separate when switching the global f
     ),
   );
   const { user } = browse();
-  await user.type(screen.getByLabelText("Search movie titles"), "Shogun");
+  await user.type(screen.getByLabelText("Search"), "Shogun");
   await user.click(
     await screen.findByRole("button", { name: "Shōgun (1980)" }),
   );
   await waitFor(() =>
     expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0080274"),
   );
-  await user.click(screen.getByRole("button", { name: "Back to movies" }));
-  await chooseSegment(user, "Series");
+  await user.click(screen.getByRole("button", { name: "Back to Discover" }));
+  await user.click(screen.getByLabelText("Search"));
+  // A feed filter does not change universal search. The same query still
+  // offers both media types, identified independently despite the shared id.
+  await user.click(await screen.findByRole("button", { name: "Series" }));
+  await user.click(screen.getByLabelText("Search"));
   await user.click(
     await screen.findByRole("button", { name: "Shōgun (2024)" }),
   );
   await waitFor(() =>
     expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt2788316"),
   );
+  await openSearchOptions(user);
   expect(screen.getByRole("radio", { name: "Episode" })).toBeChecked();
   expect(screen.getByRole("textbox", { name: "Episode" })).toHaveValue("");
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
@@ -668,7 +720,7 @@ it("browses OMDB with TMDB absent and retains the source through explicit title-
     }),
   );
   const { user } = browse();
-  await user.type(screen.getByLabelText("Search movie titles"), "Shogun");
+  await user.type(screen.getByLabelText("Search"), "Shogun");
   await user.click(
     await screen.findByRole("button", { name: "Shōgun (1980)" }),
   );
@@ -728,14 +780,15 @@ it("keeps numeric local and TMDB movie identities separate and submits no copy f
     }),
   );
   const { user } = browse();
-  await user.type(screen.getByLabelText("Search movie titles"), "Shogun");
+  await user.type(screen.getByLabelText("Search"), "Shogun");
   await user.click(
     await screen.findByRole("button", { name: "Shōgun (1980)" }),
   );
   await waitFor(() =>
     expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0080274"),
   );
-  await user.click(screen.getByRole("button", { name: "Back to movies" }));
+  await user.click(screen.getByRole("button", { name: "Back to Discover" }));
+  await user.click(screen.getByLabelText("Search"));
   await user.click(
     await screen.findByRole("button", { name: "Local edition (1980)" }),
   );
@@ -743,12 +796,8 @@ it("keeps numeric local and TMDB movie identities separate and submits no copy f
     expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0133093"),
   );
   expect(requested).toEqual(["tmdb", "local"]);
-  expect(
-    screen.getByText(/Local movie 42 · Arr instance 2/),
-  ).toBeInTheDocument();
-  expect(
-    screen.getByText(/No file, filename or hash is selected/),
-  ).toBeInTheDocument();
+  expect(screen.getByText("In your library")).toBeVisible();
+  expect(screen.queryByLabelText("Library copy")).toBeNull();
   expect(submitted).toEqual([]);
   await pickOption(user, "Subtitle language", "English");
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
@@ -804,22 +853,21 @@ it("shows scoped local episode counts and requires explicit manual confirmation 
     }),
   );
   const { user } = browse();
-  await chooseSegment(user, "Series");
-  await user.type(screen.getByLabelText("Search series titles"), "Local");
+  // The search mock answers with the local show whatever the scope, so no
+  // tab switch is needed to reach it here.
+  await user.type(screen.getByLabelText("Search"), "Local");
   await user.click(
     await screen.findByRole("button", { name: "Local show (1980)" }),
   );
-  await screen.findByText(/3 stored episode rows across the listed copies/);
+  await screen.findByText("In your library");
+  expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0080274");
   expect(
-    screen.getByText(/does not establish ownership of the selected episode/),
-  ).toBeInTheDocument();
-  expect(
-    screen.queryAllByLabelText("Choose season")[0] ?? null,
+    screen.queryByRole("combobox", { name: "Season" }),
   ).not.toBeInTheDocument();
   expect(requests).toHaveLength(1);
   expect(new URL(requests[0]).searchParams.get("source")).toBe("local");
   await pickOption(user, "Subtitle language", "English");
-  await user.type(screen.getByLabelText("Season"), "2");
+  await user.type(screen.getByRole("textbox", { name: "Season" }), "2");
   await user.type(screen.getByRole("textbox", { name: "Episode" }), "7");
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
   await user.click(
@@ -846,7 +894,12 @@ it("shows scoped local episode counts and requires explicit manual confirmation 
 });
 
 import { useSettingsMutation } from "@/apis/hooks/system";
-import { chooseSegment, pickOption, selectInput } from "./selectTestHelpers";
+import {
+  chooseSegment,
+  openSearchOptions,
+  pickOption,
+  selectInput,
+} from "./selectTestHelpers";
 
 function SaveMetadataFixture({
   changes,
@@ -953,14 +1006,17 @@ it("forwards the literal local query separately from normalized global metadata 
     }),
   );
   const { user } = browse();
-  await user.type(
-    screen.getByLabelText("Search movie titles"),
-    "50%_Done\\Path",
-  );
-  await waitFor(() => expect(queries).toHaveLength(1));
-  expect(queries[0].get("q")).toBe("50 done path");
-  expect(queries[0].get("local_q")).toBe("50%_Done\\Path");
-  expect(queries[0].get("source")).toBe("all");
+  await user.type(screen.getByLabelText("Search"), "50%_Done\\Path");
+  await waitFor(() => expect(queries).toHaveLength(2));
+  expect(queries.map((query) => query.get("type")).sort()).toEqual([
+    "movie",
+    "show",
+  ]);
+  for (const query of queries) {
+    expect(query.get("q")).toBe("50 done path");
+    expect(query.get("local_q")).toBe("50%_Done\\Path");
+    expect(query.get("source")).toBe("all");
+  }
 });
 
 it("cancels a retired TMDB response while allowing an unaffected OMDB response to finish", async () => {
@@ -1074,7 +1130,7 @@ it.each([
       }),
     );
     const { user } = browse();
-    await user.type(screen.getByLabelText("Search movie titles"), "Shogun");
+    await user.type(screen.getByLabelText("Search"), "Shogun");
     await user.click(
       await screen.findByRole("button", { name: "Shōgun (1980)" }),
     );
@@ -1084,7 +1140,7 @@ it.each([
     ).toBeInTheDocument();
     expect(submissions).toEqual([]);
     if (cached)
-      expect(screen.getByText(/Cached OMDB metadata/)).toBeInTheDocument();
+      expect(screen.getByText(/Cached title details/)).toBeInTheDocument();
   },
 );
 
@@ -1147,7 +1203,7 @@ it.each([
       }),
     );
     const { user } = browse();
-    await user.type(screen.getByLabelText("Search movie titles"), "Shogun");
+    await user.type(screen.getByLabelText("Search"), "Shogun");
     expect(await screen.findByText(message)).toBeInTheDocument();
     expect(
       screen.getByText("TMDB is temporarily unavailable."),
@@ -1157,9 +1213,85 @@ it.each([
         screen.getByRole("button", { name: "Cached title (1980)" }),
       ).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "Shōgun (1980)" }));
-    expect(
-      await screen.findByText(/Film · 1980 · Local library/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("In your library")).toBeInTheDocument();
     expect(submissions).toEqual([]);
   },
 );
+
+it("heads the title retrieval with its purpose and the remembered-language note", async () => {
+  const { user } = browse();
+  await user.type(screen.getByLabelText("Search"), "Shogun");
+  await user.click(
+    await screen.findByRole("button", { name: "Shōgun (1980)" }),
+  );
+  expect(
+    await screen.findByRole("heading", { name: "Find the subtitles you need" }),
+  ).toBeInTheDocument();
+  expect(screen.getByText(/remembered for Discover/)).toBeInTheDocument();
+  expect(
+    screen.getByText(/Library profiles stay unchanged/),
+  ).toBeInTheDocument();
+});
+
+it("cancels a pending subtitle search when leaving the title", async () => {
+  let release: (() => void) | undefined;
+  const requests: unknown[] = [];
+  server.use(
+    http.post("/api/discover/search", async ({ request }) => {
+      requests.push(await request.json());
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return HttpResponse.json({
+        search_id: "search-1",
+        context: {
+          media_type: "movie",
+          imdb_id: "tt0080274",
+          language: "eng",
+          matching_mode: "title",
+        },
+        status: "complete",
+        checked_at: "2026-09-08T10:00:00Z",
+        attempted_at: "2026-09-08T10:00:00Z",
+        cache_status: "fresh",
+        coverage: {
+          complete: true,
+          configured_count: 1,
+          completed_count: 1,
+          providers: [],
+        },
+        results: [],
+      });
+    }),
+  );
+  const { user } = browse();
+  await user.type(screen.getByLabelText("Search"), "Shogun");
+  await user.click(
+    await screen.findByRole("button", { name: "Shōgun (1980)" }),
+  );
+  await screen.findByRole("heading", { name: "Shōgun" });
+  await pickOption(user, "Subtitle language", "English");
+  await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+  await waitFor(() => expect(requests).toHaveLength(1));
+  await waitFor(() => expect(release).toBeDefined());
+  await user.click(screen.getByRole("button", { name: "Back to Discover" }));
+  await user.click(screen.getByLabelText("Search"));
+  release?.();
+  await waitFor(() =>
+    expect(
+      queryClient.isMutating({
+        mutationKey: [QueryKeys.Discover, QueryKeys.Search],
+      }),
+    ).toBe(0),
+  );
+  // The late response belongs to a selection the reader has already left, so
+  // nothing is filed. Back lands on the homepage, which carries no retrieval
+  // form or results.
+  expect(
+    screen.queryByRole("heading", { name: /Subtitle results/ }),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByText(/No subtitles matched/)).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Find subtitles" }),
+  ).not.toBeInTheDocument();
+});

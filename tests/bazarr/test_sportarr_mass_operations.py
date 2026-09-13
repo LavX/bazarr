@@ -339,7 +339,10 @@ def test_upgrade_runs_once_per_owner_not_once_per_row():
          patch('subtitles.mass_operations.upgrade_movies_subtitles'):
         result = _process_media_action(items, 'upgrade', job_id=1)
 
-    assert [c.kwargs['arr_instance_id'] for c in upgrade.call_args_list] == [42, 43]
+    assert [c.kwargs for c in upgrade.call_args_list] == [
+        dict(job_id=1, arr_instance_id=42, event_ids=[61, 62], league_ids=[]),
+        dict(job_id=1, arr_instance_id=43, event_ids=[], league_ids=[51]),
+    ]
     assert result['queued'] == 2
 
 
@@ -695,3 +698,24 @@ def test_mass_mod_cancellation_preserves_only_completed_publications(
         assert refreshed.count(('plex', 'Sports')) == 1
         assert refreshed.count(('jellyfin', 'sports-id')) == 1
         assert refreshed.count(('sportarr', 1)) == 1
+
+
+def test_sync_history_does_not_suppress_another_owners_remote_path(sports_toolbox, monkeypatch):  # noqa: F811
+    import shutil
+    from datetime import datetime
+    from app.database import TableSportsEvents, TableHistorySports
+    from subtitles import mass_operations
+    _, session, folder = sports_toolbox
+    path = '/sports/event.en.hi.srt'
+    shutil.copyfile(folder / '1/event.en.hi.srt', folder / '2/event.en.hi.srt')
+    for event_id in (61, 62):
+        session.get(TableSportsEvents, event_id).subtitles = str([['en:hi', path]])
+    session.add(TableHistorySports(arr_instance_id=1, league_id=51, event_id=61,
+        action=5, timestamp=datetime.now(), subtitles_path=path))
+    session.commit()
+    monkeypatch.setattr(mass_operations, 'database', session)
+    items, _ = mass_operations._collect_sports(event_ids=[61, 62], sports_instance={61: {1}, 62: {2}})
+    assert [(item['sports_event_id'], item['arr_instance_id']) for item in items] == [(62, 2)]
+    forced, _ = mass_operations._collect_sports(event_ids=[61, 62], sports_instance={61: {1}, 62: {2}},
+                                               force_resync=True)
+    assert {item['arr_instance_id'] for item in forced} == {1, 2}

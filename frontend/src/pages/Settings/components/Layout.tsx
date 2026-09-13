@@ -76,8 +76,10 @@ const Layout: FunctionComponent<Props> = (props) => {
   useOnValueChange(isRefetching, (value) => {
     if (
       !value &&
-      !Object.keys(form.values.settings).some((key) =>
-        key.startsWith("settings-discover-"),
+      !Object.keys(form.values.settings).some(
+        (key) =>
+          key.startsWith("settings-discover-") ||
+          key === "settings-general-metadata_language",
       )
     ) {
       form.reset();
@@ -95,8 +97,10 @@ const Layout: FunctionComponent<Props> = (props) => {
           onSuccess: () => {
             setMetadataRefreshFailed(false);
             if (
-              Object.keys(settingsToSubmit).some((key) =>
-                key.startsWith("settings-discover-"),
+              Object.keys(settingsToSubmit).some(
+                (key) =>
+                  key.startsWith("settings-discover-") ||
+                  key === "settings-general-metadata_language",
               )
             )
               formRef.current.reset();

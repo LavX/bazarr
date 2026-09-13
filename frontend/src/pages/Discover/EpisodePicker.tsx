@@ -1,14 +1,6 @@
 import { useEffect, useRef } from "react";
-import { Link, useLocation, useNavigate } from "react-router";
-import {
-  Alert,
-  Anchor,
-  Button,
-  Group,
-  Stack,
-  Text,
-  Title,
-} from "@mantine/core";
+import { useNavigate } from "react-router";
+import { Alert, Button, Stack, Text } from "@mantine/core";
 import { useDiscoverMetadata } from "@/apis/hooks/discover";
 import { useDiscover } from "@/contexts/Discover";
 import {
@@ -23,13 +15,18 @@ export function episodeLink(showId: number, season: number, episode: number) {
   return `/discover?show=${showId}&season=${season}&episode=${episode}`;
 }
 
-export default function EpisodePicker({ show }: { show: MetadataShow }) {
+export default function EpisodePicker({
+  show,
+  showOptions = false,
+}: {
+  show: MetadataShow;
+  showOptions?: boolean;
+}) {
   const { state, updateBrowsing, updateDraft } = useDiscover();
   const { browsing, draft } = state;
   const season = browsing.selectedSeason;
   const number = browsing.selectedEpisode;
   const navigate = useNavigate();
-  const location = useLocation();
   const seasons = useDiscoverMetadata(
     `shows/${show.id}/seasons/${season}`,
     undefined,
@@ -98,7 +95,12 @@ export default function EpisodePicker({ show }: { show: MetadataShow }) {
     }
   }, [parentMatches, parentKey, refetchEpisode]);
   const unavailable = seasons.isError || seasons.data?.status === "unavailable";
-  const conflicting = draft.episodeIdentity?.identity_status === "conflict";
+  const conflicting = episode?.identity_status === "conflict";
+  const needsManual =
+    show.seasons === null ||
+    show.seasons.length === 0 ||
+    unavailable ||
+    episode?.identity_status === "unverified";
   const beginManual = () =>
     updateDraft({
       manualEntry: true,
@@ -106,25 +108,30 @@ export default function EpisodePicker({ show }: { show: MetadataShow }) {
       season: "",
       episode: "",
     });
+  const seasonRows = show.seasons ?? [];
+  const episodeRows =
+    seasons.data?.season?.season === season ? seasons.data.season.episodes : [];
+  // A single season has no meaningful choice. Keep that default in the URL
+  // without adding a second history stop when the show first opens.
+  useEffect(() => {
+    if (season !== null || seasonRows.length !== 1) return;
+    const onlySeason = seasonRows[0].season;
+    void navigate(`/discover?show=${show.id}&season=${onlySeason}`, {
+      replace: true,
+    });
+  }, [season, seasonRows, show.id, navigate]);
+
   return (
-    <Stack className={styles.episodePicker} gap="md">
-      <Title order={3}>Choose an episode</Title>
-      <Text size="sm">
-        Select a season, then an episode. Browsing does not search subtitle
-        providers.
-      </Text>
-      {show.seasons === null ? (
-        <Alert color="yellow">
-          Season metadata is unavailable for this show.
-        </Alert>
-      ) : show.seasons.length === 0 ? (
-        <Text>No seasons have been listed for this show.</Text>
-      ) : (
+    <Stack className={styles.episodePicker} gap="sm">
+      <div className={styles.episodeSelectors}>
         <DiscoverSelect
-          label="Choose season"
-          placeholder="Choose a season"
+          label="Season"
+          placeholder={
+            seasonRows.length ? "Choose a season" : "No seasons available"
+          }
+          disabled={!seasonRows.length}
           value={season?.toString() ?? ""}
-          options={show.seasons.map((row) => ({
+          options={seasonRows.map((row) => ({
             value: String(row.season),
             label: row.title,
           }))}
@@ -138,141 +145,133 @@ export default function EpisodePicker({ show }: { show: MetadataShow }) {
               manualConfirmed: false,
               manualEntry: false,
             });
-            if (location.search.includes("show="))
-              void navigate(
-                `/discover?show=${show.id}${next === null ? "" : `&season=${next}`}`,
-                { replace: true },
-              );
+            void navigate(
+              `/discover?show=${show.id}${next === null ? "" : `&season=${next}`}`,
+            );
           }}
         />
+        <DiscoverSelect
+          label="Episode"
+          placeholder={
+            season === null
+              ? "Choose a season first"
+              : seasons.isFetching
+                ? "Loading episodes…"
+                : "Choose an episode"
+          }
+          disabled={season === null || !episodeRows.length}
+          value={number?.toString() ?? ""}
+          options={episodeRows.map((row) => ({
+            value: String(row.episode),
+            label: `${row.episode}. ${row.title}`,
+          }))}
+          onChange={(value) => {
+            if (season !== null && value)
+              void navigate(episodeLink(show.id, season, Number(value)));
+          }}
+        />
+      </div>
+      {show.seasons === null && (
+        <Text size="sm" c="dimmed">
+          Season details are unavailable for this show.
+        </Text>
       )}
-      {season !== null && seasons.isFetching && (
-        <Text role="status">Loading season episodes.</Text>
+      {show.seasons?.length === 0 && (
+        <Text size="sm" c="dimmed">
+          No episodes have been listed for this show yet.
+        </Text>
       )}
       {season !== null && unavailable && (
         <Alert color="yellow">
-          Season metadata is temporarily unavailable. This does not mean the
-          season is empty.
-          <Button variant="subtle" onClick={() => void seasons.refetch()}>
-            Retry season
+          Episodes could not be loaded.
+          <Button
+            type="button"
+            variant="subtle"
+            onClick={() => void seasons.refetch()}
+          >
+            Retry
           </Button>
         </Alert>
       )}
-      {seasons.data?.season && (
-        <Stack gap={0} aria-label="Season episodes">
-          {!seasons.data.season.episodes.length && (
-            <Text>This season has no listed episodes.</Text>
-          )}
-          {seasons.data.season.episodes.map((row) => (
-            <Group
-              key={row.id}
-              className={styles.episodeRow}
-              justify="space-between"
-            >
-              <Anchor
-                c="var(--discover-link)"
-                component={Link}
-                to={episodeLink(show.id, row.season, row.episode)}
-                aria-current={row.episode === number ? "page" : undefined}
-              >
-                {row.season === 0 ? "Special" : `S${row.season}`} E{row.episode}
-                : {row.title}
-              </Anchor>
-              <Text size="sm">{row.air_date ?? "Air date unavailable"}</Text>
-            </Group>
-          ))}
-        </Stack>
-      )}
+      {season !== null &&
+        !seasons.isFetching &&
+        !unavailable &&
+        seasons.data?.season &&
+        !episodeRows.length && (
+          <Text size="sm" c="dimmed">
+            No episodes have been listed for this season yet.
+          </Text>
+        )}
       {number !== null && details.isFetching && (
-        <Text role="status">Loading exact episode identity.</Text>
+        <Text size="sm" role="status">
+          Loading episode details…
+        </Text>
       )}
       {number !== null &&
         (details.isError ||
           details.data?.status === "unavailable" ||
           details.data?.service_status === "unavailable") && (
           <Alert color="yellow">
-            {details.data?.unavailable_dependency === "tvdb_episode"
-              ? "TVDB episode verification is temporarily unavailable."
-              : "Episode metadata is temporarily unavailable."}{" "}
-            Your selection is retained.
-            {details.data?.status === "cached" && details.data.fetched_at && (
-              <Text size="sm">
-                Cached identity fetched{" "}
-                <time dateTime={details.data.fetched_at}>
-                  {new Date(details.data.fetched_at).toLocaleString()}
-                </time>
-                .
-              </Text>
-            )}
-            <Button variant="subtle" onClick={() => void details.refetch()}>
-              Retry episode
+            Episode details are temporarily unavailable. Your selection is
+            retained.
+            <Button
+              type="button"
+              variant="subtle"
+              onClick={() => void details.refetch()}
+            >
+              Retry
             </Button>
           </Alert>
         )}
-      {episode && (
-        <Stack gap="xs" aria-label="Selected episode">
-          <Title order={4}>
-            S{episode.season} E{episode.episode}: {episode.title}
-          </Title>
-          <Text>
-            {episode.air_date
-              ? `Original air date: ${episode.air_date}`
-              : "Original air date unavailable"}
-          </Text>
-          <Text size="sm">
-            TMDB episode {episode.id}
-            {episode.imdb_id ? ` · Episode IMDb ${episode.imdb_id}` : ""}
-          </Text>
-          {!parentMatches && (
-            <Alert color="yellow">
-              The show identity changed. This episode must be reconciled with
-              the current show before subtitle search can continue.
-              <Button variant="subtle" onClick={() => void details.refetch()}>
-                Retry episode mapping
-              </Button>
-            </Alert>
-          )}
-          {parentMatches && episode.identity_status === "resolved" && (
-            <Text size="sm">
-              Verified TVDB default order: season {episode.target_season},
-              episode {episode.target_episode}. Subtitle catalogs can use
-              different orders. Timing compatibility is unverified.
-            </Text>
-          )}
-          {parentMatches && episode.identity_status === "unverified" && (
-            <Alert color="yellow">
-              Episode numbering is unverified. Confirm a manual target below to
-              search.
-            </Alert>
-          )}
-          {episode.identity_status === "conflict" && (
-            <Alert color="red">
-              Source episode identities conflict. Subtitle search is blocked.
-              Retry details after the source mapping is corrected.
-              <Button variant="subtle" onClick={() => void details.refetch()}>
-                Retry episode mapping
-              </Button>
-            </Alert>
-          )}
-          <Anchor
-            c="var(--discover-link)"
-            component={Link}
-            to={episodeLink(show.id, episode.season, episode.episode)}
-          >
-            Exact episode link
-          </Anchor>
-        </Stack>
-      )}
-      {show.imdb_id && parentMatches && !conflicting && !draft.manualEntry && (
-        <Button variant="subtle" onClick={beginManual}>
-          Enter a manual episode
-        </Button>
-      )}
-      {draft.manualEntry && (
+      {episode && !parentMatches && (
         <Alert color="yellow">
-          Manual recovery: confirm the series identity and target numbers below.
-          This does not verify source numbering.
+          Show details changed. Refresh this episode before searching.
+          <Button
+            type="button"
+            variant="subtle"
+            onClick={() => void details.refetch()}
+          >
+            Refresh episode
+          </Button>
         </Alert>
+      )}
+      {episode &&
+        parentMatches &&
+        episode.identity_status === "unverified" &&
+        !draft.manualEntry && (
+          <Text size="sm">
+            Confirm this episode’s season and number to search.
+          </Text>
+        )}
+      {conflicting && (
+        <Alert color="red">
+          Episode numbering does not match between metadata sources. Refresh
+          details before searching.
+          <Button
+            type="button"
+            variant="subtle"
+            onClick={() => void details.refetch()}
+          >
+            Refresh episode
+          </Button>
+        </Alert>
+      )}
+      {show.imdb_id &&
+        parentMatches &&
+        !conflicting &&
+        !draft.manualEntry &&
+        (showOptions || needsManual) && (
+          <Button
+            type="button"
+            variant="subtle"
+            className={styles.episodeManual}
+            onClick={beginManual}
+          >
+            Enter episode numbers manually
+          </Button>
+        )}
+      {draft.manualEntry && (
+        <Text size="sm">Confirm the season and episode numbers below.</Text>
       )}
     </Stack>
   );

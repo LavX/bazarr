@@ -39,6 +39,7 @@ import {
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import client from "@/apis/raw/client";
+import { useSearchSource } from "@/contexts/UniversalSearch";
 import {
   readStoredValue,
   removeStoredValue,
@@ -75,6 +76,7 @@ import JumpToCue from "./JumpToCue";
 import { detectFormat, getParser } from "./parsers";
 import QCPanel from "./QCPanel";
 import SearchReplace from "./SearchReplace";
+import { createSubtitleSearchSource } from "./searchSource";
 import { getSerializer } from "./serializers";
 import ShortcutSheet from "./ShortcutSheet";
 import StatusBar from "./StatusBar";
@@ -1039,6 +1041,12 @@ export default function EditorPage() {
   const handleSearchNavigate = useCallback((cueIndex: number) => {
     setSelectedIndex(cueIndex);
   }, []);
+
+  const subtitleSearch = useMemo(
+    () => createSubtitleSearchSource(docState.cues, handleSearchNavigate),
+    [docState.cues, handleSearchNavigate],
+  );
+  useSearchSource(subtitleSearch);
 
   const handleJumpToCue = useCallback((index: number) => {
     setSelectedIndex(index);

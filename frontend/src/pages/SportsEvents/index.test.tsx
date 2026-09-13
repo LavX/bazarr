@@ -3,12 +3,14 @@ import { createMemoryRouter, RouterProvider } from "react-router";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { SportsEvent } from "@/apis/raw/sports";
 import { sportarr } from "@/pages/Settings/Connections/__tests__/fixtures";
 import { AllProviders } from "@/providers";
 import { rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import * as files from "@/utilities/files";
 import { registerAppNavigate } from "@/utilities/whatsNew";
+import { EventSubtitleStatuses } from "./table";
 import SportsEvents from ".";
 
 function renderDetail() {
@@ -27,6 +29,7 @@ describe("sports event detail", () => {
   beforeEach(() => {
     // Every sports surface is gated on the master toggle now.
     server.use(
+      http.get("/api/system/languages", () => HttpResponse.json([])),
       http.get("/api/system/settings", () =>
         HttpResponse.json({ general: { use_sportarr: true } }),
       ),
@@ -310,7 +313,12 @@ describe("sports event detail", () => {
   });
 
   it("shows the shared sync status for each present sports subtitle", async () => {
+    let rowRequests = 0;
     server.use(
+      http.get("/api/sports/events/*/subtitles/*/sync-status", () => {
+        rowRequests += 1;
+        return HttpResponse.json({ synced: false });
+      }),
       http.get("/api/system/arr-instances", () =>
         HttpResponse.json([sportarr]),
       ),
@@ -332,31 +340,27 @@ describe("sports event detail", () => {
                 ["fr", "/sports/event.fr.srt", 41],
               ],
               missing_subtitles: [],
+              sync_status: {
+                en: {
+                  synced: true,
+                  confirmed: true,
+                  editedAfterSync: false,
+                  lastModified: 100,
+                  lastSyncTimestamp: "2026-09-01T00:00:00",
+                  jobStatus: null,
+                },
+                fr: {
+                  synced: false,
+                  confirmed: false,
+                  editedAfterSync: false,
+                  lastModified: 100,
+                  lastSyncTimestamp: null,
+                  jobStatus: "running",
+                },
+              },
             },
           ],
           total: 1,
-        }),
-      ),
-      // en was synced and the result confirmed: the shared history icon.
-      http.get("/api/sports/events/61/subtitles/en/sync-status", () =>
-        HttpResponse.json({
-          synced: true,
-          confirmed: true,
-          editedAfterSync: false,
-          lastModified: 100,
-          lastSyncTimestamp: "2026-09-01T00:00:00",
-          jobStatus: null,
-        }),
-      ),
-      // fr is still running: the same spinner the movie Status cell shows.
-      http.get("/api/sports/events/61/subtitles/fr/sync-status", () =>
-        HttpResponse.json({
-          synced: false,
-          confirmed: false,
-          editedAfterSync: false,
-          lastModified: 100,
-          lastSyncTimestamp: null,
-          jobStatus: "running",
         }),
       ),
     );
@@ -368,6 +372,73 @@ describe("sports event detail", () => {
     expect(
       await within(table).findByLabelText("Sync running"),
     ).toBeInTheDocument();
+    expect(rowRequests).toBe(0);
+  });
+
+  it("renders 200 subtitle statuses without per-row requests", async () => {
+    let rowRequests = 0;
+    server.use(
+      http.get("/api/sports/events/*/subtitles/*/sync-status", () => {
+        rowRequests += 1;
+        return HttpResponse.json({ synced: true, confirmed: true });
+      }),
+    );
+    const event: SportsEvent = {
+      id: 61,
+      arr_instance_id: 42,
+      league_id: 51,
+      sportarrEventId: 9,
+      file_id: 71,
+      partNumber: null,
+      partName: null,
+      season: null,
+      episode: null,
+      title: "Event",
+      eventDate: null,
+      broadcastDate: null,
+      path: "/sports/event.mkv",
+      mapped_path: "/sports/event.mkv",
+      file_size: 100,
+      hasFile: true,
+      monitored: true,
+      profileId: null,
+      audio_language: [],
+      missing_subtitles: [],
+      subtitles: [
+        ["en", "/sports/event.en.srt", 40],
+        ["fr", "/sports/event.fr.srt", 40],
+      ],
+      sync_status: {
+        en: {
+          synced: true,
+          confirmed: true,
+          editedAfterSync: false,
+          lastModified: 100,
+          lastSyncTimestamp: "2026-09-01T00:00:00",
+          jobStatus: null,
+        },
+        fr: {
+          synced: true,
+          confirmed: true,
+          editedAfterSync: false,
+          lastModified: 100,
+          lastSyncTimestamp: "2026-09-01T00:00:00",
+          jobStatus: null,
+        },
+      },
+    };
+    rawRender(
+      <AllProviders>
+        {Array.from({ length: 100 }, (_, index) => (
+          <EventSubtitleStatuses
+            key={index}
+            event={{ ...event, id: index + 61 }}
+          />
+        ))}
+      </AllProviders>,
+    );
+    expect(await screen.findAllByLabelText("Sync")).toHaveLength(200);
+    expect(rowRequests).toBe(0);
   });
 
   it("lists each playable part with date and file state without inventing numbering", async () => {

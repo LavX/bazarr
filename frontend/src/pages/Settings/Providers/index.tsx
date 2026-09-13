@@ -1,6 +1,7 @@
 import { FunctionComponent, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router";
+import { useLocation, useNavigate, useSearchParams } from "react-router";
 import {
+  Accordion,
   Anchor,
   Button,
   Stack,
@@ -42,11 +43,15 @@ import {
   ProviderInfo,
   ProviderList,
 } from "./list";
+import TmdbIntegration from "./TmdbIntegration";
 
 type TabKey = "my-providers" | "marketplace" | "updates" | "activity";
 
 function requestedTabKey(value: string | null): TabKey | null {
-  return value === "marketplace" || value === "updates" || value === "activity"
+  return value === "my-providers" ||
+    value === "marketplace" ||
+    value === "updates" ||
+    value === "activity"
     ? value
     : null;
 }
@@ -263,17 +268,48 @@ const AntiCaptchaSection: FunctionComponent = () => (
 );
 
 const IntegrationsSection: FunctionComponent = () => (
-  <ProviderView
-    addLabel="Add integration"
-    availableOptions={IntegrationList}
-    settingsKey="settings-general-enabled_integrations"
-  />
+  <Stack gap="md">
+    <Accordion id="metadata" variant="default" style={{ scrollMarginTop: 100 }}>
+      <Accordion.Item value="tmdb">
+        <Accordion.Control>TMDB</Accordion.Control>
+        <Accordion.Panel>
+          <TmdbIntegration />
+        </Accordion.Panel>
+      </Accordion.Item>
+      <Accordion.Item value="omdb">
+        <Accordion.Control>OMDb</Accordion.Control>
+        <Accordion.Panel>
+          <Stack gap="sm" maw={720}>
+            <MantineText size="sm">
+              Title and year metadata for movies and shows outside your library.
+            </MantineText>
+            <Password label="OMDb API key" settingKey="settings-omdb-apikey" />
+            <Anchor
+              href="https://www.omdbapi.com/apikey.aspx"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Get an OMDb API key
+            </Anchor>
+          </Stack>
+        </Accordion.Panel>
+      </Accordion.Item>
+    </Accordion>
+    <ProviderView
+      addLabel="Add integration"
+      availableOptions={IntegrationList.filter((item) => item.key !== "omdb")}
+      excludedKeys={["omdb"]}
+      settingsKey="settings-general-enabled_integrations"
+    />
+  </Stack>
 );
 
 const SettingsProvidersView: FunctionComponent = () => {
   // A link can open a specific tab: Discover sends readers whose enabled
   // providers cannot be searched straight to the marketplace.
-  const [params, setParams] = useSearchParams();
+  const [params] = useSearchParams();
+  const navigate = useNavigate();
+  const { hash } = useLocation();
   const requestedTab = params.get("tab");
   const [tab, setTab] = useState<TabKey>(
     requestedTabKey(requestedTab) ?? "my-providers",
@@ -288,15 +324,14 @@ const SettingsProvidersView: FunctionComponent = () => {
     if (requestedTab === null) return;
     const requested = requestedTabKey(requestedTab);
     if (requested) setTab(requested);
-    setParams(
-      (current) => {
-        const next = new URLSearchParams(current);
-        next.delete("tab");
-        return next;
-      },
-      { replace: true },
-    );
-  }, [requestedTab, setParams]);
+    const next = new URLSearchParams(params);
+    next.delete("tab");
+    navigate({ search: next.toString(), hash }, { replace: true });
+  }, [requestedTab, params, navigate, hash]);
+  useEffect(() => {
+    if (hash !== "#metadata" || tab !== "my-providers") return;
+    document.getElementById("metadata")?.scrollIntoView({ block: "start" });
+  }, [hash, tab]);
   const catalog = useProviderHubCatalog();
   const providers = useProviderHubProviders();
   const providerOptions = useProviderOptions(providers.data);

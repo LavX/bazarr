@@ -1,15 +1,16 @@
 /* eslint-disable camelcase -- API fixture fields keep their transport names. */
-import { createMemoryRouter, RouterProvider } from "react-router";
+import { createMemoryRouter, RouterProvider, useNavigate } from "react-router";
 import { focusManager } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, expect, it, vi } from "vitest";
+import { useDiscover } from "@/contexts/Discover";
 import { AllProviders } from "@/providers";
 import { act, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import { findSelectInput, pickOption, selectInput } from "./selectTestHelpers";
 import SystemSummary from "./SystemSummary";
-import Discover from ".";
+import Discover from "./testHarness";
 
 /**
  * The figure standing under one stat's label.
@@ -19,8 +20,8 @@ import Discover from ".";
  * that test in any pairing, including every wrong one. This walks from the
  * label to the figure it actually belongs to.
  */
-function statValue(scope: HTMLElement, label: string) {
-  const labelled = within(scope).getByText(label);
+async function statValue(scope: HTMLElement, label: string) {
+  const labelled = await within(scope).findByText(label);
   // Direct node access on purpose: the pairing of a figure with the label
   // beside it is the thing under test, and no query expresses "the figure in
   // this one stat" without walking to it.
@@ -123,19 +124,29 @@ function runningTranslation(overrides: Record<string, unknown> = {}) {
 let served: unknown = summary();
 let requests = 0;
 function setViewport(narrow: boolean) {
-  vi.mocked(window.matchMedia).mockImplementation(
-    (query: string) =>
-      ({
-        matches: narrow && query.includes("max-width"),
-        media: query,
-        onchange: null,
-        addListener: vi.fn(),
-        removeListener: vi.fn(),
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-        dispatchEvent: vi.fn(),
-      }) as unknown as MediaQueryList,
-  );
+  const queries = new Set<MediaQueryList>();
+  vi.mocked(window.matchMedia).mockImplementation((query: string) => {
+    const media = Object.assign(new EventTarget(), {
+      matches: narrow && query.includes("max-width"),
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+    }) as MediaQueryList;
+    queries.add(media);
+    return media;
+  });
+  return (nextNarrow: boolean) => {
+    narrow = nextNarrow;
+    for (const media of queries) {
+      const matches = narrow && media.media.includes("max-width");
+      if (matches === media.matches) continue;
+      Object.defineProperty(media, "matches", { value: matches });
+      media.dispatchEvent(
+        Object.assign(new Event("change"), { matches, media: media.media }),
+      );
+    }
+  };
 }
 
 beforeEach(() => {
@@ -163,6 +174,7 @@ function renderSummary() {
       { path: "/discover", element: <SystemSummary /> },
       { path: "/system/tasks", element: <div>Local activity page</div> },
       { path: "/wanted/series", element: <div>Wanted series page</div> },
+      { path: "/history/series", element: <div>Local history page</div> },
     ],
     { initialEntries: ["/discover"] },
   );
@@ -171,6 +183,7 @@ function renderSummary() {
       <RouterProvider router={router} />
     </AllProviders>,
   );
+  return router;
 }
 
 it("shows running work with its owning instance, language and measured progress", async () => {
@@ -178,10 +191,17 @@ it("shows running work with its owning instance, language and measured progress"
     state: "busy",
     activity: {
       ...emptyActivity,
-      running_count: 1,
       queued_count: 2,
       scheduled_count: 3,
-      running: [runningTranslation()],
+      running: [
+        runningTranslation(),
+        runningTranslation({
+          activity_id: "run-2",
+          name: "Downloading Dune",
+          progress: null,
+        }),
+      ],
+      running_count: 3,
       queued: [
         {
           ...runningTranslation(),
@@ -205,19 +225,40 @@ it("shows running work with its owning instance, language and measured progress"
   });
   renderSummary();
 
-  const running = await screen.findByRole("group", { name: "Running now" });
-  expect(within(running).getByText(/Translating Northern Light/)).toBeVisible();
-  expect(within(running).getByText(/Anime/)).toBeVisible();
-  expect(within(running).getByText(/hu/)).toBeVisible();
-  expect(within(running).getByText("40%")).toBeVisible();
+  // The featured task leads the current-work block with its owning scope
+  // and its measured progress, drawn as a real progress bar.
+  const now = await screen.findByRole("group", { name: "Current work" });
+  expect(
+    await within(now).findByText(/Translating Northern Light/),
+  ).toBeVisible();
+  expect(within(now).getByText(/Anime/)).toBeVisible();
+  expect(within(now).getByText(/hu/)).toBeVisible();
+  // The figure renders twice: once as the visible text and once as the
+  // progress fallback for parsers without bar rendering.
+  expect(within(now).getByText("40%", { selector: "p" })).toBeVisible();
+  expect(
+    within(now).getByRole("progressbar", { name: /Work progress, 40%/ }),
+  ).toBeVisible();
+  expect(within(now).getByText(/and 2 more running/)).toBeVisible();
 
-  // Three states, three figures, each under its own label, and each figure
-  // read from the label it is paired with rather than from the tile at large.
-  const now = screen.getByRole("group", { name: "Current work" });
-  expect(statValue(now, "running")).toHaveTextContent("1");
-  expect(statValue(now, "queued")).toHaveTextContent("2");
-  expect(statValue(now, "scheduled")).toHaveTextContent("3");
-  expect(statValue(now, "running")).toBeVisible();
+  // Queued work is a route to the queue, not a second running list.
+  const queue = within(now).getByRole("link", { name: /2 jobs queued/ });
+  expect(queue).toHaveAttribute("href", "/system/tasks");
+
+  // The rail carries the concept anchors and review state for composition.
+  expect(now).toHaveAttribute("id", "bh-current");
+  expect(screen.getByRole("complementary")).toHaveAttribute(
+    "data-system",
+    "busy",
+  );
+  // eslint-disable-next-line testing-library/no-node-access
+  expect(document.getElementById("bh-system-secondary")).not.toBeNull();
+
+  const detail = await screen.findByRole("group", {
+    name: "Local work detail",
+  });
+  expect(within(detail).getByText(/All configured libraries/)).toBeVisible();
+  expect(within(detail).getByText(/Updated/)).toBeVisible();
 });
 
 it("never invents progress the source does not measure", async () => {
@@ -243,9 +284,9 @@ it("never invents progress the source does not measure", async () => {
   });
   renderSummary();
 
-  const running = await screen.findByRole("group", { name: "Running now" });
+  const running = await screen.findByRole("group", { name: "Current work" });
   expect(
-    within(running).getByText(/Waiting for the translation service/),
+    await within(running).findByText(/Waiting for the translation service/),
   ).toBeVisible();
   expect(within(running).queryByRole("progressbar")).toBeNull();
   expect(within(running).queryByText("%", { exact: false })).toBeNull();
@@ -263,16 +304,15 @@ it("describes Wanted as outstanding subtitle requirements, not a title count", a
   });
   renderSummary();
 
-  const wanted = await screen.findByRole("group", { name: "Wanted subtitles" });
+  const wanted = await screen.findByRole("group", { name: "Wanted" });
   expect(within(wanted).getByText("3")).toBeVisible();
-  expect(
-    within(wanted).getByText(/subtitle languages still wanted/i),
-  ).toBeVisible();
+  expect(within(wanted).getByText(/Subtitles still needed/i)).toBeVisible();
   expect(within(wanted).getByText(/across 2 library items/i)).toBeVisible();
   expect(within(wanted).queryByRole("alert")).toBeNull();
-  expect(
-    within(wanted).getByRole("link", { name: /Open Wanted/ }),
-  ).toHaveAttribute("href", "/wanted/series");
+  expect(within(wanted).getByRole("link", { name: /Wanted/ })).toHaveAttribute(
+    "href",
+    "/wanted/series",
+  );
 });
 
 it("qualifies an incomplete Wanted aggregate instead of showing a confident total", async () => {
@@ -288,7 +328,7 @@ it("qualifies an incomplete Wanted aggregate instead of showing a confident tota
   });
   renderSummary();
 
-  const wanted = await screen.findByRole("group", { name: "Wanted subtitles" });
+  const wanted = await screen.findByRole("group", { name: "Wanted" });
   expect(within(wanted).getByText(/at least/i)).toBeVisible();
   expect(
     within(wanted).getByText(/4 items have no computed requirement list yet/i),
@@ -322,11 +362,16 @@ it("lists only successful arrivals with their exact title, language and time", a
   });
   renderSummary();
 
-  const arrivals = await screen.findByRole("group", { name: "Recently added" });
+  const arrivals = await screen.findByRole("group", {
+    name: "Subtitles arrived",
+  });
   expect(within(arrivals).getByText(/Northern Light/)).toBeVisible();
-  expect(within(arrivals).getByText(/S02E05/)).toBeVisible();
+  expect(within(arrivals).getByText(/S02 E05/)).toBeVisible();
   expect(within(arrivals).getByText(/Home/)).toBeVisible();
-  expect(within(arrivals).getByText(/hu:forced/)).toBeVisible();
+  expect(within(arrivals).getByText(/Hungarian · forced/)).toBeVisible();
+  expect(
+    within(arrivals).getByRole("link", { name: "History" }),
+  ).toHaveAttribute("href", "/history/series");
   const stamp = within(arrivals).getByText(
     (_content, element) => element?.tagName === "TIME",
   );
@@ -335,7 +380,9 @@ it("lists only successful arrivals with their exact title, language and time", a
 
 it("says nothing has arrived rather than hiding the section", async () => {
   renderSummary();
-  const arrivals = await screen.findByRole("group", { name: "Recently added" });
+  const arrivals = await screen.findByRole("group", {
+    name: "Subtitles arrived",
+  });
   expect(
     within(arrivals).getByText(/No subtitles have arrived recently/i),
   ).toBeVisible();
@@ -424,12 +471,18 @@ it("says a figure it could not read is unknown rather than drawing a zero", asyn
   renderSummary();
 
   const now = await screen.findByRole("group", { name: "Current work" });
-  expect(statValue(now, "running")).toHaveTextContent("Unknown");
-  expect(statValue(now, "running")).toHaveAttribute("data-unknown", "true");
-  expect(statValue(now, "scheduled")).toHaveTextContent("Unknown");
+  expect(await statValue(now, "running")).toHaveTextContent("Unknown");
+  expect(await statValue(now, "running")).toHaveAttribute(
+    "data-unknown",
+    "true",
+  );
+  expect(await statValue(now, "scheduled")).toHaveTextContent("Unknown");
   // The figure that was readable keeps its value and is not marked unknown.
-  expect(statValue(now, "queued")).toHaveTextContent("2");
-  expect(statValue(now, "queued")).toHaveAttribute("data-unknown", "false");
+  expect(await statValue(now, "queued")).toHaveTextContent("2");
+  expect(await statValue(now, "queued")).toHaveAttribute(
+    "data-unknown",
+    "false",
+  );
   expect(within(now).queryByText("0")).toBeNull();
 });
 
@@ -467,7 +520,7 @@ it("marks one unavailable component unknown while the rest keep their values", a
   });
   renderSummary();
 
-  const wanted = await screen.findByRole("group", { name: "Wanted subtitles" });
+  const wanted = await screen.findByRole("group", { name: "Wanted" });
   // A count that could not be read says so in full, and never as a figure.
   expect(
     within(wanted).getByText(
@@ -475,8 +528,8 @@ it("marks one unavailable component unknown while the rest keep their values", a
     ),
   ).toBeVisible();
   expect(within(wanted).queryByText("0")).toBeNull();
-  expect(within(wanted).queryByText(/still wanted/)).toBeNull();
-  const arrivals = screen.getByRole("group", { name: "Recently added" });
+  expect(within(wanted).queryByText(/still needed/)).toBeNull();
+  const arrivals = screen.getByRole("group", { name: "Subtitles arrived" });
   expect(within(arrivals).getByText(/Example/)).toBeVisible();
 });
 
@@ -494,7 +547,7 @@ it("retries local status on request without disturbing anything else", async () 
     screen.getByRole("button", { name: "Retry local status" }),
   );
   await waitFor(() => expect(requests).toBeGreaterThan(attempts));
-  const wanted = await screen.findByRole("group", { name: "Wanted subtitles" });
+  const wanted = await screen.findByRole("group", { name: "Wanted" });
   expect(within(wanted).getByText("5")).toBeVisible();
 });
 
@@ -503,7 +556,7 @@ it("labels a failed refresh as the last reading rather than as current", async (
     wanted: { ...emptyWanted, requirements: 5, media_count: 3 },
   });
   renderSummary();
-  const wanted = await screen.findByRole("group", { name: "Wanted subtitles" });
+  const wanted = await screen.findByRole("group", { name: "Wanted" });
   expect(within(wanted).getByText("5")).toBeVisible();
 
   served = null;
@@ -521,7 +574,7 @@ it("labels a failed refresh as the last reading rather than as current", async (
   ).toBeVisible();
 });
 
-it("treats an unused library and translator as optional setup, not failure", async () => {
+it("reports a new installation from its real readings with no setup panels", async () => {
   served = summary({
     state: "new_installation",
     onboarding: {
@@ -544,13 +597,18 @@ it("treats an unused library and translator as optional setup, not failure", asy
   });
   renderSummary();
 
-  const onboarding = await screen.findByRole("group", {
-    name: "Optional setup",
-  });
-  expect(within(onboarding).getByText(/No Sonarr or Radarr/)).toBeVisible();
-  expect(within(onboarding).getByText(/optional AI translator/)).toBeVisible();
+  // The approved concept carries no setup panels: the quiet status reads from
+  // the real activity measurement, and the footer says no library is
+  // connected yet.
+  expect(await screen.findByText(/No jobs running/i)).toBeVisible();
+  expect(screen.queryByRole("group", { name: "Optional setup" })).toBeNull();
+  expect(screen.queryByText(/Make your library look after itself/)).toBeNull();
+  expect(screen.queryByText(/Connect your library/)).toBeNull();
+  expect(screen.queryByText(/No Sonarr or Radarr/)).toBeNull();
+  expect(screen.queryByText(/optional AI translator/)).toBeNull();
   expect(screen.queryByRole("group", { name: "Needs attention" })).toBeNull();
   expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.getByText(/No library connected yet/)).toBeVisible();
 });
 
 it("opens the detail on a wide panel and collapses it on a narrow viewport", async () => {
@@ -563,7 +621,7 @@ it("opens the detail on a wide panel and collapses it on a narrow viewport", asy
     name: "Local work detail",
   });
   expect(detail).toHaveAttribute("open");
-  expect(screen.getByText(/No local work running/i)).toBeVisible();
+  expect(screen.getByText(/No jobs running/i)).toBeVisible();
 
   setViewport(true);
   renderSummary();
@@ -572,15 +630,24 @@ it("opens the detail on a wide panel and collapses it on a narrow viewport", asy
   });
   expect(panels[panels.length - 1]).not.toHaveAttribute("open");
   // The short current-work summary and its retry stay outside the disclosure.
-  const headlines = screen.getAllByText(/No local work running/i);
+  const headlines = screen.getAllByText(/No jobs running/i);
   expect(headlines[headlines.length - 1]).toBeVisible();
 });
 
 function browseDiscover() {
   const router = createMemoryRouter(
     [
-      { path: "/discover", element: <Discover /> },
+      {
+        path: "/discover",
+        element: (
+          <>
+            <DetailEntry />
+            <Discover />
+          </>
+        ),
+      },
       { path: "/system/tasks", element: <div>Local activity page</div> },
+      { path: "/history/series", element: <div>Local history page</div> },
     ],
     { initialEntries: ["/discover"] },
   );
@@ -590,6 +657,40 @@ function browseDiscover() {
     </AllProviders>,
   );
   return router;
+}
+
+/** Enters the title detail on demand. The homepage carries no retrieval
+ * controls, so focus and scroll restoration tests reach the detail this way
+ * instead of by typing into a homepage form. Setting both sides together
+ * keeps the detail on its retrieval page: typing an IMDb identifier into the
+ * detail form would clear the selection and return to the homepage. */
+function DetailEntry() {
+  const navigate = useNavigate();
+  const { updateBrowsing, updateDraft } = useDiscover();
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        void navigate("/discover?movie=900");
+        updateBrowsing({
+          selectedId: 900,
+          selectedSource: "tmdb",
+          selectedType: "movie",
+          selectedSeason: null,
+          selectedEpisode: null,
+        });
+        updateDraft({
+          mediaType: "movie",
+          imdbId: "tt1234567",
+          language: "eng",
+          season: "",
+          episode: "",
+        });
+      }}
+    >
+      Enter detail
+    </button>
+  );
 }
 
 it("shows search, the start of discovery and the summary together", async () => {
@@ -615,12 +716,20 @@ it("shows search, the start of discovery and the summary together", async () => 
   });
   browseDiscover();
 
-  expect(await screen.findByText("Your Bazarr+")).toBeVisible();
+  expect(await screen.findByText("Your library")).toBeVisible();
   expect(screen.getByRole("heading", { name: "Discover" })).toBeVisible();
-  expect(selectInput("Subtitle language")).toBeVisible();
+  // The homepage carries no retrieval controls. Search and the summary sit
+  // together there; the retrieval controls live on the detail.
+  expect(screen.queryByLabelText("Subtitle language")).toBeNull();
+  expect(
+    screen.queryByRole("button", { name: /Find subtitles/ }),
+  ).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Enter detail" }));
+  expect(await findSelectInput("Subtitle language")).toBeVisible();
   expect(
     screen.getByRole("button", { name: /Find subtitles/ }),
   ).toBeInTheDocument();
+  expect(screen.queryByText("Your library")).not.toBeInTheDocument();
 });
 
 it("records a return target so leaving for local work restores Discover", async () => {
@@ -642,19 +751,20 @@ it("records a return target so leaving for local work restores Discover", async 
     ),
   );
   const router = browseDiscover();
+  await userEvent.click(screen.getByRole("button", { name: "Enter detail" }));
   const imdb = await screen.findByLabelText("IMDb ID");
-  await userEvent.type(imdb, "tt0133093");
+  expect(imdb).toHaveValue("tt1234567");
 
-  await userEvent.click(screen.getByRole("link", { name: "Activity" }));
+  await userEvent.click(screen.getByRole("link", { name: "History" }));
   await waitFor(() =>
-    expect(screen.getByText("Local activity page")).toBeVisible(),
+    expect(screen.getByText("Local history page")).toBeVisible(),
   );
 
   await waitFor(() => router.navigate(-1));
   await waitFor(() =>
-    expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0133093"),
+    expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt1234567"),
   );
-  expect(screen.getByText("Your Bazarr+")).toBeVisible();
+  expect(screen.queryByText("Your Bazarr+")).not.toBeInTheDocument();
 });
 
 function discoverFixtures() {
@@ -761,6 +871,7 @@ it("restores the retrieval control and the scroll offset after returning from lo
   const harness = scrollHarness(3338);
   try {
     const router = browseDiscover();
+    await userEvent.click(screen.getByRole("button", { name: "Enter detail" }));
     const language = await findSelectInput("Subtitle language");
     await act(async () => {
       language.focus();
@@ -771,9 +882,9 @@ it("restores the retrieval control and the scroll offset after returning from lo
       window.dispatchEvent(new Event("scroll"));
     });
 
-    await userEvent.click(screen.getByRole("link", { name: "Activity" }));
+    await userEvent.click(screen.getByRole("link", { name: "History" }));
     await waitFor(() =>
-      expect(screen.getByText("Local activity page")).toBeVisible(),
+      expect(screen.getByText("Local history page")).toBeVisible(),
     );
     // The browser applies its own offset on a history return.
     harness.setScroll(742);
@@ -799,6 +910,7 @@ it("reveals the restored control when the saved offset would hide it behind the 
   const harness = scrollHarness(3000);
   try {
     const router = browseDiscover();
+    await userEvent.click(screen.getByRole("button", { name: "Enter detail" }));
     const imdb = await screen.findByLabelText("IMDb ID");
     await act(async () => {
       imdb.focus();
@@ -808,9 +920,9 @@ it("reveals the restored control when the saved offset would hide it behind the 
     await act(async () => {
       window.dispatchEvent(new Event("scroll"));
     });
-    await userEvent.click(screen.getByRole("link", { name: "Activity" }));
+    await userEvent.click(screen.getByRole("link", { name: "History" }));
     await waitFor(() =>
-      expect(screen.getByText("Local activity page")).toBeVisible(),
+      expect(screen.getByText("Local history page")).toBeVisible(),
     );
     harness.setScroll(0);
     await waitFor(() => router.navigate(-1));
@@ -832,9 +944,9 @@ it("never steals focus or scroll on a first visit", async () => {
   const harness = scrollHarness(3040);
   try {
     browseDiscover();
+    await userEvent.click(screen.getByRole("button", { name: "Enter detail" }));
     await findSelectInput("Subtitle language");
-    // No frame was requested at all, so the page owner did not try to restore.
-    expect(harness.pending()).toBe(0);
+    // Opening a title schedules its requested scroll to the top.
     harness.paint();
     expect(selectInput("Subtitle language")).not.toHaveFocus();
     expect(screen.getByLabelText("IMDb ID")).not.toHaveFocus();
@@ -849,6 +961,7 @@ it("cancels the restoration when the page leaves again before paint", async () =
   const harness = scrollHarness(3040);
   try {
     const router = browseDiscover();
+    await userEvent.click(screen.getByRole("button", { name: "Enter detail" }));
     const language = await findSelectInput("Subtitle language");
     await act(async () => {
       language.focus();
@@ -858,9 +971,9 @@ it("cancels the restoration when the page leaves again before paint", async () =
     await act(async () => {
       window.dispatchEvent(new Event("scroll"));
     });
-    await userEvent.click(screen.getByRole("link", { name: "Activity" }));
+    await userEvent.click(screen.getByRole("link", { name: "History" }));
     await waitFor(() =>
-      expect(screen.getByText("Local activity page")).toBeVisible(),
+      expect(screen.getByText("Local history page")).toBeVisible(),
     );
     harness.setScroll(0);
     await waitFor(() => router.navigate(-1));
@@ -929,8 +1042,9 @@ it("restores a control in the results region, which no other owner claims", asyn
   const harness = scrollHarness(3338);
   try {
     const router = browseDiscover();
+    await userEvent.click(screen.getByRole("button", { name: "Enter detail" }));
     const imdb = await screen.findByLabelText("IMDb ID");
-    await userEvent.type(imdb, "tt1234567");
+    expect(imdb).toHaveValue("tt1234567");
     await pickOption(userEvent, "Subtitle language", "English");
     await userEvent.click(
       screen.getByRole("button", { name: /Find subtitles/ }),
@@ -945,9 +1059,9 @@ it("restores a control in the results region, which no other owner claims", asyn
       window.dispatchEvent(new Event("scroll"));
     });
 
-    await userEvent.click(screen.getByRole("link", { name: "Activity" }));
+    await userEvent.click(screen.getByRole("link", { name: "History" }));
     await waitFor(() =>
-      expect(screen.getByText("Local activity page")).toBeVisible(),
+      expect(screen.getByText("Local history page")).toBeVisible(),
     );
     harness.setScroll(759);
     await waitFor(() => router.navigate(-1));
@@ -1020,16 +1134,16 @@ it("reports an unreadable schedule as unknown rather than as none scheduled", as
   renderSummary();
 
   const scheduled = await screen.findByRole("group", {
-    name: "Scheduled work",
+    name: "Current work",
   });
   expect(
-    within(scheduled).getByText(/unknown rather than none/i),
+    await within(scheduled).findByText(/could not be read/i),
   ).toBeVisible();
-  // The headline drops the scheduled figure rather than printing a zero.
-  expect(screen.getByText(/No local work running\./)).toBeVisible();
+  // The quiet block stands, with no scheduled figure printed as a zero.
+  expect(screen.getByText(/No jobs running\./)).toBeVisible();
 });
 
-it("reports an unreadable optional setup state instead of hiding it", async () => {
+it("stays silent about optional setup when that state cannot be read", async () => {
   served = summary({
     onboarding: {
       availability: "unknown",
@@ -1040,10 +1154,10 @@ it("reports an unreadable optional setup state instead of hiding it", async () =
   });
   renderSummary();
 
-  const onboarding = await screen.findByRole("group", {
-    name: "Optional setup",
-  });
-  expect(within(onboarding).getByText(/could not be read/i)).toBeVisible();
+  // There is no setup panel to report the unreadable state in. The quiet
+  // status still reads from the real activity measurement.
+  expect(await screen.findByText(/No jobs running/i)).toBeVisible();
+  expect(screen.queryByRole("group", { name: "Optional setup" })).toBeNull();
 });
 
 it("remembers the reader's disclosure choice across leaving and returning", async () => {
@@ -1052,24 +1166,24 @@ it("remembers the reader's disclosure choice across leaving and returning", asyn
   });
   // A narrow viewport, where the panel starts short.
   setViewport(true);
-  const router = browseDiscover();
+  const view = renderSummary();
   const detail = await screen.findByRole("group", {
     name: "Local work detail",
   });
   expect(detail).not.toHaveAttribute("open");
 
-  await userEvent.click(screen.getByText("Local work detail"));
+  await userEvent.click(screen.getByText("Recent arrivals and Wanted"));
   await waitFor(() =>
     expect(
       screen.getByRole("group", { name: "Local work detail" }),
     ).toHaveAttribute("open"),
   );
 
-  await userEvent.click(screen.getByRole("link", { name: "Activity" }));
+  await userEvent.click(screen.getByRole("link", { name: "History" }));
   await waitFor(() =>
-    expect(screen.getByText("Local activity page")).toBeVisible(),
+    expect(screen.getByText("Local history page")).toBeVisible(),
   );
-  await waitFor(() => router.navigate(-1));
+  await waitFor(() => view.navigate(-1));
 
   // The panel comes back the height it left, which is what makes the saved
   // return offset reachable on a narrow viewport.
@@ -1084,6 +1198,54 @@ it("stores no disclosure preference the reader never expressed", async () => {
   served = summary();
   renderSummary();
   await screen.findByRole("group", { name: "Local work detail" });
+  expect(localStorage.getItem("bazarr.discover.local-work-detail")).toBeNull();
+});
+
+it("shows a collapsed mobile rail when widened and preserves the mobile choice", async () => {
+  const resize = setViewport(true);
+  renderSummary();
+  const detail = await screen.findByRole("group", {
+    name: "Local work detail",
+  });
+  await userEvent.click(screen.getByText("Recent arrivals and Wanted"));
+  await waitFor(() => expect(detail).toHaveAttribute("open"));
+  await userEvent.click(screen.getByText("Recent arrivals and Wanted"));
+  await waitFor(() => expect(detail).not.toHaveAttribute("open"));
+
+  act(() => resize(false));
+  await waitFor(() => expect(detail).toHaveAttribute("open"));
+  expect(screen.getByRole("link", { name: "History" })).toBeVisible();
+
+  act(() => resize(true));
+  await waitFor(() => expect(detail).not.toHaveAttribute("open"));
+  expect(localStorage.getItem("bazarr.discover.local-work-detail")).toBe(
+    "closed",
+  );
+});
+
+it("shows the desktop rail after reloading with a saved collapsed mobile choice", async () => {
+  localStorage.setItem("bazarr.discover.local-work-detail", "closed");
+  renderSummary();
+  const detail = await screen.findByRole("group", {
+    name: "Local work detail",
+  });
+  expect(detail).toHaveAttribute("open");
+  expect(screen.getByRole("link", { name: "History" })).toBeVisible();
+  expect(localStorage.getItem("bazarr.discover.local-work-detail")).toBe(
+    "closed",
+  );
+});
+
+it("collapses the rail when a desktop viewport narrows without a saved choice", async () => {
+  const resize = setViewport(false);
+  renderSummary();
+  const detail = await screen.findByRole("group", {
+    name: "Local work detail",
+  });
+  expect(detail).toHaveAttribute("open");
+
+  act(() => resize(true));
+  await waitFor(() => expect(detail).not.toHaveAttribute("open"));
   expect(localStorage.getItem("bazarr.discover.local-work-detail")).toBeNull();
 });
 

@@ -343,4 +343,102 @@ describe("sports library", () => {
       ).toBeNull(),
     );
   });
+  it.each(["include", "exclude"] as const)(
+    "filters owned league audio by %s after catalogue load and update",
+    async (mode) => {
+      let release: () => void = () => undefined;
+      const loaded = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let catalogue = [
+        { code2: "en", name: "English" },
+        { code2: "fr", name: "French" },
+      ];
+      server.use(
+        http.get("/api/system/arr-instances", () =>
+          HttpResponse.json([sportarr, sportarrSibling]),
+        ),
+        http.get("/api/system/languages/audio", async () => {
+          await loaded;
+          return HttpResponse.json(catalogue);
+        }),
+        http.get("/api/sports/leagues", () =>
+          HttpResponse.json({
+            data: [
+              {
+                id: 51,
+                arr_instance_id: 42,
+                sportarrLeagueId: 7,
+                title: "English League",
+                monitored: true,
+                tags: [],
+                audio_language: ["English", "Klingon"],
+                eventCount: 2,
+                eventFileCount: 2,
+                profileId: null,
+              },
+              {
+                id: 52,
+                arr_instance_id: 43,
+                sportarrLeagueId: 7,
+                title: "French League",
+                monitored: true,
+                tags: [],
+                audio_language: ["French"],
+                eventCount: 1,
+                eventFileCount: 1,
+                profileId: null,
+              },
+            ],
+            total: 2,
+          }),
+        ),
+      );
+      customRender(<Sports />);
+      await screen.findByRole("link", { name: "English League" });
+      expect(screen.getByText("Klingon")).toBeInTheDocument();
+      await act(async () => {
+        release();
+      });
+      const actor = userEvent.setup();
+      await actor.click(screen.getByRole("button", { name: "Toggle filters" }));
+      const choose = async (name: string) => {
+        const input = await screen.findByPlaceholderText(
+          `Select languages to ${mode}...`,
+        );
+        await actor.click(input);
+        if (input.getAttribute("aria-expanded") !== "true")
+          await actor.keyboard("{ArrowDown}");
+        const listboxes = await screen.findAllByRole("listbox", {
+          hidden: true,
+        });
+        const listbox = listboxes.find(
+          (element) => element.id === input.getAttribute("aria-controls"),
+        );
+        if (!listbox) throw new Error("Audio filter listbox did not open");
+        await actor.click(
+          within(listbox).getByRole("option", { name, hidden: true }),
+        );
+        await actor.keyboard("{Escape}");
+        const retained =
+          mode === "include" ? "English League" : "French League";
+        const removed = mode === "include" ? "French League" : "English League";
+        await waitFor(() =>
+          expect(screen.queryByRole("link", { name: removed })).toBeNull(),
+        );
+        expect(
+          screen.getByRole("link", { name: retained }),
+        ).toBeInTheDocument();
+      };
+      await choose("English");
+      await actor.click(screen.getByRole("button", { name: "Clear all" }));
+      catalogue = [...catalogue, { code2: "kl", name: "Klingon" }];
+      await act(async () => {
+        await queryClient.invalidateQueries({
+          queryKey: [QueryKeys.System, QueryKeys.Languages, "audio"],
+        });
+      });
+      await choose("Klingon");
+    },
+  );
 });

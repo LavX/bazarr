@@ -658,3 +658,25 @@ def test_apply_default_profile_respects_the_sports_tag_filter(schema_session, mo
     assert schema_session.execute(
         sa.select(TableSportsLeagues.profileId).order_by(TableSportsLeagues.id)
     ).scalars().all() == [1, None]
+
+
+def test_league_audio_aggregates_only_its_owned_events(library):
+    from app.database import TableSportsEvents, TableSportsLeagues
+    from sportarr.library import list_leagues, get_league
+    session, _ = library
+    session.execute(sa.insert(TableSportsLeagues), [
+        dict(id=51, arr_instance_id=1, sportarrLeagueId=7, title='First'),
+        dict(id=52, arr_instance_id=2, sportarrLeagueId=7, title='Other'),
+    ])
+    session.execute(sa.insert(TableSportsEvents), [
+        dict(id=i, arr_instance_id=owner, league_id=league, sportarrEventId=i,
+             file_id=i, path=f'/sports/{i}.mkv', title='Event', audio_language=audio)
+        for i, owner, league, audio in [
+            (61, 1, 51, "['English', 'French']"), (62, 1, 51, "['French']"),
+            (63, 1, 51, 'bad metadata'), (64, 2, 52, "['German']"),
+        ]
+    ])
+    assert list_leagues(session, 1)['data'][0]['audio_language'] == ['English', 'French']
+    assert get_league(session, 52, 2)['audio_language'] == ['German']
+    session.execute(sa.update(TableSportsEvents).where(TableSportsEvents.id == 61).values(audio_language='[]'))
+    assert get_league(session, 51, 1)['audio_language'] == ['French']

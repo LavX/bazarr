@@ -1,4 +1,5 @@
 /* eslint-disable camelcase */
+import type { SubtitleSyncStatus } from "@/utilities/subtitles";
 import BaseApi from "./base";
 import client from "./client";
 
@@ -54,6 +55,7 @@ export interface SportsEvent extends SportsEventReference {
   audio_language: string[];
   subtitles: [language: string, path: string | null, size: number | null][];
   missing_subtitles: string[];
+  sync_status?: Record<string, SubtitleSyncStatus>;
 }
 
 export interface SportsPublication {

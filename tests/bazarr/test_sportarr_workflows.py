@@ -1292,3 +1292,39 @@ def test_ineligible_event_does_not_load_its_language_profile(workflow_library, m
     session.commit()
     monkeypatch.setattr(automatic, 'get_profiles_list', lambda profile: pytest.fail('Excluded event loaded a profile'))
     assert automatic.eligibility(session, resolve_event_in_session(session, 61, 1)) == 'Event or league is not monitored'
+
+
+def test_selected_upgrade_filters_reach_the_owned_history_query(workflow_library, monkeypatch):
+    import shutil
+    from app.config import settings
+    from app.database import TableSportsEvents, TableSportsLeagues
+    from subtitles import mass_operations
+
+    automatic, _, workflows, _, session, folder = workflow_library
+    monkeypatch.setattr(settings.general, 'upgrade_subs', True)
+    monkeypatch.setattr(settings.general, 'days_to_upgrade_subs', 30)
+    session.execute(sa.insert(TableSportsLeagues).values(id=53, arr_instance_id=1,
+        sportarrLeagueId=8, title='Unselected', profileId=1))
+    original = session.get(TableSportsEvents, 61).to_dict()
+    original.update(id=63, league_id=53, sportarrEventId=10, file_id=73,
+                    path='/sports/alternate.mkv', title='Alternate')
+    session.execute(sa.insert(TableSportsEvents).values(**original))
+    shutil.copyfile(folder / '1/event.mkv', folder / '1/alternate.mkv')
+    for event_id, owner in [(61, 1), (62, 2), (63, 1)]:
+        assert automatic.search_event(event_id, owner)['downloads'] == 1
+    assert {row['event_id'] for row in workflows.upgrade_rows(session)} == {61, 62, 63}
+    calls = []
+    def record(event_id, owner, **kwargs):
+        calls.append((event_id, owner))
+        return {'downloads': 0, 'status': 'empty', 'message': 'No replacement'}
+    monkeypatch.setattr(workflows, 'search_event', record)
+    monkeypatch.setattr(mass_operations, 'upgrade_sports_subtitles', workflows.upgrade_sports_subtitles)
+    result = mass_operations._process_media_action([
+        {'type': 'sportsLeague', 'sportsLeagueId': 51, 'arr_instance_id': 1},
+        {'type': 'sports', 'sportsEventId': 61, 'arr_instance_id': 1},
+        {'type': 'sports', 'sportsEventId': 62, 'arr_instance_id': 1},
+    ], 'upgrade', job_id='fixture')
+    assert result['errors'] == []
+    assert calls == [(61, 1)]
+    assert workflows.upgrade_rows(session, 1, event_ids=[], league_ids=[]) == []
+    assert workflows.upgrade_rows(session, 1, league_ids=[52]) == []

@@ -149,6 +149,7 @@ describe("Sportarr Connections", () => {
       }),
     );
     customRender(<SettingsConnectionsView />);
+    await settingsLoaded();
     await user.click(
       await screen.findByRole("button", { name: /add your first Sportarr/i }),
     );
@@ -163,7 +164,7 @@ describe("Sportarr Connections", () => {
       dialog.getByRole("combobox", {
         name: "Profile for newly synced leagues",
       }),
-    ).toHaveValue("No default profile");
+    ).toHaveValue("Use the global default");
     await user.type(
       dialog.getByRole("textbox", { name: "Name" }),
       "Main Sportarr",
@@ -209,7 +210,7 @@ describe("Sportarr Connections", () => {
       await reopened.findByRole("combobox", {
         name: "Profile for newly synced leagues",
       }),
-    ).toHaveValue("No default profile");
+    ).toHaveValue("Use the global default");
     expect(
       reopened.getByRole("switch", { name: "Default Sportarr instance" }),
     ).toBeChecked();
@@ -285,6 +286,7 @@ describe("Sportarr Connections", () => {
       }),
     );
     customRender(<SettingsConnectionsView />);
+    await settingsLoaded();
     await user.click(await screen.findByRole("button", { name: "Edit" }));
     const dialog = within(
       await screen.findByRole("dialog", { name: "Edit Main Sportarr" }),
@@ -306,24 +308,16 @@ describe("Sportarr Connections", () => {
       ).toHaveValue("English Sports"),
     );
 
-    await user.clear(dialog.getByRole("textbox", { name: "Name" }));
-    await user.type(
-      dialog.getByRole("textbox", { name: "Name" }),
-      "Sports server",
-    );
-    await user.clear(dialog.getByRole("textbox", { name: "Address" }));
-    await user.type(
-      dialog.getByRole("textbox", { name: "Address" }),
-      "sports.local",
-    );
-    await user.clear(dialog.getByRole("textbox", { name: "Port" }));
-    await user.type(dialog.getByRole("textbox", { name: "Port" }), "1967");
-    await user.type(
-      dialog.getByRole("textbox", { name: "Base URL" }),
-      "/league-proxy/",
-    );
-    await user.clear(dialog.getByRole("textbox", { name: "Timeout" }));
-    await user.type(dialog.getByRole("textbox", { name: "Timeout" }), "45");
+    for (const [name, value] of [
+      ["Name", "Sports server"],
+      ["Address", "sports.local"],
+      ["Port", "1967"],
+      ["Base URL", "/league-proxy/"],
+      ["Timeout", "45"],
+    ]) {
+      await user.clear(dialog.getByRole("textbox", { name }));
+      await user.paste(value);
+    }
     await user.click(dialog.getByRole("switch", { name: "Use SSL" }));
     await user.click(
       dialog.getByRole("switch", { name: "Verify certificate" }),

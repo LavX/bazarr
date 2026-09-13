@@ -122,7 +122,8 @@ export default function LocalCopyPicker() {
   // the list) must stay in view while it is in use.
   const [opened, setOpened] = useState(false);
   const open = opened || draft.copyId !== undefined;
-  if (target === null) return null;
+  if (target === null || (!items.length && draft.copyId === undefined))
+    return null;
   const kind = episode ? "episode" : "film";
 
   return (
@@ -133,7 +134,6 @@ export default function LocalCopyPicker() {
     >
       <summary>
         <span>Match a copy in your library</span>
-        <span className={styles.optionalTag}>Optional</span>
       </summary>
       <div className={styles.copyBody}>
         <Text size="sm">

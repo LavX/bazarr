@@ -214,3 +214,44 @@ def test_stalled_ownership_preparation_allows_native_writer_and_rejects_stale_pu
         with pytest.raises(ValueError, match="changed"):
             future.result(timeout=5)
     assert not destination.exists()
+
+
+@pytest.mark.parametrize('change', ['definition', 'function'])
+def test_changed_trigger_definition_refuses_cached_snapshot(revision_library, tmp_path, change):
+    from sportarr.output import SportsOutputNamespace
+    engine = revision_library
+    context = SimpleNamespace(mapped_path=str(tmp_path / 'event.mkv'), event_id=1, arr_instance_id=1)
+    with Session(engine) as session:
+        SportsOutputNamespace(context, session)
+        if engine.dialect.name == 'sqlite':
+            session.execute(sa.text('DROP TRIGGER ownership_revision_table_movies_insert'))
+            session.execute(sa.text('CREATE TRIGGER ownership_revision_table_movies_insert AFTER INSERT ON table_movies BEGIN SELECT 1; END'))
+        elif change == 'function':
+            session.execute(sa.text("CREATE OR REPLACE FUNCTION advance_subtitle_ownership_revision() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$"))
+        else:
+            session.execute(sa.text('DROP TRIGGER ownership_revision ON table_movies'))
+            session.execute(sa.text('CREATE TRIGGER ownership_revision AFTER INSERT ON table_movies FOR EACH ROW EXECUTE FUNCTION advance_subtitle_ownership_revision()'))
+        with pytest.raises(ValueError, match='protection'):
+            SportsOutputNamespace(context, session)
+
+
+def test_existing_database_upgrade_seeds_bounded_metadata_and_rollback(revision_library):
+    from app.ownership_revision import install_ownership_revision, ownership_revision, verify_ownership_protection
+    engine = revision_library
+    with engine.connect() as connection:
+        connection.execute(sa.text('DROP TABLE subtitle_ownership_changes'))
+        install_ownership_revision(connection)
+        rows = connection.execute(sa.text('SELECT table_name, row_id FROM subtitle_ownership_changes')).all()
+        assert set(rows) == {('generation', 0), ('*', 0)}
+        verify_ownership_protection(Session(connection))
+        previous = ownership_revision(connection)
+    with engine.connect().execution_options(isolation_level='SERIALIZABLE') as connection:
+        transaction = connection.begin()
+        connection.execute(sa.text("INSERT INTO table_movies (id,\"radarrId\",\"tmdbId\",title,path) VALUES (1,1,'1','A','/a.mkv')"))
+        for _ in range(5):
+            connection.execute(sa.text("UPDATE table_movies SET title='changed' WHERE id=1"))
+        assert connection.execute(sa.text("SELECT count(*) FROM subtitle_ownership_changes WHERE table_name='table_movies'")).scalar_one() == 1
+        transaction.rollback()
+    with engine.connect() as connection:
+        assert ownership_revision(connection) == previous
+        assert connection.execute(sa.text("SELECT count(*) FROM subtitle_ownership_changes WHERE table_name='table_movies'")).scalar_one() == 0

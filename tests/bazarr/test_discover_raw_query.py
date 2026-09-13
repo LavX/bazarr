@@ -150,7 +150,7 @@ def test_episode_hints_remain_unverified_and_unsupported_media_is_honest(authent
     assert len(response.json["results"]) == 1
     video = providers.videos[0][1]
     assert (video.series, video.season, video.episode, video.series_imdb_id) == ("Example Show", 2, 3, None)
-    assert response.json["status"] == "partial"
+    assert response.json["status"] == "complete"
     movie = next(item for item in response.json["coverage"]["providers"] if item["provider"] == "discover_movie")
     assert (movie["status"], movie["reason"]) == ("skipped", "unsupported_media")
 
