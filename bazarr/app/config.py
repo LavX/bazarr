@@ -1594,9 +1594,12 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
         if settings.general.use_radarr:
             movies_full_scan_subtitles(use_cache=True)
 
-    if undefined_subtitles_track_default_changed or use_embedded_subs_changed:
+    if undefined_subtitles_track_default_changed or use_embedded_subs_changed or audio_tracks_parsing_changed:
         from subtitles.indexer.sports import sports_full_scan_subtitles
-        sports_full_scan_subtitles()
+        sports_full_scan_subtitles(refresh_audio=audio_tracks_parsing_changed,
+                                  audio_mode=bool(settings.general.parse_embedded_audio_track)
+                                  if audio_tracks_parsing_changed else None,
+                                  audio_refresh_id=secrets.token_hex(16) if audio_tracks_parsing_changed else None)
 
     if audio_tracks_parsing_changed:
         from .scheduler import scheduler

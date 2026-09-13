@@ -75,6 +75,7 @@ class HistoryStats(Resource):
         history_where_clauses_sports = [(TableHistorySports.timestamp.between(past, now))]
 
         if action != 'All':
+            action = int(action)
             history_where_clauses.append((TableHistory.action == action))
             history_where_clauses_movie.append((TableHistoryMovie.action == action))
             history_where_clauses_sports.append((TableHistorySports.action == action))
@@ -102,7 +103,7 @@ class HistoryStats(Resource):
             'id': x.id,
         } for x in database.execute(
             select(TableHistory.timestamp, TableHistory.id)
-            .where(history_where_clause))
+            .where(history_where_clause).order_by(TableHistory.timestamp))
             .all()]
         data_series = [{'date': date[0], 'count': sum(1 for item in date[1])} for date in
                        itertools.groupby(list(data_series),
@@ -114,7 +115,7 @@ class HistoryStats(Resource):
             'id': x.id,
         } for x in database.execute(
             select(TableHistoryMovie.timestamp, TableHistoryMovie.id)
-            .where(history_where_clause_movie))
+            .where(history_where_clause_movie).order_by(TableHistoryMovie.timestamp))
             .all()]
         data_movies = [{'date': date[0], 'count': sum(1 for item in date[1])} for date in
                        itertools.groupby(list(data_movies),
@@ -128,7 +129,7 @@ class HistoryStats(Resource):
             'id': x.id,
         } for x in database.execute(
             select(TableHistorySports.timestamp, TableHistorySports.id)
-            .where(history_where_clause_sports))
+            .where(history_where_clause_sports).order_by(TableHistorySports.timestamp))
             .all()]
         data_sports = [{'date': date[0], 'count': sum(1 for item in date[1])} for date in
                        itertools.groupby(list(data_sports),

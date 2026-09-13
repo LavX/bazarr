@@ -44,9 +44,7 @@ const SportarrSection: FunctionComponent<Props> = ({ children }) => {
             label="Excluded Tags"
             settingKey="settings-sportarr-excluded_tags"
             sanitizeFn={(values: string[] | null) =>
-              values?.map((item) =>
-                item.replace(/[^a-z0-9_-]/gi, "").toLowerCase(),
-              )
+              values?.map((item) => item.replace(/[^a-z0-9_-]/gi, ""))
             }
           ></Chips>
           <Message>

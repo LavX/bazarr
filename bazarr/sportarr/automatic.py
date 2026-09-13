@@ -159,10 +159,13 @@ def search_event(
         threshold = max(threshold, minimum_score)
     row = database.get(TableSportsEvents, event_id, populate_existing=True)
     profile = get_profiles_list(context.profile_id)
-    if language is None:
+    wanted = upgraded_from_id is None and previous_artifact is None and replacement_state is None
+    if wanted:
         store_subtitles_sports(event_id, arr_instance_id, cancel=cancel)
         row = database.get(TableSportsEvents, event_id, populate_existing=True)
         languages = ast.literal_eval(row.missing_subtitles or "[]")
+        if language is not None:
+            languages = [code for code in languages if code == language]
     else:
         # Upgrades and replacements still follow current profile audio exclusions.
         languages = (
@@ -189,7 +192,7 @@ def search_event(
         if reason:
             return {"status": "skipped", "message": reason, "downloads": downloads}
         # Re-check cutoff after each publication, including another job's indexing.
-        if language is None:
+        if wanted:
             row = database.get(TableSportsEvents, event_id, populate_existing=True)
             if code not in _missing(
                 context.profile_id,
@@ -202,7 +205,7 @@ def search_event(
         # scans do. Sports only ever translated from a fresh download, so an
         # event whose source subtitle came off disk never got its translation
         # and was re-searched by every wanted scan forever.
-        if language is None:
+        if wanted:
             from sportarr.profile_hooks import translate_from_existing
 
             try:

@@ -814,6 +814,48 @@ describe("Sportarr tab layout", () => {
     expect(screen.getByText("Search After Sync")).toBeInTheDocument();
   });
 
+  it("preserves excluded tag case through editing, save, and reload", async () => {
+    const user = userEvent.setup();
+    let tags: string[] = [];
+    let saved: FormData | undefined;
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: { theme: "auto", use_sportarr: true },
+          sportarr: {
+            excluded_tags: tags,
+            excluded_sports: [],
+            only_monitored: false,
+          },
+        }),
+      ),
+      http.post("/api/system/settings", async ({ request }) => {
+        saved = await request.formData();
+        tags = saved.getAll("settings-sportarr-excluded_tags").map(String);
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    const view = customRender(<SettingsConnectionsView />);
+    await settingsLoaded();
+    await user.type(
+      screen.getByRole("combobox", { name: "Excluded Tags" }),
+      "NoSubs{Enter}",
+    );
+    await user.click(
+      await screen.findByRole("button", { name: /Save 1 pending change/ }),
+    );
+    await waitFor(() =>
+      expect(saved?.getAll("settings-sportarr-excluded_tags")).toEqual([
+        "NoSubs",
+      ]),
+    );
+    view.unmount();
+    customRender(<SettingsConnectionsView />);
+    await settingsLoaded();
+    expect(await screen.findByText("NoSubs")).toBeVisible();
+    expect(screen.queryByText("nosubs")).not.toBeInTheDocument();
+  });
+
   it("hides the options behind the master toggle", async () => {
     const user = userEvent.setup();
     customRender(<SettingsConnectionsView />);

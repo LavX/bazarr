@@ -36,12 +36,14 @@ LANGUAGES = [
 def sports_event(schema_session, monkeypatch):
     import languages.get_languages as get_languages
     from app.database import TableArrInstances, TableSportsEvents, TableSportsLeagues
-    from utilities import path_mappings, video_analyzer
+    from app import database as db
+    from utilities import video_analyzer
 
     monkeypatch.setattr(get_languages, 'languages_dict', LANGUAGES, raising=False)
 
     schema_session.add(TableArrInstances(id=42, kind='sportarr', stable_key='sportarr-1',
-                                         name='Sportarr', enabled=1, port=1867, api_key='k'))
+                                         name='Sportarr', enabled=1, port=1867, api_key='k',
+                                         path_mappings='[["/data/sports", "/mnt/sports"]]'))
     schema_session.add(TableSportsLeagues(id=51, arr_instance_id=42, sportarrLeagueId=7,
                                           title='Formula 1', path='/data/sports/f1'))
     # Flushed in dependency order by hand: the composite league FK is not
@@ -57,8 +59,7 @@ def sports_event(schema_session, monkeypatch):
     monkeypatch.setattr(video_analyzer, 'database', schema_session)
     # The owning Sportarr mounts its library elsewhere than Bazarr does, which
     # is the whole point of scoping the mapping to the instance.
-    monkeypatch.setattr(path_mappings, '_sports_instance_mapping',
-                        lambda _id: [['/data/sports', '/mnt/sports']])
+    monkeypatch.setattr(db, 'database', schema_session)
     return schema_session
 
 
@@ -130,3 +131,20 @@ def test_the_api_passes_the_event_through():
     source = inspect.getsource(subtitles.Subtitles)
     assert '"sportsEventId"' in source
     assert 'sports_event_id=sportsEventId' in source
+
+
+def test_an_omitted_owner_uses_the_unique_local_event_owner(sports_event, monkeypatch):
+    from utilities import video_analyzer
+
+    seen = []
+    def parse(file, file_size, *args, **kwargs):
+        seen.append((file, file_size, kwargs['arr_instance_id'], kwargs['sports_event_id']))
+        return FFPROBE
+    monkeypatch.setattr(video_analyzer, 'parse_video_metadata', parse)
+
+    result = video_analyzer.subtitles_sync_references(
+        subtitles_path='/mnt/sports/f1/race.hu.srt', sports_event_id=61)
+
+    assert seen == [('/mnt/sports/f1/race.mkv', 8123456789, 42, 61)]
+    assert [track['language'] for track in result['audio_tracks']] == ['Hungarian', 'Undefined', 'English']
+    assert [track['path'] for track in result['external_subtitles_tracks']] == ['/mnt/sports/f1/race.en.srt']

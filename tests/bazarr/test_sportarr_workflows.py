@@ -1328,3 +1328,187 @@ def test_selected_upgrade_filters_reach_the_owned_history_query(workflow_library
     assert calls == [(61, 1)]
     assert workflows.upgrade_rows(session, 1, event_ids=[], league_ids=[]) == []
     assert workflows.upgrade_rows(session, 1, league_ids=[52]) == []
+
+
+@pytest.fixture
+def existing_translation_source(workflow_library):
+    from app import database as db
+    from subtitles.indexer.sports import store_subtitles_sports
+
+    automatic, history, workflows, service, session, folder = workflow_library
+    items = [dict(id=index, language=language, forced='False', hi='False',
+        audio_exclude='False', audio_only_include='False', translate_from='fr')
+        for index, language in enumerate(('en', 'de'), 1)]
+    session.execute(sa.update(db.TableLanguagesProfiles).where(db.TableLanguagesProfiles.profileId == 1)
+        .values(items=json.dumps(items)))
+    db.update_profile_id_list.invalidate()
+    (folder / '1/event.fr.srt').write_text('1\n00:00:00,000 --> 00:00:01,000\nUn événement sportif.\n')
+    store_subtitles_sports(61, 1)
+    yield workflow_library
+
+
+@pytest.mark.parametrize('language, targets', [('en', ['en']), (None, ['en', 'de'])])
+def test_wanted_translates_only_requested_missing_targets_from_the_owned_source(
+    existing_translation_source, monkeypatch, language, targets
+):
+    from subtitles.tools.translate import main
+
+    automatic, _, _, _, _, folder = existing_translation_source
+    queued = []
+    def queue_translation(**kwargs):
+        kwargs['sports_operation'].validate(wanted=True)
+        queued.append((kwargs['to_lang'], kwargs['arr_instance_id'], kwargs['source_srt_file']))
+        return 73
+    monkeypatch.setattr(main, 'translate_subtitles_file', queue_translation)
+    monkeypatch.setattr(automatic, '_init_pool', lambda *args, **kwargs: pytest.fail('Wanted translation searched providers'))
+
+    result = automatic.search_event(61, 1, language=language)
+
+    assert result['downloads'] == len(targets)
+    assert queued == [(language, 1, str(folder / '1/event.fr.srt')) for language in targets]
+    assert not list((folder / '2').glob('*.srt'))
+
+
+@pytest.mark.parametrize('failure', ['error', 'cancelled'])
+def test_language_specific_translation_failure_preserves_provider_fallback_and_cancellation(
+    existing_translation_source, monkeypatch, failure
+):
+    from app.jobs_queue import JobCancelled
+    from app.database import TableHistorySports
+    from subtitles.tools.translate import main
+
+    automatic, _, _, _, session, folder = existing_translation_source
+    attempted = []
+    def queue_translation(**kwargs):
+        attempted.append(kwargs['to_lang'])
+        if failure == 'cancelled':
+            raise JobCancelled('Cancelled fixture translation')
+        raise RuntimeError('Unavailable fixture translator')
+    monkeypatch.setattr(main, 'translate_subtitles_file', queue_translation)
+
+    if failure == 'cancelled':
+        with pytest.raises(JobCancelled):
+            automatic.search_event(61, 1, language='en')
+        assert not (folder / '1/event.en.srt').exists()
+        assert session.execute(sa.select(TableHistorySports)).all() == []
+    else:
+        result = automatic.search_event(61, 1, language='en')
+        assert result['downloads'] == 1
+        assert (folder / '1/event.en.srt').exists()
+        record = session.execute(sa.select(TableHistorySports)).scalar_one()
+        assert (record.arr_instance_id, record.event_id, record.action) == (1, 61, 1)
+    assert attempted == ['en']
+
+
+def test_a_language_specific_wanted_request_rechecks_missing_and_owner(existing_translation_source, monkeypatch):
+    from subtitles.tools.translate import main
+    from subtitles.indexer.sports import store_subtitles_sports
+
+    automatic, _, _, _, _, folder = existing_translation_source
+    monkeypatch.setattr(main, 'translate_subtitles_file', lambda **kwargs: pytest.fail('Unexpected translation'))
+    monkeypatch.setattr(automatic, '_init_pool', lambda *args, **kwargs: pytest.fail('Unexpected provider search'))
+    with pytest.raises(ValueError):
+        automatic.search_event(61, 2, language='en')
+    assert automatic.search_event(61, 1, language='fr')['downloads'] == 0
+    (folder / '1/event.en.srt').write_text('1\n00:00:00,000 --> 00:00:01,000\nAn existing subtitle.\n')
+    store_subtitles_sports(61, 1)
+    assert automatic.search_event(61, 1, language='en')['downloads'] == 0
+
+
+@pytest.mark.parametrize('mode', ['upgrade', 'replacement'])
+def test_provider_upgrades_and_replacements_do_not_translate_existing_sources(
+    existing_translation_source, monkeypatch, mode
+):
+    from app.config import settings
+    from app.database import TableHistorySports
+    from subtitles.tools.translate import main
+    from sportarr import profile_hooks
+
+    automatic, history, workflows, service, session, _ = existing_translation_source
+    # Obtain the initial provider artifact through the real manual publication.
+    result = service.manual_search_sports(61, 'en', arr_instance_id=1)[0]
+    service.manual_download_sports(61, result, 1)
+    original = session.execute(sa.select(TableHistorySports)).scalar_one()
+    session.execute(sa.update(TableHistorySports).values(score=1))
+    monkeypatch.setattr(main, 'translate_subtitles_file', lambda **kwargs: pytest.fail('Provider operation queued translation'))
+    monkeypatch.setattr(profile_hooks, 'translate_from_existing', lambda *args, **kwargs: pytest.fail('Provider operation attempted translation'))
+    if mode == 'upgrade':
+        monkeypatch.setattr(settings.general, 'upgrade_subs', True)
+        monkeypatch.setattr(settings.general, 'upgrade_manual', True)
+        monkeypatch.setattr(settings.general, 'days_to_upgrade_subs', 30)
+        result = workflows.upgrade_sports_subtitles(job_id='fixture', arr_instance_id=1)
+        assert result['data'][0]['downloads'] == 1
+    else:
+        result = history.blacklist_history(original.id, 1)
+        assert result['file_status'] == 'deleted'
+        assert result['replacement']['status'] == 'no_result'
+
+
+@pytest.mark.parametrize('manual', [False, True])
+def test_translated_null_score_upgrades_use_zero_baseline_and_keep_owned_selection(workflow_library, monkeypatch, manual):
+    from app.config import settings
+    from app.database import TableHistorySports
+
+    automatic, _, workflows, _, session, _ = workflow_library
+    monkeypatch.setattr(settings.general, 'upgrade_subs', True)
+    monkeypatch.setattr(settings.general, 'upgrade_manual', manual)
+    monkeypatch.setattr(settings.general, 'days_to_upgrade_subs', 30)
+    for event_id, owner in [(61, 1), (62, 2)]:
+        automatic.search_event(event_id, owner)
+    session.execute(sa.update(TableHistorySports).values(action=6, score=None))
+    records = session.execute(sa.select(TableHistorySports)).scalars().all()
+    first = next(row for row in records if row.arr_instance_id == 1)
+    expected = {row.id for row in records} if manual else set()
+    assert workflows.upgradable_history_ids(session, [row.id for row in records]) == expected
+    assert {row['id'] for row in workflows.upgrade_rows(session)} == expected
+    selected = workflows.upgrade_rows(session, 1, event_ids=[61, 62], league_ids=[52])
+    assert [row['id'] for row in selected] == ([first.id] if manual else [])
+    assert workflows.upgrade_rows(session, 1, event_ids=[62], league_ids=[52]) == []
+    minimum_scores = []
+    real_search = workflows.search_event
+    def search_with_score(event_id, owner, **kwargs):
+        minimum_scores.append(kwargs['minimum_score'])
+        return real_search(event_id, owner, **kwargs)
+    monkeypatch.setattr(workflows, 'search_event', search_with_score)
+    result = workflows.upgrade_sports_subtitles(job_id='fixture', arr_instance_id=1, event_ids=[61])
+    assert minimum_scores == ([1] if manual else [])
+    rows = session.execute(sa.select(TableHistorySports).order_by(TableHistorySports.id)).scalars().all()
+    assert len(rows) == (3 if manual else 2)
+    if manual:
+        assert result['data'][0]['downloads'] == 1
+        assert (rows[-1].action, rows[-1].upgradedFromId, rows[-1].arr_instance_id) == (3, first.id, 1)
+        assert rows[-1].score > 0
+    assert len([row for row in rows if row.arr_instance_id == 2]) == 1
+
+
+@pytest.mark.parametrize('change', ['null_download', 'ceiling', 'embedded', 'old', 'excluded', 'disabled'])
+def test_translated_upgrade_support_keeps_other_upgrade_exclusions(workflow_library, monkeypatch, change):
+    from datetime import datetime, timedelta
+    from app.config import settings
+    from app.database import TableArrInstances, TableHistorySports
+
+    automatic, _, workflows, _, session, _ = workflow_library
+    monkeypatch.setattr(settings.general, 'upgrade_subs', True)
+    monkeypatch.setattr(settings.general, 'upgrade_manual', True)
+    monkeypatch.setattr(settings.general, 'days_to_upgrade_subs', 30)
+    automatic.search_event(61, 1)
+    values = dict(action=6, score=None)
+    if change == 'null_download':
+        values['action'] = 1
+    elif change == 'ceiling':
+        values.update(score=177, score_out_of=180)
+    elif change == 'embedded':
+        values['action'] = 7
+    elif change == 'old':
+        values['timestamp'] = datetime.now() - timedelta(days=31)
+    elif change == 'excluded':
+        session.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 1)
+            .values(options=json.dumps({'sports_settings': {'excluded_tags': ['NoSubs']}})))
+        from app.database import TableSportsLeagues
+        session.execute(sa.update(TableSportsLeagues).where(TableSportsLeagues.id == 51).values(tags="['NoSubs']"))
+    elif change == 'disabled':
+        session.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 1).values(enabled=0))
+    session.execute(sa.update(TableHistorySports).values(**values))
+    ids = session.execute(sa.select(TableHistorySports.id)).scalars().all()
+    assert workflows.upgradable_history_ids(session, ids) == set()
+    assert workflows.upgrade_rows(session) == []

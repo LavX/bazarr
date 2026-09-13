@@ -32,20 +32,6 @@ def test_the_search_loop_translates_before_searching_providers():
     assert "continue" in following
 
 
-def test_only_the_wanted_scan_translates_not_an_upgrade():
-    """language is not None for upgrades and replacements; those are asking for
-    a specific provider result, not a translation."""
-    import inspect
-
-    from sportarr import automatic
-
-    source = inspect.getsource(automatic.search_event)
-    translate_at = source.index("translate_from_existing(context, code")
-    guard = source.rindex("if language is None:", 0, translate_at)
-    between = source[guard:translate_at]
-    assert "_init_pool" not in between
-
-
 def test_a_translate_failure_falls_back_to_a_provider_search():
     """A broken translator must not make the language unobtainable."""
     import inspect

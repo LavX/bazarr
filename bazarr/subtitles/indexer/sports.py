@@ -3,6 +3,7 @@ import ast
 import logging
 import os
 import pickle
+import time
 from types import SimpleNamespace
 
 from sqlalchemy import select
@@ -10,7 +11,7 @@ from subliminal_patch import core, search_external_subtitles
 from subliminal_patch.score import MAX_SCORES
 
 from app.config import settings
-from app.jobs_queue import jobs_queue
+from app.jobs_queue import jobs_queue, JobCancelled
 from app.database import (database, get_audio_profile_languages, get_profile_cutoff, get_profiles_list,
                           TableArrInstances, TableHistorySports, TableSportsEvents)
 from languages.custom_lang import CustomLanguage
@@ -364,19 +365,55 @@ def list_missing_subtitles_sports(event_id=None, league_id=None, arr_instance_id
     notify([local_id for local_id, _ in ids])
 
 
-def sports_full_scan_subtitles(job_id=None, arr_instance_id=None, *, wait_for_completion=False):
+class _ScanJobSignal:
+    def __init__(self, job_id):
+        self.job_id = job_id
+
+    def is_set(self):
+        # The queue raises JobCancelled so callers retain the cancelled outcome.
+        jobs_queue.update_job_progress(job_id=self.job_id)
+        return False
+
+    def wait(self, timeout):
+        time.sleep(timeout)
+        return self.is_set()
+
+
+def sports_full_scan_subtitles(job_id=None, arr_instance_id=None, *, wait_for_completion=False, refresh_audio=False,
+                               audio_mode=None, audio_refresh_id=None):
+    # Settings saves supply a distinct refresh ID: both modes can already be
+    # running when a later save needs another scan. Jobs use the latest setting.
     if not job_id:
         if not _events(arr_instance_id=arr_instance_id):
             return
+        if refresh_audio and audio_mode is None:
+            # Direct refresh requests retain same-mode deduplication.
+            audio_mode = bool(settings.general.parse_embedded_audio_track)
         return jobs_queue.add_job_from_function('Indexing sports subtitles', is_progress=True,
                                                 wait_for_completion=wait_for_completion)
+    cancel = _ScanJobSignal(job_id)
+    check_cancelled(cancel)
+    if refresh_audio and not settings.general.parse_embedded_audio_track:
+        # Parsed audio replaces the upstream value in the local row. Restore
+        # that value through the owned reconciliation before recomputing Wanted.
+        from sportarr.sync.events import sync_events
+        query = select(TableSportsEvents.league_id, TableSportsEvents.arr_instance_id).join(
+            TableArrInstances, TableSportsEvents.arr_instance_id == TableArrInstances.id).where(
+            TableArrInstances.kind == 'sportarr', TableArrInstances.enabled == 1)
+        if arr_instance_id is not None:
+            require_sportarr(database, arr_instance_id)
+            query = query.where(TableSportsEvents.arr_instance_id == arr_instance_id)
+        for league_id, owner in database.execute(query.distinct()).all():
+            sync_events(league_id, owner, cancel=cancel)
     ids = _events(arr_instance_id=arr_instance_id)
     jobs_queue.update_job_progress(job_id=job_id, progress_max=len(ids), progress_message='Indexing')
     index = SyncOutputOwnerIndex()
     failures = []
     for position, (event_id, owner) in enumerate(ids, 1):
         try:
-            store_subtitles_sports(event_id, owner, ownership_index=index)
+            store_subtitles_sports(event_id, owner, ownership_index=index, cancel=cancel)
+        except JobCancelled:
+            raise
         except Exception:
             failures.append(event_id)
             logging.exception('Could not index sports event %s for owner %s', event_id, owner)

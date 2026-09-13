@@ -213,7 +213,7 @@ def subtitles_sync_references(subtitles_path, sonarr_episode_id=None, radarr_mov
         media_data = database.execute(
             scoped(
                 select(TableSportsEvents.path, TableSportsEvents.file_size, TableSportsEvents.file_id,
-                       TableSportsEvents.subtitles)
+                       TableSportsEvents.subtitles, TableSportsEvents.arr_instance_id)
                 .where(TableSportsEvents.id == sports_event_id),
                 TableSportsEvents.arr_instance_id, arr_instance_id)) \
             .first()
@@ -221,6 +221,8 @@ def subtitles_sync_references(subtitles_path, sonarr_episode_id=None, radarr_mov
         if not media_data:
             return references_dict
 
+        if arr_instance_id is None:
+            arr_instance_id = media_data.arr_instance_id
         mapped_path = path_mappings.path_replace_instance(media_data.path, arr_instance_id, 'sports')
 
         data = parse_video_metadata(mapped_path, media_data.file_size, None, None,

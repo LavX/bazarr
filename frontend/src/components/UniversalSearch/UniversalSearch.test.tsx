@@ -74,6 +74,8 @@ function mount(editor?: React.ReactNode) {
         children: [
           { path: "/settings/general", element: <p>Settings page</p> },
           { path: "/movies/:id", element: <p>Library movie</p> },
+          { path: "/series/:id", element: <p>Library series</p> },
+          { path: "/sports/:id", element: <p>Library league</p> },
           { path: "/editor", element: editor },
         ],
       },
@@ -224,4 +226,114 @@ it("waits for both catalog sources before announcing no matches", async () => {
   expect(
     await screen.findByText("No catalog titles matched this search."),
   ).toBeInTheDocument();
+});
+
+it.each(["click", "keyboard"])(
+  "opens owned Sports league matches using %s",
+  async (selection) => {
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({ general: { theme: "dark", use_sportarr: true } }),
+      ),
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([
+          { id: 42, kind: "sportarr", enabled: true },
+          { id: 43, kind: "sportarr", enabled: true },
+        ]),
+      ),
+      http.get("/api/system/searches", () =>
+        HttpResponse.json([
+          {
+            id: 51,
+            sportarrLeagueId: 7,
+            arr_instance_id: 42,
+            title: "Formula One",
+            sport: "Motorsport",
+            year: "",
+            poster: null,
+          },
+          {
+            id: 52,
+            sportarrLeagueId: 7,
+            arr_instance_id: 43,
+            title: "Formula One",
+            sport: "Motorsport",
+            year: "",
+            poster: null,
+          },
+          {
+            id: 901,
+            radarrId: 7,
+            arr_instance_id: 2,
+            title: "Formula movie",
+            year: "2020",
+            poster: null,
+          },
+          {
+            id: 902,
+            sonarrSeriesId: 7,
+            arr_instance_id: 3,
+            title: "Formula series",
+            year: "2021",
+            poster: null,
+          },
+        ]),
+      ),
+    );
+    const { router, user } = mount();
+    await user.type(screen.getByLabelText("Search"), "Formula");
+    const leagues = await screen.findAllByRole("link", { name: /Formula One/ });
+    expect(leagues).toHaveLength(2);
+    expect(leagues[0]).toHaveAttribute("href", "/sports/51?instance=42");
+    expect(leagues[1]).toHaveAttribute("href", "/sports/52?instance=43");
+    expect(screen.getByRole("link", { name: /Formula movie/ })).toHaveAttribute(
+      "href",
+      "/movies/901",
+    );
+    expect(
+      screen.getByRole("link", { name: /Formula series/ }),
+    ).toHaveAttribute("href", "/series/902");
+    if (selection === "click") await user.click(leagues[1]);
+    else {
+      await user.keyboard("{ArrowDown}{ArrowDown}");
+      expect(leagues[1]).toHaveFocus();
+      await user.keyboard("{Enter}");
+    }
+    expect(router.state.location.pathname).toBe("/sports/52");
+    expect(router.state.location.search).toBe("?instance=43");
+    expect(
+      screen.queryByRole("region", { name: "In your library" }),
+    ).not.toBeInTheDocument();
+  },
+);
+
+it("hides Sports search matches while the master toggle is disabled", async () => {
+  server.use(
+    http.get("/api/system/searches", () =>
+      HttpResponse.json([
+        {
+          id: 51,
+          sportarrLeagueId: 7,
+          arr_instance_id: 42,
+          title: "Formula One",
+          year: "",
+          poster: null,
+        },
+        {
+          id: 901,
+          radarrId: 7,
+          arr_instance_id: 2,
+          title: "Formula movie",
+          year: "2020",
+          poster: null,
+        },
+      ]),
+    ),
+  );
+  const { user } = mount();
+  await user.type(screen.getByLabelText("Search"), "Formula");
+  await screen.findByRole("link", { name: /Formula movie/ });
+  expect(
+    screen.queryByRole("link", { name: /Formula One/ }),
+  ).not.toBeInTheDocument();
 });

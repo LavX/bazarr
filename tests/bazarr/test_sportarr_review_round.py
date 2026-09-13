@@ -1034,3 +1034,42 @@ def test_sports_sync_refreshes_final_outputs_once_even_after_partial_cancellatio
         ('plex', 'Sports'), ('plex', 'Other Sports'),
         ('jellyfin', 'sports-id'), ('jellyfin', 'other-sports-id'), ('sportarr', 1),
     ], key=str)
+
+
+@pytest.mark.parametrize('filters, expected', [
+    ('', [2, 2]),
+    ('&action=6', [1, 0]),
+    ('&provider=fixture', [2, 1]),
+    ('&language=en', [1, 2]),
+    ('&action=1&provider=fixture&language=en', [1, 0]),
+])
+def test_interleaved_sports_history_dates_align_with_the_other_chart_series(indexed_library, monkeypatch, filters, expected):  # noqa: F811
+    import datetime
+    from flask import Flask
+    from app.database import TableHistorySports
+    from api.history import stats
+
+    session, _ = indexed_library
+    monkeypatch.setattr(stats, 'database', session)
+    now = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    days = [now - datetime.timedelta(days=2), now - datetime.timedelta(days=1)]
+    # Insertion order deliberately revisits each day and crosses Sports owners.
+    for day, owner, action, provider, language in [
+        (0, 1, 1, 'fixture', 'en'), (1, 2, 2, 'other', 'en'),
+        (0, 2, 3, 'fixture', 'fr'), (1, 1, 3, 'fixture', 'en'),
+        (0, 1, 6, 'translator', 'en'),
+    ]:
+        session.add(TableHistorySports(arr_instance_id=owner, league_id=50 + owner, event_id=60 + owner,
+            timestamp=days[day], action=action, provider=provider, language=language))
+        session.flush()
+    session.commit()
+
+    with Flask(__name__).test_request_context('/history/stats?timeFrame=week' + filters):
+        result = stats.HistoryStats.get.__wrapped__(stats.HistoryStats())
+
+    dates = [entry['date'] for entry in result['sports']]
+    assert len(dates) == len(set(dates)) == 7
+    assert dates == [entry['date'] for entry in result['series']] == [entry['date'] for entry in result['movies']]
+    counts = {entry['date']: entry['count'] for entry in result['sports']}
+    assert [counts[day.strftime('%Y-%m-%d')] for day in days] == expected
+    assert sum(counts.values()) == sum(expected)

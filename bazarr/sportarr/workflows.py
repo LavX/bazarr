@@ -317,8 +317,8 @@ def upgradable_history_ids(session, history_ids):
         if (row.action not in actions
                 or not row.timestamp
                 or row.timestamp <= minimum_timestamp
-                or row.score is None
-                or row.score >= (row.score_out_of or 180) - 3
+                or (row.score is None and row.action != 6)
+                or (row.score or 0) >= (row.score_out_of or 180) - 3
                 or not row.artifact):
             continue
         try:
@@ -377,8 +377,8 @@ def upgrade_rows(session, arr_instance_id=None, job_id=None, *, event_ids=None, 
             row.action not in actions
             or not row.timestamp
             or row.timestamp <= minimum_timestamp
-            or row.score is None
-            or row.score >= (row.score_out_of or 180) - 3
+            or (row.score is None and row.action != 6)
+            or (row.score or 0) >= (row.score_out_of or 180) - 3
             or not row.artifact
         ):
             continue
@@ -438,7 +438,7 @@ def upgrade_sports_subtitles(
                             row["event_id"],
                             row["arr_instance_id"],
                             language=row["language"],
-                            minimum_score=row["score"] + 1,
+                            minimum_score=(row["score"] or 0) + 1,
                             upgraded_from_id=row["upgradedFromId"] or row["id"],
                             job_id=job_id,
                             cancel=signal,

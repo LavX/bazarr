@@ -1022,3 +1022,280 @@ def test_explicit_no_profile_ignores_instance_and_legacy_defaults(
         monkeypatch.setattr(settings.general, f"{noun}_default_profile", 5)
     module.store_subtitles_sports(61, 1)
     assert row(session, 61).missing_subtitles == "[]"
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+def test_audio_setting_save_repairs_indexed_rows_and_preserves_upstream_fallback(indexed_library, monkeypatch, enabled):
+    import sys
+    from types import SimpleNamespace
+    from app import config, database as db
+    from sportarr.sync import events
+    from test_sportarr_events import event, file, remote
+
+    session, folder = indexed_library
+    module = sports(monkeypatch, session)
+    monkeypatch.setattr(config, 'write_config', lambda: True)
+    monkeypatch.setattr(config, 'validate_log_regex', lambda: None)
+    monkeypatch.setattr(config.settings.validators, 'validate', lambda: None)
+    monkeypatch.setattr(config.settings.general, 'use_sonarr', False)
+    monkeypatch.setattr(config.settings.general, 'use_radarr', False)
+    monkeypatch.setattr(config.settings.general, 'parse_embedded_audio_track', not enabled)
+    monkeypatch.setattr(config.settings.general, 'use_embedded_subs', False)
+    monkeypatch.setitem(sys.modules, 'app.scheduler', SimpleNamespace(scheduler=None))
+    monkeypatch.setattr(module, 'jobs_queue', SimpleNamespace(
+        update_job_progress=lambda **kwargs: None, update_job_name=lambda **kwargs: None))
+    session.execute(sa.update(db.TableArrInstances).where(db.TableArrInstances.id == 2).values(enabled=0))
+    session.execute(sa.update(db.TableArrInstances).where(db.TableArrInstances.id == 1)
+        .values(options=json.dumps({'sports_settings': {'search_on_sync': False}})))
+    session.execute(sa.insert(db.TableLanguagesProfiles).values(profileId=1, name='English',
+        items=json.dumps([dict(id=1, language='en', hi='False', forced='False', audio_exclude='True')]), originalFormat=0))
+    session.execute(sa.update(db.TableSportsLeagues).where(db.TableSportsLeagues.id == 51).values(profileId=1))
+    db.update_profile_id_list.invalidate()
+    for sidecar in (folder / '1').glob('*.srt'):
+        sidecar.unlink()
+    monkeypatch.setattr(module, '_metadata', lambda context, signature, cached, use_cache, cancel:
+        dict(sports_file=signature, ffprobe={'audio': [{'language': 'eng'}]}))
+    module.store_subtitles_sports(61, 1)
+    before = row(session, 61)
+    assert ast.literal_eval(before.audio_language) == (['French'] if enabled else ['English'])
+    assert pickle.loads(before.ffprobe_cache)['sports_indexed'] is True
+    sibling = row(session, 62).to_dict()
+    remote_calls = remote(monkeypatch, events, [event(files=[file(
+        filePath='/sports/event.mkv', size=(folder / '1/event.mkv').stat().st_size,
+        languages=['French'])])])
+    scan = module.sports_full_scan_subtitles
+    monkeypatch.setattr(module, 'sports_full_scan_subtitles', lambda **kwargs: scan(job_id='fixture', **kwargs))
+
+    config.save_settings([('settings-general-parse_embedded_audio_track', [str(enabled).lower()])])
+
+    current = row(session, 61)
+    assert ast.literal_eval(current.audio_language) == (['English'] if enabled else ['French'])
+    assert ast.literal_eval(current.missing_subtitles) == ([] if enabled else ['en'])
+    assert pickle.loads(current.ffprobe_cache)['sports_indexed'] is True
+    assert row(session, 62).to_dict() == sibling
+    assert len(remote_calls) == (0 if enabled else 1)
+
+
+def test_audio_refresh_is_not_discarded_by_an_existing_full_scan(indexed_library, monkeypatch):
+    from test_sportarr_workflows import private_queue
+
+    session, _ = indexed_library
+    module = sports(monkeypatch, session)
+    queue = private_queue(monkeypatch)
+    monkeypatch.setattr(module, 'jobs_queue', queue)
+    ordinary = module.sports_full_scan_subtitles(arr_instance_id=1)
+    refreshing = module.sports_full_scan_subtitles(arr_instance_id=1, refresh_audio=True)
+    assert ordinary and refreshing and ordinary != refreshing
+    assert len(queue.jobs_pending_queue) == 2
+    assert [job.kwargs['refresh_audio'] for job in queue.jobs_pending_queue] == [False, True]
+    assert module.sports_full_scan_subtitles(arr_instance_id=1) is False
+    assert module.sports_full_scan_subtitles(arr_instance_id=1, refresh_audio=True) is False
+
+
+def test_audio_refresh_failure_preserves_local_rows_and_fails_the_scan(indexed_library, monkeypatch):
+    from app.config import settings
+    from app.database import TableSportsEvents
+    from sportarr.sync import events
+    from types import SimpleNamespace
+
+    session, _ = indexed_library
+    module = sports(monkeypatch, session)
+    monkeypatch.setattr(settings.general, 'parse_embedded_audio_track', False)
+    monkeypatch.setattr(events.ArrClientFactory, 'from_row', lambda *args, **kwargs:
+        SimpleNamespace(get=lambda path: SimpleNamespace(status_code=503, json=lambda: [])))
+    before = [row.to_dict() for row in session.execute(sa.select(TableSportsEvents).order_by(TableSportsEvents.id)).scalars()]
+    with pytest.raises(ValueError, match='Could not read complete Sportarr events'):
+        module.sports_full_scan_subtitles(job_id='fixture', arr_instance_id=1, refresh_audio=True)
+    after = [row.to_dict() for row in session.execute(sa.select(TableSportsEvents).order_by(TableSportsEvents.id)).scalars()]
+    assert after == before
+
+
+def test_ordinary_full_scan_does_not_refresh_upstream_audio(indexed_library, monkeypatch):
+    from app.config import settings
+    from sportarr.sync import events
+
+    session, _ = indexed_library
+    module = sports(monkeypatch, session)
+    from test_sportarr_workflows import private_queue
+    monkeypatch.setattr(module, 'jobs_queue', private_queue(monkeypatch))
+    monkeypatch.setattr(settings.general, 'parse_embedded_audio_track', False)
+    monkeypatch.setattr(events, 'sync_events', lambda *args, **kwargs: pytest.fail('Ordinary scan refreshed upstream'))
+    module.sports_full_scan_subtitles(job_id='fixture', arr_instance_id=1)
+    assert pickle.loads(row(session, 61).ffprobe_cache)['sports_indexed'] is True
+    assert row(session, 62).ffprobe_cache is None
+
+
+@pytest.fixture
+def queued_audio_refresh(indexed_library, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    from app import config, database as db
+    from sportarr.sync import events
+    from test_sportarr_events import event, file, remote
+    from test_sportarr_workflows import private_queue
+
+    session, folder = indexed_library
+    module = sports(monkeypatch, session)
+    queue = private_queue(monkeypatch)
+    monkeypatch.setattr(module, 'jobs_queue', queue)
+    monkeypatch.setattr(config, 'write_config', lambda: True)
+    monkeypatch.setattr(config, 'validate_log_regex', lambda: None)
+    monkeypatch.setattr(config.settings.validators, 'validate', lambda: None)
+    monkeypatch.setattr(config.settings.general, 'use_sonarr', False)
+    monkeypatch.setattr(config.settings.general, 'use_radarr', False)
+    monkeypatch.setattr(config.settings.general, 'use_embedded_subs', False)
+    monkeypatch.setattr(config.settings.general, 'parse_embedded_audio_track', True)
+    monkeypatch.setitem(sys.modules, 'app.scheduler', SimpleNamespace(scheduler=None))
+    session.execute(sa.update(db.TableArrInstances).where(db.TableArrInstances.id == 2).values(enabled=0))
+    session.execute(sa.update(db.TableArrInstances).where(db.TableArrInstances.id == 1)
+        .values(options=json.dumps({'sports_settings': {'search_on_sync': False}})))
+    monkeypatch.setattr(module, '_metadata', lambda context, signature, cached, use_cache, cancel:
+        dict(sports_file=signature, ffprobe={'audio': [{'language': 'eng'}]}))
+    payload = [event(files=[file(filePath='/sports/event.mkv',
+        size=(folder / '1/event.mkv').stat().st_size, languages=['French'])])]
+    calls = remote(monkeypatch, events, payload)
+    return config, module, session, queue, calls, payload
+
+
+def run_pending_audio_jobs(queue):
+    count = 0
+    while queue.jobs_pending_queue:
+        count += 1
+        assert count <= 5, 'Settings changes repeatedly queued more scans'
+        job = queue.jobs_pending_queue.popleft()
+        queue.jobs_running_queue.append(job)
+        queue._run_job(job)
+    return count
+
+
+@pytest.mark.parametrize('initial, transitions, upstream_count', [
+    (True, [False], 1), (True, [False, True], 0), (True, [False, True, False], 3),
+    (False, [True], 1), (False, [True, False], 3),
+])
+def test_running_audio_scan_preserves_the_last_settings_transition(queued_audio_refresh, monkeypatch, initial, transitions, upstream_count):
+    config, module, session, queue, calls, _ = queued_audio_refresh
+    config.settings.general.parse_embedded_audio_track = initial
+    original = module.store_subtitles_sports
+    switched = []
+    sibling = row(session, 62).to_dict()
+
+    def finish_then_change(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if not switched:
+            switched.append(True)
+            assert ast.literal_eval(row(session, 61).audio_language) == (['English'] if initial else ['French'])
+            for enabled in transitions:
+                config.save_settings([('settings-general-parse_embedded_audio_track', [str(enabled).lower()])])
+        return result
+    monkeypatch.setattr(module, 'store_subtitles_sports', finish_then_change)
+    assert module.sports_full_scan_subtitles(refresh_audio=True)
+
+    assert run_pending_audio_jobs(queue) == 1 + len(transitions)
+    assert config.settings.general.parse_embedded_audio_track is transitions[-1]
+    assert ast.literal_eval(row(session, 61).audio_language) == (['English'] if transitions[-1] else ['French'])
+    assert len(calls) == upstream_count
+    assert row(session, 62).to_dict() == sibling
+    assert not queue.jobs_failed_queue
+
+
+@pytest.mark.parametrize('initial, repeated', [(True, False), (False, False), (True, True), (False, True)])
+def test_concurrent_audio_scans_preserve_later_settings_saves(queued_audio_refresh, monkeypatch, initial, repeated):
+    config, module, session, queue, calls, _ = queued_audio_refresh
+    monkeypatch.setattr(config.settings.general, 'concurrent_jobs', 2)
+    config.settings.general.parse_embedded_audio_track = initial
+    original = module.store_subtitles_sports
+    sibling = row(session, 62).to_dict()
+    state = {'stage': 'first', 'stores': 0}
+    transitions = [initial, not initial, initial] if repeated else [initial]
+
+    def after_store(*args, **kwargs):
+        result = original(*args, **kwargs)
+        state['stores'] += 1
+        # Disabled parsing stores once during reconciliation and once in the scan.
+        if state['stage'] == 'first' and state['stores'] == (1 if initial else 2):
+            state.update(stage='second', stores=0)
+            config.save_settings([('settings-general-parse_embedded_audio_track', [str(not initial).lower()])])
+            second_job = queue._reserve_next_job()
+            assert second_job is not None
+            assert len(queue.jobs_running_queue) == 2
+            assert queue._run_job(second_job) is True
+        elif state['stage'] == 'second' and state['stores'] == (2 if initial else 1):
+            state['stage'] = 'saved_again'
+            assert ast.literal_eval(row(session, 61).audio_language) == (['French'] if initial else ['English'])
+            # Both previous jobs remain running, after releasing their file locks.
+            for enabled in transitions:
+                config.save_settings([('settings-general-parse_embedded_audio_track', [str(enabled).lower()])])
+        return result
+
+    monkeypatch.setattr(module, 'store_subtitles_sports', after_store)
+    assert module.sports_full_scan_subtitles(refresh_audio=True)
+    first_job = queue._reserve_next_job()
+    assert first_job is not None
+    assert queue._run_job(first_job) is True
+    run_pending_audio_jobs(queue)
+
+    assert state['stage'] == 'saved_again'
+    assert config.settings.general.parse_embedded_audio_track is initial
+    assert ast.literal_eval(row(session, 61).audio_language) == (['English'] if initial else ['French'])
+    assert len(calls) == 1 + (0 if initial else len(transitions))
+    assert len(queue.jobs_completed_queue) == 2 + len(transitions)
+    assert not queue.jobs_pending_queue and not queue.jobs_running_queue and not queue.jobs_failed_queue
+    assert row(session, 62).to_dict() == sibling
+
+
+@pytest.mark.parametrize('stage', ['before_execution', 'during_response', 'during_reconciliation'])
+def test_audio_scan_cancellation_preserves_owned_rows(queued_audio_refresh, monkeypatch, stage):
+    from sqlalchemy.orm import Session
+    from app.database import TableSportsEvents
+    from sportarr.sync import events
+    from test_sportarr_events import event, file, remote
+
+    config, module, session, queue, calls, payload = queued_audio_refresh
+    module.store_subtitles_sports(61, 1)
+    before = [row(session, event_id).to_dict() for event_id in (61, 62)]
+    config.save_settings([('settings-general-parse_embedded_audio_track', ['false'])])
+    job = queue.jobs_pending_queue.popleft()
+    queue.jobs_running_queue.append(job)
+    if stage == 'before_execution':
+        job.cancelled = True
+    elif stage == 'during_response':
+        calls = remote(monkeypatch, events, payload, change=lambda: setattr(job, 'cancelled', True))
+    else:
+        # Cancel after an actual row mutation was flushed, before the next row.
+        payload.append(event(id=9, files=[file(10, eventId=9, filePath='/sports/another.mkv')]))
+        def cancel_after_write(transaction, context):
+            if any(isinstance(value, TableSportsEvents) and value.audio_language == "['French']"
+                   for value in transaction.dirty):
+                job.cancelled = True
+        sa.event.listen(Session, 'after_flush', cancel_after_write)
+    try:
+        assert queue._run_job(job) is False
+    finally:
+        if stage == 'during_reconciliation':
+            sa.event.remove(Session, 'after_flush', cancel_after_write)
+    assert job.progress_message == 'Cancelled by user'
+    assert [row(session, event_id).to_dict() for event_id in (61, 62)] == before
+    assert session.execute(sa.select(TableSportsEvents.id).order_by(TableSportsEvents.id)).scalars().all() == [61, 62]
+    assert len(calls) == (0 if stage == 'before_execution' else 1)
+    assert not queue.jobs_failed_queue
+
+
+def test_ordinary_scan_cancellation_reaches_the_indexer_before_publication(queued_audio_refresh, monkeypatch):
+    config, module, session, queue, _, _ = queued_audio_refresh
+    before = row(session, 61).to_dict()
+    assert module.sports_full_scan_subtitles(arr_instance_id=1)
+    job = queue.jobs_pending_queue.popleft()
+    queue.jobs_running_queue.append(job)
+    metadata = module._metadata
+    def cancel_after_probe(*args, **kwargs):
+        data = metadata(*args, **kwargs)
+        job.cancelled = True
+        return data
+    monkeypatch.setattr(module, '_metadata', cancel_after_probe)
+    assert queue._run_job(job) is False
+    current = row(session, 61)
+    assert job.progress_message == 'Cancelled by user'
+    assert current.audio_language == before['audio_language']
+    assert current.missing_subtitles == before['missing_subtitles']
+    # An interrupted scan remains retryable, with no completed index flag.
+    assert not current.ffprobe_cache or not pickle.loads(current.ffprobe_cache)['sports_indexed']

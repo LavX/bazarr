@@ -776,3 +776,45 @@ def test_sports_library_settings_survive_a_save(monkeypatch):
         config.settings.plex.sports_library_ids = previous_plex_ids
         config.settings.jellyfin.sports_library = previous_jellyfish
         config.settings.jellyfin.sports_library_ids = previous_jellyfin_ids
+
+
+@pytest.mark.parametrize('enabled', [True, False])
+def test_audio_parsing_changes_rescan_sports_and_refresh_native_libraries(monkeypatch, enabled):
+    from app import config
+
+    effects = []
+    scans = []
+    def schedule_scan(**kwargs):
+        scans.append(kwargs)
+        effects.append(('sports', config.settings.general.parse_embedded_audio_track))
+    monkeypatch.setattr(config, 'write_config', lambda: True)
+    monkeypatch.setattr(config, 'validate_log_regex', lambda: None)
+    monkeypatch.setattr(config.settings.validators, 'validate', lambda: None)
+    monkeypatch.setattr(config.settings.general, 'parse_embedded_audio_track', not enabled)
+    monkeypatch.setattr(config.settings.general, 'use_sonarr', True)
+    monkeypatch.setattr(config.settings.general, 'use_radarr', True)
+    monkeypatch.setitem(sys.modules, 'app.database', SimpleNamespace(
+        database=SimpleNamespace(execute=lambda statement: None),
+        update=lambda model: _FakeUpdate(), System=object))
+    monkeypatch.setitem(sys.modules, 'app.scheduler', SimpleNamespace(scheduler=None))
+    monkeypatch.setitem(sys.modules, 'subtitles.indexer.sports', SimpleNamespace(
+        sports_full_scan_subtitles=schedule_scan))
+    monkeypatch.setitem(sys.modules, 'sonarr.sync.series', SimpleNamespace(
+        update_series=lambda: effects.append(('series', config.settings.general.parse_embedded_audio_track))))
+    monkeypatch.setitem(sys.modules, 'radarr.sync.movies', SimpleNamespace(
+        update_movies=lambda: effects.append(('movies', config.settings.general.parse_embedded_audio_track))))
+
+    config.save_settings([('settings-general-parse_embedded_audio_track', [str(enabled).lower()])])
+
+    assert sorted(effects) == [('movies', enabled), ('series', enabled), ('sports', enabled)]
+    assert scans[0]['refresh_audio'] is True
+    assert scans[0]['audio_mode'] is enabled
+    first_request = scans[0]['audio_refresh_id']
+    assert isinstance(first_request, str) and first_request
+    config.save_settings([('settings-general-parse_embedded_audio_track', [str(not enabled).lower()])])
+    config.save_settings([('settings-general-parse_embedded_audio_track', [str(enabled).lower()])])
+    assert [scan['audio_mode'] for scan in scans] == [enabled, not enabled, enabled]
+    assert len({scan['audio_refresh_id'] for scan in scans}) == 3
+    effects.clear()
+    config.save_settings([('settings-general-instance_name', ['Bazarr'])])
+    assert effects == []
