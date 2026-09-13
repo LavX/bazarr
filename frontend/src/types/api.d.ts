@@ -251,6 +251,8 @@ declare namespace History {
       subs_id?: string;
       parsed_timestamp: string;
       timestamp: string;
+      history_id?: number;
+      timestamp_iso?: string | null;
       description: string;
       upgradable: boolean;
       matches: string[];

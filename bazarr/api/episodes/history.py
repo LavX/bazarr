@@ -29,6 +29,7 @@ class EpisodesHistory(Resource):
 
     data_model = api_ns_episodes_history.model('history_episodes_data_model', {
         'id': fields.Integer(),
+        'history_id': fields.Integer(),
         'series_id': fields.Integer(),
         # Owning instance (#156) so secondary actions (blacklist) can route.
         'arr_instance_id': fields.Integer(),
@@ -37,6 +38,7 @@ class EpisodesHistory(Resource):
         'episode_number': fields.String(),
         'episodeTitle': fields.String(),
         'timestamp': fields.String(),
+        'timestamp_iso': fields.String(),
         'subs_id': fields.String(),
         'description': fields.String(),
         'sonarrSeriesId': fields.Integer(),
@@ -128,7 +130,7 @@ class EpisodesHistory(Resource):
                              func.coalesce(blacklisted_subtitles.c.arr_instance_id, -1))),
                   isouter=True) \
             .where(reduce(operator.and_, query_conditions)) \
-            .order_by(TableHistory.timestamp.desc())
+            .order_by(TableHistory.timestamp.desc(), TableHistory.id.desc())
         if length > 0:
             stmt = stmt.limit(length).offset(start)
         episode_history = [{
@@ -141,6 +143,7 @@ class EpisodesHistory(Resource):
             'episode_number': x.episode_number,
             'episodeTitle': x.episodeTitle,
             'timestamp': x.timestamp,
+            'timestamp_iso': x.timestamp.isoformat() if x.timestamp else None,
             'subs_id': x.subs_id,
             'description': x.description,
             'sonarrSeriesId': x.sonarrSeriesId,
@@ -184,7 +187,6 @@ class EpisodesHistory(Resource):
             del item['video_path']
             del item['external_subtitles']
             del item['profileId']
-            del item['history_id']
 
             if item['score']:
                 item['score'] = f"{round((int(item['score']) * 100 / item['score_out_of']), 2)}%"
