@@ -21,6 +21,7 @@ def test_sports_deletion_finalizes_only_after_file_removal(indexed_library, monk
     from app.database import TableHistorySports
     from media_servers import events as publication
     from sportarr import history, notify
+    from sportarr import subtitles as sports_subtitles
     from subtitles.indexer import sports
     from subtitles.tools import delete
 
@@ -30,6 +31,10 @@ def test_sports_deletion_finalizes_only_after_file_removal(indexed_library, monk
     _index(session, 61, [['en:hi', '/sports/event.en.hi.srt', 42]])
     monkeypatch.setattr(events, 'database', session)
     monkeypatch.setattr(history, 'database', session)
+    # The route publishes inside sports_manual_operation, which reads the
+    # session off this module; left unpatched it keeps whichever session first
+    # imported it, which is another test's database.
+    monkeypatch.setattr(sports_subtitles, 'database', session)
     monkeypatch.setattr(settings.general, 'use_plex', False)
     monkeypatch.setattr(settings.general, 'use_jellyfin', False)
     emissions, rescans, notifications, webhooks = [], [], [], []
@@ -60,7 +65,10 @@ def test_sports_deletion_finalizes_only_after_file_removal(indexed_library, monk
     ):
         body, status = events.SportsEventSubtitles.delete.__wrapped__(events.SportsEventSubtitles(), 61)
 
-    assert status == {'reindex': 204, 'remove': 409, 'guard': 400}[failure], body
+    # A refusal raised while the deletion is under way says the event or its
+    # recording moved underneath the request, which is a conflict rather than a
+    # malformed one: the route answers 409 for all of them.
+    assert status == {'reindex': 204, 'remove': 409, 'guard': 409}[failure], body
     assert source.exists() is (failure == 'guard')
     assert sibling.read_bytes() == sibling_before
     rows = session.execute(sa.select(TableHistorySports)).scalars().all()
@@ -166,7 +174,8 @@ def test_sports_delete_requests_one_rescan_and_publishes_to_the_dispatcher():
     start = source.rindex("if media_type == 'sports':")
     sports = source[start : source.index("if media_type == 'series':", start)]
     assert "notify_rescan(arr_instance_id)" in sports
-    assert "publication_callback(media_type, media_path, 'delete', arr_instance_id)" in sports
+    assert "publication_callback(media_type, media_path, 'delete'," in sports
+    assert "arr_instance_id)" in sports.split("publication_callback(media_type, media_path, 'delete',")[1]
 
 
 def test_the_history_writer_uses_the_result_attributes_not_its_kwargs():
@@ -238,11 +247,16 @@ def test_a_subtitle_the_event_does_not_own_is_refused(indexed_library, monkeypat
     from app.config import settings
     from app.database import TableHistorySports
     from sportarr import history
+    from sportarr import subtitles as sports_subtitles
 
     session, folder = indexed_library
     _index(session, 61, [['en:hi', '/sports/event.en.hi.srt', 42]])
     monkeypatch.setattr(events, 'database', session)
     monkeypatch.setattr(history, 'database', session)
+    # The route publishes inside sports_manual_operation, which reads the
+    # session off this module; left unpatched it keeps whichever session first
+    # imported it, which is another test's database.
+    monkeypatch.setattr(sports_subtitles, 'database', session)
     monkeypatch.setattr(settings.general, 'use_plex', False)
     monkeypatch.setattr(settings.general, 'use_jellyfin', False)
 
@@ -260,3 +274,72 @@ def test_a_subtitle_the_event_does_not_own_is_refused(indexed_library, monkeypat
     assert status == 403, body
     assert neighbour.exists()
     assert session.execute(sa.select(TableHistorySports)).scalars().all() == []
+
+
+def test_the_unlink_happens_inside_the_owned_boundary(indexed_library, monkeypatch):  # noqa: F811
+    """Ownership was checked, then the file was removed outside any boundary.
+
+    A reconciliation that reassigns or replaces the recording in that window
+    leaves the request unlinking a path another event has since adopted, and
+    then recording the deletion against this one. The removal now runs inside
+    the same publication guard the other sports mutations use, which locks the
+    event row and revalidates the recording signature either side of it.
+    """
+    from contextlib import contextmanager
+
+    from flask import Flask
+    from api.sports import events
+    from app.config import settings
+    from media_servers import events as publication
+    from sportarr import history, notify
+    from sportarr import subtitles as sports_subtitles
+    from subtitles.indexer import sports
+    from subtitles.tools import delete
+
+    session, folder = indexed_library
+    _index(session, 61, [['en:hi', '/sports/event.en.hi.srt', 42]])
+    for module, name in ((events, 'database'), (history, 'database'),
+                         (sports_subtitles, 'database')):
+        monkeypatch.setattr(module, name, session)
+    monkeypatch.setattr(settings.general, 'use_plex', False)
+    monkeypatch.setattr(settings.general, 'use_jellyfin', False)
+    monkeypatch.setattr(notify, 'notify_rescan', lambda *a: None)
+    monkeypatch.setattr(publication, 'notify_subtitle_mutation', lambda *a: None)
+    monkeypatch.setattr(delete, 'event_stream', lambda **kw: None)
+    monkeypatch.setattr(delete, 'call_external_webhook', lambda **kw: None)
+    monkeypatch.setattr(sports, 'store_subtitles_sports', lambda *a, **kw: None)
+
+    order = []
+    real_operation = sports_subtitles.sports_manual_operation
+    real_unlink = delete._delete_subtitle_file
+
+    @contextmanager
+    def watched_operation(event_id, arr_instance_id, cancel=None):
+        with real_operation(event_id, arr_instance_id, cancel) as operation:
+            context, validate, guard, video = operation
+
+            @contextmanager
+            def watched_guard(**kwargs):
+                order.append('guard-entered')
+                with guard(**kwargs) as inner:
+                    yield inner
+                order.append('guard-left')
+
+            yield context, validate, watched_guard, video
+
+    def watched_unlink(*args, **kwargs):
+        order.append('unlinked')
+        return real_unlink(*args, **kwargs)
+
+    monkeypatch.setattr(sports_subtitles, 'sports_manual_operation', watched_operation)
+    monkeypatch.setattr(delete, '_delete_subtitle_file', watched_unlink)
+
+    with Flask(__name__).test_request_context(
+        '/sports/events/61/subtitles', method='DELETE',
+        json={'arr_instance_id': 1, 'language': 'en', 'hi': True, 'path': '/sports/event.en.hi.srt'},
+    ):
+        body, status = events.SportsEventSubtitles.delete.__wrapped__(events.SportsEventSubtitles(), 61)
+
+    assert status == 204, body
+    assert order == ['guard-entered', 'unlinked', 'guard-left']
+    assert not (folder / '1/event.en.hi.srt').exists()

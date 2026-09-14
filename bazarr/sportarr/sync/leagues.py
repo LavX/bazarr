@@ -202,6 +202,15 @@ def update_sports_for_instance(arr_instance_id, job_id=None, *, cancel=None, exp
     """
     from sportarr.rootfolder import sync_rootfolders
     from sportarr.sync.events import sync_event_leagues
+    from sportarr.workflows import SportsJobSignal
+
+    # Queued from the Sports UI, this runs with the job_id the queue injects and
+    # nothing else: stopping the task from the Tasks page marked the job
+    # cancelled while every checkpoint here was still asking a None signal, so
+    # the fetches, reconciliation, indexing and search-after-sync all ran to the
+    # end anyway. An explicit signal from the caller still wins.
+    if cancel is None and job_id:
+        cancel = SportsJobSignal(arr_instance_id, job_id)
     with owner_sync_lock(arr_instance_id, cancel, timeout=lock_timeout):
         expected = expected_connection or connection_identity(require_sportarr(database, arr_instance_id))
         # The lock is re-entrant and already held here, so the nested calls

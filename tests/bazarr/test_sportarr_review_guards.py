@@ -384,3 +384,117 @@ def test_the_other_media_types_do_not_enter_the_sports_boundary(monkeypatch):
     result = content.promote_sync_subtitle('movie', 12, 'en', 'en:sync', arr_instance_id=3)
     assert result[0] == 'guarded'
     assert result[2] == {}
+
+
+# --------------------------------------------------------------------------
+# Stopping a queued sports job actually stops it.
+# --------------------------------------------------------------------------
+
+def test_a_cancelled_batch_stops_between_league_events(monkeypatch):
+    """A scan-disk batch kept probing a whole league after it was stopped.
+
+    Each event in the league is probed and indexed in this one call, and the
+    batch updates progress only before entering it, so with no signal the
+    cancellation was observed only once the league had finished.
+    """
+    from sportarr import workflows
+    from subtitles import mass_operations
+    from subtitles.indexer import sports
+
+    indexed, signals = [], []
+
+    class _Signal:
+        def __init__(self, owner, job_id=None, parent=None):
+            self.owner, self.job_id = owner, job_id
+            signals.append(self)
+
+        def is_set(self):
+            # Stopped while the first event was being probed.
+            return len(indexed) >= 1
+
+    monkeypatch.setattr(workflows, 'SportsJobSignal', _Signal)
+    monkeypatch.setattr(sports, 'store_subtitles_sports',
+                        lambda event_id, owner, **kwargs: indexed.append((event_id, owner,
+                                                                         kwargs.get('cancel'))))
+    monkeypatch.setattr(mass_operations, 'database',
+                        SimpleNamespace(execute=lambda *a, **kw: SimpleNamespace(
+                            scalars=lambda: SimpleNamespace(all=lambda: [61, 62, 63]))))
+
+    # check_cancelled speaks ValueError here, deliberately: the sports layer
+    # turns that into a refusal rather than a crash.
+    with pytest.raises(ValueError, match='stopped'):
+        mass_operations._scan_sports(
+            {'type': 'sportsLeague', 'sportsLeagueId': 51, 'arr_instance_id': 1}, 9)
+
+    assert [entry[0] for entry in indexed] == [61]
+    assert indexed[0][2] is signals[0]
+    assert (signals[0].owner, signals[0].job_id) == (1, 9)
+
+
+def test_a_queued_league_sync_takes_the_jobs_cancellation(monkeypatch):
+    """The queue's job_id was accepted and ignored.
+
+    Stopping the task from the Tasks page marks that job cancelled, and it is
+    the only handle the page has on this sync, so every checkpoint below was
+    asking a None signal and the league synced to the end regardless.
+    """
+    from sportarr import workflows
+    from sportarr.sync import events as sync_events_module
+
+    seen = {}
+
+    class _Signal:
+        def __init__(self, owner, job_id=None, parent=None):
+            self.owner, self.job_id = owner, job_id
+
+    monkeypatch.setattr(workflows, 'SportsJobSignal', _Signal)
+    monkeypatch.setattr(sync_events_module, 'sync_events',
+                        lambda league_id, owner, **kwargs: seen.update(kwargs, league=league_id))
+
+    sync_events_module.sync_one_league(51, 1, job_id=9)
+    assert isinstance(seen['cancel'], _Signal)
+    assert (seen['cancel'].owner, seen['cancel'].job_id) == (1, 9)
+
+    # An explicit signal from the caller still wins, and no job id means no
+    # signal to invent.
+    explicit = _Signal(1, 4)
+    sync_events_module.sync_one_league(51, 1, job_id=9, cancel=explicit)
+    assert seen['cancel'] is explicit
+    sync_events_module.sync_one_league(51, 1)
+    assert seen['cancel'] is None
+
+
+def test_a_queued_library_sync_takes_the_jobs_cancellation(monkeypatch):
+    """The whole-instance wrapper ignored its job_id the same way."""
+    from contextlib import contextmanager
+
+    from sportarr import rootfolder, workflows
+    from sportarr.sync import events as sync_events_module
+    from sportarr.sync import leagues as sync_leagues_module
+
+    seen = {}
+
+    class _Signal:
+        def __init__(self, owner, job_id=None, parent=None):
+            self.owner, self.job_id = owner, job_id
+
+    @contextmanager
+    def fake_lock(owner, cancel, timeout=None):
+        seen['lock'] = cancel
+        yield
+
+    monkeypatch.setattr(workflows, 'SportsJobSignal', _Signal)
+    monkeypatch.setattr(sync_leagues_module, 'owner_sync_lock', fake_lock)
+    monkeypatch.setattr(sync_leagues_module, 'require_sportarr', lambda *a, **kw: 'instance')
+    monkeypatch.setattr(sync_leagues_module, 'connection_identity', lambda instance: 'identity')
+    monkeypatch.setattr(sync_leagues_module, 'check_cancelled', lambda cancel: seen.setdefault('checked', cancel))
+    monkeypatch.setattr(rootfolder, 'sync_rootfolders', lambda owner, **kwargs: None)
+    monkeypatch.setattr(sync_leagues_module, 'sync_leagues',
+                        lambda owner, **kwargs: seen.update(leagues=kwargs.get('cancel')) or [51])
+    monkeypatch.setattr(sync_events_module, 'sync_event_leagues',
+                        lambda ids, owner, **kwargs: seen.update(events=kwargs.get('cancel')))
+
+    sync_leagues_module.update_sports_for_instance(1, job_id=9)
+    for stage in ('lock', 'leagues', 'events', 'checked'):
+        assert isinstance(seen[stage], _Signal), stage
+        assert (seen[stage].owner, seen[stage].job_id) == (1, 9)

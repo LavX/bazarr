@@ -1038,22 +1038,30 @@ def _process_subtitle_item(item, action, options, job_id):
     return False
 
 
-def _scan_sports(item):
+def _scan_sports(item, job_id=None):
     """Re-index a selected sports event, or every event in a selected league.
 
     Returns False when the selection names nothing indexable, so the caller can
     count it as skipped rather than queued.
+
+    Cancellation is threaded the way _search_sports below threads it. A league
+    indexes every one of its events in this one call, each probing a recording,
+    and the batch updates progress only before entering here: without a signal
+    a stopped batch kept probing the whole league before anything noticed.
     """
+    from sportarr.workflows import SportsJobSignal
+    from sportarr.connection import check_cancelled
     from subtitles.indexer.sports import store_subtitles_sports
 
     arr_instance_id = item.get('arr_instance_id')
     if not arr_instance_id:
         return False
+    cancel = SportsJobSignal(arr_instance_id, job_id)
     if item.get('type') == 'sports':
         event_id = item.get('sportsEventId')
         if not event_id:
             return False
-        store_subtitles_sports(event_id, arr_instance_id)
+        store_subtitles_sports(event_id, arr_instance_id, cancel=cancel)
         return True
     league_id = item.get('sportsLeagueId')
     if not league_id:
@@ -1065,7 +1073,8 @@ def _scan_sports(item):
         )
     ).scalars().all()
     for event_id in rows:
-        store_subtitles_sports(event_id, arr_instance_id)
+        check_cancelled(cancel)
+        store_subtitles_sports(event_id, arr_instance_id, cancel=cancel)
     return bool(rows)
 
 
@@ -1205,7 +1214,7 @@ def _process_media_action(items, action, job_id):
                     else:
                         movies_scan_subtitles(radarr_id, arr_instance_id=arr_instance_id)
                 elif item_type in ('sports', 'sportsLeague'):
-                    scanned = _scan_sports(item)
+                    scanned = _scan_sports(item, job_id)
                     if not scanned:
                         skipped += 1
                         continue

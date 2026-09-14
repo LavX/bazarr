@@ -2,6 +2,7 @@
 
 import os
 import logging
+from contextlib import nullcontext
 from media_servers.events import publication_callback
 
 from subliminal.subtitle import SUBTITLE_EXTENSIONS
@@ -45,7 +46,7 @@ def _delete_subtitle_file(media_path, subtitle_path, on_publish=None):
 
 def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_path, sonarr_series_id=None,
                      sonarr_episode_id=None, radarr_id=None, arr_instance_id=None,
-                     sports_event_id=None):
+                     sports_event_id=None, publication_guard=None):
     if not subtitles_path:
         logging.error('No subtitles to delete.')
         return False
@@ -115,8 +116,17 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
         from sportarr.history import sports_history_log
         from subtitles.indexer.sports import store_subtitles_sports
 
-        removed = _delete_subtitle_file(media_path, pr(subtitles_path),
-                                        publication_callback(media_type, media_path, 'delete', arr_instance_id))
+        # The owned boundary around the unlink itself, when the caller supplied
+        # one: it locks the event row and revalidates the recording signature
+        # either side of the removal, so a reconciliation that reassigns the
+        # recording between the caller's ownership check and this unlink cannot
+        # take another event's subtitle with it. Only the removal is inside it;
+        # the reindex and history below open their own sports transaction and
+        # would nest a nowait row lock inside this one.
+        with (publication_guard() if publication_guard is not None else nullcontext()):
+            removed = _delete_subtitle_file(media_path, pr(subtitles_path),
+                                            publication_callback(media_type, media_path, 'delete',
+                                                                 arr_instance_id))
         if not removed:
             store_subtitles_sports(sports_event_id, arr_instance_id)
             return False

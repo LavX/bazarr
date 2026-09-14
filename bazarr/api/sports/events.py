@@ -99,7 +99,7 @@ class SportsEventSubtitles(Resource):
         Lives on the resource that already owns this path rather than a second
         Resource registered over it, which would shadow the index POST above.
         """
-        from sportarr.identity import resolve_event_in_session
+        from sportarr.subtitles import sports_manual_operation
         from subtitles.tools.delete import delete_subtitles
 
         try:
@@ -109,51 +109,64 @@ class SportsEventSubtitles(Resource):
             if not language or not path:
                 return {'message': 'language and path are required'}, 400
 
-            context = resolve_event_in_session(database, event_id, owner)
+            # The same owned boundary the upload, edit and promote routes use.
+            # It pins the recording's signature here and hands down a guard that
+            # locks the event row and revalidates around the unlink, so a
+            # reconciliation that reassigns the recording between these checks
+            # and the removal cannot make this request delete the subtitle of
+            # whichever event has adopted it.
+            with sports_manual_operation(event_id, owner) as operation:
+                context, _validate, guard, _video = operation
 
-            # Containment, the same guard the shared toolbox endpoint applies
-            # (#GHSA). Without it the only check on a caller-supplied path was
-            # its file extension, so an authenticated request could name any
-            # subtitle Bazarr can reach, including one belonging to a different
-            # media item, and have it removed. The mapped path is what gets
-            # deleted, so the mapped path is what has to be contained.
-            mapped_subtitle = path_mappings.path_replace_instance(
-                path, context.arr_instance_id, 'sports')
-            if not subtitle_path_within_area(
-                mapped_subtitle,
-                context.mapped_path,
-                subfolder_mode=settings.general.subfolder,
-                custom_subfolder=settings.general.subfolder_custom,
-            ):
-                return {'message': 'Subtitle path is outside the media library.'}, 403
+                # Containment, the same guard the shared toolbox endpoint
+                # applies (#GHSA). Without it the only check on a
+                # caller-supplied path was its file extension, so an
+                # authenticated request could name any subtitle Bazarr can
+                # reach, including one belonging to a different media item, and
+                # have it removed. The mapped path is what gets deleted, so the
+                # mapped path is what has to be contained.
+                mapped_subtitle = path_mappings.path_replace_instance(
+                    path, context.arr_instance_id, 'sports')
+                if not subtitle_path_within_area(
+                    mapped_subtitle,
+                    context.mapped_path,
+                    subfolder_mode=settings.general.subfolder,
+                    custom_subfolder=settings.general.subfolder_custom,
+                ):
+                    return {'message': 'Subtitle path is outside the media library.'}, 403
 
-            # Containment alone answers "is this inside the library", not "is
-            # this THIS event's subtitle". Sports recordings share a directory
-            # routinely, and a custom subtitle folder is one absolute directory
-            # for everything, so a sibling event's subtitle passed the check
-            # above and was deleted with the history written against the event
-            # in the URL. The event's own index is the list the UI offers, so a
-            # path outside it is either stale or not this event's to remove.
-            if not _indexed_subtitle(context, path, mapped_subtitle):
-                return {'message': 'Subtitle does not belong to this sports event.'}, 403
+                # Containment alone answers "is this inside the library", not
+                # "is this THIS event's subtitle". Sports recordings share a
+                # directory routinely, and a custom subtitle folder is one
+                # absolute directory for everything, so a sibling event's
+                # subtitle passed the check above and was deleted with the
+                # history written against the event in the URL. The event's own
+                # index is the list the UI offers, so a path outside it is
+                # either stale or not this event's to remove.
+                if not _indexed_subtitle(context, path, mapped_subtitle):
+                    return {'message': 'Subtitle does not belong to this sports event.'}, 403
 
-            removed = delete_subtitles(
-                media_type='sports',
-                language=language,
-                forced=body.get('forced', False),
-                hi=body.get('hi', False),
-                media_path=context.mapped_path,
-                subtitles_path=path,
-                arr_instance_id=context.arr_instance_id,
-                sports_event_id=context.event_id,
-            )
+                removed = delete_subtitles(
+                    media_type='sports',
+                    language=language,
+                    forced=body.get('forced', False),
+                    hi=body.get('hi', False),
+                    media_path=context.mapped_path,
+                    subtitles_path=path,
+                    arr_instance_id=context.arr_instance_id,
+                    sports_event_id=context.event_id,
+                    publication_guard=guard,
+                )
             if not removed:
                 return {'message': 'Could not delete this subtitle.'}, 409
             return '', 204
         except SportsNotFound as exc:
             return {'message': str(exc)}, 404
         except ValueError as exc:
-            return {'message': str(exc)}, 400
+            # Anything that refuses mid-deletion refuses because the event or
+            # its recording moved underneath the request, which is a conflict
+            # rather than a malformed request.
+            return {'message': str(exc)}, 409
 
 
 @api_ns_sports_events.route('/sports/rootfolders')

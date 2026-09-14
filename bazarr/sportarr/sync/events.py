@@ -144,9 +144,16 @@ def sync_one_league(league_id, arr_instance_id, job_id=None, *, cancel=None):
     The jobs queue injects job_id into every job's kwargs, and sync_events does
     not take one, so queueing it directly raised TypeError the moment the job
     ran: the request returned 202 and the sync never happened. Mirrors
-    update_sports_for_instance, which accepts and ignores job_id for the same
-    reason.
+    update_sports_for_instance.
+
+    That job_id is also the only handle the Tasks page has on this sync, so it
+    becomes the cancellation signal when the caller supplied none: without it
+    stopping the task marked the job cancelled and the league went on syncing.
     """
+    from sportarr.workflows import SportsJobSignal
+
+    if cancel is None and job_id:
+        cancel = SportsJobSignal(arr_instance_id, job_id)
     return sync_events(league_id, arr_instance_id, cancel=cancel)
 
 
