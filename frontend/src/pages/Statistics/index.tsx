@@ -2,6 +2,7 @@ import { FunctionComponent, useState } from "react";
 import { Container, Tabs } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import {
+  faChartColumn,
   faChartLine,
   faLanguage,
   faListCheck,
@@ -12,12 +13,14 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useDistSettings } from "@/apis/hooks";
 import { useInstanceName } from "@/apis/hooks/site";
 import DistributionHubOverview from "@/pages/DistributionHub/OverviewPanel";
+import ActivityPanel from "./ActivityPanel";
 import OverviewPanel from "./OverviewPanel";
 import ProvidersPanel from "./ProvidersPanel";
 import TasksPanel from "./TasksPanel";
 import TranslatorPanel from "./TranslatorPanel";
 
 type TabKey =
+  | "activity"
   | "overview"
   | "providers"
   | "tasks"
@@ -25,7 +28,7 @@ type TabKey =
   | "translator";
 
 const StatisticsView: FunctionComponent = () => {
-  const [tab, setTab] = useState<TabKey>("overview");
+  const [tab, setTab] = useState<TabKey>("activity");
   const { data: distSettings } = useDistSettings();
 
   useDocumentTitle(`Statistics - ${useInstanceName()}`);
@@ -43,6 +46,12 @@ const StatisticsView: FunctionComponent = () => {
         keepMounted={false}
       >
         <Tabs.List>
+          <Tabs.Tab
+            value="activity"
+            leftSection={<FontAwesomeIcon icon={faChartColumn} />}
+          >
+            Activity
+          </Tabs.Tab>
           <Tabs.Tab
             value="overview"
             leftSection={<FontAwesomeIcon icon={faChartLine} />}
@@ -77,6 +86,9 @@ const StatisticsView: FunctionComponent = () => {
           </Tabs.Tab>
         </Tabs.List>
 
+        <Tabs.Panel value="activity" pt="md">
+          <ActivityPanel />
+        </Tabs.Panel>
         <Tabs.Panel value="overview" pt="md">
           <OverviewPanel />
         </Tabs.Panel>

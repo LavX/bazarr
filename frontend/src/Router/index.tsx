@@ -58,9 +58,6 @@ import Redirector from "./Redirector";
 import { RouterNames } from "./RouterNames";
 import { CustomRouteObject } from "./type";
 
-const HistoryStats = lazy(
-  () => import("@/pages/History/Statistics/HistoryStats"),
-);
 const StatisticsView = lazy(() => import("@/pages/Statistics"));
 const SystemStatusView = lazy(() => import("@/pages/System/Status"));
 const SubtitleEditor = lazy(() => import("@/pages/SubtitleEditor"));
@@ -139,15 +136,6 @@ function useRoutes(): CustomRouteObject[] {
                 name: "Movies",
                 hidden: !radarr,
                 element: <MoviesHistoryView></MoviesHistoryView>,
-              },
-              {
-                path: "stats",
-                name: "Statistics",
-                element: (
-                  <Lazy>
-                    <HistoryStats></HistoryStats>
-                  </Lazy>
-                ),
               },
             ],
           },

@@ -39,6 +39,10 @@ const mock = (opts: { distEnabled?: boolean } = {}) => {
     http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
     http.get("/api/system/tasks", () => HttpResponse.json({ data: [] })),
     http.get("/api/providers", () => HttpResponse.json({ data: [] })),
+    http.get("/api/history/stats", () =>
+      HttpResponse.json({ series: [], movies: [] }),
+    ),
+    http.get("/api/system/languages", () => HttpResponse.json([])),
     http.get("/api/provider-hub/providers", () =>
       HttpResponse.json({ data: [] }),
     ),
@@ -74,12 +78,16 @@ const mock = (opts: { distEnabled?: boolean } = {}) => {
 describe("Statistics page", () => {
   beforeEach(() => mock());
 
-  it("opens on the overview tab", async () => {
+  it("opens on the activity tab, so downloads over time is the landing view", async () => {
     customRender(<StatisticsView />);
 
     expect(
-      await screen.findByRole("tab", { name: /overview/i }),
+      await screen.findByRole("tab", { name: /activity/i }),
     ).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: /overview/i })).toHaveAttribute(
+      "aria-selected",
+      "false",
+    );
   });
 
   it("shows a tab for each available section", async () => {
