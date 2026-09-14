@@ -261,7 +261,14 @@ class ArrInstanceRepository:
         return row
 
     def delete(self, instance_id):
-        """Delete an instance. Refuse while it still owns any rows."""
+        """Delete an instance.
+
+        A sportarr instance is deleted outright: its leagues, events, history
+        and blacklist are its own metadata and go with it through the foreign
+        key cascade, and no media file is touched. Every other kind refuses
+        while it still owns rows, because those rows are media the user would
+        lose the ownership of rather than metadata about a server.
+        """
         row = self.get(instance_id)
         if row is None:
             return False
@@ -297,19 +304,37 @@ class ArrInstanceRepository:
         return True
 
     def _refresh_ownership_triggers(self):
-        """Match the ownership triggers to whether Sportarr exists at all.
+        """Install or drop the ownership triggers when Sportarr appears or goes.
 
         The triggers tax every write to table_episodes and table_movies, so
-        install_ownership_revision only installs them for an install that has a
-        Sportarr instance. Startup alone is too late to decide: the first
-        instance is created from a running process, and the publication
-        boundary refuses to run without them. Never raises, because failing
-        here would turn a successful create or delete into an error, and the
-        next startup reinstalls.
+        they exist only for an install that has a Sportarr instance. Startup
+        alone cannot decide that: the first instance is created from a running
+        process. The publication boundary can install them itself when it finds
+        none, so this is not the only path and does not have to succeed; doing
+        it here keeps the DDL out of a publication.
+
+        Only on a transition. install_ownership_revision is a full rebuild: it
+        bumps the revision, clears the change log and drops and recreates every
+        trigger, so running it for a second or third instance would throw away
+        a valid incremental snapshot and, on PostgreSQL, take ACCESS EXCLUSIVE
+        on the two busiest tables from a request thread for no change at all.
+
+        In a SAVEPOINT, because the engine is AUTOCOMMIT and the rebuild is a
+        dozen statements: without one, a failure partway leaves triggers
+        dropped and not recreated, and the boundary refuses a partial set
+        rather than repairing it, which would strand every sports publication
+        until the next restart. Never raises, because a failed refresh must not
+        turn a successful create or delete into an error, and the boundary or
+        the next startup installs what this did not.
         """
-        from app.ownership_revision import install_ownership_revision
+        from app.ownership_revision import (install_ownership_revision, ownership_triggers_present,
+                                            sportarr_in_use)
         try:
-            install_ownership_revision(self._session.connection())
+            connection = self._session.connection()
+            if sportarr_in_use(connection) == ownership_triggers_present(self._session):
+                return
+            with self._session.begin_nested():
+                install_ownership_revision(self._session.connection())
         except Exception:
             logging.exception('BAZARR could not refresh the subtitle ownership triggers')
 

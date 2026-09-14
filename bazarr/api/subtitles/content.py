@@ -1410,17 +1410,26 @@ def _create_subtitle_guarded(media_type, media_id, arr_instance_id=None, sports_
             return 'No space left on device', 507
         raise
 
-    # Force re-scan subtitles from disk using the media (video) path
-    if media_type == 'episode':
-        store_subtitles(row.path, video_path, use_cache=False, arr_instance_id=arr_instance_id)
-        event_stream(type='episode', payload=row.id)
-    elif media_type == 'sports':
-        from subtitles.indexer.sports import store_subtitles_sports
-        store_subtitles_sports(row.id, arr_instance_id)
-        event_stream(type='sports', action='update', payload=row.id)
-    else:
-        store_subtitles_movie(row.path, video_path, use_cache=False, arr_instance_id=arr_instance_id)
-        event_stream(type='movie', payload=row.id)
+    # Force re-scan subtitles from disk using the media (video) path. Best
+    # effort, for the reason the editor write and the promotion state: the file
+    # is created and published by here, and the sports indexer raises a bare
+    # OSError on a probe failure or its analysis timeout, which would answer
+    # 500 for a creation that succeeded and leave the retry to answer 409
+    # against the file this request just wrote.
+    try:
+        if media_type == 'episode':
+            store_subtitles(row.path, video_path, use_cache=False, arr_instance_id=arr_instance_id)
+            event_stream(type='episode', payload=row.id)
+        elif media_type == 'sports':
+            from subtitles.indexer.sports import store_subtitles_sports
+            store_subtitles_sports(row.id, arr_instance_id)
+            event_stream(type='sports', action='update', payload=row.id)
+        else:
+            store_subtitles_movie(row.path, video_path, use_cache=False, arr_instance_id=arr_instance_id)
+            event_stream(type='movie', payload=row.id)
+    except Exception:
+        logging.exception('BAZARR could not reindex %s %s after creating its subtitle',
+                          media_type, row.id)
 
     # Build language with modifiers
     language_with_modifiers = language

@@ -1464,10 +1464,13 @@ def test_indexing_retires_a_release_type_mismatch_that_is_no_longer_missing(
     indexed_library, monkeypatch
 ):
     """series and movies both prune here, with the same reasoning: every way a
-    subtitle can arrive ends at the indexer. Sports mismatches are written by
-    the automatic search and read by the sports Wanted page, and nothing else
-    cleared them, so a resolved one badged the event forever and the reporter
-    then deduped a genuinely new mismatch away.
+    subtitle can arrive ends at the indexer.
+
+    The manual save and upload paths clear their own language separately,
+    through clear_mismatch_after_manual_save, and that overlap is deliberate.
+    What had no cover was every OTHER arrival: a scan, a sync, a translation or
+    a file dropped next to the recording, after which a resolved mismatch
+    badged the event forever and the reporter deduped a genuinely new one away.
     """
     from app.database import TableReleaseTypeMismatch, select
     from subtitles import mismatch

@@ -78,20 +78,29 @@ def sportarr_in_use(connection):
     """Whether any Sportarr instance exists, enabled or not.
 
     Enabled is deliberately not part of it: an instance that is switched off
-    for an evening still owns rows whose ownership must stay tracked, and
-    reinstalling the triggers on every toggle would churn the snapshot
-    generation for nothing.
+    for an evening still owns rows whose ownership has to stay tracked, and
+    switching it back on must not be the moment the tracking starts, because
+    everything written while it was off would then be missing from the change
+    log with nothing to say so.
+
+    Raises rather than answering False on a database fault. False is not a
+    safe default here: the caller drops every trigger for it, so a transient
+    error on this one statement would silently strip ownership tracking from an
+    install that does have Sportarr.
     """
-    try:
-        return bool(connection.execute(
-            text("SELECT 1 FROM arr_instances WHERE kind = 'sportarr' LIMIT 1")).first())
-    except SQLAlchemyError:
-        return False
+    return bool(connection.execute(
+        text("SELECT 1 FROM arr_instances WHERE kind = 'sportarr' LIMIT 1")).first())
 
 
 def install_ownership_revision(connection):
     if not set(OWNER_TABLES) <= set(inspect(connection).get_table_names()):
         return
+    # Asked before anything is written. The answer decides whether the triggers
+    # below are created or dropped, and the DROPs are unconditional, so a fault
+    # here must leave the schema exactly as it found it rather than take the
+    # triggers with it. It is also the first statement, so on PostgreSQL a
+    # failure cannot abort a transaction this function has already written to.
+    wanted = sportarr_in_use(connection)
     connection.execute(text("CREATE TABLE IF NOT EXISTS subtitle_ownership_revision (id INTEGER PRIMARY KEY, revision BIGINT NOT NULL)"))
     connection.execute(text("INSERT INTO subtitle_ownership_revision (id, revision) VALUES (1, 0) ON CONFLICT (id) DO NOTHING"))
     connection.execute(text("CREATE TABLE IF NOT EXISTS subtitle_ownership_changes (table_name VARCHAR(64) NOT NULL, row_id BIGINT NOT NULL, revision BIGINT NOT NULL, PRIMARY KEY (table_name, row_id))"))
@@ -108,7 +117,6 @@ def install_ownership_revision(connection):
     # Sportarr instance does not pay it. The tables above are still created:
     # they cost nothing, and ownership_revision() reads the counter whether or
     # not anything advances it.
-    wanted = sportarr_in_use(connection)
     if connection.dialect.name == 'postgresql':
         for function, body in [('advance_subtitle_ownership_revision', ROW_FUNCTION),
                                ('truncate_subtitle_ownership_revision', TRUNCATE_FUNCTION)]:

@@ -90,19 +90,20 @@ def forget_league_event_mismatches(session, owner, league_ids):
 
     In its own SAVEPOINT, and never raises: this shares a transaction with the
     delete that follows, and on PostgreSQL a failed statement would abort it.
+    The savepoint covers the lookups as well as the delete, because a swallowed
+    failure in either leaves that transaction just as aborted.
     """
+    from app.database import TableSportsEvents
+    from subtitles.mismatch import forget_media
     try:
-        from app.database import TableSportsEvents
-        from subtitles.mismatch import forget_media
-        event_ids = []
-        for batch in in_chunks(list(league_ids)):
-            event_ids.extend(session.execute(select(TableSportsEvents.id).where(
-                TableSportsEvents.arr_instance_id == owner,
-                TableSportsEvents.league_id.in_(batch))).scalars().all())
-        if not event_ids:
-            return
         with session.begin_nested():
-            forget_media(session, 'sports', event_ids)
+            event_ids = []
+            for batch in in_chunks(list(league_ids)):
+                event_ids.extend(session.execute(select(TableSportsEvents.id).where(
+                    TableSportsEvents.arr_instance_id == owner,
+                    TableSportsEvents.league_id.in_(batch))).scalars().all())
+            if event_ids:
+                forget_media(session, 'sports', event_ids)
     except Exception:
         logging.exception('BAZARR could not forget the pruned sports leagues mismatches')
 

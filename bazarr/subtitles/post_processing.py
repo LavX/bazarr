@@ -45,8 +45,9 @@ def postprocessing(command, path, subtitle_path=None, *, lock_paths=None,
     # Configured commands can mutate subtitles in place. This is the one boundary
     # that must hold this media's mutation locks while the external command runs:
     # the command is pointed at the published subtitle itself, so nothing else
-    # stands between it and another writer. The guarded branch above stages into
-    # a private file and therefore does not need them, and must not take them.
+    # stands between it and another writer. The guarded branch above takes the
+    # same locks for its copy, but releases them before the command, because
+    # there the command only rewrites a staging file.
     if lock_paths is None:
         destination = os.path.join(get_target_folder(path, create=False) or os.path.dirname(path), '.destination')
         lock_paths = (path, destination, subtitle_path or path)

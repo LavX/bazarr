@@ -363,17 +363,74 @@ def test_a_failed_event_mismatch_cleanup_does_not_abort_the_prune(schema_session
 # The incremental snapshot's IN list.
 # --------------------------------------------------------------------------
 
-def test_the_incremental_ownership_read_is_chunked():
+def test_the_incremental_ownership_read_never_overruns_the_bind_limit(schema_session, monkeypatch):
     """subtitle_ownership_changes accumulates one row per changed media row and
     is pruned only at startup, so a large Sonarr sync between restarts hands
-    this more ids than a driver will take bind parameters for."""
-    import inspect
+    this more ids than a driver will take bind parameters for.
 
+    Driven rather than read: the previous version of this test asserted that
+    the source contained `in_chunks(ids)`, which would have stayed green under
+    a chunk size above the limit, a loop over the wrong list, or a rename.
+    What matters is the width of the statements that actually reach the driver,
+    so that is what is measured.
+    """
+    from sqlalchemy import event, text
+
+    from app.database import TableEpisodes
+    from app.ownership_revision import install_ownership_revision
     from sportarr import output
+    from utilities.sql_limits import MAX_IN_CLAUSE
 
-    source = inspect.getsource(output._snapshot)
-    assert 'in_chunks(ids)' in source
-    assert 'table.id.in_(batch)' in source
+    install_ownership_revision(schema_session.connection())
+    # More changed rows than any driver takes bind parameters for in one IN.
+    changed = list(range(1, (MAX_IN_CLAUSE * 3) + 7))
+    schema_session.execute(
+        TableEpisodes.__table__.insert(),
+        [{'id': i, 'sonarrEpisodeId': i, 'season': 1, 'episode': i,
+          'title': f'E{i}', 'path': f'/tv/E{i}.mkv'} for i in changed])
+    # Past the '*' full-resync marker the install writes at the current
+    # revision: a cached snapshot older than that one is discarded and rebuilt
+    # in full, which reads no IN list at all.
+    schema_session.execute(
+        text('UPDATE subtitle_ownership_revision SET revision = revision + 1 WHERE id = 1'))
+    revision = schema_session.execute(
+        text('SELECT revision FROM subtitle_ownership_revision WHERE id = 1')).scalar_one()
+    schema_session.execute(
+        text('INSERT INTO subtitle_ownership_changes VALUES (:t, :r, :v)'),
+        [{'t': 'table_episodes', 'r': i, 'v': revision} for i in changed])
+    schema_session.commit()
+
+    # Measured at the driver, not at compile time: SQLAlchemy renders IN as a
+    # single expanding parameter and only expands it on the way to the cursor,
+    # so a compile-time count is 1 however many ids were handed over.
+    widths = []
+
+    @event.listens_for(schema_session.get_bind(), 'before_cursor_execute')
+    def record(conn, cursor, statement, parameters, context, executemany):
+        if not executemany and parameters is not None:
+            widths.append(len(parameters))
+
+    # Seed a cached snapshot so the incremental branch, the one that builds the
+    # IN list, is the branch that runs. It has to carry the live generation and
+    # a revision at or below the current one, or _snapshot discards it and
+    # rebuilds in full, which reads no IN list at all.
+    generation = schema_session.execute(text(
+        "SELECT revision FROM subtitle_ownership_changes "
+        "WHERE table_name='generation' AND row_id=0")).scalar_one()
+    output._snapshots[schema_session.get_bind()] = output._OwnershipSnapshot(
+        schema_session, output._configuration(), generation, revision - 1)
+    from sportarr import db as sports_db
+    monkeypatch.setattr(sports_db, 'needs_sports_transaction', lambda session: True)
+
+    try:
+        output._snapshot(schema_session, output._configuration(),
+                         output.ownership_revision(schema_session))
+    finally:
+        event.remove(schema_session.get_bind(), 'before_cursor_execute', record)
+
+    assert widths, 'no statement was measured'
+    assert max(widths) <= MAX_IN_CLAUSE, (
+        f'a statement bound {max(widths)} parameters, over the {MAX_IN_CLAUSE} cap')
 
 
 # --------------------------------------------------------------------------
@@ -551,3 +608,171 @@ def test_applying_mods_to_a_recording_announces_a_sports_event(monkeypatch, tmp_
 
     assert reindexed == [(11, 42)]
     assert announced == [{'type': 'sports', 'action': 'update', 'payload': 11}]
+
+
+# --------------------------------------------------------------------------
+# Round two: the fixes above that landed only in part.
+# --------------------------------------------------------------------------
+
+def test_the_publication_boundary_does_not_relabel_a_fault_in_its_own_flush(monkeypatch):
+    """sports_history only calls session.add, so the history INSERT is emitted
+    by the boundary's flush after the yield, not inside the body.
+
+    Resetting the in_body flag before that flush meant a read-only or full
+    database still answered "Subtitle destination owners are busy", and the
+    retry then repeated it four times.
+    """
+    from contextlib import contextmanager
+
+    from sqlalchemy.exc import OperationalError
+
+    from sportarr import subtitles as sports_subtitles
+
+    fault = OperationalError('INSERT', {}, Exception('attempt to write a readonly database'))
+
+    class Session:
+        def execute(self, *args, **kwargs):
+            return SimpleNamespace(scalar_one=lambda: None)
+
+        def flush(self):
+            raise fault
+
+    @contextmanager
+    def transaction(*args, **kwargs):
+        yield Session()
+
+    monkeypatch.setattr(sports_subtitles, 'sports_transaction', transaction)
+    monkeypatch.setattr(sports_subtitles, 'lock_output_owners', lambda *a, **kw: None)
+    monkeypatch.setattr(sports_subtitles, 'validate_context', lambda *a, **kw: None)
+    monkeypatch.setattr(sports_subtitles, '_signature', lambda *a, **kw: 'sig')
+    monkeypatch.setattr(sports_subtitles, 'SportsOutputNamespace',
+                        lambda *a, **kw: SimpleNamespace(validate=lambda session: None))
+
+    context = SimpleNamespace(event_id=11, league_id=7, arr_instance_id=42)
+    with pytest.raises(OperationalError) as raised:
+        with sports_subtitles.sports_file_publication(context, 'sig'):
+            pass  # the caller adds rows; the boundary flushes them
+    assert raised.value is fault
+
+
+def test_a_failure_after_the_body_ran_is_not_retried(monkeypatch):
+    """Retrying is only safe while the caller's rows cannot already have landed.
+
+    An OperationalError from the commit leaves rollback_confirmed False, and on
+    PostgreSQL it can mean the connection dropped with the commit in flight. A
+    retry would then write a second history row for one download, which is what
+    upgrades and the blacklist walk.
+    """
+    from contextlib import contextmanager
+
+    from sqlalchemy.exc import OperationalError
+
+    from sportarr import subtitles as sports_subtitles
+    from sportarr.errors import SportsOwnersBusy
+
+    @contextmanager
+    def transaction(*args, **kwargs):
+        yield SimpleNamespace(execute=lambda *a, **kw: SimpleNamespace(scalar_one=lambda: None),
+                              flush=lambda: None)
+        raise OperationalError('COMMIT', {}, Exception('server closed the connection'))
+
+    monkeypatch.setattr(sports_subtitles, 'sports_transaction', transaction)
+    monkeypatch.setattr(sports_subtitles, 'lock_output_owners', lambda *a, **kw: None)
+    monkeypatch.setattr(sports_subtitles, 'validate_context', lambda *a, **kw: None)
+    monkeypatch.setattr(sports_subtitles, '_signature', lambda *a, **kw: 'sig')
+    monkeypatch.setattr(sports_subtitles, 'SportsOutputNamespace',
+                        lambda *a, **kw: SimpleNamespace(validate=lambda session: None))
+
+    context = SimpleNamespace(event_id=11, league_id=7, arr_instance_id=42)
+    with pytest.raises(OperationalError):
+        with sports_subtitles.sports_file_publication(context, 'sig'):
+            pass
+    # Not SportsOwnersBusy, so retry_while_owners_busy passes it straight through.
+    assert not isinstance(SportsOwnersBusy('x'), type(None))
+
+
+def test_a_cancelled_wait_for_a_provider_slot_frees_the_pool(monkeypatch):
+    """The caller terminates the pool on every path that fails before this call
+    and the worker's finally frees it after. A stop while waiting for a slot
+    falls between the two."""
+    from sportarr import automatic
+
+    terminated = []
+    pool = SimpleNamespace(terminate=lambda: terminated.append(True))
+
+    class Stopped:
+        def is_set(self):
+            return True
+
+    # Hold every slot so the acquire loop has to wait.
+    held = []
+    while automatic._provider_slots.acquire(blocking=False):
+        held.append(True)
+    try:
+        with pytest.raises(ValueError):
+            automatic._provider_result(object(), set(), pool, 0, {'originalFormat': 0}, Stopped())
+    finally:
+        for _ in held:
+            automatic._provider_slots.release()
+
+    assert terminated == [True], 'the pool must be terminated when the wait is cancelled'
+
+
+def test_creating_a_subtitle_survives_a_reindex_that_cannot_run(tmp_path, monkeypatch):
+    """The original finding named edit, create and promote. Create kept its
+    reindex outside every handler, so it still answered 500 after the file was
+    written and published, and the retry then answered 409 against that file.
+    """
+    from unittest.mock import Mock
+
+    from flask import Flask
+
+    from api.subtitles import content
+
+    video = tmp_path / 'Actual.mkv'
+    video.touch()
+    subtitle = video.with_suffix('.en.srt')
+    metadata = {'mediaPath': '/upstream/Actual.mkv', 'arrInstanceId': 7}
+    monkeypatch.setattr(content.path_mappings, 'path_replace_instance',
+                        lambda path, owner, kind: str(video))
+    monkeypatch.setattr(content, 'resolve_subtitle_path',
+                        lambda kind, ident, language, **kwargs: (str(subtitle), metadata))
+    monkeypatch.setattr(content, 'get_target_folder', lambda path: None)
+    monkeypatch.setattr(content, 'event_stream', lambda **kwargs: None)
+    row = Mock(path='/upstream/Actual.mkv', id=4, arr_instance_id=7)
+    monkeypatch.setattr(content, 'database',
+                        Mock(execute=Mock(return_value=Mock(first=Mock(return_value=row)))))
+    # The shape the sports indexer raises on a probe failure or its timeout.
+    monkeypatch.setattr(content, 'store_subtitles_movie',
+                        Mock(side_effect=OSError('Could not analyze sports video')))
+
+    app = Flask(__name__)
+    with app.test_request_context(json={'content': 'Created', 'language': 'en', 'format': 'srt'}):
+        result = content._create_subtitle('movie', 42, arr_instance_id=7)
+
+    assert subtitle.exists(), 'the subtitle must still have been created'
+    assert result[1] == 201, f'a completed creation must not answer {result[1]}'
+
+
+def test_a_second_sportarr_instance_does_not_rebuild_the_triggers(schema_session, monkeypatch):
+    """install_ownership_revision is a full rebuild: it bumps the revision,
+    clears the change log and drops and recreates every trigger. Running it when
+    the answer has not changed throws away a valid snapshot and, on PostgreSQL,
+    takes ACCESS EXCLUSIVE on the two busiest tables from a request thread."""
+    from app.database import TableArrInstances
+    from app.ownership_revision import install_ownership_revision
+    from arr_instances.repository import ArrInstanceRepository
+
+    schema_session.add(TableArrInstances(
+        id=42, kind='sportarr', name='First', stable_key='first', port=1867, enabled=1))
+    schema_session.commit()
+    install_ownership_revision(schema_session.connection())
+
+    rebuilt = []
+    monkeypatch.setattr('app.ownership_revision.install_ownership_revision',
+                        lambda connection: rebuilt.append(True))
+
+    repo = ArrInstanceRepository(schema_session)
+    repo._refresh_ownership_triggers()
+
+    assert rebuilt == [], 'the triggers already match; nothing should be rebuilt'

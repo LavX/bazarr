@@ -274,7 +274,11 @@ def store_subtitles_sports(event_id, arr_instance_id=None, *, use_cache=None, ow
     # Every way a subtitle can arrive ends here, exactly as it does for series
     # and movies, which is what makes this the right place to retire a
     # release-type mismatch. Sports mismatches are written by the automatic
-    # search and read by the sports Wanted page, and nothing else clears them.
+    # search and read by the sports Wanted page. The manual save and upload
+    # paths clear their own language through clear_mismatch_after_manual_save,
+    # deliberately: that one does not depend on the indexer being reached or on
+    # profile state. This is the safety net under every other arrival, not a
+    # replacement for it, and the overlap is intended.
     # Outside the publication transaction, the way the sibling indexers run it:
     # this never raises, and a failed statement inside would abort the commit
     # that just recorded the index.

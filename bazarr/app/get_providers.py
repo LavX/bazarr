@@ -555,11 +555,19 @@ def _handle_mgb(name, exception, ids, language, sports_context=None):
         # The remaining null-id case is an episode or movie whose database
         # refiner did not resolve, which is routine on an instance with its own
         # path mappings because the refiner looks the row up through the GLOBAL
-        # reverse mapping. The row it writes is unattributed and shows as a junk
-        # entry on the Excluded page, but get_blacklist() reads (provider,
-        # subs_id) with no media scoping, so it does suppress the bad release
-        # everywhere. Dropping it instead left the corrupt subtitle to be
-        # re-downloaded and re-rejected forever.
+        # reverse mapping. get_blacklist() reads (provider, subs_id) with no
+        # media scoping, so the row does suppress the bad release everywhere,
+        # and dropping it left the corrupt subtitle to be re-downloaded and
+        # re-rejected forever.
+        #
+        # Know what the row costs, because it is not a visible junk entry. Both
+        # Excluded pages inner-join the local ids this row leaves NULL, so it
+        # never lists, and blacklist_delete refuses an unscoped delete once a
+        # NULL-owner row coexists with an owned one. The exclusion is therefore
+        # global and reachable only by Remove All. That is the behaviour
+        # development has always had; it is recorded here so the next reader
+        # weighing "tidy the Excluded page" against "stop re-downloading a
+        # subtitle the provider rejected" knows which way the trade runs.
         if exception.media_type == "series":
             if not (ids.get('sonarrSeriesId') and ids.get('sonarrEpisodeId')):
                 logging.warning(

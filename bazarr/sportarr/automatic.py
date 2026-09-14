@@ -73,8 +73,17 @@ def _provider_result(video, languages, pool, minimum, profile, cancel, candidate
     os.environ["SZ_KEEP_ENCODING"] = "" if settings.general.utf8_encode else "True"
 
     # Providers finish under their own timeout; abandoned results cannot publish.
-    while not _provider_slots.acquire(timeout=0.1):
-        check_cancelled(cancel)
+    # The pool belongs to this function from here on: the caller terminates it
+    # on every path that fails BEFORE this call, and the worker's finally frees
+    # it after. A cancellation raised while waiting for a slot falls between the
+    # two, and left the pool and its logged-in provider sessions resident for
+    # the life of the process.
+    try:
+        while not _provider_slots.acquire(timeout=0.1):
+            check_cancelled(cancel)
+    except BaseException:
+        pool.terminate()
+        raise
     result = Queue(maxsize=1)
     started = False
     # Every candidate the search scores lands here, the rejected ones included.
