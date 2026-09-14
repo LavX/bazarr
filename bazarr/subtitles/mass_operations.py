@@ -1056,7 +1056,10 @@ def _scan_sports(item, job_id=None):
     arr_instance_id = item.get('arr_instance_id')
     if not arr_instance_id:
         return False
-    cancel = SportsJobSignal(arr_instance_id, job_id)
+    # Only with a job to answer to: the signal reads the owner's enabled state
+    # and reports progress against the job, and a direct call carrying neither
+    # has nothing to be cancelled by. The batch always supplies one.
+    cancel = SportsJobSignal(arr_instance_id, job_id) if job_id else None
     if item.get('type') == 'sports':
         event_id = item.get('sportsEventId')
         if not event_id:
