@@ -20,15 +20,15 @@ import TasksPanel from "./TasksPanel";
 import TranslatorPanel from "./TranslatorPanel";
 
 type TabKey =
-  | "activity"
   | "overview"
+  | "activity"
   | "providers"
   | "tasks"
   | "distribution"
   | "translator";
 
 const StatisticsView: FunctionComponent = () => {
-  const [tab, setTab] = useState<TabKey>("activity");
+  const [tab, setTab] = useState<TabKey>("overview");
   const { data: distSettings } = useDistSettings();
 
   useDocumentTitle(`Statistics - ${useInstanceName()}`);
@@ -47,16 +47,16 @@ const StatisticsView: FunctionComponent = () => {
       >
         <Tabs.List>
           <Tabs.Tab
-            value="activity"
-            leftSection={<FontAwesomeIcon icon={faChartColumn} />}
-          >
-            Activity
-          </Tabs.Tab>
-          <Tabs.Tab
             value="overview"
             leftSection={<FontAwesomeIcon icon={faChartLine} />}
           >
             Overview
+          </Tabs.Tab>
+          <Tabs.Tab
+            value="activity"
+            leftSection={<FontAwesomeIcon icon={faChartColumn} />}
+          >
+            Activity
           </Tabs.Tab>
           <Tabs.Tab
             value="providers"
@@ -86,11 +86,11 @@ const StatisticsView: FunctionComponent = () => {
           </Tabs.Tab>
         </Tabs.List>
 
-        <Tabs.Panel value="activity" pt="md">
-          <ActivityPanel />
-        </Tabs.Panel>
         <Tabs.Panel value="overview" pt="md">
           <OverviewPanel />
+        </Tabs.Panel>
+        <Tabs.Panel value="activity" pt="md">
+          <ActivityPanel />
         </Tabs.Panel>
         <Tabs.Panel value="providers" pt="md">
           <ProvidersPanel />

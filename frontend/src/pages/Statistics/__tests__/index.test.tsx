@@ -78,16 +78,26 @@ const mock = (opts: { distEnabled?: boolean } = {}) => {
 describe("Statistics page", () => {
   beforeEach(() => mock());
 
-  it("opens on the activity tab, so downloads over time is the landing view", async () => {
+  it("opens on the overview tab", async () => {
     customRender(<StatisticsView />);
 
     expect(
-      await screen.findByRole("tab", { name: /activity/i }),
+      await screen.findByRole("tab", { name: /overview/i }),
     ).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("tab", { name: /overview/i })).toHaveAttribute(
+    expect(screen.getByRole("tab", { name: /activity/i })).toHaveAttribute(
       "aria-selected",
       "false",
     );
+  });
+
+  it("lists overview first, ahead of activity", async () => {
+    customRender(<StatisticsView />);
+
+    await screen.findByRole("tab", { name: /overview/i });
+    const order = screen
+      .getAllByRole("tab")
+      .map((t) => t.textContent?.trim() ?? "");
+    expect(order.slice(0, 2)).toEqual(["Overview", "Activity"]);
   });
 
   it("shows a tab for each available section", async () => {
