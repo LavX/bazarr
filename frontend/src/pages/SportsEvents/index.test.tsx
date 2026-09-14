@@ -276,6 +276,113 @@ describe("sports event detail", () => {
     },
   );
 
+  it("keeps the status icons in step with the badges under only-desired", async () => {
+    // The two columns are filtered by one rule between them: only an on-disk
+    // subtitle gets a status icon, and the only-desired filter only ever hides
+    // embedded tracks, never a file. An undesired file therefore keeps both its
+    // badge and its icon, and an undesired embedded track has neither, so the
+    // Status column cannot attribute one subtitle's sync state to another.
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: { use_sportarr: true, embedded_subs_show_desired: true },
+        }),
+      ),
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([sportarr]),
+      ),
+      http.get("/api/system/languages/profiles", () =>
+        HttpResponse.json([
+          {
+            profileId: 5,
+            name: "English only",
+            cutoff: null,
+            items: [
+              {
+                id: 0,
+                language: "en",
+                forced: "False",
+                hi: "False",
+                audio_exclude: "False",
+                audio_only_include: "False",
+                translate_from: null,
+              },
+            ],
+            mustContain: [],
+            mustNotContain: [],
+            originalFormat: false,
+            tag: "",
+            combine: null,
+          },
+        ]),
+      ),
+      http.get("/api/system/languages", () =>
+        HttpResponse.json([
+          { code2: "en", code3: "eng", name: "English", enabled: true },
+          { code2: "de", code3: "deu", name: "German", enabled: true },
+        ]),
+      ),
+      http.get("/api/sports/leagues/51", () =>
+        HttpResponse.json({
+          id: 51,
+          arr_instance_id: 42,
+          title: "League",
+          profileId: 5,
+        }),
+      ),
+      http.get("/api/sports/leagues/51/events", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: 61,
+              arr_instance_id: 42,
+              league_id: 51,
+              title: "Event",
+              path: "/sports/event.mkv",
+              hasFile: true,
+              profileId: 5,
+              // German first, and undesired: the order the misalignment would
+              // need. It is a file, so it stays in both columns.
+              subtitles: [
+                ["de", "/sports/event.de.srt", 40],
+                ["en", "/sports/event.en.srt", 40],
+                // Embedded and undesired: hidden from the badges, and it never
+                // had a status icon to begin with.
+                ["fr", null, null],
+              ],
+              missing_subtitles: [],
+              sync_status: {
+                de: {
+                  synced: true,
+                  confirmed: true,
+                  editedAfterSync: false,
+                  lastModified: 100,
+                  lastSyncTimestamp: "2026-09-01T00:00:00",
+                  jobStatus: null,
+                },
+                en: {
+                  synced: true,
+                  confirmed: true,
+                  editedAfterSync: false,
+                  lastModified: 100,
+                  lastSyncTimestamp: "2026-09-01T00:00:00",
+                  jobStatus: null,
+                },
+              },
+            },
+          ],
+          total: 1,
+        }),
+      ),
+    );
+    renderDetail();
+    const table = await screen.findByRole("table");
+    await within(table).findByText("en");
+    expect(within(table).getByText("de")).toBeInTheDocument();
+    expect(within(table).queryByText("fr")).toBeNull();
+    expect(await within(table).findAllByLabelText("Sync")).toHaveLength(2);
+  });
+
   it("renders an unmonitored event as unmonitored", async () => {
     server.use(
       http.get("/api/system/arr-instances", () =>

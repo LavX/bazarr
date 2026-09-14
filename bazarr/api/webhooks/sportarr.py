@@ -21,6 +21,7 @@ import logging
 
 from flask_restx import Resource, Namespace, fields
 
+from app.config import settings
 from app.database import TableSportsEvents, database, select
 from sportarr.connection import SportsSyncBusy
 from arr_instances.repository import ArrInstanceRepository
@@ -113,6 +114,14 @@ class WebHooksSportarr(Resource):
         args = api_ns_webhooks_sportarr.payload
         event_type = args.get("eventType")
         logging.debug("Received Sportarr webhook event: %s", event_type)
+
+        if not settings.general.use_sportarr:
+            # The scheduler and the SSE client both treat the master toggle as
+            # the shutdown boundary. An enabled instance row outlives that
+            # toggle, so without this an import hook still indexed the event and
+            # queued a provider search after the user turned Sportarr off.
+            logging.warning("Sportarr webhook ignored: Sportarr is disabled.")
+            return "Sportarr is disabled.", 200
 
         arr_instance_id, reason = _resolve_owner(stable_key)
         if arr_instance_id is None:

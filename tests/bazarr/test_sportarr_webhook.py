@@ -28,6 +28,9 @@ def webhook(schema_session, monkeypatch):
     schema_session.commit()
 
     monkeypatch.setattr(sportarr, 'database', schema_session)
+    # The hook is gated on the master toggle, like the scheduler and the SSE
+    # client. Every test below describes an install with Sportarr turned on.
+    monkeypatch.setattr(sportarr.settings.general, 'use_sportarr', True)
     calls = []
 
     class _Namespace:

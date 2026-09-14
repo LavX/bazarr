@@ -51,7 +51,17 @@ def check_health(job_id=None, wait_for_completion=False):
         from sportarr.rootfolder import sync_rootfolders
 
         for inst in repo.list('sportarr', enabled_only=True):
-            sync_rootfolders(inst.id)
+            # sync_rootfolders raises on an offline instance, a non-200 answer or
+            # a malformed root-folder payload, unlike the Sonarr and Radarr
+            # helpers above which absorb transport failures themselves. Left
+            # unguarded, one unreachable Sportarr aborted the whole health job:
+            # the remaining owners were never checked and the badge event and
+            # backup rotation below never ran, so the job had no terminal state.
+            try:
+                sync_rootfolders(inst.id)
+            except Exception:
+                logging.exception('BAZARR could not refresh the root folders of Sportarr instance %s',
+                                  inst.id)
     event_stream(type='badges')
 
     from .backup import backup_rotation

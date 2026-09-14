@@ -177,7 +177,19 @@ class SportsLeague(Resource):
             return {'message': str(exc)}, 404
         except ValueError as exc:
             return {'message': str(exc)}, 400
-        library.refresh_league_profiles([league_id], owner)
+        # Best-effort and queued, the same treatment the batch route gives this
+        # refresh. Walking a large league's events inline opened a transaction
+        # per event while the request was still held open, and assign_profile()
+        # has already committed by then, so a timeout or a refresh error
+        # reported a failed PATCH for a change that had taken effect. The
+        # refresh_id keeps a second assignment from being swallowed by the
+        # queue's kwargs deduplication while an older refresh is still running.
+        try:
+            _queue('refresh_league_profiles', {
+                'league_ids': [league_id], 'arr_instance_id': owner,
+                'refresh_id': uuid4().hex})
+        except Exception:
+            logging.exception('Could not queue sports profile refresh for league %s', league_id)
         # 204 carries no body, and every episode/movie/series equivalent
         # returns the empty string here.
         return '', 204

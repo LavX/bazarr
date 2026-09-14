@@ -73,8 +73,45 @@ def _profile_value(snapshot):
     return profile
 
 
+def _is_extraction_artifact(context, path):
+    """True for the server's own extraction of this event's embedded track.
+
+    Translating an embedded track has no sidecar to point at: the track is
+    extracted out of the container into ``<config_dir>/extracted_subs/`` first,
+    and that file is what both the subtitle toolbox and the batch runner hand
+    to manual_translation_operation. The sidecar rule below cannot describe it,
+    so every embedded sports translation was refused with "Sports subtitle
+    source does not belong to its event".
+
+    Verified rather than trusted: the artifact has to sit in that one directory
+    and carry the cache name an extraction of THIS event's video would be given,
+    recomputed here from the event's own mapped path. An arbitrary file dropped
+    in the directory, or another event's extraction, does not match.
+    """
+    from subtitles.tools.translate.batch import (extracted_subtitle_key,
+                                                 extracted_subtitles_dir)
+
+    if os.path.realpath(os.path.dirname(path)) != os.path.realpath(extracted_subtitles_dir()):
+        return False
+    return os.path.basename(path).startswith(extracted_subtitle_key(context.mapped_path) + ".")
+
+
 def _source_path(context, path):
     from utilities.helper import get_target_folder
+
+    # A symlink or anything that is not a regular file is refused whatever the
+    # directory: the checks below describe where a source may live, not what it
+    # may point at. A vanished source is refused the same way rather than
+    # raising OSError out of a validation the callers handle as ValueError.
+    try:
+        regular = stat.S_ISREG(os.stat(path, follow_symlinks=False).st_mode)
+    except OSError:
+        regular = False
+    if os.path.islink(path) or not regular:
+        raise ValueError("Sports subtitle source does not belong to its event")
+
+    if _is_extraction_artifact(context, path):
+        return
 
     roots = {
         os.path.realpath(os.path.dirname(context.mapped_path)),
@@ -85,10 +122,8 @@ def _source_path(context, path):
     }
     stem = os.path.splitext(os.path.basename(context.mapped_path))[0].lower()
     if (
-        os.path.islink(path)
-        or os.path.realpath(os.path.dirname(path)) not in roots
+        os.path.realpath(os.path.dirname(path)) not in roots
         or not os.path.basename(path).lower().startswith(stem + ".")
-        or not stat.S_ISREG(os.stat(path, follow_symlinks=False).st_mode)
     ):
         raise ValueError("Sports subtitle source does not belong to its event")
 

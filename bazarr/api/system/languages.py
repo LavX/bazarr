@@ -3,7 +3,8 @@
 from flask_restx import Resource, Namespace, reqparse
 from operator import itemgetter
 
-from app.database import TableHistory, TableHistoryMovie, TableSettingsLanguages, database, select
+from app.database import (TableHistory, TableHistoryMovie, TableHistorySports, TableSettingsLanguages,
+                          database, select)
 from languages.get_languages import alpha2_from_alpha3, language_from_alpha2, alpha3_from_alpha2
 
 from ..utils import authenticate, False_Keys
@@ -32,6 +33,15 @@ class Languages(Resource):
             languages += database.execute(
                 select(TableHistoryMovie.language)
                 .where(TableHistoryMovie.language.is_not(None)))\
+                .all()
+            # The statistics chart plots sports downloads alongside series and
+            # movies, and its language filter is built from this list. Without
+            # this arm a language that only ever appeared in sports history had
+            # no option to select, so that part of the chart could not be
+            # filtered at all.
+            languages += database.execute(
+                select(TableHistorySports.language)
+                .where(TableHistorySports.language.is_not(None)))\
                 .all()
             languages_list = [lang.language.split(':')[0] for lang in languages]
             languages_dicts = []
