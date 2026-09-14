@@ -1,6 +1,7 @@
 """Wanted, league and upgrade jobs with local event IDs and exact owners."""
 
 import ast
+import datetime
 import logging
 import time
 
@@ -287,6 +288,42 @@ def blacklist_sports_subtitle(history_id, arr_instance_id, job_id=None):
     return result
 
 
+def _latest_history_rows(session, rows):
+    """The newest history row id for each (owner, event, language) in ``rows``.
+
+    Recency is read the way upgrade_rows' ORDER BY does, including the corner
+    where a row carries no timestamp: PostgreSQL sorts NULLs first under DESC,
+    so such a row would be the one upgrade_rows sees and swallows. Treating it
+    as the newest here keeps the flag on the conservative side on both
+    backends, rather than promising an upgrade that would never run.
+    """
+    keys = {(row.arr_instance_id, row.event_id, row.language) for row in rows}
+    if not keys:
+        return {}
+    candidates = session.execute(
+        select(TableHistorySports.id, TableHistorySports.arr_instance_id,
+               TableHistorySports.event_id, TableHistorySports.language,
+               TableHistorySports.timestamp)
+        .where(TableHistorySports.arr_instance_id.in_({key[0] for key in keys}),
+               TableHistorySports.event_id.in_({key[1] for key in keys}))
+    ).all()
+
+    def recency(candidate):
+        return (candidate.timestamp is None,
+                candidate.timestamp or datetime.datetime.min,
+                candidate.id)
+
+    newest = {}
+    for candidate in candidates:
+        key = (candidate.arr_instance_id, candidate.event_id, candidate.language)
+        if key not in keys:
+            continue
+        current = newest.get(key)
+        if current is None or recency(candidate) > recency(current):
+            newest[key] = candidate
+    return {key: candidate.id for key, candidate in newest.items()}
+
+
 def upgradable_history_ids(session, history_ids):
     """The subset of ``history_ids`` the upgrade run would consider, cheaply.
 
@@ -314,8 +351,16 @@ def upgradable_history_ids(session, history_ids):
         .where(TableArrInstances.kind == "sportarr", TableArrInstances.enabled == 1,
                TableHistorySports.id.in_(list(history_ids)))
     ).scalars().all()
+    # Only the newest row of each (owner, event, language) can be upgraded:
+    # upgrade_rows() walks history newest-first and marks the tuple seen before
+    # it applies any eligibility filter, so it never reaches an older row.
+    # Flagging one anyway put an upgrade indicator on the Sports History page
+    # that the upgrade run would silently skip forever.
+    latest = _latest_history_rows(session, rows)
     upgradable = set()
     for row in rows:
+        if latest.get((row.arr_instance_id, row.event_id, row.language)) != row.id:
+            continue
         if (row.action not in actions
                 or not row.timestamp
                 or row.timestamp <= minimum_timestamp

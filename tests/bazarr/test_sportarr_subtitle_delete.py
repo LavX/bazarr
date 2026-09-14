@@ -25,6 +25,9 @@ def test_sports_deletion_finalizes_only_after_file_removal(indexed_library, monk
     from subtitles.tools import delete
 
     session, folder = indexed_library
+    # The route deletes what the event's own index lists, which is what the UI
+    # offers; the fixture indexes nothing on its own.
+    _index(session, 61, [['en:hi', '/sports/event.en.hi.srt', 42]])
     monkeypatch.setattr(events, 'database', session)
     monkeypatch.setattr(history, 'database', session)
     monkeypatch.setattr(settings.general, 'use_plex', False)
@@ -211,3 +214,49 @@ def test_the_guard_is_the_shared_one():
     assert "subtitle_path_within_area" in inspect.getsource(events)
     assert subtitle_path_within_area("/media/x/a.srt", "/media/x/a.mkv") is True
     assert subtitle_path_within_area("/etc/passwd.srt", "/media/x/a.mkv") is False
+
+
+def _index(session, event_id, entries):
+    from app.database import TableSportsEvents
+
+    session.execute(sa.update(TableSportsEvents)
+                    .where(TableSportsEvents.id == event_id)
+                    .values(subtitles=str(entries)))
+    session.commit()
+
+
+def test_a_subtitle_the_event_does_not_own_is_refused(indexed_library, monkeypatch):  # noqa: F811
+    """Containment answers "inside the library", not "belongs to this event".
+
+    Sports recordings share a directory routinely, and a custom subtitle folder
+    is one absolute directory for all of them, so a sibling event's subtitle
+    passed the containment check and was deleted with the history written
+    against the event named in the URL.
+    """
+    from flask import Flask
+    from api.sports import events
+    from app.config import settings
+    from app.database import TableHistorySports
+    from sportarr import history
+
+    session, folder = indexed_library
+    _index(session, 61, [['en:hi', '/sports/event.en.hi.srt', 42]])
+    monkeypatch.setattr(events, 'database', session)
+    monkeypatch.setattr(history, 'database', session)
+    monkeypatch.setattr(settings.general, 'use_plex', False)
+    monkeypatch.setattr(settings.general, 'use_jellyfin', False)
+
+    # Same directory as event 61's own recording, so containment cannot tell
+    # them apart. Written here the way a second recording's subtitle would be.
+    neighbour = folder / '1/neighbour.fr.srt'
+    neighbour.write_text('1\n00:00:00,000 --> 00:00:01,000\nAnother event.\n')
+
+    with Flask(__name__).test_request_context(
+        '/sports/events/61/subtitles', method='DELETE',
+        json={'arr_instance_id': 1, 'language': 'fr', 'path': '/sports/neighbour.fr.srt'},
+    ):
+        body, status = events.SportsEventSubtitles.delete.__wrapped__(events.SportsEventSubtitles(), 61)
+
+    assert status == 403, body
+    assert neighbour.exists()
+    assert session.execute(sa.select(TableHistorySports)).scalars().all() == []

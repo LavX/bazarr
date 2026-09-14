@@ -206,7 +206,7 @@ class SportsLeagueSubtitlesCombine(Resource):
         if not event_ids:
             return {"status": "not_found"}, 404
 
-        built = skipped = failed = 0
+        built = skipped = failed = warnings = 0
         details = []
         for event_id in event_ids:
             try:
@@ -236,13 +236,19 @@ class SportsLeagueSubtitlesCombine(Resource):
                 })
             if result_status == "built":
                 built += 1
+                # Published, but a follow-up step did not complete: the index
+                # refresh, most often. Counted apart from a clean build so the
+                # summary cannot report an unqualified success for a subtitle
+                # the event may not list yet.
+                if result is not None and result.error:
+                    warnings += 1
             elif result_status == "skipped":
                 skipped += 1
             else:
                 failed += 1
 
         return {"status": "batch_complete", "built": built, "skipped": skipped,
-                "failed": failed, "details": details}, 200
+                "failed": failed, "warnings": warnings, "details": details}, 200
 
 
 @api_ns_sports_subtitles.route("/sports/events/<int:event_id>/subtitles/upload")

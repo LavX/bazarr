@@ -58,3 +58,23 @@ def test_the_engine_rejects_an_override_for_sports():
     sports = source[source.index("if media_type == 'sports':"):source.index("else:")]
     assert "if languages is not None or format is not None:" in sports
     assert "sports_operation is None" in sports
+
+
+def test_a_published_combine_with_a_failed_follow_up_is_not_reported_clean():
+    """`built` with an `error` is a partial success, not a success.
+
+    When the composition is published but finalize() fails, most often because
+    the index refresh cannot probe the recording, the engine returns
+    status='built' carrying the error. Every consumer counted that as a clean
+    build, so the operator got a green summary for a subtitle the event may not
+    list until it is reindexed.
+    """
+    import inspect
+
+    from api.sports import subtitles
+
+    source = inspect.getsource(subtitles.SportsLeagueSubtitlesCombine)
+    counted = source[source.index('if result_status == "built":'):]
+    assert "warnings += 1" in counted.split("elif")[0]
+    assert "result.error" in counted.split("elif")[0]
+    assert '"warnings": warnings' in source

@@ -306,3 +306,81 @@ def test_the_extraction_directory_has_one_definition():
     assert 'hashlib' not in source
     guard = inspect.getsource(profile_hooks._is_extraction_artifact)
     assert 'extracted_subtitle_key' in guard
+
+
+# --------------------------------------------------------------------------
+# Promoting a sync output publishes inside the owned boundary.
+# --------------------------------------------------------------------------
+
+def test_the_sports_promotion_enters_the_owned_publication_boundary(monkeypatch):
+    """The promote route wrote through the generic flow.
+
+    The PUT and create routes both pin identity in `sports_manual_operation`
+    first, so a reconciliation that replaces or moves the recording mid-request
+    cannot publish over the new file. Promotion resolved its source and target
+    outside that boundary, wrote the bytes, and then reindexed and logged
+    history against the event as it had become.
+    """
+    from contextlib import contextmanager
+
+    from api.subtitles import content
+    from sportarr import subtitles as sports_subtitles
+
+    entered = []
+
+    @contextmanager
+    def fake_operation(event_id, arr_instance_id, cancel=None):
+        entered.append((event_id, arr_instance_id))
+        yield (SimpleNamespace(arr_instance_id=7), lambda: None,
+               'guard', '/media/sports/race.mkv')
+
+    monkeypatch.setattr(sports_subtitles, 'sports_manual_operation', fake_operation)
+    monkeypatch.setattr(content, '_promote_sync_subtitle_guarded',
+                        lambda *args, **kwargs: (args, kwargs))
+
+    args, kwargs = content.promote_sync_subtitle('sports', 61, 'en', 'en:sync',
+                                                 arr_instance_id=1)
+    assert entered == [(61, 1)]
+    # The owner comes back off the resolved event, not off the request.
+    assert args[-1] == 7
+    assert kwargs['sports_operation'][3] == '/media/sports/race.mkv'
+
+
+def test_losing_the_sports_recording_mid_promotion_is_a_conflict(monkeypatch):
+    """The guard's own refusal has to read as 409, not as a 500."""
+    from contextlib import contextmanager
+
+    from api.subtitles import content
+    from sportarr import subtitles as sports_subtitles
+
+    @contextmanager
+    def fake_operation(event_id, arr_instance_id, cancel=None):
+        yield (SimpleNamespace(arr_instance_id=7), lambda: None, 'guard', '/media/race.mkv')
+
+    def refuse(*args, **kwargs):
+        raise ValueError('Sports file changed. Please try again.')
+
+    monkeypatch.setattr(sports_subtitles, 'sports_manual_operation', fake_operation)
+    monkeypatch.setattr(content, '_promote_sync_subtitle_guarded', refuse)
+
+    body, status = content.promote_sync_subtitle('sports', 61, 'en', 'en:sync',
+                                                 arr_instance_id=1)
+    assert status == 409
+    assert body == 'Sports file changed. Please try again.'
+
+
+def test_the_other_media_types_do_not_enter_the_sports_boundary(monkeypatch):
+    """Episodes and movies have no owned publication boundary to enter."""
+    from api.subtitles import content
+    from sportarr import subtitles as sports_subtitles
+
+    def fail(*args, **kwargs):
+        raise AssertionError('sports_manual_operation used for a non-sports promotion')
+
+    monkeypatch.setattr(sports_subtitles, 'sports_manual_operation', fail)
+    monkeypatch.setattr(content, '_promote_sync_subtitle_guarded',
+                        lambda *args, **kwargs: ('guarded', args, kwargs))
+
+    result = content.promote_sync_subtitle('movie', 12, 'en', 'en:sync', arr_instance_id=3)
+    assert result[0] == 'guarded'
+    assert result[2] == {}

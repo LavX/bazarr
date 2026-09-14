@@ -1,9 +1,12 @@
 """Authenticated file-row and root-folder views, addressed with local IDs."""
+import ast
+import os
+
 from flask import request
 from flask_restx import Namespace, Resource
 
 from app.config import settings
-from app.database import database
+from app.database import TableSportsEvents, database, select
 from sportarr import library, rootfolder
 from utilities.path_mappings import path_mappings
 from utilities.security_guards import subtitle_path_within_area
@@ -12,6 +15,35 @@ from ..utils import authenticate
 from sportarr.errors import SportsNotFound
 
 api_ns_sports_events = Namespace('Sports Events', description='Owned playable sports files')
+
+
+
+def _indexed_subtitle(context, path, mapped_subtitle):
+    """True when the event's own subtitle index records this file.
+
+    Both forms are compared because the column stores the Sportarr-side path
+    the UI sends back, while path mapping is what makes it local: a caller that
+    names either one of the pair is naming the same indexed file.
+    """
+    recorded = database.execute(
+        select(TableSportsEvents.subtitles)
+        .where(TableSportsEvents.id == context.event_id,
+               TableSportsEvents.arr_instance_id == context.arr_instance_id)).scalar()
+    try:
+        entries = ast.literal_eval(recorded or '[]')
+    except (SyntaxError, TypeError, ValueError):
+        return False
+    if not isinstance(entries, (list, tuple)):
+        return False
+    wanted = {os.path.normpath(path), os.path.normpath(mapped_subtitle)}
+    for entry in entries:
+        if not isinstance(entry, (list, tuple)) or len(entry) < 2 or not isinstance(entry[1], str):
+            continue
+        known = os.path.normpath(entry[1])
+        if known in wanted or os.path.normpath(path_mappings.path_replace_instance(
+                entry[1], context.arr_instance_id, 'sports')) in wanted:
+            return True
+    return False
 
 
 @api_ns_sports_events.route('/sports/leagues/<int:league_id>/events')
@@ -94,6 +126,16 @@ class SportsEventSubtitles(Resource):
                 custom_subfolder=settings.general.subfolder_custom,
             ):
                 return {'message': 'Subtitle path is outside the media library.'}, 403
+
+            # Containment alone answers "is this inside the library", not "is
+            # this THIS event's subtitle". Sports recordings share a directory
+            # routinely, and a custom subtitle folder is one absolute directory
+            # for everything, so a sibling event's subtitle passed the check
+            # above and was deleted with the history written against the event
+            # in the URL. The event's own index is the list the UI offers, so a
+            # path outside it is either stale or not this event's to remove.
+            if not _indexed_subtitle(context, path, mapped_subtitle):
+                return {'message': 'Subtitle does not belong to this sports event.'}, 403
 
             removed = delete_subtitles(
                 media_type='sports',

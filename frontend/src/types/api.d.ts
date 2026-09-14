@@ -481,6 +481,9 @@ declare namespace Api {
     built?: number;
     skipped?: number;
     failed?: number;
+    // Built, but a follow-up step (most often the index refresh) failed. Part
+    // of `built`, not a fourth outcome: the file is on disk either way.
+    warnings?: number;
     details?: Array<{
       episodeId: number;
       status: string;

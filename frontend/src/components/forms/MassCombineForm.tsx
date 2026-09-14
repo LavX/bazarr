@@ -87,6 +87,7 @@ const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
     let built = 0;
     let skipped = 0;
     let failed = 0;
+    let warnings = 0;
 
     for (const item of items) {
       let scope:
@@ -144,8 +145,15 @@ const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
           built += result.built ?? 0;
           skipped += result.skipped ?? 0;
           failed += result.failed ?? 0;
+          warnings += result.warnings ?? 0;
         } else if (result.status === "built") {
           built += 1;
+          // Published with a failed follow-up step, most often the index
+          // refresh. Still built, but the summary has to say so rather than
+          // count it as a clean one.
+          if (result.error) {
+            warnings += 1;
+          }
         } else if (result.status === "skipped") {
           skipped += 1;
         } else {
@@ -160,8 +168,10 @@ const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
 
     notifications.show({
       title: "Combine complete",
-      message: `Built ${built}, skipped ${skipped}, failed ${failed}`,
-      color: failed > 0 ? "yellow" : "green",
+      message:
+        `Built ${built}, skipped ${skipped}, failed ${failed}` +
+        (warnings > 0 ? `, ${warnings} needing attention` : ""),
+      color: failed > 0 || warnings > 0 ? "yellow" : "green",
     });
 
     onComplete?.();

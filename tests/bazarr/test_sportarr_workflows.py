@@ -1646,3 +1646,43 @@ def test_sports_upgrade_marker_uses_the_latest_history_row_including_ties(workfl
                                                              action=action, score=score, language='en', timestamp=now))
     assert batch.get_upgradable_media_ids()['sportsKeys'] == []
     assert workflows.upgrade_rows(session, 1) == []
+
+
+def test_an_older_history_row_is_not_flagged_upgradable(workflow_library, monkeypatch):
+    """The flag has to agree with the run, or it promises an upgrade forever.
+
+    upgrade_rows() walks history newest-first and marks each
+    (owner, event, language) seen BEFORE it applies any eligibility filter, so
+    an older row is never reached. The page flag evaluated each requested row on
+    its own, so a superseded low-score row kept an upgrade indicator that no
+    upgrade run would ever act on.
+    """
+    import datetime
+
+    from app.config import settings
+    from app.database import TableHistorySports
+
+    automatic, _, workflows, _, session, _ = workflow_library
+    monkeypatch.setattr(settings.general, 'upgrade_subs', True)
+    monkeypatch.setattr(settings.general, 'upgrade_manual', True)
+    monkeypatch.setattr(settings.general, 'days_to_upgrade_subs', 30)
+    automatic.search_event(61, 1)
+    older = session.execute(sa.select(TableHistorySports)).scalars().one()
+    assert workflows.upgradable_history_ids(session, [older.id]) == {older.id}
+
+    # The same subtitle, downloaded again at a better score: this is the row
+    # the upgrade run sees, and it is already good enough to leave alone.
+    session.execute(sa.insert(TableHistorySports).values(
+        action=older.action, arr_instance_id=older.arr_instance_id,
+        league_id=older.league_id, event_id=older.event_id,
+        language=older.language, provider=older.provider,
+        score=(older.score_out_of or 180), score_out_of=older.score_out_of,
+        description=older.description, subtitles_path=older.subtitles_path,
+        video_path=older.video_path, artifact=older.artifact,
+        timestamp=(older.timestamp or datetime.datetime.now()) + datetime.timedelta(hours=1)))
+    session.commit()
+    newer = session.execute(sa.select(TableHistorySports)
+                            .order_by(TableHistorySports.id.desc())).scalars().first()
+
+    assert workflows.upgradable_history_ids(session, [older.id, newer.id]) == set()
+    assert [row['id'] for row in workflows.upgrade_rows(session)] == []
