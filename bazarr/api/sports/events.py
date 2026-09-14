@@ -105,18 +105,24 @@ class SportsEventSubtitles(Resource):
         try:
             body = _body()
             owner = _owner(body.get('arr_instance_id'))
+            # The same positive-integer rule the resolver applies, asked here so
+            # a malformed request is answered as one: past this point a refusal
+            # means the event moved, not that the request was wrong.
+            _owner(event_id)
             language, path = body.get('language'), body.get('path')
             if not language or not path:
                 return {'message': 'language and path are required'}, 400
+        except ValueError as exc:
+            return {'message': str(exc)}, 400
 
-            # The same owned boundary the upload, edit and promote routes use.
-            # It pins the recording's signature here and hands down a guard that
-            # locks the event row and revalidates around the unlink, so a
-            # reconciliation that reassigns the recording between these checks
-            # and the removal cannot make this request delete the subtitle of
-            # whichever event has adopted it.
+        try:
+            # The same owned operation the upload, edit and promote routes use.
+            # It pins the recording's signature, and that check is re-asked
+            # under the subtitle write locks immediately before the unlink, so a
+            # reconciliation that reassigns the recording cannot make this
+            # request delete the subtitle of whichever event has adopted it.
             with sports_manual_operation(event_id, owner) as operation:
-                context, _validate, guard, _video = operation
+                context, revalidate, _guard, _video = operation
 
                 # Containment, the same guard the shared toolbox endpoint
                 # applies (#GHSA). Without it the only check on a
@@ -155,17 +161,21 @@ class SportsEventSubtitles(Resource):
                     subtitles_path=path,
                     arr_instance_id=context.arr_instance_id,
                     sports_event_id=context.event_id,
-                    publication_guard=guard,
+                    revalidate=revalidate,
                 )
             if not removed:
                 return {'message': 'Could not delete this subtitle.'}, 409
             return '', 204
         except SportsNotFound as exc:
             return {'message': str(exc)}, 404
+        except OSError:
+            # Reading the recording is how the operation pins it, and Sportarr
+            # can have taken the file away before Bazarr re-synced. The index
+            # POST above answers the same way rather than with a 500.
+            return {'message': 'Could not read this sports file. Path mapping or accessibility issue?'}, 409
         except ValueError as exc:
-            # Anything that refuses mid-deletion refuses because the event or
-            # its recording moved underneath the request, which is a conflict
-            # rather than a malformed request.
+            # Anything that refuses from here on refuses because the event or
+            # its recording moved underneath the request.
             return {'message': str(exc)}, 409
 
 

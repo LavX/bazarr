@@ -276,14 +276,15 @@ def test_a_subtitle_the_event_does_not_own_is_refused(indexed_library, monkeypat
     assert session.execute(sa.select(TableHistorySports)).scalars().all() == []
 
 
-def test_the_unlink_happens_inside_the_owned_boundary(indexed_library, monkeypatch):  # noqa: F811
-    """Ownership was checked, then the file was removed outside any boundary.
+def test_the_recording_is_rechecked_under_the_locks_before_the_unlink(indexed_library, monkeypatch):  # noqa: F811
+    """Ownership was checked, then the file was removed with nothing re-asked.
 
     A reconciliation that reassigns or replaces the recording in that window
-    leaves the request unlinking a path another event has since adopted, and
-    then recording the deletion against this one. The removal now runs inside
-    the same publication guard the other sports mutations use, which locks the
-    event row and revalidates the recording signature either side of it.
+    left the request unlinking a path another event had adopted, and then
+    recording the deletion against this one. The operation's own signature
+    check now runs inside the subtitle write locks, which is where the indexer
+    takes its own, and before the removal rather than after it: a refusal has
+    to mean nothing was deleted.
     """
     from contextlib import contextmanager
 
@@ -298,9 +299,8 @@ def test_the_unlink_happens_inside_the_owned_boundary(indexed_library, monkeypat
 
     session, folder = indexed_library
     _index(session, 61, [['en:hi', '/sports/event.en.hi.srt', 42]])
-    for module, name in ((events, 'database'), (history, 'database'),
-                         (sports_subtitles, 'database')):
-        monkeypatch.setattr(module, name, session)
+    for module in (events, history, sports_subtitles):
+        monkeypatch.setattr(module, 'database', session)
     monkeypatch.setattr(settings.general, 'use_plex', False)
     monkeypatch.setattr(settings.general, 'use_jellyfin', False)
     monkeypatch.setattr(notify, 'notify_rescan', lambda *a: None)
@@ -309,37 +309,143 @@ def test_the_unlink_happens_inside_the_owned_boundary(indexed_library, monkeypat
     monkeypatch.setattr(delete, 'call_external_webhook', lambda **kw: None)
     monkeypatch.setattr(sports, 'store_subtitles_sports', lambda *a, **kw: None)
 
-    order = []
+    held, order = [], []
+    real_locks = delete.subtitle_write_locks
     real_operation = sports_subtitles.sports_manual_operation
-    real_unlink = delete._delete_subtitle_file
+
+    @contextmanager
+    def watched_locks(*args, **kwargs):
+        with real_locks(*args, **kwargs) as states:
+            held.append(True)
+            try:
+                yield states
+            finally:
+                held.pop()
 
     @contextmanager
     def watched_operation(event_id, arr_instance_id, cancel=None):
         with real_operation(event_id, arr_instance_id, cancel) as operation:
             context, validate, guard, video = operation
 
-            @contextmanager
-            def watched_guard(**kwargs):
-                order.append('guard-entered')
-                with guard(**kwargs) as inner:
-                    yield inner
-                order.append('guard-left')
+            def watched_validate():
+                # The locks the indexer also takes are held by now, so the
+                # recording cannot be swapped between here and the unlink.
+                assert held, 'the recording was re-checked outside the write locks'
+                order.append('revalidated')
+                return validate()
 
-            yield context, validate, watched_guard, video
+            yield context, watched_validate, guard, video
 
-    def watched_unlink(*args, **kwargs):
-        order.append('unlinked')
-        return real_unlink(*args, **kwargs)
-
+    monkeypatch.setattr(delete, 'subtitle_write_locks', watched_locks)
     monkeypatch.setattr(sports_subtitles, 'sports_manual_operation', watched_operation)
-    monkeypatch.setattr(delete, '_delete_subtitle_file', watched_unlink)
+
+    subtitle = folder / '1/event.en.hi.srt'
+
+    def request():
+        with Flask(__name__).test_request_context(
+            '/sports/events/61/subtitles', method='DELETE',
+            json={'arr_instance_id': 1, 'language': 'en', 'hi': True,
+                  'path': '/sports/event.en.hi.srt'},
+        ):
+            return events.SportsEventSubtitles.delete.__wrapped__(events.SportsEventSubtitles(), 61)
+
+    body, status = request()
+    assert status == 204, body
+    assert order == ['revalidated']
+    assert not subtitle.exists()
+
+
+def test_a_recording_that_moved_mid_request_keeps_its_subtitle(indexed_library, monkeypatch):  # noqa: F811
+    """A refusal raised before the unlink leaves the file and the history alone."""
+    from contextlib import contextmanager
+
+    from flask import Flask
+    from api.sports import events
+    from app.config import settings
+    from app.database import TableHistorySports
+    from sportarr import history
+    from sportarr import subtitles as sports_subtitles
+
+    session, folder = indexed_library
+    _index(session, 61, [['en:hi', '/sports/event.en.hi.srt', 42]])
+    for module in (events, history, sports_subtitles):
+        monkeypatch.setattr(module, 'database', session)
+    monkeypatch.setattr(settings.general, 'use_plex', False)
+    monkeypatch.setattr(settings.general, 'use_jellyfin', False)
+
+    real_operation = sports_subtitles.sports_manual_operation
+
+    @contextmanager
+    def refusing_operation(event_id, arr_instance_id, cancel=None):
+        with real_operation(event_id, arr_instance_id, cancel) as operation:
+            context, _validate, guard, video = operation
+
+            def refuse():
+                raise ValueError('Sports file changed. Please try again.')
+
+            yield context, refuse, guard, video
+
+    monkeypatch.setattr(sports_subtitles, 'sports_manual_operation', refusing_operation)
 
     with Flask(__name__).test_request_context(
         '/sports/events/61/subtitles', method='DELETE',
-        json={'arr_instance_id': 1, 'language': 'en', 'hi': True, 'path': '/sports/event.en.hi.srt'},
+        json={'arr_instance_id': 1, 'language': 'en', 'hi': True,
+              'path': '/sports/event.en.hi.srt'},
     ):
         body, status = events.SportsEventSubtitles.delete.__wrapped__(events.SportsEventSubtitles(), 61)
 
-    assert status == 204, body
-    assert order == ['guard-entered', 'unlinked', 'guard-left']
-    assert not (folder / '1/event.en.hi.srt').exists()
+    assert status == 409, body
+    assert (folder / '1/event.en.hi.srt').exists()
+    assert session.execute(sa.select(TableHistorySports)).scalars().all() == []
+
+
+def test_a_malformed_delete_is_still_a_bad_request(indexed_library, monkeypatch):  # noqa: F811
+    """The conflict status covers the operation, not the request's shape.
+
+    Answering "arr_instance_id is required" with 409 tells the caller the
+    server is in a state it can retry out of, and the GET and POST on this same
+    resource still answer 400 for the identical body.
+    """
+    from flask import Flask
+    from api.sports import events
+
+    session, _ = indexed_library
+    monkeypatch.setattr(events, 'database', session)
+
+    for payload in ({'language': 'en', 'path': '/sports/event.en.hi.srt'},
+                    {'arr_instance_id': 0, 'language': 'en', 'path': '/x.srt'},
+                    {'arr_instance_id': 1}):
+        with Flask(__name__).test_request_context(
+            '/sports/events/61/subtitles', method='DELETE', json=payload,
+        ):
+            body, status = events.SportsEventSubtitles.delete.__wrapped__(
+                events.SportsEventSubtitles(), 61)
+        assert status == 400, (payload, body)
+
+
+def test_a_vanished_recording_is_a_conflict_not_a_crash(indexed_library, monkeypatch):  # noqa: F811
+    """Pinning the event stats the recording, and Sportarr can have moved it.
+
+    Before the operation was entered this route never touched the video, so an
+    orphaned subtitle could still be removed. It has to answer as the index
+    POST beside it does rather than raise out of the handler.
+    """
+    from flask import Flask
+    from api.sports import events
+    from sportarr import subtitles as sports_subtitles
+
+    session, folder = indexed_library
+    _index(session, 61, [['en:hi', '/sports/event.en.hi.srt', 42]])
+    for module in (events, sports_subtitles):
+        monkeypatch.setattr(module, 'database', session)
+    (folder / '1/event.mkv').unlink()
+
+    with Flask(__name__).test_request_context(
+        '/sports/events/61/subtitles', method='DELETE',
+        json={'arr_instance_id': 1, 'language': 'en', 'hi': True,
+              'path': '/sports/event.en.hi.srt'},
+    ):
+        body, status = events.SportsEventSubtitles.delete.__wrapped__(events.SportsEventSubtitles(), 61)
+
+    assert status == 409, body
+    assert 'sports file' in body['message'].lower()

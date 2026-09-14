@@ -377,13 +377,43 @@ def test_a_missing_sports_row_is_404_not_400():
 
 
 def test_every_sports_handler_maps_not_found_to_404():
+    """A block that can resolve a sports identity has to answer 404 for a miss.
+
+    resolve_event_in_session and friends raise SportsNotFound, which is a
+    subclass of nothing the ValueError arm catches, so a try that guards one of
+    those calls without a SportsNotFound arm answers 400 or 500 for a row that
+    simply is not there.
+
+    Request-shape validation is the one exception, and it is checked rather
+    than assumed: a try whose body only reads the request (_body, _owner,
+    _optional_owner) cannot raise SportsNotFound, and answering a malformed
+    request with 404 would be wrong anyway.
+    """
+    import ast
     import importlib
+
+    shape_only = {'_body', '_owner', '_optional_owner'}
+
+    def caught(handler, name):
+        target = handler.type
+        return isinstance(target, ast.Name) and target.id == name
+
+    def calls(node):
+        return {call.func.id for call in ast.walk(node)
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)}
 
     for name in ('events', 'leagues', 'subtitles', 'workflows'):
         module = importlib.import_module(f'api.sports.{name}')
-        source = inspect.getsource(module)
-        assert source.count('except SportsNotFound as exc:') == \
-            source.count('except ValueError as exc:'), name
+        tree = ast.parse(inspect.getsource(module))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Try):
+                continue
+            if not any(caught(handler, 'ValueError') for handler in node.handlers):
+                continue
+            if any(caught(handler, 'SportsNotFound') for handler in node.handlers):
+                continue
+            assert calls(ast.Module(body=node.body, type_ignores=[])) <= shape_only, (
+                f'{name}: line {node.lineno} catches ValueError without SportsNotFound')
 
 
 def test_the_league_patch_returns_no_body_with_204():

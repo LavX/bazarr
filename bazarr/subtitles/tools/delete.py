@@ -2,7 +2,6 @@
 
 import os
 import logging
-from contextlib import nullcontext
 from media_servers.events import publication_callback
 
 from subliminal.subtitle import SUBTITLE_EXTENSIONS
@@ -27,8 +26,15 @@ from plex.operations import plex_refresh_item, plex_update_sports_library
 from jellyfin.operations import jellyfin_refresh_item, jellyfin_update_sports_library
 
 
-def _delete_subtitle_file(media_path, subtitle_path, on_publish=None):
+def _delete_subtitle_file(media_path, subtitle_path, on_publish=None, revalidate=None):
     with subtitle_write_locks(media_path, subtitle_path):
+        # Under the directory locks, which is where a caller's ownership check
+        # has to be re-asked: the sports indexer takes these same locks before
+        # it opens its transaction, so a reconciliation cannot swap the
+        # recording out between the check and the removal below. Before the
+        # unlink, never after: a refusal here has to mean nothing was deleted.
+        if revalidate is not None:
+            revalidate()
         state = subtitle_write_lock(media_path, os.path.dirname(subtitle_path))
         try:
             os.remove(subtitle_path)
@@ -46,7 +52,7 @@ def _delete_subtitle_file(media_path, subtitle_path, on_publish=None):
 
 def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_path, sonarr_series_id=None,
                      sonarr_episode_id=None, radarr_id=None, arr_instance_id=None,
-                     sports_event_id=None, publication_guard=None):
+                     sports_event_id=None, revalidate=None):
     if not subtitles_path:
         logging.error('No subtitles to delete.')
         return False
@@ -116,17 +122,19 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
         from sportarr.history import sports_history_log
         from subtitles.indexer.sports import store_subtitles_sports
 
-        # The owned boundary around the unlink itself, when the caller supplied
-        # one: it locks the event row and revalidates the recording signature
-        # either side of the removal, so a reconciliation that reassigns the
-        # recording between the caller's ownership check and this unlink cannot
-        # take another event's subtitle with it. Only the removal is inside it;
-        # the reindex and history below open their own sports transaction and
-        # would nest a nowait row lock inside this one.
-        with (publication_guard() if publication_guard is not None else nullcontext()):
-            removed = _delete_subtitle_file(media_path, pr(subtitles_path),
-                                            publication_callback(media_type, media_path, 'delete',
-                                                                 arr_instance_id))
+        # The caller's recording check, re-asked under the write locks rather
+        # than only before them, so a reconciliation that reassigns the
+        # recording cannot make this request take another event's subtitle
+        # with it. Deliberately the signature check and not the full
+        # publication boundary: that one opens a transaction and locks the
+        # event row, and holding those while _delete_subtitle_file waits on the
+        # subtitle directory locks inverts the order every other writer uses
+        # (staged_subtitle_write takes the locks first and enters the guard
+        # inside them), which deadlocks against an indexer mid-probe.
+        removed = _delete_subtitle_file(media_path, pr(subtitles_path),
+                                        publication_callback(media_type, media_path, 'delete',
+                                                             arr_instance_id),
+                                        revalidate=revalidate)
         if not removed:
             store_subtitles_sports(sports_event_id, arr_instance_id)
             return False
