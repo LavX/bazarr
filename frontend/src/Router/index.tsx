@@ -7,6 +7,7 @@ import {
 } from "react";
 import { createBrowserRouter, Navigate, RouterProvider } from "react-router";
 import {
+  faChartPie,
   faClock,
   faCogs,
   faCompass,
@@ -60,6 +61,7 @@ import { CustomRouteObject } from "./type";
 const HistoryStats = lazy(
   () => import("@/pages/History/Statistics/HistoryStats"),
 );
+const StatisticsView = lazy(() => import("@/pages/Statistics"));
 const SystemStatusView = lazy(() => import("@/pages/System/Status"));
 const SubtitleEditor = lazy(() => import("@/pages/SubtitleEditor"));
 const SubtitleEditorPage = lazy(
@@ -190,6 +192,16 @@ function useRoutes(): CustomRouteObject[] {
                 element: <BlacklistMoviesView></BlacklistMoviesView>,
               },
             ],
+          },
+          {
+            icon: faChartPie,
+            name: "Statistics",
+            path: "statistics",
+            element: (
+              <Lazy>
+                <StatisticsView></StatisticsView>
+              </Lazy>
+            ),
           },
           {
             icon: faStore,
