@@ -11,6 +11,7 @@ from arr_instances.resolution import resolve_default_profile
 from sportarr.db import sports_transaction
 from sportarr.connection import check_cancelled, connection_identity, owner_sync_lock
 from sportarr.settings import get_sports_settings
+from utilities.sql_limits import in_chunks
 
 
 def require_sportarr(session, arr_instance_id):
@@ -64,9 +65,46 @@ def _parse_leagues(data, client):
 
 
 def _prune_leagues(session, owner, upstream_ids):
-    session.execute(delete(TableSportsLeagues).where(
+    stale = session.execute(select(TableSportsLeagues.id).where(
         TableSportsLeagues.arr_instance_id == owner,
-        TableSportsLeagues.sportarrLeagueId.not_in(upstream_ids)))
+        TableSportsLeagues.sportarrLeagueId.not_in(upstream_ids))).scalars().all()
+    if not stale:
+        return
+    forget_league_event_mismatches(session, owner, stale)
+    for batch in in_chunks(stale):
+        session.execute(delete(TableSportsLeagues).where(
+            TableSportsLeagues.arr_instance_id == owner,
+            TableSportsLeagues.id.in_(batch)))
+
+
+def forget_league_event_mismatches(session, owner, league_ids):
+    """Forget the mismatches of the events a league deletion is about to cascade.
+
+    The events go with their league through the foreign key, but
+    release_type_mismatches has no foreign key and matches on media_id alone,
+    so nothing removes those rows. SQLite reuses a deleted event id for a later
+    insert, and the orphan then badges a recording that never earned it, while
+    report_release_type_mismatch dedups its real one away. The per-event prune
+    in sync/events.py has always done this; the league and whole-instance paths
+    did not.
+
+    In its own SAVEPOINT, and never raises: this shares a transaction with the
+    delete that follows, and on PostgreSQL a failed statement would abort it.
+    """
+    try:
+        from app.database import TableSportsEvents
+        from subtitles.mismatch import forget_media
+        event_ids = []
+        for batch in in_chunks(list(league_ids)):
+            event_ids.extend(session.execute(select(TableSportsEvents.id).where(
+                TableSportsEvents.arr_instance_id == owner,
+                TableSportsEvents.league_id.in_(batch))).scalars().all())
+        if not event_ids:
+            return
+        with session.begin_nested():
+            forget_media(session, 'sports', event_ids)
+    except Exception:
+        logging.exception('BAZARR could not forget the pruned sports leagues mismatches')
 
 
 def notify(local_ids):

@@ -760,11 +760,17 @@ def test_a_rung_that_answers_with_the_wrong_status_is_not_a_refresh(dispatch):
 
 
 @pytest.mark.parametrize('operation', ['download', 'upload', 'delete'])
-def test_a_sports_publication_refreshes_the_mapped_library_only(dispatch, operation):
-    """A sports write reaches the same dispatcher as a movie or episode one,
-    but the only rung it can climb is the library: a sports event carries no
-    identifiers and no item type a server indexes, so the ladder offers just
-    the whole-library scan for the path the mapping resolves."""
+def test_a_sports_publication_scans_the_file_on_silo_and_the_library_on_emby(dispatch, operation):
+    """A sports write reaches the same dispatcher as a movie or episode one.
+
+    A sports event carries no provider identifiers, so the identity rungs
+    cannot answer for it, and Emby resolves a path through the same typed item
+    lookup, which has no sports entry, leaving it the library the mapped path
+    points into. Silo's file rung takes only a library and a path and is media
+    type agnostic, so a recording scans there exactly as a movie does and
+    confirms; routing it to the library instead submitted a recursive scan of a
+    whole, often shared, library for every publication and never confirmed.
+    """
     from media_servers import resolution
     dispatch.release.set()
     dispatch.dispatcher.notify(movie_event(media_type='sports', operation=operation,
@@ -772,13 +778,13 @@ def test_a_sports_publication_refreshes_the_mapped_library_only(dispatch, operat
                                            subtitle_path='/movies/sports/Event.en.srt'))
     assert dispatch.dispatcher.wait_idle(3)
     assert set(dispatch.rungs) == {('emby', resolution.LIBRARY),
-                                   ('silo', resolution.LIBRARY)}
+                                   ('silo', resolution.PATH)}
     assert dispatch.emby_items == []
     assert dispatch.identifier_calls == []
-    assert set(dispatch.library_calls) == {('emby', ('sports', '/media/sports/Event.mkv')),
-                                           ('silo', ('7',))}
+    assert set(dispatch.library_calls) == {('emby', ('sports', '/media/sports/Event.mkv'))}
+    assert [path for path, _ in dispatch.calls['silo']] == ['/media/sports/Event.mkv']
     assert dispatch.dispatcher.status(IDS['emby'])['state'] == 'requested'
-    assert dispatch.dispatcher.status(IDS['silo'])['state'] == 'requested'
+    assert dispatch.dispatcher.status(IDS['silo'])['state'] == 'confirmed'
 
 
 def test_a_sports_publication_outside_any_mapping_refreshes_nothing(dispatch):
@@ -807,4 +813,4 @@ def test_a_sports_publication_accepts_either_mapped_silo_library_type(dispatch):
                                                video_path='/movies/sports/Event.mkv',
                                                subtitle_path='/movies/sports/Event.en.srt'))
         assert dispatch.dispatcher.wait_idle(3)
-        assert dispatch.dispatcher.status(IDS['silo'])['state'] == 'requested'
+        assert dispatch.dispatcher.status(IDS['silo'])['state'] == 'confirmed'

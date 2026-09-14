@@ -133,6 +133,12 @@ def subtitle_write_locks(video_path, *paths, cancel=None):
                 # yields a different object than the raw call returned.
                 states[directory] = stack.enter_context(state)
             else:
+                # The cancellable branch cannot go through __enter__: it needs
+                # a timed acquire so a stop request is honoured while waiting,
+                # and the context-manager protocol has no way to ask for one.
+                # A substituted lock therefore has to expose the same .lock and
+                # .revision surface the real state does; a generator double
+                # works on the branch above and not on this one.
                 while not cancel.is_set():
                     if state.lock.acquire(timeout=0.05):
                         stack.callback(state.lock.release)

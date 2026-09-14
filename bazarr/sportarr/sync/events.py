@@ -89,9 +89,14 @@ def _prune_events(session, league_id, owner, keep):
     # and radarr sync paths do. The link is a plain integer, not a foreign key,
     # so nothing removes these on its own, and SQLite reuses a deleted row id
     # for a later insert, which would badge an unrelated new event.
+    # In its own SAVEPOINT: this and the deletes below share one transaction,
+    # and on PostgreSQL a failed statement aborts it, so swallowing the failure
+    # here used to take the deletes down with "current transaction is aborted"
+    # and kill the whole league sync.
     try:
         from subtitles.mismatch import forget_media
-        forget_media(session, 'sports', list(stale))
+        with session.begin_nested():
+            forget_media(session, 'sports', list(stale))
     except Exception:
         logging.exception('BAZARR could not forget the pruned sports events mismatches')
     for batch in in_chunks(stale):

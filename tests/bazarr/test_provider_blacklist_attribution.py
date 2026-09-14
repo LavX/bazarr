@@ -4,8 +4,16 @@
 A sports video is a Movie for provider compatibility, so providers report its
 media_type as "movie", while the id dict subliminal builds carries only the
 Sonarr and Radarr keys and every one of them is None for a sports search. The
-movie branch ran anyway and wrote a blacklist row with a null radarrId: it
-blacklisted nothing and left a junk entry on the movie Excluded page.
+movie branch ran anyway and wrote a blacklist row with a null radarrId, a junk
+entry on the movie Excluded page. A sports search is now attributed to its own
+event instead, through the context its video carries.
+
+What that row is NOT is inert. ``get_blacklist()`` reads (provider, subs_id)
+with no media scoping at all, so an unattributed row does suppress the release
+everywhere. An episode or movie whose database refiner did not resolve, routine
+on an instance with its own path mappings because the refiner looks the row up
+through the GLOBAL reverse mapping, still has to record one, or the corrupt
+subtitle is re-downloaded and re-rejected forever.
 """
 
 from types import SimpleNamespace
@@ -61,18 +69,21 @@ def test_an_episode_release_is_blacklisted(blacklist_calls):
     assert blacklist_calls == [('series', 3, 9, 'provider', 'release-1', 'en')]
 
 
-def test_a_sports_search_without_a_context_records_nothing(blacklist_calls):
-    """Every id is None, and media_type is "movie" because the video is one.
+def test_an_unattributable_movie_release_is_still_excluded(blacklist_calls):
+    """Every id is None, so the row cannot name its media. It is written anyway.
 
-    Without the video's sports context nothing can be attributed: the callback
-    must not invent an event. The context only travels on a real sports video.
+    get_blacklist() has no media scoping, so this row is what keeps the release
+    out of the next search. Dropping it to keep the Excluded page tidy would
+    trade a cosmetic problem for an endless re-download of a subtitle a
+    provider has already said is bad. A sports search never reaches here: its
+    video and every subtitle listed off it carry sports_context.
     """
     from app.get_providers import _handle_mgb
 
     _handle_mgb('provider', _exception('movie'),
                 {'radarrId': None, 'sonarrSeriesId': None, 'sonarrEpisodeId': None},
                 Language('eng'))
-    assert blacklist_calls == []
+    assert blacklist_calls == [('movie', None, 'provider', 'release-1', 'en')]
 
 
 def test_a_sports_search_records_to_its_event_when_the_context_travels(
@@ -171,16 +182,37 @@ def test_the_pool_threads_the_video_sports_context_to_the_callback():
     assert "sports_context=getattr(subtitle, 'sports_context', None)" in download_source
 
 
-def test_a_partial_episode_id_records_nothing(blacklist_calls):
-    """Half an episode key is not a key: the old check only tested for the
-    presence of the dict entries, which subliminal always sets, so a None pair
-    passed it."""
+def test_a_partial_episode_id_still_excludes_the_release(blacklist_calls):
+    """Half an episode key is not a key, and the row records what it has.
+
+    The exclusion is what matters: it is keyed on (provider, subs_id), which is
+    present and correct here, and the episode ids are only the attribution.
+    Refusing to write it would leave the release to come back on every search.
+    """
     from app.get_providers import _handle_mgb
 
     _handle_mgb('provider', _exception('series'),
                 {'radarrId': None, 'sonarrSeriesId': 3, 'sonarrEpisodeId': None},
                 Language('eng'))
-    assert blacklist_calls == []
+    assert blacklist_calls == [('series', 3, None, 'provider', 'release-1', 'en')]
+
+
+def test_the_release_blacklist_is_not_scoped_to_any_media():
+    """Why an unattributed row is worth writing, asserted rather than assumed.
+
+    get_blacklist() and get_blacklist_movie() select only (provider, subs_id).
+    If either ever grows a media filter, the tests above become wrong and this
+    one says so first.
+    """
+    import inspect
+
+    from radarr import blacklist as movie_blacklist
+    from sonarr import blacklist as series_blacklist
+
+    for source in (inspect.getsource(series_blacklist.get_blacklist),
+                   inspect.getsource(movie_blacklist.get_blacklist_movie)):
+        assert '.where(' not in source
+        assert 'provider' in source and 'subs_id' in source
 
 
 def test_the_language_modifier_travels_with_the_release(blacklist_calls):

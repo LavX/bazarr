@@ -19,6 +19,34 @@ def validate_sports_mappings(value):
     return value
 
 
+def usable_sports_mappings(value, source):
+    """Drop the pairs that cannot be applied, and keep the ones that can.
+
+    The Sonarr and Radarr tables have skipped just the offending pair since
+    d3204863a, and the settings page persists whatever was posted: its Add
+    button appends an empty pair, so a table saved mid-edit always carries one.
+    Voiding the whole table for it left every sports path unmapped with nothing
+    user-visible saying so.
+    """
+    usable = []
+    seen = ({}, {})
+    for pair in value if isinstance(value, list) else []:
+        if (not isinstance(pair, list) or len(pair) != 2 or
+                any(not isinstance(prefix, str) or not prefix.strip() or '\x00' in prefix
+                    for prefix in pair)):
+            logging.warning('BAZARR ignoring an incomplete %s Sportarr path mapping row', source)
+            continue
+        keys = tuple(pair[side].replace('\\', '/').rstrip('/') for side in (0, 1))
+        if any(keys[side] in seen[side] for side in (0, 1)):
+            logging.warning('BAZARR ignoring a duplicated %s Sportarr path mapping prefix: %s',
+                            source, keys[0])
+            continue
+        for side in (0, 1):
+            seen[side][keys[side]] = True
+        usable.append(pair)
+    return usable
+
+
 def global_sports_mappings():
     """The Path Mappings table on the Connections page, as [remote, local] pairs.
 
@@ -27,11 +55,7 @@ def global_sports_mappings():
     keeps a caller from mutating live config.
     """
     raw = [list(pair) for pair in (settings.general.path_mappings_sports or [])]
-    try:
-        return validate_sports_mappings(raw)
-    except ValueError:
-        logging.debug('BAZARR ignoring malformed global Sportarr path mappings')
-        return []
+    return usable_sports_mappings(raw, 'global')
 
 
 def read_sports_mappings(value, inherit=True):
@@ -162,9 +186,17 @@ class PathMappings:
         """Path-replace ``path`` using the owning instance's per-instance
         path_mappings when configured (#156), else the global mapping.
 
-        media_type is 'series'/'episode' or 'movie'/'movies'. This is the entry
-        point to use wherever a media row carries an arr_instance_id, so the
-        per-instance path_mappings column is no longer silently ignored.
+        media_type is 'series'/'episode', 'movie'/'movies' or 'sports'. This is
+        the entry point to use wherever a media row carries an arr_instance_id,
+        so the per-instance path_mappings column is no longer silently ignored.
+
+        The series and movie branches degrade to the global table when the
+        owner resolves to nothing. The 'sports' branch does NOT: it has no
+        global fallback to degrade to, and raises ValueError for a missing,
+        disabled or wrong-kind owner and for malformed stored JSON. Callers
+        that turn a lookup into an HTTP answer must therefore join to an
+        enabled sportarr owner first, or handle the raise, rather than
+        assuming a mapping always comes back.
         """
         if media_type == 'sports':
             return apply_sports_mapping(path, _sports_instance_mapping(arr_instance_id))

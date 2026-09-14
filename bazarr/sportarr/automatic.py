@@ -76,6 +76,7 @@ def _provider_result(video, languages, pool, minimum, profile, cancel, candidate
     while not _provider_slots.acquire(timeout=0.1):
         check_cancelled(cancel)
     result = Queue(maxsize=1)
+    started = False
     # Every candidate the search scores lands here, the rejected ones included.
     # When a search comes back empty they are the only evidence of what the
     # providers actually hold, and reading them costs no extra request.
@@ -111,7 +112,19 @@ def _provider_result(video, languages, pool, minimum, profile, cancel, candidate
             finally:
                 _provider_slots.release()
 
-    Thread(target=run, name="sports-provider-search", daemon=True).start()
+    # The pool and the slot are released in the worker's finally, so nothing
+    # frees them if the worker never runs. A thread that cannot start would
+    # otherwise leak a slot permanently, and four of those would deadlock every
+    # later sports search.
+    try:
+        Thread(target=run, name="sports-provider-search", daemon=True).start()
+        started = True
+    finally:
+        if not started:
+            try:
+                pool.terminate()
+            finally:
+                _provider_slots.release()
     while True:
         check_cancelled(cancel)
         try:

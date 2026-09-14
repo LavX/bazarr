@@ -7,7 +7,7 @@ import sys
 
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
 
-from app.database import (TableShows, TableEpisodes, TableMovies, TableSportsEvents,
+from app.database import (TableArrInstances, TableShows, TableEpisodes, TableMovies, TableSportsEvents,
                           database, select)
 from sportarr.subtitles import sports_manual_operation
 from arr_instances.resolution import scoped
@@ -278,7 +278,16 @@ class Subtitles(Resource):
                 sports_stmt = scoped(
                     select(
                         TableSportsEvents.path, TableSportsEvents.arr_instance_id
-                    ).where(TableSportsEvents.id == id),
+                    )
+                    # Joined to an ENABLED sportarr owner: the mapping below
+                    # has no global fallback and raises for a disabled one,
+                    # which left this handler answering 500 where the row is
+                    # simply not reachable. Defaulting the owner id is not
+                    # enough on its own.
+                    .join(TableArrInstances, TableSportsEvents.arr_instance_id == TableArrInstances.id)
+                    .where(TableSportsEvents.id == id,
+                           TableArrInstances.kind == 'sportarr',
+                           TableArrInstances.enabled == 1),
                     TableSportsEvents.arr_instance_id,
                     arr_instance_id,
                 )
@@ -356,7 +365,14 @@ class Subtitles(Resource):
                     TableSportsEvents.subtitles,
                     TableSportsEvents.league_id,
                     TableSportsEvents.arr_instance_id,
-                ).where(TableSportsEvents.id == id),
+                )
+                # Same enabled-owner join as the sync lookup above, and for the
+                # same reason: the sports path mapping refuses a disabled owner
+                # by raising, which surfaces as a 500 rather than a 404.
+                .join(TableArrInstances, TableSportsEvents.arr_instance_id == TableArrInstances.id)
+                .where(TableSportsEvents.id == id,
+                       TableArrInstances.kind == 'sportarr',
+                       TableArrInstances.enabled == 1),
                 TableSportsEvents.arr_instance_id,
                 arr_instance_id,
             )

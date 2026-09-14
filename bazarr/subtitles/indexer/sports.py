@@ -24,6 +24,7 @@ from sportarr.parser import positive_id
 from sportarr.settings import get_sports_settings
 from sportarr.sync.leagues import notify, require_sportarr
 from subtitles.adaptive_searching import is_search_given_up
+from subtitles.mismatch import prune_mismatches_for_media
 from subtitles.indexer.utils import (add_combined_outputs, add_sync_engine_outputs, get_external_subtitles_path,
                                      guess_external_subtitles, normalize_subtitle_language_variant,
                                      subtitle_language_with_combined_modifier, subtitle_language_with_sync_modifier)
@@ -217,7 +218,15 @@ def store_subtitles_sports(event_id, arr_instance_id=None, *, use_cache=None, ow
             row = _validated_row(session, context, signature, cancel)
             cached = _cached(row, signature)
             if not cached:
-                row.subtitles = row.missing_subtitles = row.failedAttempts = '[]'
+                row.subtitles = row.failedAttempts = '[]'
+                # Not '[]': this commits before the probe below, and a probe
+                # that cannot run leaves the row as it stands here. An empty
+                # missing list reads as "nothing wanted", and the Wanted query
+                # filters on missing_subtitles != '[]', so the recording would
+                # leave Wanted permanently and never be searched again. The
+                # mapping-failure path above recomputes it for the same reason.
+                row.missing_subtitles = str(_missing(context.profile_id, [], row.audio_language,
+                                                     row.failedAttempts))
             row.ffprobe_cache = (pickle.dumps(cached | {'sports_indexed': False}, pickle.HIGHEST_PROTOCOL)
                                  if cached else None)
             session.flush()
@@ -250,7 +259,9 @@ def store_subtitles_sports(event_id, arr_instance_id=None, *, use_cache=None, ow
             # is the only source there has ever been.
             if settings.general.parse_embedded_audio_track:
                 row.audio_language = str(audio_languages_from_metadata(data, context.mapped_path))
-            row.missing_subtitles = str(_missing(context.profile_id, actual, row.audio_language, row.failedAttempts))
+            missing_subtitles_text = str(_missing(context.profile_id, actual, row.audio_language,
+                                                  row.failedAttempts))
+            row.missing_subtitles = missing_subtitles_text
             row.ffprobe_cache = pickle.dumps(data | {'sports_indexed': True}, pickle.HIGHEST_PROTOCOL)
             session.flush()
             check_cancelled(cancel)
@@ -260,6 +271,14 @@ def store_subtitles_sports(event_id, arr_instance_id=None, *, use_cache=None, ow
             # The transaction session flushes only what this block flushes, so
             # the history rows above stay pending until they are flushed too.
             session.flush()
+    # Every way a subtitle can arrive ends here, exactly as it does for series
+    # and movies, which is what makes this the right place to retire a
+    # release-type mismatch. Sports mismatches are written by the automatic
+    # search and read by the sports Wanted page, and nothing else clears them.
+    # Outside the publication transaction, the way the sibling indexers run it:
+    # this never raises, and a failed statement inside would abort the commit
+    # that just recorded the index.
+    prune_mismatches_for_media('sports', context.event_id, missing_subtitles_text)
     check_cancelled(cancel)
     notify([event_id])
     return actual

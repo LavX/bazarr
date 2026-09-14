@@ -15,3 +15,16 @@ row into an unhandled 500.
 
 class SportsNotFound(ValueError):
     """The requested sports row does not exist, or is not this owner's."""
+
+
+class SportsOwnersBusy(ValueError):
+    """The owned publication boundary could not take its locks right now.
+
+    The boundary is deliberately NOWAIT, so a concurrent writer on the owner
+    tables fails it outright rather than queueing behind a scan. That is a
+    transient contention answer, not a fault, and callers that can afford to
+    wait a moment should retry it rather than abandoning a publication midway.
+
+    Subclasses ``ValueError`` for the reason ``SportsNotFound`` does: every
+    handler that already maps ``ValueError`` onto a 409 keeps doing so.
+    """

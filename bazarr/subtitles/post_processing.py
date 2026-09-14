@@ -31,11 +31,22 @@ def postprocessing(command, path, subtitle_path=None, *, lock_paths=None,
             with subtitle_write_locks(path, subtitle_path):
                 validate_source()
                 shutil.copyfile(subtitle_path, temporary)
+            # Deliberately outside the locks, unlike the branch below, and the
+            # difference is what the command is pointed at. Here it rewrites an
+            # O_EXCL staging file that nothing else can name, and the publish
+            # that follows re-takes the locks and refuses if the destination or
+            # the source moved meanwhile. Holding the coordinator across an
+            # operator-configured command instead would block every other
+            # writer for as long as that command takes, and a later writer that
+            # arrives during it would be locked out rather than preserved.
             _postprocessing_locked(command_builder(temporary), path)
         _report_subtitle_publication(on_publish, subtitle_path)
         return
     # Configured commands can mutate subtitles in place. This is the one boundary
-    # that must hold this media's mutation locks while the external command runs.
+    # that must hold this media's mutation locks while the external command runs:
+    # the command is pointed at the published subtitle itself, so nothing else
+    # stands between it and another writer. The guarded branch above stages into
+    # a private file and therefore does not need them, and must not take them.
     if lock_paths is None:
         destination = os.path.join(get_target_folder(path, create=False) or os.path.dirname(path), '.destination')
         lock_paths = (path, destination, subtitle_path or path)

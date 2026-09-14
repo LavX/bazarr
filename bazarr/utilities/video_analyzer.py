@@ -6,7 +6,8 @@ import pickle
 import re
 
 from app.config import settings
-from app.database import TableEpisodes, TableMovies, TableSportsEvents, database, update, select
+from app.database import (TableArrInstances, TableEpisodes, TableMovies, TableSportsEvents, database,
+                          update, select)
 from arr_instances.resolution import scoped
 from languages.custom_lang import CustomLanguage
 from languages.get_languages import (language_from_alpha2, language_from_alpha3, alpha3_from_alpha2,
@@ -214,7 +215,16 @@ def subtitles_sync_references(subtitles_path, sonarr_episode_id=None, radarr_mov
             scoped(
                 select(TableSportsEvents.path, TableSportsEvents.file_size, TableSportsEvents.file_id,
                        TableSportsEvents.subtitles, TableSportsEvents.arr_instance_id)
-                .where(TableSportsEvents.id == sports_event_id),
+                # Joined to an ENABLED sportarr owner, the way
+                # resolve_subtitle_path is: the sports mapping below has no
+                # global fallback and raises for a disabled or missing owner,
+                # and this function has no caller that catches it, so an event
+                # whose instance was disabled answered 500 instead of an empty
+                # reference list.
+                .join(TableArrInstances, TableSportsEvents.arr_instance_id == TableArrInstances.id)
+                .where(TableSportsEvents.id == sports_event_id,
+                       TableArrInstances.kind == 'sportarr',
+                       TableArrInstances.enabled == 1),
                 TableSportsEvents.arr_instance_id, arr_instance_id)) \
             .first()
 

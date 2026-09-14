@@ -7,6 +7,7 @@ Fernet-encrypted settings, so the key is encrypted here on write via
 ``secret_store.encrypt_secret`` and decrypted on read via ``decrypt_secret``.
 API-facing callers use :func:`to_safe_dict`, which never carries the key.
 """
+import logging
 import re
 from datetime import datetime
 
@@ -141,6 +142,8 @@ class ArrInstanceRepository:
             )
             self._session.add(row)
             self._session.flush()
+        if kind == 'sportarr':
+            self._refresh_ownership_triggers()
         return row
 
     def update(self, instance_id, *, name=_UNSET, enabled=_UNSET,
@@ -267,10 +270,20 @@ class ArrInstanceRepository:
             from sportarr.db import sports_transaction
             with sports_transaction(self._session) as session:
                 # The FK cascade removes this owner's metadata, never media files.
+                # Release-type mismatches are not part of it: the link is a plain
+                # integer, so the cascaded events would leave their rows behind
+                # to badge a later recording that reuses one of their ids.
+                from sqlalchemy import select as _select
+                from app.database import TableSportsLeagues
+                from sportarr.sync.leagues import forget_league_event_mismatches
+                forget_league_event_mismatches(session, instance_id, session.execute(
+                    _select(TableSportsLeagues.id).where(
+                        TableSportsLeagues.arr_instance_id == instance_id)).scalars().all())
                 session.execute(delete(TableArrInstances).where(TableArrInstances.id == instance_id))
                 ArrInstanceRepository(session)._reconcile_default('sportarr', demoted_id=instance_id)
                 session.flush()
             self._session.expire_all()
+            self._refresh_ownership_triggers()
             return True
         if self._has_owned_rows(instance_id):
             raise ValueError("cannot delete an instance that still owns rows")
@@ -282,6 +295,23 @@ class ArrInstanceRepository:
             self._session.flush()
             self._reconcile_default(kind, demoted_id=instance_id)
         return True
+
+    def _refresh_ownership_triggers(self):
+        """Match the ownership triggers to whether Sportarr exists at all.
+
+        The triggers tax every write to table_episodes and table_movies, so
+        install_ownership_revision only installs them for an install that has a
+        Sportarr instance. Startup alone is too late to decide: the first
+        instance is created from a running process, and the publication
+        boundary refuses to run without them. Never raises, because failing
+        here would turn a successful create or delete into an error, and the
+        next startup reinstalls.
+        """
+        from app.ownership_revision import install_ownership_revision
+        try:
+            install_ownership_revision(self._session.connection())
+        except Exception:
+            logging.exception('BAZARR could not refresh the subtitle ownership triggers')
 
     def _has_owned_rows(self, instance_id):
         from app.database import (

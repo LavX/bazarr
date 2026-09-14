@@ -112,6 +112,11 @@ def test_indexer_writes_audio_language_before_computing_missing():
 
     Writing it after _missing would leave audio_exclude / audio_only_include
     reading a stale value for a whole indexing cycle.
+
+    The earlier _missing in the pre-probe reset is a different question: it runs
+    before the file is read at all, so there is no fresh audio metadata for it
+    to be stale against, and it exists so that a recording whose probe cannot
+    run stays wanted instead of being committed with an empty missing list.
     """
     import inspect
 
@@ -119,7 +124,7 @@ def test_indexer_writes_audio_language_before_computing_missing():
 
     source = inspect.getsource(sports.store_subtitles_sports)
     audio_at = source.index("row.audio_language = str(audio_languages_from_metadata")
-    missing_at = source.index("row.missing_subtitles = str(_missing(")
+    missing_at = source.index("missing_subtitles_text = str(_missing(")
     assert audio_at < missing_at
 
 

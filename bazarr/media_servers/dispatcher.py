@@ -330,19 +330,18 @@ class RefreshDispatcher:
         rather than carried through every publication callback, and the rungs
         that need them disappear when they cannot be read.
         """
-        if event.media_type == "sports":
-            # A sports event carries no identifiers and no item type either
-            # server indexes, so the only rung that can answer is the library
-            # the mapped path points into. The scan is scoped to that library,
-            # exactly as the movie and episode library rungs are.
-            if server == "emby":
-                return [(resolution.LIBRARY, lambda: client.refresh_library(
-                    event.media_type, mapped["path"], ensure_current=guard,
-                    coalesce=coalesce), "requested")]
-            return [(resolution.LIBRARY, lambda: client.refresh_library(
-                mapped["library_id"], ensure_current=guard,
-                coalesce=coalesce), "requested")]
         supported = set(getattr(client, "REFRESH_STEPS", ()) or ())
+        if event.media_type == "sports":
+            # A sports event carries no provider identifiers, so the identity
+            # rungs cannot answer for one. Emby resolves a path through the
+            # same typed item lookup, whose _ITEM_TYPES has no sports entry,
+            # leaving it the library the mapped path points into. Silo's file
+            # rung takes only a library and a path and is media-type agnostic,
+            # so a recording scans there exactly as a movie does; routing it to
+            # the library instead submitted a recursive scan of a whole, often
+            # shared, library for every publication and could never confirm.
+            supported &= ({resolution.LIBRARY} if server == "emby"
+                          else {resolution.PATH, resolution.LIBRARY})
         metadata = (self.metadata_factory(event)
                     if supported & {resolution.PROVIDER_ID, resolution.TITLE_YEAR} else None)
         if metadata is None:

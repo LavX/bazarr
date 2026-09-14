@@ -8,7 +8,7 @@ from threading import RLock
 from weakref import WeakKeyDictionary
 
 from sqlalchemy import select, text
-from app.ownership_revision import ownership_revision, ownership_token, verify_ownership_protection
+from app.ownership_revision import ensure_ownership_protection, ownership_revision, ownership_token
 
 from app.config import settings
 from app.database import (
@@ -18,6 +18,7 @@ from app.database import (
     TableSportsEvents,
 )
 from utilities.helper import get_target_folder
+from utilities.sql_limits import in_chunks
 from utilities.path_mappings import (
     _apply_mapping,
     apply_sports_mapping,
@@ -273,9 +274,14 @@ def _snapshot(session, configuration, revision):
             else:
                 for table, media_type in MEDIA_TABLES:
                     ids = [row_id for name, row_id in changes if name == table.__tablename__]
-                    if ids:
+                    # Chunked: subtitle_ownership_changes accumulates one row
+                    # per changed media row and is pruned only at startup, so a
+                    # large Sonarr sync between restarts hands this more ids
+                    # than a driver will take bind parameters for. Same cap the
+                    # rest of the repo applies to an IN list.
+                    for batch in in_chunks(ids):
                         for row in session.execute(select(table.id, table.arr_instance_id, table.path,
-                                                          table.subtitles).where(table.id.in_(ids))):
+                                                          table.subtitles).where(table.id.in_(batch))):
                             cached.replace(media_type, row)
             if revision != ownership_revision(session) or configuration != _configuration():
                 raise ValueError('Subtitle destination ownership changed. Please retry.')
@@ -294,7 +300,7 @@ class SportsOutputNamespace:
 
     def __init__(self, context, session, *, read_path=None):
         self.context = context
-        verify_ownership_protection(session)
+        ensure_ownership_protection(session)
         self.configuration = _configuration()
         self.revision = ownership_revision(session)
         if read_path is not None:

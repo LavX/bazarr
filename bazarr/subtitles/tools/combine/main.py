@@ -23,7 +23,11 @@ class CombineResult:
     path: str = ""
     alignment: str = ""    # for "built" only
     reason: str = ""       # for "skipped" only
-    error: str = ""        # for "failed" only
+    # Set on "failed", and also on a "built" whose owned publication could not
+    # be finalised: the file exists and is correct, but the sports bookkeeping
+    # that should have followed it did not run. A consumer that reports a
+    # built-with-error as a clean build hides a half-finished publication.
+    error: str = ""
 
 
 def try_combine_for_video(video_path, media_type, sonarr_series_id=None,

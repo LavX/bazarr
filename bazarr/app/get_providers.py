@@ -546,26 +546,35 @@ def _handle_mgb(name, exception, ids, language, sports_context=None):
         return
 
     if ids:
-        if exception.media_type == "series":
-            if ids.get('sonarrSeriesId') and ids.get('sonarrEpisodeId'):
-                blacklist_log(ids['sonarrSeriesId'], ids['sonarrEpisodeId'], name, exception.id, language_str)
-                return
-        elif ids.get('radarrId'):
-            blacklist_log_movie(ids['radarrId'], name, exception.id, language_str)
-            return
-        # No usable media id. A sports search reaches here every time: its video
-        # is a Movie for provider compatibility, so providers report media_type
-        # "movie", while the id dict subliminal builds carries only the Sonarr
-        # and Radarr keys and every one of them is None. The movie branch used
-        # to run anyway and write a blacklist row with a null radarrId, which
-        # blacklists nothing and leaves a junk entry on the movie Excluded page.
+        # The id dict always carries all three keys, filled with None when the
+        # video does not have them, so membership never told these branches
+        # apart. A sports search is already gone by here: its video and every
+        # subtitle listed off it carry sports_context, which the branch above
+        # returns on, so nothing below can be a recording.
         #
-        # A sports search that carried no context still drops here, because
-        # there is nothing to attribute the exclusion to. The callback cannot
-        # invent an event.
-        logging.warning(
-            'BAZARR provider %s demanded a blacklist for %s, but the search carried no '
-            'media id to attribute it to; not recording it.', name, exception.id)
+        # The remaining null-id case is an episode or movie whose database
+        # refiner did not resolve, which is routine on an instance with its own
+        # path mappings because the refiner looks the row up through the GLOBAL
+        # reverse mapping. The row it writes is unattributed and shows as a junk
+        # entry on the Excluded page, but get_blacklist() reads (provider,
+        # subs_id) with no media scoping, so it does suppress the bad release
+        # everywhere. Dropping it instead left the corrupt subtitle to be
+        # re-downloaded and re-rejected forever.
+        if exception.media_type == "series":
+            if not (ids.get('sonarrSeriesId') and ids.get('sonarrEpisodeId')):
+                logging.warning(
+                    'BAZARR provider %s demanded a blacklist for %s on an episode that could not '
+                    'be attributed; recording it unattributed so the release stays excluded.',
+                    name, exception.id)
+            blacklist_log(ids.get('sonarrSeriesId'), ids.get('sonarrEpisodeId'), name, exception.id,
+                          language_str)
+            return
+        if not ids.get('radarrId'):
+            logging.warning(
+                'BAZARR provider %s demanded a blacklist for %s on a movie that could not be '
+                'attributed; recording it unattributed so the release stays excluded.',
+                name, exception.id)
+        blacklist_log_movie(ids.get('radarrId'), name, exception.id, language_str)
 
 
 def provider_throttle(name, exception, ids=None, language=None, sports_context=None):

@@ -2,6 +2,7 @@
 
 import ast
 import hashlib
+import logging
 import os
 import re
 import tempfile
@@ -858,7 +859,16 @@ def _get_media_metadata(media_type, media_id, arr_instance_id=None):
         query = (
             select(TableSportsEvents.id, TableSportsEvents.league_id, TableSportsEvents.arr_instance_id,
                    TableSportsEvents.path, TableSportsEvents.sportarrEventId, TableSportsEvents.title)
-            .where(TableSportsEvents.id == media_id)
+            # Joined to an ENABLED sportarr owner, the same gate
+            # resolve_subtitle_path enforces. Without it this answered 200 with
+            # the league title, the event title and the raw Sportarr-side path
+            # for an event whose instance is disabled, past the gate every
+            # other sports endpoint applies, and the follow-up create then 404d.
+            .join(TableArrInstances,
+                  TableSportsEvents.arr_instance_id == TableArrInstances.id)
+            .where(TableSportsEvents.id == media_id,
+                   TableArrInstances.kind == 'sportarr',
+                   TableArrInstances.enabled == 1)
         )
         if arr_instance_id is not None:
             query = query.where(TableSportsEvents.arr_instance_id == arr_instance_id)
@@ -1024,7 +1034,15 @@ def _save_subtitle_content_guarded(media_type, media_id, language_code, arr_inst
             return 'No space left on device', 507
         raise
 
-    _refresh_media_subtitles(media_type, media_id, metadata)
+    # Best effort: the bytes are on disk and published. A reindex that cannot
+    # run (the sports indexer raises a bare OSError on a probe failure or its
+    # analysis timeout) must not answer 500 for a write that succeeded, or the
+    # retry would come back 409 against the file this request just created.
+    try:
+        _refresh_media_subtitles(media_type, media_id, metadata)
+    except Exception:
+        logging.exception('BAZARR could not reindex %s %s after writing its subtitle',
+                          media_type, media_id)
     response = make_response('', 204)
     response.headers['ETag'] = f'"{new_etag}"'
     return response
@@ -1137,7 +1155,13 @@ def _promote_sync_subtitle_guarded(media_type, media_id, target_language, source
         raise
 
     try:
+        # Best effort, for the reason the editor write states: history below
+        # records the promotion in a finally, so raising here reported failure
+        # for a promotion that had already been written and logged.
         _refresh_media_subtitles(media_type, media_id, metadata)
+    except Exception:
+        logging.exception('BAZARR could not reindex %s %s after promoting its subtitle',
+                          media_type, media_id)
     finally:
         _log_promoted_sync_history(
             media_type=media_type,
@@ -1330,9 +1354,12 @@ def _create_subtitle_guarded(media_type, media_id, arr_instance_id=None, sports_
     # Build the subtitle filename. `language` was already validated against
     # r'^[a-zA-Z]{2,3}$' above, `ext` comes from the FORMAT_TO_EXT whitelist,
     # `hi`/`forced` are booleans, so the source string cannot contain path
-    # separators. Running the filename through `secure_filename` still has
-    # value as a CodeQL-recognised sanitiser for py/path-injection, and we
-    # use `safe_join` for the directory composition.
+    # separators. _subtitle_filename runs `secure_filename` over that
+    # request-derived suffix, which is the CodeQL-recognised sanitiser for
+    # py/path-injection; it deliberately does NOT run over `video_name`, which
+    # comes off the media row and must keep its spaces to stay matchable. The
+    # directory composition uses `safe_join`, and the normpath containment
+    # below anchors the result.
     video_name = os.path.splitext(os.path.basename(video_path))[0]
     suffix = language
     if hi:

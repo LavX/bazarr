@@ -141,6 +141,13 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
             if metadata:
                 event_stream(type='series', payload=metadata.sonarrSeriesId)
             event_stream(type='episode', payload=metadata.id if metadata else media_id)
+        elif media_type == 'sports':
+            # Reindexed by its own indexer, which takes the event id rather
+            # than a pair of paths, and announced as a sports event. Falling
+            # through to the movie branch announced an event id as a movie id.
+            from subtitles.indexer.sports import store_subtitles_sports
+            store_subtitles_sports(media_id, arr_instance_id)
+            event_stream(type='sports', action='update', payload=media_id)
         else:
             event_stream(type='movie', payload=media_id)
 

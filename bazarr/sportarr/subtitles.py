@@ -4,8 +4,9 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
-import os
 import logging
+import os
+import time
 
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
@@ -24,6 +25,7 @@ from app.config import settings
 from app.get_providers import get_providers
 from sportarr.connection import check_cancelled
 from sportarr.db import SportsTransactionOutcome, sports_transaction
+from sportarr.errors import SportsOwnersBusy
 from sportarr.identity import SportsEventContext, resolve_event_in_session
 from sportarr.notify import notify_rescan, rescan_batch
 from sportarr.output import (
@@ -34,6 +36,34 @@ from sportarr.output import (
 )
 from sportarr.sync.leagues import require_sportarr
 from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
+
+# Bounded: the owner tables are busy for as long as one arr write takes, not
+# for as long as a scan takes, so a few short waits either clear it or it is
+# not contention.
+_HISTORY_PUBLICATION_ATTEMPTS = 4
+_HISTORY_PUBLICATION_BACKOFF = 0.25
+
+
+def retry_while_owners_busy(attempt, cancel=None):
+    """Run ``attempt`` again while the owned publication boundary is contended.
+
+    The boundary is NOWAIT by design, so an overlapping arr write fails it
+    outright rather than queueing behind a scan. Contention is transient and a
+    caller with nothing left to undo should wait a moment rather than abandon
+    the work; every other failure is passed straight through.
+    """
+    for index in range(_HISTORY_PUBLICATION_ATTEMPTS):
+        try:
+            return attempt()
+        except SportsOwnersBusy:
+            if index == _HISTORY_PUBLICATION_ATTEMPTS - 1:
+                raise
+            check_cancelled(cancel)
+            logging.warning(
+                "Sports publication is waiting on the destination owners; retrying"
+            )
+            time.sleep(_HISTORY_PUBLICATION_BACKOFF * (index + 1))
+            check_cancelled(cancel)
 
 
 @dataclass(frozen=True)
@@ -123,6 +153,11 @@ def sports_file_publication(
 ):
     """Short owned publication boundary for provider and nonprovider file work."""
     namespace = SportsOutputNamespace(context, database, read_path=output_path)
+    # The guard's own statements are NOWAIT, so an OperationalError out of them
+    # is lock contention. One raised by the caller's body inside the guard, the
+    # flush in sportarr/history.py for instance, is a database fault and must
+    # keep its own wording rather than being relabelled as busy owners.
+    in_body = False
     try:
         with sports_transaction(database, nowait=True, outcome=outcome) as session:
             lock_output_owners(session, context.arr_instance_id)
@@ -149,12 +184,16 @@ def sports_file_publication(
             ).scalar_one()
             validate()
             namespace.validate(session)
+            in_body = True
             yield session, validate
+            in_body = False
             session.flush()
             validate()
             namespace.validate(session)
     except OperationalError as exc:
-        raise ValueError("Subtitle destination owners are busy. Please retry.") from exc
+        if in_body:
+            raise
+        raise SportsOwnersBusy("Subtitle destination owners are busy. Please retry.") from exc
 
 
 @contextmanager
@@ -447,20 +486,30 @@ def save_sports_subtitle(
             state[phase] = "completed"
             phase = "history"
             state[phase] = "running"
-            with sports_publication(candidate, cancel, outcome=history_outcome) as (
-                session,
-                check,
-            ):
-                history_started = True
-                validate_artifact_stat(artifact, saved[0].storage_path)
-                sports_history(
+            def write_history():
+                nonlocal history_started
+                with sports_publication(candidate, cancel, outcome=history_outcome) as (
                     session,
-                    context,
-                    result,
-                    action=3 if is_upgrade else 2 if is_manual else 1,
-                    upgraded_from_id=upgraded_from_id,
-                    artifact=artifact,
-                )
+                    check,
+                ):
+                    history_started = True
+                    validate_artifact_stat(artifact, saved[0].storage_path)
+                    sports_history(
+                        session,
+                        context,
+                        result,
+                        action=3 if is_upgrade else 2 if is_manual else 1,
+                        upgraded_from_id=upgraded_from_id,
+                        artifact=artifact,
+                    )
+
+            # Retried on contention alone. The file is already published by
+            # here, and the boundary is NOWAIT, so an overlapping Sonarr or
+            # Radarr write on the owner tables can fail it outright. Losing
+            # this row loses the subtitle for good: upgrades walk history, and
+            # so does the blacklist, and there is no repair path that would
+            # write it later.
+            retry_while_owners_busy(write_history, cancel)
             state[phase] = "committed"
             # Series and movies notify as soon as the download is recorded;
             # sports never did, so with Apprise configured every sports

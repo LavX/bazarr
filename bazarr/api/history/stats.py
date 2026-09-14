@@ -75,7 +75,13 @@ class HistoryStats(Resource):
         history_where_clauses_sports = [(TableHistorySports.timestamp.between(past, now))]
 
         if action != 'All':
-            action = int(action)
+            # Parsed as a string with an 'All' sentinel, so anything else may
+            # still not be a number. Comparing the raw string matched nothing
+            # against the integer column; int() on it raised out of the handler.
+            try:
+                action = int(action)
+            except (TypeError, ValueError):
+                return 'Action must be a number or "All"', 400
             history_where_clauses.append((TableHistory.action == action))
             history_where_clauses_movie.append((TableHistoryMovie.action == action))
             history_where_clauses_sports.append((TableHistorySports.action == action))

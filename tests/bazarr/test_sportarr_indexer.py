@@ -1412,3 +1412,82 @@ def test_audio_save_honors_sports_master_with_retained_enabled_owner(
         assert row(session, 61).audio_language == before
         assert calls == []
     assert row(session, 62).audio_language == "['French']"
+
+
+def test_a_probe_that_cannot_run_leaves_the_recording_wanted(indexed_library, monkeypatch):
+    """The first transaction commits before the file is read, so whatever it
+    writes is what an unprobeable recording is left with.
+
+    missing_subtitles was hard-coded to '[]' there. The Wanted query filters on
+    missing_subtitles != '[]', so a recording whose probe failed left Wanted
+    permanently and was never searched again, and every retry reproduced it.
+    """
+    from app import database as db
+    from sportarr import library
+
+    session, _ = indexed_library
+    module = sports(monkeypatch, session)
+    items = [
+        dict(
+            id=i,
+            language=language,
+            hi="False",
+            forced="False",
+            audio_exclude="False",
+            audio_only_include="False",
+        )
+        for i, language in enumerate(("fr", "en", "de"), 1)
+    ]
+    session.execute(
+        sa.insert(db.TableLanguagesProfiles).values(
+            profileId=5, name="Sports", items=json.dumps(items)
+        )
+    )
+    db.update_profile_id_list.invalidate()
+    assert library.assign_profile(session, 51, 1, 5)
+    monkeypatch.setattr(
+        module,
+        "search_external_subtitles",
+        lambda *a, **kw: (_ for _ in ()).throw(OSError("offline")),
+    )
+
+    with pytest.raises(OSError):
+        module.store_subtitles_sports(61, 1)
+
+    assert ast.literal_eval(row(session, 61).missing_subtitles) == ["fr", "en", "de"], (
+        "an unprobeable recording must stay wanted"
+    )
+    assert ast.literal_eval(row(session, 61).subtitles) == []
+
+
+def test_indexing_retires_a_release_type_mismatch_that_is_no_longer_missing(
+    indexed_library, monkeypatch
+):
+    """series and movies both prune here, with the same reasoning: every way a
+    subtitle can arrive ends at the indexer. Sports mismatches are written by
+    the automatic search and read by the sports Wanted page, and nothing else
+    cleared them, so a resolved one badged the event forever and the reporter
+    then deduped a genuinely new mismatch away.
+    """
+    from app.database import TableReleaseTypeMismatch, select
+    from subtitles import mismatch
+
+    session, _ = indexed_library
+    module = sports(monkeypatch, session)
+    monkeypatch.setattr(mismatch, "database", session)
+    session.add(
+        TableReleaseTypeMismatch(
+            media_type="sports",
+            media_id=61,
+            arr_instance_id=1,
+            language="fr",
+            video_release_type="web",
+            subtitle_release_type="bluray",
+        )
+    )
+    session.commit()
+
+    assert {item[0] for item in module.store_subtitles_sports(61, 1)} == {"fr", "en:hi"}
+
+    session.expire_all()
+    assert session.execute(select(TableReleaseTypeMismatch)).scalars().all() == []

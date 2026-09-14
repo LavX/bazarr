@@ -12,8 +12,22 @@ from test_sportarr_kind_migration import migration_engine, _run  # noqa: F401
 @pytest.fixture
 def revision_library(migration_engine):  # noqa: F811
     from app.database import Base
+    from app.ownership_revision import install_ownership_revision
 
     Base.metadata.create_all(migration_engine)
+    # The triggers tax every write to table_episodes and table_movies, so they
+    # are installed only for an install that has a Sportarr instance, and
+    # create_all fires the install hook before any row can exist. The instance
+    # stays for the life of the fixture: a migration reinstalls from the same
+    # condition, so removing it again would drop the triggers a rebuild is
+    # meant to restore.
+    with migration_engine.begin() as connection:
+        connection.execute(sa.text(
+            "INSERT INTO arr_instances (id,kind,name,stable_key,port,enabled,is_default,ip,"
+            "base_url,ssl,verify_ssl,http_timeout,api_key,created_at,updated_at) "
+            "VALUES (99,'sportarr','Seed','seed',1867,1,0,'127.0.0.1','/',0,0,60,'',"
+            "'2026-01-01','2026-01-01')"))
+        install_ownership_revision(connection)
     return migration_engine
 
 
