@@ -59,6 +59,19 @@ def test_disabled_reasoning_is_explicit_in_translation_request(service, events, 
     assert post.call_args.kwargs['json']['config']['reasoning'] == {'enabled': False}
 
 
+@pytest.mark.parametrize('stored', ['', None])
+def test_cleared_reasoning_setting_still_disables_reasoning(service, monkeypatch, stored):
+    monkeypatch.setattr(module.settings.translator, 'openrouter_reasoning', stored)
+
+    assert service._build_reasoning_config() == {'enabled': False}
+
+
+def test_effort_reasoning_setting_is_sent_as_an_effort(service, monkeypatch):
+    monkeypatch.setattr(module.settings.translator, 'openrouter_reasoning', 'high')
+
+    assert service._build_reasoning_config() == {'effort': 'high'}
+
+
 @pytest.mark.parametrize('structured', [True, False])
 @pytest.mark.parametrize('status', ['partial', 'completed'])
 def test_poll_preserves_usable_lines(service, events, monkeypatch, status, structured):

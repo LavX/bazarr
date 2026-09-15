@@ -269,7 +269,14 @@ class OpenRouterTranslatorService:
         """
         reasoning_mode = getattr(settings.translator, 'openrouter_reasoning', 'disabled')
 
-        if reasoning_mode == 'disabled':
+        # An empty value means disabled, not "let the model decide". The validator
+        # that pins this setting to one of disabled/low/medium/high only runs at
+        # startup, so a settings save that clears the key leaves an empty string
+        # behind until the next restart. An empty effort is one the translator
+        # service ignores, which puts the model's own default reasoning back in
+        # charge and stalls the job: the exact failure this setting exists to
+        # prevent.
+        if not reasoning_mode or reasoning_mode == 'disabled':
             return {'enabled': False}
 
         return {
