@@ -34,13 +34,16 @@ import DigitalReleases from "./DigitalReleases";
 import DiscoverSelect from "./DiscoverSelect";
 import { readableTime } from "./feedText";
 import LibraryActivity from "./LibraryActivity";
+import LibraryHero from "./LibraryHero";
 import LocalCopyPicker from "./LocalCopyPicker";
+import NeedsAttention from "./NeedsAttention";
 import ProviderCoverage from "./ProviderCoverage";
 import RecentEpisodes from "./RecentEpisodes";
 import SearchProgress from "./SearchProgress";
 import SubtitleResults from "./SubtitleResults";
 import TitleDetails, { TitleEpisodePicker, TitleNotes } from "./TitleDetails";
 import Trending from "./Trending";
+import WantedQueue from "./WantedQueue";
 import styles from "./Discover.module.scss";
 import buttonClasses from "@/assets/button.module.scss";
 
@@ -664,6 +667,18 @@ export default function Discover() {
           ) : browsingPage ? (
             <>
               <div id="bh-browse">
+                {/* Everything above the global catalog line is the reader's own
+                    library: what it holds, what is broken, what is missing, what
+                    just arrived. The feeds below it are the world's. Each half
+                    opens with a hero so neither reads as a preamble to the
+                    other. */}
+                <LibraryHero />
+                <NeedsAttention />
+                {/* Outstanding work before completed work. The hero already
+                    carries the reassurance that automation is running, so a
+                    second full section of successes ahead of the gaps pushed
+                    the only actionable part of the page further down. */}
+                <WantedQueue />
                 <LibraryActivity />
                 <Trending />
                 {state.browsing.trendingFilter !== "movie" && (
