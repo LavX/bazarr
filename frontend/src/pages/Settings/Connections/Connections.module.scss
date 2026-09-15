@@ -1,3 +1,14 @@
+.tabList {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
+
+  > * {
+    flex: 0 0 auto;
+  }
+}
+
 .card {
   position: relative;
   border-radius: var(--bz-radius-lg);

@@ -16,6 +16,7 @@ describe("connection tabs", () => {
       "jellyfin",
       "emby",
       "silo",
+      "seerr",
     ]);
   });
 
@@ -30,6 +31,7 @@ describe("connection tabs", () => {
     expect(parseTabFromHash("#jellyfin")).toBe("jellyfin");
     expect(parseTabFromHash("#emby")).toBe("emby");
     expect(parseTabFromHash("#silo")).toBe("silo");
+    expect(parseTabFromHash("#seerr")).toBe("seerr");
   });
 
   it("parses a bare fragment without a hash", () => {

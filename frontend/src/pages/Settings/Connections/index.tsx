@@ -13,6 +13,7 @@ import {
 } from "@mantine/core";
 import { showNotification } from "@mantine/notifications";
 import {
+  faPaperPlane,
   faPlus,
   faRotateRight,
   faServer,
@@ -32,6 +33,7 @@ import JellyfinSection from "@/pages/Settings/Jellyfin/JellyfinSection";
 import MediaServerSection from "@/pages/Settings/MediaServers/MediaServerSection";
 import PlexSection from "@/pages/Settings/Plex/PlexSection";
 import RadarrSection from "@/pages/Settings/Radarr/RadarrSection";
+import SeerrSection from "@/pages/Settings/Seerr/SeerrSection";
 import SonarrSection from "@/pages/Settings/Sonarr/SonarrSection";
 import SportarrSection from "@/pages/Settings/Sportarr/SportarrSection";
 import InstanceCard from "./InstanceCard";
@@ -218,7 +220,7 @@ const SettingsConnectionsView: FunctionComponent = () => {
   return (
     <Layout name="Connections">
       <Tabs value={activeTab} onChange={handleTabChange} keepMounted={false}>
-        <Tabs.List mb="md">
+        <Tabs.List mb="md" className={styles.tabList}>
           <Tabs.Tab
             value="sonarr"
             leftSection={<FontAwesomeIcon icon={ARR_META.sonarr.icon} />}
@@ -257,6 +259,12 @@ const SettingsConnectionsView: FunctionComponent = () => {
             leftSection={<FontAwesomeIcon icon={faServer} />}
           >
             Silo
+          </Tabs.Tab>
+          <Tabs.Tab
+            value="seerr"
+            leftSection={<FontAwesomeIcon icon={faPaperPlane} />}
+          >
+            Seerr
           </Tabs.Tab>
         </Tabs.List>
 
@@ -308,6 +316,9 @@ const SettingsConnectionsView: FunctionComponent = () => {
         </Tabs.Panel>
         <Tabs.Panel value="silo">
           <MediaServerSection kind="silo" />
+        </Tabs.Panel>
+        <Tabs.Panel value="seerr">
+          <SeerrSection />
         </Tabs.Panel>
       </Tabs>
 
