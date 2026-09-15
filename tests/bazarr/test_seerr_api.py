@@ -45,6 +45,15 @@ def test_apikey_is_never_read_from_the_url():
             assert {"json", "form"} <= location
 
 
+def test_test_connection_refuses_the_masked_sentinel(seerr_api):
+    client, records = seerr_api([])
+    response = client.post('/api/seerr/test-connection', json={"url": "http://seerr:5055", "apikey": "***"},
+                           headers=HEADERS)
+    assert response.status_code == 200
+    assert response.json == {"success": False, "error_code": "configuration"}
+    assert records == []
+
+
 def test_media_status_for_a_movie(seerr_api):
     client, records = seerr_api([(200, PUBLIC, {}), (200, {"id": 550}, {})])
     response = client.get('/api/seerr/media/movie/550', headers=HEADERS)
