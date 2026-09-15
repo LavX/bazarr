@@ -11,6 +11,7 @@ import movies from "./movies";
 import plex from "./plex";
 import providerHub from "./providerHub";
 import providers from "./providers";
+import seerr from "./seerr";
 import series from "./series";
 import sports from "./sports";
 import subtitles from "./subtitles";
@@ -36,6 +37,7 @@ const api = {
   providerHub,
   distributionHub,
   arrInstances,
+  seerr,
 };
 
 export default api;

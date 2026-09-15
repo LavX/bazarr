@@ -224,6 +224,7 @@ export interface LocalOwnership {
   truncated: boolean;
   selected_episode_owned: null;
   complete_series: null;
+  seasons_owned: number[];
 }
 export interface LocalCopy {
   local_id: number;
