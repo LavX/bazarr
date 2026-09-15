@@ -141,19 +141,20 @@ describe("SystemApi.login", () => {
     vi.restoreAllMocks();
   });
 
-  it("returns the response data on successful login", async () => {
-    const payload = { upgrade_hash: false };
+  it("resolves without handing the caller any response body", async () => {
+    // The endpoint answers 204. Nothing about the account may travel back to
+    // the browser, so login deliberately returns nothing at all.
     vi.spyOn(client.axios, "post").mockResolvedValue({
-      data: payload,
-      status: 200,
-      statusText: "OK",
+      data: "",
+      status: 204,
+      statusText: "No Content",
       headers: {},
       config: { headers: {} } as AxiosResponse["config"],
     });
 
     const result = await systemApi.login("admin", "secret");
 
-    expect(result).toEqual(payload);
+    expect(result).toBeUndefined();
   });
 
   it("sends credentials as form fields with action=login", async () => {

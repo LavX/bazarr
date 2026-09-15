@@ -2,7 +2,6 @@
 
 import gc
 import time
-import secrets
 import logging
 import threading
 from collections import OrderedDict
@@ -72,7 +71,7 @@ def _clear_failed_attempts(ip):
 class SystemAccount(Resource):
     post_request_parser = reqparse.RequestParser()
     post_request_parser.add_argument('action', type=str, required=True,
-                                     help='Action from ["login", "logout", "upgrade_hash"]')
+                                     help='Action from ["login", "logout"]')
     post_request_parser.add_argument('username', type=str, required=False, help='Bazarr username')
     post_request_parser.add_argument('password', type=str, required=False, help='Bazarr password')
 
@@ -101,10 +100,15 @@ class SystemAccount(Resource):
                 _clear_failed_attempts(ip)
                 establish_session()
                 if needs_password_upgrade():
-                    # Store password in session for upgrade (server-side only, never sent to client)
-                    session['_pw_for_upgrade'] = password
-                    session['_upgrade_token'] = secrets.token_urlsafe(16)
-                    return {'upgrade_hash': True, 'upgrade_token': session['_upgrade_token']}, 200
+                    # Re-hash here, where the plaintext already is. The old path
+                    # parked it in the session and re-read it on a follow-up
+                    # call, but the session is a signed, unencrypted cookie:
+                    # "server-side only" was never true of it. A write failure
+                    # must not reject credentials that were correct.
+                    try:
+                        upgrade_password_hash(password)
+                    except Exception:
+                        logging.exception('Password hash upgrade failed; the login itself stands')
                 return '', 204
             else:
                 _record_failed_attempt(ip)
@@ -119,16 +123,5 @@ class SystemAccount(Resource):
                 session.clear()
                 gc.collect()
                 return '', 204
-        elif action == 'upgrade_hash':
-            # Verify upgrade token from session (no password re-transmission)
-            token = args.get('password')  # reuse password field for token
-            stored_token = session.get('_upgrade_token')
-            stored_pw = session.get('_pw_for_upgrade')
-            if not stored_token or not stored_pw or token != stored_token:
-                return 'Invalid or expired upgrade token', 403
-            upgrade_password_hash(stored_pw)
-            session.pop('_pw_for_upgrade', None)
-            session.pop('_upgrade_token', None)
-            return '', 204
 
         return 'Unknown action', 400
