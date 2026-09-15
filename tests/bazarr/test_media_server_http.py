@@ -142,3 +142,27 @@ def test_real_stream_read_timeout_is_categorized(http_fixture):
     assert str(error.value) == "timeout"
     assert len(records) == 1
     assert time.monotonic() - started < 13
+
+
+def test_request_result_returns_status_and_body_for_non_success(http_fixture):
+    from media_servers.http import MediaServerHTTP
+    base, records = http_fixture([(409, {"message": "Request for this media already exists."}, {})])
+    with MediaServerHTTP(base) as http:
+        status, body = http.request_result("POST", "/api/v1/request", json={"mediaId": 1})
+    assert status == 409
+    assert json.loads(body) == {"message": "Request for this media already exists."}
+    assert records[0]["method"] == "POST"
+
+
+def test_request_result_still_refuses_redirects(http_fixture):
+    from media_servers.http import MediaServerError, MediaServerHTTP
+    base, _records = http_fixture([(302, b"", {"Location": "http://elsewhere.example/"})])
+    with MediaServerHTTP(base) as http, pytest.raises(MediaServerError, match="redirect_denied"):
+        http.request_result("GET", "/api/v1/status")
+
+
+def test_timeout_is_configurable_per_client(http_fixture):
+    from media_servers.http import MediaServerError, MediaServerHTTP
+    base, _records = http_fixture([(200, b"{}", {})], body_delay=0.6)
+    with MediaServerHTTP(base, timeout=(1, 0.2)) as http, pytest.raises(MediaServerError, match="timeout"):
+        http.request_result("GET", "/slow")
