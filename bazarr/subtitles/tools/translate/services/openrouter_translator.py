@@ -265,12 +265,12 @@ class OpenRouterTranslatorService:
     def _build_reasoning_config(self):
         """
         Build reasoning configuration based on Bazarr settings.
-        Sends effort level directly to the AI Subtitle Translator service.
+        Sends an explicit disable flag or effort level to the AI Subtitle Translator service.
         """
         reasoning_mode = getattr(settings.translator, 'openrouter_reasoning', 'disabled')
 
         if reasoning_mode == 'disabled':
-            return None
+            return {'enabled': False}
 
         return {
             'effort': reasoning_mode,
