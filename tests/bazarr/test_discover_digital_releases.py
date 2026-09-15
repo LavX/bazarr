@@ -359,7 +359,9 @@ def test_admission_failure_accounting_cannot_exceed_bounded_raw_rows(authenticat
     assert feed["coverage"] == {"candidate_limit": 20, "candidates": 3, "checked": 1,
                                 "missing_region": 0, "failed": 2, "truncated": True, "complete": False}
     assert feed["coverage"]["candidates"] <= min(len(rows), feed["coverage"]["candidate_limit"])
-    assert len(upstream.calls) == 3
+    # One admission page and one release check. No row here carries a poster, so
+    # the image configuration is not requested at all.
+    assert [url.rsplit("/3", 1)[1] for url, _ in upstream.calls] == ["/discover/movie", "/movie/1/release_dates"]
 
 
 @pytest.mark.parametrize("rows,candidates", [
@@ -528,3 +530,71 @@ def test_new_transport_failure_does_not_relabel_earlier_malformed_coverage(authe
     assert failed["status"] == "unavailable" and failed["items"] == []
     assert failed["coverage"]["candidates"] == failed["coverage"]["failed"] == 0
     assert all(failed[name] is None for name in ("fetched_at", "expires_at", "stale_until", "last_success"))
+
+
+def artwork_payload(upstream, monkeypatch):
+    """The fixture's configuration omits backdrop sizes, which TMDB always sends."""
+    configure(upstream, monkeypatch)
+    base = upstream.payload
+
+    def payload(url):
+        raw = base(url)
+        if url.endswith("/configuration"):
+            raw["images"]["backdrop_sizes"] = ["w780"]
+        return raw
+
+    upstream.payload = payload
+    return payload
+
+
+def test_verified_films_keep_their_artwork_when_the_budget_runs_out(authenticated_client, upstream, monkeypatch):
+    """A film that survived its release check is shown, so it is shown with its art.
+
+    Artwork used to be resolved in one pass after every release check, which is
+    the one pass a spent budget skips. The reader was then handed the films the
+    run did verify with an empty poster each, which reads as a broken page rather
+    than as partial coverage.
+    """
+    from discover import feeds
+    base = artwork_payload(upstream, monkeypatch)
+    elapsed = [0.0]
+    monkeypatch.setattr(feeds.time, "monotonic", lambda: 100.0 + elapsed[0])
+    checks = []
+
+    def payload(url):
+        if "/release_dates" in url:
+            checks.append(url)
+            if len(checks) > 1:
+                elapsed[0] += feeds.CALL_SECONDS
+        return base(url)
+
+    upstream.payload = payload
+    feed = get(authenticated_client).json
+    assert [item["id"] for item in feed["items"]] == [1]
+    assert feed["service_status"] == "unavailable"
+    assert feed["items"][0]["poster_url"] == "https://image.tmdb.org/t/p/w342/poster.jpg"
+
+
+def test_a_partially_covered_feed_is_not_re_derived_on_every_visit(authenticated_client, upstream, monkeypatch):
+    """Partial coverage is a usable feed, not a failure to retry on each visit.
+
+    One malformed sibling used to drop the whole feed to the failure retry
+    window, so every visit past the next thirty seconds re-ran twenty-odd
+    release checks upstream. On a loaded instance that run went partial the same
+    way, and the feed never converged for as long as the reader kept looking.
+    """
+    from discover import feeds
+    configure_admission_rows(upstream, monkeypatch,
+                             [{"id": 1, "title": "Verified film"}, {"id": 2, "title": None}])
+    advance = control_digital_time(monkeypatch)
+    first = get(authenticated_client).json
+    assert first["service_status"] == "unavailable" and first["coverage"]["failed"] == 1
+    calls = len(upstream.calls)
+    advance(feeds.RETRY_SECONDS + 1)
+    again = get(authenticated_client).json
+    assert len(upstream.calls) == calls
+    assert again["status"] == "cached"
+    assert (again["items"], again["fetched_at"]) == (first["items"], first["fetched_at"])
+    advance(feeds.PARTIAL_SECONDS)
+    assert get(authenticated_client).json["status"] == "live"
+    assert len(upstream.calls) > calls

@@ -427,3 +427,57 @@ def test_empty_library_can_retrieve_the_exact_feed_episode(authenticated_client,
     assert (video.season, video.episode) == (3, 7)
     assert video.tmdb_id == 401
     assert before == {table.name: session.execute(sa.select(table)).all() for table in db.Base.metadata.sorted_tables}
+
+
+def test_show_artwork_survives_a_run_that_runs_out_of_budget(authenticated_client, upstream, monkeypatch):
+    """Episodes that were collected are shown, so they are shown with their art.
+
+    Hydration ran once after every season had been scanned, which is the pass a
+    spent budget never reaches. The records the run did collect then arrived with
+    an empty poster each, so a partially covered feed looked like a broken one.
+    """
+    from discover import feeds
+    configure(upstream, monkeypatch)
+    elapsed = [0.0]
+    monkeypatch.setattr(feeds.time, "monotonic", lambda: 100.0 + elapsed[0])
+    base = upstream.payload
+
+    def payload(url):
+        raw = base(url)
+        if url.endswith("/configuration"):
+            raw["images"]["backdrop_sizes"] = ["w780"]
+        if url.endswith("/trending/tv/week"):
+            for row in raw["results"]:
+                row["poster_path"] = f"/show{row['id']}.jpg"
+        if url.endswith("/tv/101"):
+            # A second usable show, whose records arrive with the budget gone.
+            elapsed[0] += feeds.CALL_SECONDS
+            return {"id": 101, "name": "Second show", "seasons": [{"id": 301, "season_number": 1}]}
+        return raw
+
+    upstream.payload = payload
+    feed = get(authenticated_client).json
+    assert [row["id"] for row in feed["items"]] == [401, 402]
+    assert feed["service_status"] == "unavailable"
+    assert all(row["poster_url"] == "https://image.tmdb.org/t/p/w342/show100.jpg" for row in feed["items"])
+
+
+def test_a_partially_covered_feed_is_not_re_derived_on_every_visit(authenticated_client, upstream, monkeypatch):
+    """One unusable show is partial coverage, not a failure to retry every visit.
+
+    The thirty-second failure retry used to apply to a stored partial feed too,
+    so every visit past it rebuilt the whole feed: a trending page, six shows and
+    their seasons. That is the work the freshness window exists to avoid.
+    """
+    from discover import feeds
+    configure(upstream, monkeypatch)
+    elapsed = [0.0]
+    monkeypatch.setattr(feeds.time, "monotonic", lambda: 100.0 + elapsed[0])
+    first = get(authenticated_client).json
+    assert first["service_status"] == "unavailable" and first["items"]
+    elapsed[0] += feeds.RETRY_SECONDS + 1
+    again = get(authenticated_client).json
+    assert again["status"] == "cached"
+    assert (again["items"], again["fetched_at"]) == (first["items"], first["fetched_at"])
+    elapsed[0] += feeds.PARTIAL_SECONDS
+    assert get(authenticated_client).json["status"] == "live"

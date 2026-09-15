@@ -632,3 +632,33 @@ def test_masked_override_error_does_not_require_a_saved_token(authenticated_clie
     assert response.json["message"] == (
         "Enter an optional TMDB override, or omit it to check the configured connection.")
     assert settings.discover.tmdb_access_token == stored
+
+
+def test_tmdb_calls_share_one_pooled_transport(upstream, monkeypatch):
+    """A session per call paid a DNS lookup, a connect and a TLS handshake each.
+
+    A feed makes twenty-odd calls inside one budget, so on a loaded instance the
+    setups, not the answers, were what pushed it past that budget and left the
+    reader with partial coverage and no artwork.
+    """
+    from discover import metadata
+    sessions = []
+    stub = requests.Session.request
+
+    def record(session, method, url, **kwargs):
+        sessions.append(session)
+        return stub(session, method, url, **kwargs)
+
+    monkeypatch.setattr(requests.Session, "request", record)
+    config = metadata.Configuration("5ecafe00cafe00cafe00cafe00cafe00", "en-US", "pooled-revision")
+    for _ in range(3):
+        metadata._request(config, "/configuration")
+    assert len(sessions) == 3
+    assert len({id(session) for session in sessions}) == 1
+    adapter = sessions[0].get_adapter("https://api.themoviedb.org/3/configuration")
+    assert isinstance(adapter, requests.adapters.HTTPAdapter)
+    # A connection the far end closed between two calls is the pool's own race,
+    # not a source failure, so an idempotent GET may be replayed once.
+    assert (adapter.max_retries.total, adapter.max_retries.allowed_methods) == (1, frozenset({"GET"}))
+    # Shared transport, so no response may leave per-reader state behind on it.
+    assert len(sessions[0].cookies) == 0
