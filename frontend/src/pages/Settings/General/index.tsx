@@ -255,8 +255,9 @@ const SettingsGeneralView: FunctionComponent = () => {
             settingKey="settings-auth-session_lifetime_days"
           ></Number>
           <Message>
-            How long a signed-in browser stays signed in. Requires a restart of
-            Bazarr when changed
+            How long a signed-in browser may sit idle before it has to sign in
+            again. The window restarts on every request, so a browser in regular
+            use stays signed in. Requires a restart of Bazarr when changed
           </Message>
           <Selector
             label="Secure Session Cookie"

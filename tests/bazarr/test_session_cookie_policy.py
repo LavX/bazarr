@@ -128,3 +128,26 @@ def test_trusted_proxy_value(configured, expected):
     config = SimpleNamespace(general=SimpleNamespace(trusted_proxies=configured))
 
     assert trusted_proxy_value(config) == expected
+
+
+def test_the_lifetime_is_an_idle_window_not_an_absolute_cap():
+    """
+    Flask re-issues a permanent session cookie on every request, so the expiry
+    slides forward. That is the behaviour the settings copy promises, and it is
+    worth pinning: a change to SESSION_REFRESH_EACH_REQUEST would silently turn
+    a browser in daily use into one that gets signed out on a fixed schedule.
+    """
+    app = _app(lifetime_days=7)
+
+    @app.route("/read")
+    def read():
+        from app.auth import is_session_authenticated
+
+        return "yes" if is_session_authenticated() else "no"
+
+    client = app.test_client()
+    client.get("/sign-in")
+    later = client.get("/read")
+
+    assert later.get_data(as_text=True) == "yes"
+    assert "Expires=" in _set_cookie_header(later)

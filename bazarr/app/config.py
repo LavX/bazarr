@@ -265,9 +265,11 @@ validators = [
               is_in=[None, 'basic', 'form']),
     Validator('auth.username', must_exist=True, default='', is_type_of=str, cast=str),
     Validator('auth.password', must_exist=True, default='', is_type_of=str, cast=str),
-    # How long a signed-in browser stays signed in. Flask's cookie carried no
-    # expiry at all, so a session lasted until the browser was closed, or
-    # forever in a browser that restores tabs.
+    # How long a signed-in browser may sit idle before it has to sign in
+    # again. The window slides forward on each request, so an active browser
+    # stays signed in. Flask's cookie carried no expiry at all, so a session
+    # lasted until the browser was closed, or forever in one that restores
+    # tabs.
     Validator('auth.session_lifetime_days', must_exist=True, default=30, is_type_of=int, gte=1, lte=365),
     # Secure flag policy for the session cookie. 'auto' follows the scheme of
     # the request the cookie is set on, which is what a plain-http LAN install
