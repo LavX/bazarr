@@ -39,6 +39,31 @@ export default function JobsButton({
       : queued.length
         ? `${queued.length} queued`
         : "";
+
+  const measured = running
+    .map((job) =>
+      job.is_progress &&
+      Number.isFinite(job.progress_max) &&
+      job.progress_max > 0 &&
+      Number.isFinite(job.progress_value)
+        ? Math.max(0, Math.min(1, job.progress_value / job.progress_max))
+        : null,
+    )
+    .filter((value): value is number => value !== null);
+  // Only claim a percentage when every running job reports one, otherwise the
+  // bar would show the progress of a subset as if it were the whole workload.
+  const determinate = running.length > 0 && measured.length === running.length;
+  const progress = determinate
+    ? (measured.reduce((sum, value) => sum + value, 0) / measured.length) * 100
+    : undefined;
+  const state = unavailable
+    ? "idle"
+    : running.length
+      ? "running"
+      : queued.length
+        ? "queued"
+        : "idle";
+
   return (
     <Tooltip
       label={
@@ -61,49 +86,25 @@ export default function JobsButton({
         className={`${expanded ? styles.expandedControls : styles.railLink} ${styles.jobsButton}`}
         data-active={!unavailable && running.length > 0}
       >
-        {active.length > 0 && !unavailable ? (
-          <span className={styles.jobActivity} aria-hidden="true">
-            {active.slice(0, 3).map((job) => {
-              const known =
-                job.status === "running" &&
-                job.is_progress &&
-                Number.isFinite(job.progress_max) &&
-                job.progress_max > 0 &&
-                Number.isFinite(job.progress_value);
-              const progress = known
-                ? Math.max(
-                    0,
-                    Math.min(
-                      100,
-                      (job.progress_value / job.progress_max) * 100,
-                    ),
-                  )
-                : undefined;
-              return (
-                <span
-                  key={job.job_id}
-                  className={styles.jobTrack}
-                  data-running={job.status === "running"}
-                  data-indeterminate={job.status === "running" && !known}
-                >
-                  <span
-                    style={
-                      progress === undefined
-                        ? undefined
-                        : { width: `${progress}%` }
-                    }
-                  />
-                </span>
-              );
-            })}
-          </span>
-        ) : (
+        <span className={styles.jobIndicator}>
           <span className={styles.railIcon}>
             <FontAwesomeIcon
               icon={unavailable ? faTriangleExclamation : faListCheck}
             />
           </span>
-        )}
+          <span
+            className={styles.jobActivity}
+            data-state={state}
+            data-indeterminate={state === "running" && !determinate}
+            aria-hidden="true"
+          >
+            <span
+              style={
+                progress === undefined ? undefined : { width: `${progress}%` }
+              }
+            />
+          </span>
+        </span>
         <span className={styles.jobCaption}>
           <span>{expanded ? "Jobs Manager" : "Jobs"}</span>
           {(expanded || label) && (
