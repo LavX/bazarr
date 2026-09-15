@@ -143,6 +143,15 @@ def _ownership(connection, items):
                             Episode.arr_instance_id == Show.arr_instance_id)
                      .group_by(Episode.series_id))
         counts = dict(connection.execute(statement).all())
+    seasons = {}
+    if ids:
+        statement = (select(Episode.series_id, Episode.season)
+                     .join(Show, Show.id == Episode.series_id)
+                     .where(Episode.series_id.in_(ids), Show.arr_instance_id.is_not(None),
+                            Episode.arr_instance_id == Show.arr_instance_id, Episode.season.is_not(None))
+                     .distinct())
+        for series_id, season in connection.execute(statement).all():
+            seasons.setdefault(series_id, set()).add(int(season))
     for item in items:
         if item["media_type"] != "show":
             continue
@@ -151,7 +160,9 @@ def _ownership(connection, items):
         item["ownership"] = {"episode_count": sum(copy["episode_count"] or 0 for copy in item.get("copies", [])),
                              "unknown_owners": any(copy["arr_instance_id"] is None for copy in item.get("copies", [])),
                              "truncated": item.get("copies_truncated", False),
-                             "selected_episode_owned": None, "complete_series": None}
+                             "selected_episode_owned": None, "complete_series": None,
+                             "seasons_owned": sorted(set().union(*(seasons.get(copy["local_id"], set())
+                                                                   for copy in item.get("copies", []))))}
 
 
 def _expand(connection, items, *, merge=False):

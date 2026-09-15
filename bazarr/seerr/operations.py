@@ -160,6 +160,31 @@ def request_outcome(status, body, cap) -> dict:
     return {"error_code": "upstream_error"}
 
 
+_find_cache = {}
+
+
+def tmdb_id_for_tvdb(tvdb_id) -> int | None:
+    """TMDB id for a show Bazarr knows only by TVDB id, through TMDB's find endpoint."""
+    from discover import metadata
+    if type(tvdb_id) is not int or tvdb_id <= 0:
+        return None
+    if tvdb_id in _find_cache:
+        return _find_cache[tvdb_id]
+    try:
+        config = metadata.configuration()
+        raw = metadata._request(config, f"/find/{tvdb_id}", {"external_source": "tvdb_id"})
+        rows = raw.get("tv_results") if isinstance(raw, dict) else None
+        found = rows[0].get("id") if isinstance(rows, list) and rows and isinstance(rows[0], dict) else None
+        result = found if type(found) is int and found > 0 else None
+    except Exception:
+        logger.debug("TMDB find failed for a TVDB id", exc_info=False)
+        return None
+    if len(_find_cache) > 2048:
+        _find_cache.clear()
+    _find_cache[tvdb_id] = result
+    return result
+
+
 def get_seerr_client() -> SeerrClient:
     url, apikey = settings.seerr.url, settings.seerr.apikey
     if not url or not apikey:

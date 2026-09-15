@@ -182,3 +182,28 @@ def test_permission_bits():
     assert user_capabilities(1024)["can_request_4k_movie"] is True
     assert user_capabilities(0)["can_request_movie"] is False
     assert user_capabilities(2)["can_request_4k_tv"] is True  # ADMIN
+
+
+def test_tmdb_id_for_tvdb_uses_tmdb_find(monkeypatch):
+    from discover import metadata
+    from seerr import operations
+    calls = []
+
+    def fake_request(config, path, params=None):
+        calls.append((path, params))
+        return {"tv_results": [{"id": 1399}], "movie_results": []}
+
+    monkeypatch.setattr(metadata, "_request", fake_request)
+    monkeypatch.setattr(operations, "_find_cache", {})
+    assert operations.tmdb_id_for_tvdb(121361) == 1399
+    assert calls == [("/find/121361", {"external_source": "tvdb_id"})]
+    assert operations.tmdb_id_for_tvdb(121361) == 1399
+    assert len(calls) == 1
+
+
+def test_tmdb_id_for_tvdb_returns_none_when_unmatched(monkeypatch):
+    from discover import metadata
+    from seerr import operations
+    monkeypatch.setattr(metadata, "_request", lambda config, path, params=None: {"tv_results": []})
+    monkeypatch.setattr(operations, "_find_cache", {})
+    assert operations.tmdb_id_for_tvdb(5) is None
