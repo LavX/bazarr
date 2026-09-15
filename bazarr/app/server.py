@@ -16,7 +16,7 @@ from .ui import ui_bp
 from .get_args import args
 from .config import settings, base_url
 from .database import close_database
-from .app import create_app
+from .app import create_app, trusted_proxy_value
 
 app = create_app()
 from compat import register as register_compat  # noqa: E402
@@ -48,12 +48,16 @@ class Server:
 
     def configure_server(self):
         try:
-            # Trust X-Forwarded-* only from 127.0.0.1 (the supervisor proxy
-            # in docker/supervisor.py). Direct clients that inject these
-            # headers are untrusted and Waitress strips them. The compat
-            # endpoint reads X-Forwarded-Host/Proto for download-link
-            # construction; trusting arbitrary client values would let an
-            # attacker forge stream URLs and exfiltrate the Api-Key.
+            # Trust X-Forwarded-* only from general.trusted_proxies, which
+            # defaults to 127.0.0.1 (the supervisor proxy in
+            # docker/supervisor.py). Direct clients that inject these headers
+            # are untrusted and Waitress strips them. The compat endpoint
+            # reads X-Forwarded-Host/Proto for download-link construction;
+            # trusting arbitrary client values would let an attacker forge
+            # stream URLs and exfiltrate the Api-Key. A reverse proxy in
+            # another container has to be named in that setting, otherwise its
+            # HTTPS reads as http here and every client shares one login
+            # rate-limit bucket under the proxy's address.
             # Thread count: measured on a live 4-instance install, the old
             # inherited threads=100 accounted for 100 of 123 process threads
             # at idle for a single-user UI whose heavy work runs in background
@@ -69,7 +73,7 @@ class Server:
                                         host=self.address,
                                         port=self.port,
                                         threads=settings.general.web_server_threads,
-                                        trusted_proxy='127.0.0.1',
+                                        trusted_proxy=trusted_proxy_value(),
                                         trusted_proxy_headers={'x-forwarded-host',
                                                                'x-forwarded-proto',
                                                                'x-forwarded-for'})

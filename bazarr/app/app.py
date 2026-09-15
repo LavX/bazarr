@@ -1,6 +1,9 @@
 # coding=utf-8
 
-from flask import Flask, redirect, Request
+from datetime import timedelta
+
+from flask import Flask, redirect, request, Request
+from flask.sessions import SecureCookieSessionInterface
 
 from flask_compress import Compress
 from flask_cors import CORS
@@ -18,6 +21,62 @@ class CustomRequest(Request):
         super(CustomRequest, self).__init__(*args, **kwargs)
         # required to increase form-data size before returning a 413
         self.max_form_parts = 10000
+
+
+class SchemeAwareSessionInterface(SecureCookieSessionInterface):
+    """Decide the session cookie's Secure flag per request.
+
+    Flask reads SESSION_COOKIE_SECURE once, from config, which forces a single
+    answer for an application that is reached both ways: marking the cookie
+    Secure breaks a plain-http LAN install, and leaving it unmarked sends the
+    cookie in the clear for everyone behind HTTPS. Under the 'auto' policy the
+    flag follows the scheme of the request the cookie is being set on, so both
+    work. 'always' and 'never' are the explicit overrides, and 'always' is what
+    an HTTPS proxy this instance cannot detect needs.
+
+    The scheme seen here is the one ReverseProxied derived from
+    X-Forwarded-Proto, which waitress only passes on for an address listed in
+    general.trusted_proxies.
+    """
+
+    def get_cookie_secure(self, app):
+        policy = app.config.get('SESSION_COOKIE_SECURE_POLICY', 'auto')
+        if policy == 'always':
+            return True
+        if policy == 'never':
+            return False
+        return bool(request and request.is_secure)
+
+
+def configure_session_cookie(app, config=settings):
+    """Apply the session cookie policy to an app.
+
+    SameSite=Lax is set explicitly rather than left to the browser default:
+    the value decides whether the cookie survives a top-level redirect back
+    into Bazarr, which is what an external identity provider returning to a
+    callback looks like, while still not riding along on a cross-site POST.
+    """
+    app.config['SESSION_COOKIE_HTTPONLY'] = True
+    app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+    app.config['SESSION_COOKIE_SECURE_POLICY'] = config.auth.cookie_secure
+    app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=config.auth.session_lifetime_days)
+    app.session_interface = SchemeAwareSessionInterface()
+    return app
+
+
+def trusted_proxy_value(config=settings):
+    """Render general.trusted_proxies for waitress.
+
+    Waitress takes either one address or a comma-separated list. An empty
+    setting means "trust nothing", which it spells as None rather than an empty
+    string: an empty string would be read as an address, match nothing, and be
+    harder to spot.
+    """
+    entries = [str(entry).strip() for entry in (config.general.trusted_proxies or [])]
+    entries = [entry for entry in entries if entry]
+    if not entries:
+        return None
+    return ','.join(entries)
 
 
 def cors_is_enabled(config=settings):
@@ -41,6 +100,7 @@ def create_app():
     app.wsgi_app = ReverseProxied(app.wsgi_app)
 
     app.config["SECRET_KEY"] = settings.general.flask_secret_key
+    configure_session_cookie(app)
     app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
     app.config['JSON_AS_ASCII'] = False
 

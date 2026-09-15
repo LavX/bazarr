@@ -31,7 +31,12 @@ import { useBaseInput } from "@/pages/Settings/utilities/hooks";
 import { useSettings } from "@/pages/Settings/utilities/SettingsProvider";
 import { Environment, toggleState } from "@/utilities";
 import ExternalWebhookSelector from "./ExternalWebhookSelector";
-import { branchOptions, proxyOptions, securityOptions } from "./options";
+import {
+  branchOptions,
+  cookieSecureOptions,
+  proxyOptions,
+  securityOptions,
+} from "./options";
 
 // Auth password input that NEVER displays the stored value.
 //
@@ -206,6 +211,16 @@ const SettingsGeneralView: FunctionComponent = () => {
           Hostname or IP address to access Bazarr (ie: bazarr.mydomain.local or
           192.168.0.100). Required for webhook security.
         </Message>
+        <Chips
+          label="Trusted Proxies"
+          settingKey="settings-general-trusted_proxies"
+        ></Chips>
+        <Message>
+          Addresses whose X-Forwarded-* headers Bazarr will believe. Add your
+          reverse proxy here if it runs on another host or in another container,
+          otherwise its HTTPS looks like plain HTTP to Bazarr and every visitor
+          shares one login rate limit. Requires a restart of Bazarr when changed
+        </Message>
       </Section>
       <Section header="Metadata">
         <MetadataLanguage />
@@ -235,6 +250,25 @@ const SettingsGeneralView: FunctionComponent = () => {
         <CollapseBox settingKey="settings-auth-type">
           <Text label="Username" settingKey="settings-auth-username"></Text>
           <AuthPasswordInput />
+          <Number
+            label="Session Lifetime (days)"
+            settingKey="settings-auth-session_lifetime_days"
+          ></Number>
+          <Message>
+            How long a signed-in browser stays signed in. Requires a restart of
+            Bazarr when changed
+          </Message>
+          <Selector
+            label="Secure Session Cookie"
+            options={cookieSecureOptions}
+            settingKey="settings-auth-cookie_secure"
+          ></Selector>
+          <Message>
+            Automatic marks the cookie secure only on HTTPS requests, which
+            keeps plain HTTP on a local network working. Choose Always when a
+            reverse proxy terminates HTTPS and is not listed under Trusted
+            Proxies. Requires a restart of Bazarr when changed
+          </Message>
         </CollapseBox>
         <Text
           label="API Key"

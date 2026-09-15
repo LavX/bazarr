@@ -26,7 +26,14 @@ def is_session_authenticated():
 
 
 def establish_session():
-    """Mark the current session as signed in."""
+    """Mark the current session as signed in.
+
+    Marking it permanent is what puts PERMANENT_SESSION_LIFETIME to work: it
+    gives the cookie an expiry and makes the signature itself expire, so a
+    session cannot outlive the configured window. Without it Flask issues a
+    browser-session cookie that never expires server-side.
+    """
+    session.permanent = True
     session[SESSION_KEY] = True
 
 
