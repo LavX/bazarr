@@ -142,6 +142,18 @@ validators = [
     # (Socket.IO long-polling parks one worker per open browser tab).
     Validator('general.web_server_threads', must_exist=True, default=32, is_type_of=int, gte=4, lte=100),
     Validator('general.hostname', must_exist=True, default=platform.node(), is_type_of=str),
+    # The one address whose X-Forwarded-* headers waitress may believe. The
+    # default covers only the in-container supervisor hop, so a reverse proxy
+    # running in another container is not trusted until it is named here:
+    # without that the request scheme reads as http behind HTTPS, and every
+    # client shares one rate-limit bucket because remote_addr is the proxy's
+    # address. Empty means trust nothing.
+    #
+    # Deliberately a single address rather than a list: waitress compares the
+    # peer against this value exactly (proxy_headers.py), so a comma-separated
+    # list matches no one and would silently trust less than the old hardcoded
+    # default did.
+    Validator('general.trusted_proxy', must_exist=True, default='127.0.0.1', is_type_of=str, cast=str),
     Validator('general.base_url', must_exist=True, default='', is_type_of=str),
     Validator('general.instance_name', must_exist=True, default='Bazarr+', is_type_of=str,
               apply_default_on_none=True),
@@ -267,6 +279,18 @@ validators = [
               is_in=[None, 'basic', 'form']),
     Validator('auth.username', must_exist=True, default='', is_type_of=str, cast=str),
     Validator('auth.password', must_exist=True, default='', is_type_of=str, cast=str),
+    # How long a signed-in browser may sit idle before it has to sign in
+    # again. The window slides forward on each request, so an active browser
+    # stays signed in. Flask's cookie carried no expiry at all, so a session
+    # lasted until the browser was closed, or forever in one that restores
+    # tabs.
+    Validator('auth.session_lifetime_days', must_exist=True, default=30, is_type_of=int, gte=1, lte=365),
+    # Secure flag policy for the session cookie. 'auto' follows the scheme of
+    # the request the cookie is set on, which is what a plain-http LAN install
+    # needs; 'always' is the right answer behind an HTTPS reverse proxy that
+    # this instance cannot detect (see general.trusted_proxy).
+    Validator('auth.cookie_secure', must_exist=True, default='auto', is_type_of=str,
+              is_in=['auto', 'always', 'never']),
 
     # cors section
     Validator('cors.enabled', must_exist=True, default=False, is_type_of=bool),

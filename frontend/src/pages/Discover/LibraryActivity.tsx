@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useState } from "react";
 import { Link } from "react-router";
 import {
   faArrowRight,
@@ -36,17 +37,59 @@ function ArrivalLink({
   );
 }
 
+/**
+ * The compact cover slot for one arrival.
+ *
+ * The feed tiles next door carry a labelled placeholder that has no room in a
+ * 64px slot, so this one falls back to the same caption glyph it sits on. A
+ * failure is held in state rather than written onto the node's style, because
+ * the list re-renders as the summary refreshes and a hidden node would
+ * otherwise survive into the next item that reuses it.
+ */
+function ArrivalArtwork({ src }: { src: string | null }) {
+  const [failed, setFailed] = useState(false);
+  return (
+    <span className={styles.libraryArtwork} aria-hidden="true">
+      <FontAwesomeIcon icon={faClosedCaptioning} />
+      {src && !failed && (
+        <img
+          src={src}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          onError={() => setFailed(true)}
+        />
+      )}
+    </span>
+  );
+}
+
+/**
+ * "hu:hi" as a reader's words.
+ *
+ * The stored form appends its attributes after a colon, and rendering them raw
+ * put an unexplained lowercase "hi" beside the language with the same
+ * separator the page uses between unrelated facts. Bracketing keeps the
+ * attribute attached to the language it belongs to.
+ */
+const VARIANT_NAMES: Record<string, string> = {
+  hi: "HI",
+  forced: "Forced",
+};
+
 function languageName(language: string | null) {
   if (!language) return "Subtitle fetched";
   const [code, ...variants] = language.split(":");
+  let name = code;
   try {
-    return [
-      new Intl.DisplayNames(["en"], { type: "language" }).of(code),
-      ...variants,
-    ].join(" · ");
+    name = new Intl.DisplayNames(["en"], { type: "language" }).of(code) ?? code;
   } catch {
     return language;
   }
+  if (!variants.length) return name;
+  return `${name} (${variants
+    .map((variant) => VARIANT_NAMES[variant] ?? variant)
+    .join(", ")})`;
 }
 
 export default function LibraryActivity() {
@@ -77,8 +120,10 @@ export default function LibraryActivity() {
     >
       <div className={styles.libraryHeading}>
         <div>
-          <h2 id="library-activity-title">Your library</h2>
-          {arrivals.length > 0 && <p>Latest subtitles fetched</p>}
+          {/* The hero above owns the name "Your library"; this strip is the
+              narrower fact of what arrived most recently, and saying both
+              would leave two headings claiming the same section. */}
+          <h2 id="library-activity-title">Recently fetched</h2>
         </div>
         <div className={styles.libraryHistory}>
           {historyCategories.map(({ path, label }) => (
@@ -93,30 +138,27 @@ export default function LibraryActivity() {
           {arrivals.map((item) => (
             <li key={item.event_id}>
               <ArrivalLink item={item}>
-                <span className={styles.libraryArtwork} aria-hidden="true">
-                  <FontAwesomeIcon icon={faClosedCaptioning} />
-                  {item.poster_url && (
-                    <img
-                      src={item.poster_url}
-                      alt=""
-                      onError={(event) => {
-                        event.currentTarget.style.display = "none";
-                      }}
-                    />
-                  )}
-                </span>
+                <ArrivalArtwork
+                  key={item.poster_url}
+                  src={item.poster_url ?? null}
+                />
                 <span className={styles.libraryArrivalCopy}>
                   <strong>{item.title ?? "Translated subtitles"}</strong>
                   {item.season !== null && item.episode !== null && (
                     <span>
-                      S{String(item.season).padStart(2, "0")} E
+                      S{String(item.season).padStart(2, "0")}E
                       {String(item.episode).padStart(2, "0")}
                       {item.episode_title ? ` · ${item.episode_title}` : ""}
                     </span>
                   )}
                   <span className={styles.libraryLanguage}>
                     <FontAwesomeIcon icon={faClosedCaptioning} />{" "}
-                    {languageName(item.language)}
+                    {/* Every language fetched for this title, so two languages
+                        of one episode read as one arrival in two languages
+                        rather than as the same card rendered twice. */}
+                    {(item.languages?.length ? item.languages : [item.language])
+                      .map(languageName)
+                      .join(", ")}
                   </span>
                   {item.timestamp && (
                     <time dateTime={item.timestamp}>

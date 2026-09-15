@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
+import client from "@/apis/raw/client";
 import type {
   DiscoverDownloadIdentity,
   DiscoverSelection,
@@ -205,6 +206,19 @@ async function admittedFeed<
     throw new FeedBusy("Metadata feeds are busy. Retry shortly.");
   return data;
 }
+/**
+ * How long a global metadata feed is worth re-asking for.
+ *
+ * It mirrors FRESH_SECONDS on the server, which is the only thing that decides
+ * when these feeds are actually re-fetched from TMDB. Asking more often than
+ * that cannot produce newer titles, it just spends a round trip to be handed
+ * the same payload back, and the responses now carry a matching max-age so the
+ * browser holds them across a page load too. The two have to be changed
+ * together: a shorter window here is wasted work, a longer one shows titles the
+ * server has already replaced.
+ */
+const FEED_FRESH_MS = 3_600_000;
+
 const feedRetry = (count: number, error: Error) =>
   error instanceof FeedBusy && count < 2;
 const feedRetryDelay = (attempt: number) => (attempt === 0 ? 1000 : 12000);
@@ -218,8 +232,8 @@ export function useDiscoverTrending(mediaType: TrendingMediaType) {
     queryFn: ({ signal }) =>
       admittedFeed(api.discover.trending(mediaType, signal)),
     enabled: Boolean(revision) && configured,
-    staleTime: 300_000,
-    gcTime: 3_600_000,
+    staleTime: FEED_FRESH_MS,
+    gcTime: FEED_FRESH_MS * 2,
     networkMode: "always",
     retry: feedRetry,
     retryDelay: feedRetryDelay,
@@ -269,8 +283,8 @@ export function useDiscoverDigitalReleases(region: string) {
     queryFn: ({ signal }) =>
       admittedFeed(api.discover.digitalReleases(region, signal)),
     enabled: Boolean(revision) && configured,
-    staleTime: 300_000,
-    gcTime: 3_600_000,
+    staleTime: FEED_FRESH_MS,
+    gcTime: FEED_FRESH_MS * 2,
     networkMode: "always",
     retry: feedRetry,
     retryDelay: feedRetryDelay,
@@ -321,8 +335,8 @@ export function useDiscoverRecentEpisodes() {
     ],
     queryFn: ({ signal }) => admittedFeed(api.discover.recentEpisodes(signal)),
     enabled: Boolean(revision) && configured,
-    staleTime: 300_000,
-    gcTime: 3_600_000,
+    staleTime: FEED_FRESH_MS,
+    gcTime: FEED_FRESH_MS * 2,
     networkMode: "always",
     retry: feedRetry,
     retryDelay: feedRetryDelay,
@@ -342,5 +356,132 @@ export function useDiscoverRecentEpisodes() {
     configured,
     settingsLoading: settings.isLoading,
     settingsError: settings.isError,
+  };
+}
+
+/**
+ * The next few titles still missing subtitles, for the Discover homepage.
+ *
+ * The Wanted page owns the full list and pages through it; this is the short
+ * head of that same queue, so it asks for a bounded slice rather than reusing
+ * the table's pagination. It shares the Wanted query key prefix so acting on an
+ * item from here invalidates both surfaces together.
+ *
+ * Sonarr and Radarr are asked separately because a reader may run only one of
+ * them, and an install with no Radarr must not be shown a failed movie query.
+ */
+/**
+ * One sports event still missing subtitles.
+ *
+ * Sportarr reports missing languages as bare codes rather than the objects the
+ * series and movie endpoints return, so the shapes cannot be shared.
+ */
+export interface SportsWantedEvent {
+  id: number;
+  title: string;
+  league_id: number | null;
+  partName: string | null;
+  missing_subtitles: string[];
+  arr_instance_id: number | null;
+}
+
+/**
+ * Sportarr is optional and is not present in every build, so it is reached
+ * through the shared client by path rather than through a typed api module
+ * that may not be there, and the setting is read defensively for the same
+ * reason. Where it is off, the query never runs and the group never appears.
+ */
+function useSportarrEnabled() {
+  const settings = useSystemSettings();
+  const general = settings.data?.general as
+    | { use_sportarr?: boolean }
+    | undefined;
+  return general?.use_sportarr ?? false;
+}
+
+/**
+ * How many sports events still need subtitles.
+ *
+ * Read from Sportarr's own wanted endpoint rather than counted here, so the
+ * figure is the one its Wanted page shows: that query also applies monitoring,
+ * language profiles and league exclusions, and a count assembled separately
+ * would drift from it. One row is asked for because only the total is wanted.
+ */
+export function useSportsWantedCount() {
+  const sportarr = useSportarrEnabled();
+  return useQuery({
+    queryKey: [QueryKeys.Discover, "sports", QueryKeys.Wanted, "count"],
+    queryFn: async () => {
+      const response = await client.axios.get<{ total: number }>(
+        "/sports/wanted",
+        { params: { start: 0, length: 1 } },
+      );
+      return response.data?.total ?? 0;
+    },
+    enabled: sportarr,
+    staleTime: 30_000,
+    retry: false,
+  });
+}
+
+export function useWantedPreview(limit: number) {
+  const settings = useSystemSettings();
+  const sportarr = useSportarrEnabled();
+  const sports = useQuery({
+    queryKey: [
+      QueryKeys.Discover,
+      "sports",
+      QueryKeys.Wanted,
+      "preview",
+      limit,
+    ],
+    queryFn: async () => {
+      const response = await client.axios.get<{ data: SportsWantedEvent[] }>(
+        "/sports/wanted",
+        { params: { start: 0, length: limit } },
+      );
+      return response.data?.data ?? [];
+    },
+    enabled: sportarr,
+    staleTime: 30_000,
+    retry: false,
+  });
+  const series = useQuery({
+    queryKey: [QueryKeys.Series, QueryKeys.Wanted, "preview", limit],
+    queryFn: () => api.episodes.wanted({ start: 0, length: limit }),
+    enabled: settings.data?.general.use_sonarr ?? false,
+    staleTime: 30_000,
+    retry: false,
+  });
+  const movies = useQuery({
+    queryKey: [QueryKeys.Movies, QueryKeys.Wanted, "preview", limit],
+    queryFn: () => api.movies.wanted({ start: 0, length: limit }),
+    enabled: settings.data?.general.use_radarr ?? false,
+    staleTime: 30_000,
+    retry: false,
+  });
+  // Reported per source. Combining them meant a failing or slow Radarr, or the
+  // optional Sportarr call, blanked the whole section including the kinds that
+  // had already answered.
+  const connected = [series, movies, sports].filter((query) => query.isEnabled);
+  return {
+    episodes: series.data?.data ?? [],
+    movies: movies.data?.data ?? [],
+    sports: sports.data ?? [],
+    failed: {
+      episodes: series.isError,
+      movies: movies.isError,
+      sports: sports.isError,
+    },
+    // Judged over the sources that are actually configured, and only when all
+    // of them agree. A disabled source is not evidence of anything: counting
+    // its false "not pending" or "not failing" would report the section ready,
+    // or healthy, on the strength of a query that never ran. A reader with
+    // none connected is not loading and not failing, they simply have no
+    // library to be missing anything from.
+    isPending:
+      connected.length > 0 && connected.every((query) => query.isPending),
+    isError: connected.length > 0 && connected.every((query) => query.isError),
+    connected: connected.length > 0,
   };
 }

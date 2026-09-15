@@ -411,20 +411,169 @@ def test_only_recorded_acquisitions_become_arrivals(summary_database, quiet_queu
     assert all(item["action"] in (1, 2, 3, 4) for item in arrivals)
 
 
+def test_library_counts_are_exact_and_cost_one_statement(summary_database, quiet_queue,
+                                                         monkeypatch):
+    """Counts a reader recognises, without spending the module's query budget."""
+    from app.config import settings
+    from discover.summary import QUERY_BUDGET, get_summary
+    monkeypatch.setattr(settings.general, "use_sonarr", True)
+    monkeypatch.setattr(settings.general, "use_radarr", True)
+    session = summary_database.session
+    add_instance(session, 1, name="Main")
+    add_instance(session, 2, kind="radarr", name="Films")
+    add_show(session, 100, 1, title="Northern Light")
+    add_episode(session, 101, 100, 1, missing="[]", season=2, episode=5, title="Home")
+    add_episode(session, 102, 100, 1, missing="[]", upstream=21, season=2, episode=6,
+                title="Away")
+    add_movie(session, 200, 2, missing="[]")
+    add_episode_history(session, 1, 2, 101, 100, 1)
+    add_movie_history(session, 1, 1, 200, 2)
+    # A deletion is not something this install went and got.
+    add_episode_history(session, 2, 0, 102, 100, 1)
+    # Nor is an upload, which is a subtitle the reader supplied. It is still a
+    # real arrival, so it stays in ARRIVAL_ACTIONS and only this count omits it.
+    add_episode_history(session, 3, 4, 102, 100, 1)
+    session.commit()
+
+    summary, statements = counted(summary_database.engine, get_summary)
+    library = summary["library"]
+
+    assert library["availability"] == "available"
+    assert (library["series"], library["movies"], library["episodes"]) == (1, 1, 2)
+    assert library["subtitles_fetched"] == 2
+    assert len(statements) <= QUERY_BUDGET
+
+
+def test_two_languages_of_one_episode_are_one_arrival(summary_database, quiet_queue):
+    """The display limit counts titles a reader can take in, not events."""
+    from discover.summary import get_summary
+    session = summary_database.session
+    add_instance(session, 1, name="Main")
+    add_show(session, 100, 1, title="Snowfall")
+    add_episode(session, 101, 100, 1, missing="[]", season=3, episode=1, title="Protect")
+    add_show(session, 110, 1, upstream=11, title="Dead City")
+    add_episode(session, 111, 110, 1, missing="[]", upstream=21, season=3, episode=8,
+                title="Tenebrae")
+    add_episode_history(session, 1, 1, 101, 100, 1, language="en:hi", minutes=1)
+    add_episode_history(session, 2, 1, 101, 100, 1, language="hu:hi", minutes=2)
+    add_episode_history(session, 3, 1, 111, 110, 1, language="hu:hi", minutes=3)
+    session.commit()
+
+    arrivals = get_summary()["arrivals"]
+    # Two cards for one episode read as the same thing rendered twice, and on a
+    # strip of four they spend half the room saying it.
+    assert [item["title"] for item in arrivals] == ["Snowfall", "Dead City"]
+    assert sorted(arrivals[0]["languages"]) == ["en:hi", "hu:hi"]
+    assert arrivals[1]["languages"] == ["hu:hi"]
+
+
+def test_library_counts_follow_what_is_switched_on_and_enabled(summary_database, quiet_queue,
+                                                              monkeypatch):
+    """Rows outlive both the integration and the instance that owned them."""
+    from app.config import settings
+    from discover.summary import get_summary
+    session = summary_database.session
+    monkeypatch.setattr(settings.general, "use_sonarr", True)
+    monkeypatch.setattr(settings.general, "use_radarr", False)
+    add_instance(session, 1, name="Main")
+    add_instance(session, 2, kind="sonarr", name="Retired", enabled=0, is_default=0)
+    add_instance(session, 3, kind="radarr", name="Films", is_default=0)
+    add_show(session, 100, 1, title="Northern Light")
+    add_show(session, 110, 2, upstream=11, title="On a disabled instance")
+    add_movie(session, 200, 3, missing="[]")
+    session.commit()
+
+    library = get_summary()["library"]
+    # Radarr is off, so its rows are not the reader's library however many of
+    # them survive in the table, and a disabled Sonarr's shows are not either.
+    assert library["series"] == 1
+    assert library["movies"] == 0
+
+
+def test_library_counts_keep_rows_that_predate_the_instance_migration(summary_database,
+                                                                     quiet_queue, monkeypatch):
+    """An unowned row belongs to the default instance, not to nobody."""
+    from app.config import settings
+    from app.database import TableShows
+    from discover.summary import get_summary
+    session = summary_database.session
+    monkeypatch.setattr(settings.general, "use_sonarr", True)
+    add_instance(session, 1, name="Main")
+    add_show(session, 100, 1, title="Owned")
+    add_show(session, 110, 1, upstream=11, title="Migrated from before instances")
+    session.get(TableShows, 110).arr_instance_id = None
+    session.commit()
+
+    assert get_summary()["library"]["series"] == 2
+
+
+def test_media_items_and_language_requirements_are_published_separately(
+        summary_database, quiet_queue):
+    """One item needing two languages is one item and two requirements.
+
+    Publishing only the requirement total let a reader be told "176 episodes"
+    when 140 episodes needed subtitles, overstating the work by a third.
+    """
+    from discover.summary import get_summary
+    session = summary_database.session
+    add_instance(session, 1, name="Main")
+    add_show(session, 100, 1)
+    add_episode(session, 101, 100, 1, missing="['en', 'hu']")
+    add_episode(session, 102, 100, 1, upstream=21, missing="['en']")
+    add_movie(session, 200, 1, missing="['en', 'hu', 'de']")
+    session.commit()
+
+    wanted = get_summary()["wanted"]
+    assert wanted["episode_requirements"] == 3
+    assert wanted["episode_media_count"] == 2
+    assert wanted["movie_requirements"] == 3
+    assert wanted["movie_media_count"] == 1
+    assert wanted["requirements"] == 6 and wanted["media_count"] == 3
+
+
+def test_sports_are_absent_not_zero_when_sportarr_is_off(summary_database, quiet_queue):
+    """A reader without Sportarr is not shown a tile for it."""
+    from discover.summary import get_summary
+    add_instance(summary_database.session, 1, name="Main")
+    summary_database.session.commit()
+
+    library = get_summary()["library"]
+    assert library["availability"] == "available"
+    assert "sports_events" not in library and "sports_leagues" not in library
+
+
+def test_a_library_that_cannot_be_counted_never_reports_zero(summary_database, quiet_queue,
+                                                             monkeypatch):
+    """Nothing and no answer are different facts, and only one is reassuring."""
+    from discover import summary as summary_module
+    from discover.summary import get_summary
+    add_instance(summary_database.session, 1, name="Main")
+    summary_database.session.commit()
+    monkeypatch.setattr(summary_module, "_library_component",
+                        lambda instances: (_ for _ in ()).throw(RuntimeError("no")))
+
+    library = get_summary()["library"]
+    assert library["availability"] == "unknown"
+    assert library["series"] is None and library["subtitles_fetched"] is None
+
+
 def test_arrivals_retain_exact_title_episode_language_and_time(summary_database, quiet_queue):
     from discover.summary import get_summary
     session = summary_database.session
     add_instance(session, 1, name="Main")
     add_show(session, 100, 1, title="Northern Light")
     from app.database import TableShows
-    session.get(TableShows, 100).poster = "https://example.com/library-poster.jpg"
+    session.get(TableShows, 100).poster = "/MediaCover/485/poster-250.jpg"
     add_episode(session, 101, 100, 1, missing="[]", season=2, episode=5, title="Home")
     add_episode_history(session, 1, 2, 101, 100, 1, language="hu:forced", provider="opensubtitles")
     session.commit()
 
     arrival = get_summary()["arrivals"][0]
     assert arrival["title"] == "Northern Light"
-    assert arrival["poster_url"] == "https://example.com/library-poster.jpg"
+    # Published through this Bazarr's image proxy, not as the arr's own path:
+    # the raw path is not reachable from a browser and 404s on every cover.
+    assert arrival["poster_url"] == (
+        "/images/series/MediaCover/485/poster-250.jpg?arr_instance_id=1")
     assert arrival["season"] == 2
     assert arrival["episode"] == 5
     assert arrival["episode_title"] == "Home"

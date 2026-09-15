@@ -11,6 +11,21 @@ export const securityOptions: SelectorOption<string>[] = [
   },
 ];
 
+export const cookieSecureOptions: SelectorOption<string>[] = [
+  {
+    label: "Automatic",
+    value: "auto",
+  },
+  {
+    label: "Always",
+    value: "always",
+  },
+  {
+    label: "Never",
+    value: "never",
+  },
+];
+
 export const proxyOptions: SelectorOption<string>[] = [
   {
     label: "Socks5 (local DNS)",
