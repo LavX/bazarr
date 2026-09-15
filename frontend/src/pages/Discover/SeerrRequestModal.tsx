@@ -11,6 +11,8 @@ import {
 } from "@mantine/core";
 import type { MetadataTitle } from "@/types/discover";
 import type { SeerrMediaState, SeerrRequestBody } from "@/types/seerr";
+import { groupSeerrSeasons } from "./seerrSeasons";
+import styles from "./Discover.module.scss";
 
 type Props = {
   title: MetadataTitle;
@@ -28,34 +30,18 @@ export default function SeerrRequestModal({
   onSubmit,
 }: Props) {
   const isShow = title.media_type === "show";
-  const [is4k, set4k] = useState(false);
+  // The only lane open is the 4K one: there is no valid non-4K request to
+  // fall back to, so is4k starts (and, for a show, stays) forced true rather
+  // than defaulting to the usual unchecked box.
+  const fourKOnly = !state.requestable && state.requestable_4k;
+  const [is4k, set4k] = useState(fourKOnly);
   const [chosen, setChosen] = useState<number[]>([]);
   const tvdbId =
     "tvdb_id" in title && typeof title.tvdb_id === "number"
       ? title.tvdb_id
       : undefined;
 
-  const groups = useMemo(() => {
-    const seasons = (
-      "seasons" in title && Array.isArray(title.seasons) ? title.seasons : []
-    ).filter((s) => state.special_episodes || s.season > 0);
-    const seerr = new Map(state.seasons.map((s) => [s.number, s.state]));
-    const owned = new Set(
-      ("ownership" in title && title.ownership?.seasons_owned) || [],
-    );
-    const inSeerr = seasons.filter(
-      (s) =>
-        seerr.get(s.season) === "requested" ||
-        seerr.get(s.season) === "available",
-    );
-    const rest = seasons.filter((s) => !inSeerr.includes(s));
-    return {
-      inSeerr,
-      owned: rest.filter((s) => owned.has(s.season)),
-      open: rest.filter((s) => !owned.has(s.season)),
-      hasList: seasons.length > 0,
-    };
-  }, [title, state]);
+  const groups = useMemo(() => groupSeerrSeasons(title, state), [title, state]);
 
   const toggle = (season: number) =>
     setChosen((current) =>
@@ -72,7 +58,10 @@ export default function SeerrRequestModal({
     is4k,
   });
 
-  const fourK = state.requestable_4k && (
+  // Nothing to choose when the 4K lane is the only one open: is4k is fixed at
+  // true, so a checkbox that could uncheck it would offer a choice that
+  // cannot actually be submitted.
+  const fourK = state.requestable_4k && !fourKOnly && (
     <Checkbox
       label="Request the 4K version"
       checked={is4k}
@@ -84,6 +73,9 @@ export default function SeerrRequestModal({
     return (
       <Modal opened onClose={onClose} title={`Request ${title.title}`}>
         <Stack>
+          {fourKOnly && (
+            <Text size="sm">Only the 4K version is available to request.</Text>
+          )}
           {fourK}
           <Text size="xs" c="dimmed">
             Requested as the Seerr owner and approved immediately.
@@ -93,7 +85,7 @@ export default function SeerrRequestModal({
               Cancel
             </Button>
             <Button onClick={() => onSubmit(body(undefined))}>
-              Request in Seerr
+              {fourKOnly ? "Request the 4K version" : "Request in Seerr"}
             </Button>
           </Group>
         </Stack>
@@ -101,7 +93,11 @@ export default function SeerrRequestModal({
     );
   }
 
-  const allOnly = !state.partial_requests || !groups.hasList;
+  // A show whose only open lane is 4K has no per-season 4K state to draw
+  // from (the backend does not report it), so it collapses to the same
+  // whole-series fallback as "Seerr forbids partial requests" or "the season
+  // list is unavailable", just with its own reason and is4k forced true.
+  const allOnly = fourKOnly || !state.partial_requests || !groups.hasList;
   const label = (s: { season: number; title: string }) =>
     s.title || `Season ${s.season}`;
 
@@ -110,9 +106,11 @@ export default function SeerrRequestModal({
       <Stack>
         {allOnly ? (
           <Text size="sm">
-            {state.partial_requests
-              ? "Season details are unavailable."
-              : "Seerr only accepts whole-series requests."}
+            {fourKOnly
+              ? "Only the 4K version is available to request."
+              : state.partial_requests
+                ? "Season details are unavailable."
+                : "Seerr only accepts whole-series requests."}
           </Text>
         ) : (
           <>
@@ -129,9 +127,9 @@ export default function SeerrRequestModal({
               </div>
             )}
             {groups.owned.length > 0 && (
-              <fieldset className="seerr-group">
+              <fieldset className={styles.seerrGroup}>
                 <legend>
-                  <Text fw={600} size="sm">
+                  <Text span fw={600} size="sm">
                     In your Bazarr+ library
                   </Text>
                 </legend>
@@ -145,9 +143,9 @@ export default function SeerrRequestModal({
                 ))}
               </fieldset>
             )}
-            <fieldset className="seerr-group">
+            <fieldset className={styles.seerrGroup}>
               <legend>
-                <Text fw={600} size="sm">
+                <Text span fw={600} size="sm">
                   Available to request
                 </Text>
               </legend>

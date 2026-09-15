@@ -3890,6 +3890,21 @@
 .seerrStatus {
   font-size: var(--mantine-font-size-sm);
 }
+// A season group is content, not a form panel: no fieldset chrome, just the
+// same item gap the rest of the seasons flow uses (Stack default) so the
+// legend and its checkboxes read as one quiet list.
+.seerrGroup {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--mantine-spacing-xs);
+  legend {
+    padding: 0;
+    width: 100%;
+  }
+}
 @media (max-width: 900px) {
   .detailHero .detailHeroSurface {
     grid-template-columns: 150px minmax(0, 1fr);

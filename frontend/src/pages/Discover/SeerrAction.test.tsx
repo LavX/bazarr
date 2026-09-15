@@ -23,8 +23,13 @@ function render(ui: ReactElement) {
 
 const media = vi.fn();
 const request = vi.fn();
+// Configurable per test (default true) so the "Seerr disabled" rule has
+// somewhere to flip it off, rather than being permanently hardcoded on.
+let useSeerrEnabled = true;
 vi.mock("@/apis/hooks/system", () => ({
-  useSystemSettings: () => ({ data: { general: { use_seerr: true } } }),
+  useSystemSettings: () => ({
+    data: { general: { use_seerr: useSeerrEnabled } },
+  }),
 }));
 vi.mock("@/apis/hooks/seerr", () => ({
   useSeerrMedia: (identity: unknown, enabled: boolean) =>
@@ -95,11 +100,22 @@ describe("SeerrAction", () => {
   // tests that touch it (or that must prove it starts unset) need a clean
   // slate rather than whatever an earlier test in this file left behind.
   beforeEach(() => {
+    useSeerrEnabled = true;
+    media.mockClear();
+    request.mockClear();
     try {
       sessionStorage.clear();
     } catch {
       /* storage unavailable */
     }
+  });
+
+  it("renders nothing when Seerr is disabled, even with a requestable title", () => {
+    useSeerrEnabled = false;
+    answer({ ...base, known: false, status: "unknown", requestable: true });
+    render(<SeerrAction title={movie as never} inLibrary={false} />);
+    expect(screen.queryByText(/Seerr/)).toBeNull();
+    expect(media).toHaveBeenLastCalledWith(null, false);
   });
 
   it("renders nothing for an OMDb-only title", () => {
@@ -270,6 +286,86 @@ describe("SeerrAction", () => {
       },
       expect.anything(),
     );
+  });
+
+  it("makes the 4K lane reachable for a movie whose only open lane is 4K", async () => {
+    answer({
+      ...base,
+      status: "blocklisted",
+      requestable: false,
+      requestable_4k: true,
+    });
+    render(<SeerrAction title={movie as never} inLibrary={false} />);
+    const button = screen.getByRole("button", { name: "Request in Seerr" });
+    await userEvent.click(button);
+    // The first click must open the modal, never submit directly.
+    expect(request).not.toHaveBeenCalled();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Request the 4K version" }),
+    );
+    expect(request).toHaveBeenCalledWith(
+      { media_type: "movie", tmdb_id: 550, is4k: true },
+      expect.anything(),
+    );
+  });
+
+  it("offers request-all-seasons with is4k for a show whose only open lane is 4K", async () => {
+    answer({
+      ...base,
+      status: "blocklisted",
+      requestable: false,
+      requestable_4k: true,
+      link: "http://s/tv/1399",
+    });
+    render(<SeerrAction title={show as never} inLibrary={false} />);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Request in Seerr" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Request all seasons" }),
+    );
+    expect(request).toHaveBeenCalledWith(
+      {
+        media_type: "tv",
+        tmdb_id: 1399,
+        tvdb_id: 121361,
+        seasons: "all",
+        is4k: true,
+      },
+      expect.anything(),
+    );
+  });
+
+  it("hides the request action for a fully requested show with no 4K lane open", () => {
+    answer({
+      ...base,
+      status: "available",
+      requestable: true,
+      requestable_4k: false,
+      seasons: [
+        { number: 1, state: "available" },
+        { number: 2, state: "available" },
+      ],
+    });
+    render(<SeerrAction title={show as never} inLibrary={true} />);
+    expect(screen.queryByRole("button", { name: /Request/ })).toBeNull();
+  });
+
+  it("keeps the request action for an otherwise-exhausted show when the 4K lane is still open", () => {
+    answer({
+      ...base,
+      status: "available",
+      requestable: true,
+      requestable_4k: true,
+      seasons: [
+        { number: 1, state: "available" },
+        { number: 2, state: "available" },
+      ],
+    });
+    render(<SeerrAction title={show as never} inLibrary={true} />);
+    expect(
+      screen.getByRole("button", { name: "Request in Seerr" }),
+    ).toBeInTheDocument();
   });
 
   it("resolves a local-source movie by its tmdb_id", () => {

@@ -15,6 +15,7 @@ import type {
   SeerrRequestOutcome,
 } from "@/types/seerr";
 import SeerrRequestModal from "./SeerrRequestModal";
+import { groupSeerrSeasons } from "./seerrSeasons";
 import styles from "./Discover.module.scss";
 
 const REJECTED_KEY_FLAG = "bazarr.seerr.rejected-key-shown";
@@ -200,10 +201,23 @@ export default function SeerrAction({
   const isShow = identity.kind === "tv";
   const tmdbId = "tmdbId" in identity ? identity.tmdbId : state.tmdb_id;
   const badge = badgeFor(state);
+  // A completed show is still `requestable` (TMDB can know a season Seerr
+  // does not), but if the same season-grouping arithmetic the modal uses
+  // says nothing is actually selectable, offering the button just opens a
+  // modal with a disabled submit. Suppress it then, unless the 4K lane is
+  // still open: that lane always has "Request all seasons" to offer.
+  const seasonGroups = isShow ? groupSeerrSeasons(title!, state) : null;
+  const seasonsExhausted =
+    seasonGroups !== null &&
+    seasonGroups.hasList &&
+    state.partial_requests &&
+    seasonGroups.owned.length === 0 &&
+    seasonGroups.open.length === 0;
   const canRequest =
-    state.requestable &&
+    (state.requestable || state.requestable_4k) &&
     tmdbId !== undefined &&
-    !(inLibrary && !isShow && !state.known);
+    !(inLibrary && !isShow && !state.known) &&
+    !(seasonsExhausted && !state.requestable_4k);
   const needsModal = isShow || state.requestable_4k;
   const requestLabel =
     state.status === "partially_available"
