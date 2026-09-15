@@ -164,9 +164,15 @@ def test_guard_contention_is_reported_as_a_retryable_busy_error(monkeypatch):
     from sportarr import subtitles as sports_subtitles
     from sportarr.errors import SportsOwnersBusy
 
+    # Shaped like the real thing: PostgreSQL reports a NOWAIT lock it could not
+    # take as 55P03. A bare OperationalError with no code is a database fault,
+    # not contention, and must not be answered as busy.
+    class Contended(Exception):
+        pgcode = '55P03'
+
     @contextmanager
     def transaction(*args, **kwargs):
-        raise OperationalError('LOCK TABLE', {}, Exception('could not obtain lock'))
+        raise OperationalError('LOCK TABLE', {}, Contended('could not obtain lock'))
         yield  # pragma: no cover
 
     monkeypatch.setattr(sports_subtitles, 'sports_transaction', transaction)
@@ -684,11 +690,12 @@ def test_a_failure_after_the_body_ran_is_not_retried(monkeypatch):
                         lambda *a, **kw: SimpleNamespace(validate=lambda session: None))
 
     context = SimpleNamespace(event_id=11, league_id=7, arr_instance_id=42)
-    with pytest.raises(OperationalError):
+    with pytest.raises(OperationalError) as raised:
         with sports_subtitles.sports_file_publication(context, 'sig'):
             pass
-    # Not SportsOwnersBusy, so retry_while_owners_busy passes it straight through.
-    assert not isinstance(SportsOwnersBusy('x'), type(None))
+    # Not SportsOwnersBusy, so retry_while_owners_busy passes it straight
+    # through rather than repeating a commit that may have landed.
+    assert not isinstance(raised.value, SportsOwnersBusy)
 
 
 def test_a_cancelled_wait_for_a_provider_slot_frees_the_pool(monkeypatch):
@@ -776,3 +783,129 @@ def test_a_second_sportarr_instance_does_not_rebuild_the_triggers(schema_session
     repo._refresh_ownership_triggers()
 
     assert rebuilt == [], 'the triggers already match; nothing should be rebuilt'
+
+
+# --------------------------------------------------------------------------
+# Round three: classifying by what the error is, not where it happened.
+# --------------------------------------------------------------------------
+
+def _operational(orig):
+    from sqlalchemy.exc import OperationalError
+    return OperationalError('SQL', {}, orig)
+
+
+@pytest.mark.parametrize('pgcode,contention', [
+    ('55P03', True),    # NOWAIT lock this boundary asked for and could not take
+    ('40001', True),    # serialization failure: the server discarded the whole transaction
+    ('40P01', True),    # deadlock victim, likewise discarded
+    ('57014', False),   # statement timeout
+    ('53100', False),   # disk full
+    ('08006', False),   # connection failure, which may have committed
+])
+def test_only_a_discarded_transaction_counts_as_owner_contention(pgcode, contention):
+    """Position was the wrong axis twice.
+
+    Classifying by where the error happened called a plain SELECT failure in
+    the pre-body region contention, and called a serialization failure at
+    commit unrepeatable when it is the one thing that most wants repeating.
+    """
+    from sportarr.subtitles import _is_owner_contention
+
+    class Orig(Exception):
+        pass
+
+    orig = Orig('boom')
+    orig.pgcode = pgcode
+    assert _is_owner_contention(_operational(orig)) is contention
+
+
+def test_sqlite_reports_contention_without_a_code():
+    from sportarr.subtitles import _is_owner_contention
+
+    assert _is_owner_contention(_operational(Exception('database is locked')))
+    assert not _is_owner_contention(_operational(Exception('attempt to write a readonly database')))
+
+
+def test_a_serialization_failure_at_commit_is_retried(monkeypatch):
+    """SERIALIZABLE is the boundary's isolation level, so 40001 at commit is
+    routine. Nothing was written, and losing the history row loses the upgrade
+    and blacklist trail for good, so this is the case the retry exists for."""
+    from contextlib import contextmanager
+
+    from sqlalchemy.exc import OperationalError
+
+    from sportarr import subtitles as sports_subtitles
+    from sportarr.errors import SportsOwnersBusy
+
+    class Serialization(Exception):
+        pgcode = '40001'
+
+    @contextmanager
+    def transaction(*args, **kwargs):
+        yield SimpleNamespace(execute=lambda *a, **kw: SimpleNamespace(scalar_one=lambda: None),
+                              flush=lambda: None)
+        raise OperationalError('COMMIT', {}, Serialization('could not serialize access'))
+
+    monkeypatch.setattr(sports_subtitles, 'sports_transaction', transaction)
+    monkeypatch.setattr(sports_subtitles, 'lock_output_owners', lambda *a, **kw: None)
+    monkeypatch.setattr(sports_subtitles, 'validate_context', lambda *a, **kw: None)
+    monkeypatch.setattr(sports_subtitles, '_signature', lambda *a, **kw: 'sig')
+    monkeypatch.setattr(sports_subtitles, 'SportsOutputNamespace',
+                        lambda *a, **kw: SimpleNamespace(validate=lambda session: None))
+
+    context = SimpleNamespace(event_id=11, league_id=7, arr_instance_id=42)
+    with pytest.raises(SportsOwnersBusy):
+        with sports_subtitles.sports_file_publication(context, 'sig'):
+            pass
+
+
+def test_a_drifted_trigger_set_is_rebuilt_rather_than_left(schema_session):
+    """ownership_triggers_present answers "is any one there", which a partial
+    or drifted set satisfies while verify_ownership_protection still refuses
+    it. Gating on presence alone left the one state the publication boundary
+    declines to repair, with nothing else to repair it before a restart."""
+    from sqlalchemy import text
+
+    from app.database import TableArrInstances
+    from app.ownership_revision import (install_ownership_revision, ownership_triggers_match,
+                                        ownership_triggers_present)
+
+    schema_session.add(TableArrInstances(
+        id=42, kind='sportarr', name='Sports', stable_key='s', port=1867, enabled=1))
+    schema_session.commit()
+    install_ownership_revision(schema_session.connection())
+    assert ownership_triggers_match(schema_session, True)
+
+    # Drop one of the set, the way an interrupted migration or a restored dump can.
+    schema_session.execute(text('DROP TRIGGER ownership_revision_table_movies_insert'))
+
+    assert ownership_triggers_present(schema_session), 'the rest of the set is still there'
+    assert not ownership_triggers_match(schema_session, True), (
+        'a partial set must not read as already correct')
+
+
+def test_the_trigger_refresh_does_not_take_a_bare_savepoint(monkeypatch, schema_session):
+    """The app session is bound to an AUTOCOMMIT engine, where PostgreSQL
+    rejects a bare SAVEPOINT outside a transaction block. sports_transaction is
+    the repo's answer to that and nests when a transaction is already open."""
+    from arr_instances.repository import ArrInstanceRepository
+    from sportarr import db as sports_db
+
+    # Fail the way PostgreSQL does when a bare SAVEPOINT reaches a connection
+    # in autocommit, so a refresh that took one would be caught here.
+    def refuse_bare_savepoint(*args, **kwargs):
+        raise AssertionError('SAVEPOINT can only be used in transaction blocks')
+
+    monkeypatch.setattr(type(schema_session), 'begin_nested', refuse_bare_savepoint,
+                        raising=False)
+
+    used = []
+    real = sports_db.sports_transaction
+
+    def counted(session, **kwargs):
+        used.append(True)
+        return real(session, **kwargs)
+
+    monkeypatch.setattr(sports_db, 'sports_transaction', counted)
+    ArrInstanceRepository(schema_session)._refresh_ownership_triggers()
+    assert used == [True], 'the refresh must go through sports_transaction'

@@ -78,10 +78,12 @@ def sportarr_in_use(connection):
     """Whether any Sportarr instance exists, enabled or not.
 
     Enabled is deliberately not part of it: an instance that is switched off
-    for an evening still owns rows whose ownership has to stay tracked, and
-    switching it back on must not be the moment the tracking starts, because
-    everything written while it was off would then be missing from the change
-    log with nothing to say so.
+    for an evening still owns rows whose ownership has to stay tracked. Nothing
+    would be lost if it were, because a reinstall writes the '*' full-resync
+    marker and any snapshot older than that is rebuilt from the tables rather
+    than from the change log. What it would cost is the reinstall itself, on
+    every toggle: a trigger drop and recreate, a forced full snapshot rebuild,
+    and on PostgreSQL ACCESS EXCLUSIVE on the two busiest tables.
 
     Raises rather than answering False on a database fault. False is not a
     safe default here: the caller drops every trigger for it, so a transient
@@ -181,6 +183,24 @@ def ownership_triggers_present(session):
         JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE t.tgname IN ('ownership_revision', 'ownership_revision_truncate')
         AND n.nspname = current_schema() LIMIT 1""")).first())
+
+
+def ownership_triggers_match(session, wanted):
+    """Whether the installed triggers are already what ``wanted`` calls for.
+
+    Not the same question as ``ownership_triggers_present``, which answers
+    "is any one of them there". A partial or drifted set answers yes to that
+    and still fails ``verify_ownership_protection``, so gating a rebuild on
+    presence alone leaves exactly the state the publication boundary refuses
+    to run against, with nothing left to repair it before the next restart.
+    """
+    if not wanted:
+        return not ownership_triggers_present(session)
+    try:
+        verify_ownership_protection(session)
+        return True
+    except ValueError:
+        return False
 
 
 def ensure_ownership_protection(session):

@@ -93,9 +93,13 @@ def forget_league_event_mismatches(session, owner, league_ids):
     The savepoint covers the lookups as well as the delete, because a swallowed
     failure in either leaves that transaction just as aborted.
     """
-    from app.database import TableSportsEvents
-    from subtitles.mismatch import forget_media
     try:
+        # Inside the try, not above it: these are function-local to dodge an
+        # import cycle, and a first resolution that fails would otherwise raise
+        # straight into the caller's open transaction, against the contract
+        # this docstring states.
+        from app.database import TableSportsEvents
+        from subtitles.mismatch import forget_media
         with session.begin_nested():
             event_ids = []
             for batch in in_chunks(list(league_ids)):

@@ -1173,9 +1173,16 @@ def migrate_db(app):
     except Exception:
         logging.exception("Language profile reference reconcile failed; continuing startup")
 
-    # Batch migrations can rebuild tables and discard their triggers.
-    with engine.begin() as connection:
-        install_ownership_revision(connection)
+    # Batch migrations can rebuild tables and discard their triggers. Guarded
+    # the way every reconcile above it is: sportarr_in_use raises rather than
+    # answering False for a database fault, because the caller drops every
+    # trigger on a False, and an unguarded raise here would turn a transient
+    # fault into a boot that never completes.
+    try:
+        with engine.begin() as connection:
+            install_ownership_revision(connection)
+    except Exception:
+        logging.exception("Subtitle ownership trigger install failed; continuing startup")
 
     optimize_sqlite_database(engine)
 

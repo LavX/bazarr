@@ -146,9 +146,9 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
             # than a pair of paths, and announced as a sports event. Falling
             # through to the movie branch announced an event id as a movie id.
             #
-            # Best effort, unlike the sibling indexers above: those never raise,
-            # while the sports one raises a bare OSError on a probe failure or
-            # its analysis timeout. The mod is already applied to the file by
+            # Best effort, unlike the sibling indexers above: those swallow
+            # their own indexing failures, while the sports one raises a bare
+            # OSError on a probe failure or its analysis timeout. The mod is already applied to the file by
             # here, so letting that through would fail the job for work that
             # succeeded and skip the event below, leaving the UI on the old state.
             from subtitles.indexer.sports import store_subtitles_sports

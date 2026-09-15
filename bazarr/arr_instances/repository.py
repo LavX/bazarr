@@ -319,22 +319,29 @@ class ArrInstanceRepository:
         a valid incremental snapshot and, on PostgreSQL, take ACCESS EXCLUSIVE
         on the two busiest tables from a request thread for no change at all.
 
-        In a SAVEPOINT, because the engine is AUTOCOMMIT and the rebuild is a
-        dozen statements: without one, a failure partway leaves triggers
-        dropped and not recreated, and the boundary refuses a partial set
-        rather than repairing it, which would strand every sports publication
-        until the next restart. Never raises, because a failed refresh must not
-        turn a successful create or delete into an error, and the boundary or
-        the next startup installs what this did not.
+        Through sports_transaction, not begin_nested. The rebuild is a dozen
+        statements and has to be all or nothing, but this session is usually
+        the app one, which is bound to an AUTOCOMMIT engine, and PostgreSQL
+        rejects a bare SAVEPOINT outside a transaction block. sports_transaction
+        exists for exactly this: it opens a dedicated connection with a real
+        transaction when the session needs one, and nests when the caller has
+        already opened one. The two probes run inside it too, so a failure in
+        either rolls back with the rest instead of leaving the caller's
+        transaction aborted.
+
+        Never raises, because a failed refresh must not turn a successful
+        create or delete into an error. The next startup reinstalls, and a
+        publication installs them itself if it finds none at all.
         """
-        from app.ownership_revision import (install_ownership_revision, ownership_triggers_present,
+        from app.ownership_revision import (install_ownership_revision, ownership_triggers_match,
                                             sportarr_in_use)
+        from sportarr.db import sports_transaction
         try:
-            connection = self._session.connection()
-            if sportarr_in_use(connection) == ownership_triggers_present(self._session):
-                return
-            with self._session.begin_nested():
-                install_ownership_revision(self._session.connection())
+            with sports_transaction(self._session) as session:
+                connection = session.connection()
+                if ownership_triggers_match(session, sportarr_in_use(connection)):
+                    return
+                install_ownership_revision(connection)
         except Exception:
             logging.exception('BAZARR could not refresh the subtitle ownership triggers')
 

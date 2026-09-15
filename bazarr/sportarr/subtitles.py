@@ -52,9 +52,10 @@ def retry_while_owners_busy(attempt, cancel=None):
     caller with nothing left to undo should wait a moment rather than abandon
     the work; every other failure is passed straight through.
 
-    Safe to retry because the boundary answers busy only for failures that
-    happen before the caller's body runs. Once the body has been entered, its
-    rows may or may not have landed, and that is reported rather than repeated.
+    Safe to retry because the boundary answers busy only for a lock it could
+    not take or a transaction the server discarded, neither of which leaves
+    anything behind. A failure that may have committed, or that is not
+    contention at all, keeps its own type and is never repeated here.
     """
     for index in range(_HISTORY_PUBLICATION_ATTEMPTS):
         try:
@@ -151,25 +152,47 @@ def get_blacklist_sports(context, session=None):
     ]
 
 
+# 55P03 is a lock this boundary asked for with NOWAIT and could not have.
+# 40001 and 40P01 are the server discarding the whole transaction, so nothing
+# it wrote survived. SQLite reports the same conditions as a busy or locked
+# database, with no code to read.
+_CONTENTION_PGCODES = ('55P03', '40001', '40P01')
+
+
+def _is_owner_contention(exc):
+    """Whether this OperationalError is the owner tables being busy.
+
+    Anything else is a database fault, and calling it contention hides the
+    cause behind retry wording and then repeats it for as long as the retry
+    budget lasts.
+    """
+    original = getattr(exc, 'orig', None)
+    pgcode = getattr(original, 'pgcode', None)
+    if pgcode is not None:
+        return pgcode in _CONTENTION_PGCODES
+    message = str(original or exc).lower()
+    return 'database is locked' in message or 'database is busy' in message
+
+
 @contextmanager
 def sports_file_publication(
     context, signature, cancel=None, extra_validate=None, *, outcome=None, output_path=None
 ):
     """Short owned publication boundary for provider and nonprovider file work."""
     namespace = SportsOutputNamespace(context, database, read_path=output_path)
-    # Only the statements BEFORE the caller's body answer "busy". Those are the
-    # NOWAIT ones, lock_output_owners and the FOR UPDATE NOWAIT below, so an
-    # OperationalError out of them really is contention and is worth retrying.
+    # Classified by what the error IS, not by where it happened. Position was
+    # the wrong axis twice: the pre-body region is not only the NOWAIT
+    # statements (it also opens the connection, runs a plain SELECT through
+    # resolve_event_in_session, and takes require_sportarr's FOR UPDATE without
+    # nowait), and the post-body region is not only unrepeatable work (a
+    # serialization failure at commit wrote nothing and is the one thing that
+    # most wants retrying).
     #
-    # Everything from the yield onwards is the caller's work. That includes the
-    # flush after it: sports_history only calls session.add, so the history
-    # INSERT is emitted there, not in the body, and labelling a fault in it
-    # "busy owners" hid the real cause behind lock-contention wording. It also
-    # includes the commit, where an OperationalError on PostgreSQL can mean the
-    # connection dropped with the commit in flight: retrying that would write
-    # the caller's rows a second time. Both propagate unchanged.
+    # So: a lock the boundary could not take, or a transaction the server threw
+    # out, is contention. It is safe to repeat, because nothing it did survived.
+    # Anything else keeps its own wording, including the ambiguous commit-time
+    # connection drop that could have committed the caller's rows.
     in_body = False
-    body_reached = False
     try:
         with sports_transaction(database, nowait=True, outcome=outcome) as session:
             lock_output_owners(session, context.arr_instance_id)
@@ -196,14 +219,16 @@ def sports_file_publication(
             ).scalar_one()
             validate()
             namespace.validate(session)
-            in_body = body_reached = True
+            in_body = True
             yield session, validate
             in_body = False
             session.flush()
             validate()
             namespace.validate(session)
     except OperationalError as exc:
-        if in_body or body_reached:
+        # The caller's body keeps its own error whatever it is: this boundary
+        # cannot know whether repeating that body is safe.
+        if in_body or not _is_owner_contention(exc):
             raise
         raise SportsOwnersBusy("Subtitle destination owners are busy. Please retry.") from exc
 

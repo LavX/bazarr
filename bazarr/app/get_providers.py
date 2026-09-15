@@ -562,12 +562,15 @@ def _handle_mgb(name, exception, ids, language, sports_context=None):
         #
         # Know what the row costs, because it is not a visible junk entry. Both
         # Excluded pages inner-join the local ids this row leaves NULL, so it
-        # never lists, and blacklist_delete refuses an unscoped delete once a
-        # NULL-owner row coexists with an owned one. The exclusion is therefore
-        # global and reachable only by Remove All. That is the behaviour
-        # development has always had; it is recorded here so the next reader
-        # weighing "tidy the Excluded page" against "stop re-downloading a
-        # subtitle the provider rejected" knows which way the trade runs.
+        # never lists, and the exclusion it applies is global. It is still
+        # removable: blacklist_delete counts distinct owners for that one
+        # (provider, subs_id) and refuses only when a NULL-owner row shares a
+        # key with an owned one, which is not the ordinary case, so an unscoped
+        # delete by the provider and release id the warning below prints will
+        # clear it. That is the behaviour development has always had; it is
+        # recorded here so the next reader weighing "tidy the Excluded page"
+        # against "stop re-downloading a subtitle the provider rejected" knows
+        # which way the trade runs.
         if exception.media_type == "series":
             if not (ids.get('sonarrSeriesId') and ids.get('sonarrEpisodeId')):
                 logging.warning(
