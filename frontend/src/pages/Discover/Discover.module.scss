@@ -3881,6 +3881,15 @@
   border-radius: 7px;
   font-size: 13px;
 }
+.seerrAction {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--mantine-spacing-xs);
+}
+.seerrStatus {
+  font-size: var(--mantine-font-size-sm);
+}
 @media (max-width: 900px) {
   .detailHero .detailHeroSurface {
     grid-template-columns: 150px minmax(0, 1fr);

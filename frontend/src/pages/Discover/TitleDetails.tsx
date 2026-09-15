@@ -22,6 +22,7 @@ import { useDiscoverMetadata } from "@/apis/hooks/discover";
 import { useDiscover } from "@/contexts/Discover";
 import EpisodePicker from "./EpisodePicker";
 import MediaPoster from "./MediaPoster";
+import SeerrAction from "./SeerrAction";
 import styles from "./Discover.module.scss";
 
 /** The selected title as the page currently knows it, cached or received. */
@@ -331,6 +332,7 @@ export default function TitleDetails({
                     </Menu.Dropdown>
                   </Menu>
                 )}
+                <SeerrAction title={movie} inLibrary={inLibrary} />
               </div>
             </div>
           </article>
