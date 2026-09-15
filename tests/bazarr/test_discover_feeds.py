@@ -74,6 +74,43 @@ def test_feed_is_authenticated_and_parameters_are_source_scoped(authenticated_cl
     assert len(upstream.calls) <= 2
 
 
+def test_a_served_feed_is_reusable_by_the_browser_until_the_server_refreshes_it(authenticated_client, upstream):
+    """The browser is told to hold it exactly as long as the server will."""
+    from discover import feeds
+    upstream.payload = payload
+    response = get(authenticated_client)
+    assert response.json["status"] == "live" and response.json["items"]
+    control = response.headers["Cache-Control"]
+    assert control.startswith("private, max-age=")
+    # Read off the payload's own expiry, so it can never outlast the server's
+    # freshness, and never restates FRESH_SECONDS as a second literal.
+    seconds = int(control.rsplit("=", 1)[1])
+    assert 0 < seconds <= feeds.FRESH_SECONDS
+
+
+@pytest.mark.parametrize("status", [503, 401])
+def test_a_feed_the_reader_is_told_to_refresh_is_never_pinned_in_their_browser(authenticated_client, upstream, status):
+    """Refresh has to reach the server in exactly the states that advise it."""
+    upstream.status = status
+    response = get(authenticated_client)
+    assert response.json["items"] == []
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_a_degraded_feed_serving_retained_titles_is_not_cached(authenticated_client, upstream, monkeypatch):
+    """Saved titles shown during an outage must not outlive the outage."""
+    from discover import feeds
+    clock = [100.0]
+    monkeypatch.setattr(feeds.time, "monotonic", lambda: clock[0])
+    upstream.payload = payload
+    assert get(authenticated_client).json["items"]
+    clock[0] += feeds.FRESH_SECONDS + 1
+    upstream.status = 503
+    degraded = get(authenticated_client)
+    assert degraded.json["items"] and degraded.json["service_status"] == "unavailable"
+    assert degraded.headers["Cache-Control"] == "no-store"
+
+
 @pytest.mark.parametrize("query", ["media_type=tv", "media_type=all&media_type=movie", "period=day", "page=2", "media_type=all&language=hun"])
 def test_unknown_or_repeated_parameters_never_reach_upstream(authenticated_client, upstream, query):
     assert get(authenticated_client, query).status_code == 400
@@ -121,13 +158,38 @@ def test_cache_scope_includes_filter_locale_and_configuration(authenticated_clie
     assert authenticated_client.provider_searches == []
 
 
+def test_the_job_cap_can_serve_one_whole_page_of_feeds():
+    """The homepage asks for every feed at once, so all of them must fit.
+
+    With a cap below the number of feeds one page renders, a cold load refused
+    the last request in milliseconds without ever reaching TMDB, and the reader
+    was told that feed was temporarily unavailable when nothing had failed.
+    """
+    from discover import feeds
+    assert feeds.MAX_JOBS >= feeds.HOMEPAGE_FEEDS
+
+
+def test_a_feed_can_never_be_fresh_past_the_point_it_stops_being_servable():
+    """Freshness suppresses the re-fetch; staleness gates whether items are served.
+
+    If the stale window were the shorter of the two there would be a stretch
+    where an entry is fresh, so nothing refreshes it, and no longer usable, so
+    nothing serves it, and the reader would get an empty feed until the entry
+    finally expired. The two windows are tuned by hand, so the ordering is
+    asserted rather than assumed.
+    """
+    from discover import feeds
+    assert feeds.STALE_SECONDS >= feeds.FRESH_SECONDS
+    assert feeds.RETRY_SECONDS < feeds.FRESH_SECONDS
+
+
 def test_failed_refresh_retains_original_times_then_expires(authenticated_client, upstream, monkeypatch):
     from discover import feeds
     clock = [100.0]
     monkeypatch.setattr(feeds.time, "monotonic", lambda: clock[0])
     upstream.payload = payload
     first = get(authenticated_client).json
-    clock[0] += 301
+    clock[0] += feeds.FRESH_SECONDS + 1
     upstream.status = 503
     cached = get(authenticated_client).json
     assert cached["status"] == "cached" and cached["service_status"] == "unavailable"
@@ -135,7 +197,7 @@ def test_failed_refresh_retains_original_times_then_expires(authenticated_client
     calls = len(upstream.calls)
     assert get(authenticated_client).json["status"] == "cached"
     assert len(upstream.calls) == calls
-    clock[0] += 3600
+    clock[0] += feeds.STALE_SECONDS - feeds.FRESH_SECONDS
     expired = get(authenticated_client).json
     assert expired["status"] == "unavailable" and expired["items"] == []
     assert expired["last_success"] == first["fetched_at"]
@@ -183,6 +245,10 @@ def test_total_caller_deadline_coalesces_and_bounds_uncancelled_workers(authenti
     from discover import feeds, metadata
     upstream.payload = payload
     monkeypatch.setattr(feeds, "CALL_SECONDS", 0.1)
+    # What is under test is coalescing and refusal once the cap is reached, not
+    # how many slots production gives itself, so the cap is pinned here and the
+    # production value is guarded by its own test.
+    monkeypatch.setattr(feeds, "MAX_JOBS", 2)
     original = metadata._request
     release = threading.Event()
     started = threading.Event()

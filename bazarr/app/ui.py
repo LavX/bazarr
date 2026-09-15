@@ -185,35 +185,65 @@ def _instance_image_url(kind, url):
     return f'{client.base_url()}/api/v3/{path}?apikey={client.api_key}', client.verify_ssl
 
 
+# How long a browser may reuse a library cover without asking again. Cover art
+# changes when someone replaces it in Sonarr/Radarr, which is rare, and a day-old
+# poster costs nothing; re-fetching every cover on every page view costs a round
+# trip through Bazarr to the arr instance for each one. Radarr paths already
+# carry a ``lastWrite`` query, so replaced movie art arrives under a new URL and
+# is picked up immediately regardless of this window.
+COVER_MAX_AGE = 86400
+COVER_CACHE_CONTROL = f'private, max-age={COVER_MAX_AGE}, stale-while-revalidate=604800'
+# Relayed in both directions so the once-a-day revalidation can be answered with
+# an empty 304 instead of the image again.
+COVER_VALIDATORS = ('ETag', 'Last-Modified')
+
+
+def _proxy_cover(kind, url, rewrite=None):
+    """Stream one library cover from its owning arr instance, cached.
+
+    The reader's own validators are carried upstream and the upstream answer is
+    carried back, so an unchanged cover is answered with a 304 and no body. An
+    upstream failure stays a 404 here rather than being dressed up as a 200
+    whose body is the arr instance's error page.
+    """
+    url = url.strip("/")
+    url_image, verify = _instance_image_url(kind, url)
+    if url_image is None:
+        return '', 404
+    if rewrite:
+        url_image = url_image.replace(*rewrite)
+    headers = dict(HEADERS)
+    for header in ('If-None-Match', 'If-Modified-Since'):
+        if request.headers.get(header):
+            headers[header] = request.headers[header]
+    try:
+        req = requests.get(url_image, stream=True, timeout=15, verify=verify, headers=headers)
+    except Exception:
+        return '', 404
+
+    passthrough = {name: req.headers[name] for name in COVER_VALIDATORS if name in req.headers}
+    if req.status_code == 304:
+        req.close()
+        return Response(status=304, headers={'Cache-Control': COVER_CACHE_CONTROL, **passthrough})
+    if req.status_code != 200:
+        req.close()
+        return '', 404
+    return Response(stream_with_context(req.iter_content(2048)),
+                    content_type=req.headers.get('content-type', 'application/octet-stream'),
+                    headers={'Cache-Control': COVER_CACHE_CONTROL, **passthrough})
+
+
 @ui_bp.route('/images/series/<path:url>', methods=['GET'])
 @check_login
 def series_images(url):
-    url = url.strip("/")
-    url_image, verify = _instance_image_url('sonarr', url)
-    if url_image is None:
-        return '', 404
-    url_image = url_image.replace('poster-250', 'poster-500')
-    try:
-        req = requests.get(url_image, stream=True, timeout=15, verify=verify, headers=HEADERS)
-    except Exception:
-        return '', 404
-    else:
-        return Response(stream_with_context(req.iter_content(2048)), content_type=req.headers['content-type'])
+    # Sonarr stores the 250px poster; the UI wants the 500px one.
+    return _proxy_cover('sonarr', url, rewrite=('poster-250', 'poster-500'))
 
 
 @ui_bp.route('/images/movies/<path:url>', methods=['GET'])
 @check_login
 def movies_images(url):
-    url = url.strip("/")
-    url_image, verify = _instance_image_url('radarr', url)
-    if url_image is None:
-        return '', 404
-    try:
-        req = requests.get(url_image, stream=True, timeout=15, verify=verify, headers=HEADERS)
-    except Exception:
-        return '', 404
-    else:
-        return Response(stream_with_context(req.iter_content(2048)), content_type=req.headers['content-type'])
+    return _proxy_cover('radarr', url)
 
 
 # --- Cinematic login backdrops (pre-auth) --------------------------------

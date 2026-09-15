@@ -9,11 +9,30 @@ import time
 from utilities.locked_lru import LockedLRU
 from . import metadata
 
-FRESH_SECONDS = 300
-STALE_SECONDS = 3600
+# TMDB recomputes these feeds about once a day, so the old five-minute window
+# bought nothing: twelve times an hour the first reader to open Discover paid a
+# blocking upstream call (up to CALL_SECONDS) to be handed back the same titles.
+FRESH_SECONDS = 3600
+# How long a stored feed stays servable at all, past which the reader gets an
+# empty feed rather than a stale one. It must never fall below FRESH_SECONDS: an
+# entry that is fresh (so nothing re-fetches it) but no longer usable (so nothing
+# serves it) would leave the page blank until it expired. Past freshness this is
+# only a failure cushion, so it is sized to carry a TMDB outage rather than to
+# match the data's own lifetime. Going much wider would not help: the digital and
+# recent-episode keys carry their own date window, so their entries are replaced
+# when the day rolls over whatever this says. A failed attempt is unaffected
+# either way, it retries on RETRY_SECONDS.
+STALE_SECONDS = 6 * 3600
 RETRY_SECONDS = 30
 CALL_SECONDS = 12
-MAX_JOBS = 2
+# The Discover homepage renders three feeds and asks for all of them at once,
+# so a cap below three guaranteed that every cold load refused one outright:
+# the third request was rejected in milliseconds without ever reaching TMDB,
+# and the reader was told the feed was "temporarily unavailable" when nothing
+# had actually failed. The cap exists to bound concurrent outbound work, so it
+# is set to what one page legitimately asks for and no higher.
+HOMEPAGE_FEEDS = 3
+MAX_JOBS = HOMEPAGE_FEEDS
 MAX_ITEMS = 20
 _cache = LockedLRU(maxsize=64)
 _jobs = {}
