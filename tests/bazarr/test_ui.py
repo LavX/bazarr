@@ -4,7 +4,7 @@ Test for Bazarr UI functionality including authentication decorators.
 import pytest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch  # noqa: F401
-from flask import Flask
+from flask import Flask, session as flask_session
 
 from app.ui import check_login
 
@@ -291,10 +291,9 @@ def test_check_login_form_auth_success():
     app.secret_key = 'test_secret'
 
     with app.test_request_context():
-        with patch('app.ui.settings') as mock_settings, \
-             patch('app.ui.session', {'logged_in': True}):
-
+        with patch('app.ui.settings') as mock_settings:
             mock_settings.auth.type = 'form'
+            flask_session['logged_in'] = True
 
             decorated_function = check_login(test_function)
             result = decorated_function()
@@ -310,10 +309,10 @@ def test_check_login_form_auth_failure():
         return "should_not_reach"
 
     app = Flask(__name__)
+    app.secret_key = 'test_secret'
     with app.test_request_context():
         with patch('app.ui.settings') as mock_settings, \
-             patch('app.ui.session', {}) as mock_session, \
-             patch('app.ui.abort') as mock_abort:  # noqa: F841
+             patch('app.ui.abort') as mock_abort:
 
             mock_settings.auth.type = 'form'
             mock_abort.return_value = ('Unauthorized', 401)

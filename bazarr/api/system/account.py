@@ -10,6 +10,7 @@ from collections import OrderedDict
 from flask import session, request
 from flask_restx import Resource, Namespace, reqparse
 
+from app.auth import clear_session, establish_session
 from app.config import settings
 from utilities.helper import check_credentials, needs_password_upgrade, upgrade_password_hash
 
@@ -98,7 +99,7 @@ class SystemAccount(Resource):
             password = args.get('password')
             if check_credentials(username, password, request):
                 _clear_failed_attempts(ip)
-                session['logged_in'] = True
+                establish_session()
                 if needs_password_upgrade():
                     # Store password in session for upgrade (server-side only, never sent to client)
                     session['_pw_for_upgrade'] = password
@@ -107,7 +108,9 @@ class SystemAccount(Resource):
                 return '', 204
             else:
                 _record_failed_attempt(ip)
-                session['logged_in'] = False
+                # Remove the key rather than storing False: a stored False is a
+                # value another gate may read as "present, therefore signed in".
+                clear_session()
                 return 'Authentication failed', 403
         elif action == 'logout':
             if settings.auth.type == 'basic':
