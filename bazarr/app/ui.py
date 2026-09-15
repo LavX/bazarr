@@ -7,7 +7,7 @@ import time
 import requests
 import mimetypes
 
-from flask import (request, abort, render_template, Response, session, send_file, stream_with_context, Blueprint,
+from flask import (request, abort, render_template, Response, send_file, stream_with_context, Blueprint,
                    redirect)
 from functools import wraps
 from urllib.parse import unquote, urlparse
@@ -20,6 +20,7 @@ from utilities.helper import check_credentials
 from utilities.central import get_log_file_path
 from utilities.security_guards import api_key_matches
 
+from .auth import is_session_authenticated
 from .config import settings, base_url, get_ssl_verify
 from .database import database, System
 from .get_args import args
@@ -65,7 +66,7 @@ def check_login(actual_method):
                     'WWW-Authenticate': 'Basic realm="Login Required"'
                 })
         elif settings.auth.type == 'form':
-            if 'logged_in' not in session:
+            if not is_session_authenticated():
                 return abort(401)
         return actual_method(*args, **kwargs)
     return wrapper
@@ -119,7 +120,7 @@ def catch_all(path):
                 'WWW-Authenticate': 'Basic realm="Login Required"'
             })
     elif settings.auth.type == 'form':
-        if 'logged_in' not in session or not session['logged_in']:
+        if not is_session_authenticated():
             auth = False
 
     try:

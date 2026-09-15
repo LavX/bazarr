@@ -10,19 +10,7 @@ class SystemApi extends BaseApi {
   }
 
   async login(username: string, password: string) {
-    const response = await this.post<{
-      upgrade_hash?: boolean;
-      upgrade_token?: string;
-    }>("/account", { username, password }, { action: "login" });
-    return response.data;
-  }
-
-  async upgradePasswordHash(upgradeToken: string) {
-    await this.post(
-      "/account",
-      { password: upgradeToken },
-      { action: "upgrade_hash" },
-    );
+    await this.post("/account", { username, password }, { action: "login" });
   }
 
   async logout() {
