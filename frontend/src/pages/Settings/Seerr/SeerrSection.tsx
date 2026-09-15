@@ -1,7 +1,13 @@
 import { FunctionComponent, useCallback, useState } from "react";
 import { Alert, Button, Text as MantineText } from "@mantine/core";
 import { useSeerrTestConnectionMutation } from "@/apis/hooks/seerr";
-import { Check, Password, Section, Text } from "@/pages/Settings/components";
+import {
+  Check,
+  CollapseBox,
+  Password,
+  Section,
+  Text,
+} from "@/pages/Settings/components";
 import { seerrEnabledKey } from "@/pages/Settings/keys";
 import { useSettingValue } from "@/pages/Settings/utilities/hooks";
 import type { SeerrTestResult } from "@/types/seerr";
@@ -98,35 +104,40 @@ const VerifySslCheck: FunctionComponent = () => {
 };
 
 // Seerr (Jellyseerr/Overseerr) request integration for the Connections page.
-//
-// Unlike the media server sections, the connection fields here are not
-// hidden behind the Enabled toggle: the disclosure copy about who requests
-// run as needs to be readable, and the URL/API key need to be fillable and
-// testable, before a user decides to flip Seerr on.
+// Follows the same shape as every sibling section on this page (Plex,
+// Jellyfin, Sonarr, Radarr, the media server variants): an "Enabled" switch
+// on its own, then the connection fields collapsed behind it.
 const SeerrSection: FunctionComponent = () => {
   return (
-    <Section header="Seerr">
-      <Check label="Enabled" settingKey={seerrEnabledKey} />
-      <MantineText size="sm" c="dimmed">
-        Works with Seerr, Jellyseerr and Overseerr. Requests from Bazarr+ are
-        made with this API key. Requested as the Seerr owner and approved
-        immediately.
-      </MantineText>
-      <Text
-        label="Seerr URL"
-        settingKey="settings-seerr-url"
-        placeholder="http://seerr:5055"
-      />
-      <Password label="API key" settingKey="settings-seerr-apikey" />
-      <VerifySslCheck />
-      <Text
-        label="Browser URL"
-        settingKey="settings-seerr-external_url"
-        placeholder="Leave empty to use Seerr's application URL"
-        description="Shown to users as the link back to Seerr. Leave empty to use the Seerr URL above."
-      />
-      <SeerrTestButton />
-    </Section>
+    <>
+      <Section header="Use Seerr">
+        <Check label="Enabled" settingKey={seerrEnabledKey} />
+      </Section>
+
+      <CollapseBox settingKey={seerrEnabledKey}>
+        <Section header="Connection">
+          <Text
+            label="Seerr URL"
+            settingKey="settings-seerr-url"
+            placeholder="http://seerr:5055"
+          />
+          <Password label="API key" settingKey="settings-seerr-apikey" />
+          <VerifySslCheck />
+          <Text
+            label="Browser URL"
+            settingKey="settings-seerr-external_url"
+            placeholder="Leave empty to use Seerr's application URL"
+            description="Shown to users as the link back to Seerr. Leave empty to use the Seerr URL above."
+          />
+          <MantineText size="sm" c="dimmed">
+            Works with Seerr, Jellyseerr and Overseerr. Requests from Bazarr+
+            are made with this API key. Requested as the Seerr owner and
+            approved immediately.
+          </MantineText>
+          <SeerrTestButton />
+        </Section>
+      </CollapseBox>
+    </>
   );
 };
 

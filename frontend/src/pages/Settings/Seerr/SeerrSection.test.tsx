@@ -53,6 +53,10 @@ describe("SeerrSection", () => {
   it("tests the typed connection and reads out the acting user", async () => {
     renderSettingsSection(<SeerrSection />);
     const user = userEvent.setup();
+    expect(
+      screen.queryByRole("textbox", { name: "Seerr URL" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("switch", { name: "Enabled" }));
     await user.type(screen.getByLabelText("Seerr URL"), "http://seerr:5055");
     await user.type(screen.getByLabelText("API key"), "synthetic-key");
     await user.click(screen.getByRole("button", { name: "Test" }));
