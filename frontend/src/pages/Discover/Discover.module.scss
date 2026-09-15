@@ -27,6 +27,12 @@
   max-width: 1200px;
   margin-inline: auto;
   padding: 26px;
+  /* Decoration must never be able to widen the document. A blurred glow paints
+     well outside its own box, so without this the page grows a horizontal
+     scrollbar over a few hundred pixels of invisible light. `clip` rather than
+     `hidden`: it does not create a scroll container, so vertical overflow still
+     shows and the glow reaching up behind the header is untouched. */
+  overflow-x: clip;
   color: var(--bz-text-primary);
   caret-color: var(--mantine-color-brand-5);
   accent-color: var(--mantine-color-brand-5);
@@ -283,7 +289,7 @@
   justify-content: space-between;
   gap: 8px 16px;
   flex-wrap: wrap;
-  margin-block: 4px 14px;
+  margin-block: 16px 14px;
   > p {
     color: var(--bz-text-tertiary);
     font-size: 0.8125rem;
@@ -2577,17 +2583,58 @@
   }
 }
 
-.discover .globalLabel {
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  color: var(--bh-muted);
-  white-space: nowrap;
-  svg {
-    width: 13px;
-    height: 13px;
+/* The library hero opens the page, so its glow is the first thing the page
+   does. It used to be confined below the header, because an opaque header
+   sliced straight through anything that reached up into it. The header is
+   transparent at rest now, so the light carries on through that band and the
+   spread can be what it wants to be: wider than the panel on every side, and
+   blurred further so it reads as the page being lit rather than as a shape
+   sitting behind a card. */
+.libraryStage[data-artwork="true"]::before {
+  /* Vertical spread only. The mask is an ellipse sized to the closest side, so
+     on a box this wide it fades out long before the left and right edges: a
+     wide horizontal inset bought no visible light and pushed painted pixels
+     past the page column, which the document answered with a horizontal
+     scrollbar. The glow grows upward and downward, where it is actually seen. */
+  inset: -42% -2%;
+  filter: blur(72px) saturate(1.9);
+  /* The ellipse still touches all four edges, so the light is fully gone by
+     the edge and never ends in a band; it just starts fading later. */
+  mask-image: radial-gradient(
+    ellipse closest-side at center,
+    #000 30%,
+    transparent 100%
+  );
+}
+
+/* The boundary between the reader's own library and the wider catalog. The
+   rule above it does the separating; the heading says which side you are on. */
+.globalIntro {
+  margin-top: 40px;
+  padding-top: 28px;
+  border-top: 1px solid var(--bz-border-card);
+  h2 {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0;
+    font-size: clamp(1.25rem, 1.1rem + 0.7vw, 1.625rem);
+    font-weight: 650;
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+    color: var(--bh-ink);
+    svg {
+      width: 17px;
+      height: 17px;
+      color: var(--bz-accent, #e5a13a);
+    }
+  }
+  > p {
+    margin: 6px 0 0;
+    max-width: 52ch;
+    color: var(--bh-muted);
+    font-size: 13px;
+    line-height: 1.45;
   }
 }
 
@@ -4384,5 +4431,476 @@
     gap: 12px;
     padding-block: 12px;
     align-items: start;
+  }
+}
+
+/* Needs attention: the conditions that make a search quietly find nothing. */
+.attention {
+  position: relative;
+  margin-bottom: 24px;
+  h2 {
+    font-size: 15px;
+    font-weight: 650;
+    margin: 0 0 10px;
+    color: var(--bh-ink);
+    svg {
+      width: 14px;
+      margin-right: 6px;
+      color: var(--bz-warning, #e5a13a);
+    }
+  }
+  ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  li {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 12px 14px;
+    border: 1px solid var(--bz-border-card);
+    border-left: 3px solid var(--bz-warning, #e5a13a);
+    border-radius: 10px;
+    background: var(--bz-surface-raised);
+    font-size: 13px;
+  }
+  li[data-severity="error"] {
+    border-left-color: var(--bz-danger, #d9534f);
+  }
+  li > svg {
+    width: 14px;
+    margin-top: 2px;
+    flex: 0 0 auto;
+    color: var(--bz-warning, #e5a13a);
+  }
+  li[data-severity="error"] > svg {
+    color: var(--bz-danger, #d9534f);
+  }
+  li > a {
+    margin-left: auto;
+    white-space: nowrap;
+    color: var(--discover-link, var(--bh-muted));
+    text-decoration: none;
+    font-size: 12px;
+    svg {
+      width: 11px;
+      margin-left: 5px;
+    }
+  }
+}
+.attentionCopy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  strong {
+    font-weight: 600;
+    line-height: 1.35;
+  }
+  span {
+    color: var(--bh-muted);
+    font-size: 12px;
+    line-height: 1.35;
+  }
+}
+
+/* Still missing: the head of the wanted queue, actionable in place. */
+.wanted {
+  position: relative;
+  margin-bottom: 32px;
+}
+.wantedHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+  h2 {
+    font-size: 20px;
+    font-weight: 650;
+    margin: 0;
+    line-height: 1.3;
+  }
+  p {
+    margin: 5px 0 0;
+    color: var(--bh-muted);
+    font-size: 12px;
+  }
+  > a {
+    color: var(--bh-muted);
+    font-size: 12px;
+    white-space: nowrap;
+    text-decoration: none;
+    svg {
+      width: 12px;
+      margin-left: 6px;
+    }
+  }
+}
+.wantedGroups {
+  display: grid;
+  /* One column per configured library, up to the three Bazarr can have. The
+     track floor is low enough that three still fit side by side on a normal
+     desktop, and auto-fit collapses to two or one as the width or the number
+     of configured libraries drops, so nothing has to be told how many there
+     are. min() keeps a single narrow column from overflowing its container. */
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 270px), 1fr));
+  gap: 14px 20px;
+}
+.wantedGroup {
+  min-width: 0;
+}
+.wantedGroupHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  h3 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 650;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--bz-text-tertiary, var(--bh-muted));
+  }
+  a {
+    color: var(--bh-muted);
+    font-size: 13px;
+    white-space: nowrap;
+    text-decoration: none;
+    svg {
+      width: 12px;
+      margin-left: 6px;
+    }
+  }
+}
+.wantedList {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  li {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+    padding: 10px 12px;
+    border: 1px solid var(--bz-border-card);
+    border-radius: 10px;
+    background: var(--bz-surface-raised);
+  }
+}
+.wantedTitle {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  /* An episode carries a second line and a movie does not, so left to itself a
+     movie row sat shorter than the episode row beside it and the three strips
+     stopped lining up across the page. The space a second line would occupy is
+     reserved whether or not there is one, which is the cause; pinning a height
+     on the row instead only chases the symptom, and gets it wrong by the two
+     pixels of its own border. A longer title still grows the row. */
+  --wanted-title-line: 1.25;
+  --wanted-detail-size: 13px;
+  min-height: calc(
+    15px * var(--wanted-title-line) + 2px + var(--wanted-detail-size) *
+      var(--wanted-title-line)
+  );
+  color: var(--bh-ink);
+  text-decoration: none;
+  strong {
+    font-size: 15px;
+    font-weight: 600;
+    line-height: var(--wanted-title-line);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  span {
+    font-size: var(--wanted-detail-size);
+    line-height: var(--wanted-title-line);
+    color: var(--bh-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+.wantedLanguages {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-left: auto;
+  button {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    // WCAG 2.2 target size: the pill must be at least 24px tall in fact, not
+    // merely look tappable.
+    min-height: 28px;
+    padding: 5px 12px;
+    border: 1px solid var(--bz-border-card);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--bh-ink);
+    font: inherit;
+    font-size: 12.5px;
+    cursor: pointer;
+    white-space: nowrap;
+    svg {
+      width: 10px;
+    }
+    &:hover:not(:disabled) {
+      background: var(--bh-hover);
+    }
+    &:disabled {
+      opacity: 0.5;
+      cursor: progress;
+    }
+  }
+}
+/* A missing language with no action behind it. It must not wear the shape of
+   the search pills beside it: Sportarr's per-event endpoint returns candidates
+   to choose between rather than searching and downloading, so this states the
+   gap and the row links to where it can be worked on. */
+.wantedLanguageBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 11px;
+  border: 1px dashed var(--bz-border-card);
+  border-radius: 999px;
+  color: var(--bh-muted);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.wantedEmpty,
+.wantedMore {
+  margin: 0;
+  color: var(--bh-muted);
+  font-size: 12px;
+}
+.wantedMore {
+  margin-top: 10px;
+}
+
+@media (max-width: 820px) {
+  .wantedList {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .wantedList li,
+  .attention li {
+    flex-wrap: wrap;
+  }
+  .wantedLanguages {
+    margin-left: 0;
+    justify-content: flex-start;
+  }
+  .attention li > a {
+    margin-left: 26px;
+  }
+}
+
+/* The library hero. It borrows .stage and .feature so the local half of the
+   page and the global half below it are visibly the same kind of thing, and
+   only overrides what a status panel needs that a poster hero does not. */
+.libraryFeature {
+  aspect-ratio: auto;
+  /* Measured at 255px when the panel was sized purely by its contents; this is
+     that plus 15%. A floor rather than a fixed height, so a wrapped row of
+     actions or a long running-job name still grows it. */
+  min-height: 293px;
+  max-height: none;
+  /* The artwork is a full backdrop in a container much shorter than the source,
+     so with cover the crop sits wherever object-position puts it. The shared
+     30% cut through faces on portrait-heavy fanart; favouring the upper part of
+     the frame keeps heads in shot. This is a fallback, not a composition: the
+     arr chooses the image, and some will still crop awkwardly. */
+  > img {
+    /* Twenty points higher than the 25% it sat at. With cover, a smaller
+       vertical percentage favours the upper part of the source, so this keeps
+       heads and titles in frame on portrait-heavy fanart. The arr chooses the
+       image, so this is a fallback that suits most of them rather than a
+       composition that is right for every one. */
+    object-position: 50% 5%;
+  }
+  /* Library fanart is chosen by the arr, not by us, and often carries the
+     show's own title lettering across the frame. The global hero's scrim is
+     tuned for quieter poster art; here the copy has to stay legible over
+     whatever arrived, so the left side is darkened further and further across.
+     Layered over the shared scrim rather than replacing it. */
+  &[data-artwork="true"]::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background: linear-gradient(
+      to right,
+      rgba(11, 12, 21, 0.92) 0%,
+      rgba(11, 12, 21, 0.78) 34%,
+      rgba(11, 12, 21, 0.35) 62%,
+      rgba(11, 12, 21, 0) 88%
+    );
+    pointer-events: none;
+  }
+  .featureCopy {
+    padding: clamp(18px, 2.4vw, 26px) clamp(20px, 3vw, 32px);
+    max-width: 58rem;
+    animation: none;
+  }
+  .featureCopy h2 {
+    font-size: clamp(1.375rem, 1.1rem + 1.1vw, 1.75rem);
+    max-width: none;
+  }
+}
+.heroTop {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  h2 {
+    margin: 0;
+  }
+}
+.heroStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 5px 12px 5px 10px;
+  border-radius: 999px;
+  background: rgba(255, 248, 240, 0.12);
+  color: #fff8f0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  svg {
+    width: 12px;
+    flex: 0 0 auto;
+  }
+  &[data-tone="quiet"] svg {
+    color: #6fd48b;
+  }
+  &[data-tone="attention"] svg {
+    color: #f0b849;
+  }
+  &[data-tone="unknown"] svg {
+    color: rgba(255, 248, 240, 0.7);
+  }
+}
+.heroStats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+.heroStat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 104px;
+  padding: 7px 12px;
+  border: 1px solid rgba(255, 248, 240, 0.16);
+  border-radius: 12px;
+  background: rgba(11, 12, 21, 0.62);
+  backdrop-filter: blur(10px);
+  svg {
+    width: 13px;
+    color: rgba(255, 248, 240, 0.6);
+  }
+  strong {
+    font-size: 1.125rem;
+    font-weight: 700;
+    line-height: 1.2;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  span {
+    font-size: 11.5px;
+    color: rgba(255, 248, 240, 0.78);
+  }
+  /* An unreadable count must not wear the typography of a measured one. */
+  &[data-unknown="true"] strong {
+    font-size: 0.9375rem;
+    font-weight: 600;
+    color: rgba(255, 248, 240, 0.72);
+  }
+}
+.heroSchedule {
+  color: rgba(255, 248, 240, 0.7);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.heroActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 18px;
+  margin-top: 14px;
+  a {
+    color: rgba(255, 248, 240, 0.82);
+    font-size: 13px;
+    text-decoration: none;
+    white-space: nowrap;
+    svg {
+      width: 12px;
+      margin-left: 6px;
+    }
+    &:hover {
+      color: #fff8f0;
+    }
+  }
+}
+.heroCta {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  padding-inline: 18px;
+  border-radius: 10px;
+  background: var(--bz-accent, #e5a13a);
+  color: #14151f !important;
+  font-weight: 650;
+  &:hover {
+    filter: brightness(1.06);
+  }
+}
+
+@media (max-width: 820px) {
+  .heroStat {
+    flex: 1 1 calc(50% - 10px);
+    min-width: 0;
+  }
+}
+
+/* The Still missing header can carry one link per kind that has something
+   missing, so they need to sit together rather than stack. */
+.wantedLinks {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  a {
+    color: var(--bh-muted);
+    font-size: 12px;
+    white-space: nowrap;
+    text-decoration: none;
+    svg {
+      width: 12px;
+      margin-left: 6px;
+    }
   }
 }

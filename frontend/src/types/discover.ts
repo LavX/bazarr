@@ -539,6 +539,9 @@ export interface DiscoverWantedComponent {
   episode_requirements: number | null;
   movie_requirements: number | null;
   media_count: number | null;
+  /** Media items, not language requirements: one item may need several. */
+  episode_media_count?: number | null;
+  movie_media_count?: number | null;
   unknown_media_count: number | null;
   qualifications: string[];
   by_instance: {
@@ -548,9 +551,26 @@ export interface DiscoverWantedComponent {
   }[];
 }
 
+/** Whole-library counts. Null throughout when they could not be read. */
+export interface DiscoverLibraryComponent {
+  availability: DiscoverSummaryAvailability;
+  observed_at: string | null;
+  complete: boolean;
+  series: number | null;
+  movies: number | null;
+  episodes: number | null;
+  subtitles_fetched: number | null;
+  /** Absent where Sportarr is off or not in this build, never zero. */
+  sports_leagues?: number;
+  sports_events?: number;
+}
+
 export interface DiscoverArrival {
   library_id?: number | null;
+  /** Every language fetched for this title, newest first. */
+  languages?: string[];
   poster_url?: string | null;
+  backdrop_url?: string | null;
   kind: "episode" | "movie" | "translation";
   event_id: string;
   status: "success";
@@ -608,6 +628,7 @@ export interface DiscoverSummary {
   query_budget: number;
   activity: DiscoverActivityComponent;
   wanted: DiscoverWantedComponent;
+  library: DiscoverLibraryComponent;
   arrivals: DiscoverArrival[];
   arrivals_status: DiscoverArrivalsStatus;
   attention: {

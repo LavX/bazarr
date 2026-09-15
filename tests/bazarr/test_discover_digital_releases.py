@@ -14,6 +14,23 @@ def get(client, query="region=US"):
                       headers={"X-API-KEY": "metadata-test-key"})
 
 
+# These tests drive a fake clock from one fixed instant, so every age they
+# assert is that instant plus an offset. Deriving the freshness and staleness
+# offsets from the feed's own constants keeps the behaviour under test (an
+# entry expires, a failure cannot extend it) separate from the particular
+# window those constants happen to name.
+CLOCK_START = datetime(2026, 9, 8, 12, tzinfo=timezone.utc)
+
+
+def at(seconds):
+    return (CLOCK_START + timedelta(seconds=seconds)).isoformat()
+
+
+def windows():
+    from discover import feeds
+    return feeds.FRESH_SECONDS, feeds.STALE_SECONDS
+
+
 def release(day, kind=4, region="US"):
     return {"iso_3166_1": region, "release_dates": [{"type": kind, "release_date": day}]}
 
@@ -123,7 +140,8 @@ def test_failed_refresh_keeps_original_age_and_auth_failure_hides_items(authenti
     monkeypatch.setattr(feeds.time, "monotonic", lambda: clock[0])
     configure(upstream, monkeypatch, {1: [release("2026-09-08")]})
     first = get(authenticated_client).json
-    clock[0] += 301
+    fresh, stale = windows()
+    clock[0] += fresh + 1
     upstream.status = 503
     failed = get(authenticated_client).json
     assert failed["status"] == "cached" and failed["service_status"] == "unavailable"
@@ -135,7 +153,7 @@ def test_failed_refresh_keeps_original_age_and_auth_failure_hides_items(authenti
     upstream.status = 401
     rejected = get(authenticated_client).json
     assert rejected["status"] == "authentication_failed" and rejected["items"] == []
-    clock[0] += 3600
+    clock[0] += stale - fresh
     upstream.status = 503
     assert get(authenticated_client).json["items"] == []
 
@@ -239,6 +257,9 @@ def test_shared_job_cap_coalesces_regional_work_and_rate_limit_is_global(authent
     from discover import feeds, metadata
     configure(upstream, monkeypatch, {1: [release("2026-09-08")]})
     monkeypatch.setattr(feeds, "CALL_SECONDS", .1)
+    # As in the trending case: this is about behaviour once every slot is
+    # taken, not about how many slots production gives itself.
+    monkeypatch.setattr(feeds, "MAX_JOBS", 2)
     release_worker = threading.Event()
     started = threading.Event()
     original = metadata._request
@@ -389,18 +410,19 @@ def test_malformed_refresh_retains_success_payload_coverage_age_and_retry_then_r
     first = get(authenticated_client).json
     retained = {name: first[name] for name in ("items", "coverage", "fetched_at", "expires_at", "stale_until", "last_success")}
     assert first["fetched_at"] == first["last_success"] == "2026-09-08T12:00:00+00:00"
-    assert first["expires_at"] == "2026-09-08T12:05:00+00:00"
-    assert first["stale_until"] == "2026-09-08T13:00:00+00:00"
+    fresh, stale = windows()
+    assert first["expires_at"] == at(fresh)
+    assert first["stale_until"] == at(stale)
     if initial_rows:
         assert [item["id"] for item in first["items"]] == [1]
         assert first["items"][0]["provenance"]["release_date"] == "2026-09-08T00:00:00.000Z"
-    advance(301)
+    advance(fresh + 1)
     upstream.payload = {"results": [{"id": 2, "title": None}], "total_pages": 1}
     failed = get(authenticated_client).json
     assert {name: failed[name] for name in retained} == retained
     assert failed["status"] == ("cached" if initial_rows else "empty")
     assert failed["service_status"] == "unavailable"
-    assert failed["attempted_at"] == "2026-09-08T12:05:01+00:00"
+    assert failed["attempted_at"] == at(fresh + 1)
     calls = len(upstream.calls)
     advance(29)
     throttled = get(authenticated_client).json
@@ -418,9 +440,9 @@ def test_malformed_refresh_retains_success_payload_coverage_age_and_retry_then_r
     assert recovered["items"] == first["items"] and recovered["coverage"] == first["coverage"]
     assert recovered["status"] == ("live" if initial_rows else "empty")
     assert recovered["service_status"] == first["service_status"]
-    assert recovered["fetched_at"] == recovered["last_success"] == "2026-09-08T12:06:01+00:00"
-    assert recovered["expires_at"] == "2026-09-08T12:11:01+00:00"
-    assert recovered["stale_until"] == "2026-09-08T13:06:01+00:00"
+    assert recovered["fetched_at"] == recovered["last_success"] == at(fresh + 61)
+    assert recovered["expires_at"] == at(fresh + 61 + fresh)
+    assert recovered["stale_until"] == at(fresh + 61 + stale)
 
 
 def test_cold_repeated_malformed_attempts_have_failure_coverage_without_success_age(authenticated_client, upstream, monkeypatch):
@@ -452,8 +474,9 @@ def test_cold_repeated_malformed_attempts_have_failure_coverage_without_success_
     assert empty["coverage"]["candidates"] == empty["coverage"]["failed"] == 0
     assert empty["coverage"]["complete"] is True
     assert empty["fetched_at"] == empty["last_success"] == "2026-09-08T12:01:00+00:00"
-    assert empty["expires_at"] == "2026-09-08T12:06:00+00:00"
-    assert empty["stale_until"] == "2026-09-08T13:01:00+00:00"
+    fresh, stale = windows()
+    assert empty["expires_at"] == at(60 + fresh)
+    assert empty["stale_until"] == at(60 + stale)
     advance(31)
     assert get(authenticated_client).json["coverage"] == empty["coverage"]
     assert len(upstream.calls) == 3
@@ -466,7 +489,8 @@ def test_malformed_retry_cannot_extend_or_revive_expired_success(authenticated_c
     first = get(authenticated_client).json
     assert [item["id"] for item in first["items"]] == [1]
     upstream.payload = {"results": [{"id": 2, "title": None}, None], "total_pages": 1}
-    advance(3599)
+    fresh, stale = windows()
+    advance(stale - 1)
     retained = get(authenticated_client).json
     assert retained["items"] == first["items"] and retained["coverage"] == first["coverage"]
     assert retained["stale_until"] == first["stale_until"]
@@ -491,7 +515,7 @@ def test_malformed_retry_cannot_extend_or_revive_expired_success(authenticated_c
     recovered = get(authenticated_client).json
     assert recovered["status"] == "live" and recovered["items"] == first["items"]
     assert recovered["service_status"] is None
-    assert recovered["fetched_at"] == recovered["last_success"] == "2026-09-08T13:00:59+00:00"
+    assert recovered["fetched_at"] == recovered["last_success"] == at(stale + 59)
 
 
 def test_new_transport_failure_does_not_relabel_earlier_malformed_coverage(authenticated_client, upstream, monkeypatch):

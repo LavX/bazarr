@@ -226,6 +226,27 @@ beforeEach(() => {
   );
 });
 
+it("marks where the page stops describing the reader's own library", async () => {
+  browse();
+  // Without this the local sections above and the global feeds below ran
+  // together, and the feeds read as though they were still about the library.
+  const heading = await screen.findByRole("heading", {
+    name: /beyond your library/i,
+  });
+  expect(heading).toBeInTheDocument();
+  expect(
+    screen.getByText(
+      /trending worldwide, whether or not you already have them/i,
+    ),
+  ).toBeInTheDocument();
+  // The section it opens is the one holding the global feed controls.
+  expect(
+    screen.getByRole("region", { name: /beyond your library/i }),
+  ).toContainElement(
+    screen.getByRole("group", { name: /global trending media/i }),
+  );
+});
+
 it("shows sourced weekly global titles without local media or subtitle language", async () => {
   browse();
   expect(

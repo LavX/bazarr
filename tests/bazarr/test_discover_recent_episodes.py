@@ -237,10 +237,11 @@ def clock_control(monkeypatch):
 
 
 def test_warm_source_outage_keeps_original_dates_and_freshness(authenticated_client, upstream, monkeypatch):
+    from discover import feeds
     configure(upstream, monkeypatch)
     clock = clock_control(monkeypatch)
     first = get(authenticated_client).json
-    clock[0] += 301
+    clock[0] += feeds.FRESH_SECONDS + 1
     upstream.status = 503
     retained = get(authenticated_client).json
     assert retained["items"] == first["items"]
@@ -250,18 +251,18 @@ def test_warm_source_outage_keeps_original_dates_and_freshness(authenticated_cli
     upstream.status = 401
     rejected = get(authenticated_client).json
     assert rejected["status"] == "authentication_failed" and rejected["items"] == []
-    clock[0] += 3601
+    clock[0] += feeds.STALE_SECONDS - feeds.FRESH_SECONDS
     upstream.status = 503
     assert get(authenticated_client).json["items"] == []
     assert authenticated_client.provider_searches == []
 
 
 def test_full_admission_outage_keeps_observation_and_age(authenticated_client, upstream, monkeypatch):
-    from discover import metadata
+    from discover import feeds, metadata
     configure(upstream, monkeypatch)
     clock = clock_control(monkeypatch)
     first = get(authenticated_client).json
-    clock[0] += 301
+    clock[0] += feeds.FRESH_SECONDS + 1
     metadata._cache.invalidate(hard=True)
     upstream.status = 503
     retained = get(authenticated_client).json
@@ -329,7 +330,10 @@ def test_reuses_accepted_weekly_series_feed_without_guessing_pagination(authenti
 def test_shared_saturation_recovers_without_cache_poisoning(authenticated_client, upstream, monkeypatch, path):
     from discover import feeds
     configure(upstream, monkeypatch)
-    monkeypatch.setattr(feeds, "_jobs", {"one": feeds._Job(time.monotonic() + 12), "two": feeds._Job(time.monotonic() + 12)})
+    # Saturate whatever the cap is, rather than pinning it: the point is what
+    # happens when no slot is free, not how many slots there are.
+    monkeypatch.setattr(feeds, "_jobs", {
+        str(slot): feeds._Job(time.monotonic() + 12) for slot in range(feeds.MAX_JOBS)})
     busy = authenticated_client.get("/api/discover/feeds/" + path, headers={"X-API-KEY": "metadata-test-key"}).json
     assert busy["status"] == "unavailable" and busy["retry_after_ms"] == 1000
     assert upstream.calls == []

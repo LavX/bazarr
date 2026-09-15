@@ -11,7 +11,8 @@ different facts and only one of them is reassuring.
 
 Query shape is fixed: one instance identity projection, one grouped requirement
 aggregate and one uncomputed count per media kind, one bounded history read per
-media kind, and one grouped inaccessible-root-folder read per media kind. The
+media kind, one grouped inaccessible-root-folder read per media kind, and one
+select whose scalar subqueries carry every library count at once. The
 grouped aggregates parse each distinct stored requirement list once and multiply
 by its row count, so no query fans out per media item or per tile.
 """
@@ -24,7 +25,7 @@ import sys
 import time
 from threading import Lock
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, false, func, or_, select
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,12 @@ MAX_REQUIREMENT_TOKENS = 200
 # observation; 6 conflates a full translation with a partial one and is proven
 # only by a live typed publication observation, never by the history row.
 ARRIVAL_ACTIONS = (1, 2, 3, 4)
+
+# The same events minus 4, an upload. An upload is a real arrival, so it belongs
+# above, but it is a subtitle the reader supplied rather than one this install
+# went and found, and counting it under "subtitles fetched" would credit the
+# install with work it did not do.
+FETCHED_ACTIONS = (1, 2, 3)
 
 # Classify by the module and function a job actually runs. Matching words in a
 # job name counts unrelated work: the translator status endpoint does that today
@@ -76,6 +83,11 @@ OPERATION_LABELS = {
 
 _wanted_lock = Lock()
 _wanted_cache = {"value": None, "expires": 0.0}
+_library_lock = Lock()
+_library_cache = {"value": None, "expires": 0.0}
+# A library's shape barely moves between two page loads, and these are whole
+# table counts. Reading them once a minute keeps them off the per-request path.
+LIBRARY_CACHE_SECONDS = 60
 
 
 def _now():
@@ -248,7 +260,13 @@ def _wanted_component(instances):
         "requirements": episodes + movies,
         "episode_requirements": episodes,
         "movie_requirements": movies,
+        # Media items and language requirements are different units, and a
+        # media item can need several languages. Publishing both per kind is
+        # what lets a reader be told "140 episodes need subtitles" without the
+        # figure quietly being a count of languages instead.
         "media_count": episode_media + movie_media,
+        "episode_media_count": episode_media,
+        "movie_media_count": movie_media,
         "unknown_media_count": unknown_media,
         "qualifications": sorted(qualifications),
         "by_instance": [{"arr_instance_id": owner,
@@ -300,9 +318,19 @@ def _cached_wanted(instances):
 
 
 def reset_cache():
+    """Drop every reading this module holds.
+
+    Every cache here has to be listed, or the one that is missed survives the
+    only invalidation point there is: the test fixture that isolates one
+    database from the next, which is how a later case ends up asserting against
+    counts taken from an engine that has already been disposed.
+    """
     with _wanted_lock:
         _wanted_cache["value"] = None
         _wanted_cache["expires"] = 0.0
+    with _library_lock:
+        _library_cache["value"] = None
+        _library_cache["expires"] = 0.0
 
 
 # ---------------------------------------------------------------- activity
@@ -489,7 +517,153 @@ def _unknown_activity():
     }
 
 
+# ---------------------------------------------------------------- library
+
+
+def _library_component(instances):
+    """How much there is, as one statement.
+
+    Counts only. Nothing here inspects a requirement or a subtitle file, so it
+    stays a handful of indexed counts however large the library is, and it says
+    nothing it cannot count exactly. The counts are scalar subqueries of a
+    single select rather than one round trip each, because this module's query
+    budget is a fixed contract and a status read may not spend it on arithmetic.
+
+    There is deliberately no per-instance breakdown: ``wanted`` already carries
+    one where it changes what a reader would do, and adding two grouped reads
+    here to restate the shape of the library would cost more than it tells.
+    """
+    from app.config import settings
+    from app.database import TableEpisodes, TableHistory, TableHistoryMovie, TableMovies, TableShows
+
+    def count(table, where=None):
+        statement = select(func.count()).select_from(table)
+        return (statement if where is None else statement.where(where)).scalar_subquery()
+
+    # Rows survive an integration being switched off and an instance being
+    # disabled, so counting the tables flat would show a Radarr-only install a
+    # series count and fold a disabled Sonarr's shows into the total the reader
+    # is told they have. Restrict to the instances that are actually live, the
+    # way every other read of these tables does.
+    general = getattr(settings, "general", None)
+    enabled_owners = {owner for owner, entry in instances.items() if entry["enabled"]}
+
+    def owned(table, kind):
+        # The integration being off is the whole answer: its rows survive being
+        # switched off, and a Radarr-only install should not be shown a series
+        # count built from them.
+        if not getattr(general, f"use_{kind}", False):
+            return false()
+        owners = [owner for owner in enabled_owners if instances[owner]["kind"] == kind]
+        # A row from before the multi-instance migration carries no owner and
+        # belongs to the default instance. Matching only the owner list would
+        # quietly drop every one of them from the count.
+        orphan = table.arr_instance_id.is_(None)
+        return or_(orphan, table.arr_instance_id.in_(owners)) if owners else orphan
+
+    columns = [
+        count(TableShows, owned(TableShows, "sonarr")).label("series"),
+        count(TableMovies, owned(TableMovies, "radarr")).label("movies"),
+        count(TableEpisodes, owned(TableEpisodes, "sonarr")).label("episodes"),
+        # What this Bazarr went and found. Upgrades and manual downloads count
+        # because the install did the work; an upload does not, because the
+        # reader did, and "subtitles fetched" would be crediting it wrongly.
+        count(TableHistory, TableHistory.action.in_(FETCHED_ACTIONS)).label("episode_subtitles"),
+        count(TableHistoryMovie,
+              TableHistoryMovie.action.in_(FETCHED_ACTIONS)).label("movie_subtitles"),
+    ]
+    with _connection() as connection:
+        row = connection.execute(select(*columns)).one()
+        # Sportarr is optional and separately branched, so it gets its own
+        # statement. Folded into the select above, a missing or unreadable
+        # sports table took series, movies, episodes and the fetched count down
+        # with it, and this module promises that one failed source leaves the
+        # others intact.
+        sports = _sports_counts(connection, count)
+
+    component = {"availability": "available", "observed_at": _iso(_now()), "complete": True,
+                 "series": row.series, "movies": row.movies, "episodes": row.episodes,
+                 "subtitles_fetched": row.episode_subtitles + row.movie_subtitles}
+    # Absent rather than zero: an install with no Sportarr has no sports, and a
+    # "0 sports" tile would invite a reader to go looking for a feature they
+    # have not turned on.
+    if sports:
+        component.update(sports)
+    return component
+
+
+def _sports_counts(connection, count):
+    """Sports counts, only where Sportarr is both present and switched on.
+
+    Sportarr is optional and its tables only exist where it shipped, so this
+    resolves them at call time and contributes nothing at all when the setting
+    is off, the models are not in this build, or the tables are absent from the
+    database it is pointed at. That last case is why it runs on its own
+    statement and swallows its own failure: a sports table that cannot be read
+    must not take the rest of the library's counts down with it.
+    """
+    from app.config import settings
+    if not getattr(getattr(settings, "general", None), "use_sportarr", False):
+        return {}
+    try:
+        from app.database import TableSportsEvents, TableSportsLeagues
+    except ImportError:
+        return {}
+    try:
+        row = connection.execute(select(
+            count(TableSportsLeagues).label("sports_leagues"),
+            count(TableSportsEvents).label("sports_events"),
+        )).one()
+    except Exception:
+        logger.exception("Discover summary could not count the sports library")
+        return {}
+    return {"sports_leagues": row.sports_leagues, "sports_events": row.sports_events}
+
+
+def _unknown_library():
+    return {"availability": "unknown", "observed_at": None, "complete": False,
+            "series": None, "movies": None, "episodes": None, "subtitles_fetched": None}
+
+
+def _cached_library(instances):
+    now = time.monotonic()
+    with _library_lock:
+        cached = _library_cache["value"]
+        if cached is not None and _library_cache["expires"] > now:
+            return dict(cached)
+        try:
+            component = _library_component(instances)
+        except Exception:
+            logger.exception("Discover summary could not count the library")
+            # A retained reading is still true about a library that has not
+            # changed; only its age is unknown, and availability says so.
+            if cached is not None:
+                return dict(cached, availability="stale")
+            return _unknown_library()
+        _library_cache["value"] = component
+        _library_cache["expires"] = now + LIBRARY_CACHE_SECONDS
+        return dict(component)
+
+
 # ---------------------------------------------------------------- arrivals
+
+
+def _arrival_poster(path, kind, arr_instance_id):
+    """The library cover, addressed the way every other page addresses it.
+
+    The stored value is the owning Sonarr/Radarr's own relative path, which is
+    not reachable from the browser: it has to go through this Bazarr's
+    authenticated image proxy, carrying the owning instance so a non-default
+    instance's cover is fetched from that server rather than the default one.
+    Published raw, every cover 404s and the page silently shows placeholders.
+    Imported here because ``api`` pulls in every namespace at package import.
+    """
+    if not path:
+        return None
+    from api.utils import image_proxy_path_with_instance
+    from app.config import base_url
+    media = "series" if kind == "episode" else "movies"
+    return f"{base_url}/images/{media}{image_proxy_path_with_instance(path, arr_instance_id)}"
 
 
 def _history_candidates(connection, kind, instances, qualifications):
@@ -504,7 +678,8 @@ def _history_candidates(connection, kind, instances, qualifications):
                             TableEpisodes.title.label("episode_title"),
                             TableShows.id.label("library_id"),
                             TableShows.title.label("show_title"),
-                            TableShows.poster.label("poster_url"))
+                            TableShows.poster.label("poster_url"),
+                            TableShows.fanart.label("backdrop_url"))
                      .select_from(TableHistory)
                      .outerjoin(TableEpisodes, TableHistory.episode_id == TableEpisodes.id)
                      .outerjoin(TableShows, TableHistory.series_id == TableShows.id)
@@ -519,7 +694,8 @@ def _history_candidates(connection, kind, instances, qualifications):
                             TableMovies.arr_instance_id.label("media_owner"),
                             TableMovies.id.label("library_id"),
                             TableMovies.title.label("movie_title"),
-                            TableMovies.poster.label("poster_url"))
+                            TableMovies.poster.label("poster_url"),
+                            TableMovies.fanart.label("backdrop_url"))
                      .select_from(TableHistoryMovie)
                      .outerjoin(TableMovies, TableHistoryMovie.movie_id == TableMovies.id)
                      .where(and_(TableHistoryMovie.action != 7,
@@ -549,7 +725,9 @@ def _history_candidates(connection, kind, instances, qualifications):
         owner = row.arr_instance_id if row.arr_instance_id is not None else row.media_owner
         arrivals.append({
             "kind": kind, "event_id": f"{kind}:{row.id}", "status": "success",
-            "action": row.action, "title": title, "poster_url": row.poster_url,
+            "action": row.action, "title": title,
+            "poster_url": _arrival_poster(row.poster_url, kind, owner),
+            "backdrop_url": _arrival_poster(row.backdrop_url, kind, owner),
             "library_id": row.library_id,
             "season": row.season if kind == "episode" else None,
             "episode": row.episode if kind == "episode" else None,
@@ -600,6 +778,7 @@ def _arrivals(instances):
         candidates += _history_candidates(connection, "movie", instances, qualifications)
     candidates += _observed_translation_arrivals(instances)
     candidates.sort(key=lambda item: item["_sort"], reverse=True)
+    candidates = _merge_by_media(candidates)
     selected = candidates[:ARRIVAL_DISPLAY_LIMIT]
     for item in selected:
         del item["_sort"]
@@ -610,6 +789,40 @@ def _arrivals(instances):
         "qualifications": sorted(qualifications),
     }
     return selected, status
+
+
+def _merge_by_media(candidates):
+    """One entry per title, carrying every language fetched for it.
+
+    Two languages of the same episode are two real events, but as two cards
+    they read as the same thing rendered twice, and on a strip of four they
+    spend half the room saying it. The limit is a number of titles a reader can
+    take in, so it is applied to titles.
+
+    Order is preserved, so the merged entry keeps the position and the fields of
+    the most recent event for that title, and only gathers the languages of the
+    older ones.
+    """
+    merged = []
+    index = {}
+    for item in candidates:
+        if item["kind"] == "translation":
+            # A translation observation carries no library identity and its
+            # title is allowed to be null, so every untitled one would key
+            # identically and collapse onto a single card that then absorbed
+            # the languages of unrelated events. Its own id keeps them apart.
+            key = ("translation", item["event_id"])
+        else:
+            key = (item["kind"], item.get("arr_instance_id"), item.get("library_id"),
+                   item.get("title"), item.get("season"), item.get("episode"))
+        existing = index.get(key)
+        if existing is None:
+            item["languages"] = [item["language"]] if item["language"] else []
+            index[key] = item
+            merged.append(item)
+        elif item["language"] and item["language"] not in existing["languages"]:
+            existing["languages"].append(item["language"])
+    return merged
 
 
 def _unknown_arrivals():
@@ -883,6 +1096,7 @@ def get_summary():
         activity_component = _unknown_activity()
 
     wanted = _cached_wanted(instances)
+    library = _cached_library(instances)
 
     try:
         arrivals, arrivals_status = _arrivals(instances)
@@ -909,6 +1123,7 @@ def get_summary():
         "query_budget": QUERY_BUDGET,
         "activity": activity_component,
         "wanted": wanted,
+        "library": library,
         "arrivals": arrivals,
         "arrivals_status": arrivals_status,
         "attention": attention,

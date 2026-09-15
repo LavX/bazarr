@@ -152,11 +152,16 @@ def test_movie_image_route_fetches_matching_instance(monkeypatch):
             return "https://radarr.example:7878/radarr"
 
     class UpstreamResponse:
-        headers = {"content-type": "image/jpeg"}
+        status_code = 200
+        headers = {"content-type": "image/jpeg", "ETag": '"abc"',
+                   "Last-Modified": "Mon, 01 Sep 2026 00:00:00 GMT"}
 
         def iter_content(self, chunk_size):
             captured["chunk_size"] = chunk_size
             yield b"image-bytes"
+
+        def close(self):
+            captured["closed"] = True
 
     def fake_get(url, stream, timeout, verify, headers):
         captured.update({
@@ -193,6 +198,110 @@ def test_movie_image_route_fetches_matching_instance(monkeypatch):
     assert captured["timeout"] == 15
     assert captured["verify"] is True
     assert captured["chunk_size"] == 2048
+    # Without these the browser re-fetches every cover through Bazarr on every
+    # page view, one round trip per poster to the owning arr instance.
+    # A day and no more: Sonarr strips the cache-busting query from its image
+    # URLs, so a replaced series poster has no new address to arrive under and
+    # only this window ends it.
+    assert response.headers["Cache-Control"] == "private, max-age=86400"
+    assert response.headers["ETag"] == '"abc"'
+    assert response.headers["Last-Modified"] == "Mon, 01 Sep 2026 00:00:00 GMT"
+
+
+def test_cover_route_relays_the_readers_validators_and_a_not_modified(monkeypatch):
+    """An unchanged cover is answered with an empty 304, not the image again."""
+    from app import ui
+    import arr_instances.resolution as resolution
+
+    captured = {}
+
+    class RadarrClient:
+        kind = "radarr"
+        api_key = "key"
+        verify_ssl = True
+        _base_url_raw = "/radarr"
+
+        def base_url(self):
+            return "https://radarr.example:7878/radarr"
+
+    class NotModified:
+        status_code = 304
+        headers = {"ETag": '"abc"'}
+
+        def iter_content(self, chunk_size):  # pragma: no cover - never streamed
+            raise AssertionError("a 304 has no body to stream")
+
+        def close(self):
+            captured["closed"] = True
+
+    def fake_get(url, stream, timeout, verify, headers):
+        captured["headers"] = headers
+        return NotModified()
+
+    monkeypatch.setattr(ui, "settings", SimpleNamespace(auth=SimpleNamespace(type=None)))
+    monkeypatch.setattr(ui.requests, "get", fake_get)
+    monkeypatch.setattr(
+        resolution,
+        "client_for_instance",
+        lambda session, instance_id: RadarrClient(),
+    )
+
+    app = Flask(__name__)
+    app.register_blueprint(ui.ui_bp)
+
+    response = app.test_client().get(
+        "/images/movies/radarr/MediaCover/1/poster.jpg?arr_instance_id=9",
+        headers={"If-None-Match": '"abc"'},
+    )
+
+    assert response.status_code == 304
+    assert response.data == b""
+    assert captured["headers"]["If-None-Match"] == '"abc"'
+    assert captured["closed"] is True
+    assert response.headers["ETag"] == '"abc"'
+
+
+def test_cover_route_does_not_dress_an_upstream_failure_as_an_image(monkeypatch):
+    """A 404 body from the arr instance is a 404 here, not a 200 of its text."""
+    from app import ui
+    import arr_instances.resolution as resolution
+
+    class RadarrClient:
+        kind = "radarr"
+        api_key = "key"
+        verify_ssl = True
+        _base_url_raw = "/radarr"
+
+        def base_url(self):
+            return "https://radarr.example:7878/radarr"
+
+    class Missing:
+        status_code = 404
+        headers = {"content-type": "text/html"}
+
+        def iter_content(self, chunk_size):  # pragma: no cover - never streamed
+            raise AssertionError("an error page is not a cover")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ui, "settings", SimpleNamespace(auth=SimpleNamespace(type=None)))
+    monkeypatch.setattr(ui.requests, "get",
+                        lambda url, stream, timeout, verify, headers: Missing())
+    monkeypatch.setattr(
+        resolution,
+        "client_for_instance",
+        lambda session, instance_id: RadarrClient(),
+    )
+
+    app = Flask(__name__)
+    app.register_blueprint(ui.ui_bp)
+
+    response = app.test_client().get(
+        "/images/movies/radarr/MediaCover/1/poster.jpg?arr_instance_id=9")
+
+    assert response.status_code == 404
+    assert "Cache-Control" not in response.headers
 
 
 def test_check_login_no_authentication():

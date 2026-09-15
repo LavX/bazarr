@@ -169,7 +169,22 @@ export default function Trending() {
       data?.status === "authentication_failed");
   return (
     <>
-      <section aria-label="Spotlight" className={styles.spotlight}>
+      <section aria-labelledby="bh-global-title" className={styles.spotlight}>
+        {/* The line where the page stops being about this install. Everything
+            above it was counted from the reader's own library; everything below
+            is the wider catalog, most of which they do not have. Without a
+            heading saying so, the two halves ran together and the feeds read as
+            though they were still describing the library. */}
+        <div className={styles.globalIntro}>
+          <h2 id="bh-global-title">
+            <FontAwesomeIcon icon={faGlobe} aria-hidden="true" />
+            Beyond your library
+          </h2>
+          <p>
+            Films and series trending worldwide, whether or not you already have
+            them.
+          </p>
+        </div>
         <div className={styles.filterRow}>
           <div
             role="group"
@@ -211,10 +226,6 @@ export default function Trending() {
               </button>
             ))}
           </div>
-          <Text component="p" className={styles.globalLabel}>
-            <FontAwesomeIcon icon={faGlobe} aria-hidden="true" />
-            Global catalog
-          </Text>
         </div>
         {featured && (
           <div
