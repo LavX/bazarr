@@ -2,7 +2,7 @@ import { FunctionComponent } from "react";
 import { Container } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import { useSystemAnnouncements } from "@/apis/hooks";
-import { useInstanceName } from "@/apis/hooks/site";
+import { useAppTitle } from "@/apis/hooks/site";
 import { QueryOverlay } from "@/components/async";
 import Table from "./table";
 
@@ -11,7 +11,7 @@ const SystemAnnouncementsView: FunctionComponent = () => {
 
   const { data } = announcements;
 
-  useDocumentTitle(`Announcements - ${useInstanceName()} (System)`);
+  useDocumentTitle(`Announcements - ${useAppTitle()} (System)`);
 
   return (
     <QueryOverlay result={announcements}>
