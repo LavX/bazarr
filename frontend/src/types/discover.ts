@@ -305,6 +305,7 @@ export interface MetadataFallbackTitle extends Omit<
   id: string | number;
   media_type: "movie" | "show";
   tvdb_id?: number | null;
+  tmdb_id?: number | null;
   seasons?: null;
 }
 export type MetadataTitle =

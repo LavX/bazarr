@@ -1,5 +1,5 @@
 /* eslint-disable camelcase -- transport field names. */
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router";
 import { Anchor, Badge, Button, Group, Text } from "@mantine/core";
 import { faPaperPlane } from "@fortawesome/free-solid-svg-icons";
@@ -34,6 +34,14 @@ export function seerrIdentity(
     typeof title.tvdb_id === "number"
   ) {
     return { kind: "tv", tvdbId: title.tvdb_id };
+  }
+  if (
+    title.source === "local" &&
+    title.media_type === "movie" &&
+    typeof title.tmdb_id === "number" &&
+    title.tmdb_id > 0
+  ) {
+    return { kind: "movie", tmdbId: title.tmdb_id };
   }
   return null;
 }
@@ -96,14 +104,54 @@ export default function SeerrAction({
   const query = useSeerrMedia(identity, enabled && identity !== null);
   const mutation = useSeerrRequestMutation(identity);
   const [modalOpen, setModalOpen] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
+  const [message, setMessage] = useState<{
+    text: string;
+    isError: boolean;
+  } | null>(null);
+
+  const data: SeerrMediaResponse | undefined = query.data;
+  const isRejectedKeyError =
+    !!data &&
+    "configured" in data &&
+    "error_code" in data &&
+    data.error_code === "rejected_key";
+
+  // Captured once at mount, before the effect below ever writes: whether a
+  // previous SeerrAction instance already showed this banner earlier in the
+  // session. This value must never change after mount, or the banner would
+  // hide itself the instant its own write below lands. Reading and writing
+  // sessionStorage directly in the render body doesn't work here: StrictMode
+  // double-invokes render in development, so the discarded first pass's
+  // write was already visible to the second, kept pass, and the banner could
+  // fail to render on a genuine first mount.
+  const [rejectedKeyAlreadyShown] = useState(() => {
+    try {
+      return sessionStorage.getItem(REJECTED_KEY_FLAG) === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    if (!isRejectedKeyError || rejectedKeyAlreadyShown) return;
+    try {
+      sessionStorage.setItem(REJECTED_KEY_FLAG, "1");
+    } catch {
+      /* storage unavailable */
+    }
+  }, [isRejectedKeyError, rejectedKeyAlreadyShown]);
 
   const submit = useCallback(
     (body: SeerrRequestBody) => {
       setMessage(null);
       mutation.mutate(body, {
-        onSuccess: (outcome) => setMessage(outcomeText(outcome)),
-        onError: () => setMessage("Seerr is unreachable."),
+        onSuccess: (outcome) =>
+          setMessage({
+            text: outcomeText(outcome),
+            isError: "error_code" in outcome,
+          }),
+        onError: () =>
+          setMessage({ text: "Seerr is unreachable.", isError: true }),
       });
     },
     [mutation],
@@ -117,7 +165,6 @@ export default function SeerrAction({
       </span>
     );
   }
-  const data: SeerrMediaResponse | undefined = query.data;
   if (!data || !("configured" in data)) return null;
   if ("error_code" in data) {
     if (data.error_code === "unreachable") {
@@ -135,14 +182,7 @@ export default function SeerrAction({
       );
     }
     if (data.error_code === "rejected_key") {
-      let shown = false;
-      try {
-        shown = sessionStorage.getItem(REJECTED_KEY_FLAG) === "1";
-        sessionStorage.setItem(REJECTED_KEY_FLAG, "1");
-      } catch {
-        /* storage unavailable */
-      }
-      if (shown) return null;
+      if (rejectedKeyAlreadyShown) return null;
       return (
         <Text size="sm" className={styles.seerrStatus}>
           Seerr rejected the API key.{" "}
@@ -207,8 +247,8 @@ export default function SeerrAction({
         </Text>
       )}
       {message && (
-        <Text size="sm" role="status">
-          {message}
+        <Text size="sm" role={message.isError ? "alert" : "status"}>
+          {message.text}
         </Text>
       )}
       {modalOpen && tmdbId !== undefined && (

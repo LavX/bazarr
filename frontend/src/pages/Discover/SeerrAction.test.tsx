@@ -4,7 +4,7 @@ import { MemoryRouter } from "react-router";
 import { MantineProvider } from "@mantine/core";
 import { render as rtlRender, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SeerrMediaResponse } from "@/types/seerr";
 import SeerrAction from "./SeerrAction";
 
@@ -91,6 +91,17 @@ const base = {
 };
 
 describe("SeerrAction", () => {
+  // The rejected-key once-per-session flag lives in real sessionStorage, so
+  // tests that touch it (or that must prove it starts unset) need a clean
+  // slate rather than whatever an earlier test in this file left behind.
+  beforeEach(() => {
+    try {
+      sessionStorage.clear();
+    } catch {
+      /* storage unavailable */
+    }
+  });
+
   it("renders nothing for an OMDb-only title", () => {
     answer(undefined);
     render(
@@ -259,5 +270,47 @@ describe("SeerrAction", () => {
       },
       expect.anything(),
     );
+  });
+
+  it("resolves a local-source movie by its tmdb_id", () => {
+    answer({ ...base, known: false, status: "unknown", requestable: true });
+    const localMovie = {
+      source: "local",
+      media_type: "movie",
+      id: 42,
+      tmdb_id: 550,
+      title: "Fight Club",
+    };
+    render(<SeerrAction title={localMovie as never} inLibrary={false} />);
+    expect(media).toHaveBeenLastCalledWith(
+      { kind: "movie", tmdbId: 550 },
+      true,
+    );
+    expect(
+      screen.getByRole("button", { name: "Request in Seerr" }),
+    ).toBeInTheDocument();
+  });
+
+  it("announces a loading state while checking Seerr", () => {
+    answer(undefined);
+    render(<SeerrAction title={movie as never} inLibrary={false} />);
+    expect(screen.getByRole("status")).toHaveTextContent(/Checking Seerr/);
+  });
+
+  it("renders nothing when Seerr is not configured", () => {
+    answer({ configured: true, error_code: "not_configured" });
+    render(<SeerrAction title={movie as never} inLibrary={false} />);
+    expect(screen.queryByText(/Seerr/)).toBeNull();
+  });
+
+  it("shows the rejected-key banner once per session", () => {
+    answer({ configured: true, error_code: "rejected_key" });
+    const { unmount } = render(
+      <SeerrAction title={movie as never} inLibrary={false} />,
+    );
+    expect(screen.getByText(/Seerr rejected the API key/)).toBeInTheDocument();
+    unmount();
+    render(<SeerrAction title={movie as never} inLibrary={false} />);
+    expect(screen.queryByText(/Seerr rejected the API key/)).toBeNull();
   });
 });
