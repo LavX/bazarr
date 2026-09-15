@@ -1,138 +1,102 @@
-/* eslint-disable camelcase */
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
-import type { ProviderHubJob } from "@/apis/raw/providerHub";
+import { defaultStatisticsFilters } from "@/pages/Statistics/filters";
 import ProvidersPanel from "@/pages/Statistics/ProvidersPanel";
 import { customRender, screen } from "@/tests";
 import server from "@/tests/mocks/node";
 
-interface MockOpts {
-  providers?: System.Provider[];
-  installs?: Record<string, unknown>[];
-  jobs?: ProviderHubJob[];
-  sources?: Record<string, unknown>[];
-}
+const emptyMetrics: History.Metrics = {
+  totals: {
+    downloads: 0,
+    series: 0,
+    movies: 0,
+    sports: 0,
+    dailyAverage: 0,
+    peakDate: null,
+    peakCount: 0,
+    automaticPct: 0,
+  },
+  byProvider: [],
+  providerReliability: [],
+  byLanguage: [],
+  byAction: [],
+  scoreHistogram: [],
+};
 
-const mock = (opts: MockOpts = {}) => {
+const mock = (over: Partial<History.Metrics> = {}) => {
   server.use(
-    http.get("/api/providers", () =>
-      HttpResponse.json({ data: opts.providers ?? [] }),
-    ),
-    http.get("/api/provider-hub/providers", () =>
-      HttpResponse.json({ data: opts.installs ?? [] }),
-    ),
-    http.get("/api/provider-hub/jobs", () =>
-      HttpResponse.json({ data: opts.jobs ?? [] }),
-    ),
-    http.get("/api/provider-hub/catalog", () =>
-      HttpResponse.json({ sources: opts.sources ?? [], entries: [] }),
+    http.get("/api/history/metrics", () =>
+      HttpResponse.json({ ...emptyMetrics, ...over }),
     ),
   );
 };
 
+const render = () =>
+  customRender(<ProvidersPanel filters={defaultStatisticsFilters} />);
+
 describe("Statistics > ProvidersPanel", () => {
   beforeEach(() => mock());
 
-  it("counts healthy and throttled providers", async () => {
+  it("lists providers with their download counts", async () => {
     mock({
-      providers: [
-        { name: "a", status: "Good", retry: "-" },
-        { name: "b", status: "Good", retry: "-" },
-        { name: "c", status: "DownloadLimitExceeded", retry: "in 4 hours" },
+      byProvider: [
+        { provider: "opensubtitles", count: 412, avgScorePct: 88.5 },
+        { provider: "podnapisi", count: 97, avgScorePct: 74.2 },
       ],
     });
-    customRender(<ProvidersPanel />);
-
-    // Await the value: labels render before the providers query resolves.
-    expect(await screen.findByText("2 / 3")).toBeInTheDocument();
-    expect(screen.getByText(/providers healthy/i)).toBeInTheDocument();
-  });
-
-  it("lists a throttled provider with its reason and retry time", async () => {
-    mock({
-      providers: [
-        {
-          name: "opensubtitles",
-          status: "DownloadLimitExceeded",
-          retry: "in 4 hours",
-        },
-      ],
-    });
-    customRender(<ProvidersPanel />);
+    render();
 
     expect(await screen.findByText("opensubtitles")).toBeInTheDocument();
-    expect(screen.getByText("DownloadLimitExceeded")).toBeInTheDocument();
-    expect(screen.getByText("in 4 hours")).toBeInTheDocument();
+    expect(screen.getByText("podnapisi")).toBeInTheDocument();
   });
 
-  it("says so plainly when no provider is throttled", async () => {
-    mock({ providers: [{ name: "a", status: "Good", retry: "-" }] });
-    customRender(<ProvidersPanel />);
+  it("shows mean match quality per provider", async () => {
+    mock({
+      byProvider: [{ provider: "alpha", count: 10, avgScorePct: 88.5 }],
+    });
+    render();
+
+    expect(await screen.findByText(/88.5%/)).toBeInTheDocument();
+  });
+
+  it("shows a dash when a provider has no scored download", async () => {
+    mock({ byProvider: [{ provider: "alpha", count: 3, avgScorePct: null }] });
+    render();
+
+    expect(await screen.findByText("alpha")).toBeInTheDocument();
+    expect(screen.getByText("-")).toBeInTheDocument();
+  });
+
+  it("reports the blacklist rate that tells you to drop a provider", async () => {
+    mock({
+      providerReliability: [
+        { provider: "flaky", downloads: 412, blacklisted: 38, ratePct: 9.2 },
+      ],
+    });
+    render();
+
+    expect(await screen.findByText(/9.2%/)).toBeInTheDocument();
+    expect(screen.getByText(/38 of 412/)).toBeInTheDocument();
+  });
+
+  it("explains what the blacklist rate measures", async () => {
+    mock({
+      providerReliability: [
+        { provider: "flaky", downloads: 10, blacklisted: 1, ratePct: 10 },
+      ],
+    });
+    render();
 
     expect(
-      await screen.findByText(/no providers are throttled/i),
+      await screen.findByText(/share of this provider's downloads/i),
     ).toBeInTheDocument();
   });
 
-  it("warns that throttle history is not retained", async () => {
-    // Expired throttles are deleted from throttled_providers.dat, so this view
-    // is a snapshot and must not be read as a rate.
-    customRender(<ProvidersPanel />);
+  it("says so when nothing was downloaded in the window", async () => {
+    render();
 
-    expect(await screen.findByText(/current state only/i)).toBeInTheDocument();
-  });
-
-  it("breaks down installed Provider Hub plugins by state", async () => {
-    mock({
-      installs: [
-        { provider_id: "p1", state: "active" },
-        { provider_id: "p2", state: "active" },
-        { provider_id: "p3", state: "staged", pending_restart: true },
-      ],
-    });
-    customRender(<ProvidersPanel />);
-
-    expect(await screen.findByText(/plugins installed/i)).toBeInTheDocument();
-    expect(screen.getByText("3")).toBeInTheDocument();
-    expect(screen.getByText(/1 pending restart/i)).toBeInTheDocument();
-  });
-
-  it("reports install duration percentiles from the hub job log", async () => {
-    mock({
-      jobs: [
-        { action: "install", state: "completed", duration_ms: 1000 },
-        { action: "install", state: "completed", duration_ms: 3000 },
-      ],
-    });
-    customRender(<ProvidersPanel />);
-
-    expect(await screen.findByText("2.0s")).toBeInTheDocument();
-    expect(screen.getByText(/median job duration/i)).toBeInTheDocument();
-  });
-
-  it("shows a dash when no hub job recorded a duration", async () => {
-    mock({ jobs: [{ action: "install", state: "running" }] });
-    customRender(<ProvidersPanel />);
-
-    expect(await screen.findByText(/median job duration/i)).toBeInTheDocument();
-    expect(screen.getAllByText("-").length).toBeGreaterThan(0);
-  });
-
-  it("flags a catalog source that failed to refresh", async () => {
-    mock({
-      sources: [
-        {
-          name: "official",
-          url: "https://example.test/catalog",
-          trusted: true,
-          last_checked_at: "2026-09-14T10:00:00Z",
-          last_error: "connection refused",
-        },
-      ],
-    });
-    customRender(<ProvidersPanel />);
-
-    expect(await screen.findByText("official")).toBeInTheDocument();
-    expect(screen.getByText("connection refused")).toBeInTheDocument();
+    expect(
+      await screen.findByText(/no downloads in this period/i),
+    ).toBeInTheDocument();
   });
 });

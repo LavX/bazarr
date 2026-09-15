@@ -1,235 +1,161 @@
-import { FunctionComponent, useMemo } from "react";
+import { FunctionComponent } from "react";
+import { Group, Progress, Stack, Table, Text } from "@mantine/core";
 import {
-  Badge,
-  Group,
-  SimpleGrid,
-  Stack,
-  Table,
-  Text,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  LabelList,
+  ResponsiveContainer,
   Tooltip,
-} from "@mantine/core";
-import {
-  useProviderHubCatalog,
-  useProviderHubJobs,
-  useProviderHubProviders,
-  useSystemProviders,
-} from "@/apis/hooks";
+  XAxis,
+  YAxis,
+} from "recharts";
+import { useHistoryMetrics } from "@/apis/hooks";
+import { QueryOverlay } from "@/components/async";
 import PanelCard from "./components/PanelCard";
-import StatTile from "./components/StatTile";
-import {
-  formatDurationMs,
-  HUB_JOB_LOG_CAP,
-  summarizeHubJobs,
-  summarizeProviderHealth,
-} from "./utils";
+import { StatisticsFilters } from "./filters";
 
-const ProvidersPanel: FunctionComponent = () => {
-  // history=false is the throttle-state variant. The history=true variant
-  // returns a flat list with status "History" and carries no health signal.
-  const { data: providers } = useSystemProviders(false);
-  const { data: installs } = useProviderHubProviders();
-  const { data: hubJobs } = useProviderHubJobs();
-  const { data: catalog } = useProviderHubCatalog();
+interface Props {
+  filters: StatisticsFilters;
+}
 
-  const health = useMemo(
-    () => summarizeProviderHealth(providers ?? []),
-    [providers],
+/** Colour the reliability bar by how bad the rate is. */
+const rateColor = (pct: number) =>
+  pct >= 10 ? "#fa5252" : pct >= 3 ? "#fab005" : "#40c057";
+
+const ProvidersPanel: FunctionComponent<Props> = ({ filters }) => {
+  const query = useHistoryMetrics(
+    filters.timeFrame,
+    filters.action,
+    filters.provider,
+    filters.language,
   );
-  const jobs = useMemo(() => summarizeHubJobs(hubJobs ?? []), [hubJobs]);
+  const metrics = query.data;
+  const leaderboard = metrics?.byProvider ?? [];
+  const reliability = metrics?.providerReliability ?? [];
 
-  const throttled = (providers ?? []).filter(
-    (p) => p.status !== "Good" && p.status !== "History",
-  );
-
-  const pendingRestart = (installs ?? []).filter((i) => i.pending_restart);
-  const installStates = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const install of installs ?? []) {
-      counts.set(install.state, (counts.get(install.state) ?? 0) + 1);
-    }
-    return [...counts.entries()].sort((a, b) => b[1] - a[1]);
-  }, [installs]);
-
-  const sources = catalog?.sources ?? [];
+  // Height scales with the row count so ten providers do not squash into the
+  // same box as two.
+  const chartHeight = Math.max(200, leaderboard.length * 38 + 40);
 
   return (
-    <Stack gap="lg">
-      <SimpleGrid cols={{ base: 1, xs: 2, lg: 4 }}>
-        <StatTile
-          label="Providers healthy"
-          value={`${health.good} / ${health.total}`}
-          color={health.throttled > 0 ? "yellow" : "green"}
-          hint={
-            health.throttled > 0
-              ? `${health.throttled} throttled right now`
-              : "none throttled right now"
-          }
-        />
-        <StatTile
-          label="Providers throttled"
-          value={health.throttled}
-          color={health.throttled > 0 ? "red" : undefined}
-          hint={
-            health.reasons.length > 0
-              ? `${health.reasons.length} distinct reason(s)`
-              : "none right now"
-          }
-        />
-        <StatTile
-          label="Plugins installed"
-          value={installs?.length ?? 0}
-          hint={
-            pendingRestart.length > 0
-              ? `${pendingRestart.length} pending restart`
-              : "all active"
-          }
-        />
-        <StatTile
-          label="Median job duration"
-          value={formatDurationMs(jobs.durationP50Ms)}
-          hint={`p95 ${formatDurationMs(jobs.durationP95Ms)}`}
-        />
-      </SimpleGrid>
-
-      <PanelCard
-        title="Throttled providers"
-        caveat="Current state only. Bazarr deletes a throttle entry the moment it expires, so past outages cannot be shown."
-      >
-        {throttled.length === 0 ? (
-          <Text size="sm" c="dimmed">
-            No providers are throttled.
-          </Text>
-        ) : (
-          <Table>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Provider</Table.Th>
-                <Table.Th>Reason</Table.Th>
-                <Table.Th>Retry</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {throttled.map((p) => (
-                <Table.Tr key={p.name}>
-                  <Table.Td>
-                    <Text size="sm">{p.name}</Text>
-                  </Table.Td>
-                  <Table.Td>
-                    <Badge color="red" variant="light">
-                      {p.status}
-                    </Badge>
-                  </Table.Td>
-                  <Table.Td>
-                    <Text size="sm" c="dimmed">
-                      {p.retry}
-                    </Text>
-                  </Table.Td>
-                </Table.Tr>
-              ))}
-            </Table.Tbody>
-          </Table>
-        )}
-      </PanelCard>
-
-      <SimpleGrid cols={{ base: 1, lg: 2 }}>
-        <PanelCard title="Plugin states">
-          {installStates.length === 0 ? (
+    <QueryOverlay result={query}>
+      <Stack gap="lg">
+        <PanelCard
+          title="Downloads by provider"
+          caveat="Which providers actually feed your library over the selected window."
+        >
+          {leaderboard.length === 0 ? (
             <Text size="sm" c="dimmed">
-              No Provider Hub plugins installed.
+              No downloads in this period.
             </Text>
           ) : (
-            <Group gap="xs">
-              {installStates.map(([state, count]) => (
-                <Badge
-                  key={state}
-                  variant="light"
-                  color={state === "active" ? "green" : "yellow"}
+            <div style={{ width: "100%", height: chartHeight }}>
+              <ResponsiveContainer>
+                <BarChart
+                  data={leaderboard}
+                  layout="vertical"
+                  margin={{ left: 8, right: 48 }}
                 >
-                  {state}: {count}
-                </Badge>
-              ))}
-            </Group>
+                  <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
+                  <XAxis
+                    type="number"
+                    tick={{ fontSize: 11 }}
+                    allowDecimals={false}
+                  />
+                  <YAxis
+                    type="category"
+                    dataKey="provider"
+                    width={140}
+                    tick={{ fontSize: 11 }}
+                  />
+                  <Tooltip />
+                  <Bar dataKey="count" name="Downloads" fill="#4dabf7">
+                    <LabelList
+                      dataKey="count"
+                      position="right"
+                      style={{ fontSize: 11 }}
+                    />
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
           )}
         </PanelCard>
 
         <PanelCard
-          title="Plugin activity"
-          caveat={
-            jobs.saturated
-              ? `Job log is full at ${HUB_JOB_LOG_CAP} entries, so older activity has been discarded.`
-              : `Most recent ${HUB_JOB_LOG_CAP} jobs at most.`
-          }
+          title="Match quality by provider"
+          caveat="Mean score as a percentage of what was achievable, normalised so episodes and movies are comparable. A hash match can exceed 100%."
         >
-          {jobs.byAction.length === 0 ? (
+          {leaderboard.length === 0 ? (
             <Text size="sm" c="dimmed">
-              No plugin jobs recorded.
+              Nothing scored in this period.
             </Text>
           ) : (
-            <Group gap="xs">
-              {jobs.byAction.map(({ action, count }) => (
-                <Badge key={action} variant="light" color="blue">
-                  {action}: {count}
-                </Badge>
-              ))}
-              {jobs.byState
-                .filter(({ state }) => state === "failed")
-                .map(({ state, count }) => (
-                  <Badge key={state} variant="light" color="red">
-                    failed: {count}
-                  </Badge>
+            <Table>
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th>Provider</Table.Th>
+                  <Table.Th>Downloads</Table.Th>
+                  <Table.Th>Mean quality</Table.Th>
+                </Table.Tr>
+              </Table.Thead>
+              <Table.Tbody>
+                {leaderboard.map((row) => (
+                  <Table.Tr key={row.provider}>
+                    <Table.Td>
+                      <Text size="sm">{row.provider}</Text>
+                    </Table.Td>
+                    <Table.Td>
+                      <Text size="sm" c="dimmed">
+                        {row.count}
+                      </Text>
+                    </Table.Td>
+                    <Table.Td>
+                      <Text size="sm">
+                        {row.avgScorePct === null
+                          ? "-"
+                          : `${row.avgScorePct.toFixed(1)}%`}
+                      </Text>
+                    </Table.Td>
+                  </Table.Tr>
                 ))}
-            </Group>
+              </Table.Tbody>
+            </Table>
           )}
         </PanelCard>
-      </SimpleGrid>
 
-      <PanelCard title="Catalog sources">
-        {sources.length === 0 ? (
-          <Text size="sm" c="dimmed">
-            No catalog sources configured.
-          </Text>
-        ) : (
-          <Table>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Source</Table.Th>
-                <Table.Th>Last checked</Table.Th>
-                <Table.Th>Status</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {sources.map((source) => (
-                <Table.Tr key={source.name}>
-                  <Table.Td>
-                    <Tooltip label={source.url} withinPortal>
-                      <Text size="sm">{source.name}</Text>
-                    </Tooltip>
-                  </Table.Td>
-                  <Table.Td>
+        <PanelCard
+          title="Blacklist rate"
+          caveat="Share of this provider's downloads that you later blacklisted. A provider high on both charts is the one to turn off."
+        >
+          {reliability.length === 0 ? (
+            <Text size="sm" c="dimmed">
+              No downloads to rate yet.
+            </Text>
+          ) : (
+            <Stack gap="sm">
+              {reliability.map((row) => (
+                <div key={row.provider}>
+                  <Group justify="space-between" gap="xs">
+                    <Text size="sm">{row.provider}</Text>
                     <Text size="sm" c="dimmed">
-                      {source.last_checked_at
-                        ? new Date(source.last_checked_at).toLocaleString()
-                        : "never"}
+                      {row.ratePct.toFixed(1)}% ({row.blacklisted} of{" "}
+                      {row.downloads})
                     </Text>
-                  </Table.Td>
-                  <Table.Td>
-                    {source.last_error ? (
-                      <Text size="sm" c="red">
-                        {source.last_error}
-                      </Text>
-                    ) : (
-                      <Badge variant="light" color="green">
-                        ok
-                      </Badge>
-                    )}
-                  </Table.Td>
-                </Table.Tr>
+                  </Group>
+                  <Progress
+                    mt={4}
+                    value={Math.min(100, row.ratePct)}
+                    color={rateColor(row.ratePct)}
+                  />
+                </div>
               ))}
-            </Table.Tbody>
-          </Table>
-        )}
-      </PanelCard>
-    </Stack>
+            </Stack>
+          )}
+        </PanelCard>
+      </Stack>
+    </QueryOverlay>
   );
 };
 

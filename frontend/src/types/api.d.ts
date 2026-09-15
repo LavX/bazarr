@@ -282,6 +282,47 @@ declare namespace History {
     sports?: StatItem[];
   };
 
+  type MetricsTotals = {
+    downloads: number;
+    series: number;
+    movies: number;
+    sports: number;
+    dailyAverage: number;
+    /** Local calendar date of the busiest day, or null when nothing matched. */
+    peakDate: string | null;
+    peakCount: number;
+    /** Share of downloads that arrived without anyone clicking search. */
+    automaticPct: number;
+  };
+
+  type MetricsProvider = {
+    provider: string;
+    count: number;
+    /** Mean match quality, normalised per media type. May exceed 100 on a hash match. */
+    avgScorePct: number | null;
+  };
+
+  type MetricsReliability = {
+    provider: string;
+    downloads: number;
+    blacklisted: number;
+    ratePct: number;
+  };
+
+  type MetricsLanguage = { language: string; count: number };
+  type MetricsAction = { action: number; count: number };
+  /** bucket 0-9 are ten-point bands; 10 is ">= 100%", where hash matches land. */
+  type MetricsBucket = { bucket: number; count: number };
+
+  type Metrics = {
+    totals: MetricsTotals;
+    byProvider: MetricsProvider[];
+    providerReliability: MetricsReliability[];
+    byLanguage: MetricsLanguage[];
+    byAction: MetricsAction[];
+    scoreHistogram: MetricsBucket[];
+  };
+
   type TimeFrameOptions = "week" | "month" | "trimester" | "year";
   type ActionOptions = 1 | 2 | 3;
 }
