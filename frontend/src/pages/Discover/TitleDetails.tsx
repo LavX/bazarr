@@ -23,6 +23,7 @@ import { useDiscover } from "@/contexts/Discover";
 import EpisodePicker from "./EpisodePicker";
 import MediaPoster from "./MediaPoster";
 import SeerrAction from "./SeerrAction";
+import { useSeerrClause } from "./seerrTitle";
 import styles from "./Discover.module.scss";
 
 /** The selected title as the page currently knows it, cached or received. */
@@ -221,6 +222,10 @@ export default function TitleDetails({
         ? "Checking your library…"
         : "Library check incomplete"
       : "Not in your library";
+  // Where the title stands is one sentence, not two labels: this chip is the
+  // subject and Seerr's state is its second clause. Reading them as separate
+  // elements made the row state the same fact twice over.
+  const seerrClause = useSeerrClause(movie, inLibrary);
   const hasBackdrop = Boolean(
     movie?.backdrop_url && failedBackdrop !== movie.backdrop_url,
   );
@@ -301,7 +306,9 @@ export default function TitleDetails({
               <div className={styles.detailAvailability}>
                 <span className={styles.libraryStatus} data-local={inLibrary}>
                   <FontAwesomeIcon icon={inLibrary ? faCheck : faCloud} />
-                  {libraryLabel}
+                  {seerrClause
+                    ? `${libraryLabel} · ${seerrClause}`
+                    : libraryLabel}
                 </span>
                 {destinations.length === 1 && (
                   <Button

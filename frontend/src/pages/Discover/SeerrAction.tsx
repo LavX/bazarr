@@ -1,7 +1,7 @@
 /* eslint-disable camelcase -- transport field names. */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router";
-import { Anchor, Badge, Button, Group, Text } from "@mantine/core";
+import { Anchor, Button, Group, Text } from "@mantine/core";
 import { faPaperPlane } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useSeerrMedia, useSeerrRequestMutation } from "@/apis/hooks/seerr";
@@ -10,74 +10,15 @@ import type { MetadataTitle } from "@/types/discover";
 import type {
   SeerrIdentity,
   SeerrMediaResponse,
-  SeerrMediaState,
   SeerrRequestBody,
   SeerrRequestOutcome,
 } from "@/types/seerr";
 import SeerrRequestModal from "./SeerrRequestModal";
 import { groupSeerrSeasons } from "./seerrSeasons";
+import { seerrClause, seerrIdentity } from "./seerrTitle";
 import styles from "./Discover.module.scss";
 
 const REJECTED_KEY_FLAG = "bazarr.seerr.rejected-key-shown";
-
-export function seerrIdentity(
-  title: MetadataTitle | null,
-): SeerrIdentity | null {
-  if (!title) return null;
-  if (title.source === "tmdb" && typeof title.id === "number") {
-    return title.media_type === "show"
-      ? { kind: "tv", tmdbId: title.id }
-      : { kind: "movie", tmdbId: title.id };
-  }
-  if (
-    title.source === "local" &&
-    title.media_type === "show" &&
-    typeof title.tvdb_id === "number"
-  ) {
-    return { kind: "tv", tvdbId: title.tvdb_id };
-  }
-  if (
-    title.source === "local" &&
-    title.media_type === "movie" &&
-    typeof title.tmdb_id === "number" &&
-    title.tmdb_id > 0
-  ) {
-    return { kind: "movie", tmdbId: title.tmdb_id };
-  }
-  return null;
-}
-
-const BADGES: Record<string, string> = {
-  pending: "Awaiting approval",
-  processing: "Processing",
-  declined: "Declined",
-  failed: "Failed",
-  partially_available: "Some seasons available",
-  available: "Available in Seerr",
-  blocklisted: "Blocklisted",
-};
-
-// Order matters, and APPROVED is the whole reason. Seerr leaves a finished
-// request at APPROVED rather than tidying it away, so reading that before the
-// media row reported "Processing" over a title already available, and hid
-// "Some seasons available" (with its seasons flow) behind the stale row. Only
-// that one check moves below the media row. A request still pending, declined
-// or failed stays above it: a series Seerr holds in full can have a brand new
-// season requested, and the badge is the only place the reader learns what
-// became of it.
-function badgeFor(state: SeerrMediaState): string | null {
-  if (state.request?.status === "pending") return BADGES.pending;
-  if (state.request?.status === "declined") return BADGES.declined;
-  if (state.request?.status === "failed") return BADGES.failed;
-  if (state.status === "available") return BADGES.available;
-  if (state.status === "blocklisted") return BADGES.blocklisted;
-  if (state.status === "partially_available") return BADGES.partially_available;
-  if (state.status === "processing" || state.request?.status === "approved")
-    return BADGES.processing;
-  if (state.status === "pending") return BADGES.pending;
-  // Only "unknown" and "deleted" reach here, and neither carries a badge.
-  return null;
-}
 
 // Identifies the title a notice or a pending submit belongs to. Separate from
 // the react-query key on purpose: this only has to tell one selected title
@@ -152,6 +93,7 @@ export default function SeerrAction({
     key: string;
     text: string;
     isError: boolean;
+    at: number;
   } | null>(null);
   const currentKey = identity ? identityKey(identity) : null;
   // Same reason, for the in-flight submit: the request's own variables say
@@ -206,9 +148,15 @@ export default function SeerrAction({
               key,
               text: outcomeText(outcome),
               isError: "error_code" in outcome,
+              at: Date.now(),
             }),
           onError: (error) =>
-            setMessage({ key, text: errorText(error), isError: true }),
+            setMessage({
+              key,
+              text: errorText(error),
+              isError: true,
+              at: Date.now(),
+            }),
         },
       );
     },
@@ -257,7 +205,6 @@ export default function SeerrAction({
   const state = data;
   const isShow = identity.kind === "tv";
   const tmdbId = "tmdbId" in identity ? identity.tmdbId : state.tmdb_id;
-  const badge = badgeFor(state);
   // A completed show is still `requestable` (TMDB can know a season Seerr
   // does not), but if the same season-grouping arithmetic the modal uses
   // says nothing is actually selectable, offering the button just opens a
@@ -276,6 +223,16 @@ export default function SeerrAction({
       ? "Request seasons"
       : "Request in Seerr";
 
+  // "Requested in Seerr." is a confirmation for the moment between the click
+  // and the refresh. Once that refresh lands and the chip states Seerr's own
+  // answer, keeping it makes the row say one thing twice. An error stays: the
+  // chip never carries a reason a request was refused.
+  const clause = seerrClause(state, inLibrary);
+  const noticeVisible =
+    message !== null &&
+    message.key === currentKey &&
+    !(!message.isError && clause !== null && query.dataUpdatedAt > message.at);
+
   const onRequest = () => {
     if (needsModal) {
       setModalOpen(true);
@@ -284,15 +241,21 @@ export default function SeerrAction({
     submit({ media_type: "movie", tmdb_id: tmdbId!, is4k: false });
   };
 
+  // A fragment, not a box of its own: these are items of the availability
+  // row, and a nested flex container gave the row a second gap rhythm and no
+  // hierarchy. The note below claims a full row so the sentences sit under
+  // the controls instead of competing with them.
   return (
-    <div className={styles.seerrAction}>
-      {badge && <Badge variant="light">{badge}</Badge>}
+    <>
       {canRequest && (
         <Button
           size="compact-sm"
-          // Not filled: "Open in library" sits in this same row, and the
-          // stylesheet spends the amber fill on one action per row.
+          // Not filled: "Open in library" holds the row's one amber fill.
+          // Mantine's own default variant is a pale slab that reads as
+          // disabled over hero artwork, so this borrows the glass treatment
+          // the library chip beside it already uses.
           variant="default"
+          className={styles.seerrRequest}
           leftSection={<FontAwesomeIcon icon={faPaperPlane} />}
           loading={mutation.isPending && pendingKey === currentKey}
           onClick={onRequest}
@@ -310,17 +273,21 @@ export default function SeerrAction({
           Open in Seerr
         </Anchor>
       )}
-      {canRequest && (
-        <Text size="xs" c="dimmed">
-          Requested as the Seerr owner and approved immediately.
-          {ownershipUncertain &&
-            " Your library check is incomplete, so what you already own may not be fully reflected here."}
-        </Text>
-      )}
-      {message && message.key === currentKey && (
-        <Text size="sm" role={message.isError ? "alert" : "status"}>
-          {message.text}
-        </Text>
+      {(canRequest || noticeVisible) && (
+        <div className={styles.seerrNote}>
+          {canRequest && (
+            <Text size="xs" c="dimmed">
+              Requested as the Seerr owner and approved immediately.
+              {ownershipUncertain &&
+                " Your library check is incomplete, so what you already own may not be fully reflected here."}
+            </Text>
+          )}
+          {noticeVisible && (
+            <Text size="sm" role={message!.isError ? "alert" : "status"}>
+              {message!.text}
+            </Text>
+          )}
+        </div>
       )}
       {modalOpen && tmdbId !== undefined && (
         <SeerrRequestModal
@@ -335,6 +302,6 @@ export default function SeerrAction({
           }}
         />
       )}
-    </div>
+    </>
   );
 }

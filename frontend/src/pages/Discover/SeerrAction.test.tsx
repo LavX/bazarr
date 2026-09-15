@@ -165,43 +165,16 @@ describe("SeerrAction", () => {
     ).toBeNull();
   });
 
+  // The state-to-label matrix lives in seerrTitle.test.ts now, with the chip
+  // clause it produces. The link is SeerrAction's own.
   it.each([
-    [
-      {
-        status: "pending",
-        request: { id: 1, status: "pending", is4k: false, seasons: [] },
-      },
-      "Awaiting approval",
-    ],
-    [
-      {
-        status: "processing",
-        request: { id: 1, status: "approved", is4k: false, seasons: [] },
-      },
-      "Processing",
-    ],
-    [
-      {
-        status: "unknown",
-        requestable: true,
-        request: { id: 1, status: "declined", is4k: false, seasons: [] },
-      },
-      "Declined",
-    ],
-    [
-      {
-        status: "unknown",
-        requestable: true,
-        request: { id: 1, status: "failed", is4k: false, seasons: [] },
-      },
-      "Failed",
-    ],
-    [{ status: "available" }, "Available in Seerr"],
-    [{ status: "blocklisted" }, "Blocklisted"],
-  ] as const)("renders %o as %s", (partial, label) => {
+    { status: "pending" },
+    { status: "processing" },
+    { status: "available" },
+    { status: "blocklisted" },
+  ] as const)("links into Seerr for %o", (partial) => {
     answer({ ...base, ...partial } as SeerrMediaResponse);
     render(<SeerrAction title={movie as never} inLibrary={false} />);
-    expect(screen.getByText(label)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Open in Seerr/ })).toHaveAttribute(
       "href",
       "http://s/movie/550",
@@ -246,7 +219,6 @@ describe("SeerrAction", () => {
       seasons: [{ number: 2, state: "requested" }],
     });
     render(<SeerrAction title={show as never} inLibrary={true} />);
-    expect(screen.getByText("Some seasons available")).toBeInTheDocument();
     await userEvent.click(
       screen.getByRole("button", { name: "Request seasons" }),
     );
@@ -411,27 +383,15 @@ describe("SeerrAction", () => {
     );
   });
 
-  it("reads availability off the media row, not off a request Seerr left approved", () => {
-    // Seerr does not tidy a finished request away, so an available title
-    // routinely still carries an APPROVED row. The badge must report the
-    // title, not the paperwork.
-    const approved = { id: 1, status: "approved", is4k: false, seasons: [] };
-    answer({ ...base, status: "available", request: approved } as never);
-    const { unmount } = render(
-      <SeerrAction title={movie as never} inLibrary={false} />,
-    );
-    expect(screen.getByText("Available in Seerr")).toBeInTheDocument();
-    expect(screen.queryByText("Processing")).toBeNull();
-    unmount();
+  it("still offers the seasons flow behind a request Seerr left approved", () => {
     answer({
       ...base,
       status: "partially_available",
       requestable: true,
-      request: approved,
+      request: { id: 1, status: "approved", is4k: false, seasons: [] },
       seasons: [{ number: 2, state: "available" }],
     } as never);
     render(<SeerrAction title={show as never} inLibrary={true} />);
-    expect(screen.getByText("Some seasons available")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Request seasons" }),
     ).toBeInTheDocument();
@@ -462,30 +422,6 @@ describe("SeerrAction", () => {
       </MemoryRouter>,
     );
     expect(screen.queryByText("Requested in Seerr.")).toBeNull();
-  });
-
-  it("keeps a pending request's badge over a fully available series", () => {
-    // Seerr does not recompute a series' status when a new season is
-    // requested, so "available" plus a pending request row is the normal
-    // shape of "the reader just asked for season 9". The badge is the only
-    // place that answer appears.
-    answer({
-      ...base,
-      status: "available",
-      request: { id: 1, status: "pending", is4k: false, seasons: [9] },
-    } as never);
-    const { unmount } = render(
-      <SeerrAction title={show as never} inLibrary={true} />,
-    );
-    expect(screen.getByText("Awaiting approval")).toBeInTheDocument();
-    unmount();
-    answer({
-      ...base,
-      status: "available",
-      request: { id: 1, status: "declined", is4k: false, seasons: [9] },
-    } as never);
-    render(<SeerrAction title={show as never} inLibrary={true} />);
-    expect(screen.getByText("Declined")).toBeInTheDocument();
   });
 
   it("hides the action for an exhausted show on a whole-series-only server", () => {

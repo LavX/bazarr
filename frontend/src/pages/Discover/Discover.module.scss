@@ -3881,14 +3881,44 @@
   border-radius: 7px;
   font-size: 13px;
 }
-.seerrAction {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--mantine-spacing-xs);
-}
 .seerrStatus {
   font-size: var(--mantine-font-size-sm);
+}
+// The request is the row's second action, so it must not take the amber fill
+// that "Open in library" holds. Mantine's own default variant is a pale slab
+// that reads as disabled over hero artwork, so this matches the library chip
+// standing next to it: same height, same border, same quiet ground.
+.discover .seerrRequest {
+  // Matched to .openLibrary, the action standing next to it, rather than to
+  // the status chip: two adjacent buttons of different heights read as a
+  // mistake, and measured 42 against 36 before this.
+  min-height: 42px;
+  border-radius: 7px;
+  font-size: 13px;
+  color: var(--detail-muted);
+  background: var(--bz-hover-bg);
+  border: 1px solid var(--bz-border-interactive);
+  &:hover {
+    color: var(--bz-text-primary);
+    background: var(--bz-surface-raised);
+  }
+}
+.detailHero[data-artwork="true"] .seerrRequest {
+  color: #eeedf3;
+  background: rgba(15, 15, 25, 0.55);
+  border-color: rgba(255, 255, 255, 0.22);
+  &:hover {
+    color: #ffffff;
+    background: rgba(15, 15, 25, 0.74);
+  }
+}
+// Footnotes, not controls. Claiming the full row of the wrapping availability
+// flex puts them under the actions rather than in the queue beside them.
+.seerrNote {
+  flex: 0 0 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 // A season group is content, not a form panel: no fieldset chrome, just the
 // same item gap the rest of the seasons flow uses (Stack default) so the
