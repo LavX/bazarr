@@ -156,7 +156,7 @@ def get_blacklist_sports(context, session=None):
 # 40001 and 40P01 are the server discarding the whole transaction, so nothing
 # it wrote survived. SQLite reports the same conditions as a busy or locked
 # database, with no code to read.
-_CONTENTION_PGCODES = ('55P03', '40001', '40P01')
+_CONTENTION_SQLSTATES = ('55P03', '40001', '40P01')
 
 
 def _is_owner_contention(exc):
@@ -165,11 +165,16 @@ def _is_owner_contention(exc):
     Anything else is a database fault, and calling it contention hides the
     cause behind retry wording and then repeats it for as long as the retry
     budget lasts.
+
+    Both spellings of the SQLSTATE are read. psycopg 3, which this project
+    installs, exposes it as ``sqlstate``; psycopg 2 called it ``pgcode``.
+    Reading only one of them silently classifies every real lock refusal as a
+    fault, because the attribute is simply absent on the other driver.
     """
     original = getattr(exc, 'orig', None)
-    pgcode = getattr(original, 'pgcode', None)
-    if pgcode is not None:
-        return pgcode in _CONTENTION_PGCODES
+    state = getattr(original, 'sqlstate', None) or getattr(original, 'pgcode', None)
+    if state is not None:
+        return state in _CONTENTION_SQLSTATES
     message = str(original or exc).lower()
     return 'database is locked' in message or 'database is busy' in message
 

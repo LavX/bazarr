@@ -168,7 +168,7 @@ def test_guard_contention_is_reported_as_a_retryable_busy_error(monkeypatch):
     # take as 55P03. A bare OperationalError with no code is a database fault,
     # not contention, and must not be answered as busy.
     class Contended(Exception):
-        pgcode = '55P03'
+        sqlstate = '55P03'
 
     @contextmanager
     def transaction(*args, **kwargs):
@@ -794,7 +794,12 @@ def _operational(orig):
     return OperationalError('SQL', {}, orig)
 
 
-@pytest.mark.parametrize('pgcode,contention', [
+# psycopg 3, which this project installs, spells it sqlstate; psycopg 2 called
+# it pgcode. Both are parametrized because reading only one of them classifies
+# every real lock refusal on the other driver as a database fault, which is a
+# silent failure: the attribute is absent rather than wrong.
+@pytest.mark.parametrize('attribute', ['sqlstate', 'pgcode'])
+@pytest.mark.parametrize('state,contention', [
     ('55P03', True),    # NOWAIT lock this boundary asked for and could not take
     ('40001', True),    # serialization failure: the server discarded the whole transaction
     ('40P01', True),    # deadlock victim, likewise discarded
@@ -802,7 +807,7 @@ def _operational(orig):
     ('53100', False),   # disk full
     ('08006', False),   # connection failure, which may have committed
 ])
-def test_only_a_discarded_transaction_counts_as_owner_contention(pgcode, contention):
+def test_only_a_discarded_transaction_counts_as_owner_contention(attribute, state, contention):
     """Position was the wrong axis twice.
 
     Classifying by where the error happened called a plain SELECT failure in
@@ -815,8 +820,23 @@ def test_only_a_discarded_transaction_counts_as_owner_contention(pgcode, content
         pass
 
     orig = Orig('boom')
-    orig.pgcode = pgcode
+    setattr(orig, attribute, state)
     assert _is_owner_contention(_operational(orig)) is contention
+
+
+def test_the_real_driver_error_is_recognised():
+    """Driven with the exception psycopg actually raises, not a stand-in.
+
+    A hand-rolled double carried the attribute name this code first guessed at,
+    so the unit tests passed while every genuine lock refusal fell through to
+    "database fault" and the Postgres suite was the only thing that noticed.
+    """
+    psycopg_errors = pytest.importorskip('psycopg.errors')
+    from sportarr.subtitles import _is_owner_contention
+
+    assert _is_owner_contention(_operational(psycopg_errors.LockNotAvailable('nope')))
+    assert _is_owner_contention(_operational(psycopg_errors.SerializationFailure('nope')))
+    assert not _is_owner_contention(_operational(psycopg_errors.DiskFull('nope')))
 
 
 def test_sqlite_reports_contention_without_a_code():
@@ -838,7 +858,7 @@ def test_a_serialization_failure_at_commit_is_retried(monkeypatch):
     from sportarr.errors import SportsOwnersBusy
 
     class Serialization(Exception):
-        pgcode = '40001'
+        sqlstate = '40001'
 
     @contextmanager
     def transaction(*args, **kwargs):
