@@ -57,7 +57,7 @@ class MediaServerHTTP:
     def __exit__(self, *_args):
         self.close()
 
-    def _exchange(self, method, path, *, params=None, json=None):
+    def _exchange(self, method, path, *, params=None, json=None, read_body=lambda status: True):
         """One bounded exchange: the status and the body, with redirects refused."""
         # API paths are local to this validated base, including any proxy prefix.
         if not isinstance(path, str) or not path.startswith("/") or path.startswith("//") or "?" in path or "#" in path:
@@ -69,6 +69,8 @@ class MediaServerHTTP:
                 status = response.status_code
                 if 300 <= status < 400:
                     raise MediaServerError("redirect_denied")
+                if not read_body(status):
+                    return status, b""
                 length = response.headers.get("Content-Length")
                 if length is not None:
                     try:
@@ -100,7 +102,8 @@ class MediaServerHTTP:
         return self._exchange(method, path, params=params, json=json)
 
     def _request(self, method, path, *, params=None, json=None, success_statuses=(200,)):
-        status, body = self._exchange(method, path, params=params, json=json)
+        status, body = self._exchange(method, path, params=params, json=json,
+                                       read_body=lambda status: status in success_statuses)
         if status not in success_statuses:
             code = {401: "unauthorized", 403: "forbidden", 404: "not_found"}.get(status)
             raise MediaServerError(code or ("server_error" if status >= 500 else "request_rejected"))

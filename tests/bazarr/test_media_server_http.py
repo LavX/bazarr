@@ -30,7 +30,8 @@ def http_fixture():
                 self.send_response(status)
                 for key, value in headers.items():
                     self.send_header(key, value)
-                self.send_header("Content-Length", str(len(body)))
+                if "Content-Length" not in headers:
+                    self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 if body_delay:
                     time.sleep(body_delay)
@@ -166,3 +167,19 @@ def test_timeout_is_configurable_per_client(http_fixture):
     base, _records = http_fixture([(200, b"{}", {})], body_delay=0.6)
     with MediaServerHTTP(base, timeout=(1, 0.2)) as http, pytest.raises(MediaServerError, match="timeout"):
         http.request_result("GET", "/slow")
+
+
+def test_non_success_status_short_circuits_before_reading_the_body(http_fixture):
+    from media_servers.http import MediaServerError, MediaServerHTTP
+    base, _records = http_fixture([(401, b"x" * 8, {"Content-Length": "-1"})])
+    with MediaServerHTTP(base) as client, pytest.raises(MediaServerError, match="unauthorized"):
+        client.request_json("GET", "/System/Info")
+
+
+def test_request_result_still_reads_the_body_on_non_success(http_fixture):
+    from media_servers.http import MediaServerHTTP
+    base, _records = http_fixture([(409, {"message": "dup"}, {})])
+    with MediaServerHTTP(base) as http:
+        status, body = http.request_result("GET", "/api/v1/status")
+    assert status == 409
+    assert json.loads(body) == {"message": "dup"}
