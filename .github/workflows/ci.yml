@@ -412,6 +412,8 @@ jobs:
             tests/bazarr/test_sportarr_subtitle_upload.py \
             tests/bazarr/test_editor_instance_scope.py \
             tests/bazarr/test_history_blacklist_scope.py \
+            tests/bazarr/test_history_metrics.py \
+            tests/bazarr/test_history_metrics_postgres.py \
             tests/bazarr/test_history_owner_resolution.py \
             tests/bazarr/test_local_id_actions.py \
             tests/bazarr/test_navigation_local_ids.py \

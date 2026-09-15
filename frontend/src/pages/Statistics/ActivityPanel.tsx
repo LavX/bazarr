@@ -1,4 +1,4 @@
-import { FunctionComponent, useMemo, useState } from "react";
+import { FunctionComponent, useMemo } from "react";
 import { SimpleGrid, Stack, useMantineTheme } from "@mantine/core";
 import { merge } from "lodash";
 import {
@@ -11,38 +11,25 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import {
-  useHistoryStats,
-  useLanguages,
-  useSystemProviders,
-} from "@/apis/hooks";
+import { useHistoryMetrics, useHistoryStats } from "@/apis/hooks";
 import { useSportsAvailability } from "@/apis/hooks/sports";
-import { Selector } from "@/components";
 import { QueryOverlay } from "@/components/async";
-import { useSelectorOptions } from "@/utilities";
 import PanelCard from "./components/PanelCard";
-import { actionOptions, timeFrameOptions } from "./options";
+import StatTile from "./components/StatTile";
+import { StatisticsFilters } from "./filters";
 
-const ActivityPanel: FunctionComponent = () => {
-  // history=true lists the providers that actually appear in download
-  // history, which is the useful set to filter by here.
-  const { data: providers } = useSystemProviders(true);
-  const providerOptions = useSelectorOptions(providers ?? [], (v) => v.name);
+interface Props {
+  filters: StatisticsFilters;
+}
 
-  const { data: historyLanguages } = useLanguages(true);
-  const languageOptions = useSelectorOptions(
-    historyLanguages ?? [],
-    (value) => value.name,
-  );
-
-  const [timeFrame, setTimeFrame] = useState<History.TimeFrameOptions>("month");
-  const [action, setAction] = useState<Nullable<History.ActionOptions>>(null);
-  const [lang, setLanguage] = useState<Nullable<Language.Server>>(null);
-  const [provider, setProvider] = useState<Nullable<System.Provider>>(null);
+const ActivityPanel: FunctionComponent<Props> = ({ filters }) => {
+  const { timeFrame, action, provider, language: lang } = filters;
 
   const { enabled: sportsEnabled } = useSportsAvailability();
   const stats = useHistoryStats(timeFrame, action, provider, lang);
+  const metrics = useHistoryMetrics(timeFrame, action, provider, lang);
   const { data } = stats;
+  const totals = metrics.data?.totals;
 
   const convertedData = useMemo(() => {
     if (!data) return [];
@@ -63,33 +50,32 @@ const ActivityPanel: FunctionComponent = () => {
   return (
     <Stack gap="lg">
       <SimpleGrid cols={{ base: 1, xs: 2, lg: 4 }}>
-        <Selector
-          placeholder="Time..."
-          options={timeFrameOptions}
-          value={timeFrame}
-          onChange={(v) => setTimeFrame(v ?? "month")}
-        ></Selector>
-        <Selector
-          placeholder="Action..."
-          clearable
-          options={actionOptions}
-          value={action}
-          onChange={setAction}
-        ></Selector>
-        <Selector
-          {...providerOptions}
-          placeholder="Provider..."
-          clearable
-          value={provider}
-          onChange={setProvider}
-        ></Selector>
-        <Selector
-          {...languageOptions}
-          placeholder="Language..."
-          clearable
-          value={lang}
-          onChange={setLanguage}
-        ></Selector>
+        <StatTile
+          label="Downloads"
+          value={totals?.downloads ?? 0}
+          hint={
+            totals
+              ? `${totals.series} series / ${totals.movies} movies${
+                  sportsEnabled ? ` / ${totals.sports} sports` : ""
+                }`
+              : undefined
+          }
+        />
+        <StatTile
+          label="Per day"
+          value={totals?.dailyAverage ?? 0}
+          hint="average across the window"
+        />
+        <StatTile
+          label="Busiest day"
+          value={totals?.peakCount ?? 0}
+          hint={totals?.peakDate ?? "nothing yet"}
+        />
+        <StatTile
+          label="Arrived automatically"
+          value={`${totals?.automaticPct ?? 0}%`}
+          hint="no one had to search"
+        />
       </SimpleGrid>
 
       <PanelCard
