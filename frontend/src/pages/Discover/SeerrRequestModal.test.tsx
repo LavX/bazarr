@@ -138,6 +138,95 @@ describe("SeerrRequestModal", () => {
     });
   });
 
+  it("collapses a show whose every season is taken to the 4K whole-series request", async () => {
+    const onSubmit = vi.fn();
+    render(
+      <SeerrRequestModal
+        title={show}
+        // A show stays `requestable` once every season is taken: the flag only
+        // reports that Seerr has not blocklisted it. The season arithmetic is
+        // what says the non-4K lane has nothing left.
+        state={{
+          ...base,
+          status: "available",
+          requestable: true,
+          requestable_4k: true,
+          seasons: [
+            { number: 1, state: "available" },
+            { number: 2, state: "available" },
+          ],
+        }}
+        tmdbId={1399}
+        onClose={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+    expect(
+      screen.getByText("Only the 4K version is available to request."),
+    ).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Request all seasons" }),
+    );
+    expect(onSubmit).toHaveBeenCalledWith({
+      media_type: "tv",
+      tmdb_id: 1399,
+      tvdb_id: 121361,
+      seasons: "all",
+      is4k: true,
+    });
+  });
+
+  it("collapses the season picker once 4K is ticked for a show", async () => {
+    const onSubmit = vi.fn();
+    render(
+      <SeerrRequestModal
+        title={show}
+        state={{ ...base, requestable: true, requestable_4k: true }}
+        tmdbId={1399}
+        onClose={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+    await userEvent.click(screen.getByRole("checkbox", { name: "Season 1" }));
+    await userEvent.click(
+      screen.getByRole("checkbox", { name: "Request the 4K version" }),
+    );
+    // The groups describe the non-4K lane only, so a 4K request cannot carry
+    // them: the picker, and the season ticked in it, go away.
+    expect(screen.queryByText("Available to request")).toBeNull();
+    expect(
+      screen.getByText(
+        "Seerr does not report 4K availability season by season, so the whole series is requested.",
+      ),
+    ).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Request all seasons" }),
+    );
+    expect(onSubmit).toHaveBeenCalledWith({
+      media_type: "tv",
+      tmdb_id: 1399,
+      tvdb_id: 121361,
+      seasons: "all",
+      is4k: true,
+    });
+  });
+
+  it("says so when the library check behind the owned group is incomplete", () => {
+    render(
+      <SeerrRequestModal
+        title={show}
+        state={base}
+        tmdbId={1399}
+        libraryUncertain
+        onClose={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByText(/Your library check is incomplete/),
+    ).toBeInTheDocument();
+  });
+
   it("keeps the optional 4K checkbox unchecked when both lanes are open for a movie", () => {
     render(
       <SeerrRequestModal

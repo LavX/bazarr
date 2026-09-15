@@ -19,17 +19,29 @@ export interface SeerrSeasonGroups {
   open: SeerrSeasonEntry[];
   /** Whether TMDB's own season list was available to group at all. */
   hasList: boolean;
+  /**
+   * Seerr takes per-season requests, the season list is known, and no season
+   * is left to send: the non-4K lane has nothing to offer, whatever the media
+   * row's `requestable` flag says. That flag only reports "not blocklisted",
+   * so for a show it stays true long after every season is taken.
+   */
+  exhausted: boolean;
 }
 
 export function groupSeerrSeasons(
   title: MetadataTitle,
   state: SeerrMediaState,
 ): SeerrSeasonGroups {
-  const seasons: SeerrSeasonEntry[] = (
-    "seasons" in title && Array.isArray(title.seasons) ? title.seasons : []
-  ).filter((s) => state.special_episodes || s.season > 0);
+  // hasList describes TMDB's list, not what survives the specials filter. A
+  // show whose only entry is season 0, with specials off in Seerr, has a list
+  // and nothing in it to request; folding those two into one flag told the
+  // reader "Season details are unavailable" and then offered a whole-series
+  // request that Seerr answers as a no-op.
+  const listed: SeerrSeasonEntry[] =
+    "seasons" in title && Array.isArray(title.seasons) ? title.seasons : [];
+  const seasons = listed.filter((s) => state.special_episodes || s.season > 0);
   const seerr = new Map(state.seasons.map((s) => [s.number, s.state]));
-  const owned = new Set(
+  const ownedLocally = new Set(
     ("ownership" in title && title.ownership?.seasons_owned) || [],
   );
   const inSeerr = seasons.filter(
@@ -38,10 +50,17 @@ export function groupSeerrSeasons(
       seerr.get(s.season) === "available",
   );
   const rest = seasons.filter((s) => !inSeerr.includes(s));
+  const owned = rest.filter((s) => ownedLocally.has(s.season));
+  const open = rest.filter((s) => !ownedLocally.has(s.season));
   return {
     inSeerr,
-    owned: rest.filter((s) => owned.has(s.season)),
-    open: rest.filter((s) => !owned.has(s.season)),
-    hasList: seasons.length > 0,
+    owned,
+    open,
+    hasList: listed.length > 0,
+    exhausted:
+      listed.length > 0 &&
+      state.partial_requests &&
+      owned.length === 0 &&
+      open.length === 0,
   };
 }

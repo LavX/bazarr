@@ -38,8 +38,15 @@ const SeerrTestButton: FunctionComponent = () => {
         onSuccess: (data: SeerrTestResult) => {
           if (data.success) {
             const name = data.application_title || "Seerr";
-            const actor = data.acting_user?.display_name ?? "owner";
-            setTitle(`${name} ${data.version ?? ""} as ${actor}`.trim());
+            // `||`, not `??`: the backend normalises a missing display name to
+            // an empty string, which would otherwise label the button "as"
+            // with nothing after it. Joining the parts, rather than trimming a
+            // template, keeps a server with no version from leaving a doubled
+            // space in the middle.
+            const actor = data.acting_user?.display_name || "owner";
+            setTitle(
+              [name, data.version, "as", actor].filter(Boolean).join(" "),
+            );
             setColor("success");
 
             if (
@@ -127,7 +134,7 @@ const SeerrSection: FunctionComponent = () => {
             label="Browser URL"
             settingKey="settings-seerr-external_url"
             placeholder="Leave empty to use Seerr's application URL"
-            description="Shown to users as the link back to Seerr. Leave empty to use the Seerr URL above."
+            description="Shown to users as the link back to Seerr. Leave empty to use the application URL Seerr reports, falling back to the Seerr URL above."
           />
           <MantineText size="sm" c="dimmed">
             Works with Seerr, Jellyseerr and Overseerr. Requests from Bazarr+

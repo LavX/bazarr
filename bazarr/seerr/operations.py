@@ -10,9 +10,11 @@ tell flavours apart (develop images report "develop-<sha>"), but the
 """
 
 import logging
+import time
 
 from app.config import settings
 from media_servers.http import MediaServerError
+from utilities.locked_lru import LockedLRU
 from .client import SeerrClient
 
 logger = logging.getLogger(__name__)
@@ -170,7 +172,65 @@ def error_code_for(error: MediaServerError) -> str:
     return "upstream_error" if error.code in ("upstream_error", "invalid_response", "server_error") else "unreachable"
 
 
-_find_cache = {}
+# A hit is stable for an hour; a miss expires far sooner, because a show TMDB
+# has not mapped to a TVDB id yet must not stay unrequestable for the lifetime
+# of the process. Both sit behind the same LockedLRU the Discover metadata
+# caches use, since Waitress serves these routes from many threads.
+_FIND_TTL = 3600
+_FIND_MISS_TTL = 300
+_find_cache = LockedLRU(maxsize=256)
+
+# Capability comes from /settings/public, which every media view and every
+# request needs, and which only changes when the operator edits their Seerr
+# settings: that moves the cache key below, so a short TTL is enough to stop
+# each title view paying for a second round trip.
+_CAPABILITY_TTL = 300
+_capability_cache = LockedLRU(maxsize=4)
+
+# After a transport failure the next few reads are answered from here rather
+# than parked on the connect timeout. The window is deliberately short: a
+# reader who clicks Retry inside it is told "unreachable" immediately, which
+# is the same answer, just without the wait.
+_COOLDOWN_SECONDS = 10
+_cooldowns = LockedLRU(maxsize=4)
+
+
+def _server_key():
+    """Identity of the configured server: any settings change retires its cache entries."""
+    return (settings.seerr.url, settings.seerr.apikey, bool(settings.seerr.verify_ssl))
+
+
+def cached_capability(client: SeerrClient) -> dict:
+    """Capability for the configured server, re-probed at most every few minutes."""
+    key = _server_key()
+    cached = _capability_cache.get(key)
+    if cached is not None and cached[0] > time.monotonic():
+        return cached[1]
+    cap = capability(client.public_settings())
+    _capability_cache[key] = (time.monotonic() + _CAPABILITY_TTL, cap)
+    return cap
+
+
+def in_cooldown() -> bool:
+    """Whether a recent transport failure should be answered without a round trip."""
+    return time.monotonic() < _cooldowns.get(_server_key(), 0)
+
+
+def note_unreachable() -> None:
+    """Record that the configured server did not answer."""
+    _cooldowns[_server_key()] = time.monotonic() + _COOLDOWN_SECONDS
+
+
+def reset_caches() -> None:
+    """Drop every cached probe.
+
+    Settings changes already retire entries structurally, because the keys
+    carry the server identity and the metadata revision. This exists for tests,
+    which reuse one process across several fake servers.
+    """
+    _capability_cache.clear()
+    _cooldowns.clear()
+    _find_cache.clear()
 
 
 def tmdb_id_for_tvdb(tvdb_id) -> int | None:
@@ -178,20 +238,26 @@ def tmdb_id_for_tvdb(tvdb_id) -> int | None:
     from discover import metadata
     if type(tvdb_id) is not int or tvdb_id <= 0:
         return None
-    if tvdb_id in _find_cache:
-        return _find_cache[tvdb_id]
     try:
         config = metadata.configuration()
+        # Keyed on the metadata revision, which changes when the effective TMDB
+        # credential or locale does, so a reader who fixes a broken key is not
+        # held to the answer it produced.
+        key = (config.revision, tvdb_id)
+        cached = _find_cache.get(key)
+        if cached is not None and cached[0] > time.monotonic():
+            return cached[1]
         raw = metadata._request(config, f"/find/{tvdb_id}", {"external_source": "tvdb_id"})
         rows = raw.get("tv_results") if isinstance(raw, dict) else None
         found = rows[0].get("id") if isinstance(rows, list) and rows and isinstance(rows[0], dict) else None
         result = found if type(found) is int and found > 0 else None
     except Exception:
-        logger.debug("TMDB find failed for a TVDB id", exc_info=False)
+        # Nothing is cached from a failure, and it is logged above DEBUG with a
+        # traceback: the symptom on its own (every TVDB-only show reporting
+        # unresolved) names neither the cause nor this call site.
+        logger.warning("TMDB find failed for TVDB id %s", tvdb_id, exc_info=True)
         return None
-    if len(_find_cache) > 2048:
-        _find_cache.clear()
-    _find_cache[tvdb_id] = result
+    _find_cache[key] = (time.monotonic() + (_FIND_TTL if result else _FIND_MISS_TTL), result)
     return result
 
 

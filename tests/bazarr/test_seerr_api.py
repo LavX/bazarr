@@ -15,8 +15,12 @@ PUBLIC = {"initialized": True, "hideBlocklisted": False, "movie4kEnabled": False
 def seerr_api(monkeypatch, http_fixture):
     from api import api_bp
     from app.config import settings
+    from seerr import operations
 
     def configure(replies):
+        # One process serves every fake server in this file, so the capability
+        # and cooldown caches have to start empty for each of them.
+        operations.reset_caches()
         base, records = http_fixture(replies)
         monkeypatch.setitem(settings.auth, 'apikey', 'synthetic-bazarr-key')
         monkeypatch.setitem(settings.general, 'use_seerr', True)
@@ -34,6 +38,12 @@ def test_routes_require_the_session(seerr_api):
     client, _records = seerr_api([])
     assert client.get('/api/seerr/media/movie/550').status_code == 401
     assert client.post('/api/seerr/request', json={}).status_code == 401
+    # test-connection makes a server-side request to a host named in the body,
+    # and by-tvdb spends the TMDB credential: both need the session as much as
+    # the two above, so both are pinned here rather than trusted to a decorator.
+    assert client.post('/api/seerr/test-connection',
+                       json={"url": "http://seerr:5055", "apikey": "k"}).status_code == 401
+    assert client.get('/api/seerr/media/tv/by-tvdb/121361').status_code == 401
 
 
 def test_apikey_is_never_read_from_the_url():
@@ -118,6 +128,11 @@ def test_request_show_sends_seasons_and_tvdb(seerr_api):
 @pytest.mark.parametrize("body", [
     {}, {"media_type": "show", "tmdb_id": 1}, {"media_type": "movie", "tmdb_id": "550"},
     {"media_type": "tv", "tmdb_id": 1, "seasons": "some"}, {"media_type": "tv", "tmdb_id": 1, "seasons": [-1]},
+    # A movie carries neither a season list nor a TVDB id, and a season list
+    # longer than any real series is refused here rather than forwarded.
+    {"media_type": "movie", "tmdb_id": 550, "seasons": "all"},
+    {"media_type": "movie", "tmdb_id": 550, "tvdb_id": 121361},
+    {"media_type": "tv", "tmdb_id": 1, "seasons": list(range(201))},
 ])
 def test_request_validation(seerr_api, body):
     client, _records = seerr_api([])
@@ -129,3 +144,23 @@ def test_request_error_bodies_never_echo_the_key(seerr_api):
     response = client.post('/api/seerr/request', json={"media_type": "movie", "tmdb_id": 1}, headers=HEADERS)
     assert response.json == {"error_code": "upstream_error"}
     assert "synthetic-seerr-key" not in response.get_data(as_text=True)
+
+
+def test_capability_is_probed_once_for_several_views(seerr_api):
+    client, records = seerr_api([(200, PUBLIC, {}), (200, {"id": 550}, {}), (200, {"id": 551}, {})])
+    assert client.get('/api/seerr/media/movie/550', headers=HEADERS).status_code == 200
+    assert client.get('/api/seerr/media/movie/551', headers=HEADERS).status_code == 200
+    assert [r["path"] for r in records] == ["/api/v1/settings/public", "/api/v1/movie/550", "/api/v1/movie/551"]
+
+
+def test_unreachable_is_answered_from_a_cooldown(seerr_api, monkeypatch):
+    from app.config import settings
+    from seerr import operations
+    client, _records = seerr_api([])
+    monkeypatch.setitem(settings.seerr, 'url', 'http://127.0.0.1:9')
+    attempts = []
+    real = operations.get_seerr_client
+    monkeypatch.setattr(operations, 'get_seerr_client', lambda: attempts.append(1) or real())
+    assert client.get('/api/seerr/media/movie/550', headers=HEADERS).json["error_code"] == "unreachable"
+    assert client.get('/api/seerr/media/movie/551', headers=HEADERS).json["error_code"] == "unreachable"
+    assert len(attempts) == 1

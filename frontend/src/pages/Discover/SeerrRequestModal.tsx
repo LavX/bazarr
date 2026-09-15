@@ -18,6 +18,7 @@ type Props = {
   title: MetadataTitle;
   state: SeerrMediaState;
   tmdbId: number;
+  libraryUncertain?: boolean;
   onClose: () => void;
   onSubmit: (body: SeerrRequestBody) => void;
 };
@@ -26,22 +27,25 @@ export default function SeerrRequestModal({
   title,
   state,
   tmdbId,
+  libraryUncertain = false,
   onClose,
   onSubmit,
 }: Props) {
   const isShow = title.media_type === "show";
+  const groups = useMemo(() => groupSeerrSeasons(title, state), [title, state]);
   // The only lane open is the 4K one: there is no valid non-4K request to
   // fall back to, so is4k starts (and, for a show, stays) forced true rather
-  // than defaulting to the usual unchecked box.
-  const fourKOnly = !state.requestable && state.requestable_4k;
+  // than defaulting to the usual unchecked box. A show's `requestable` only
+  // reports "Seerr has not blocklisted it", and stays true once every season
+  // is taken, so for a show the season arithmetic decides this instead.
+  const fourKOnly =
+    (!state.requestable || groups.exhausted) && state.requestable_4k;
   const [is4k, set4k] = useState(fourKOnly);
   const [chosen, setChosen] = useState<number[]>([]);
   const tvdbId =
     "tvdb_id" in title && typeof title.tvdb_id === "number"
       ? title.tvdb_id
       : undefined;
-
-  const groups = useMemo(() => groupSeerrSeasons(title, state), [title, state]);
 
   const toggle = (season: number) =>
     setChosen((current) =>
@@ -93,25 +97,35 @@ export default function SeerrRequestModal({
     );
   }
 
-  // A show whose only open lane is 4K has no per-season 4K state to draw
-  // from (the backend does not report it), so it collapses to the same
-  // whole-series fallback as "Seerr forbids partial requests" or "the season
-  // list is unavailable", just with its own reason and is4k forced true.
-  const allOnly = fourKOnly || !state.partial_requests || !groups.hasList;
+  // A 4K show request has no per-season 4K state to draw from: Seerr reports
+  // season status for the non-4K lane only. So any 4K show request collapses
+  // to the same whole-series fallback as "Seerr forbids partial requests" or
+  // "the season list is unavailable". Sending the groups shown here alongside
+  // is4k would ask for seasons Seerr may already hold at 4K, which it answers
+  // with a 409.
+  const allOnly =
+    fourKOnly || is4k || !state.partial_requests || !groups.hasList;
+  const allOnlyReason = fourKOnly
+    ? "Only the 4K version is available to request."
+    : is4k
+      ? "Seerr does not report 4K availability season by season, so the whole series is requested."
+      : !state.partial_requests
+        ? "Seerr only accepts whole-series requests."
+        : "Season details are unavailable.";
   const label = (s: { season: number; title: string }) =>
     s.title || `Season ${s.season}`;
 
   return (
     <Modal opened onClose={onClose} title={`Request ${title.title}`}>
       <Stack>
-        {allOnly ? (
-          <Text size="sm">
-            {fourKOnly
-              ? "Only the 4K version is available to request."
-              : state.partial_requests
-                ? "Season details are unavailable."
-                : "Seerr only accepts whole-series requests."}
+        {libraryUncertain && (
+          <Text size="sm" c="dimmed">
+            Your library check is incomplete, so what you already own may be
+            missing from these groups.
           </Text>
+        )}
+        {allOnly ? (
+          <Text size="sm">{allOnlyReason}</Text>
         ) : (
           <>
             {groups.inSeerr.length > 0 && (

@@ -10,6 +10,9 @@ from . import api_ns_seerr
 from ..utils import authenticate
 
 _MEDIA_TYPES = ('movie', 'tv')
+# A caller-supplied list that is forwarded upstream needs a ceiling. No real
+# series comes close, so this only refuses a payload nobody legitimately sends.
+_MAX_SEASONS = 200
 
 
 def _parse_verify_ssl(raw):
@@ -27,16 +30,21 @@ def _configured():
 def _status_payload(media_type, tmdb_id):
     if not _configured():
         return {"configured": False, "error_code": "not_configured"}
+    if operations.in_cooldown():
+        return {"configured": True, "error_code": "unreachable"}
     try:
         with operations.get_seerr_client() as client:
-            cap = operations.capability(client.public_settings())
+            cap = operations.cached_capability(client)
             status, body = client.media(media_type, tmdb_id)
             if status == 403:
                 return {"configured": True, "error_code": "rejected_key"}
             return {"configured": True,
                     **operations.normalize_media(media_type, tmdb_id, status, body, cap, operations.link_base(cap))}
     except MediaServerError as error:
-        return {"configured": True, "error_code": operations.error_code_for(error)}
+        code = operations.error_code_for(error)
+        if code == "unreachable":
+            operations.note_unreachable()
+        return {"configured": True, "error_code": code}
     except ValueError:
         return {"configured": False, "error_code": "not_configured"}
 
@@ -57,6 +65,10 @@ class SeerrTestConnection(Resource):
     @api_ns_seerr.response(401, 'Not Authenticated')
     def post(self):
         args = self.post_request_parser.parse_args()
+        # seerr.apikey is a user-visible secret, so the settings form posts the
+        # real key back and this sentinel does not arise from it today. The
+        # guard stays because the masked tiers do send it, and testing with the
+        # literal '***' would report a working server for a key nobody holds.
         if args['apikey'] == '***':
             return {"success": False, "error_code": "configuration"}, 200
         return operations.test_connection(args['url'], args['apikey'], _parse_verify_ssl(args.get('verify_ssl'))), 200
@@ -93,6 +105,11 @@ def _validated_request_body(body):
     media_type, tmdb_id = body.get('media_type'), body.get('tmdb_id')
     if media_type not in _MEDIA_TYPES or type(tmdb_id) is not int or tmdb_id <= 0:
         return None
+    # A movie has neither a season list nor a TVDB id. Forwarding them anyway
+    # reaches Seerr, which rejects the payload, and the reader sees the generic
+    # "Seerr rejected the request" rather than our own 400.
+    if media_type == 'movie' and (body.get('seasons') is not None or body.get('tvdb_id') is not None):
+        return None
     payload = {"mediaType": media_type, "mediaId": tmdb_id, "is4k": body.get('is4k') is True}
     tvdb_id = body.get('tvdb_id')
     if tvdb_id is not None:
@@ -103,7 +120,8 @@ def _validated_request_body(body):
     if seasons is not None:
         if seasons == "all":
             payload["seasons"] = "all"
-        elif isinstance(seasons, list) and seasons and all(type(s) is int and s >= 0 for s in seasons):
+        elif (isinstance(seasons, list) and seasons and len(seasons) <= _MAX_SEASONS
+                and all(type(s) is int and s >= 0 for s in seasons)):
             payload["seasons"] = sorted(set(seasons))
         else:
             return None
@@ -126,7 +144,7 @@ class SeerrRequest(Resource):
             return {"error_code": "not_configured"}, 200
         try:
             with operations.get_seerr_client() as client:
-                cap = operations.capability(client.public_settings())
+                cap = operations.cached_capability(client)
                 status, body = client.create_request(payload)
                 result = operations.request_outcome(status, body)
                 # Only a successful outcome gets a link: an error body must
@@ -138,6 +156,9 @@ class SeerrRequest(Resource):
                         result["link"] = f"{base}/{payload['mediaType']}/{payload['mediaId']}"
                 return result, 200
         except MediaServerError as error:
-            return {"error_code": operations.error_code_for(error)}, 200
+            code = operations.error_code_for(error)
+            if code == "unreachable":
+                operations.note_unreachable()
+            return {"error_code": code}, 200
         except ValueError:
             return {"error_code": "not_configured"}, 200

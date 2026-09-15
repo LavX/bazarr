@@ -40,14 +40,13 @@ class SeerrApi extends BaseApi {
     return response.data;
   }
 
-  // The backend reads this body with request.get_json(), not reqparse, so
-  // it must go as JSON rather than through BaseApi.post's form encoding.
-  async request(body: SeerrRequestBody, signal?: AbortSignal) {
-    const response = await client.axios.post<SeerrRequestOutcome>(
-      this.prefix + "/request",
-      body,
-      { signal },
-    );
+  // postRaw, not post: the backend reads this body with request.get_json(),
+  // not reqparse, so it must go as JSON rather than through BaseApi.post's
+  // form encoding. No signal here, unlike the reads above: a request that
+  // reached Seerr has already dispatched a download, so a navigation must not
+  // cancel it.
+  async request(body: SeerrRequestBody) {
+    const response = await this.postRaw<SeerrRequestOutcome>("/request", body);
     return response.data;
   }
 }

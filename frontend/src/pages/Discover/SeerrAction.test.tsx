@@ -102,7 +102,9 @@ describe("SeerrAction", () => {
   beforeEach(() => {
     useSeerrEnabled = true;
     media.mockClear();
-    request.mockClear();
+    // Reset, not clear: one test below installs an implementation that answers
+    // the mutate handlers, and it must not leak into the next.
+    request.mockReset();
     try {
       sessionStorage.clear();
     } catch {
@@ -351,7 +353,7 @@ describe("SeerrAction", () => {
     expect(screen.queryByRole("button", { name: /Request/ })).toBeNull();
   });
 
-  it("keeps the request action for an otherwise-exhausted show when the 4K lane is still open", () => {
+  it("keeps the request action for an otherwise-exhausted show, and its 4K request submits", async () => {
     answer({
       ...base,
       status: "available",
@@ -363,8 +365,87 @@ describe("SeerrAction", () => {
       ],
     });
     render(<SeerrAction title={show as never} inLibrary={true} />);
-    expect(
+    await userEvent.click(
       screen.getByRole("button", { name: "Request in Seerr" }),
+    );
+    // The modal has to reach a submittable state: a show keeps `requestable`
+    // once Seerr holds every season, so a 4K-only lane cannot be recognised
+    // from that flag and the submit used to stay disabled with nothing to tick.
+    await userEvent.click(
+      screen.getByRole("button", { name: "Request all seasons" }),
+    );
+    expect(request).toHaveBeenCalledWith(
+      {
+        media_type: "tv",
+        tmdb_id: 1399,
+        tvdb_id: 121361,
+        seasons: "all",
+        is4k: true,
+      },
+      expect.anything(),
+    );
+  });
+
+  it("reads availability off the media row, not off a request Seerr left approved", () => {
+    // Seerr does not tidy a finished request away, so an available title
+    // routinely still carries an APPROVED row. The badge must report the
+    // title, not the paperwork.
+    const approved = { id: 1, status: "approved", is4k: false, seasons: [] };
+    answer({ ...base, status: "available", request: approved } as never);
+    const { unmount } = render(
+      <SeerrAction title={movie as never} inLibrary={false} />,
+    );
+    expect(screen.getByText("Available in Seerr")).toBeInTheDocument();
+    expect(screen.queryByText("Processing")).toBeNull();
+    unmount();
+    answer({
+      ...base,
+      status: "partially_available",
+      requestable: true,
+      request: approved,
+      seasons: [{ number: 2, state: "available" }],
+    } as never);
+    render(<SeerrAction title={show as never} inLibrary={true} />);
+    expect(screen.getByText("Some seasons available")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Request seasons" }),
+    ).toBeInTheDocument();
+  });
+
+  it("does not carry a request notice over to the next title", async () => {
+    request.mockImplementation((_body, handlers) =>
+      handlers.onSuccess({ outcome: "requested" }),
+    );
+    answer({ ...base, known: false, status: "unknown", requestable: true });
+    const { rerender } = render(
+      <SeerrAction title={movie as never} inLibrary={false} />,
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Request in Seerr" }),
+    );
+    expect(screen.getByText("Requested in Seerr.")).toBeInTheDocument();
+    // Same mounted component, a different selected title: the notice belongs
+    // to the title it was raised for.
+    rerender(
+      <MemoryRouter>
+        <MantineProvider>
+          <SeerrAction
+            title={{ ...movie, id: 680, title: "Pulp Fiction" } as never}
+            inLibrary={false}
+          />
+        </MantineProvider>
+      </MemoryRouter>,
+    );
+    expect(screen.queryByText("Requested in Seerr.")).toBeNull();
+  });
+
+  it("says the library check is incomplete next to the action", () => {
+    answer({ ...base, known: false, status: "unknown", requestable: true });
+    render(
+      <SeerrAction title={movie as never} inLibrary={false} libraryUncertain />,
+    );
+    expect(
+      screen.getByText(/Your library check is incomplete/),
     ).toBeInTheDocument();
   });
 

@@ -57,14 +57,31 @@ const BADGES: Record<string, string> = {
   blocklisted: "Blocklisted",
 };
 
+// Order matters. The media row is the fact; a request row is only how the
+// title got there, and Seerr leaves a finished request at APPROVED rather
+// than tidying it away. Reading the request first therefore reported
+// "Processing" over a title that is already available, and hid "Some seasons
+// available" (with its seasons flow) behind the same stale row.
 function badgeFor(state: SeerrMediaState): string | null {
+  if (state.status === "available") return BADGES.available;
+  if (state.status === "blocklisted") return BADGES.blocklisted;
   if (state.request?.status === "pending") return BADGES.pending;
   if (state.request?.status === "declined") return BADGES.declined;
   if (state.request?.status === "failed") return BADGES.failed;
+  if (state.status === "partially_available") return BADGES.partially_available;
   if (state.status === "processing" || state.request?.status === "approved")
     return BADGES.processing;
   if (state.status === "pending") return BADGES.pending;
   return BADGES[state.status] ?? null;
+}
+
+// Identifies the title a notice or a pending submit belongs to. Separate from
+// the react-query key on purpose: this only has to tell one selected title
+// from the next within a single mounted SeerrAction.
+function identityKey(identity: SeerrIdentity): string {
+  return "tmdbId" in identity
+    ? `${identity.kind}:tmdb:${identity.tmdbId}`
+    : `${identity.kind}:tvdb:${identity.tvdbId}`;
 }
 
 function outcomeText(outcome: SeerrRequestOutcome): string {
@@ -92,9 +109,12 @@ function outcomeText(outcome: SeerrRequestOutcome): string {
 export default function SeerrAction({
   title,
   inLibrary,
+  libraryUncertain = false,
 }: {
   title: MetadataTitle | null;
   inLibrary: boolean;
+  /** The library read was truncated or failed, so `inLibrary` is a floor. */
+  libraryUncertain?: boolean;
 }) {
   const { data: settings } = useSystemSettings();
   const enabled = settings?.general?.use_seerr === true;
@@ -105,10 +125,17 @@ export default function SeerrAction({
   const query = useSeerrMedia(identity, enabled && identity !== null);
   const mutation = useSeerrRequestMutation(identity);
   const [modalOpen, setModalOpen] = useState(false);
+  // Both carry the title they belong to. This component is not keyed to the
+  // selection, so without that a notice from one title outlived it and read
+  // as the next title's result, and a submit in flight lit up the next
+  // title's button.
   const [message, setMessage] = useState<{
+    key: string;
     text: string;
     isError: boolean;
   } | null>(null);
+  const [submittedKey, setSubmittedKey] = useState<string | null>(null);
+  const currentKey = identity ? identityKey(identity) : null;
 
   const data: SeerrMediaResponse | undefined = query.data;
   const isRejectedKeyError =
@@ -144,18 +171,22 @@ export default function SeerrAction({
 
   const submit = useCallback(
     (body: SeerrRequestBody) => {
+      if (!currentKey) return;
+      const key = currentKey;
       setMessage(null);
+      setSubmittedKey(key);
       mutation.mutate(body, {
         onSuccess: (outcome) =>
           setMessage({
+            key,
             text: outcomeText(outcome),
             isError: "error_code" in outcome,
           }),
         onError: () =>
-          setMessage({ text: "Seerr is unreachable.", isError: true }),
+          setMessage({ key, text: "Seerr is unreachable.", isError: true }),
       });
     },
-    [mutation],
+    [mutation, currentKey],
   );
 
   if (!enabled || identity === null) return null;
@@ -207,12 +238,7 @@ export default function SeerrAction({
   // modal with a disabled submit. Suppress it then, unless the 4K lane is
   // still open: that lane always has "Request all seasons" to offer.
   const seasonGroups = isShow ? groupSeerrSeasons(title!, state) : null;
-  const seasonsExhausted =
-    seasonGroups !== null &&
-    seasonGroups.hasList &&
-    state.partial_requests &&
-    seasonGroups.owned.length === 0 &&
-    seasonGroups.open.length === 0;
+  const seasonsExhausted = seasonGroups?.exhausted === true;
   const canRequest =
     (state.requestable || state.requestable_4k) &&
     tmdbId !== undefined &&
@@ -238,8 +264,11 @@ export default function SeerrAction({
       {canRequest && (
         <Button
           size="compact-sm"
+          // Not filled: "Open in library" sits in this same row, and the
+          // stylesheet spends the amber fill on one action per row.
+          variant="default"
           leftSection={<FontAwesomeIcon icon={faPaperPlane} />}
-          loading={mutation.isPending}
+          loading={mutation.isPending && submittedKey === currentKey}
           onClick={onRequest}
         >
           {requestLabel}
@@ -258,9 +287,11 @@ export default function SeerrAction({
       {canRequest && (
         <Text size="xs" c="dimmed">
           Requested as the Seerr owner and approved immediately.
+          {libraryUncertain &&
+            " Your library check is incomplete, so this may already be in your library."}
         </Text>
       )}
-      {message && (
+      {message && message.key === currentKey && (
         <Text size="sm" role={message.isError ? "alert" : "status"}>
           {message.text}
         </Text>
@@ -270,6 +301,7 @@ export default function SeerrAction({
           title={title!}
           state={state}
           tmdbId={tmdbId}
+          libraryUncertain={libraryUncertain}
           onClose={() => setModalOpen(false)}
           onSubmit={(body) => {
             setModalOpen(false);

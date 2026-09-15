@@ -79,7 +79,6 @@ export type SeerrRequestOutcome =
         | "rejected_key"
         | "unreachable"
         | "not_configured";
-      link?: string;
     };
 
 export interface SeerrTestResult {

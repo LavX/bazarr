@@ -332,7 +332,11 @@ export default function TitleDetails({
                     </Menu.Dropdown>
                   </Menu>
                 )}
-                <SeerrAction title={movie} inLibrary={inLibrary} />
+                <SeerrAction
+                  title={movie}
+                  inLibrary={inLibrary}
+                  libraryUncertain={libraryUncertain}
+                />
               </div>
             </div>
           </article>

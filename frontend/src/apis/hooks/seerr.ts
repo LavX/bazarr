@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
@@ -32,11 +33,24 @@ export function useSeerrMedia(
 
 export function useSeerrRequestMutation(identity: SeerrIdentity | null) {
   const client = useQueryClient();
+  // The query to refresh is the title that was on screen when the reader
+  // submitted, not whichever title the component happens to be rendering when
+  // the answer lands. React Query reads onSettled off the latest render's
+  // options, so on a navigation mid-request that closure names the new title:
+  // it would refetch a title nothing happened to and leave the requested one
+  // stale. mutationFn runs synchronously inside mutate(), while the
+  // submitting render is still the current one, so it is the one place that
+  // can pin the right identity.
+  const submitted = useRef<SeerrIdentity | null>(null);
   return useMutation({
-    mutationFn: (body: SeerrRequestBody) => api.seerr.request(body),
+    mutationFn: (body: SeerrRequestBody) => {
+      submitted.current = identity;
+      return api.seerr.request(body);
+    },
     onSettled: () => {
-      if (identity)
-        void client.invalidateQueries({ queryKey: seerrMediaKey(identity) });
+      const target = submitted.current;
+      if (target)
+        void client.invalidateQueries({ queryKey: seerrMediaKey(target) });
     },
   });
 }
