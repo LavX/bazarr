@@ -1,5 +1,4 @@
 /* eslint-disable camelcase */
-import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 import StatisticsView from "@/pages/Statistics";
@@ -21,35 +20,11 @@ const distSettings = (enabled: boolean) => ({
 
 const mock = (opts: { distEnabled?: boolean } = {}) => {
   server.use(
-    http.get("/api/badges", () =>
-      HttpResponse.json({
-        episodes: 0,
-        movies: 0,
-        providers: 0,
-        status: 0,
-        sonarr_signalr: "LIVE",
-        radarr_signalr: "LIVE",
-        announcements: 0,
-      }),
-    ),
-    http.get("/api/system/status", () =>
-      HttpResponse.json({ data: { start_time: 1, database_engine: "SQLite" } }),
-    ),
-    http.get("/api/system/health", () => HttpResponse.json({ data: [] })),
-    http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
-    http.get("/api/system/tasks", () => HttpResponse.json({ data: [] })),
-    http.get("/api/providers", () => HttpResponse.json({ data: [] })),
     http.get("/api/history/stats", () =>
-      HttpResponse.json({ series: [], movies: [] }),
+      HttpResponse.json({ series: [], movies: [], sports: [] }),
     ),
+    http.get("/api/providers", () => HttpResponse.json({ data: [] })),
     http.get("/api/system/languages", () => HttpResponse.json([])),
-    http.get("/api/provider-hub/providers", () =>
-      HttpResponse.json({ data: [] }),
-    ),
-    http.get("/api/provider-hub/jobs", () => HttpResponse.json({ data: [] })),
-    http.get("/api/provider-hub/catalog", () =>
-      HttpResponse.json({ sources: [], entries: [] }),
-    ),
     http.get("/api/distribution-hub/settings", () =>
       HttpResponse.json(distSettings(opts.distEnabled ?? true)),
     ),
@@ -78,50 +53,39 @@ const mock = (opts: { distEnabled?: boolean } = {}) => {
 describe("Statistics page", () => {
   beforeEach(() => mock());
 
-  it("opens on the overview tab", async () => {
+  it("opens on the activity tab", async () => {
     customRender(<StatisticsView />);
 
     expect(
-      await screen.findByRole("tab", { name: /overview/i }),
+      await screen.findByRole("tab", { name: /activity/i }),
     ).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("tab", { name: /activity/i })).toHaveAttribute(
-      "aria-selected",
-      "false",
-    );
   });
 
-  it("lists overview first, ahead of activity", async () => {
+  it("offers only chart-bearing tabs", async () => {
     customRender(<StatisticsView />);
 
-    await screen.findByRole("tab", { name: /overview/i });
-    const order = screen
-      .getAllByRole("tab")
-      .map((t) => t.textContent?.trim() ?? "");
-    expect(order.slice(0, 2)).toEqual(["Overview", "Activity"]);
+    // Await the gated tab: Distribution appears only once dist settings load.
+    await screen.findByRole("tab", { name: /distribution/i });
+    const tabs = screen.getAllByRole("tab").map((t) => t.textContent?.trim());
+    expect(tabs).toEqual(["Activity", "Distribution", "Translator"]);
   });
 
-  it("shows a tab for each available section", async () => {
+  it("does not re-implement the System pages", async () => {
+    // Health, provider throttle state and the scheduler board each already
+    // have a dedicated System page. Duplicating them here is what made this
+    // read as a status page rather than a statistics one.
     customRender(<StatisticsView />);
 
+    await screen.findByRole("tab", { name: /activity/i });
     expect(
-      await screen.findByRole("tab", { name: /overview/i }),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: /providers/i })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: /tasks/i })).toBeInTheDocument();
+      screen.queryByRole("tab", { name: /overview/i }),
+    ).not.toBeInTheDocument();
     expect(
-      screen.getByRole("tab", { name: /translator/i }),
-    ).toBeInTheDocument();
-  });
-
-  it("switches to the providers tab when selected", async () => {
-    const user = userEvent.setup();
-    customRender(<StatisticsView />);
-
-    await user.click(await screen.findByRole("tab", { name: /providers/i }));
-
+      screen.queryByRole("tab", { name: /providers/i }),
+    ).not.toBeInTheDocument();
     expect(
-      await screen.findByText(/no providers are throttled/i),
-    ).toBeInTheDocument();
+      screen.queryByRole("tab", { name: /tasks/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("offers the distribution tab while the endpoint is enabled", async () => {
@@ -139,7 +103,7 @@ describe("Statistics page", () => {
     customRender(<StatisticsView />);
 
     expect(
-      await screen.findByRole("tab", { name: /overview/i }),
+      await screen.findByRole("tab", { name: /activity/i }),
     ).toBeInTheDocument();
     await waitFor(() =>
       expect(

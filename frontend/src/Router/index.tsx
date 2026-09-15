@@ -7,7 +7,6 @@ import {
 } from "react";
 import { createBrowserRouter, Navigate, RouterProvider } from "react-router";
 import {
-  faChartPie,
   faClock,
   faCogs,
   faCompass,
@@ -222,16 +221,6 @@ export function useRoutes(): CustomRouteObject[] {
             ],
           },
           {
-            icon: faChartPie,
-            name: "Statistics",
-            path: "statistics",
-            element: (
-              <Lazy>
-                <StatisticsView></StatisticsView>
-              </Lazy>
-            ),
-          },
-          {
             icon: faStore,
             name: "Subtitle Hub",
             path: "subtitle-hub",
@@ -346,6 +335,15 @@ export function useRoutes(): CustomRouteObject[] {
             name: "System",
             path: "system",
             children: [
+              {
+                path: "statistics",
+                name: "Statistics",
+                element: (
+                  <Lazy>
+                    <StatisticsView></StatisticsView>
+                  </Lazy>
+                ),
+              },
               {
                 path: "tasks",
                 name: "Tasks",

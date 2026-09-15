@@ -3,10 +3,7 @@ import { Container, Tabs } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import {
   faChartColumn,
-  faChartLine,
   faLanguage,
-  faListCheck,
-  faPlug,
   faTowerBroadcast,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
@@ -14,24 +11,15 @@ import { useDistSettings } from "@/apis/hooks";
 import { useAppTitle } from "@/apis/hooks/site";
 import DistributionHubOverview from "@/pages/DistributionHub/OverviewPanel";
 import ActivityPanel from "./ActivityPanel";
-import OverviewPanel from "./OverviewPanel";
-import ProvidersPanel from "./ProvidersPanel";
-import TasksPanel from "./TasksPanel";
 import TranslatorPanel from "./TranslatorPanel";
 
-type TabKey =
-  | "overview"
-  | "activity"
-  | "providers"
-  | "tasks"
-  | "distribution"
-  | "translator";
+type TabKey = "activity" | "distribution" | "translator";
 
 const StatisticsView: FunctionComponent = () => {
-  const [tab, setTab] = useState<TabKey>("overview");
+  const [tab, setTab] = useState<TabKey>("activity");
   const { data: distSettings } = useDistSettings();
 
-  useDocumentTitle(`Statistics - ${useAppTitle()}`);
+  useDocumentTitle(`Statistics - ${useAppTitle()} (System)`);
 
   // Hide the distribution tab while the endpoint is off: compat_usage is only
   // written when it is serving, so the chart would be a flat zero line that
@@ -47,28 +35,10 @@ const StatisticsView: FunctionComponent = () => {
       >
         <Tabs.List>
           <Tabs.Tab
-            value="overview"
-            leftSection={<FontAwesomeIcon icon={faChartLine} />}
-          >
-            Overview
-          </Tabs.Tab>
-          <Tabs.Tab
             value="activity"
             leftSection={<FontAwesomeIcon icon={faChartColumn} />}
           >
             Activity
-          </Tabs.Tab>
-          <Tabs.Tab
-            value="providers"
-            leftSection={<FontAwesomeIcon icon={faPlug} />}
-          >
-            Providers
-          </Tabs.Tab>
-          <Tabs.Tab
-            value="tasks"
-            leftSection={<FontAwesomeIcon icon={faListCheck} />}
-          >
-            Tasks
           </Tabs.Tab>
           {showDistribution && (
             <Tabs.Tab
@@ -86,17 +56,8 @@ const StatisticsView: FunctionComponent = () => {
           </Tabs.Tab>
         </Tabs.List>
 
-        <Tabs.Panel value="overview" pt="md">
-          <OverviewPanel />
-        </Tabs.Panel>
         <Tabs.Panel value="activity" pt="md">
           <ActivityPanel />
-        </Tabs.Panel>
-        <Tabs.Panel value="providers" pt="md">
-          <ProvidersPanel />
-        </Tabs.Panel>
-        <Tabs.Panel value="tasks" pt="md">
-          <TasksPanel />
         </Tabs.Panel>
         {showDistribution && (
           <Tabs.Panel value="distribution" pt="md">
