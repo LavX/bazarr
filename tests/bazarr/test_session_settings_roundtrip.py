@@ -2,11 +2,9 @@
 """
 Round-trip tests for the session-hardening settings.
 
-general.trusted_proxies is a list, and the settings writer unwraps a
-single-element list into a scalar unless the key's last segment is named in
-array_keys. Getting that wrong is invisible until someone configures exactly
-one proxy, which is the common case: the value then fails validation as "not a
-list", and the save is rejected.
+general.trusted_proxy is a single address because waitress compares the peer
+against it exactly; a list would match nobody. These pin the round trip through
+the settings writer, which casts and coerces values on the way in.
 """
 import sys
 from types import SimpleNamespace
@@ -41,29 +39,35 @@ def saveable(monkeypatch):
 @pytest.mark.parametrize(
     ("submitted", "expected"),
     [
-        (["10.0.0.5"], ["10.0.0.5"]),
-        (["10.0.0.5", "172.18.0.2"], ["10.0.0.5", "172.18.0.2"]),
-        ([""], []),
+        (["127.0.0.1"], "127.0.0.1"),
+        (["10.0.0.5"], "10.0.0.5"),
+        # Cleared in the UI: stored as an empty string, which the helper that
+        # feeds waitress turns into "trust nothing".
+        ([""], ""),
     ],
 )
-def test_trusted_proxies_stays_a_list(saveable, submitted, expected):
-    original = list(saveable.settings.general.trusted_proxies)
+def test_trusted_proxy_round_trips(saveable, submitted, expected):
+    original = saveable.settings.general.trusted_proxy
     try:
-        saveable.save_settings([("settings-general-trusted_proxies", submitted)])
+        saveable.save_settings([("settings-general-trusted_proxy", submitted)])
 
-        assert saveable.settings.general.trusted_proxies == expected
-    finally:
-        saveable.settings.general.trusted_proxies = original
-
-
-def test_trusted_proxies_survives_validation(saveable):
-    """The validator types this as a list, so an unwrapped scalar is rejected."""
-    original = list(saveable.settings.general.trusted_proxies)
-    try:
-        saveable.save_settings([("settings-general-trusted_proxies", ["10.0.0.5"])])
+        assert saveable.settings.general.trusted_proxy == expected
         saveable.settings.validators.validate()
     finally:
-        saveable.settings.general.trusted_proxies = original
+        saveable.settings.general.trusted_proxy = original
+
+
+def test_a_cleared_trusted_proxy_cannot_break_startup(saveable):
+    """An empty value must mean "trust nothing", never a server that refuses to build."""
+    from app.app import trusted_proxy_value
+
+    original = saveable.settings.general.trusted_proxy
+    try:
+        saveable.save_settings([("settings-general-trusted_proxy", [""])])
+
+        assert trusted_proxy_value(saveable.settings) is None
+    finally:
+        saveable.settings.general.trusted_proxy = original
 
 
 def test_cookie_policy_settings_round_trip(saveable):
@@ -96,7 +100,7 @@ def test_the_new_settings_are_exposed_to_the_ui(saveable):
 
     assert "session_lifetime_days" in served["auth"]
     assert "cookie_secure" in served["auth"]
-    assert "trusted_proxies" in served["general"]
+    assert "trusted_proxy" in served["general"]
 
 
 def test_the_api_key_and_password_are_not_newly_exposed(saveable):

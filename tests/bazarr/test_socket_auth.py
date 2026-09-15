@@ -13,10 +13,13 @@ import pytest
 from flask import Flask
 
 
-def _config(cors=False, auth_type=None):
+API_KEY = "testapikeytestapikeytestapikey12"
+
+
+def _config(cors=False, auth_type=None, apikey=API_KEY):
     return SimpleNamespace(
         cors=SimpleNamespace(enabled=cors),
-        auth=SimpleNamespace(type=auth_type),
+        auth=SimpleNamespace(type=auth_type, apikey=apikey),
     )
 
 
@@ -53,15 +56,27 @@ def test_same_origin_mode_follows_forwarded_headers():
 
 
 @pytest.mark.parametrize(
-    ("auth_type", "signed_in", "expected"),
+    ("auth_type", "signed_in", "payload", "expected"),
     [
-        (None, False, True),   # no login mode: the socket is as open as everything else
-        ("form", False, False),
-        ("form", True, True),
+        # No credential at all is refused in every mode, including the one with
+        # no login configured, which /api has always refused too.
+        (None, False, None, False),
+        ("form", False, None, False),
+        ("basic", False, None, False),
+        # The session is enough under form login.
+        ("form", True, None, True),
+        # The API key is enough in any mode; it is what the client sends and
+        # the only credential available with basic auth or no login mode.
+        (None, False, {"apiKey": API_KEY}, True),
+        ("form", False, {"apiKey": API_KEY}, True),
+        ("basic", False, {"apiKey": API_KEY}, True),
+        # A wrong key is not.
+        ("form", False, {"apiKey": "wrong"}, False),
+        (None, False, {"apiKey": ""}, False),
     ],
 )
-def test_connect_is_refused_without_a_session_under_form_auth(
-    monkeypatch, auth_type, signed_in, expected
+def test_connect_requires_a_session_or_the_api_key(
+    monkeypatch, auth_type, signed_in, payload, expected
 ):
     from app import app as app_module
 
@@ -76,7 +91,7 @@ def test_connect_is_refused_without_a_session_under_form_auth(
         if signed_in:
             session["logged_in"] = True
 
-        assert app_module._authorize_socket_connection() is expected
+        assert app_module._authorize_socket_connection(payload) is expected
 
 
 def test_connect_under_basic_auth_checks_the_header(monkeypatch):
@@ -118,3 +133,26 @@ def test_the_handler_is_registered_on_the_socket():
     events = [event for event, _handler, _namespace in socketio.handlers]
 
     assert "connect" in events
+
+
+def test_an_error_inside_the_gate_refuses_rather_than_admits(monkeypatch):
+    """
+    python-socketio joins the client to the namespace before calling this
+    handler and only catches ConnectionRefusedError around it, so any other
+    exception escaping would leave the client in the room receiving events. An
+    error here has to mean refuse.
+    """
+    from app import app as app_module
+
+    monkeypatch.setattr(app_module, "settings", _config(auth_type="form"))
+
+    def boom():
+        raise RuntimeError("session backend exploded")
+
+    monkeypatch.setattr(app_module, "is_session_authenticated", boom)
+
+    flask_app = Flask(__name__)
+    flask_app.config["SECRET_KEY"] = "test-secret-key"
+
+    with flask_app.test_request_context("/api/socket.io/"):
+        assert app_module._authorize_socket_connection() is False

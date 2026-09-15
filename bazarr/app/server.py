@@ -69,14 +69,25 @@ class Server:
             # dozen parked tabs with ample headroom for bursts, and waitress
             # queues rather than drops beyond it. Configurable (4..100) for
             # larger installs via general.web_server_threads.
+            # trusted_proxy_headers is only legal alongside a trusted_proxy:
+            # waitress raises ValueError for the pair, and that escapes this
+            # OSError handler and the import of this module, so an operator who
+            # clears the setting would get a boot loop fixable only by editing
+            # config.yaml. With no proxy trusted, waitress strips every
+            # forwarded header anyway, which is the intent.
+            proxy_options = {}
+            trusted_proxy = trusted_proxy_value()
+            if trusted_proxy:
+                proxy_options = {'trusted_proxy': trusted_proxy,
+                                 'trusted_proxy_headers': {'x-forwarded-host',
+                                                           'x-forwarded-proto',
+                                                           'x-forwarded-for'}}
+
             self.server = create_server(app,
                                         host=self.address,
                                         port=self.port,
                                         threads=settings.general.web_server_threads,
-                                        trusted_proxy=trusted_proxy_value(),
-                                        trusted_proxy_headers={'x-forwarded-host',
-                                                               'x-forwarded-proto',
-                                                               'x-forwarded-for'})
+                                        **proxy_options)
             self.connected = True
         except OSError as error:
             if error.errno == errno.EADDRNOTAVAIL:

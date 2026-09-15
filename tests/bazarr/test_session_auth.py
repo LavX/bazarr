@@ -342,3 +342,36 @@ def test_an_upstream_bazarr_user_can_log_in_twice(monkeypatch):
     ):
         _, status = account.SystemAccount().post()
         assert status == 403
+
+
+def test_login_drops_a_stale_password_left_by_an_older_release(monkeypatch):
+    """
+    Releases before this one parked the plaintext password in the session under
+    _pw_for_upgrade. That cookie is still in browsers, so a login that only
+    added its own key would re-sign the old payload and hand it back with a
+    fresh expiry, outliving the fix.
+    """
+    from api.system import account
+
+    monkeypatch.setattr(
+        account, "settings", SimpleNamespace(auth=SimpleNamespace(type="form"))
+    )
+    monkeypatch.setattr(account, "check_credentials", lambda *a, **k: True)
+    monkeypatch.setattr(account, "needs_password_upgrade", lambda: False)
+    account._login_attempts.clear()
+
+    app = _login_app()
+    with app.test_request_context(
+        "/api/system/account?action=login",
+        method="POST",
+        data={"username": "admin", "password": "pw"},
+    ):
+        session["_pw_for_upgrade"] = "hunter2"
+        session["_upgrade_token"] = "stale-token"
+
+        _, status = account.SystemAccount().post()
+
+        assert status == 204
+        assert "_pw_for_upgrade" not in session
+        assert "_upgrade_token" not in session
+        assert session["logged_in"] is True

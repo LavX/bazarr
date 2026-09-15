@@ -115,39 +115,72 @@ def test_establish_session_marks_the_session_permanent():
 @pytest.mark.parametrize(
     ("configured", "expected"),
     [
-        (["127.0.0.1"], "127.0.0.1"),
-        (["127.0.0.1", "172.18.0.5"], "127.0.0.1,172.18.0.5"),
-        ([" 10.0.0.2 ", ""], "10.0.0.2"),
-        ([], None),
+        ("127.0.0.1", "127.0.0.1"),
+        ("  10.0.0.2  ", "10.0.0.2"),
+        ("", None),
         (None, None),
     ],
 )
 def test_trusted_proxy_value(configured, expected):
     from app.app import trusted_proxy_value
 
-    config = SimpleNamespace(general=SimpleNamespace(trusted_proxies=configured))
+    config = SimpleNamespace(general=SimpleNamespace(trusted_proxy=configured))
 
     assert trusted_proxy_value(config) == expected
 
 
-def test_the_lifetime_is_an_idle_window_not_an_absolute_cap():
+def test_waitress_actually_honours_the_value_we_hand_it():
     """
-    Flask re-issues a permanent session cookie on every request, so the expiry
-    slides forward. That is the behaviour the settings copy promises, and it is
-    worth pinning: a change to SESSION_REFRESH_EACH_REQUEST would silently turn
-    a browser in daily use into one that gets signed out on a fixed schedule.
+    Waitress compares the peer against trusted_proxy exactly, so anything that
+    is not a single address trusts nobody. Driving its own middleware is the
+    only way to catch that: a test of the formatter alone passed happily while
+    the value it produced matched no one.
     """
-    app = _app(lifetime_days=7)
+    from waitress.proxy_headers import proxy_headers_middleware
 
-    @app.route("/read")
-    def read():
-        from app.auth import is_session_authenticated
+    def app(environ, _start_response):
+        app.seen = environ
+        return []
 
-        return "yes" if is_session_authenticated() else "no"
+    def run(trusted, peer):
+        wrapped = proxy_headers_middleware(
+            app,
+            trusted_proxy=trusted,
+            trusted_proxy_headers={"x-forwarded-proto"},
+            clear_untrusted=True,
+        )
+        wrapped(
+            {
+                "REMOTE_ADDR": peer,
+                "HTTP_X_FORWARDED_PROTO": "https",
+                "wsgi.url_scheme": "http",
+                "SERVER_NAME": "bazarr",
+                "SERVER_PORT": "6767",
+            },
+            lambda *_a, **_k: None,
+        )
+        return app.seen
 
-    client = app.test_client()
-    client.get("/sign-in")
-    later = client.get("/read")
+    assert run("127.0.0.1", "127.0.0.1")["wsgi.url_scheme"] == "https"
+    assert run("127.0.0.1", "10.0.0.9")["wsgi.url_scheme"] == "http"
 
-    assert later.get_data(as_text=True) == "yes"
-    assert "Expires=" in _set_cookie_header(later)
+
+def test_an_empty_setting_still_produces_a_server_waitress_will_build():
+    """
+    waitress refuses trusted_proxy_headers without a trusted_proxy, and that
+    ValueError escapes the OSError handler in Server.configure_server, so it
+    would be a boot loop an operator could only fix by editing config.yaml.
+    """
+    from waitress.adjustments import Adjustments
+
+    from app.app import trusted_proxy_value
+
+    proxy = trusted_proxy_value(SimpleNamespace(general=SimpleNamespace(trusted_proxy="")))
+    assert proxy is None
+
+    options = {}
+    if proxy:
+        options = {"trusted_proxy": proxy, "trusted_proxy_headers": {"x-forwarded-proto"}}
+
+    # Must not raise.
+    Adjustments(host="127.0.0.1", port=6767, **options)

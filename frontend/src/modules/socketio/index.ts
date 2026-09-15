@@ -19,6 +19,12 @@ class SocketIOClient {
       upgrade: true,
       rememberUpgrade: true,
       autoConnect: false,
+      // The server refuses a connection that cannot prove who it is. The
+      // session cookie rides along on its own, but it only exists under form
+      // login: with basic auth, or with no login mode at all, the API key is
+      // what the rest of the client already authenticates with, so send it
+      // here too rather than leaving those installs unable to connect.
+      auth: { apiKey: Environment.apiKey },
     });
 
     this.socket.on("connect", this.onConnect.bind(this));

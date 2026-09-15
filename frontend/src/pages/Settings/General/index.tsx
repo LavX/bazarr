@@ -211,15 +211,17 @@ const SettingsGeneralView: FunctionComponent = () => {
           Hostname or IP address to access Bazarr (ie: bazarr.mydomain.local or
           192.168.0.100). Required for webhook security.
         </Message>
-        <Chips
-          label="Trusted Proxies"
-          settingKey="settings-general-trusted_proxies"
-        ></Chips>
+        <Text
+          label="Trusted Proxy"
+          placeholder="127.0.0.1"
+          settingKey="settings-general-trusted_proxy"
+        ></Text>
         <Message>
-          Addresses whose X-Forwarded-* headers Bazarr will believe. Add your
-          reverse proxy here if it runs on another host or in another container,
-          otherwise its HTTPS looks like plain HTTP to Bazarr and every visitor
-          shares one login rate limit. Requires a restart of Bazarr when changed
+          The one address whose X-Forwarded-* headers Bazarr will believe. Set
+          it to your reverse proxy if it runs on another host or in another
+          container, otherwise its HTTPS looks like plain HTTP to Bazarr and
+          every visitor shares one login rate limit. Leave empty to trust
+          nothing. Requires a restart of Bazarr when changed
         </Message>
       </Section>
       <Section header="Metadata">
@@ -252,6 +254,8 @@ const SettingsGeneralView: FunctionComponent = () => {
           <AuthPasswordInput />
           <Number
             label="Session Lifetime (days)"
+            min={1}
+            max={365}
             settingKey="settings-auth-session_lifetime_days"
           ></Number>
           <Message>

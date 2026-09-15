@@ -55,7 +55,7 @@ declare namespace Settings {
     ignore_vobsub_subs: boolean;
     instance_name: string;
     ip: string;
-    trusted_proxies: string[];
+    trusted_proxy: string;
     multithreading: boolean;
     minimum_score: number;
     minimum_score_movie: number;

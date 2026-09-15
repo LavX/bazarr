@@ -28,14 +28,21 @@ def is_session_authenticated():
 def establish_session():
     """Mark the current session as signed in.
 
-    Marking it permanent is what puts PERMANENT_SESSION_LIFETIME to work: it
-    gives the cookie an expiry and makes the signature itself expire. Without
-    it Flask issues a browser-session cookie that never expires server-side.
+    Every other key is dropped first. Releases before this one parked the
+    admin's plaintext password in the session under _pw_for_upgrade, and that
+    cookie is still in browsers: without clearing, the next login would re-sign
+    it and hand it back with a fresh expiry, so the hole this module exists to
+    close would outlive the fix. Clearing on login is the right default anyway,
+    since nothing in a pre-login session deserves to survive authentication.
 
-    Flask re-issues the cookie on each request, so the window is an idle
-    timeout rather than an absolute cap: a browser in daily use stays signed
-    in, and one left alone for the configured number of days does not.
+    Marking it permanent is what gives the cookie a browser-side expiry, and
+    Flask re-issues it on each request, so the window is an idle timeout rather
+    than an absolute cap: a browser in daily use stays signed in, one left
+    alone for the configured number of days does not. Flask applies the same
+    lifetime as a signature max age either way, so this is about the browser
+    discarding the cookie, not about the server starting to honour it.
     """
+    session.clear()
     session.permanent = True
     session[SESSION_KEY] = True
 
