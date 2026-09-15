@@ -93,6 +93,7 @@ declare namespace Settings {
     use_emby?: boolean;
     use_silo?: boolean;
     use_plex?: boolean;
+    use_seerr?: boolean;
     use_postprocessing: boolean;
     use_postprocessing_threshold: boolean;
     use_postprocessing_threshold_movie: boolean;

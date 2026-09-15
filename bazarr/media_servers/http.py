@@ -40,9 +40,10 @@ def parse_verify_ssl(value) -> bool:
 class MediaServerHTTP:
     RESPONSE_LIMIT = 2 * 1024 * 1024
 
-    def __init__(self, url: str, *, verify_ssl: bool = True, headers=None):
+    def __init__(self, url: str, *, verify_ssl: bool = True, headers=None, timeout=(3, 10)):
         self.url = validate_server_url(url)
         self.verify_ssl = parse_verify_ssl(verify_ssl)
+        self.timeout = timeout
         self.session = requests.Session()
         self.session.trust_env = False
         self.session.headers.update({"Accept": "application/json", **(headers or {})})
@@ -56,20 +57,20 @@ class MediaServerHTTP:
     def __exit__(self, *_args):
         self.close()
 
-    def _request(self, method, path, *, params=None, json=None, success_statuses=(200,)):
+    def _exchange(self, method, path, *, params=None, json=None, read_body=lambda status: True):
+        """One bounded exchange: the status and the body, with redirects refused."""
         # API paths are local to this validated base, including any proxy prefix.
         if not isinstance(path, str) or not path.startswith("/") or path.startswith("//") or "?" in path or "#" in path:
             raise MediaServerError("invalid_url")
         try:
             with self.session.request(method, self.url + path, params=params, json=json,
-                                      timeout=(3, 10), verify=self.verify_ssl,
+                                      timeout=self.timeout, verify=self.verify_ssl,
                                       allow_redirects=False, stream=True) as response:
                 status = response.status_code
                 if 300 <= status < 400:
                     raise MediaServerError("redirect_denied")
-                if status not in success_statuses:
-                    code = {401: "unauthorized", 403: "forbidden", 404: "not_found"}.get(status)
-                    raise MediaServerError(code or ("server_error" if status >= 500 else "request_rejected"))
+                if not read_body(status):
+                    return status, b""
                 length = response.headers.get("Content-Length")
                 if length is not None:
                     try:
@@ -85,7 +86,7 @@ class MediaServerHTTP:
                     if len(body) + len(chunk) > self.RESPONSE_LIMIT:
                         raise MediaServerError("response_too_large")
                     body.extend(chunk)
-                return bytes(body)
+                return status, bytes(body)
         except requests.exceptions.SSLError:
             raise MediaServerError("tls_error") from None
         except requests.exceptions.Timeout:
@@ -96,6 +97,17 @@ class MediaServerHTTP:
             raise MediaServerError(code) from None
         except requests.exceptions.RequestException:
             raise MediaServerError("connection_error") from None
+
+    def request_result(self, method, path, *, params=None, json=None):
+        return self._exchange(method, path, params=params, json=json)
+
+    def _request(self, method, path, *, params=None, json=None, success_statuses=(200,)):
+        status, body = self._exchange(method, path, params=params, json=json,
+                                       read_body=lambda status: status in success_statuses)
+        if status not in success_statuses:
+            code = {401: "unauthorized", 403: "forbidden", 404: "not_found"}.get(status)
+            raise MediaServerError(code or ("server_error" if status >= 500 else "request_rejected"))
+        return body
 
     def request_json(self, method, path, *, params=None, json=None, success_statuses=(200,)):
         body = self._request(method, path, params=params, json=json, success_statuses=success_statuses)

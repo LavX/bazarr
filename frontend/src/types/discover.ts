@@ -224,6 +224,7 @@ export interface LocalOwnership {
   truncated: boolean;
   selected_episode_owned: null;
   complete_series: null;
+  seasons_owned: number[];
 }
 export interface LocalCopy {
   local_id: number;
@@ -304,6 +305,7 @@ export interface MetadataFallbackTitle extends Omit<
   id: string | number;
   media_type: "movie" | "show";
   tvdb_id?: number | null;
+  tmdb_id?: number | null;
   seasons?: null;
 }
 export type MetadataTitle =

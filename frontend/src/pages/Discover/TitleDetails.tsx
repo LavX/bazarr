@@ -22,6 +22,8 @@ import { useDiscoverMetadata } from "@/apis/hooks/discover";
 import { useDiscover } from "@/contexts/Discover";
 import EpisodePicker from "./EpisodePicker";
 import MediaPoster from "./MediaPoster";
+import SeerrAction from "./SeerrAction";
+import { useSeerrClause } from "./seerrTitle";
 import styles from "./Discover.module.scss";
 
 /** The selected title as the page currently knows it, cached or received. */
@@ -200,13 +202,19 @@ export default function TitleDetails({
         ? `${destination.label} · Copy ${destination.to.split("/").pop()}`
         : destination.label,
   }));
-  const libraryUncertain =
-    !inLibrary &&
-    (movie?.copies === undefined ||
-      movie.copies_truncated ||
-      movie.ownership?.truncated ||
-      !received ||
-      details.isError);
+  // What the page knows about local copies and owned seasons is incomplete.
+  // The hero's own label needs this only for a title believed absent (hence
+  // the !inLibrary below), but the Seerr season grouping needs the opposite
+  // case: a show that IS held, whose owned-seasons list was cut short by the
+  // copy limit or left incomplete by a copy with no owning instance.
+  const ownershipUncertain =
+    movie?.copies === undefined ||
+    movie.copies_truncated === true ||
+    movie.ownership?.truncated === true ||
+    movie.ownership?.unknown_owners === true ||
+    !received ||
+    details.isError;
+  const libraryUncertain = !inLibrary && ownershipUncertain;
   const libraryLabel = inLibrary
     ? "In your library"
     : libraryUncertain
@@ -214,6 +222,10 @@ export default function TitleDetails({
         ? "Checking your library…"
         : "Library check incomplete"
       : "Not in your library";
+  // Where the title stands is one sentence, not two labels: this chip is the
+  // subject and Seerr's state is its second clause. Reading them as separate
+  // elements made the row state the same fact twice over.
+  const seerrClause = useSeerrClause(movie, inLibrary);
   const hasBackdrop = Boolean(
     movie?.backdrop_url && failedBackdrop !== movie.backdrop_url,
   );
@@ -294,7 +306,9 @@ export default function TitleDetails({
               <div className={styles.detailAvailability}>
                 <span className={styles.libraryStatus} data-local={inLibrary}>
                   <FontAwesomeIcon icon={inLibrary ? faCheck : faCloud} />
-                  {libraryLabel}
+                  {seerrClause
+                    ? `${libraryLabel} · ${seerrClause}`
+                    : libraryLabel}
                 </span>
                 {destinations.length === 1 && (
                   <Button
@@ -331,6 +345,11 @@ export default function TitleDetails({
                     </Menu.Dropdown>
                   </Menu>
                 )}
+                <SeerrAction
+                  title={movie}
+                  inLibrary={inLibrary}
+                  ownershipUncertain={ownershipUncertain}
+                />
               </div>
             </div>
           </article>

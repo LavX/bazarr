@@ -65,6 +65,9 @@ USER_VISIBLE_SECRETS = frozenset({
     "jellyfin.apikey",
     "emby.apikey",
     "silo.apikey",
+    # Seerr: the key is admin access to Seerr, encrypted at rest and shown
+    # only in the Connections form.
+    "seerr.apikey",
     # Network proxy (full login pair).
     "proxy.username",
     "proxy.password",

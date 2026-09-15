@@ -277,3 +277,30 @@ def test_conflict_outside_title_shortlist_survives_final_grouping(library_databa
         sa.event.remove(engine, "before_cursor_execute", record)
     assert statements and all(statement.lstrip().upper().startswith("SELECT") for statement in statements)
     assert {table.name: session.execute(sa.select(table)).all() for table in Base.metadata.sorted_tables} == before
+
+
+def test_ownership_lists_seasons_with_a_local_episode(library_database):
+    from app.database import TableEpisodes, TableLanguagesProfiles, TableShows
+    from discover.library import attach_local_copies
+    engine, session = library_database
+    session.add(TableLanguagesProfiles(profileId=1, items="[]", name="Test"))
+    show = TableShows(title="Firefly", year="2002", tvdbId=78874, imdbId="tt0303461", path="/tv/Firefly",
+                      sonarrSeriesId=1, arr_instance_id=1, profileId=1, sortTitle="firefly")
+    session.add(show)
+    session.flush()
+    for season, episode in ((1, 1), (1, 2), (3, 4)):
+        session.add(TableEpisodes(series_id=show.id, sonarrSeriesId=1, sonarrEpisodeId=season * 100 + episode,
+                                  arr_instance_id=1, season=season, episode=episode,
+                                  path=f"/tv/Firefly/S{season:02d}E{episode:02d}.mkv", title="ep"))
+    # Same series row, a different arr instance: the season side of the grouped
+    # query carries the same owner predicate as the count, so season 5 must not
+    # appear. This is the central invariant of the multiple-arr-instances
+    # feature, and the count alone would not catch a predicate dropped here.
+    session.add(TableEpisodes(series_id=show.id, sonarrSeriesId=1, sonarrEpisodeId=501,
+                              arr_instance_id=2, season=5, episode=1,
+                              path="/tv/Firefly/S05E01.mkv", title="ep"))
+    session.commit()
+    items = attach_local_copies([{"media_type": "show", "source": "tmdb", "id": 1437, "tvdb_id": 78874,
+                                  "imdb_id": "tt0303461", "title": "Firefly", "year": 2002}])
+    assert items[0]["ownership"]["seasons_owned"] == [1, 3]
+    assert items[0]["ownership"]["episode_count"] == 3
