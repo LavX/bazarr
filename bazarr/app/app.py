@@ -20,6 +20,18 @@ class CustomRequest(Request):
         self.max_form_parts = 10000
 
 
+def cors_is_enabled(config=settings):
+    """Read the cors.enabled flag.
+
+    This used to be `settings.get('cors', 'enabled')`, which reads like "the
+    enabled key of the cors section" but is dynaconf's get(key, default): it
+    returned the whole `cors` section and fell back to the string 'enabled'.
+    Either way the result was a non-empty truthy object, so CORS was on for
+    everyone and the setting did nothing.
+    """
+    return bool(config.cors.enabled)
+
+
 def create_app():
     # Flask Setup
     app = Flask(__name__)
@@ -34,7 +46,7 @@ def create_app():
 
     app.config['RESTX_MASK_SWAGGER'] = False
 
-    if settings.get('cors', 'enabled'):
+    if cors_is_enabled():
         CORS(app)
 
     if args.dev:
