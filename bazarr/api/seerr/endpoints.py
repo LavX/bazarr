@@ -36,8 +36,7 @@ def _status_payload(media_type, tmdb_id):
             return {"configured": True,
                     **operations.normalize_media(media_type, tmdb_id, status, body, cap, operations.link_base(cap))}
     except MediaServerError as error:
-        code = "upstream_error" if error.code in ("upstream_error", "invalid_response", "server_error") else "unreachable"
-        return {"configured": True, "error_code": code}
+        return {"configured": True, "error_code": operations.error_code_for(error)}
     except ValueError:
         return {"configured": False, "error_code": "not_configured"}
 
@@ -129,7 +128,7 @@ class SeerrRequest(Resource):
             with operations.get_seerr_client() as client:
                 cap = operations.capability(client.public_settings())
                 status, body = client.create_request(payload)
-                result = operations.request_outcome(status, body, cap)
+                result = operations.request_outcome(status, body)
                 # Only a successful outcome gets a link: an error body must
                 # stay exactly the error_code shape, never gain extra keys
                 # that could carry upstream detail toward the client.
@@ -139,7 +138,6 @@ class SeerrRequest(Resource):
                         result["link"] = f"{base}/{payload['mediaType']}/{payload['mediaId']}"
                 return result, 200
         except MediaServerError as error:
-            code = "upstream_error" if error.code in ("invalid_response", "server_error") else "unreachable"
-            return {"error_code": code}, 200
+            return {"error_code": operations.error_code_for(error)}, 200
         except ValueError:
             return {"error_code": "not_configured"}, 200

@@ -1,6 +1,8 @@
 # coding=utf-8
 """What Bazarr shows for each Seerr answer, across the three flavours."""
 
+import logging
+
 import pytest
 
 from test_media_server_http import http_fixture as http_fixture
@@ -30,6 +32,17 @@ def test_link_base_prefers_external_then_application_then_api_url(monkeypatch):
     assert link_base(capability(SEERR_PUBLIC)) == "http://seerr:5055"
     monkeypatch.setattr(settings.seerr, "external_url", "https://me.example/seerr/")
     assert link_base(capability(SEERR_PUBLIC)) == "https://me.example/seerr"
+
+
+def test_link_base_rejects_a_candidate_without_an_http_scheme(monkeypatch):
+    from app.config import settings
+    from seerr.operations import capability, link_base
+    monkeypatch.setattr(settings.seerr, "external_url", "javascript:alert(1)")
+    monkeypatch.setattr(settings.seerr, "url", "http://seerr:5055")
+    # The malformed candidate is skipped in favour of the next valid one.
+    assert link_base(capability({})) == "http://seerr:5055"
+    monkeypatch.setattr(settings.seerr, "url", "seerr.example/no-scheme")
+    assert link_base(capability({})) == ""
 
 
 @pytest.mark.parametrize("blocklist, code, expected", [
@@ -137,11 +150,30 @@ def test_4k_axis_is_independent():
 ])
 def test_request_outcomes(status, body, expected):
     from seerr.operations import request_outcome
-    result = request_outcome(status, body, _cap())
+    result = request_outcome(status, body)
     for key, value in expected.items():
         assert result[key] == value
     if status == 201:
         assert result["request"] == {"id": 12, "status": "approved", "is4k": False, "seasons": []}
+
+
+def test_a_201_with_an_unusable_body_is_still_reported_as_requested():
+    """A request Seerr really created must never read back as a failure: that
+    sends the user into a retry, which then reads back as already_requested."""
+    from seerr.operations import request_outcome
+    assert request_outcome(201, None) == {"outcome": "requested", "request": None}
+    assert request_outcome(201, [1, 2, 3]) == {"outcome": "requested", "request": None}
+    assert request_outcome(201, "not json") == {"outcome": "requested", "request": None}
+
+
+def test_request_outcome_picks_the_newest_non_4k_request_by_id():
+    """Order in the requests array is not a guarantee; only the id is."""
+    from seerr.operations import normalize_media
+    body = {"id": 550, "mediaInfo": {"status": 1, "status4k": 1, "seasons": [],
+                                     "requests": [{"id": 9, "status": 1, "is4k": False, "seasons": []},
+                                                  {"id": 3, "status": 1, "is4k": False, "seasons": []}]}}
+    result = normalize_media("movie", 550, 200, body, _cap(), "http://s")
+    assert result["request"]["id"] == 9
 
 
 def test_test_connection_reports_capability_and_acting_user(http_fixture):
@@ -167,9 +199,14 @@ def test_test_connection_distinguishes_rejected_key(http_fixture):
 
 def test_test_connection_never_echoes_the_key_or_exception_text(http_fixture, caplog):
     from seerr.operations import test_connection
+    # The code logs the failure at DEBUG. Without raising the capture level
+    # to match, caplog.text stays empty and the assertion below cannot fail
+    # no matter what leaks into the log message.
+    caplog.set_level(logging.DEBUG)
     base, _records = http_fixture([(500, b"synthetic-key leaked", {})])
     result = test_connection(base, "synthetic-key", True)
     assert result == {"success": False, "error_code": "connection_failed"}
+    assert caplog.text
     assert "synthetic-key" not in caplog.text
 
 

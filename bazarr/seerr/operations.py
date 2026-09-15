@@ -48,7 +48,9 @@ def capability(public: dict) -> dict:
 def link_base(cap: dict) -> str:
     for candidate in (settings.seerr.external_url, cap.get("application_url"), settings.seerr.url):
         if isinstance(candidate, str) and candidate.strip():
-            return candidate.strip().rstrip("/")
+            candidate = candidate.strip().rstrip("/")
+            if candidate.lower().startswith(("http://", "https://")):
+                return candidate
     return ""
 
 
@@ -100,7 +102,7 @@ def normalize_media(media_type, tmdb_id, status, body, cap, base_link) -> dict:
         result["status_4k"] = _decode_status(info.get("status4k"), cap)
     requests = _requests(info) if known else []
     non_4k = [r for r in requests if not r["is4k"]]
-    result["request"] = non_4k[-1] if non_4k else None
+    result["request"] = max(non_4k, key=lambda row: row["id"]) if non_4k else None
     open_non_4k = any(r["status"] in _OPEN_REQUEST for r in non_4k)
     open_4k = any(r["status"] in _OPEN_REQUEST for r in requests if r["is4k"])
     lane_4k = cap["movie_4k"] if media_type == "movie" else cap["series_4k"]
@@ -135,10 +137,13 @@ def normalize_media(media_type, tmdb_id, status, body, cap, base_link) -> dict:
     return result
 
 
-def request_outcome(status, body, cap) -> dict:
+def request_outcome(status, body) -> dict:
     message = body.get("message") if isinstance(body, dict) else None
-    if status == 201 and isinstance(body, dict):
-        rows = _requests({"requests": [body]})
+    if status == 201:
+        # Seerr created the request either way: a body we cannot read is not
+        # a reason to report failure and send the user into a retry that then
+        # reads back as already_requested.
+        rows = _requests({"requests": [body]}) if isinstance(body, dict) else []
         return {"outcome": "requested", "request": rows[0] if rows else None}
     if status == 202:
         return {"outcome": "nothing_to_request"}
@@ -158,6 +163,11 @@ def request_outcome(status, body, cap) -> dict:
     if status == 400:
         return {"error_code": "validation"}
     return {"error_code": "upstream_error"}
+
+
+def error_code_for(error: MediaServerError) -> str:
+    """Map a transport failure to the small vocabulary the API responds with."""
+    return "upstream_error" if error.code in ("upstream_error", "invalid_response", "server_error") else "unreachable"
 
 
 _find_cache = {}

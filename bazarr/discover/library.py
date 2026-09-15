@@ -136,22 +136,21 @@ def _ownership(connection, items):
     from app.database import TableShows as Show
     ids = {copy["local_id"] for item in items if item["media_type"] == "show" for copy in item.get("copies", [])}
     counts = {}
+    seasons = {}
     if ids:
-        statement = (select(Episode.series_id, func.count(Episode.id))
+        # One grouped query stands in for the former pair (an episode count and
+        # a distinct-seasons read) that shared the same join and filter: each
+        # (series, season) row's count folds into the per-series total, and its
+        # season, when not null, joins that series' owned-seasons set.
+        statement = (select(Episode.series_id, Episode.season, func.count(Episode.id))
                      .join(Show, Show.id == Episode.series_id)
                      .where(Episode.series_id.in_(ids), Show.arr_instance_id.is_not(None),
                             Episode.arr_instance_id == Show.arr_instance_id)
-                     .group_by(Episode.series_id))
-        counts = dict(connection.execute(statement).all())
-    seasons = {}
-    if ids:
-        statement = (select(Episode.series_id, Episode.season)
-                     .join(Show, Show.id == Episode.series_id)
-                     .where(Episode.series_id.in_(ids), Show.arr_instance_id.is_not(None),
-                            Episode.arr_instance_id == Show.arr_instance_id, Episode.season.is_not(None))
-                     .distinct())
-        for series_id, season in connection.execute(statement).all():
-            seasons.setdefault(series_id, set()).add(int(season))
+                     .group_by(Episode.series_id, Episode.season))
+        for series_id, season, count in connection.execute(statement).all():
+            counts[series_id] = counts.get(series_id, 0) + count
+            if season is not None:
+                seasons.setdefault(series_id, set()).add(int(season))
     for item in items:
         if item["media_type"] != "show":
             continue

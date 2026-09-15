@@ -470,12 +470,12 @@ validators = [
     Validator('jellyfin.verify_ssl', must_exist=True, default=True, is_type_of=bool),
 
     # seerr section (Overseerr, Jellyseerr and Seerr share this API)
-    Validator('seerr.url', must_exist=True, default='', is_type_of=str),
-    Validator('seerr.apikey', must_exist=True, default='', is_type_of=str),
+    Validator('seerr.url', must_exist=True, default='', is_type_of=str, cast=str),
+    Validator('seerr.apikey', must_exist=True, default='', is_type_of=str, cast=str),
     Validator('seerr.verify_ssl', must_exist=True, default=True, is_type_of=bool),
     # Browser-facing base for links. Empty means Seerr's own applicationUrl,
     # then the API url above.
-    Validator('seerr.external_url', must_exist=True, default='', is_type_of=str),
+    Validator('seerr.external_url', must_exist=True, default='', is_type_of=str, cast=str),
 
     # proxy section
     Validator('proxy.type', must_exist=True, default=None, is_type_of=(NoneType, str),
