@@ -18,12 +18,14 @@ import {
   Title,
   useComputedColorScheme,
 } from "@mantine/core";
+import { useDocumentTitle } from "@mantine/hooks";
 import { faMagnifyingGlass } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useSystemSettings } from "@/apis/hooks";
 import { useDiscoverMetadata } from "@/apis/hooks/discover";
 import { useLanguageProfiles, useLanguages } from "@/apis/hooks/languages";
 import { useProviderHubProviders } from "@/apis/hooks/providerHub";
+import { useAppTitle } from "@/apis/hooks/site";
 import { useDiscover } from "@/contexts/Discover";
 import {
   discoverPageKey,
@@ -53,6 +55,7 @@ function listNames(names: string[]): string {
 }
 
 export default function Discover() {
+  useDocumentTitle(`Discover - ${useAppTitle()}`);
   const {
     state,
     rememberPage,

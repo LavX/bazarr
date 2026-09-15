@@ -10,7 +10,7 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useDistSaveSettings, useDistSettings } from "@/apis/hooks";
-import { useInstanceName } from "@/apis/hooks/site";
+import { useAppTitle } from "@/apis/hooks/site";
 import KeysPanel from "./KeysPanel";
 import OverviewPanel from "./OverviewPanel";
 import SettingsPanel from "./SettingsPanel";
@@ -23,7 +23,7 @@ const DistributionHubView: FunctionComponent = () => {
   const settings = useDistSettings();
   const saveSettings = useDistSaveSettings();
 
-  useDocumentTitle(`Distribution Hub - ${useInstanceName()}`);
+  useDocumentTitle(`Distribution Hub - ${useAppTitle()}`);
 
   const enabled = settings.data?.enabled ?? true;
   const restartRequired = settings.data?.restart_required ?? false;

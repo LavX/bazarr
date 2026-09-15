@@ -39,7 +39,7 @@ import {
   useMovieHistory,
   useMovieModification,
 } from "@/apis/hooks/movies";
-import { useInstanceName } from "@/apis/hooks/site";
+import { useAppTitle } from "@/apis/hooks/site";
 import { Action, FullPageDropzone, Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import { CombineModal } from "@/components/forms/CombineForm";
@@ -139,7 +139,7 @@ const MovieDetailView: FunctionComponent = () => {
   const hasTask = useIsMovieActionRunning();
 
   useDocumentTitle(
-    `${movie?.title ?? "Unknown Movie"} - ${useInstanceName()} (Movies)`,
+    `${movie?.title ?? "Unknown Movie"} - ${useAppTitle()} (Movies)`,
   );
 
   const openDropzone = useRef<VoidFunction>(null);

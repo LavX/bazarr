@@ -11,7 +11,7 @@ import {
 } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import { useSystemReleases } from "@/apis/hooks";
-import { useInstanceName } from "@/apis/hooks/site";
+import { useAppTitle } from "@/apis/hooks/site";
 import { QueryOverlay } from "@/components/async";
 import { BuildKey } from "@/utilities";
 import classes from "./index.module.css";
@@ -20,7 +20,7 @@ const SystemReleasesView: FunctionComponent = () => {
   const releases = useSystemReleases();
   const { data } = releases;
 
-  useDocumentTitle(`Releases - ${useInstanceName()} (System)`);
+  useDocumentTitle(`Releases - ${useAppTitle()} (System)`);
 
   return (
     <Container size="md" py={12}>

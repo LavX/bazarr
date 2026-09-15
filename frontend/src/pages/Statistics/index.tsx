@@ -11,7 +11,7 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useDistSettings } from "@/apis/hooks";
-import { useInstanceName } from "@/apis/hooks/site";
+import { useAppTitle } from "@/apis/hooks/site";
 import DistributionHubOverview from "@/pages/DistributionHub/OverviewPanel";
 import ActivityPanel from "./ActivityPanel";
 import OverviewPanel from "./OverviewPanel";
@@ -31,7 +31,7 @@ const StatisticsView: FunctionComponent = () => {
   const [tab, setTab] = useState<TabKey>("overview");
   const { data: distSettings } = useDistSettings();
 
-  useDocumentTitle(`Statistics - ${useInstanceName()}`);
+  useDocumentTitle(`Statistics - ${useAppTitle()}`);
 
   // Hide the distribution tab while the endpoint is off: compat_usage is only
   // written when it is serving, so the chart would be a flat zero line that
