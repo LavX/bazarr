@@ -224,6 +224,7 @@ jobs:
             tests/bazarr/test_login_backdrops.py \
             tests/bazarr/test_onboarding_flag.py \
             tests/bazarr/test_session_auth.py \
+            tests/bazarr/test_socket_auth.py \
             tests/bazarr/test_session_cookie_policy.py \
             tests/bazarr/test_session_settings_roundtrip.py \
             tests/bazarr/test_ui.py \

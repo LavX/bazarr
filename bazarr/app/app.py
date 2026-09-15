@@ -9,6 +9,7 @@ from flask_compress import Compress
 from flask_cors import CORS
 from flask_socketio import SocketIO
 
+from .auth import is_session_authenticated
 from .database import database
 from .get_args import args
 from .config import settings, base_url
@@ -91,6 +92,52 @@ def cors_is_enabled(config=settings):
     return bool(config.cors.enabled)
 
 
+def socket_allowed_origins(config=settings):
+    """Which origins may open the event socket.
+
+    The socket was configured with a wildcard, which is the same defect the
+    HTTP CORS switch had and worse in effect: engineio reflects the caller's
+    origin and adds the credentials header, so any page in any tab could open
+    a long poll and read the whole live event stream.
+
+    None is engineio's same-origin mode: it builds the allowed origin from the
+    request's own scheme and host, honouring X-Forwarded-Proto and
+    X-Forwarded-Host, so a reverse-proxied install keeps working. The wildcard
+    returns only when the operator turns CORS on deliberately, which is the
+    same switch the HTTP routes obey.
+    """
+    return '*' if cors_is_enabled(config) else None
+
+
+@socketio.on('connect')
+def _authorize_socket_connection(auth=None):
+    """Refuse an unauthenticated socket connection when a login mode is on.
+
+    The auth argument is the payload flask-socketio hands a connect handler; it
+    is unused here because the browser authenticates with the session cookie or
+    the basic-auth header the handshake already carries.
+
+    There was no connect handler at all, so the gate that protects the rest of
+    the application did not exist here: anyone who could reach the port could
+    subscribe and watch every library and task event, with no cookie and no
+    API key. Returning False rejects the connection.
+
+    With no login mode configured the socket stays open, which matches what
+    every other surface does in that configuration.
+    """
+    if settings.auth.type == 'form':
+        return is_session_authenticated()
+    if settings.auth.type == 'basic':
+        # Imported here: utilities.helper reads app.config at import time, and
+        # pulling it in at module scope makes this module part of that cycle.
+        from utilities.helper import check_credentials
+
+        credentials = request.authorization
+        return bool(credentials and check_credentials(credentials.username, credentials.password, request,
+                                                      log_success=False))
+    return True
+
+
 def create_app():
     # Flask Setup
     app = Flask(__name__)
@@ -115,7 +162,8 @@ def create_app():
         app.config["DEBUG"] = False
 
     from engineio.async_drivers import threading  # noqa: F401
-    socketio.init_app(app, path=f'{base_url.rstrip("/")}/api/socket.io', cors_allowed_origins='*',
+    socketio.init_app(app, path=f'{base_url.rstrip("/")}/api/socket.io',
+                      cors_allowed_origins=socket_allowed_origins(),
                       async_mode='threading', allow_upgrades=False, transports='polling', engineio_logger=False)
 
     @app.errorhandler(404)
