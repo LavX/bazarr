@@ -16,6 +16,7 @@ import {
   useLanguages,
   useSystemProviders,
 } from "@/apis/hooks";
+import { useSportsAvailability } from "@/apis/hooks/sports";
 import { Selector } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import { useSelectorOptions } from "@/utilities";
@@ -39,6 +40,7 @@ const ActivityPanel: FunctionComponent = () => {
   const [lang, setLanguage] = useState<Nullable<Language.Server>>(null);
   const [provider, setProvider] = useState<Nullable<System.Provider>>(null);
 
+  const { enabled: sportsEnabled } = useSportsAvailability();
   const stats = useHistoryStats(timeFrame, action, provider, lang);
   const { data } = stats;
 
@@ -47,7 +49,13 @@ const ActivityPanel: FunctionComponent = () => {
 
     const movies = data.movies.map((v) => ({ date: v.date, movies: v.count }));
     const series = data.series.map((v) => ({ date: v.date, series: v.count }));
-    return merge(movies, series);
+    // The endpoint has counted sports downloads all along; plotting only two
+    // of the three series it returns would drop them silently.
+    const sports = (data.sports ?? []).map((v) => ({
+      date: v.date,
+      sports: v.count,
+    }));
+    return merge(merge(movies, series), sports);
   }, [data]);
 
   const theme = useMantineTheme();
@@ -107,6 +115,13 @@ const ActivityPanel: FunctionComponent = () => {
                   dataKey="movies"
                   fill={theme.colors.yellow[4]}
                 />
+                {sportsEnabled && (
+                  <Bar
+                    name="Sports"
+                    dataKey="sports"
+                    fill={theme.colors.teal[4]}
+                  />
+                )}
               </BarChart>
             </ResponsiveContainer>
           </div>

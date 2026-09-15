@@ -658,8 +658,11 @@ def test_sync_subtitles_marks_skipped_progress_complete(mocker):
     )
 
 
-def test_subsyncer_reports_engine_progress(monkeypatch, tmp_path):
+def test_subsyncer_reports_engine_progress(monkeypatch, tmp_path, schema_session):
+    from app import database as db_module
     from subtitles.tools.subsyncer import SubSyncer
+
+    monkeypatch.setattr(db_module, 'database', schema_session)
 
     subtitle = tmp_path / 'Movie.hu.srt'
     _write(subtitle, 'original')
@@ -874,7 +877,11 @@ def test_tagged_sync_output_defers_only_to_an_actual_media_owner(
     rows = [SimpleNamespace(path=str(path), arr_instance_id=None) for path in media_folder.iterdir()
             if path.is_file() and path.suffix.lower() in ('.mkv', '.mp4')]
     db = Mock()
-    db.execute.return_value.all.return_value = rows
+    def execute(statement):
+        model = statement.column_descriptions[0]['entity']
+        selected = [] if model is db_module.TableSportsEvents else rows
+        return SimpleNamespace(all=lambda: selected)
+    db.execute.side_effect = execute
     monkeypatch.setattr(db_module, 'database', db)
     monkeypatch.setattr(path_mappings, 'path_replace_instance', lambda path, *args: path)
     result = add_sync_engine_outputs(str(subtitle_folder), {}, video_path=str(video))

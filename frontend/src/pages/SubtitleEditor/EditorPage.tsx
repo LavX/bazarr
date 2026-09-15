@@ -66,7 +66,11 @@ import {
   subtitleDocumentReducer,
 } from "./document";
 import EditableCueTable from "./EditableCueTable";
-import { buildEditorAutosaveKey, buildEditorSubtitlesUrl } from "./editorScope";
+import {
+  buildEditorAutosaveKey,
+  buildEditorSubtitlesUrl,
+  editorBreadcrumb,
+} from "./editorScope";
 import EditorToolbar from "./EditorToolbar";
 import JumpToCue from "./JumpToCue";
 import { detectFormat, getParser } from "./parsers";
@@ -1788,14 +1792,11 @@ export default function EditorPage() {
   }
 
   // Breadcrumb links
-  const isSeries = mediaType === "episode" || mediaType === "series";
-  const listPath = isSeries ? "/series" : "/movies";
-  const listLabel = isSeries ? "Series" : "Movies";
-  const detailPath = data?.mediaId
-    ? isSeries
-      ? `/series/${data.mediaId}`
-      : `/movies/${data.mediaId}`
-    : undefined;
+  const { listPath, listLabel, detailPath } = editorBreadcrumb(
+    mediaType,
+    data?.mediaId,
+    scopedArrInstanceId,
+  );
 
   const selectedCue =
     selectedIndex >= 0 && selectedIndex < docState.cues.length

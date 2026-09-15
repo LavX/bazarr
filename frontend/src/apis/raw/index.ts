@@ -12,6 +12,7 @@ import plex from "./plex";
 import providerHub from "./providerHub";
 import providers from "./providers";
 import series from "./series";
+import sports from "./sports";
 import subtitles from "./subtitles";
 import system from "./system";
 import utils from "./utils";
@@ -25,6 +26,7 @@ const api = {
   movies,
   mediaServers,
   series,
+  sports,
   providers,
   history,
   subtitles,

@@ -11,6 +11,7 @@ describe("connection tabs", () => {
     expect(CONNECTION_TABS).toEqual([
       "sonarr",
       "radarr",
+      "sportarr",
       "plex",
       "jellyfin",
       "emby",
@@ -24,6 +25,7 @@ describe("connection tabs", () => {
   });
 
   it("parses a leading-hash fragment to its tab", () => {
+    expect(parseTabFromHash("#sportarr")).toBe("sportarr");
     expect(parseTabFromHash("#plex")).toBe("plex");
     expect(parseTabFromHash("#jellyfin")).toBe("jellyfin");
     expect(parseTabFromHash("#emby")).toBe("emby");

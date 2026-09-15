@@ -177,6 +177,7 @@ class Scheduler:
     def update_configurable_tasks(self):
         self.__sonarr_update_task()
         self.__radarr_update_task()
+        self.__sportarr_update_task()
         self.__sonarr_full_update_task()
         self.__radarr_full_update_task()
         self.__update_bazarr_task()
@@ -308,6 +309,10 @@ class Scheduler:
                     id=f'update_movies_{inst.id}', name=f'Sync with Radarr ({inst.name})',
                     replace_existing=True,
                     kwargs=dict(arr_instance_id=inst.id, wait_for_completion=True))
+
+    def __sportarr_update_task(self):
+        from sportarr.scheduler import configure_sports_jobs
+        configure_sports_jobs(self.aps_scheduler, database)
 
     def __provider_hub_worker_reaper_task(self):
         # Hub workers are spawned lazily per pool and provider and nothing else

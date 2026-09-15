@@ -12,6 +12,8 @@ import logging
 
 import srt
 import pysubs2
+from sportarr.profile_hooks import sports_write_kwargs, finish_translation
+from sportarr.connection import check_cancelled
 from subtitles.tools.subsync_engines import staged_subtitle_write
 from media_servers.events import publication_callback
 import requests
@@ -48,7 +50,7 @@ class GeminiTranslatorService:
 
     def __init__(self, source_srt_file, dest_srt_file, to_lang, media_type, sonarr_series_id, sonarr_episode_id,
                  radarr_id, forced, hi, video_path, from_lang, orig_to_lang,
-                 arr_instance_id=None, **kwargs):
+                 arr_instance_id=None, sports_operation=None, cancel=None, **kwargs):
         self.source_srt_file = source_srt_file
         self.dest_srt_file = dest_srt_file
         self.to_lang = to_lang
@@ -58,6 +60,8 @@ class GeminiTranslatorService:
         # The owning arr instance (#156): radarrId and sonarrSeriesId are only
         # unique together with it, so every media lookup below carries it.
         self.arr_instance_id = arr_instance_id
+        self.sports_operation = sports_operation
+        self.cancel = cancel
         self.from_lang = from_lang
         self.video_path = video_path
         self.forced = forced
@@ -104,7 +108,9 @@ class GeminiTranslatorService:
             self.model_name = settings.translator.gemini_model
             self.batch_size = self._get_batch_size()
             self.description = get_description(self.media_type, self.radarr_id, self.sonarr_series_id,
-                                               arr_instance_id=self.arr_instance_id)
+                                               arr_instance_id=self.arr_instance_id,
+                                               **({"sports_context": self.sports_operation.context}
+                                                  if self.sports_operation else {}))
 
             if self.input_file:
                 self.progress_file = os.path.join(os.path.dirname(self.input_file), f".{os.path.basename(self.input_file)}.progress")
@@ -114,10 +120,16 @@ class GeminiTranslatorService:
                                            on_publish=publication_callback(self.media_type, self.video_path,
                                                                            'translate', self.arr_instance_id),
                                        source_paths=(self.source_srt_file,),
-                                           before_publish=lambda: jobs_queue.update_job_progress(job_id=job_id)) as temporary:
+                                           before_publish=lambda: jobs_queue.update_job_progress(job_id=job_id),
+                                           **sports_write_kwargs(self, job_id)) as temporary:
                     self.output_file = temporary
-                    self._check_saved_progress()
+                    if self.sports_operation:
+                        self.progress_file = temporary + '.progress'
+                    if not self.sports_operation:
+                        self._check_saved_progress()
                     self._translate_with_gemini()
+                    if self.sports_operation and (not os.path.isfile(temporary) or not os.path.getsize(temporary)):
+                        raise RuntimeError("Gemini returned no translated text")
                     add_translator_info(temporary, f"# Subtitles translated with {settings.translator.gemini_model} # ")
             except JobCancelled:
                 raise
@@ -136,8 +148,12 @@ class GeminiTranslatorService:
             message = (f"{language_from_alpha2(self.from_lang)} subtitles translated to "
                        f"{language_from_alpha3(self.to_lang)}.")
             result = create_process_result(message, self.video_path, self.orig_to_lang, self.forced, self.hi,
-                                           self.dest_srt_file, self.media_type)
+                                           self.dest_srt_file, self.media_type,
+                                           **({"sports_context": self.sports_operation.context}
+                                              if self.sports_operation else {}))
 
+            if finish_translation(self, result):
+                return self.dest_srt_file
             if self.media_type == 'episode':
                 history_log(action=6, sonarr_series_id=self.sonarr_series_id, sonarr_episode_id=self.sonarr_episode_id,
                             result=result)
@@ -380,8 +396,10 @@ class GeminiTranslatorService:
         }
 
         try:
+            check_cancelled(self.cancel)
             jobs_queue.update_job_progress(job_id=self.job_id)
             response = requests.request("POST", url, headers=headers, data=payload)
+            check_cancelled(self.cancel)
             response.raise_for_status()  # Raise an exception for bad status codes
 
             def clean_json_string(json_string):
@@ -393,6 +411,16 @@ class GeminiTranslatorService:
             result = clean_json_string(''.join(part['text'] for part in parts))
 
             translated_lines = json_tricks.loads(result)
+            if self.sports_operation:
+                expected = {item['index'] for item in batch}
+                if (not isinstance(translated_lines, list)
+                        or any(not isinstance(item, dict)
+                               or not isinstance(item.get('index'), str)
+                               or not isinstance(item.get('content'), str)
+                               or not item['content'].strip() for item in translated_lines)
+                        or len(translated_lines) != len(expected)
+                        or {item['index'] for item in translated_lines} != expected):
+                    raise ValueError('Gemini did not return one usable translation per requested cue')
             chunk_size = len(translated_lines)
 
             # Process translated lines

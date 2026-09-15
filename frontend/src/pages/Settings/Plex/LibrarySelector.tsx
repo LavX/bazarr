@@ -10,7 +10,7 @@ import styles from "@/pages/Settings/Plex/LibrarySelector.module.scss";
 
 export type LibrarySelectorProps = BaseInput<string[]> & {
   label: string;
-  libraryType: "movie" | "show";
+  libraryType: "movie" | "show" | "all";
   settingKeyIds?: string;
   description?: string;
 };
@@ -46,7 +46,12 @@ const LibrarySelector: FunctionComponent<LibrarySelectorProps> = (props) => {
     enabled: isAuthenticated && hasServers && hasSelectedServer,
   });
 
-  const filtered = libraries.filter((library) => library.type === libraryType);
+  // Plex has no sports library type, so the sports selection offers every
+  // library; the other selectors restrict to their own type.
+  const filtered =
+    libraryType === "all"
+      ? libraries
+      : libraries.filter((library) => library.type === libraryType);
   const normalizedValue = Array.isArray(value) ? value : value ? [value] : [];
 
   // Add stale libraries to dropdown data
@@ -121,7 +126,9 @@ const LibrarySelector: FunctionComponent<LibrarySelectorProps> = (props) => {
         )}
         {!error && !isLoading && selectData.length === 0 && (
           <Alert color="gray" variant="light" className={styles.alertMessage}>
-            No {libraryType} libraries found on your Plex server.
+            {libraryType === "all"
+              ? "No libraries found on your Plex server."
+              : `No ${libraryType} libraries found on your Plex server.`}
           </Alert>
         )}
       </Stack>

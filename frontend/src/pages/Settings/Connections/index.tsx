@@ -33,6 +33,7 @@ import MediaServerSection from "@/pages/Settings/MediaServers/MediaServerSection
 import PlexSection from "@/pages/Settings/Plex/PlexSection";
 import RadarrSection from "@/pages/Settings/Radarr/RadarrSection";
 import SonarrSection from "@/pages/Settings/Sonarr/SonarrSection";
+import SportarrSection from "@/pages/Settings/Sportarr/SportarrSection";
 import InstanceCard from "./InstanceCard";
 import InstanceFormModal from "./InstanceFormModal";
 import { ARR_META } from "./meta";
@@ -231,6 +232,12 @@ const SettingsConnectionsView: FunctionComponent = () => {
             Radarr
           </Tabs.Tab>
           <Tabs.Tab
+            value="sportarr"
+            leftSection={<FontAwesomeIcon icon={ARR_META.sportarr.icon} />}
+          >
+            Sportarr
+          </Tabs.Tab>
+          <Tabs.Tab
             value="plex"
             leftSection={<FontAwesomeIcon icon={faServer} />}
           >
@@ -277,6 +284,18 @@ const SettingsConnectionsView: FunctionComponent = () => {
           </RadarrSection>
         </Tabs.Panel>
 
+        <Tabs.Panel value="sportarr">
+          <SportarrSection>
+            <KindSection
+              kind="sportarr"
+              query={instances}
+              onAdd={openCreate}
+              onEdit={openEdit}
+              onDelete={openDelete}
+            />
+          </SportarrSection>
+        </Tabs.Panel>
+
         <Tabs.Panel value="plex">
           <PlexSection />
         </Tabs.Panel>
@@ -312,7 +331,9 @@ const SettingsConnectionsView: FunctionComponent = () => {
               {deleteTarget?.name}
             </Text>{" "}
             ({deleteTarget ? ARR_META[deleteTarget.kind].label : ""})? Its
-            connection settings will be removed. This cannot be undone.
+            {deleteTarget?.kind === "sportarr"
+              ? "connection settings and owned sports library, history and exclusion records will be removed. Media and subtitle files remain on disk. This cannot be undone."
+              : "connection settings will be removed. This cannot be undone."}
           </Text>
           {conflictMessage && (
             <Alert

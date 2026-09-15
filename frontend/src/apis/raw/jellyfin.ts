@@ -54,12 +54,18 @@ class JellyfinApi extends BaseApi {
     return response.data;
   }
 
-  async libraries(url?: string, apikey?: string, verifySsl?: boolean) {
+  async libraries(
+    url?: string,
+    apikey?: string,
+    verifySsl?: boolean,
+    includeAll: boolean = false,
+  ) {
     // POST so apikey rides in the request body. apikey-in-URL leaks into
     // browser history, reverse-proxy access logs, and any URL telemetry.
     const body: Record<string, string> = {};
     if (url) body.url = url;
     if (apikey) body.apikey = apikey;
+    if (includeAll) body.include_all = "true";
     if (verifySsl !== undefined) body.verify_ssl = verifySsl ? "true" : "false";
 
     // post() returns AxiosResponse<T> (not unwrapped like get()), so peel

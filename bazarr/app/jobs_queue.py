@@ -384,7 +384,8 @@ class JobsQueue:
                 event_stream(type='jobs', action='update', payload=payload)
 
     def update_job_progress(self, job_id: int, progress_value: Union[int, str, None] = None,
-                            progress_max: Union[int, None] = None, progress_message: str = ""):
+                            progress_max: Union[int, None] = None, progress_message: str = "", *,
+                            allow_cancelled: bool = False):
         """
         Updates the progress value and message for a specific job within the running jobs queue. The function
         iterates through a queue of running jobs, identifies the matching job by its ID, and updates its progress
@@ -404,7 +405,9 @@ class JobsQueue:
         """
         for job in self.jobs_running_queue:
             if job.job_id == job_id:
-                if job.cancelled:
+                # Only final accounting of an already committed operation may
+                # report after cancellation. Work checks retain the default.
+                if job.cancelled and not allow_cancelled:
                     raise JobCancelled(f"Job {job.job_name} ({job.job_id}) was cancelled")
                 payload = self._build_progress_payload(job, progress_value, progress_max, progress_message)
                 with self._progress_buffer_lock:

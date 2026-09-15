@@ -62,6 +62,16 @@ const PlexSection: FunctionComponent = () => {
           />
         </Section>
 
+        <Section header="Sports Library">
+          <LibrarySelector
+            label="Library Name"
+            settingKey="settings-plex-sports_library"
+            settingKeyIds="settings-plex-sports_library_ids"
+            libraryType="all"
+            description="Select the libraries holding your sports content. They are scanned when a sports subtitle changes."
+          />
+        </Section>
+
         <Section header="Automation">
           <WebhookSelector
             label="Webhooks"

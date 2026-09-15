@@ -393,3 +393,17 @@ describe("ManualSearchModal: Search Again button", () => {
     });
   });
 });
+
+it("keeps a failed download retryable and reports the failure", async () => {
+  const user = userEvent.setup();
+  const download = vi.fn().mockRejectedValue(new Error("Download failed"));
+  renderModal([makeSearchResult({ provider: "fixture" })], download);
+  await user.click(screen.getByRole("button", { name: /^search$/i }));
+  await user.click(screen.getByLabelText("Download"));
+  expect(
+    await screen.findByText("Download failed. Search again and retry."),
+  ).toBeInTheDocument();
+  expect(screen.getByLabelText("Download")).toBeEnabled();
+  await user.click(screen.getByLabelText("Download"));
+  expect(download).toHaveBeenCalledTimes(2);
+});

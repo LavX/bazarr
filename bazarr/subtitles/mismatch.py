@@ -47,10 +47,10 @@ from subliminal_patch.score import DEFAULT_SCORES
 from subliminal_patch.subtitle import MERGED_FORMATS_REV
 
 from app.config import settings
-from app.database import (TableEpisodes, TableMovies, TableReleaseTypeMismatch, database, delete,
+from app.database import (TableEpisodes, TableMovies, TableSportsEvents, TableReleaseTypeMismatch, database, delete,
                           insert, select)
 from app.event_handler import event_stream
-from app.notifier import send_notifications, send_notifications_movie
+from app.notifier import send_notifications, send_notifications_movie, send_notifications_sports
 from arr_instances.resolution import scoped
 from utilities.path_mappings import path_mappings
 from utilities.sql_limits import MAX_IN_CLAUSE, in_chunks
@@ -302,8 +302,12 @@ def _resolve_media_id_by_path(media_type, video, arr_instance_id):
     if not path:
         return None
 
-    table = TableEpisodes if media_type == 'series' else TableMovies
-    kind = 'series' if media_type == 'series' else 'movie'
+    if media_type == 'sports':
+        table, kind = TableSportsEvents, 'sports'
+    elif media_type == 'series':
+        table, kind = TableEpisodes, 'series'
+    else:
+        table, kind = TableMovies, 'movie'
     try:
         stored = path_mappings.path_replace_reverse_instance(path, arr_instance_id, kind)
     except Exception:
@@ -328,6 +332,10 @@ def _resolve_media_id(media_type, video, arr_instance_id):
     land on the wrong instance's row. When the owner cannot be pinned down the
     detection is dropped rather than recorded against a guess.
     """
+    if media_type == 'sports':
+        # Sports events carry no upstream id on the video object; the path is
+        # the identity, which is what the by-path resolver already uses.
+        return _resolve_media_id_by_path(media_type, video, arr_instance_id)
     if media_type == 'series':
         upstream_id = getattr(video, 'sonarrEpisodeId', None)
         if upstream_id is None:
@@ -531,7 +539,9 @@ def report_release_type_mismatch(video, media_type, language, candidates, min_sc
     body = _notification_body(_language_label(language), mismatch)
     logger.info('BAZARR %s', body)
     try:
-        if media_type == 'series':
+        if media_type == 'sports':
+            send_notifications_sports(media_id, body, arr_instance_id=arr_instance_id)
+        elif media_type == 'series':
             send_notifications(getattr(video, 'sonarrSeriesId', None),
                                getattr(video, 'sonarrEpisodeId', None), body,
                                arr_instance_id=arr_instance_id)
@@ -545,8 +555,15 @@ def report_release_type_mismatch(video, media_type, language, candidates, min_sc
     # polling and no refetch on focus, so without it a page that is already open
     # shows the new badge on the next manual reload and not before.
     try:
-        event_stream(type='episode-wanted' if media_type == 'series' else 'movie-wanted',
-                     action='update', payload=media_id)
+        # Sports has its own event type, which the socket reducer maps onto the
+        # whole Sports query root. Sending 'movie-wanted' for a sports media_id
+        # refreshed the movies Wanted page with an id that is not a movie, and
+        # left the sports Wanted page showing no badge until a manual reload.
+        if media_type == 'sports':
+            event_stream(type='sports', action='update', payload=media_id)
+        else:
+            event_stream(type='episode-wanted' if media_type == 'series' else 'movie-wanted',
+                         action='update', payload=media_id)
     except Exception:
         logger.exception('BAZARR could not announce the release-type mismatch')
 

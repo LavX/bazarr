@@ -25,6 +25,9 @@ def upgrade_db(monkeypatch):
             days_to_upgrade_subs=365,
             upgrade_manual=False,
             upgrade_subs=True,
+            # get_upgradable_media_ids gained a sports branch, gated on the
+            # master toggle so a non-sports install does not pay for the query.
+            use_sportarr=False,
         )
     )
     monkeypatch.setattr(upgrade, "database", session)
@@ -198,6 +201,11 @@ def test_batch_upgrade_ids_ignore_newer_embedded_history(upgrade_db):
         "series": [10],
         "movieKeys": [{"radarrId": 30, "arr_instance_id": 2}],
         "seriesKeys": [{"sonarrSeriesId": 10, "arr_instance_id": 1}],
+        # The endpoint carries sports now, so the sports library page can show
+        # the same low-score marker Series and Movies do. Empty here: this
+        # fixture has no sports rows and use_sportarr is off.
+        "sports": [],
+        "sportsKeys": [],
     }
 
 

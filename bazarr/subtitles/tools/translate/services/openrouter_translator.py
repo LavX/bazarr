@@ -4,6 +4,8 @@ import re
 import time
 import logging
 import pysubs2
+from sportarr.profile_hooks import sports_write_kwargs, finish_translation
+from sportarr.connection import check_cancelled
 from subtitles.tools.subsync_engines import staged_subtitle_write, SubtitleDestinationChanged
 from media_servers.events import publication_callback
 import requests
@@ -233,7 +235,7 @@ class OpenRouterTranslatorService:
 
     def __init__(self, source_srt_file, dest_srt_file, lang_obj, to_lang, from_lang, media_type,
                  video_path, orig_to_lang, forced, hi, sonarr_series_id, sonarr_episode_id,
-                 radarr_id, arr_instance_id=None):
+                 radarr_id, arr_instance_id=None, sports_operation=None, cancel=None):
         self.source_srt_file = source_srt_file
         self.dest_srt_file = dest_srt_file
         self.lang_obj = lang_obj
@@ -250,6 +252,8 @@ class OpenRouterTranslatorService:
         # The owning arr instance (#156): radarrId and sonarrSeriesId are only
         # unique together with it, so every media lookup below carries it.
         self.arr_instance_id = arr_instance_id
+        self.sports_operation = sports_operation
+        self.cancel = cancel
         self.partial_error = None
         self.routing_error = None
         self.language_code_convert_dict = {
@@ -294,7 +298,8 @@ class OpenRouterTranslatorService:
                                                                        'translate', self.arr_instance_id),
                                        source_paths=(self.source_srt_file,),
                                        before_publish=lambda: jobs_queue.update_job_progress(job_id=job_id),
-                                       allow_empty=True) as temporary:
+                                       allow_empty=not bool(self.sports_operation),
+                                       **sports_write_kwargs(self, job_id)) as temporary:
                 subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
                 lines_list: List[str] = [x.plaintext for x in subs]
                 lines_list_len = len(lines_list)
@@ -340,8 +345,12 @@ class OpenRouterTranslatorService:
             message = f"{language_from_alpha2(self.from_lang)} subtitles {translated} to {language_from_alpha3(self.to_lang)} using AI Subtitle Translator."
             if self.partial_error:
                 message += f' Some lines may remain in the source language. {self.partial_error}'
-            result = create_process_result(message, self.video_path, self.orig_to_lang, self.forced, self.hi, self.dest_srt_file, self.media_type)
+            result = create_process_result(message, self.video_path, self.orig_to_lang, self.forced, self.hi, self.dest_srt_file, self.media_type,
+                                           **({"sports_context": self.sports_operation.context}
+                                              if self.sports_operation else {}))
 
+            if finish_translation(self, result):
+                return self.dest_srt_file
             if self.media_type == 'episode':
                 history_log(action=6,
                             sonarr_series_id=self.sonarr_series_id,
@@ -357,6 +366,8 @@ class OpenRouterTranslatorService:
         except (JobCancelled, SubtitleDestinationChanged):
             raise
         except Exception as e:
+            if self.sports_operation:
+                raise
             logger.error(f'BAZARR encountered an error during AI translation: {str(e)}')  # noqa: G004
             show_message(f'AI translation failed: {str(e)}')
             hide_progress(id=f'translate_progress_{self.dest_srt_file}')
@@ -365,6 +376,7 @@ class OpenRouterTranslatorService:
     def _submit_and_poll(self, lines_list: List[str], bazarr_job_id=None) -> Optional[List[Dict[str, Any]]]:
         """Submit translation job and poll for completion with progress updates"""
         try:
+            check_cancelled(self.cancel)
             # Prepare language codes
             # from_lang should be alpha2 (e.g., "en")
             # orig_to_lang should be alpha2 (e.g., "hu")
@@ -395,7 +407,9 @@ class OpenRouterTranslatorService:
                 radarr_id=self.radarr_id,
                 sonarr_series_id=self.sonarr_series_id,
                 sonarr_episode_id=self.sonarr_episode_id,
-                arr_instance_id=self.arr_instance_id
+                arr_instance_id=self.arr_instance_id,
+                **({"sports_context": self.sports_operation.context}
+                   if self.sports_operation else {})
             )
 
             api_media_type = "Episode" if self.media_type == 'episode' else "Movie"
@@ -420,6 +434,10 @@ class OpenRouterTranslatorService:
                 }
             }
 
+            if self.sports_operation:
+                payload.pop('arrMediaId')
+                payload.pop('mediaType')
+
             base_url = settings.translator.openrouter_url.rstrip('/')
 
             # Submit job
@@ -430,6 +448,7 @@ class OpenRouterTranslatorService:
                 headers={"Content-Type": "application/json", **get_translator_auth_headers()},
                 timeout=30
             )
+            check_cancelled(self.cancel)
 
             if submit_response.status_code != 200:
                 # Fallback to sync endpoint if job queue not available
@@ -453,6 +472,8 @@ class OpenRouterTranslatorService:
             # Poll for completion
             return self._poll_job(base_url, job_id, len(lines_payload), bazarr_job_id=bazarr_job_id)
 
+        except JobCancelled:
+            raise
         except ProviderRoutingError as error:
             # Recorded rather than announced here: translate() reports every failed
             # submission, and showing the detail now would put two notifications on
@@ -489,6 +510,7 @@ class OpenRouterTranslatorService:
         last_reachable_at = started_at
 
         while True:
+            check_cancelled(self.cancel)
             now = time.monotonic()
             if now - started_at >= POLL_HARD_CAP_SECONDS:
                 reason = "reached the 12-hour polling hard cap"
@@ -508,6 +530,7 @@ class OpenRouterTranslatorService:
                     headers=get_translator_auth_headers(),
                     timeout=10
                 )
+                check_cancelled(self.cancel)
 
                 if status_response.status_code != 200:
                     logger.error(f"Error getting job status: {status_response.status_code}")  # noqa: G004
@@ -614,6 +637,7 @@ class OpenRouterTranslatorService:
     def _translate_sync(self, lines_list: List[str], payload: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
         """Fallback synchronous translation (Lingarr-compatible)"""
         base_url = settings.translator.openrouter_url.rstrip('/')
+        check_cancelled(self.cancel)
 
         response = requests.post(
             f"{base_url}/api/v1/translate/content",
@@ -621,6 +645,7 @@ class OpenRouterTranslatorService:
             headers={"Content-Type": "application/json", **get_translator_auth_headers()},
             timeout=1800
         )
+        check_cancelled(self.cancel)
 
         if response.status_code == 200:
             return self._validated_result_lines(response.json(), len(lines_list))

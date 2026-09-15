@@ -17,6 +17,7 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   useRefTracksByEpisodeId,
   useRefTracksByMovieId,
+  useRefTracksBySportsEventId,
   useSubtitleAction,
 } from "@/apis/hooks";
 import {
@@ -30,7 +31,7 @@ import { syncMaxOffsetSecondsOptions } from "@/pages/Settings/Subtitles/options"
 import { fromPython, toPython } from "@/utilities";
 
 function useReferencedSubtitles(
-  mediaType: "episode" | "movie",
+  mediaType: "episode" | "movie" | "sports",
   mediaId: number,
   subtitlesPath: string,
   arrInstanceId?: number,
@@ -48,8 +49,21 @@ function useReferencedSubtitles(
     mediaType === "movie",
     arrInstanceId,
   );
+  const sportsData = useRefTracksBySportsEventId(
+    subtitlesPath,
+    mediaId,
+    mediaType === "sports",
+    arrInstanceId,
+  );
 
-  const mediaData = mediaType === "episode" ? episodeData : movieData;
+  // A lookup rather than a nested ternary: the "not episode means movie"
+  // shorthand sent every sports event to the Radarr reference query, which
+  // answers for a movie id that happens to match and otherwise not at all.
+  const mediaData = {
+    episode: episodeData,
+    movie: movieData,
+    sports: sportsData,
+  }[mediaType];
 
   const subtitles: GroupedSelectorOptions<string>[] = [];
 

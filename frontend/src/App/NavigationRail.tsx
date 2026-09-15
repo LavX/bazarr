@@ -5,6 +5,7 @@ import {
   faCircle,
   faFilm,
   faPlay,
+  faTrophy,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import logoSrc from "@/assets/images/logo_no_orb128.png";
@@ -18,6 +19,7 @@ import styles from "./AppShell.module.scss";
 const labels: Record<string, string> = {
   series: "Series",
   movies: "Movies",
+  sports: "Sports",
   wanted: "Wanted",
   blacklist: "Excluded",
   "distribution-hub": "Distribution Hub",
@@ -195,7 +197,7 @@ export default function NavigationRail({
             {group.items.map((route) => item(route))}
             {group.label === "Media" &&
               connections &&
-              ["series", "movies"]
+              ["series", "movies", "sports"]
                 .filter(
                   (path) => !group.items.some((route) => route.path === path),
                 )
@@ -204,7 +206,12 @@ export default function NavigationRail({
                     {
                       path,
                       name: labels[path],
-                      icon: path === "series" ? faPlay : faFilm,
+                      icon:
+                        path === "series"
+                          ? faPlay
+                          : path === "sports"
+                            ? faTrophy
+                            : faFilm,
                     },
                     true,
                   ),

@@ -63,3 +63,20 @@ export function episodeBelongsToSeries(
   }
   return episode.series_id === seriesLocalId;
 }
+
+// True when the chosen sports event is owned by the opened league.
+//
+// The same guard episodeBelongsToSeries exists for, and for the same reason:
+// membership of the fetched list cannot catch a form that fetched the wrong
+// league's events, because the picker then selects from that wrong list. The
+// event payload carries league_id, so this holds even then. An event with no
+// owning id is rejected rather than assumed to belong.
+export function eventBelongsToLeague(
+  event: { league_id: number } | null,
+  leagueId: number,
+): boolean {
+  if (event === null) {
+    return false;
+  }
+  return event.league_id === leagueId;
+}

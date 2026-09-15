@@ -116,3 +116,21 @@
     animation: none;
   }
 }
+
+.cardLayout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--mantine-spacing-md);
+  align-items: start;
+}
+.cardActions {
+  flex-shrink: 0;
+}
+@media (max-width: 48em) {
+  .cardLayout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .cardActions {
+    justify-self: end;
+  }
+}

@@ -308,11 +308,13 @@ def subtitle_language_with_combined_modifier(language_str, subtitle):
     return ':'.join([base_language] + modifiers)
 
 
-def guess_external_subtitles(dest_folder, subtitles, media_type, previously_indexed_subtitles_to_exclude=None):
+def guess_external_subtitles(dest_folder, subtitles, media_type, previously_indexed_subtitles_to_exclude=None,
+                             path_reverse=None):
     for subtitle, language in subtitles.items():
         subtitle_path = os.path.join(dest_folder, subtitle)
-        reversed_subtitle_path = path_mappings.path_replace_reverse(subtitle_path) if media_type == "series" \
-            else path_mappings.path_replace_reverse_movie(subtitle_path)
+        reverse = path_reverse or (path_mappings.path_replace_reverse if media_type == "series"
+                                   else path_mappings.path_replace_reverse_movie)
+        reversed_subtitle_path = reverse(subtitle_path)
 
         if previously_indexed_subtitles_to_exclude:
             x_found_lang = None

@@ -314,10 +314,19 @@ def test_store_subtitles_uses_instance_path_mapping(schema_session, monkeypatch)
     monkeypatch.setattr(si, "subtitle_language_with_sync_modifier", lambda ls, s: ls)
     monkeypatch.setattr(si, "subtitle_language_with_combined_modifier", lambda ls, s: ls)
     monkeypatch.setattr(si.CustomLanguage, "found_external", lambda s, sp: None)
+    # Only this test's own subtitle gets a fake stat; everything else is
+    # delegated to the real one. si.os is the os module itself, so a blanket
+    # lambda replaces os.stat process-wide, and anything that stats a file
+    # while it is installed breaks on the wrong shape. Python's own linecache
+    # does that whenever a traceback is rendered, and pytest's cache writer
+    # does it at session finish through pathlib, which on 3.13+ passes
+    # follow_symlinks and hits a lambda that takes one argument. The result is
+    # a crash in pytest's shutdown rather than a test failure.
     real_stat = si.os.stat
-    monkeypatch.setattr(si.os, "stat",
-                        lambda p, *a, **k: SimpleNamespace(st_size=10) if str(p) == sub_local
-                        else real_stat(p, *a, **k))
+    monkeypatch.setattr(
+        si.os, "stat",
+        lambda p, *args, **kwargs: (SimpleNamespace(st_size=10) if str(p) == sub_local
+                                    else real_stat(p, *args, **kwargs)))
     monkeypatch.setattr(si, "list_missing_subtitles", lambda **k: None)
     monkeypatch.setattr(si, "_log_embedded_history", lambda *a, **k: None)
 

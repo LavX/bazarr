@@ -488,7 +488,7 @@ def _path_replace_for(media_type: str):
             else path_mappings.path_replace_movie)
 
 
-def _allowed_subtitle_roots(media_dir_real: str, media_path_real: str) -> list[str]:
+def _allowed_subtitle_roots(media_dir_real: str, media_path_real: str, *, create_target: bool = True) -> list[str]:
     """Compose the allowed subtitle roots: the media file's directory
     plus any configured target folder (relative or absolute).
 
@@ -501,7 +501,7 @@ def _allowed_subtitle_roots(media_dir_real: str, media_path_real: str) -> list[s
     roots = [media_dir_real]
     try:
         from utilities.helper import get_target_folder
-        target = get_target_folder(media_path_real)
+        target = get_target_folder(media_path_real) if create_target else get_target_folder(media_path_real, create=False)
         if target:
             target_real = os.path.realpath(target)
             if target_real and target_real not in roots:
@@ -523,7 +523,7 @@ def _path_under_any_root(real_path: str, roots: list[str]) -> bool:
 
 def _select_local_subs(raw_subtitles, media_dir: str,
                       requested_languages: list[str],
-                      media_path: str | None = None) -> list[dict]:
+                      media_path: str | None = None, *, create_target: bool = True) -> list[dict]:
     """Filter Bazarr's `subtitles` column entries by requested languages
     and surviving on-disk files.
 
@@ -548,7 +548,7 @@ def _select_local_subs(raw_subtitles, media_dir: str,
 
     media_dir_real = os.path.realpath(media_dir)
     media_path_real = os.path.realpath(media_path) if media_path else media_dir_real
-    allowed_roots = _allowed_subtitle_roots(media_dir_real, media_path_real)
+    allowed_roots = _allowed_subtitle_roots(media_dir_real, media_path_real, create_target=create_target)
 
     out: list[dict] = []
     for item in items:
@@ -608,6 +608,9 @@ except Exception:
     database = None
 
 
+_UNRESOLVED_SPORTS = object()
+
+
 def search_local(
     imdb_id: str | None,
     season: int | None,
@@ -617,6 +620,8 @@ def search_local(
     query: str | None = None,
     moviehash: str | None = None,
     moviehash_match: str | None = None,
+    *,
+    sports_match=_UNRESOLVED_SPORTS,
 ) -> list[dict]:
     """OS.com-shaped entries for locally-available subtitles.
 
@@ -633,6 +638,13 @@ def search_local(
     try:
         from .response_mapper import local_to_os_entry
         from . import auth as _auth
+
+        from .sports import resolve_for_request, search_entries
+        if sports_match is _UNRESOLVED_SPORTS:
+            sports_match = resolve_for_request(
+                imdb_id, season, episode, media_type, query, moviehash, moviehash_match)
+        if sports_match is not None:
+            return search_entries(sports_match, languages)
 
         if moviehash_match == "only":
             # Strict hash mode: only the moviehash resolution path can

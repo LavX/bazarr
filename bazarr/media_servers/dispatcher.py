@@ -226,7 +226,7 @@ class RefreshDispatcher:
 
     def notify(self, event):
         media_type = {"series": "episode", "movies": "movie"}.get(event.media_type, event.media_type)
-        if media_type not in {"movie", "episode"} or event.operation not in _OPERATIONS:
+        if media_type not in {"movie", "episode", "sports"} or event.operation not in _OPERATIONS:
             return
         event = SubtitleMutation(media_type, str(_media_path(event.video_path)), event.subtitle_path,
                                  event.operation, event.arr_instance_id)
@@ -302,7 +302,13 @@ class RefreshDispatcher:
                 libraries = client.get_libraries()
                 library = next((row for row in libraries if row["id"].lstrip("0") ==
                                 mapped["library_id"].lstrip("0")), None)
-                if (library is None or library["type"] != ("movies" if event.media_type == "movie" else "series")
+                # Silo only knows movie and series library types. A sports root
+                # lives inside one of those, so the type it declares cannot be
+                # checked for a sports publication; the library still has to
+                # exist and hold the file.
+                if (library is None
+                        or (event.media_type != "sports"
+                            and library["type"] != ("movies" if event.media_type == "movie" else "series"))
                         or not any(_media_path(mapped["path"]).is_relative_to(_media_path(root))
                                    for root in library["paths"])):
                     raise MediaServerError("library_invalid")
@@ -325,6 +331,17 @@ class RefreshDispatcher:
         that need them disappear when they cannot be read.
         """
         supported = set(getattr(client, "REFRESH_STEPS", ()) or ())
+        if event.media_type == "sports":
+            # A sports event carries no provider identifiers, so the identity
+            # rungs cannot answer for one. Emby resolves a path through the
+            # same typed item lookup, whose _ITEM_TYPES has no sports entry,
+            # leaving it the library the mapped path points into. Silo's file
+            # rung takes only a library and a path and is media-type agnostic,
+            # so a recording scans there exactly as a movie does; routing it to
+            # the library instead submitted a recursive scan of a whole, often
+            # shared, library for every publication and could never confirm.
+            supported &= ({resolution.LIBRARY} if server == "emby"
+                          else {resolution.PATH, resolution.LIBRARY})
         metadata = (self.metadata_factory(event)
                     if supported & {resolution.PROVIDER_ID, resolution.TITLE_YEAR} else None)
         if metadata is None:

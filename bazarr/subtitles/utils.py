@@ -19,7 +19,7 @@ from app.database import get_profiles_list
 from .refiners import registered as registered_refiners
 
 
-def get_video(path, title, sceneName, providers=None, media_type="movie"):
+def get_video(path, title, sceneName, providers=None, media_type="movie", context=None, cancel=None):
     """
     Construct `Video` instance
     :param path: path to video
@@ -29,6 +29,11 @@ def get_video(path, title, sceneName, providers=None, media_type="movie"):
     :param media_type: movie/series
     :return: `Video` instance
     """
+    if media_type == 'sports':
+        from sportarr.video import get_sports_video
+        return get_sports_video(path, title, sceneName, providers, context, cancel)
+    if context is not None:
+        raise ValueError('Sports context requires sports media type')
     hints = {"title": title, "type": "movie" if media_type == "movie" else "episode"}
 
     try:
@@ -109,8 +114,8 @@ def _get_scores(media_type, min_movie=None, min_ep=None):
 
     max_score = MAX_SCORES['episode' if series else 'movie']
 
-    min_movie = min_movie or (max_score / 2)
-    min_ep = min_ep or (2/3 * max_score)
+    min_movie = max_score / 2 if min_movie is None else min_movie
+    min_ep = 2/3 * max_score if min_ep is None else min_ep
     min_score = int(min_ep if series else min_movie)
 
     return (

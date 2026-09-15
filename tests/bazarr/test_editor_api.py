@@ -216,11 +216,11 @@ class TestResolveVideoPath:
 
     def test_invalid_media_type(self):
         result = _resolve_video_path('podcast', 1)
-        assert result == ('Invalid media type, must be "episode" or "movie"', 400)
+        assert result == ('mediaType must be one of "episode", "movie", "sports"', 400)
 
     def test_invalid_media_type_empty(self):
         result = _resolve_video_path('', 1)
-        assert result == ('Invalid media type, must be "episode" or "movie"', 400)
+        assert result == ('mediaType must be one of "episode", "movie", "sports"', 400)
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +433,7 @@ class TestValidateParams:
 
         with patch.object(editor_module, 'request', mock_request):
             result = _validate_params()
-            assert result == ('mediaType must be "episode" or "movie"', 400)
+            assert result == ('mediaType must be one of "episode", "movie", "sports"', 400)
 
     def test_invalid_media_type(self):
         mock_request = MagicMock()
@@ -441,7 +441,7 @@ class TestValidateParams:
 
         with patch.object(editor_module, 'request', mock_request):
             result = _validate_params()
-            assert result == ('mediaType must be "episode" or "movie"', 400)
+            assert result == ('mediaType must be one of "episode", "movie", "sports"', 400)
 
     def test_missing_media_id(self):
         mock_request = MagicMock()
@@ -920,7 +920,7 @@ class TestEditorSyncPost:
 
         with patch.object(editor_module, 'request', mock_request):
             result = sync_resource.post()
-        assert result == ('mediaType must be "episode" or "movie"', 400)
+        assert result == ('mediaType must be one of "episode", "movie", "sports"', 400)
 
     def test_invalid_media_type(self):
         mock_request = self._make_post_request({
@@ -930,7 +930,7 @@ class TestEditorSyncPost:
 
         with patch.object(editor_module, 'request', mock_request):
             result = sync_resource.post()
-        assert result == ('mediaType must be "episode" or "movie"', 400)
+        assert result == ('mediaType must be one of "episode", "movie", "sports"', 400)
 
     def test_missing_media_id(self):
         mock_request = self._make_post_request({
@@ -1067,7 +1067,7 @@ class TestEditorSyncPost:
 
         with patch.object(editor_module, 'request', mock_request):
             result = sync_resource.post()
-        assert result == ('mediaType must be "episode" or "movie"', 400)
+        assert result == ('mediaType must be one of "episode", "movie", "sports"', 400)
 
 
 # ---------------------------------------------------------------------------

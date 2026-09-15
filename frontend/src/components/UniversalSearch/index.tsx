@@ -20,6 +20,7 @@ import {
   normalizeTitleQuery,
   useDiscoverMetadata,
 } from "@/apis/hooks/discover";
+import { useSportsAvailability } from "@/apis/hooks/sports";
 import { useServerSearch } from "@/apis/hooks/system";
 import { useDiscover } from "@/contexts/Discover";
 import { useSearchSources } from "@/contexts/UniversalSearch";
@@ -81,12 +82,19 @@ export default function UniversalSearch() {
     localQuery,
   );
   const library = useServerSearch(localQuery, searching);
+  const sports = useSportsAvailability();
   const localMatches = searching
     ? (library.data ?? [])
         .filter(
           (item) =>
             item.id != null &&
-            (item.sonarrSeriesId != null || item.radarrId != null),
+            (item.sonarrSeriesId != null ||
+              item.radarrId != null ||
+              (item.sportarrLeagueId != null &&
+                sports.enabled &&
+                sports.instances.some(
+                  (instance) => instance.id === item.arr_instance_id,
+                ))),
         )
         .slice(0, 6)
     : [];
@@ -134,6 +142,7 @@ export default function UniversalSearch() {
     { title: "Discover", path: "/discover", terms: "browse catalog" },
     { title: "Series", path: libraryPage("series"), terms: "shows library" },
     { title: "Movies", path: libraryPage("movies"), terms: "films library" },
+    { title: "Sports", path: libraryPage("sports"), terms: "events library" },
     { title: "Providers", path: "/subtitle-hub", terms: "subtitles providers" },
     {
       title: "Settings",
@@ -147,6 +156,7 @@ export default function UniversalSearch() {
           "/discover",
           "/series",
           "/movies",
+          "/sports",
           "/subtitle-hub",
           "/settings/general",
           "/system/tasks",
@@ -455,7 +465,16 @@ export default function UniversalSearch() {
               <section aria-label="In your library">
                 <Text className={styles.groupLabel}>In your library</Text>
                 {localMatches.map((item) => {
-                  const path = `/${item.sonarrSeriesId != null ? "series" : "movies"}/${item.id}`;
+                  const kind =
+                    item.sportarrLeagueId != null
+                      ? "sports"
+                      : item.sonarrSeriesId != null
+                        ? "series"
+                        : "movies";
+                  const path =
+                    kind === "sports"
+                      ? `/sports/${item.id}?instance=${item.arr_instance_id}`
+                      : `/${kind}/${item.id}`;
                   return (
                     <Link
                       className={styles.quickMatch}
@@ -470,7 +489,11 @@ export default function UniversalSearch() {
                         {item.year ? ` (${item.year})` : ""}
                       </span>
                       <small>
-                        {item.sonarrSeriesId != null ? "Series" : "Movie"}
+                        {kind === "sports"
+                          ? "Sports"
+                          : kind === "series"
+                            ? "Series"
+                            : "Movie"}
                         {item.arr_instance_id != null
                           ? ` · Library ${item.arr_instance_id}`
                           : ""}

@@ -3,7 +3,7 @@
 
 import logging
 import os
-from media_servers.events import observe_subtitle_change
+from media_servers.events import observe_subtitle_change, SubtitleMutation, notify_subtitle_mutation
 
 from app.config import settings, sync_checker as _defaul_sync_checker
 from utilities.path_mappings import path_mappings
@@ -15,8 +15,14 @@ from app.database import TableShows, TableEpisodes, TableMovies, database, selec
 from radarr.notify import notify_radarr
 from sonarr.notify import notify_sonarr
 from arr_instances.resolution import client_for_instance, scoped
-from plex.operations import plex_set_movie_added_date_now, plex_update_library, plex_set_episode_added_date_now, plex_refresh_item  # noqa: F401
-from jellyfin.operations import jellyfin_refresh_item
+from plex.operations import (  # noqa: F401
+    plex_set_movie_added_date_now,
+    plex_update_library,
+    plex_update_sports_library,
+    plex_set_episode_added_date_now,
+    plex_refresh_item,
+)
+from jellyfin.operations import jellyfin_refresh_item, jellyfin_update_sports_library
 from app.event_handler import event_stream
 
 from .utils import _get_download_code3
@@ -49,7 +55,8 @@ class ProcessSubtitlesResult:
 
 def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_type,
                               series_id=None, episode_id=None, radarr_id=None,
-                              source_score_percent=None, forced=False, arr_instance_id=None):
+                              source_score_percent=None, forced=False, arr_instance_id=None,
+                              sports_operation=None, cancel=None):
     """
     After a subtitle is downloaded, check if any profile language is configured to
     auto-translate from the just-downloaded language. If so, queue translation.
@@ -62,6 +69,12 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
     subtitles cover only foreign-language inserts and are not a valid
     translation seed, so we skip auto-translate for them.
     """
+    if media_type == 'sports':
+        from sportarr.profile_hooks import queue_translations
+        if sports_operation is None:
+            raise ValueError('Sports profile processing requires its captured operation')
+        return queue_translations(sports_operation, subtitle_path, downloaded_lang,
+                                  source_score_percent, forced, cancel)
     try:
         from app.database import get_profile_id, get_profiles_list
         from subtitles.tools.translate.main import translate_subtitles_file
@@ -206,10 +219,13 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
         logging.exception('BAZARR error in _trigger_auto_translation')
 
 
-def _trigger_combine(video_path, media_type, radarr_id, series_id, episode_id, arr_instance_id=None):
+def _trigger_combine(video_path, media_type, radarr_id, series_id, episode_id,
+                     arr_instance_id=None, sports_operation=None, cancel=None):
     """After a subtitle download/upgrade/translate completes, try to build or
     rebuild the combined subtitle file for the video's profile rule. Best-effort:
     never raises, never blocks the caller."""
+    if media_type == 'sports':
+        return try_combine_for_video(video_path, media_type, sports_operation=sports_operation, cancel=cancel)
     try:
         try_combine_for_video(
             video_path=video_path,
@@ -238,6 +254,11 @@ def _postprocessing_config(media_type, arr_instance_id):
         threshold = int(_resolve(arr_instance_id, "general.postprocessing_threshold",
                                  settings.general.postprocessing_threshold))
     else:
+        # Movies AND sports. Sports deliberately shares the movie threshold
+        # rather than owning a key of its own: it is scored on the movie scale
+        # throughout (MAX_SCORES["movie"], a minimum_score defaulting to 70), so
+        # a percentage of that scale means exactly the same thing for both. This
+        # used to be an unremarked fall-through, which read like an oversight.
         use_threshold = _resolve(arr_instance_id, "general.use_postprocessing_threshold_movie",
                                  settings.general.use_postprocessing_threshold_movie)
         threshold = int(_resolve(arr_instance_id, "general.postprocessing_threshold_movie",
@@ -245,8 +266,42 @@ def _postprocessing_config(media_type, arr_instance_id):
     return use_pp, cmd, use_threshold, threshold
 
 
+def refresh_sports_media_servers(video_path, subtitle_path, arr_instance_id, *, publish_notification=True):
+    """Tell every configured media server a sports subtitle changed.
+
+    Series and movies refresh through item-level helpers keyed on identifiers a
+    sports event has not got. Each server's configured SPORTS library is scanned
+    instead, and a server with no sports library configured is left alone. Emby
+    and Silo instances refresh through the same publication dispatcher movies
+    and episodes use, scoped to their saved path mappings, so an instance whose
+    mappings do not cover this video is never asked to scan anything.
+    """
+    from sportarr.notify import request_media_server_refresh
+
+    if settings.general.use_plex is True:
+        sports_library = settings.plex.sports_library
+        if isinstance(sports_library, str):
+            sports_library = [sports_library] if sports_library else []
+        if sports_library:
+            request_media_server_refresh(plex_update_sports_library)
+    if settings.general.use_jellyfin is True:
+        sports_library_ids = settings.jellyfin.sports_library_ids
+        if isinstance(sports_library_ids, str):
+            sports_library_ids = [sports_library_ids] if sports_library_ids else []
+        if sports_library_ids:
+            request_media_server_refresh(jellyfin_update_sports_library)
+    if publish_notification and (settings.general.use_emby is True or settings.general.use_silo is True):
+        notify_subtitle_mutation(
+            SubtitleMutation('sports', video_path, subtitle_path, 'download', arr_instance_id))
+
+
 def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_upgrade=False, is_manual=False,
-                     job_id=None, arr_instance_id=None):
+                     job_id=None, arr_instance_id=None, *,
+                     context=None, validate=None, cancel=None, publication_guard=None):
+    if media_type == 'sports' and (context is None or validate is None or publication_guard is None):
+        raise ValueError('Sports processing requires its owned publication guard')
+    if context is not None and media_type != 'sports':
+        raise ValueError('Sports context requires sports media type')
     downloaded_provider = subtitle.provider_name
     uploader = subtitle.uploader
     release_info = subtitle.release_info
@@ -279,7 +334,31 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
     sync_checker = _defaul_sync_checker
     logging.debug("Sync checker: %s", sync_checker)
 
-    if media_type == 'series':
+    if media_type == 'sports':
+        # No arr rescan here; the Sportarr whole-library rescan is dispatched
+        # through sportarr.notify, once per affected owner per operation, because
+        # /api/library/rescan walks every root folder and is untargeted. Sonarr
+        # and Radarr each take a per-item Rescan command, which is why they get
+        # one below.
+        #
+        # The media-server refresh happens later in this function, through
+        # refresh_sports_media_servers: plex and jellyfin scan their configured
+        # sports libraries, and Emby and Silo go through the native publication
+        # dispatcher.
+        instance = validate()
+        if path != context.mapped_path:
+            raise ValueError('Sports subtitle path does not match its event')
+        owner_instance_id = context.arr_instance_id
+        series_id = ''
+        episode_id = ''
+        if sync_checker(subtitle) is True:
+            from .sync import sync_subtitles
+            sync_subtitles(video_path=path, srt_path=downloaded_path, forced=subtitle.language.forced,
+                           hi=subtitle.language.hi, srt_lang=downloaded_language_code2, percent_score=percent_score,
+                           job_id=job_id, arr_instance_id=context.arr_instance_id, owns_job_progress=False,
+                           track_job_progress=job_id is not None, context=context, validate=validate, cancel=cancel,
+                           publication_guard=publication_guard)
+    elif media_type == 'series':
         episode_metadata = database.execute(scoped(
             select(TableShows.imdbId, TableShows.tvdbId, TableEpisodes.sonarrSeriesId,
                    TableEpisodes.sonarrEpisodeId, TableEpisodes.season, TableEpisodes.episode,
@@ -330,28 +409,49 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                            arr_instance_id=movie_metadata.arr_instance_id,
                            owns_job_progress=False, publication_operation='download')
 
+    if media_type == 'sports' and validate is not None:
+        validate()
     use_postprocessing, postprocessing_cmd, use_pp_threshold, pp_threshold = _postprocessing_config(
         media_type, owner_instance_id)
     if use_postprocessing is True:
-        command = pp_replace(postprocessing_cmd, path, downloaded_path, downloaded_language, downloaded_language_code2,
-                             downloaded_language_code3, audio_language, audio_language_code2, audio_language_code3,
-                             percent_score, subtitle_id, downloaded_provider, uploader, release_info, series_id,
-                             episode_id)
+        def command_for_subtitle(subtitle_path):
+            return pp_replace(postprocessing_cmd, path, subtitle_path, downloaded_language, downloaded_language_code2,
+                              downloaded_language_code3, audio_language, audio_language_code2, audio_language_code3,
+                              percent_score, subtitle_id, downloaded_provider, uploader, release_info, series_id,
+                              episode_id)
+        command = command_for_subtitle(downloaded_path)
 
         if not use_pp_threshold or (use_pp_threshold and percent_score < pp_threshold):
             logging.debug(f"BAZARR Using post-processing command: {command}")  # noqa: G004
-            destination = os.path.join(get_target_folder(path, create=False) or os.path.dirname(path), '.destination')
-            lock_paths = (path, destination, downloaded_path)
-            # Match the command's complete lock set before observing any bytes.
-            with subtitle_write_locks(path, *lock_paths):
-                with observe_subtitle_change(media_type, path, downloaded_path, 'download', owner_instance_id):
-                    postprocessing(command, path, subtitle_path=downloaded_path, lock_paths=lock_paths)
-                    set_chmod(subtitles_path=downloaded_path)
+            if publication_guard is not None:
+                # Sports stages its own write under the owned publication guard,
+                # which takes the same locks internally; nesting the block below
+                # around it would acquire them twice.
+                postprocessing(command, path, subtitle_path=downloaded_path,
+                               publication_guard=publication_guard,
+                               command_builder=command_for_subtitle)
+                set_chmod(subtitles_path=downloaded_path)
+            else:
+                destination = os.path.join(get_target_folder(path, create=False) or os.path.dirname(path), '.destination')
+                lock_paths = (path, destination, downloaded_path)
+                # Match the command's complete lock set before observing any bytes.
+                with subtitle_write_locks(path, *lock_paths):
+                    with observe_subtitle_change(media_type, path, downloaded_path, 'download', owner_instance_id):
+                        postprocessing(command, path, subtitle_path=downloaded_path, lock_paths=lock_paths)
+                        set_chmod(subtitles_path=downloaded_path)
         else:
             logging.debug(f"BAZARR post-processing skipped because subtitles score isn't below this "  # noqa: G004
                           f"threshold value: {pp_threshold}%")
 
-    if media_type == 'series':
+    if media_type == 'sports':
+        from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
+        if validate is not None:
+            instance = validate()
+        mappings = read_sports_mappings(instance.path_mappings)
+        reversed_path = apply_sports_mapping(path, mappings, reverse=True)
+        reversed_subtitles_path = apply_sports_mapping(downloaded_path, mappings, reverse=True)
+        refresh_sports_media_servers(path, downloaded_path, owner_instance_id)
+    elif media_type == 'series':
         # Reverse-map through the owning instance's path_mappings (#156) now that
         # the owner is known; None owner => global mapping, unchanged.
         reversed_path = path_mappings.path_replace_reverse_instance(
@@ -405,31 +505,32 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         media_type=media_type
     )
 
-    # Auto-translate: trigger translation to any profile language configured with translate_from
-    _trigger_auto_translation(
-        downloaded_lang=downloaded_language_code2,
-        subtitle_path=downloaded_path,
-        video_path=path,
-        media_type=media_type,
-        series_id=series_id if media_type == 'series' else None,
-        episode_id=episode_id if media_type == 'series' else None,
-        radarr_id=movie_metadata.radarrId if media_type != 'series' else None,
-        source_score_percent=percent_score,
-        forced=subtitle.language.forced,
-        arr_instance_id=(episode_metadata.arr_instance_id if media_type == 'series'
-                         else movie_metadata.arr_instance_id),
-    )
+    if media_type != 'sports':
+        # Auto-translate: trigger translation to any profile language configured with translate_from
+        _trigger_auto_translation(
+            downloaded_lang=downloaded_language_code2,
+            subtitle_path=downloaded_path,
+            video_path=path,
+            media_type=media_type,
+            series_id=series_id if media_type == 'series' else None,
+            episode_id=episode_id if media_type == 'series' else None,
+            radarr_id=movie_metadata.radarrId if media_type != 'series' else None,
+            source_score_percent=percent_score,
+            forced=subtitle.language.forced,
+            arr_instance_id=(episode_metadata.arr_instance_id if media_type == 'series'
+                             else movie_metadata.arr_instance_id),
+        )
 
-    # Combined subtitle: if the profile defines a combine rule and all sources
-    # are now on disk, build or refresh the combined file.
-    _trigger_combine(
-        video_path=path,
-        media_type=media_type,
-        radarr_id=movie_metadata.radarrId if media_type != 'series' else None,
-        series_id=series_id if media_type == 'series' else None,
-        episode_id=episode_id if media_type == 'series' else None,
-        arr_instance_id=owner_instance_id,
-    )
+        # Combined subtitle: if the profile defines a combine rule and all sources
+        # are now on disk, build or refresh the combined file.
+        _trigger_combine(
+            video_path=path,
+            media_type=media_type,
+            radarr_id=movie_metadata.radarrId if media_type != 'series' else None,
+            series_id=series_id if media_type == 'series' else None,
+            episode_id=episode_id if media_type == 'series' else None,
+            arr_instance_id=owner_instance_id,
+        )
 
     return ProcessSubtitlesResult(message=message,
                                   reversed_path=reversed_path,

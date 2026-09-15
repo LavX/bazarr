@@ -33,6 +33,7 @@ describe("Connections page", () => {
       expect(screen.getByRole("tab", { name: /sonarr/i })).toBeInTheDocument();
     });
     expect(screen.getByRole("tab", { name: /radarr/i })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /sportarr/i })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /plex/i })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /jellyfin/i })).toBeInTheDocument();
   });

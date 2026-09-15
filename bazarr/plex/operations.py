@@ -254,6 +254,49 @@ def plex_update_library(is_movie_library: bool) -> None:
         logger.error(f"Error in plex_update_library: {e}")  # noqa: G004
 
 
+def plex_update_sports_library() -> None:
+    """Trigger a library update for every configured Plex sports library.
+
+    A sports event carries no IMDB id, so ``plex_refresh_item`` has nothing to
+    resolve the item with; scanning each configured sports section is the
+    equivalent refresh for the sports content in it.
+    """
+    try:
+        plex = get_plex_server()
+        library_names = settings.plex.sports_library
+
+        # Ensure we have a list
+        if not isinstance(library_names, list):
+            library_names = [library_names] if library_names else []
+
+        if not library_names:
+            logger.debug("No sports libraries configured in Plex settings")
+            return
+
+        # Update all configured sports libraries
+        updated_count = 0
+        for library_name in library_names:
+            if not library_name:  # Skip empty strings
+                continue
+
+            try:
+                library = plex.library.section(library_name)
+                library.update()
+                logger.info(f"Triggered update for sports library: {library_name}")  # noqa: G004
+                updated_count += 1
+            except Exception as lib_error:
+                logger.error(f"Failed to update sports library '{library_name}': {lib_error}")  # noqa: G004
+                continue
+
+        if updated_count > 0:
+            logger.debug(f"Successfully triggered update for {updated_count} sports libraries")  # noqa: G004
+        else:
+            logger.warning("Failed to update any Plex sports libraries")
+
+    except Exception as e:
+        logger.error(f"Error in plex_update_sports_library: {e}")  # noqa: G004
+
+
 def plex_refresh_item(imdb_id: str, is_movie: bool, season: int = None, episode: int = None) -> None:
     """
     Refresh a specific item in Plex instead of scanning the entire library.

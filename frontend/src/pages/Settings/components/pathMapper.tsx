@@ -10,28 +10,34 @@ import {
   moviesEnabledKey,
   pathMappingsKey,
   pathMappingsMovieKey,
+  pathMappingsSportsKey,
   seriesEnabledKey,
+  sportsEnabledKey,
 } from "@/pages/Settings/keys";
 import { useFormActions } from "@/pages/Settings/utilities/FormValues";
 import { useSettingValue } from "@/pages/Settings/utilities/hooks";
 import { useArrayAction } from "@/utilities";
 import { Message } from "./Message";
 
-type SupportType = "sonarr" | "radarr";
+type SupportType = "sonarr" | "radarr" | "sports";
 
 function getSupportKey(type: SupportType) {
   if (type === "sonarr") {
     return pathMappingsKey;
-  } else {
+  } else if (type === "radarr") {
     return pathMappingsMovieKey;
+  } else {
+    return pathMappingsSportsKey;
   }
 }
 
 function getEnabledKey(type: SupportType) {
   if (type === "sonarr") {
     return seriesEnabledKey;
-  } else {
+  } else if (type === "radarr") {
     return moviesEnabledKey;
+  } else {
+    return sportsEnabledKey;
   }
 }
 
@@ -85,13 +91,16 @@ export const PathMappingTable: FunctionComponent<TableProps> = ({ type }) => {
         header: capitalize(type),
         accessorKey: "from",
         cell: ({ row: { original, index } }) => {
+          // These are the GLOBAL (Phase-12-gated) path-mapping settings, so
+          // the browse intentionally targets the DEFAULT server (instanceId
+          // unset, #156). For a sports mapping that is the default Sportarr
+          // instance, whose browser seeds its initial listing with the root
+          // folders that have already been synced. When a per-instance
+          // path-mapping UI lands, pass the selected instance id here so it
+          // browses that instance's server.
           return (
-            // These are the GLOBAL (Phase-12-gated) path-mapping settings, so
-            // the browse intentionally targets the DEFAULT server (instanceId
-            // unset, #156). When a per-instance path-mapping UI lands, pass the
-            // selected instance id here so it browses that instance's server.
             <FileBrowser
-              type={type}
+              type={type === "sports" ? "sportarr" : type}
               defaultValue={original.from}
               onChange={(path) => {
                 action.mutate(index, { ...original, from: path });

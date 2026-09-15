@@ -33,6 +33,14 @@ export function useSubtitleAction() {
         client.invalidateQueries({
           queryKey: [QueryKeys.Series],
         });
+      } else if (type === "sports") {
+        // Sports library, wanted, history and exclusion queries all live under
+        // this one root, as the batch hook already invalidates them. Falling
+        // through to the Movies prefix refreshed nothing here: it matched no
+        // sports query and left the lists stale until the socket event arrived.
+        client.invalidateQueries({
+          queryKey: [QueryKeys.Sports],
+        });
       } else {
         // The prefix, not [Movies, id]. Movie queries are cached under the
         // canonical LOCAL id while this id is the upstream radarrId, so a key
@@ -222,7 +230,7 @@ export function useSubtitleContents(subtitlePath: string) {
 }
 
 export function useSubtitleSyncStatus(
-  mediaType: "episode" | "movie",
+  mediaType: "episode" | "movie" | "sports",
   mediaId: number | undefined,
   language: string,
   enabled: boolean,
@@ -296,6 +304,30 @@ export function useRefTracksByMovieId(
   });
 }
 
+export function useRefTracksBySportsEventId(
+  subtitlesPath: string,
+  sportsEventId: number,
+  isSportsEvent: boolean,
+  arrInstanceId?: number,
+) {
+  return useQuery({
+    queryKey: [
+      QueryKeys.Sports,
+      sportsEventId,
+      QueryKeys.Subtitles,
+      subtitlesPath,
+      arrInstanceId,
+    ],
+    queryFn: () =>
+      api.subtitles.getRefTracksBySportsEventId(
+        subtitlesPath,
+        sportsEventId,
+        arrInstanceId,
+      ),
+    enabled: isSportsEvent,
+  });
+}
+
 export function useUpgradableItems() {
   return useQuery({
     queryKey: [QueryKeys.Subtitles, "upgradable"],
@@ -324,6 +356,11 @@ export function useBatchAction() {
       // only history query not covered is the System history stats.
       void client.invalidateQueries({
         queryKey: [QueryKeys.System, QueryKeys.History],
+      });
+      // Sports rows can be in a batch now, and their library, wanted, history
+      // and exclusion queries all live under this one root.
+      void client.invalidateQueries({
+        queryKey: [QueryKeys.Sports],
       });
       void client.invalidateQueries({
         queryKey: [QueryKeys.Translator],
@@ -426,11 +463,17 @@ export function usePromoteSyncSubtitle() {
     onSuccess: (_, params) => {
       if (params.mediaType === "episode") {
         client.invalidateQueries({ queryKey: [QueryKeys.Series] });
+      } else if (params.mediaType === "sports") {
+        // Same reason as useSubtitleAction: every sports query hangs off this
+        // one root, while the Movies prefix that used to take this branch
+        // matched none of them.
+        client.invalidateQueries({ queryKey: [QueryKeys.Sports] });
       } else {
         client.invalidateQueries({ queryKey: [QueryKeys.Movies] });
       }
-      // Episode/movie history live under the Series/Movies roots above; only
-      // the System history stats need a separate invalidation.
+      // Episode, movie and sports history live under the Series, Movies and
+      // Sports roots above; only the System history stats need a separate
+      // invalidation.
       client.invalidateQueries({
         queryKey: [QueryKeys.System, QueryKeys.History],
       });
@@ -475,6 +518,11 @@ export function useSubtitleCreate() {
     onSuccess: (_, params) => {
       if (params.mediaType === "episode") {
         client.invalidateQueries({ queryKey: [QueryKeys.Series] });
+      } else if (params.mediaType === "sports") {
+        // Same reason as useSubtitleAction: every sports query hangs off this
+        // one root, while the Movies prefix that used to take this branch
+        // matched none of them.
+        client.invalidateQueries({ queryKey: [QueryKeys.Sports] });
       } else {
         client.invalidateQueries({ queryKey: [QueryKeys.Movies] });
       }
@@ -535,7 +583,8 @@ async function downloadErrorMessage(
 
 export function useSubtitleFileDownload() {
   interface Param {
-    type: "episode" | "movie";
+    type: "episode" | "movie" | "sports";
+    // Upstream id for episodes and movies, the local event id for sports.
     mediaId: number;
     // Viewer/editor language key ("en", "en:hi", "en:forced", ...).
     language: string;
@@ -587,21 +636,47 @@ export function useSubtitleArchiveDownload() {
         radarrId: number;
         language?: string;
         arrInstanceId?: number;
+      }
+    | {
+        kind: "sports";
+        leagueId: number;
+        season?: number;
+        language?: string;
+        arrInstanceId?: number;
       };
   return useMutation({
     mutationKey: [QueryKeys.Subtitles, "download-archive"],
     mutationFn: async (param: Param) => {
-      const response =
-        param.kind === "series"
-          ? await api.series.downloadSubtitlesArchive(param.seriesId, {
-              season: param.season,
+      // A lookup on the kind rather than a ternary, so a third one cannot be
+      // silently routed to the movies endpoint.
+      const response = await {
+        series: () =>
+          api.series.downloadSubtitlesArchive(
+            (param as { seriesId: number }).seriesId,
+            {
+              season: (param as { season?: number }).season,
               language: param.language,
               arrInstanceId: param.arrInstanceId,
-            })
-          : await api.movies.downloadSubtitlesArchive(param.radarrId, {
+            },
+          ),
+        movie: () =>
+          api.movies.downloadSubtitlesArchive(
+            (param as { radarrId: number }).radarrId,
+            {
               language: param.language,
               arrInstanceId: param.arrInstanceId,
-            });
+            },
+          ),
+        sports: () =>
+          api.sports.downloadSubtitlesArchive(
+            (param as { leagueId: number }).leagueId,
+            {
+              season: (param as { season?: number }).season,
+              language: param.language,
+              arrInstanceId: param.arrInstanceId,
+            },
+          ),
+      }[param.kind]();
       assertDownloadPayload(response.data);
       saveBlobAs(
         response.data,

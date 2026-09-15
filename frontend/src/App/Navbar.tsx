@@ -95,7 +95,7 @@ const sectionGroups = [
   },
 ];
 
-function groupRoutes(routes: CustomRouteObject[]) {
+export function groupRoutes(routes: CustomRouteObject[]) {
   // Filter to visible nav items (have a path, not hidden, not index-only)
   const navItems = routes.filter(
     (r) => r.path !== undefined && !r.hidden && !r.path.includes(":") && r.name,
@@ -175,8 +175,9 @@ const AppNavbar: FunctionComponent = () => {
                     navRoutes
                       .filter(
                         (route) =>
-                          ["series", "movies"].includes(route.path ?? "") &&
-                          route.hidden,
+                          ["series", "movies", "sports"].includes(
+                            route.path ?? "",
+                          ) && route.hidden,
                       )
                       .map((route) => (
                         <NavbarItem

@@ -1,0 +1,500 @@
+# coding=utf-8
+"""Guards and filters a review round found too wide or too narrow.
+
+Each test pins one defect that was live on the branch: a guard that refused
+work it was meant to allow, a gate that let work through after the user closed
+it, a loop that let one instance end a whole job, and two lists that described
+less than the page beside them showed.
+"""
+
+import json
+from types import SimpleNamespace
+
+import pytest
+from test_sportarr_webhook import webhook, _post  # noqa: F401
+
+
+# --------------------------------------------------------------------------
+# The sports source guard and server-generated extractions.
+# --------------------------------------------------------------------------
+
+@pytest.fixture
+def extraction(monkeypatch, tmp_path):
+    """An event, its video, and the extraction directory the server writes to."""
+    from app import get_args
+    from subtitles.tools.translate import batch
+
+    config_dir = tmp_path / 'config'
+    media_dir = tmp_path / 'sports'
+    media_dir.mkdir()
+    (config_dir / 'extracted_subs').mkdir(parents=True)
+    monkeypatch.setattr(get_args.args, 'config_dir', str(config_dir))
+    video = media_dir / 'race.mkv'
+    video.write_bytes(b'video')
+    context = SimpleNamespace(mapped_path=str(video))
+    extracted = (config_dir / 'extracted_subs' /
+                 f'{batch.extracted_subtitle_key(str(video))}.en.srt')
+    extracted.write_text('1\n')
+    return context, video, extracted, config_dir / 'extracted_subs'
+
+
+def test_the_guard_accepts_this_events_own_extracted_track(extraction):
+    """Embedded sports translation was refused outright.
+
+    extract_embedded_subtitle() writes the track to
+    <config_dir>/extracted_subs/<key>..., and both the subtitle toolbox and the
+    mass-translate runner hand that file to manual_translation_operation. The
+    guard only described sidecars next to the video, so every embedded sports
+    translation died on "Sports subtitle source does not belong to its event".
+    """
+    from sportarr import profile_hooks
+
+    context, _, extracted, _ = extraction
+    profile_hooks._source_path(context, str(extracted))
+
+
+def test_the_guard_still_refuses_what_the_server_did_not_write(extraction):
+    """Verified, not merely located: the directory alone is not the licence.
+
+    A file that happens to sit in extracted_subs, or another event's
+    extraction, does not carry the cache name an extraction of this event's
+    video would be given, so it stays outside the operation's source set.
+    """
+    from sportarr import profile_hooks
+    from subtitles.tools.translate import batch
+
+    context, _, _, extract_dir = extraction
+    stranger = extract_dir / 'anything.en.srt'
+    stranger.write_text('1\n')
+    other = extract_dir / f'{batch.extracted_subtitle_key("/sports/other.mkv")}.en.srt'
+    other.write_text('1\n')
+    for path in (stranger, other):
+        with pytest.raises(ValueError):
+            profile_hooks._source_path(context, str(path))
+
+
+def test_the_guard_refuses_a_symlink_in_the_extraction_directory(extraction):
+    """The extraction arm widens where a source may live, not what it may be.
+
+    A symlink named like this event's extraction would otherwise read an
+    arbitrary file through a directory the server owns.
+    """
+    from sportarr import profile_hooks
+    from subtitles.tools.translate import batch
+
+    context, _, _, extract_dir = extraction
+    secret = extract_dir.parent / 'config.ini'
+    secret.write_text('apikey\n')
+    link = extract_dir / f'{batch.extracted_subtitle_key(str(context.mapped_path))}.de.srt'
+    link.symlink_to(secret)
+    with pytest.raises(ValueError):
+        profile_hooks._source_path(context, str(link))
+
+
+def test_the_sidecar_rule_is_unchanged(extraction):
+    """The event's own sidecars still pass and strangers still do not."""
+    from sportarr import profile_hooks
+
+    context, video, _, _ = extraction
+    sidecar = video.parent / 'race.en.srt'
+    sidecar.write_text('1\n')
+    profile_hooks._source_path(context, str(sidecar))
+
+    unrelated = video.parent / 'other.en.srt'
+    unrelated.write_text('1\n')
+    with pytest.raises(ValueError):
+        profile_hooks._source_path(context, str(unrelated))
+    with pytest.raises(ValueError):
+        profile_hooks._source_path(context, str(video.parent / 'race.gone.srt'))
+
+
+# --------------------------------------------------------------------------
+# The master toggle is the shutdown boundary for the import hook too.
+# --------------------------------------------------------------------------
+
+def test_the_webhook_stops_at_the_master_toggle(webhook, monkeypatch):  # noqa: F811
+    """Turning Sportarr off did not stop an import from restarting searches.
+
+    An instance row stays enabled when the master toggle goes off, so a keyed
+    hook still resolved an owner, indexed the event and queued
+    automatic_search_sports() behind the user's back. The scheduler and the SSE
+    client both treat the toggle as the boundary; this one did not.
+    """
+    from api.webhooks import sportarr
+
+    _, namespace, calls = webhook
+    monkeypatch.setattr(sportarr.settings.general, 'use_sportarr', False)
+    _, status = _post(monkeypatch, namespace, calls,
+                      {'eventType': 'Download', 'episodeFiles': [{'id': 71}]},
+                      stable_key='sportarr-1')
+    assert status == 200
+    assert calls == []
+
+
+# --------------------------------------------------------------------------
+# One unreachable Sportarr must not end the health job.
+# --------------------------------------------------------------------------
+
+def test_one_offline_sportarr_does_not_abort_health(schema_session, monkeypatch, tmp_path):
+    """A single raise took the whole job with it.
+
+    sync_rootfolders() raises on an offline instance, a non-200 answer or a
+    malformed payload, and the loop was unguarded: the owners after it went
+    unchecked, the badge event and backup_rotation() never ran, and the job
+    never reached its terminal rename.
+    """
+    from app import database as app_database
+    from app.database import TableArrInstances
+    from sportarr import rootfolder
+    from utilities import backup, health
+
+    for owner in (1, 2):
+        schema_session.add(TableArrInstances(
+            id=owner, kind='sportarr', name=str(owner), stable_key=str(owner), port=1867,
+            enabled=1, path_mappings=json.dumps([['/sports', str(tmp_path)]])))
+    schema_session.commit()
+    for module in (health, rootfolder, app_database):
+        monkeypatch.setattr(module, 'database', schema_session)
+    # The language table is built at app start, and nothing starts the app
+    # here, so the endpoint's alpha2/alpha3 lookups would quietly drop every
+    # code and hide what this test is about.
+    from languages import get_languages
+
+    monkeypatch.setattr(get_languages, 'languages_dict',
+                        [{'code2': 'en', 'code3': 'eng', 'name': 'English'},
+                         {'code2': 'hu', 'code3': 'hun', 'name': 'Hungarian'}],
+                        raising=False)
+    monkeypatch.setattr(health.settings.general, 'use_sportarr', True)
+    monkeypatch.setattr(health.settings.general, 'use_sonarr', False)
+    monkeypatch.setattr(health.settings.general, 'use_radarr', False)
+    monkeypatch.setattr(rootfolder, 'notify', lambda *args: None)
+
+    refreshed, finished = [], []
+
+    def _sync(arr_instance_id, **kwargs):
+        refreshed.append(arr_instance_id)
+        if arr_instance_id == 1:
+            raise ConnectionError('Sportarr is offline')
+
+    monkeypatch.setattr(rootfolder, 'sync_rootfolders', _sync)
+    monkeypatch.setattr(health, 'event_stream', lambda **kwargs: finished.append('badges'))
+    monkeypatch.setattr(backup, 'backup_rotation', lambda: finished.append('backup'))
+    monkeypatch.setattr(health.jobs_queue, 'update_job_name',
+                        lambda **kwargs: finished.append(kwargs['new_job_name']))
+
+    health.check_health(job_id=7)
+
+    assert refreshed == [1, 2]
+    assert finished == ['badges', 'backup', 'Checked Health']
+
+
+# --------------------------------------------------------------------------
+# The single-league profile refresh is queued, like the batch one.
+# --------------------------------------------------------------------------
+
+def test_the_single_league_refresh_is_queued_best_effort():
+    """The PATCH walked every event of the league while the request was open.
+
+    assign_profile() has already committed by then, so a timeout or a refresh
+    error reported a failed request for a change that had taken effect. The
+    batch endpoint queues the same refresh; this one now does too, with its own
+    refresh_id so the queue's kwargs deduplication cannot swallow a second
+    assignment while an older refresh is still running.
+    """
+    import ast
+    import inspect
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[2] / 'bazarr' / 'api' / 'sports' / 'leagues.py').read_text()
+    tree = ast.parse(source)
+    patch = next(node for cls in ast.walk(tree) if isinstance(cls, ast.ClassDef)
+                 and cls.name == 'SportsLeague'
+                 for node in cls.body
+                 if isinstance(node, ast.FunctionDef) and node.name == 'patch')
+    body = ast.get_source_segment(source, patch)
+    assert 'library.refresh_league_profiles(' not in body
+    assert "_queue('refresh_league_profiles'" in body
+    assert 'refresh_id' in body
+    assert 'except Exception' in body
+
+    from sportarr import library
+
+    assert 'refresh_id' in inspect.signature(library.refresh_league_profiles).parameters
+
+
+# --------------------------------------------------------------------------
+# The statistics language filter has to know the languages it plots.
+# --------------------------------------------------------------------------
+
+def test_sports_only_languages_are_offered_to_the_statistics_filter(schema_session, monkeypatch):
+    """A sports-only language could be filtered for but never selected.
+
+    The statistics chart plots sports downloads, and its language selector is
+    built from GET /system/languages?history=true. That branch read only
+    TableHistory and TableHistoryMovie, so a language that appears only in
+    sports history had no option in the list.
+    """
+    import importlib.util
+    import sys
+    from pathlib import Path
+    from types import ModuleType
+    from app.database import (TableArrInstances, TableHistoryMovie, TableHistorySports,
+                              TableSportsEvents, TableSportsLeagues)
+
+    schema_session.add(TableArrInstances(id=1, kind='sportarr', name='S', stable_key='s', port=1867))
+    schema_session.add(TableHistoryMovie(action=1, radarrId=1, language='en', video_path='/m.mkv',
+                                        description='downloaded'))
+    schema_session.add(TableSportsLeagues(id=51, arr_instance_id=1, sportarrLeagueId=7, title='League'))
+    schema_session.flush()
+    schema_session.add(TableSportsEvents(id=61, arr_instance_id=1, league_id=51, sportarrEventId=9,
+                                         file_id=71, path='/sports/race.mkv', title='Race'))
+    schema_session.flush()
+    schema_session.add(TableHistorySports(action=1, arr_instance_id=1, league_id=51, event_id=61,
+                                          language='hu', description='downloaded'))
+    schema_session.commit()
+
+    root = Path(__file__).resolve().parents[2] / 'bazarr' / 'api'
+    for name in ('_languages_api', '_languages_api.system'):
+        package = ModuleType(name)
+        package.__path__ = []
+        monkeypatch.setitem(sys.modules, name, package)
+    for name, path in [('_languages_api.utils', root / 'utils.py'),
+                       ('_languages_api.system.languages', root / 'system' / 'languages.py')]:
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, name, module)
+        spec.loader.exec_module(module)
+    monkeypatch.setattr(module, 'database', schema_session)
+    # The language table is built at app start, and nothing starts the app
+    # here, so the endpoint's alpha2/alpha3 lookups would quietly drop every
+    # code and hide what this test is about.
+    from languages import get_languages
+
+    monkeypatch.setattr(get_languages, 'languages_dict',
+                        [{'code2': 'en', 'code3': 'eng', 'name': 'English'},
+                         {'code2': 'hu', 'code3': 'hun', 'name': 'Hungarian'}],
+                        raising=False)
+
+    from flask import Flask
+    from flask_restx import Api
+    from app.config import settings
+
+    app = Flask(__name__)
+    Api(app).add_namespace(module.api_ns_system_languages, path='/')
+    client = app.test_client()
+    answer = client.get('/system/languages?history=true',
+                        headers={'X-API-KEY': settings.auth.apikey})
+    assert answer.status_code == 200
+    codes = {item['code2'] for item in answer.json}
+    assert {'en', 'hu'} <= codes
+
+
+def test_the_extraction_directory_has_one_definition():
+    """The guard and the extractor have to agree on the artifact's name.
+
+    Recomputing the cache key in two places is how the guard would drift back
+    into refusing the extractor's own output, so both read it from here.
+    """
+    import inspect
+
+    from sportarr import profile_hooks
+    from subtitles.tools.translate import batch
+
+    source = inspect.getsource(batch.extract_embedded_subtitle)
+    assert 'extracted_subtitles_dir()' in source
+    assert 'extracted_subtitle_key(' in source
+    assert 'hashlib' not in source
+    guard = inspect.getsource(profile_hooks._is_extraction_artifact)
+    assert 'extracted_subtitle_key' in guard
+
+
+# --------------------------------------------------------------------------
+# Promoting a sync output publishes inside the owned boundary.
+# --------------------------------------------------------------------------
+
+def test_the_sports_promotion_enters_the_owned_publication_boundary(monkeypatch):
+    """The promote route wrote through the generic flow.
+
+    The PUT and create routes both pin identity in `sports_manual_operation`
+    first, so a reconciliation that replaces or moves the recording mid-request
+    cannot publish over the new file. Promotion resolved its source and target
+    outside that boundary, wrote the bytes, and then reindexed and logged
+    history against the event as it had become.
+    """
+    from contextlib import contextmanager
+
+    from api.subtitles import content
+    from sportarr import subtitles as sports_subtitles
+
+    entered = []
+
+    @contextmanager
+    def fake_operation(event_id, arr_instance_id, cancel=None):
+        entered.append((event_id, arr_instance_id))
+        yield (SimpleNamespace(arr_instance_id=7), lambda: None,
+               'guard', '/media/sports/race.mkv')
+
+    monkeypatch.setattr(sports_subtitles, 'sports_manual_operation', fake_operation)
+    monkeypatch.setattr(content, '_promote_sync_subtitle_guarded',
+                        lambda *args, **kwargs: (args, kwargs))
+
+    args, kwargs = content.promote_sync_subtitle('sports', 61, 'en', 'en:sync',
+                                                 arr_instance_id=1)
+    assert entered == [(61, 1)]
+    # The owner comes back off the resolved event, not off the request.
+    assert args[-1] == 7
+    assert kwargs['sports_operation'][3] == '/media/sports/race.mkv'
+
+
+def test_losing_the_sports_recording_mid_promotion_is_a_conflict(monkeypatch):
+    """The guard's own refusal has to read as 409, not as a 500."""
+    from contextlib import contextmanager
+
+    from api.subtitles import content
+    from sportarr import subtitles as sports_subtitles
+
+    @contextmanager
+    def fake_operation(event_id, arr_instance_id, cancel=None):
+        yield (SimpleNamespace(arr_instance_id=7), lambda: None, 'guard', '/media/race.mkv')
+
+    def refuse(*args, **kwargs):
+        raise ValueError('Sports file changed. Please try again.')
+
+    monkeypatch.setattr(sports_subtitles, 'sports_manual_operation', fake_operation)
+    monkeypatch.setattr(content, '_promote_sync_subtitle_guarded', refuse)
+
+    body, status = content.promote_sync_subtitle('sports', 61, 'en', 'en:sync',
+                                                 arr_instance_id=1)
+    assert status == 409
+    assert body == 'Sports file changed. Please try again.'
+
+
+def test_the_other_media_types_do_not_enter_the_sports_boundary(monkeypatch):
+    """Episodes and movies have no owned publication boundary to enter."""
+    from api.subtitles import content
+    from sportarr import subtitles as sports_subtitles
+
+    def fail(*args, **kwargs):
+        raise AssertionError('sports_manual_operation used for a non-sports promotion')
+
+    monkeypatch.setattr(sports_subtitles, 'sports_manual_operation', fail)
+    monkeypatch.setattr(content, '_promote_sync_subtitle_guarded',
+                        lambda *args, **kwargs: ('guarded', args, kwargs))
+
+    result = content.promote_sync_subtitle('movie', 12, 'en', 'en:sync', arr_instance_id=3)
+    assert result[0] == 'guarded'
+    assert result[2] == {}
+
+
+# --------------------------------------------------------------------------
+# Stopping a queued sports job actually stops it.
+# --------------------------------------------------------------------------
+
+def test_a_cancelled_batch_stops_between_league_events(monkeypatch):
+    """A scan-disk batch kept probing a whole league after it was stopped.
+
+    Each event in the league is probed and indexed in this one call, and the
+    batch updates progress only before entering it, so with no signal the
+    cancellation was observed only once the league had finished.
+    """
+    from sportarr import workflows
+    from subtitles import mass_operations
+    from subtitles.indexer import sports
+
+    indexed, signals = [], []
+
+    class _Signal:
+        def __init__(self, owner, job_id=None, parent=None):
+            self.owner, self.job_id = owner, job_id
+            signals.append(self)
+
+        def is_set(self):
+            # Stopped while the first event was being probed.
+            return len(indexed) >= 1
+
+    monkeypatch.setattr(workflows, 'SportsJobSignal', _Signal)
+    monkeypatch.setattr(sports, 'store_subtitles_sports',
+                        lambda event_id, owner, **kwargs: indexed.append((event_id, owner,
+                                                                         kwargs.get('cancel'))))
+    monkeypatch.setattr(mass_operations, 'database',
+                        SimpleNamespace(execute=lambda *a, **kw: SimpleNamespace(
+                            scalars=lambda: SimpleNamespace(all=lambda: [61, 62, 63]))))
+
+    # check_cancelled speaks ValueError here, deliberately: the sports layer
+    # turns that into a refusal rather than a crash.
+    with pytest.raises(ValueError, match='stopped'):
+        mass_operations._scan_sports(
+            {'type': 'sportsLeague', 'sportsLeagueId': 51, 'arr_instance_id': 1}, 9)
+
+    assert [entry[0] for entry in indexed] == [61]
+    assert indexed[0][2] is signals[0]
+    assert (signals[0].owner, signals[0].job_id) == (1, 9)
+
+
+def test_a_queued_league_sync_takes_the_jobs_cancellation(monkeypatch):
+    """The queue's job_id was accepted and ignored.
+
+    Stopping the task from the Tasks page marks that job cancelled, and it is
+    the only handle the page has on this sync, so every checkpoint below was
+    asking a None signal and the league synced to the end regardless.
+    """
+    from sportarr import workflows
+    from sportarr.sync import events as sync_events_module
+
+    seen = {}
+
+    class _Signal:
+        def __init__(self, owner, job_id=None, parent=None):
+            self.owner, self.job_id = owner, job_id
+
+    monkeypatch.setattr(workflows, 'SportsJobSignal', _Signal)
+    monkeypatch.setattr(sync_events_module, 'sync_events',
+                        lambda league_id, owner, **kwargs: seen.update(kwargs, league=league_id))
+
+    sync_events_module.sync_one_league(51, 1, job_id=9)
+    assert isinstance(seen['cancel'], _Signal)
+    assert (seen['cancel'].owner, seen['cancel'].job_id) == (1, 9)
+
+    # An explicit signal from the caller still wins, and no job id means no
+    # signal to invent.
+    explicit = _Signal(1, 4)
+    sync_events_module.sync_one_league(51, 1, job_id=9, cancel=explicit)
+    assert seen['cancel'] is explicit
+    sync_events_module.sync_one_league(51, 1)
+    assert seen['cancel'] is None
+
+
+def test_a_queued_library_sync_takes_the_jobs_cancellation(monkeypatch):
+    """The whole-instance wrapper ignored its job_id the same way."""
+    from contextlib import contextmanager
+
+    from sportarr import rootfolder, workflows
+    from sportarr.sync import events as sync_events_module
+    from sportarr.sync import leagues as sync_leagues_module
+
+    seen = {}
+
+    class _Signal:
+        def __init__(self, owner, job_id=None, parent=None):
+            self.owner, self.job_id = owner, job_id
+
+    @contextmanager
+    def fake_lock(owner, cancel, timeout=None):
+        seen['lock'] = cancel
+        yield
+
+    monkeypatch.setattr(workflows, 'SportsJobSignal', _Signal)
+    monkeypatch.setattr(sync_leagues_module, 'owner_sync_lock', fake_lock)
+    monkeypatch.setattr(sync_leagues_module, 'require_sportarr', lambda *a, **kw: 'instance')
+    monkeypatch.setattr(sync_leagues_module, 'connection_identity', lambda instance: 'identity')
+    monkeypatch.setattr(sync_leagues_module, 'check_cancelled', lambda cancel: seen.setdefault('checked', cancel))
+    monkeypatch.setattr(rootfolder, 'sync_rootfolders', lambda owner, **kwargs: None)
+    monkeypatch.setattr(sync_leagues_module, 'sync_leagues',
+                        lambda owner, **kwargs: seen.update(leagues=kwargs.get('cancel')) or [51])
+    monkeypatch.setattr(sync_events_module, 'sync_event_leagues',
+                        lambda ids, owner, **kwargs: seen.update(events=kwargs.get('cancel')))
+
+    sync_leagues_module.update_sports_for_instance(1, job_id=9)
+    for stage in ('lock', 'leagues', 'events', 'checked'):
+        assert isinstance(seen[stage], _Signal), stage
+        assert (seen[stage].owner, seen[stage].job_id) == (1, 9)

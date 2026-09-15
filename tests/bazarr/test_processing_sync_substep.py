@@ -65,3 +65,93 @@ def test_movie_substep_sync_does_not_track_parent_job_progress():
     assert sync_mock.call_args.kwargs.get("job_id") == 99
     assert sync_mock.call_args.kwargs.get("owns_job_progress") is False
     assert sync_mock.call_args.kwargs.get("track_job_progress") is not False
+
+
+def test_sports_media_refresh_fires_only_for_configured_sports_libraries(monkeypatch):
+    """A sports write must refresh a server only when it has a sports library
+    configured: the Plex and Jellyfin refresh helpers are gated on their sports
+    library settings, and the Emby and Silo dispatcher notification is gated on
+    those master switches."""
+    from app.config import settings
+    from subtitles import processing
+
+    calls = []
+    notified = []
+    monkeypatch.setattr(processing, "plex_update_sports_library", lambda: calls.append("plex"))
+    monkeypatch.setattr(processing, "jellyfin_update_sports_library", lambda: calls.append("jellyfin"))
+    monkeypatch.setattr(processing, "notify_subtitle_mutation", notified.append)
+    monkeypatch.setattr(settings.general, "use_plex", True)
+    monkeypatch.setattr(settings.general, "use_jellyfin", True)
+    monkeypatch.setattr(settings.general, "use_emby", False)
+    monkeypatch.setattr(settings.general, "use_silo", False)
+    monkeypatch.setattr(settings.plex, "sports_library", [])
+    monkeypatch.setattr(settings.jellyfin, "sports_library_ids", [])
+
+    processing.refresh_sports_media_servers("/sports/Event.mkv", "/sports/Event.en.srt", 1)
+    assert calls == []
+    assert notified == []
+
+    monkeypatch.setattr(settings.plex, "sports_library", ["Sports"])
+    monkeypatch.setattr(settings.jellyfin, "sports_library_ids", ["10"])
+    processing.refresh_sports_media_servers("/sports/Event.mkv", "/sports/Event.en.srt", 1)
+    assert calls == ["plex", "jellyfin"]
+    assert notified == []
+
+    monkeypatch.setattr(settings.general, "use_emby", True)
+    monkeypatch.setattr(settings.general, "use_silo", True)
+    calls.clear()
+    processing.refresh_sports_media_servers("/sports/Event.mkv", "/sports/Event.en.srt", 1)
+    assert calls == ["plex", "jellyfin"]
+    assert len(notified) == 1
+    assert notified[0].media_type == "sports"
+    assert notified[0].operation == "download"
+    assert notified[0].arr_instance_id == 1
+    assert notified[0].video_path == "/sports/Event.mkv"
+
+
+def test_sports_process_subtitle_calls_the_media_server_refresh(monkeypatch):
+    """Processing refreshes configured libraries and reports the exact file owner."""
+    from types import SimpleNamespace
+    from contextlib import nullcontext
+    from subzero.language import Language
+    from app.config import settings
+    from jellyfin import operations as jellyfin
+    from plex import operations as plex
+    from languages import get_languages
+    from subtitles import processing
+
+    refreshed, published = [], []
+    monkeypatch.setattr(settings.general, "use_plex", True)
+    monkeypatch.setattr(settings.general, "use_jellyfin", True)
+    monkeypatch.setattr(settings.general, "use_emby", True)
+    monkeypatch.setattr(settings.plex, "sports_library", ["Sports"])
+    monkeypatch.setattr(settings.jellyfin, "sports_library_ids", ["sports-id"])
+    monkeypatch.setattr(plex, "get_plex_server", lambda: SimpleNamespace(library=SimpleNamespace(
+        section=lambda name: SimpleNamespace(update=lambda: refreshed.append(("plex", name))))))
+    monkeypatch.setattr(jellyfin, "get_jellyfin_client", lambda: SimpleNamespace(
+        refresh_item=lambda library: refreshed.append(("jellyfin", library))))
+    monkeypatch.setattr(processing, "notify_subtitle_mutation", published.append)
+    monkeypatch.setattr(processing, "_defaul_sync_checker", lambda subtitle: False)
+    monkeypatch.setattr(processing, "_postprocessing_config", lambda *args: (False, "", False, 0))
+    monkeypatch.setattr(processing, "call_external_webhook", lambda **kwargs: None)
+    monkeypatch.setattr(get_languages, "languages_dict", [
+        {"code2": "en", "code3": "eng", "code3b": "eng", "name": "English"},
+    ], raising=False)
+    context = SimpleNamespace(mapped_path="/tmp/x.mkv", arr_instance_id=42)
+    instance = SimpleNamespace(path_mappings='[["/sports", "/tmp"]]')
+    subtitle = _fake_subtitle()
+    subtitle.language = Language("eng")
+
+    result, = processing.process_subtitle(
+        subtitle, "sports", "English", context.mapped_path, max_score=100,
+        context=context, validate=lambda: instance, publication_guard=nullcontext)
+
+    assert result.path == "/sports/x.mkv"
+    assert result.subs_path == "/sports/x.en.srt"
+    assert refreshed == [("plex", "Sports"), ("jellyfin", "sports-id")]
+    assert len(published) == 1
+    assert published[0].arr_instance_id == 42
+    assert published[0].video_path == "/tmp/x.mkv"
+    assert published[0].subtitle_path == "/tmp/x.en.srt"
+    assert published[0].media_type == "sports"
+    assert published[0].operation == "download"

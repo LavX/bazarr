@@ -7,6 +7,7 @@ Fernet-encrypted settings, so the key is encrypted here on write via
 ``secret_store.encrypt_secret`` and decrypted on read via ``decrypt_secret``.
 API-facing callers use :func:`to_safe_dict`, which never carries the key.
 """
+import logging
 import re
 from datetime import datetime
 
@@ -17,8 +18,8 @@ from app.database import TableArrInstances
 from .media_defaults import read_media_defaults
 from .subtitle_settings import read_subtitle_settings
 
-VALID_KINDS = ("sonarr", "radarr")
-_DEFAULT_PORTS = {"sonarr": 8989, "radarr": 7878}
+VALID_KINDS = ("sonarr", "radarr", "sportarr")
+_DEFAULT_PORTS = {"sonarr": 8989, "radarr": 7878, "sportarr": 1867}
 _UNSET = object()
 
 
@@ -141,6 +142,8 @@ class ArrInstanceRepository:
             )
             self._session.add(row)
             self._session.flush()
+        if kind == 'sportarr':
+            self._refresh_ownership_triggers()
         return row
 
     def update(self, instance_id, *, name=_UNSET, enabled=_UNSET,
@@ -258,10 +261,37 @@ class ArrInstanceRepository:
         return row
 
     def delete(self, instance_id):
-        """Delete an instance. Refuse while it still owns any rows."""
+        """Delete an instance.
+
+        A sportarr instance is deleted outright: its leagues, events, history
+        and blacklist are its own metadata and go with it through the foreign
+        key cascade, and no media file is touched. Every other kind refuses
+        while it still owns rows, because those rows are media the user would
+        lose the ownership of rather than metadata about a server.
+        """
         row = self.get(instance_id)
         if row is None:
             return False
+        if row.kind == 'sportarr':
+            from sqlalchemy import delete
+            from sportarr.db import sports_transaction
+            with sports_transaction(self._session) as session:
+                # The FK cascade removes this owner's metadata, never media files.
+                # Release-type mismatches are not part of it: the link is a plain
+                # integer, so the cascaded events would leave their rows behind
+                # to badge a later recording that reuses one of their ids.
+                from sqlalchemy import select as _select
+                from app.database import TableSportsLeagues
+                from sportarr.sync.leagues import forget_league_event_mismatches
+                forget_league_event_mismatches(session, instance_id, session.execute(
+                    _select(TableSportsLeagues.id).where(
+                        TableSportsLeagues.arr_instance_id == instance_id)).scalars().all())
+                session.execute(delete(TableArrInstances).where(TableArrInstances.id == instance_id))
+                ArrInstanceRepository(session)._reconcile_default('sportarr', demoted_id=instance_id)
+                session.flush()
+            self._session.expire_all()
+            self._refresh_ownership_triggers()
+            return True
         if self._has_owned_rows(instance_id):
             raise ValueError("cannot delete an instance that still owns rows")
         kind = row.kind
@@ -272,6 +302,48 @@ class ArrInstanceRepository:
             self._session.flush()
             self._reconcile_default(kind, demoted_id=instance_id)
         return True
+
+    def _refresh_ownership_triggers(self):
+        """Install or drop the ownership triggers when Sportarr appears or goes.
+
+        The triggers tax every write to table_episodes and table_movies, so
+        they exist only for an install that has a Sportarr instance. Startup
+        alone cannot decide that: the first instance is created from a running
+        process. The publication boundary can install them itself when it finds
+        none, so this is not the only path and does not have to succeed; doing
+        it here keeps the DDL out of a publication.
+
+        Only on a transition. install_ownership_revision is a full rebuild: it
+        bumps the revision, clears the change log and drops and recreates every
+        trigger, so running it for a second or third instance would throw away
+        a valid incremental snapshot and, on PostgreSQL, take ACCESS EXCLUSIVE
+        on the two busiest tables from a request thread for no change at all.
+
+        Through sports_transaction, not begin_nested. The rebuild is a dozen
+        statements and has to be all or nothing, but this session is usually
+        the app one, which is bound to an AUTOCOMMIT engine, and PostgreSQL
+        rejects a bare SAVEPOINT outside a transaction block. sports_transaction
+        exists for exactly this: it opens a dedicated connection with a real
+        transaction when the session needs one, and nests when the caller has
+        already opened one. The two probes run inside it too, so a failure in
+        either rolls back with the rest instead of leaving the caller's
+        transaction aborted.
+
+        Never raises, because a failed refresh must not turn a successful
+        create or delete into an error. The next startup reinstalls, and a
+        publication installs them itself if it finds none at all.
+        """
+        from app.ownership_revision import (install_ownership_revision, ownership_triggers_match,
+                                            sportarr_in_use)
+        from sportarr.db import sports_transaction
+        try:
+            with sports_transaction(self._session) as session:
+                connection = session.connection()
+                if ownership_triggers_match(session, sportarr_in_use(connection)):
+                    return
+                install_ownership_revision(connection)
+        except Exception:
+            logging.exception('BAZARR could not refresh the subtitle ownership triggers')
 
     def _has_owned_rows(self, instance_id):
         from app.database import (
@@ -309,7 +381,19 @@ def to_safe_dict(row):
     ``api_key_set`` tells the UI whether a key exists so it can show a masked
     placeholder without ever receiving the secret.
     """
+    # The OVERRIDE blob as stored, not the resolved values. The UI renders one
+    # row per setting and treats a present key as "this instance overrides the
+    # global", so handing it the resolved merge would show all thirteen as
+    # overridden and, on the next save, freeze them as real overrides that no
+    # longer track the Connections and Scheduler settings.
+    from sportarr.settings import read_sports_overrides
+    from utilities.path_mappings import read_sports_mappings
     return {
+        **({"sports_settings": read_sports_overrides(row),
+            # inherit=False for the same reason sports_settings serves the raw
+            # override: the UI reads a present value as an instance override.
+            "path_mappings": read_sports_mappings(row.path_mappings, inherit=False)}
+           if row.kind == "sportarr" else {}),
         "id": row.id,
         "kind": row.kind,
         "stable_key": row.stable_key,

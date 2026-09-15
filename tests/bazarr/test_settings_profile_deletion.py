@@ -33,7 +33,28 @@ def _profile_payload(profile_id, name):
 @pytest.fixture
 def post_settings(schema_session, monkeypatch):
     """Drive the real endpoint with a form, the way the frontend submits one."""
-    import api.system.settings as endpoint
+    import importlib.util
+    from pathlib import Path
+    import sys
+    from types import ModuleType, SimpleNamespace
+    from app import database as db_module
+    from subtitles.indexer import sports
+
+    # Import this HTTP boundary without starting unrelated API startup jobs.
+    root = Path(__file__).resolve().parents[2] / 'bazarr' / 'api'
+    for name in ('api', 'api.system'):
+        package = ModuleType(name)
+        package.__path__ = [str(root if name == 'api' else root / 'system')]
+        monkeypatch.setitem(sys.modules, name, package)
+    monkeypatch.setitem(sys.modules, 'app.scheduler', SimpleNamespace(scheduler=None))
+    for name, path in [('api.utils', root / 'utils.py'), ('api.system.settings', root / 'system/settings.py')]:
+        spec = importlib.util.spec_from_file_location(name, path)
+        endpoint = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, name, endpoint)
+        spec.loader.exec_module(endpoint)
+    monkeypatch.setattr(db_module, 'database', schema_session)
+    monkeypatch.setattr(sports, 'database', schema_session)
+    monkeypatch.setattr(sports, 'notify', lambda *a: None)
 
     monkeypatch.setattr(endpoint, "database", schema_session)
     monkeypatch.setattr(endpoint, "event_stream", lambda *a, **kw: None)

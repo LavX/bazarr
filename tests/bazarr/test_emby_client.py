@@ -563,3 +563,19 @@ def test_a_windows_library_root_never_swallows_a_posix_path(http_fixture):
     with EmbyClient(base, "synthetic-key") as client:
         assert client.refresh_library("movie", "/media/movies/A.mkv") is None
     assert len(records) == 1
+
+
+@pytest.mark.parametrize('collection', ['movies', 'tvshows', 'homevideos', None])
+def test_sports_library_refresh_accepts_any_collection_at_the_exact_root(http_fixture, collection):
+    from emby.client import EmbyClient
+
+    base, records = http_fixture([
+        (200, [{'ItemId': 'sports', 'Locations': ['/media/sports'], 'CollectionType': collection},
+               {'ItemId': 'other', 'Locations': ['/media/other'], 'CollectionType': collection}], {}),
+        (204, b'', {}),
+    ])
+    with EmbyClient(base, 'synthetic-key') as client:
+        assert client.refresh_library('sports', '/media/sports/race.mkv') == {'status': 'requested'}
+    assert len(records) == 2
+    assert urlsplit(records[1]['path']).path == '/Items/sports/Refresh'
+    assert parse_qs(urlsplit(records[1]['path']).query)['Recursive'] == ['true']

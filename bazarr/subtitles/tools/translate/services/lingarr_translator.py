@@ -2,16 +2,19 @@
 
 import logging
 import pysubs2
+from sportarr.profile_hooks import sports_write_kwargs, finish_translation
 from subtitles.tools.subsync_engines import staged_subtitle_write
 from media_servers.events import publication_callback
 import requests
+import time
 
 from retry.api import retry
 from deep_translator.exceptions import TooManyRequests, RequestError
 
 from app.config import settings
 from app.database import TableShows, TableEpisodes, TableMovies, database, select  # noqa: F401
-from app.jobs_queue import jobs_queue
+from app.jobs_queue import jobs_queue, JobCancelled
+from sportarr.connection import check_cancelled
 from languages.custom_lang import CustomLanguage  # noqa: F401
 from languages.get_languages import alpha3_from_alpha2, language_from_alpha2, language_from_alpha3  # noqa: F401
 from radarr.history import history_log_movie
@@ -32,7 +35,7 @@ class LingarrAuthError(Exception):
 class LingarrTranslatorService:
     def __init__(self, source_srt_file, dest_srt_file, lang_obj, to_lang, from_lang, media_type,
                  video_path, orig_to_lang, forced, hi, sonarr_series_id, sonarr_episode_id,
-                 radarr_id, arr_instance_id=None):
+                 radarr_id, arr_instance_id=None, sports_operation=None, cancel=None):
         self.source_srt_file = source_srt_file
         self.dest_srt_file = dest_srt_file
         self.lang_obj = lang_obj
@@ -49,6 +52,9 @@ class LingarrTranslatorService:
         # The owning arr instance (#156): radarrId and sonarrSeriesId are only
         # unique together with it, so every media lookup below carries it.
         self.arr_instance_id = arr_instance_id
+        self.sports_operation = sports_operation
+        self.cancel = cancel
+        self.partial_error = None
         self.language_code_convert_dict = {
             'zh': 'zh-CN',
             'zt': 'zh-TW',
@@ -62,7 +68,8 @@ class LingarrTranslatorService:
                                                                        'translate', self.arr_instance_id),
                                        source_paths=(self.source_srt_file,),
                                        before_publish=lambda: jobs_queue.update_job_progress(job_id=job_id),
-                                       allow_empty=True) as temporary:
+                                       allow_empty=not bool(self.sports_operation),
+                                       **sports_write_kwargs(self, job_id)) as temporary:
                 jobs_queue.update_job_progress(job_id=job_id, progress_max=1, progress_message=self.source_srt_file)
 
                 subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
@@ -70,11 +77,14 @@ class LingarrTranslatorService:
                 lines_list_len = len(lines_list)
 
                 if lines_list_len == 0:
+                    if self.sports_operation:
+                        raise RuntimeError('Lingarr source has no subtitle cues')
                     logger.debug('No lines to translate in subtitle file')
                     return self.dest_srt_file
 
                 logger.debug(f'Starting translation for {self.source_srt_file}')  # noqa: G004
-                translated_lines = self._translate_content(lines_list, job_id=job_id)
+                translated_lines = (self._translate_sports_lines(lines_list, job_id)
+                                    if self.sports_operation else self._translate_content(lines_list, job_id=job_id))
 
                 if translated_lines is None:
                     logger.error(f'Translation failed for {self.source_srt_file}')  # noqa: G004
@@ -105,8 +115,12 @@ class LingarrTranslatorService:
             message = (f"{language_from_alpha2(self.from_lang)} subtitles translated to "
                        f"{language_from_alpha3(self.to_lang)} using Lingarr.")
             result = create_process_result(message, self.video_path, self.orig_to_lang, self.forced, self.hi,
-                                           self.dest_srt_file, self.media_type)
+                                           self.dest_srt_file, self.media_type,
+                                           **({"sports_context": self.sports_operation.context}
+                                              if self.sports_operation else {}))
 
+            if finish_translation(self, result):
+                return self.dest_srt_file
             if self.media_type == 'episode':
                 history_log(action=6,
                             sonarr_series_id=self.sonarr_series_id,
@@ -121,10 +135,86 @@ class LingarrTranslatorService:
 
             return self.dest_srt_file
 
+        except JobCancelled:
+            raise
         except Exception as e:
             logger.error(f'BAZARR encountered an error during Lingarr translation: {str(e)}')  # noqa: G004
             jobs_queue.update_job_progress(job_id=job_id, progress_message=f'Lingarr translation failed: {str(e)}')
             raise
+
+    def _check_cancelled(self, job_id):
+        jobs_queue.update_job_progress(job_id=job_id)
+        check_cancelled(self.cancel)
+
+    def _translate_sports_lines(self, lines, job_id):
+        """Lingarr's line endpoint has no native media identity or remote job."""
+        self.partial_error = None
+        completed = []
+        jobs_queue.update_job_progress(job_id=job_id, progress_value=0,
+                                       progress_max=sum(bool(line.strip()) for line in lines))
+        for position, line in enumerate(lines):
+            self._check_cancelled(job_id)
+            if not line.strip():
+                continue
+            payload = {
+                'subtitleLine': line,
+                'sourceLanguage': self.language_code_convert_dict.get(self.from_lang, self.from_lang),
+                'targetLanguage': self.language_code_convert_dict.get(self.orig_to_lang, self.orig_to_lang),
+                'contextLinesBefore': lines[max(0, position - 2):position],
+                'contextLinesAfter': lines[position + 1:position + 3],
+            }
+            try:
+                translated = self._translate_sports_line(payload, job_id)
+            except JobCancelled:
+                raise
+            except Exception as exc:
+                self._check_cancelled(job_id)
+                if not completed:
+                    raise
+                self.partial_error = f'Lingarr stopped after {len(completed)} translated cues: {exc}'[:500]
+                logger.warning('%s', self.partial_error)
+                break
+            completed.append({'position': position, 'line': translated})
+            jobs_queue.update_job_progress(job_id=job_id, progress_value=len(completed))
+        return completed or None
+
+    def _translate_sports_line(self, payload, job_id):
+        headers = {'Content-Type': 'application/json', 'Accept': 'text/plain'}
+        if settings.translator.lingarr_token:
+            headers['X-Api-Key'] = settings.translator.lingarr_token
+        for attempt in range(3):
+            self._check_cancelled(job_id)
+            try:
+                response = requests.post(
+                    f"{settings.translator.lingarr_url.rstrip('/')}/api/translate/line",
+                    json=payload, headers=headers, timeout=1800,
+                )
+                self._check_cancelled(job_id)
+                if response.status_code == 429 or response.status_code >= 500:
+                    raise RequestError(f'Lingarr line service returned HTTP {response.status_code}')
+                if response.status_code != 200:
+                    raise LingarrAuthError(f'Lingarr line request rejected: HTTP {response.status_code}')
+                content_type = response.headers.get('Content-Type', '').split(';')[0].strip().lower()
+                if content_type == 'application/json':
+                    text = response.json()
+                elif content_type == 'text/plain':
+                    text = response.text
+                else:
+                    raise ValueError('Lingarr line service did not return text')
+                if (not isinstance(text, str) or not text.strip()
+                        or text.lstrip().lower().startswith(('<html', '<!doctype'))):
+                    raise ValueError('Lingarr line service returned no usable translated text')
+                return text
+            except (RequestError, requests.exceptions.RequestException):
+                if attempt == 2:
+                    raise
+                deadline = time.monotonic() + 2 ** attempt
+                while time.monotonic() < deadline:
+                    self._check_cancelled(job_id)
+                    if self.cancel is not None:
+                        self.cancel.wait(min(0.1, max(0, deadline - time.monotonic())))
+                    else:
+                        time.sleep(min(0.1, max(0, deadline - time.monotonic())))
 
     # Retry schedule for transient errors (e.g. 502 during back-translator cold-start ~60s):
     # ~15s -> ~30s -> ~60s -> ~120s -> ~120s (max_delay caps last two intervals)
