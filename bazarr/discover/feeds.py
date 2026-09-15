@@ -24,6 +24,14 @@ FRESH_SECONDS = 3600
 # either way, it retries on RETRY_SECONDS.
 STALE_SECONDS = 6 * 3600
 RETRY_SECONDS = 30
+# How long a feed that came back partially covered stays fresh. Partial coverage
+# is a usable feed, so it gets a window of its own rather than the retry window a
+# feed with nothing to show uses. Sharing that thirty-second window meant a
+# single failed sub-check turned every later visit into a fresh run of twenty-odd
+# upstream calls; on an instance slow enough to produce the first partial result
+# those runs went partial the same way, so the feed never converged and the
+# reader watched it reload on every page load instead.
+PARTIAL_SECONDS = 600
 CALL_SECONDS = 12
 # The Discover homepage renders three feeds and asks for all of them at once,
 # so a cap below three guaranteed that every cold load refused one outright:
@@ -48,6 +56,26 @@ class _Job:
 
 def _now():
     return datetime.now(timezone.utc)
+
+
+def _images(config, rows):
+    """The shared image configuration, once, and only when a row can use it.
+
+    Artwork is resolved while items are built rather than in one pass after the
+    records are, because a single pass at the end of a run is the pass a spent
+    budget never reaches. A feed that ran out of budget still shows what it
+    verified, and that is exactly when every poster used to go missing.
+
+    It stays optional either way: a configuration request that fails resolves
+    nothing and discards nothing, and after the first call it is served from the
+    metadata cache, so it costs the record checks at most one request.
+    """
+    if not any(row.get("poster_path") or row.get("backdrop_path") for row in rows):
+        return {}
+    try:
+        return metadata._image_config(config)
+    except metadata.UpstreamFailure:
+        return {}
 
 
 def _load(config, media_type, deadline):
@@ -258,6 +286,7 @@ def _load_digital(config, region, start, end, job):
     coverage["candidates"] = len(candidates.keys() | rejected) + unidentified
     coverage["failed"] = len(rejected - candidates.keys()) + unidentified
     job.admission_failed = bool(rows) and not candidates
+    images = _images(config, candidates.values())
     items = []
     _digital_progress(job, items, coverage)
     for identity, row in candidates.items():
@@ -273,7 +302,7 @@ def _load_digital(config, region, start, end, job):
                 coverage["missing_region"] += 1
             if qualified:
                 day, original = qualified
-                title = metadata._movie(row, {})
+                title = metadata._movie(row, images)
                 items.append({**{key: title[key] for key in ("source_id", "id", "media_type", "title", "year", "overview", "poster_url", "backdrop_url")},
                               "region": region, "release_type": "digital", "release_date": day,
                               "provenance": {"source": "tmdb", "path": f"/movie/{identity}/release_dates",
@@ -285,15 +314,6 @@ def _load_digital(config, region, start, end, job):
         _digital_progress(job, items, coverage)
     coverage["complete"] = not (coverage["truncated"] or coverage["missing_region"] or coverage["failed"])
     _digital_progress(job, items, coverage)
-    # Artwork is optional and comes after provenance so it cannot consume the
-    # release-check budget or discard already verified films.
-    if items and time.monotonic() < job.deadline:
-        images = metadata._image_config(config)
-        for item in items:
-            row = candidates[item["id"]]
-            item["poster_url"] = metadata._image(images, row.get("poster_path"), "poster")
-            item["backdrop_url"] = metadata._image(images, row.get("backdrop_path"), "backdrop")
-        _digital_progress(job, items, coverage)
 
 
 def _seal_digital(key, job, status):
@@ -309,7 +329,7 @@ def _seal_digital(key, job, status):
         coverage["complete"] = not (coverage["failed"] or coverage["missing_region"] or coverage["truncated"])
         _cache[key] = {**payload, "failure": None,
                        "service_status": "unavailable" if status == "unavailable" or coverage["failed"] else None,
-                       "retry_at": time.monotonic() + RETRY_SECONDS if coverage["failed"] else 0}
+                       "retry_at": time.monotonic() + PARTIAL_SECONDS if coverage["failed"] else 0}
         job.status = "live"
     else:
         status = "unavailable" if status == "live" else status
@@ -374,7 +394,7 @@ def digital_releases(region="US", today=None):
     with _lock:
         previous = _cache.get(key, {})
         fresh = ("time" in previous and not previous.get("failure")
-                 and time.monotonic() < previous["time"] + (RETRY_SECONDS if previous.get("service_status") else FRESH_SECONDS))
+                 and time.monotonic() < previous["time"] + (PARTIAL_SECONDS if previous.get("service_status") else FRESH_SECONDS))
         job = _jobs.get(key)
         if not fresh and time.monotonic() >= previous.get("retry_at", 0) and job is None and len(_jobs) < MAX_JOBS:
             job = _DigitalJob(deadline)
@@ -630,6 +650,10 @@ def _load_recent(config, start, end, job):
     shows, artwork = _recent_shows(config, job, coverage)
     coverage["shows"] = min(len(shows), RECENT_SHOWS)
     coverage["truncated"] |= len(shows) > RECENT_SHOWS
+    # Before the seasons, so the episodes a partially covered run does collect
+    # carry their show's poster. Hydration is still optional: it resolves at
+    # most one cached configuration request and never discards a show.
+    _recent_artwork(config, job, {show["id"]: show for show in shows[:RECENT_SHOWS]}, artwork)
     items = {}
     _recent_progress(job, [], coverage)
     for show in shows[:RECENT_SHOWS]:
@@ -668,13 +692,10 @@ def _load_recent(config, start, end, job):
                 coverage["failed"] += 1
             _recent_progress(job, list(items.values()), coverage)
     coverage["complete"] = not (coverage["truncated"] or coverage["failed"] or coverage["missing_dates"])
-    # Artwork is optional, so it spends what is left of the budget and never any
-    # of what the records need. Running it before the loop meant a slow
-    # configuration request could exhaust the deadline with zero seasons
-    # checked, which seals the whole feed as failed rather than partial.
+    # Once more for a show whose poster the earlier pass could not resolve, and
+    # then carry whatever each show ended up with onto its episodes, whichever
+    # producer resolved it, never overwriting an item's own poster with nothing.
     _recent_artwork(config, job, {show["id"]: show for show in shows[:RECENT_SHOWS]}, artwork)
-    # Carry whatever the show ended up with onto its episodes, whichever producer
-    # resolved it, and never overwrite an item's own poster with nothing.
     by_show = {show["id"]: show for show in shows}
     for item in items.values():
         poster = (by_show.get(item["show_id"]) or {}).get("poster_url")
@@ -699,7 +720,7 @@ def _seal_recent(key, job, status):
             coverage["complete"] = False
         _cache[key] = {**payload, "failure": None,
                        "service_status": "unavailable" if coverage["failed"] else None,
-                       "retry_at": time.monotonic() + RETRY_SECONDS if coverage["failed"] else 0}
+                       "retry_at": time.monotonic() + PARTIAL_SECONDS if coverage["failed"] else 0}
         job.status = "live"
     else:
         failure_coverage = deepcopy(payload["coverage"]) if payload else None
@@ -757,7 +778,7 @@ def recent_episodes(today=None):
     with _lock:
         previous = _cache.get(key, {})
         fresh = ("time" in previous and not previous.get("failure")
-                 and time.monotonic() < previous["time"] + (RETRY_SECONDS if previous.get("service_status") else FRESH_SECONDS))
+                 and time.monotonic() < previous["time"] + (PARTIAL_SECONDS if previous.get("service_status") else FRESH_SECONDS))
         job = _jobs.get(key)
         if not fresh and time.monotonic() >= previous.get("retry_at", 0) and job is None and len(_jobs) < MAX_JOBS:
             job = _RecentJob(deadline)

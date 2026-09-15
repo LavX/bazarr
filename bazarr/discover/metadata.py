@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from http import cookiejar
 import json
 import re
 import threading
@@ -27,6 +28,8 @@ CONFIG_LOCK = threading.RLock()
 _cache = make_region().configure("dogpile.cache.memory", expiration_time=STALE_SECONDS,
                                 arguments={"cache_dict": LockedLRU(maxsize=256)})
 _fetch_locks = [threading.Lock() for _ in range(32)]
+_transport_lock = threading.Lock()
+_session = None
 _current = None
 _cooldowns = LockedLRU(maxsize=32)
 
@@ -144,51 +147,91 @@ def _contains_credential(value, token):
     return False
 
 
+class _NoStoredCookies(cookiejar.DefaultCookiePolicy):
+    """A transport shared by every reader stores no per-response state."""
+
+    def set_ok(self, cookie, request):
+        return False
+
+
+def _transport():
+    """One pooled connection per host for every TMDB call in this process.
+
+    A session per request paid a DNS lookup, a TCP connect and a TLS handshake
+    on each call. A feed makes twenty-odd calls inside one budget, so on a loaded
+    instance those setups, not the answers, were what ran the budget out: the
+    reader was handed partial coverage without artwork, and the shortened retry
+    that followed re-ran the same doomed work on every page load.
+
+    The credential travels as a v3 query parameter, so the session carries no
+    authorization header to leak between a saved token and a draft one, and
+    cookies are refused so no response can leave state on a shared object.
+    """
+    global _session
+    with _transport_lock:
+        if _session is None:
+            session = requests.Session()
+            session.cookies.set_policy(_NoStoredCookies())
+            # A pooled connection can be closed by the far end between two
+            # calls, which the pool detects for a socket it can see closed and
+            # not for one closed in the moment it is handed out. One retry, for
+            # an idempotent GET only, keeps that race from being reported to the
+            # reader as a source failure.
+            retry = requests.adapters.Retry(total=1, connect=1, read=1, status=0, redirect=0,
+                                            allowed_methods=frozenset({"GET"}), backoff_factor=0,
+                                            raise_on_status=False)
+            adapter = requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=8, max_retries=retry)
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
+            _session = session
+        return _session
+
+
 def _request(config, path, params=None):
     if time.monotonic() < _cooldowns.get(config.revision, 0):
         raise UpstreamFailure()
     try:
-        # Per-request sessions avoid mutating shared authorization headers across
-        # simultaneous saved-token and draft-token checks. Environment proxies
-        # remain available through requests' normal transport configuration.
-        with requests.Session() as session:
-            # v3 authentication: the key is a query parameter, never a header and
-            # never part of the cache key or the revision.
-            with session.get(API_ROOT + path, params={**(params or {}), "api_key": config.token},
-                             headers={"Accept": "application/json"},
-                             timeout=(3.05, 8), allow_redirects=False, stream=True) as response:
-                if response.status_code in (401, 403):
-                    raise UpstreamFailure("authentication_failed")
-                if response.status_code == 429:
-                    retry = response.headers.get("Retry-After", "30")
+        # The pooled transport is shared, so nothing here may mutate it.
+        # Environment proxies remain available through requests' normal
+        # transport configuration.
+        session = _transport()
+        # v3 authentication: the key is a query parameter, never a header and
+        # never part of the cache key or the revision.
+        with session.get(API_ROOT + path, params={**(params or {}), "api_key": config.token},
+                         headers={"Accept": "application/json"},
+                         timeout=(3.05, 8), allow_redirects=False, stream=True) as response:
+            if response.status_code in (401, 403):
+                raise UpstreamFailure("authentication_failed")
+            if response.status_code == 429:
+                retry = response.headers.get("Retry-After", "30")
+                try:
+                    seconds = int(retry)
+                except ValueError:
                     try:
-                        seconds = int(retry)
-                    except ValueError:
-                        try:
-                            seconds = (parsedate_to_datetime(retry) - datetime.now(timezone.utc)).total_seconds()
-                        except (ValueError, TypeError, OverflowError):
-                            seconds = 30
-                    _cooldowns[config.revision] = time.monotonic() + max(1, min(seconds, 86400))
+                        seconds = (parsedate_to_datetime(retry) - datetime.now(timezone.utc)).total_seconds()
+                    except (ValueError, TypeError, OverflowError):
+                        seconds = 30
+                _cooldowns[config.revision] = time.monotonic() + max(1, min(seconds, 86400))
+                raise UpstreamFailure()
+            if response.status_code != 200:
+                raise UpstreamFailure()
+            length = response.headers.get("Content-Length")
+            if length and int(length) > MAX_RESPONSE_BYTES:
+                raise UpstreamFailure()
+            content = bytearray()
+            deadline = time.monotonic() + 10
+            for chunk in response.iter_content(chunk_size=16384):
+                content.extend(chunk)
+                if len(content) > MAX_RESPONSE_BYTES or time.monotonic() > deadline:
                     raise UpstreamFailure()
-                if response.status_code != 200:
-                    raise UpstreamFailure()
-                length = response.headers.get("Content-Length")
-                if length and int(length) > MAX_RESPONSE_BYTES:
-                    raise UpstreamFailure()
-                content = bytearray()
-                deadline = time.monotonic() + 10
-                for chunk in response.iter_content(chunk_size=16384):
-                    content.extend(chunk)
-                    if len(content) > MAX_RESPONSE_BYTES or time.monotonic() > deadline:
-                        raise UpstreamFailure()
-                # Never serialize a response that echoed the bearer credential.
-                if config.token and config.token.encode() in content:
-                    raise UpstreamFailure()
-                result = json.loads(content)
-                if (not isinstance(result, dict)
-                        or (config.token and _contains_credential(result, config.token))):
-                    raise UpstreamFailure()
-                return result
+            # Never serialize a response that echoed the bearer credential.
+            if config.token and config.token.encode() in content:
+                raise UpstreamFailure()
+            result = json.loads(content)
+            if (not isinstance(result, dict)
+                    or (config.token and _contains_credential(result, config.token))):
+                raise UpstreamFailure()
+            return result
     except UpstreamFailure:
         raise
     except Exception:
