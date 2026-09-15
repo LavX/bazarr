@@ -110,12 +110,19 @@ def normalize_media(media_type, tmdb_id, status, body, cap, base_link) -> dict:
         return result
     # Shows: only blocklisted hides everything; every other state leaves the
     # remaining seasons requestable. Every season Seerr already knows about
-    # is reported: taken (available) or not yet requested (requestable), and
-    # an open request bumps a season to requested unless it is already available.
+    # is reported: available only at status 5, in flight (requested) at 2/3/4,
+    # otherwise requestable; an open request bumps a season to requested
+    # unless it is already available, and never demotes an available season.
     taken = {}
     for season in (info.get("seasons") if known else None) or []:
         if isinstance(season, dict) and type(season.get("seasonNumber")) is int:
-            state = "available" if season.get("status") not in (None, 1) else "requestable"
+            season_status = season.get("status")
+            if season_status == 5:
+                state = "available"
+            elif season_status in (2, 3, 4):
+                state = "requested"
+            else:
+                state = "requestable"
             taken[season["seasonNumber"]] = state
     for request in non_4k:
         if request["status"] in _OPEN_REQUEST:

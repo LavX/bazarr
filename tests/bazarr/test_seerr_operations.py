@@ -88,6 +88,27 @@ def test_show_partially_available_keeps_remaining_seasons_requestable():
     assert result["link"] == "http://s/tv/1399"
 
 
+def test_show_season_in_flight_is_requested_not_available():
+    from seerr.operations import normalize_media
+    body = {"id": 1399, "mediaInfo": {"status": 4, "status4k": 1,
+                                      "seasons": [{"seasonNumber": 1, "status": 3}, {"seasonNumber": 2, "status": 5},
+                                                  {"seasonNumber": 3, "status": 1}],
+                                      "requests": []}}
+    result = normalize_media("tv", 1399, 200, body, _cap(), "http://s")
+    assert {s["number"]: s["state"] for s in result["seasons"]} == {1: "requested", 2: "available", 3: "requestable"}
+
+
+def test_show_available_season_is_never_demoted_by_an_open_request():
+    from seerr.operations import normalize_media
+    body = {"id": 1399, "mediaInfo": {"status": 4, "status4k": 1,
+                                      "seasons": [{"seasonNumber": 1, "status": 3}, {"seasonNumber": 2, "status": 5},
+                                                  {"seasonNumber": 3, "status": 1}],
+                                      "requests": [{"id": 3, "status": 1, "is4k": False,
+                                                    "seasons": [{"seasonNumber": 2, "status": 1}]}]}}
+    result = normalize_media("tv", 1399, 200, body, _cap(), "http://s")
+    assert {s["number"]: s["state"] for s in result["seasons"]}[2] == "available"
+
+
 def test_blocklisted_show_is_never_requestable():
     from seerr.operations import normalize_media
     body = {"id": 1399, "mediaInfo": {"status": 6, "status4k": 1, "seasons": [], "requests": []}}
