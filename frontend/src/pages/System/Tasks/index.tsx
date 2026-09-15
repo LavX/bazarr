@@ -3,7 +3,7 @@ import { Container } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import { faSync } from "@fortawesome/free-solid-svg-icons";
 import { useSystemTasks } from "@/apis/hooks";
-import { useInstanceName } from "@/apis/hooks/site";
+import { useAppTitle } from "@/apis/hooks/site";
 import { Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import Table from "./table";
@@ -13,7 +13,7 @@ const SystemTasksView: FunctionComponent = () => {
 
   const { isFetching, data, refetch } = tasks;
 
-  useDocumentTitle(`Tasks - ${useInstanceName()} (System)`);
+  useDocumentTitle(`Tasks - ${useAppTitle()} (System)`);
 
   return (
     <QueryOverlay result={tasks}>

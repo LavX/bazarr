@@ -3,7 +3,7 @@ import { Container } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import { faFileArchive } from "@fortawesome/free-solid-svg-icons";
 import { useCreateBackups, useSystemBackups } from "@/apis/hooks";
-import { useInstanceName } from "@/apis/hooks/site";
+import { useAppTitle } from "@/apis/hooks/site";
 import { Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import Table from "./table";
@@ -13,7 +13,7 @@ const SystemBackupsView: FunctionComponent = () => {
 
   const { mutate: backup, isPending: isResetting } = useCreateBackups();
 
-  useDocumentTitle(`Backups - ${useInstanceName()} (System)`);
+  useDocumentTitle(`Backups - ${useAppTitle()} (System)`);
 
   return (
     <QueryOverlay result={backups}>

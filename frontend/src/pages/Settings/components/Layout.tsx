@@ -26,7 +26,7 @@ import {
   useSettingsMutation,
   useSystemSettings,
 } from "@/apis/hooks";
-import { useInstanceName } from "@/apis/hooks/site";
+import { useAppTitle } from "@/apis/hooks/site";
 import { LoadingProvider } from "@/contexts";
 import {
   FormContext,
@@ -137,7 +137,7 @@ const Layout: FunctionComponent<Props> = (props) => {
     metadataRefreshFailed,
   );
 
-  useDocumentTitle(`${name} - ${useInstanceName()} (Settings)`);
+  useDocumentTitle(`${name} - ${useAppTitle()} (Settings)`);
 
   // Some inputs only stage their value when they are left, so the focused field
   // is blurred first and the submit waits a tick for that change to land.

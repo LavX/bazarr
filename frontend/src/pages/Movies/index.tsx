@@ -32,7 +32,7 @@ import { ColumnDef } from "@tanstack/react-table";
 import { uniqBy } from "lodash";
 import { useMovieModification, useMoviesPagination } from "@/apis/hooks";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
-import { useInstanceName } from "@/apis/hooks/site";
+import { useAppTitle } from "@/apis/hooks/site";
 import { useUpgradableItems } from "@/apis/hooks/subtitles";
 import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
 import { Toolbox } from "@/components";
@@ -551,7 +551,7 @@ const MovieView: FunctionComponent = () => {
     );
   }, [selections, modals]);
 
-  useDocumentTitle(`Movies - ${useInstanceName()}`);
+  useDocumentTitle(`Movies - ${useAppTitle()}`);
 
   return (
     <Container fluid px={0}>

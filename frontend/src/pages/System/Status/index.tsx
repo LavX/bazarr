@@ -33,7 +33,7 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useSystemHealth, useSystemStatus } from "@/apis/hooks";
-import { useInstanceName } from "@/apis/hooks/site";
+import { useAppTitle } from "@/apis/hooks/site";
 import api from "@/apis/raw";
 import { QueryOverlay } from "@/components/async";
 import {
@@ -150,7 +150,7 @@ const SystemStatusView: FunctionComponent = () => {
 
   useInterval(update, 1000);
 
-  useDocumentTitle(`Status - ${useInstanceName()} (System)`);
+  useDocumentTitle(`Status - ${useAppTitle()} (System)`);
 
   return (
     <Container fluid>
