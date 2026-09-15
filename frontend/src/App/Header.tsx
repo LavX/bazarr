@@ -1,6 +1,7 @@
-import { FunctionComponent } from "react";
+import { FunctionComponent, useState } from "react";
 import { useLocation } from "react-router";
 import { AppShell, Burger, Text } from "@mantine/core";
+import { useWindowEvent } from "@mantine/hooks";
 import UniversalSearch from "@/components/UniversalSearch";
 import { useNavbar } from "@/contexts/Navbar";
 import { useRouteItems } from "@/Router";
@@ -22,8 +23,25 @@ const pageNames: Record<string, string> = {
   subtitles: "Subtitle editor",
 };
 
+/**
+ * Past this the header stops being transparent.
+ *
+ * A few pixels rather than zero, so a rubber-band scroll or a one-pixel jitter
+ * does not flicker the background on and off.
+ */
+const SCROLLED_PAST = 4;
+
 const AppHeader: FunctionComponent = () => {
   const { show, showed } = useNavbar();
+  // At the top the header has nothing behind it but the page's own background,
+  // so a surface there only cuts the page in two: the hero glow reaches up into
+  // this band and an opaque strip sliced straight through it. Once content
+  // starts passing underneath it needs a surface again, and a translucent one
+  // keeps the page visible without letting it fight the title and the search.
+  const [scrolled, setScrolled] = useState(
+    () => typeof window !== "undefined" && window.scrollY > SCROLLED_PAST,
+  );
+  useWindowEvent("scroll", () => setScrolled(window.scrollY > SCROLLED_PAST));
   const { pathname } = useLocation();
   const parts = pathname.split("/");
   const routes = useRouteItems();
@@ -38,7 +56,7 @@ const AppHeader: FunctionComponent = () => {
       ? subpage.name
       : section;
   return (
-    <AppShell.Header className={styles.appHeader}>
+    <AppShell.Header className={styles.appHeader} data-scrolled={scrolled}>
       <div className={styles.headerLayout}>
         <div className={styles.headerIdentity}>
           <Burger

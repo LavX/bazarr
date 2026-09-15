@@ -13,9 +13,32 @@
   }
   .appHeader {
     padding: 0 !important;
-    background: var(--bz-surface-base) !important;
     border: 0 !important;
+    // Transparent at rest so whatever the page puts at its top, the Discover
+    // hero's glow among it, carries on through this band instead of ending at
+    // a hard horizontal seam. Nothing is behind the header at scroll zero: the
+    // shell already offsets the content by the header's height.
+    background: transparent !important;
     backdrop-filter: none;
+    transition:
+      background-color 180ms ease,
+      backdrop-filter 180ms ease,
+      box-shadow 180ms ease;
+    &[data-scrolled="true"] {
+      // Content is passing underneath now, so the header needs a surface. A
+      // translucent one keeps the page readable through it without letting it
+      // compete with the page title and the search field.
+      background: color-mix(
+        in srgb,
+        var(--bz-surface-base) 72%,
+        transparent
+      ) !important;
+      backdrop-filter: blur(16px) saturate(1.25);
+      box-shadow: 0 1px 0 var(--bz-border-interactive);
+    }
+    @media (prefers-reduced-motion: reduce) {
+      transition: none;
+    }
   }
 }
 .headerLayout {
