@@ -386,9 +386,9 @@ export interface SportsWantedEvent {
 }
 
 /**
- * Sportarr is optional and ships on its own branch, so it is reached through
- * the shared client by path rather than through a typed api module that does
- * not exist everywhere, and the setting is read defensively for the same
+ * Sportarr is optional and is not present in every build, so it is reached
+ * through the shared client by path rather than through a typed api module
+ * that may not be there, and the setting is read defensively for the same
  * reason. Where it is off, the query never runs and the group never appears.
  */
 function useSportarrEnabled() {
@@ -460,19 +460,28 @@ export function useWantedPreview(limit: number) {
     staleTime: 30_000,
     retry: false,
   });
+  // Reported per source. Combining them meant a failing or slow Radarr, or the
+  // optional Sportarr call, blanked the whole section including the kinds that
+  // had already answered.
+  const connected = [series, movies, sports].filter((query) => query.isEnabled);
   return {
     episodes: series.data?.data ?? [],
     movies: movies.data?.data ?? [],
     sports: sports.data ?? [],
-    // A reader with neither connected is not loading and not failing, they
-    // simply have no library to be missing anything from.
+    failed: {
+      episodes: series.isError,
+      movies: movies.isError,
+      sports: sports.isError,
+    },
+    // Judged over the sources that are actually configured, and only when all
+    // of them agree. A disabled source is not evidence of anything: counting
+    // its false "not pending" or "not failing" would report the section ready,
+    // or healthy, on the strength of a query that never ran. A reader with
+    // none connected is not loading and not failing, they simply have no
+    // library to be missing anything from.
     isPending:
-      (series.isEnabled && series.isPending) ||
-      (movies.isEnabled && movies.isPending) ||
-      (sports.isEnabled && sports.isPending),
-    isError: series.isError || movies.isError || sports.isError,
-    connected: Boolean(
-      series.isEnabled || movies.isEnabled || sports.isEnabled,
-    ),
+      connected.length > 0 && connected.every((query) => query.isPending),
+    isError: connected.length > 0 && connected.every((query) => query.isError),
+    connected: connected.length > 0,
   };
 }

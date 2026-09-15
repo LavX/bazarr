@@ -20,6 +20,7 @@
     // shell already offsets the content by the header's height.
     background: transparent !important;
     backdrop-filter: none;
+    -webkit-backdrop-filter: none;
     transition:
       background-color 180ms ease,
       backdrop-filter 180ms ease,
@@ -33,7 +34,11 @@
         var(--bz-surface-base) 72%,
         transparent
       ) !important;
-      backdrop-filter: blur(16px) saturate(1.25);
+      backdrop-filter: blur(16px) saturate(1.15);
+      // Paired deliberately: without the prefixed property a WebKit engine
+      // that needs it applies no blur at all, and a 72% transparent band then
+      // shows the content scrolling underneath straight through the title.
+      -webkit-backdrop-filter: blur(16px) saturate(1.15);
       box-shadow: 0 1px 0 var(--bz-border-interactive);
     }
     @media (prefers-reduced-motion: reduce) {

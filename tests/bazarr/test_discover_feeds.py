@@ -74,41 +74,23 @@ def test_feed_is_authenticated_and_parameters_are_source_scoped(authenticated_cl
     assert len(upstream.calls) <= 2
 
 
-def test_a_served_feed_is_reusable_by_the_browser_until_the_server_refreshes_it(authenticated_client, upstream):
-    """The browser is told to hold it exactly as long as the server will."""
-    from discover import feeds
-    upstream.payload = payload
-    response = get(authenticated_client)
-    assert response.json["status"] == "live" and response.json["items"]
-    control = response.headers["Cache-Control"]
-    assert control.startswith("private, max-age=")
-    # Read off the payload's own expiry, so it can never outlast the server's
-    # freshness, and never restates FRESH_SECONDS as a second literal.
-    seconds = int(control.rsplit("=", 1)[1])
-    assert 0 < seconds <= feeds.FRESH_SECONDS
+@pytest.mark.parametrize("status", [None, 503, 401])
+def test_a_feed_is_never_stored_by_the_browser(authenticated_client, upstream, status):
+    """A stored feed is one the reader cannot refresh their way out of.
 
-
-@pytest.mark.parametrize("status", [503, 401])
-def test_a_feed_the_reader_is_told_to_refresh_is_never_pinned_in_their_browser(authenticated_client, upstream, status):
-    """Refresh has to reach the server in exactly the states that advise it."""
-    upstream.status = status
+    The client only accepts a payload whose metadata revision matches its own,
+    and that revision is regenerated on every restart as well as on any TMDB
+    credential change. A stored copy therefore becomes undisplayable while
+    still being served from the browser's cache, and Refresh re-issues the same
+    URL and is answered from the same copy. The server already holds the feed
+    for FRESH_SECONDS, so nothing reaches TMDB either way.
+    """
+    if status is None:
+        upstream.payload = payload
+    else:
+        upstream.status = status
     response = get(authenticated_client)
-    assert response.json["items"] == []
     assert response.headers["Cache-Control"] == "no-store"
-
-
-def test_a_degraded_feed_serving_retained_titles_is_not_cached(authenticated_client, upstream, monkeypatch):
-    """Saved titles shown during an outage must not outlive the outage."""
-    from discover import feeds
-    clock = [100.0]
-    monkeypatch.setattr(feeds.time, "monotonic", lambda: clock[0])
-    upstream.payload = payload
-    assert get(authenticated_client).json["items"]
-    clock[0] += feeds.FRESH_SECONDS + 1
-    upstream.status = 503
-    degraded = get(authenticated_client)
-    assert degraded.json["items"] and degraded.json["service_status"] == "unavailable"
-    assert degraded.headers["Cache-Control"] == "no-store"
 
 
 @pytest.mark.parametrize("query", ["media_type=tv", "media_type=all&media_type=movie", "period=day", "page=2", "media_type=all&language=hun"])

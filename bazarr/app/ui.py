@@ -188,11 +188,15 @@ def _instance_image_url(kind, url):
 # How long a browser may reuse a library cover without asking again. Cover art
 # changes when someone replaces it in Sonarr/Radarr, which is rare, and a day-old
 # poster costs nothing; re-fetching every cover on every page view costs a round
-# trip through Bazarr to the arr instance for each one. Radarr paths already
-# carry a ``lastWrite`` query, so replaced movie art arrives under a new URL and
-# is picked up immediately regardless of this window.
+# trip through Bazarr to the arr instance for each one.
+#
+# A day and no more. Radarr paths carry a ``lastWrite`` query, so replaced movie
+# art arrives under a new URL and is picked up at once, but the Sonarr parser
+# strips the query from its image URLs, so a replaced series poster has no new
+# address to arrive under and only this window ends it. A
+# ``stale-while-revalidate`` leg on top would have stretched that to eight days.
 COVER_MAX_AGE = 86400
-COVER_CACHE_CONTROL = f'private, max-age={COVER_MAX_AGE}, stale-while-revalidate=604800'
+COVER_CACHE_CONTROL = f'private, max-age={COVER_MAX_AGE}'
 # Relayed in both directions so the once-a-day revalidation can be answered with
 # an empty 304 instead of the image again.
 COVER_VALIDATORS = ('ETag', 'Last-Modified')

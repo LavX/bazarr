@@ -77,6 +77,11 @@ const hungarian = {
 
 function episode(id: number, seriesTitle: string) {
   return {
+    // Local ids first, and deliberately different from the upstream ones: on a
+    // single-instance install the two coincide, which is exactly why a fixture
+    // that reuses one number cannot catch a link built from the wrong id.
+    id: 700 + id,
+    series_id: 800 + id,
     sonarrSeriesId: 100 + id,
     sonarrEpisodeId: 200 + id,
     arr_instance_id: 4,
@@ -95,6 +100,7 @@ function episode(id: number, seriesTitle: string) {
 
 function movie(id: number, title: string) {
   return {
+    id: 900 + id,
     radarrId: 300 + id,
     arr_instance_id: 2,
     title,
@@ -113,9 +119,10 @@ function sportsEvent(id: number, title: string) {
     title,
     league_id: 7,
     partName: null,
-    // Sportarr reports bare codes, not the objects the other two endpoints
-    // return, so the component has to name them itself.
-    missing_subtitles: ["hu", "en"],
+    // Sportarr reports stored keys, not the objects the other two endpoints
+    // return: a bare code, or a code with an attribute after a colon. The
+    // component has to name both itself.
+    missing_subtitles: ["hu:hi", "en"],
     arr_instance_id: 5,
   };
 }
@@ -278,6 +285,37 @@ it("shows no group at all for a kind with nothing missing", async () => {
   expect(screen.queryByRole("heading", { name: "Movies" })).toBeNull();
 });
 
+it("links each row by its local id, not the owning arr's own id", async () => {
+  render();
+  // sonarrSeriesId and radarrId stopped being globally unique when Bazarr
+  // gained more than one instance, so a link built from them opens whichever
+  // local row happens to share that number.
+  expect(
+    await screen.findByRole("link", { name: /Northern Light/ }),
+  ).toHaveAttribute("href", "/series/801");
+  expect(screen.getByRole("link", { name: /Child of God/ })).toHaveAttribute(
+    "href",
+    "/movies/901",
+  );
+});
+
+it("keeps the kinds that answered when another source fails", async () => {
+  server.use(
+    http.get(
+      "/api/movies/wanted",
+      () => new HttpResponse(null, { status: 500 }),
+    ),
+  );
+  render();
+  // A failing Radarr, or the optional Sportarr call, must not blank the
+  // episodes that are already in hand.
+  expect(
+    await screen.findByRole("heading", { name: "Episodes" }),
+  ).toBeInTheDocument();
+  expect(screen.getByText("Northern Light")).toBeInTheDocument();
+  expect(screen.queryByText(/could not be read/i)).toBeNull();
+});
+
 it("adds a sports group only where Sportarr is configured", async () => {
   connections = { use_sonarr: true, use_radarr: true, use_sportarr: true };
   render();
@@ -308,8 +346,11 @@ it("shows sports languages without pretending they start a search", async () => 
   // Sportarr's per-event endpoint returns candidates to choose between, so a
   // control shaped like the series pills would promise an action that never
   // happens. The languages are stated, and the row links to where to act.
-  expect(await screen.findByText("Hungarian")).toBeInTheDocument();
+  // "hu:hi" is a language plus an attribute, not a language. Passing the whole
+  // key to Intl.DisplayNames throws, and the old fallback rendered it raw.
+  expect(await screen.findByText("Hungarian (HI)")).toBeInTheDocument();
   expect(screen.getByText("English")).toBeInTheDocument();
+  expect(screen.queryByText(/hu:hi/)).toBeNull();
   expect(
     screen.queryByRole("button", { name: /search .* hungarian/i }),
   ).toBeNull();

@@ -8,7 +8,7 @@ import {
 import { useDiscoverSummary, useWantedPreview } from "@/apis/hooks/discover";
 import styles from "./Discover.module.scss";
 
-/** Per group, so neither kind can crowd the other out of the preview. */
+/** Per group, so no kind can crowd the others out of the preview. */
 const PER_GROUP = 3;
 
 type Entry = {
@@ -40,7 +40,18 @@ type Group = {
  * Sonarr reports an episode as "1x1" and the history strip renders "S01E01".
  * One page should not spell the same thing two ways, so both go through here.
  */
-function languageFromCode(code: string): Subtitle {
+/**
+ * One stored language key as a Subtitle the row can render.
+ *
+ * Sportarr reports "hu" and "hu:hi", where the part after the colon is an
+ * attribute rather than part of the language. Passing the whole key to
+ * Intl.DisplayNames throws, so the previous fallback rendered the raw key and
+ * put a bare "hu:hi" on screen: exactly what the arrivals strip was fixed to
+ * stop doing. The attributes also have to reach the caller, or two entries for
+ * one language collide on the same React key.
+ */
+function languageFromCode(key: string): Subtitle {
+  const [code, ...variants] = key.split(":");
   let name = code;
   try {
     name = new Intl.DisplayNames(["en"], { type: "language" }).of(code) ?? code;
@@ -50,8 +61,8 @@ function languageFromCode(code: string): Subtitle {
   return {
     name,
     code2: code as Language.CodeType,
-    hi: false,
-    forced: false,
+    hi: variants.includes("hi"),
+    forced: variants.includes("forced"),
     path: null,
   };
 }
@@ -85,10 +96,16 @@ export default function WantedQueue() {
       to: "/wanted/series",
       linkLabel: "All missing episodes",
       entries: wanted.episodes.slice(0, PER_GROUP).map((item) => ({
-        key: `episode:${item.sonarrEpisodeId}`,
+        // Local ids, not upstream ones. sonarrSeriesId and sonarrEpisodeId are
+        // the owning Sonarr's own ids and stopped being globally unique when a
+        // Bazarr gained more than one instance, so a link built from them opens
+        // whichever local row happens to share that number, and two instances
+        // can collide on the same React key. The detail routes and the Wanted
+        // pages both address media by the local id.
+        key: `episode:${item.id}`,
         title: item.seriesTitle,
         detail: `${episodeLabel(item.episode_number)} · ${item.episodeTitle}`,
-        to: `/series/${item.sonarrSeriesId}`,
+        to: `/series/${item.series_id}`,
         missing: item.missing_subtitles,
         search: (language: Subtitle) =>
           downloadEpisode.mutateAsync({
@@ -109,10 +126,11 @@ export default function WantedQueue() {
       to: "/wanted/movies",
       linkLabel: "All missing movies",
       entries: wanted.movies.slice(0, PER_GROUP).map((item) => ({
-        key: `movie:${item.radarrId}`,
+        // Local id, as above: radarrId is the owning Radarr's own id.
+        key: `movie:${item.id}`,
         title: item.title,
         detail: null,
-        to: `/movies/${item.radarrId}`,
+        to: `/movies/${item.id}`,
         missing: item.missing_subtitles,
         search: (language: Subtitle) =>
           downloadMovie.mutateAsync({
@@ -150,13 +168,18 @@ export default function WantedQueue() {
         <div>
           <h2 id="discover-wanted-title">Still missing</h2>
           {/* Two units, both named: an item can need several languages, so the
-              larger figure is subtitles and the smaller one is media. */}
+              larger figure is subtitles and the smaller one is media. The
+              kinds are not spelled out here because these totals cover
+              episodes and movies only, while the groups below can include
+              sports, and naming a set the number does not cover is the
+              contradiction this section exists to avoid. */}
           {counts?.requirements != null && counts.media_count != null && (
             <p>
               {counts.requirements} subtitle
               {counts.requirements === 1 ? "" : "s"} missing across{" "}
               {counts.media_count} episode
-              {counts.media_count === 1 ? "" : "s"} and movies
+              {counts.media_count === 1 ? "" : "s"} and movie
+              {counts.media_count === 1 ? "" : "s"}
             </p>
           )}
         </div>
@@ -198,6 +221,11 @@ export default function WantedQueue() {
                             className={styles.wantedLanguageBadge}
                           >
                             {language.name}
+                            {language.hi
+                              ? " (HI)"
+                              : language.forced
+                                ? " (Forced)"
+                                : ""}
                           </span>
                         ) : (
                           <button

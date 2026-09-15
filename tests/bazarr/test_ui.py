@@ -200,8 +200,10 @@ def test_movie_image_route_fetches_matching_instance(monkeypatch):
     assert captured["chunk_size"] == 2048
     # Without these the browser re-fetches every cover through Bazarr on every
     # page view, one round trip per poster to the owning arr instance.
-    assert response.headers["Cache-Control"] == (
-        "private, max-age=86400, stale-while-revalidate=604800")
+    # A day and no more: Sonarr strips the cache-busting query from its image
+    # URLs, so a replaced series poster has no new address to arrive under and
+    # only this window ends it.
+    assert response.headers["Cache-Control"] == "private, max-age=86400"
     assert response.headers["ETag"] == '"abc"'
     assert response.headers["Last-Modified"] == "Mon, 01 Sep 2026 00:00:00 GMT"
 

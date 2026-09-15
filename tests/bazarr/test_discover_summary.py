@@ -411,23 +411,29 @@ def test_only_recorded_acquisitions_become_arrivals(summary_database, quiet_queu
     assert all(item["action"] in (1, 2, 3, 4) for item in arrivals)
 
 
-def test_library_counts_are_exact_and_cost_one_statement(summary_database, quiet_queue):
+def test_library_counts_are_exact_and_cost_one_statement(summary_database, quiet_queue,
+                                                         monkeypatch):
     """Counts a reader recognises, without spending the module's query budget."""
-    from discover import summary as summary_module
+    from app.config import settings
     from discover.summary import QUERY_BUDGET, get_summary
+    monkeypatch.setattr(settings.general, "use_sonarr", True)
+    monkeypatch.setattr(settings.general, "use_radarr", True)
     session = summary_database.session
     add_instance(session, 1, name="Main")
+    add_instance(session, 2, kind="radarr", name="Films")
     add_show(session, 100, 1, title="Northern Light")
     add_episode(session, 101, 100, 1, missing="[]", season=2, episode=5, title="Home")
     add_episode(session, 102, 100, 1, missing="[]", upstream=21, season=2, episode=6,
                 title="Away")
-    add_movie(session, 200, 1, missing="[]")
+    add_movie(session, 200, 2, missing="[]")
     add_episode_history(session, 1, 2, 101, 100, 1)
-    add_movie_history(session, 1, 4, 200, 1)
+    add_movie_history(session, 1, 1, 200, 2)
     # A deletion is not something this install went and got.
     add_episode_history(session, 2, 0, 102, 100, 1)
+    # Nor is an upload, which is a subtitle the reader supplied. It is still a
+    # real arrival, so it stays in ARRIVAL_ACTIONS and only this count omits it.
+    add_episode_history(session, 3, 4, 102, 100, 1)
     session.commit()
-    summary_module._library_cache.update({"value": None, "expires": 0.0})
 
     summary, statements = counted(summary_database.engine, get_summary)
     library = summary["library"]
@@ -461,6 +467,46 @@ def test_two_languages_of_one_episode_are_one_arrival(summary_database, quiet_qu
     assert arrivals[1]["languages"] == ["hu:hi"]
 
 
+def test_library_counts_follow_what_is_switched_on_and_enabled(summary_database, quiet_queue,
+                                                              monkeypatch):
+    """Rows outlive both the integration and the instance that owned them."""
+    from app.config import settings
+    from discover.summary import get_summary
+    session = summary_database.session
+    monkeypatch.setattr(settings.general, "use_sonarr", True)
+    monkeypatch.setattr(settings.general, "use_radarr", False)
+    add_instance(session, 1, name="Main")
+    add_instance(session, 2, kind="sonarr", name="Retired", enabled=0, is_default=0)
+    add_instance(session, 3, kind="radarr", name="Films", is_default=0)
+    add_show(session, 100, 1, title="Northern Light")
+    add_show(session, 110, 2, upstream=11, title="On a disabled instance")
+    add_movie(session, 200, 3, missing="[]")
+    session.commit()
+
+    library = get_summary()["library"]
+    # Radarr is off, so its rows are not the reader's library however many of
+    # them survive in the table, and a disabled Sonarr's shows are not either.
+    assert library["series"] == 1
+    assert library["movies"] == 0
+
+
+def test_library_counts_keep_rows_that_predate_the_instance_migration(summary_database,
+                                                                     quiet_queue, monkeypatch):
+    """An unowned row belongs to the default instance, not to nobody."""
+    from app.config import settings
+    from app.database import TableShows
+    from discover.summary import get_summary
+    session = summary_database.session
+    monkeypatch.setattr(settings.general, "use_sonarr", True)
+    add_instance(session, 1, name="Main")
+    add_show(session, 100, 1, title="Owned")
+    add_show(session, 110, 1, upstream=11, title="Migrated from before instances")
+    session.get(TableShows, 110).arr_instance_id = None
+    session.commit()
+
+    assert get_summary()["library"]["series"] == 2
+
+
 def test_media_items_and_language_requirements_are_published_separately(
         summary_database, quiet_queue):
     """One item needing two languages is one item and two requirements.
@@ -487,11 +533,9 @@ def test_media_items_and_language_requirements_are_published_separately(
 
 def test_sports_are_absent_not_zero_when_sportarr_is_off(summary_database, quiet_queue):
     """A reader without Sportarr is not shown a tile for it."""
-    from discover import summary as summary_module
     from discover.summary import get_summary
     add_instance(summary_database.session, 1, name="Main")
     summary_database.session.commit()
-    summary_module._library_cache.update({"value": None, "expires": 0.0})
 
     library = get_summary()["library"]
     assert library["availability"] == "available"
@@ -505,7 +549,6 @@ def test_a_library_that_cannot_be_counted_never_reports_zero(summary_database, q
     from discover.summary import get_summary
     add_instance(summary_database.session, 1, name="Main")
     summary_database.session.commit()
-    summary_module._library_cache.update({"value": None, "expires": 0.0})
     monkeypatch.setattr(summary_module, "_library_component",
                         lambda instances: (_ for _ in ()).throw(RuntimeError("no")))
 

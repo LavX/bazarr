@@ -191,11 +191,13 @@ export default function LibraryHero() {
     .sort((left, right) => right.count - left.count)
     .map((entry) => ({ to: entry.to, label: entry.label(entry.count) }));
   const scheduled = data?.activity.scheduled_count ?? null;
-  // The list is not ordered by when each job next runs, and a job that is not
-  // scheduled to run again reports "Never". Naming either as "next" would state
-  // something untrue, so only a job with an actual upcoming run can be it.
-  const next = data?.activity.scheduled.find((job) =>
-    /^in\b/i.test(job.next_run_in ?? ""),
+  // A job with no further run reports exactly "Never", and everything else is
+  // an upcoming run. Testing for a leading "in" instead looked equivalent but
+  // rejected half the vocabulary the server actually produces ("now", "today",
+  // "tomorrow", "next week"), so the soonest jobs were the ones that could
+  // never be named and a later one got labelled next in their place.
+  const next = data?.activity.scheduled.find(
+    (job) => (job.next_run_in ?? "Never") !== "Never",
   );
 
   return (
