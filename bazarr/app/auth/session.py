@@ -37,11 +37,12 @@ def establish_session():
     session[SESSION_KEY] = True
 
 
-def clear_session():
-    """Drop every trace of a signed-in session.
+def clear_authentication():
+    """Drop the signed-in mark, leaving the rest of the session alone.
 
-    Used on logout and after a rejected login. A rejected login must remove the
-    key rather than set it to False: a stored False is a value some other gate
-    may one day read as "present, therefore fine".
+    Used after a rejected login, which must remove the key rather than set it
+    to False: a stored False is a value some other gate may one day read as
+    "present, therefore fine". Logout is a different operation and clears the
+    whole session, so it does not call this.
     """
     session.pop(SESSION_KEY, None)

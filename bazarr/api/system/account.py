@@ -9,7 +9,7 @@ from collections import OrderedDict
 from flask import session, request
 from flask_restx import Resource, Namespace, reqparse
 
-from app.auth import clear_session, establish_session
+from app.auth import clear_authentication, establish_session
 from app.config import settings
 from utilities.helper import check_credentials, needs_password_upgrade, upgrade_password_hash
 
@@ -114,7 +114,7 @@ class SystemAccount(Resource):
                 _record_failed_attempt(ip)
                 # Remove the key rather than storing False: a stored False is a
                 # value another gate may read as "present, therefore signed in".
-                clear_session()
+                clear_authentication()
                 return 'Authentication failed', 403
         elif action == 'logout':
             if settings.auth.type == 'basic':
