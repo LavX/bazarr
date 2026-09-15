@@ -31,10 +31,15 @@ vi.mock("@/apis/hooks/system", () => ({
     data: { general: { use_seerr: useSeerrEnabled } },
   }),
 }));
+// Mutable so one test can put a request in flight for a specific title and
+// prove the button of a different title does not show its spinner.
+const mutationState: { isPending: boolean; variables?: unknown } = {
+  isPending: false,
+};
 vi.mock("@/apis/hooks/seerr", () => ({
   useSeerrMedia: (identity: unknown, enabled: boolean) =>
     media(identity, enabled),
-  useSeerrRequestMutation: () => ({ mutate: request, isPending: false }),
+  useSeerrRequestMutation: () => ({ mutate: request, ...mutationState }),
 }));
 
 // Deliberately loose fixtures: SeerrAction only reads a handful of fields off
@@ -101,6 +106,8 @@ describe("SeerrAction", () => {
   // slate rather than whatever an earlier test in this file left behind.
   beforeEach(() => {
     useSeerrEnabled = true;
+    mutationState.isPending = false;
+    mutationState.variables = undefined;
     media.mockClear();
     // Reset, not clear: one test below installs an implementation that answers
     // the mutate handlers, and it must not leak into the next.
@@ -139,7 +146,10 @@ describe("SeerrAction", () => {
       screen.getByRole("button", { name: "Request in Seerr" }),
     );
     expect(request).toHaveBeenCalledWith(
-      { media_type: "movie", tmdb_id: 550, is4k: false },
+      {
+        body: { media_type: "movie", tmdb_id: 550, is4k: false },
+        identity: { kind: "movie", tmdbId: 550 },
+      },
       expect.anything(),
     );
     expect(
@@ -252,11 +262,14 @@ describe("SeerrAction", () => {
     );
     expect(request).toHaveBeenCalledWith(
       {
-        media_type: "tv",
-        tmdb_id: 1399,
-        tvdb_id: 121361,
-        seasons: [1],
-        is4k: false,
+        body: {
+          media_type: "tv",
+          tmdb_id: 1399,
+          tvdb_id: 121361,
+          seasons: [1],
+          is4k: false,
+        },
+        identity: { kind: "tv", tmdbId: 1399 },
       },
       expect.anything(),
     );
@@ -280,11 +293,14 @@ describe("SeerrAction", () => {
     );
     expect(request).toHaveBeenCalledWith(
       {
-        media_type: "tv",
-        tmdb_id: 1399,
-        tvdb_id: 121361,
-        seasons: "all",
-        is4k: false,
+        body: {
+          media_type: "tv",
+          tmdb_id: 1399,
+          tvdb_id: 121361,
+          seasons: "all",
+          is4k: false,
+        },
+        identity: { kind: "tv", tmdbId: 1399 },
       },
       expect.anything(),
     );
@@ -306,7 +322,10 @@ describe("SeerrAction", () => {
       screen.getByRole("button", { name: "Request the 4K version" }),
     );
     expect(request).toHaveBeenCalledWith(
-      { media_type: "movie", tmdb_id: 550, is4k: true },
+      {
+        body: { media_type: "movie", tmdb_id: 550, is4k: true },
+        identity: { kind: "movie", tmdbId: 550 },
+      },
       expect.anything(),
     );
   });
@@ -328,11 +347,14 @@ describe("SeerrAction", () => {
     );
     expect(request).toHaveBeenCalledWith(
       {
-        media_type: "tv",
-        tmdb_id: 1399,
-        tvdb_id: 121361,
-        seasons: "all",
-        is4k: true,
+        body: {
+          media_type: "tv",
+          tmdb_id: 1399,
+          tvdb_id: 121361,
+          seasons: "all",
+          is4k: true,
+        },
+        identity: { kind: "tv", tmdbId: 1399 },
       },
       expect.anything(),
     );
@@ -376,11 +398,14 @@ describe("SeerrAction", () => {
     );
     expect(request).toHaveBeenCalledWith(
       {
-        media_type: "tv",
-        tmdb_id: 1399,
-        tvdb_id: 121361,
-        seasons: "all",
-        is4k: true,
+        body: {
+          media_type: "tv",
+          tmdb_id: 1399,
+          tvdb_id: 121361,
+          seasons: "all",
+          is4k: true,
+        },
+        identity: { kind: "tv", tmdbId: 1399 },
       },
       expect.anything(),
     );
@@ -439,10 +464,87 @@ describe("SeerrAction", () => {
     expect(screen.queryByText("Requested in Seerr.")).toBeNull();
   });
 
+  it("keeps a pending request's badge over a fully available series", () => {
+    // Seerr does not recompute a series' status when a new season is
+    // requested, so "available" plus a pending request row is the normal
+    // shape of "the reader just asked for season 9". The badge is the only
+    // place that answer appears.
+    answer({
+      ...base,
+      status: "available",
+      request: { id: 1, status: "pending", is4k: false, seasons: [9] },
+    } as never);
+    const { unmount } = render(
+      <SeerrAction title={show as never} inLibrary={true} />,
+    );
+    expect(screen.getByText("Awaiting approval")).toBeInTheDocument();
+    unmount();
+    answer({
+      ...base,
+      status: "available",
+      request: { id: 1, status: "declined", is4k: false, seasons: [9] },
+    } as never);
+    render(<SeerrAction title={show as never} inLibrary={true} />);
+    expect(screen.getByText("Declined")).toBeInTheDocument();
+  });
+
+  it("hides the action for an exhausted show on a whole-series-only server", () => {
+    // Whether Seerr takes per-season requests says nothing about whether any
+    // season is left: "Request all seasons" here is a no-op it answers 202.
+    answer({
+      ...base,
+      status: "available",
+      requestable: true,
+      partial_requests: false,
+      seasons: [
+        { number: 1, state: "available" },
+        { number: 2, state: "available" },
+      ],
+    });
+    render(<SeerrAction title={show as never} inLibrary={true} />);
+    expect(screen.queryByRole("button", { name: /Request/ })).toBeNull();
+  });
+
+  it("does not show another title's in-flight request on this title's button", () => {
+    mutationState.isPending = true;
+    mutationState.variables = {
+      body: { media_type: "movie", tmdb_id: 550, is4k: false },
+      identity: { kind: "movie", tmdbId: 550 },
+    };
+    answer({ ...base, known: false, status: "unknown", requestable: true });
+    render(
+      <SeerrAction
+        title={{ ...movie, id: 680, title: "Pulp Fiction" } as never}
+        inLibrary={false}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Request in Seerr" }),
+    ).not.toHaveAttribute("data-loading", "true");
+  });
+
+  it("blames Bazarr, not Seerr, for a payload it refused to send", async () => {
+    request.mockImplementation((_vars, handlers) =>
+      handlers.onError({ response: { status: 400 } }),
+    );
+    answer({ ...base, known: false, status: "unknown", requestable: true });
+    render(<SeerrAction title={movie as never} inLibrary={false} />);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Request in Seerr" }),
+    );
+    expect(
+      screen.getByText("Bazarr could not send that request."),
+    ).toBeInTheDocument();
+  });
+
   it("says the library check is incomplete next to the action", () => {
     answer({ ...base, known: false, status: "unknown", requestable: true });
     render(
-      <SeerrAction title={movie as never} inLibrary={false} libraryUncertain />,
+      <SeerrAction
+        title={movie as never}
+        inLibrary={false}
+        ownershipUncertain
+      />,
     );
     expect(
       screen.getByText(/Your library check is incomplete/),

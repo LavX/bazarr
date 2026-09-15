@@ -201,13 +201,19 @@ export default function TitleDetails({
         ? `${destination.label} · Copy ${destination.to.split("/").pop()}`
         : destination.label,
   }));
-  const libraryUncertain =
-    !inLibrary &&
-    (movie?.copies === undefined ||
-      movie.copies_truncated ||
-      movie.ownership?.truncated ||
-      !received ||
-      details.isError);
+  // What the page knows about local copies and owned seasons is incomplete.
+  // The hero's own label needs this only for a title believed absent (hence
+  // the !inLibrary below), but the Seerr season grouping needs the opposite
+  // case: a show that IS held, whose owned-seasons list was cut short by the
+  // copy limit or left incomplete by a copy with no owning instance.
+  const ownershipUncertain =
+    movie?.copies === undefined ||
+    movie.copies_truncated === true ||
+    movie.ownership?.truncated === true ||
+    movie.ownership?.unknown_owners === true ||
+    !received ||
+    details.isError;
+  const libraryUncertain = !inLibrary && ownershipUncertain;
   const libraryLabel = inLibrary
     ? "In your library"
     : libraryUncertain
@@ -335,7 +341,7 @@ export default function TitleDetails({
                 <SeerrAction
                   title={movie}
                   inLibrary={inLibrary}
-                  libraryUncertain={libraryUncertain}
+                  ownershipUncertain={ownershipUncertain}
                 />
               </div>
             </div>

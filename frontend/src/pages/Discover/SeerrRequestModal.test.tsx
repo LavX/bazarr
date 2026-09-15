@@ -217,7 +217,7 @@ describe("SeerrRequestModal", () => {
         title={show}
         state={base}
         tmdbId={1399}
-        libraryUncertain
+        ownershipUncertain
         onClose={vi.fn()}
         onSubmit={vi.fn()}
       />,

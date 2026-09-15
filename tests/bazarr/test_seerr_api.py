@@ -153,14 +153,33 @@ def test_capability_is_probed_once_for_several_views(seerr_api):
     assert [r["path"] for r in records] == ["/api/v1/settings/public", "/api/v1/movie/550", "/api/v1/movie/551"]
 
 
-def test_unreachable_is_answered_from_a_cooldown(seerr_api, monkeypatch):
-    from app.config import settings
+def test_an_unrecognisable_public_answer_is_not_cached(seerr_api):
+    # An auth proxy's login JSON, served with a 200. capability() reads none of
+    # its own fields from it, so keeping that answer would hide both 4K lanes
+    # and read status 6 as deleted for every title until the TTL ran out.
+    login = {"loggedIn": False, "redirect": "/login"}
+    client, records = seerr_api([(200, login, {}), (200, {"id": 550}, {}),
+                                 (200, login, {}), (200, {"id": 551}, {})])
+    assert client.get('/api/seerr/media/movie/550', headers=HEADERS).status_code == 200
+    assert client.get('/api/seerr/media/movie/551', headers=HEADERS).status_code == 200
+    assert [r["path"] for r in records] == ["/api/v1/settings/public", "/api/v1/movie/550",
+                                            "/api/v1/settings/public", "/api/v1/movie/551"]
+
+
+def test_a_tmdb_refusal_is_not_logged_as_an_unexpected_failure(monkeypatch, caplog):
+    import logging
+    from discover import metadata
     from seerr import operations
-    client, _records = seerr_api([])
-    monkeypatch.setitem(settings.seerr, 'url', 'http://127.0.0.1:9')
-    attempts = []
-    real = operations.get_seerr_client
-    monkeypatch.setattr(operations, 'get_seerr_client', lambda: attempts.append(1) or real())
-    assert client.get('/api/seerr/media/movie/550', headers=HEADERS).json["error_code"] == "unreachable"
-    assert client.get('/api/seerr/media/movie/551', headers=HEADERS).json["error_code"] == "unreachable"
-    assert len(attempts) == 1
+    operations.reset_caches()
+
+    def refuse(config, path, params=None):
+        raise metadata.UpstreamFailure()
+
+    monkeypatch.setattr(metadata, '_request', refuse)
+    with caplog.at_level(logging.DEBUG, logger='seerr.operations'):
+        assert operations.tmdb_id_for_tvdb(121361) is None
+        assert [record.levelno for record in caplog.records] == [logging.DEBUG]
+        # A refusal is not an answer, so nothing about it is cached: a TMDB
+        # rate limit must not make a show unresolvable after it lifts.
+        assert operations.tmdb_id_for_tvdb(121361) is None
+        assert len(caplog.records) == 2

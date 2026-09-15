@@ -57,22 +57,26 @@ const BADGES: Record<string, string> = {
   blocklisted: "Blocklisted",
 };
 
-// Order matters. The media row is the fact; a request row is only how the
-// title got there, and Seerr leaves a finished request at APPROVED rather
-// than tidying it away. Reading the request first therefore reported
-// "Processing" over a title that is already available, and hid "Some seasons
-// available" (with its seasons flow) behind the same stale row.
+// Order matters, and APPROVED is the whole reason. Seerr leaves a finished
+// request at APPROVED rather than tidying it away, so reading that before the
+// media row reported "Processing" over a title already available, and hid
+// "Some seasons available" (with its seasons flow) behind the stale row. Only
+// that one check moves below the media row. A request still pending, declined
+// or failed stays above it: a series Seerr holds in full can have a brand new
+// season requested, and the badge is the only place the reader learns what
+// became of it.
 function badgeFor(state: SeerrMediaState): string | null {
-  if (state.status === "available") return BADGES.available;
-  if (state.status === "blocklisted") return BADGES.blocklisted;
   if (state.request?.status === "pending") return BADGES.pending;
   if (state.request?.status === "declined") return BADGES.declined;
   if (state.request?.status === "failed") return BADGES.failed;
+  if (state.status === "available") return BADGES.available;
+  if (state.status === "blocklisted") return BADGES.blocklisted;
   if (state.status === "partially_available") return BADGES.partially_available;
   if (state.status === "processing" || state.request?.status === "approved")
     return BADGES.processing;
   if (state.status === "pending") return BADGES.pending;
-  return BADGES[state.status] ?? null;
+  // Only "unknown" and "deleted" reach here, and neither carries a badge.
+  return null;
 }
 
 // Identifies the title a notice or a pending submit belongs to. Separate from
@@ -82,6 +86,16 @@ function identityKey(identity: SeerrIdentity): string {
   return "tmdbId" in identity
     ? `${identity.kind}:tmdb:${identity.tmdbId}`
     : `${identity.kind}:tvdb:${identity.tvdbId}`;
+}
+
+// A 400 is Bazarr refusing its own payload before anything was sent, which
+// "Seerr is unreachable." would misreport as the server's fault.
+function errorText(error: unknown): string {
+  const status = (error as { response?: { status?: number } } | null)?.response
+    ?.status;
+  return status === 400
+    ? "Bazarr could not send that request."
+    : "Seerr is unreachable.";
 }
 
 function outcomeText(outcome: SeerrRequestOutcome): string {
@@ -109,12 +123,18 @@ function outcomeText(outcome: SeerrRequestOutcome): string {
 export default function SeerrAction({
   title,
   inLibrary,
-  libraryUncertain = false,
+  ownershipUncertain = false,
 }: {
   title: MetadataTitle | null;
   inLibrary: boolean;
-  /** The library read was truncated or failed, so `inLibrary` is a floor. */
-  libraryUncertain?: boolean;
+  /**
+   * The library read was truncated, partly unattributed, or failed, so what
+   * the page knows about local copies and owned seasons is a floor. Distinct
+   * from the hero's own "might this be in the library after all", which only
+   * matters for a title believed absent: the season grouping needs the
+   * opposite case, a title that is present but incompletely read.
+   */
+  ownershipUncertain?: boolean;
 }) {
   const { data: settings } = useSystemSettings();
   const enabled = settings?.general?.use_seerr === true;
@@ -123,19 +143,23 @@ export default function SeerrAction({
     [enabled, title],
   );
   const query = useSeerrMedia(identity, enabled && identity !== null);
-  const mutation = useSeerrRequestMutation(identity);
+  const mutation = useSeerrRequestMutation();
   const [modalOpen, setModalOpen] = useState(false);
-  // Both carry the title they belong to. This component is not keyed to the
-  // selection, so without that a notice from one title outlived it and read
-  // as the next title's result, and a submit in flight lit up the next
-  // title's button.
+  // The notice carries the title it belongs to. This component is not keyed
+  // to the selection, so without that a notice from one title outlived it and
+  // read as the next title's result.
   const [message, setMessage] = useState<{
     key: string;
     text: string;
     isError: boolean;
   } | null>(null);
-  const [submittedKey, setSubmittedKey] = useState<string | null>(null);
   const currentKey = identity ? identityKey(identity) : null;
+  // Same reason, for the in-flight submit: the request's own variables say
+  // which title it belongs to, so a request still running does not light up
+  // the button of whichever title the reader moved on to.
+  const pendingKey = mutation.variables
+    ? identityKey(mutation.variables.identity)
+    : null;
 
   const data: SeerrMediaResponse | undefined = query.data;
   const isRejectedKeyError =
@@ -171,22 +195,24 @@ export default function SeerrAction({
 
   const submit = useCallback(
     (body: SeerrRequestBody) => {
-      if (!currentKey) return;
+      if (!identity || !currentKey) return;
       const key = currentKey;
       setMessage(null);
-      setSubmittedKey(key);
-      mutation.mutate(body, {
-        onSuccess: (outcome) =>
-          setMessage({
-            key,
-            text: outcomeText(outcome),
-            isError: "error_code" in outcome,
-          }),
-        onError: () =>
-          setMessage({ key, text: "Seerr is unreachable.", isError: true }),
-      });
+      mutation.mutate(
+        { body, identity },
+        {
+          onSuccess: (outcome) =>
+            setMessage({
+              key,
+              text: outcomeText(outcome),
+              isError: "error_code" in outcome,
+            }),
+          onError: (error) =>
+            setMessage({ key, text: errorText(error), isError: true }),
+        },
+      );
     },
-    [mutation, currentKey],
+    [mutation, identity, currentKey],
   );
 
   if (!enabled || identity === null) return null;
@@ -268,7 +294,7 @@ export default function SeerrAction({
           // stylesheet spends the amber fill on one action per row.
           variant="default"
           leftSection={<FontAwesomeIcon icon={faPaperPlane} />}
-          loading={mutation.isPending && submittedKey === currentKey}
+          loading={mutation.isPending && pendingKey === currentKey}
           onClick={onRequest}
         >
           {requestLabel}
@@ -287,8 +313,8 @@ export default function SeerrAction({
       {canRequest && (
         <Text size="xs" c="dimmed">
           Requested as the Seerr owner and approved immediately.
-          {libraryUncertain &&
-            " Your library check is incomplete, so this may already be in your library."}
+          {ownershipUncertain &&
+            " Your library check is incomplete, so what you already own may not be fully reflected here."}
         </Text>
       )}
       {message && message.key === currentKey && (
@@ -301,7 +327,7 @@ export default function SeerrAction({
           title={title!}
           state={state}
           tmdbId={tmdbId}
-          libraryUncertain={libraryUncertain}
+          ownershipUncertain={ownershipUncertain}
           onClose={() => setModalOpen(false)}
           onSubmit={(body) => {
             setModalOpen(false);

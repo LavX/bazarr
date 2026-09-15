@@ -30,8 +30,6 @@ def _configured():
 def _status_payload(media_type, tmdb_id):
     if not _configured():
         return {"configured": False, "error_code": "not_configured"}
-    if operations.in_cooldown():
-        return {"configured": True, "error_code": "unreachable"}
     try:
         with operations.get_seerr_client() as client:
             cap = operations.cached_capability(client)
@@ -41,10 +39,7 @@ def _status_payload(media_type, tmdb_id):
             return {"configured": True,
                     **operations.normalize_media(media_type, tmdb_id, status, body, cap, operations.link_base(cap))}
     except MediaServerError as error:
-        code = operations.error_code_for(error)
-        if code == "unreachable":
-            operations.note_unreachable()
-        return {"configured": True, "error_code": code}
+        return {"configured": True, "error_code": operations.error_code_for(error)}
     except ValueError:
         return {"configured": False, "error_code": "not_configured"}
 
@@ -156,9 +151,6 @@ class SeerrRequest(Resource):
                         result["link"] = f"{base}/{payload['mediaType']}/{payload['mediaId']}"
                 return result, 200
         except MediaServerError as error:
-            code = operations.error_code_for(error)
-            if code == "unreachable":
-                operations.note_unreachable()
-            return {"error_code": code}, 200
+            return {"error_code": operations.error_code_for(error)}, 200
         except ValueError:
             return {"error_code": "not_configured"}, 200

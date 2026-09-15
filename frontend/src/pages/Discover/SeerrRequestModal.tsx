@@ -18,7 +18,7 @@ type Props = {
   title: MetadataTitle;
   state: SeerrMediaState;
   tmdbId: number;
-  libraryUncertain?: boolean;
+  ownershipUncertain?: boolean;
   onClose: () => void;
   onSubmit: (body: SeerrRequestBody) => void;
 };
@@ -27,7 +27,7 @@ export default function SeerrRequestModal({
   title,
   state,
   tmdbId,
-  libraryUncertain = false,
+  ownershipUncertain = false,
   onClose,
   onSubmit,
 }: Props) {
@@ -42,8 +42,10 @@ export default function SeerrRequestModal({
     (!state.requestable || groups.exhausted) && state.requestable_4k;
   const [is4k, set4k] = useState(fourKOnly);
   const [chosen, setChosen] = useState<number[]>([]);
+  // Shows only. The backend refuses a movie request carrying a TVDB id, and
+  // the fallback title type does not forbid one on a movie.
   const tvdbId =
-    "tvdb_id" in title && typeof title.tvdb_id === "number"
+    isShow && "tvdb_id" in title && typeof title.tvdb_id === "number"
       ? title.tvdb_id
       : undefined;
 
@@ -118,7 +120,7 @@ export default function SeerrRequestModal({
   return (
     <Modal opened onClose={onClose} title={`Request ${title.title}`}>
       <Stack>
-        {libraryUncertain && (
+        {ownershipUncertain && (
           <Text size="sm" c="dimmed">
             Your library check is incomplete, so what you already own may be
             missing from these groups.

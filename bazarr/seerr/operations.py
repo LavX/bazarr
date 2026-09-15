@@ -181,18 +181,16 @@ _FIND_MISS_TTL = 300
 _find_cache = LockedLRU(maxsize=256)
 
 # Capability comes from /settings/public, which every media view and every
-# request needs, and which only changes when the operator edits their Seerr
-# settings: that moves the cache key below, so a short TTL is enough to stop
-# each title view paying for a second round trip.
+# request needs. The key carries only the Bazarr-side settings, so a change
+# made inside Seerr (a 4K lane, partial requests, the application URL) is
+# retired by the TTL alone: that is what the TTL is for, and why it is minutes
+# rather than hours.
 _CAPABILITY_TTL = 300
 _capability_cache = LockedLRU(maxsize=4)
-
-# After a transport failure the next few reads are answered from here rather
-# than parked on the connect timeout. The window is deliberately short: a
-# reader who clicks Retry inside it is told "unreachable" immediately, which
-# is the same answer, just without the wait.
-_COOLDOWN_SECONDS = 10
-_cooldowns = LockedLRU(maxsize=4)
+# Fields only Seerr's own /settings/public carries. An answer with none of
+# them is not Seerr's, whatever its status code.
+_PUBLIC_MARKERS = ("hideBlocklisted", "mediaServerType", "enableSpecialEpisodes", "movie4kEnabled",
+                   "series4kEnabled", "partialRequestsEnabled", "applicationTitle", "applicationUrl")
 
 
 def _server_key():
@@ -206,19 +204,15 @@ def cached_capability(client: SeerrClient) -> dict:
     cached = _capability_cache.get(key)
     if cached is not None and cached[0] > time.monotonic():
         return cached[1]
-    cap = capability(client.public_settings())
-    _capability_cache[key] = (time.monotonic() + _CAPABILITY_TTL, cap)
+    public = client.public_settings()
+    cap = capability(public)
+    # Only a recognisable answer is worth keeping. Some other JSON served with
+    # a 200, which is what an auth proxy's login payload looks like, yields
+    # all-defaults: caching that would hide both 4K lanes and read status 6 as
+    # deleted rather than blocklisted, for every title, until the TTL expired.
+    if isinstance(public, dict) and any(marker in public for marker in _PUBLIC_MARKERS):
+        _capability_cache[key] = (time.monotonic() + _CAPABILITY_TTL, cap)
     return cap
-
-
-def in_cooldown() -> bool:
-    """Whether a recent transport failure should be answered without a round trip."""
-    return time.monotonic() < _cooldowns.get(_server_key(), 0)
-
-
-def note_unreachable() -> None:
-    """Record that the configured server did not answer."""
-    _cooldowns[_server_key()] = time.monotonic() + _COOLDOWN_SECONDS
 
 
 def reset_caches() -> None:
@@ -229,7 +223,6 @@ def reset_caches() -> None:
     which reuse one process across several fake servers.
     """
     _capability_cache.clear()
-    _cooldowns.clear()
     _find_cache.clear()
 
 
@@ -251,10 +244,16 @@ def tmdb_id_for_tvdb(tvdb_id) -> int | None:
         rows = raw.get("tv_results") if isinstance(raw, dict) else None
         found = rows[0].get("id") if isinstance(rows, list) and rows and isinstance(rows[0], dict) else None
         result = found if type(found) is int and found > 0 else None
+    except metadata.UpstreamFailure:
+        # TMDB itself refused or is in its own cooldown, which that layer has
+        # already reported. A rate limit holds for as long as Retry-After says,
+        # so logging each view at WARNING with a traceback would fill the log
+        # with the same frame for hours.
+        logger.debug("TMDB declined a find for TVDB id %s", tvdb_id)
+        return None
     except Exception:
-        # Nothing is cached from a failure, and it is logged above DEBUG with a
-        # traceback: the symptom on its own (every TVDB-only show reporting
-        # unresolved) names neither the cause nor this call site.
+        # Anything else is unexpected, and nothing else names it: the symptom
+        # on its own is every TVDB-only show reporting unresolved.
         logger.warning("TMDB find failed for TVDB id %s", tvdb_id, exc_info=True)
         return None
     _find_cache[key] = (time.monotonic() + (_FIND_TTL if result else _FIND_MISS_TTL), result)

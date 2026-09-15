@@ -20,10 +20,12 @@ export interface SeerrSeasonGroups {
   /** Whether TMDB's own season list was available to group at all. */
   hasList: boolean;
   /**
-   * Seerr takes per-season requests, the season list is known, and no season
-   * is left to send: the non-4K lane has nothing to offer, whatever the media
-   * row's `requestable` flag says. That flag only reports "not blocklisted",
-   * so for a show it stays true long after every season is taken.
+   * The season list is known and no season is left to send, so the non-4K
+   * lane has nothing to offer, whatever the media row's `requestable` flag
+   * says. That flag only reports "not blocklisted", so for a show it stays
+   * true long after every season is taken. Whether Seerr accepts per-season
+   * requests has no bearing on this: a whole-series request for a series
+   * Seerr already holds in full is just as empty.
    */
   exhausted: boolean;
 }
@@ -57,10 +59,6 @@ export function groupSeerrSeasons(
     owned,
     open,
     hasList: listed.length > 0,
-    exhausted:
-      listed.length > 0 &&
-      state.partial_requests &&
-      owned.length === 0 &&
-      open.length === 0,
+    exhausted: listed.length > 0 && owned.length === 0 && open.length === 0,
   };
 }
