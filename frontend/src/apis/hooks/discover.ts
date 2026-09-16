@@ -7,6 +7,7 @@ import client from "@/apis/raw/client";
 import type {
   DiscoverDownloadIdentity,
   DiscoverSelection,
+  DiscoverSummary,
   MetadataSource,
   TrendingMediaType,
 } from "@/types/discover";
@@ -93,6 +94,42 @@ export function useDiscoverCopies(
 export const SUMMARY_QUERY_KEY = [QueryKeys.Discover, "summary"] as const;
 
 /**
+ * Whether a body is the summary rather than something else a 200 can carry.
+ *
+ * Only a non-2xx answer arrives as an error. A sign-in page from a reverse
+ * proxy, an authentication message and the app's own index.html are all 200s
+ * carrying a truthy body with none of the summary's components in it, and the
+ * first panel to read one of them took the whole page down.
+ */
+export function isDiscoverSummary(body: unknown): body is DiscoverSummary {
+  if (typeof body !== "object" || body === null) return false;
+  const component = (value: unknown) =>
+    typeof value === "object" && value !== null;
+  const candidate = body as Record<string, unknown>;
+  return (
+    component(candidate.activity) &&
+    component(candidate.attention) &&
+    component(candidate.wanted) &&
+    Array.isArray(candidate.arrivals)
+  );
+}
+
+/**
+ * Whether the summary has been read and could not be understood.
+ *
+ * Deliberately not `isError`: a query holding no data goes back to pending
+ * while it refetches, so anything that watched isError would flip in and out
+ * of existence, and a panel mounting is itself what starts the next read. This
+ * only stops being true when a read actually succeeds.
+ */
+export function summaryUnreadable(summary: {
+  isFetched: boolean;
+  data: DiscoverSummary | undefined;
+}): boolean {
+  return summary.isFetched && summary.data === undefined;
+}
+
+/**
  * The read-only local work summary.
  *
  * It is deliberately independent of TMDB configuration and of the metadata
@@ -104,7 +141,17 @@ export const SUMMARY_QUERY_KEY = [QueryKeys.Discover, "summary"] as const;
 export function useDiscoverSummary() {
   return useQuery({
     queryKey: SUMMARY_QUERY_KEY,
-    queryFn: ({ signal }) => api.discover.summary(signal),
+    queryFn: async ({ signal }) => {
+      const body = await api.discover.summary(signal);
+      // A read that answers with something else is a failed read, not a
+      // summary with holes in it. Handed on as data it would be dereferenced
+      // by every panel on the page, and the panels would report its counts as
+      // absent rather than as unknown.
+      if (!isDiscoverSummary(body)) {
+        throw new Error("The local summary could not be read.");
+      }
+      return body;
+    },
     staleTime: 15_000,
     gcTime: 60_000,
     retry: false,

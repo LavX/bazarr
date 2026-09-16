@@ -14,6 +14,7 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
+  summaryUnreadable,
   useDiscoverSummary,
   useSportsWantedCount,
 } from "@/apis/hooks/discover";
@@ -68,19 +69,30 @@ const UNREADABLE: Status = {
   line: "Local activity could not be read.",
 };
 
-/** What this Bazarr is doing right now, in one sentence it can stand behind. */
-function describe(data: DiscoverSummary | undefined): Status {
+/**
+ * What this Bazarr is doing right now, in one sentence it can stand behind.
+ *
+ * Read as a partial summary on purpose. A failed read is not the same as a
+ * read that has not happened yet, and a body that arrived without the
+ * components this sentence is built from is a failed read however healthy its
+ * status code was.
+ */
+function describe(
+  data: Partial<DiscoverSummary> | undefined,
+  failed: boolean,
+): Status {
+  if (failed) return UNREADABLE;
   if (!data)
     return { tone: "unknown", icon: faSpinner, line: "Reading local status" };
   const { activity, attention } = data;
-  if (activity.availability !== "available") return UNREADABLE;
-  const running = activity.running_count;
-  const queued = activity.queued_count;
+  if (!activity || activity.availability !== "available") return UNREADABLE;
+  const running = activity.running_count ?? null;
+  const queued = activity.queued_count ?? null;
   if (running === null || queued === null) return UNREADABLE;
   if (running > 0) {
     // Name the work rather than counting it: "Translating Northern Light" is
     // what the reader came to check, and a bare "1 running" is not.
-    const featured = activity.running[0];
+    const featured = activity.running?.[0];
     const rest = running - 1;
     return {
       tone: "busy",
@@ -96,18 +108,20 @@ function describe(data: DiscoverSummary | undefined): Status {
       icon: faSpinner,
       line: `${queued} subtitle job${queued === 1 ? "" : "s"} waiting to start`,
     };
-  if (attention.availability === "available" && attention.items.length > 0)
+  const attentionItems =
+    attention?.availability === "available" ? (attention.items ?? []) : [];
+  if (attentionItems.length > 0)
     return {
       tone: "attention",
       icon: faTriangleExclamation,
-      line: `${attention.items.length} thing${
-        attention.items.length === 1 ? "" : "s"
+      line: `${attentionItems.length} thing${
+        attentionItems.length === 1 ? "" : "s"
       } need attention`,
     };
   // "Nothing running" is an absence, and an absence is a poor thing to lead a
   // page with. An idle install's most interesting status is when it last did
   // something, which is a fact rather than the lack of one.
-  const last = data.arrivals.find((item) => item.timestamp);
+  const last = data.arrivals?.find((item) => item.timestamp);
   return {
     tone: "quiet",
     icon: faCircleCheck,
@@ -129,7 +143,7 @@ export default function LibraryHero() {
   const [turn, setTurn] = useState(0);
   const data = summary.data;
   const library = data?.library;
-  const status = describe(data);
+  const status = describe(data, summaryUnreadable(summary));
   // The things this install actually fetched, which are the only images on the
   // page unambiguously about this library. Deduplicated because one title can
   // arrive more than once and would otherwise hold the frame twice as long.
@@ -190,13 +204,13 @@ export default function LibraryHero() {
     .filter((entry) => entry.count > 0)
     .sort((left, right) => right.count - left.count)
     .map((entry) => ({ to: entry.to, label: entry.label(entry.count) }));
-  const scheduled = data?.activity.scheduled_count ?? null;
+  const scheduled = data?.activity?.scheduled_count ?? null;
   // A job with no further run reports exactly "Never", and everything else is
   // an upcoming run. Testing for a leading "in" instead looked equivalent but
   // rejected half the vocabulary the server actually produces ("now", "today",
   // "tomorrow", "next week"), so the soonest jobs were the ones that could
   // never be named and a later one got labelled next in their place.
-  const next = data?.activity.scheduled.find(
+  const next = data?.activity?.scheduled?.find(
     (job) => (job.next_run_in ?? "Never") !== "Never",
   );
 

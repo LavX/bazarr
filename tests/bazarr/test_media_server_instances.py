@@ -6,7 +6,8 @@ import pytest
 
 
 def settings():
-    return SimpleNamespace(general=SimpleNamespace(use_emby=True, use_silo=True))
+    return SimpleNamespace(general=SimpleNamespace(use_emby=True, use_silo=True,
+                                                   use_jellyfin=True, use_plex=True))
 
 
 def payload(kind, name='A', **overrides):

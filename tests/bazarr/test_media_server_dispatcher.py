@@ -8,7 +8,7 @@ import pytest
 
 def native_settings():
     return SimpleNamespace(
-        general=SimpleNamespace(use_emby=True, use_silo=True),
+        general=SimpleNamespace(use_emby=True, use_silo=True, use_jellyfin=True, use_plex=True),
         **{server: SimpleNamespace(url=f"http://{server}.example", apikey="synthetic-key", verify_ssl=True,
                                   path_mappings=[{"local_path": "/movies", "remote_path": "/media",
                                                   "library_id": "7"}]) for server in ("emby", "silo")})

@@ -310,6 +310,7 @@ jobs:
             tests/bazarr/test_media_server_instances.py \
             tests/bazarr/test_media_server_instance_migration.py \
             tests/bazarr/test_media_server_dispatcher.py \
+            tests/bazarr/test_media_server_convergence.py \
             tests/bazarr/test_media_server_resolution.py \
             tests/bazarr/test_media_server_mutation_hooks.py \
             tests/bazarr/test_language_profile_guards.py \
@@ -388,6 +389,7 @@ jobs:
             tests/bazarr/test_arr_atomicity_secrets.py \
             tests/bazarr/test_arr_pg_cutover_migration.py \
             tests/bazarr/test_media_server_instances_pg.py \
+            tests/bazarr/test_media_server_convergence_migration.py \
             tests/bazarr/test_sportarr_kind_migration.py \
             tests/bazarr/test_sportarr_library_migration.py \
             tests/bazarr/test_sportarr_leagues.py \

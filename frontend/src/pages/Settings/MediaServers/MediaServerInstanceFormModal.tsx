@@ -16,16 +16,23 @@ import {
 } from "@mantine/core";
 import { useForm } from "@mantine/form";
 import {
+  useMediaServerLibraries,
   useMediaServerTest,
   useSaveMediaServerInstance,
-  useSiloLibraries,
 } from "@/apis/hooks/mediaServers";
 import type {
   ConnectionOverrides,
   MediaServerInstance,
   MediaServerKind,
+  MediaServerOptions,
   PathMapping,
 } from "@/apis/raw/mediaServers";
+import {
+  KINDS_WITH_LIBRARIES,
+  KINDS_WITH_PATH_MAPPINGS,
+} from "@/apis/raw/mediaServers";
+import { CREDENTIAL_LABELS, kindName, URL_PLACEHOLDERS } from "./kinds";
+import LibraryPickers from "./LibraryPickers";
 import PathMappings from "./PathMappings";
 
 type KeyMode = "keep" | "replace" | "clear";
@@ -42,7 +49,10 @@ export default function MediaServerInstanceFormModal({
   instance,
   onClose,
 }: Props) {
-  const name = kind === "emby" ? "Emby" : "Silo";
+  const name = kindName(kind);
+  const mapped = KINDS_WITH_PATH_MAPPINGS.includes(kind);
+  const scoped = KINDS_WITH_LIBRARIES.includes(kind);
+  const credential = CREDENTIAL_LABELS[kind];
   const [keyMode, setKeyMode] = useState<KeyMode>(
     instance ? "keep" : "replace",
   );
@@ -54,6 +64,9 @@ export default function MediaServerInstanceFormModal({
       apiKey: "",
       verifySsl: instance?.verify_ssl ?? true,
       mappings: instance?.path_mappings ?? ([] as PathMapping[]),
+      refreshMovies: instance?.refresh_movies ?? true,
+      refreshEpisodes: instance?.refresh_episodes ?? true,
+      options: (instance?.options ?? {}) as MediaServerOptions,
     },
     validate: {
       name: (value) => (value.trim() ? null : "Name is required"),
@@ -76,10 +89,12 @@ export default function MediaServerInstanceFormModal({
         !(keyMode === "keep"
           ? instance?.api_key_set
           : keyMode === "replace" && value.trim())
-          ? "An enabled instance needs an API key"
+          ? `An enabled instance needs ${credential === "Plex token" ? "a Plex token" : "an API key"}`
           : null,
+      // Only a kind that resolves by path needs one. Jellyfin and Plex resolve
+      // the item themselves and have never had mappings to configure.
       mappings: (value, values) =>
-        values.enabled && value.length === 0
+        mapped && values.enabled && value.length === 0
           ? "An enabled instance needs at least one path mapping"
           : null,
     },
@@ -102,7 +117,7 @@ export default function MediaServerInstanceFormModal({
       : keyMode === "replace" && form.values.apiKey.trim()),
   );
   const test = useMediaServerTest(kind, connection, instance?.id);
-  const libraries = useSiloLibraries(connection, instance?.id);
+  const libraries = useMediaServerLibraries(kind, connection, instance?.id);
   const save = useSaveMediaServerInstance(
     kind,
     {
@@ -110,6 +125,9 @@ export default function MediaServerInstanceFormModal({
       name: form.values.name,
       enabled: form.values.enabled,
       path_mappings: form.values.mappings,
+      refresh_movies: form.values.refreshMovies,
+      refresh_episodes: form.values.refreshEpisodes,
+      options: form.values.options,
     },
     instance?.id,
   );
@@ -148,12 +166,8 @@ export default function MediaServerInstanceFormModal({
           </Text>
           <TextInput
             label="Server URL"
-            placeholder={
-              kind === "emby"
-                ? "http://192.168.1.100:8096"
-                : "https://silo.example"
-            }
-            description={`Full URL of your ${name} server, including any path prefix. Keep credentials in the API Key field.`}
+            placeholder={URL_PLACEHOLDERS[kind]}
+            description={`Full URL of your ${name} server, including any path prefix. Keep credentials in the ${credential} field.`}
             {...form.getInputProps("url")}
           />
           {kind === "silo" && (
@@ -167,11 +181,11 @@ export default function MediaServerInstanceFormModal({
             <>
               <Text size="sm">
                 {instance.api_key_set
-                  ? "An API key is stored. Keep it, replace it or clear it."
-                  : "No API key is stored."}
+                  ? `A ${credential.toLowerCase()} is stored. Keep it, replace it or clear it.`
+                  : `No ${credential.toLowerCase()} is stored.`}
               </Text>
               <SegmentedControl
-                aria-label="API key action"
+                aria-label={`${credential} action`}
                 value={keyMode}
                 onChange={(value) => {
                   setKeyMode(value as KeyMode);
@@ -187,7 +201,7 @@ export default function MediaServerInstanceFormModal({
           )}
           {keyMode === "replace" && (
             <PasswordInput
-              label="API Key"
+              label={credential}
               autoComplete="new-password"
               {...form.getInputProps("apiKey")}
             />
@@ -199,8 +213,8 @@ export default function MediaServerInstanceFormModal({
           )}
           {keyMode === "clear" && (
             <Alert color="yellow">
-              The saved API key will be removed when you save. Disable this
-              instance to save without a key.
+              The saved {credential.toLowerCase()} will be removed when you
+              save. Disable this instance to save without one.
             </Alert>
           )}
           <Switch
@@ -225,7 +239,7 @@ export default function MediaServerInstanceFormModal({
           </Text>
           {!configured && (
             <Text size="sm" c="dimmed">
-              Enter a Server URL and API Key to test this connection.
+              Enter a Server URL and {credential} to test this connection.
             </Text>
           )}
           {test.isSuccess && test.data.success && (
@@ -233,7 +247,7 @@ export default function MediaServerInstanceFormModal({
               {test.data.server_name
                 ? `Connected to ${test.data.server_name}`
                 : "Connection succeeded"}
-              {kind === "emby" && test.data.version
+              {kind !== "silo" && test.data.version
                 ? ` (v${test.data.version})`
                 : ""}
               .
@@ -241,15 +255,56 @@ export default function MediaServerInstanceFormModal({
           )}
           {(test.isError || (test.isSuccess && !test.data.success)) && (
             <Alert color="red">
-              Connection test failed. Check the Server URL, API Key, certificate
-              and server access.
+              Connection test failed. Check the Server URL, {credential},
+              certificate and server access.
             </Alert>
           )}
           <Text size="sm" c="dimmed">
-            Test{kind === "silo" ? " and Load libraries use" : " uses"} the
+            Test{kind === "emby" ? " uses" : " and Load libraries use"} the
             current fields, including unsaved changes.
           </Text>
-          <Divider label="Path mappings" />
+          <Divider label="What this instance refreshes" />
+          <Switch
+            label="Refresh movies"
+            {...form.getInputProps("refreshMovies", { type: "checkbox" })}
+          />
+          <Switch
+            label="Refresh episodes"
+            {...form.getInputProps("refreshEpisodes", { type: "checkbox" })}
+          />
+          {scoped && (
+            <LibraryPickers
+              kind={kind as "jellyfin" | "plex"}
+              value={form.values.options}
+              onChange={(value) => form.setFieldValue("options", value)}
+              libraries={libraries}
+              configured={configured}
+            />
+          )}
+          {kind === "jellyfin" && (
+            <>
+              <Text size="sm">Refresh method</Text>
+              <SegmentedControl
+                aria-label="Refresh method"
+                value={form.values.options.refresh_method ?? "immediate"}
+                onChange={(value) =>
+                  form.setFieldValue("options", {
+                    ...form.values.options,
+                    refresh_method: value as "immediate" | "async",
+                  })
+                }
+                data={[
+                  { value: "immediate", label: "Immediate" },
+                  { value: "async", label: "Async" },
+                ]}
+              />
+              <Text size="xs" c="dimmed">
+                Immediate re-reads the item's metadata straight away. Async
+                reports the file change and lets Jellyfin batch the rescan.
+              </Text>
+            </>
+          )}
+          {mapped && <Divider label="Path mappings" />}
           {kind === "silo" && (
             <>
               <Group>
@@ -286,21 +341,25 @@ export default function MediaServerInstanceFormModal({
               )}
             </>
           )}
-          <PathMappings
-            kind={kind}
-            value={form.values.mappings}
-            onChange={(value) => form.setFieldValue("mappings", value)}
-            libraries={libraries.data}
-          />
-          {form.errors.mappings && (
-            <Text size="sm" c="red">
-              {form.errors.mappings}
-            </Text>
+          {mapped && (
+            <>
+              <PathMappings
+                kind={kind}
+                value={form.values.mappings}
+                onChange={(value) => form.setFieldValue("mappings", value)}
+                libraries={libraries.data}
+              />
+              {form.errors.mappings && (
+                <Text size="sm" c="red">
+                  {form.errors.mappings}
+                </Text>
+              )}
+            </>
           )}
           {save.isError && (
             <Alert color="red">
-              Could not save this instance. Check the name, full URL, API key
-              and path mappings, then try again.
+              Could not save this instance. Check the name, full URL,{" "}
+              {credential.toLowerCase()} and library settings, then try again.
             </Alert>
           )}
           <Group justify="flex-end">

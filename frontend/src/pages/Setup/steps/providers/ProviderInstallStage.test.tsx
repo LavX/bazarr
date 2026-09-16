@@ -45,10 +45,14 @@ const mutateAsync = vi.fn();
 const restart = vi.fn();
 const onInstalledNeedsRestart = vi.fn();
 const onUseInstalled = vi.fn();
+const onNext = vi.fn();
 
 function setCatalog(entries: unknown[]) {
   mockedCatalog.mockReturnValue({
     data: { sources: [], entries },
+    // Settled: the stage reads this to tell an empty catalog from one that has
+    // not answered yet.
+    isPending: false,
   } as unknown as ReturnType<typeof useProviderHubCatalog>);
 }
 
@@ -140,6 +144,95 @@ describe("ProviderInstallStage", () => {
     vi.useRealTimers();
   });
 
+  // A first-run install with no reachable catalog has nothing to select, and
+  // the only other control on the step is disabled until something is. The
+  // wizard has four more steps after this one, so a reader who cannot reach
+  // the catalog was stranded two thirds of the way through it.
+  it("recovers the step when the catalog offers nothing and nothing is installed", async () => {
+    const user = userEvent.setup();
+    setCatalog([]);
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    expect(screen.getByText(/no providers available/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /install & restart/i }),
+    ).toBeDisabled();
+    await user.click(
+      screen.getByRole("button", { name: /continue without providers/i }),
+    );
+    expect(onNext).toHaveBeenCalledTimes(1);
+  });
+
+  // An answer that has not arrived is not an empty one. Reading the list while
+  // the query was still in flight reported a catalog with nothing in it on a
+  // healthy install, offered a recovery from a state it was not in, and then
+  // replaced both a moment later.
+  it("says nothing about the catalog while it is still being read", () => {
+    mockedCatalog.mockReturnValue({
+      data: undefined,
+      isPending: true,
+    } as unknown as ReturnType<typeof useProviderHubCatalog>);
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    expect(screen.queryByText(/no providers available/i)).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /continue without providers/i }),
+    ).toBeNull();
+  });
+
+  // It is a recovery, not a way to decline the step: a reader who can see the
+  // catalog is answering it, not stuck on it.
+  it("offers no recovery when the catalog loaded normally", () => {
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    expect(screen.queryByText(/no providers available/i)).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /continue without providers/i }),
+    ).toBeNull();
+  });
+
+  // Providers already on disk are their own way forward, offered above.
+  it("offers no recovery when providers are already installed", () => {
+    setCatalog([]);
+    customRender(
+      <ProviderInstallStage
+        hasInstalled
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    expect(screen.getByText(/no providers available/i)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /continue without providers/i }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /use already-installed providers/i }),
+    ).toBeInTheDocument();
+  });
+
   it("installs each selected provider, then restarts and shows the overlay", async () => {
     const user = userEvent.setup();
     customRender(
@@ -147,6 +240,7 @@ describe("ProviderInstallStage", () => {
         hasInstalled={false}
         onInstalledNeedsRestart={onInstalledNeedsRestart}
         onUseInstalled={onUseInstalled}
+        onNext={onNext}
       />,
     );
 
@@ -188,6 +282,7 @@ describe("ProviderInstallStage", () => {
         hasInstalled={false}
         onInstalledNeedsRestart={onInstalledNeedsRestart}
         onUseInstalled={onUseInstalled}
+        onNext={onNext}
       />,
     );
 
@@ -219,6 +314,7 @@ describe("ProviderInstallStage", () => {
         hasInstalled={false}
         onInstalledNeedsRestart={onInstalledNeedsRestart}
         onUseInstalled={onUseInstalled}
+        onNext={onNext}
       />,
     );
 
@@ -242,6 +338,7 @@ describe("ProviderInstallStage", () => {
         hasInstalled={false}
         onInstalledNeedsRestart={onInstalledNeedsRestart}
         onUseInstalled={onUseInstalled}
+        onNext={onNext}
       />,
     );
 
@@ -270,6 +367,7 @@ describe("ProviderInstallStage", () => {
         hasInstalled={false}
         onInstalledNeedsRestart={onInstalledNeedsRestart}
         onUseInstalled={onUseInstalled}
+        onNext={onNext}
       />,
     );
 
@@ -310,6 +408,7 @@ describe("ProviderInstallStage", () => {
         hasInstalled={false}
         onInstalledNeedsRestart={onInstalledNeedsRestart}
         onUseInstalled={onUseInstalled}
+        onNext={onNext}
       />,
     );
 
@@ -362,6 +461,7 @@ describe("ProviderInstallStage", () => {
         hasInstalled={false}
         onInstalledNeedsRestart={onInstalledNeedsRestart}
         onUseInstalled={onUseInstalled}
+        onNext={onNext}
       />,
     );
 
@@ -389,6 +489,7 @@ describe("ProviderInstallStage", () => {
         hasInstalled={false}
         onInstalledNeedsRestart={onInstalledNeedsRestart}
         onUseInstalled={onUseInstalled}
+        onNext={onNext}
       />,
     );
 
@@ -420,6 +521,7 @@ describe("ProviderInstallStage", () => {
         hasInstalled={false}
         onInstalledNeedsRestart={onInstalledNeedsRestart}
         onUseInstalled={onUseInstalled}
+        onNext={onNext}
       />,
     );
 
@@ -442,6 +544,7 @@ describe("ProviderInstallStage", () => {
         hasInstalled={false}
         onInstalledNeedsRestart={onInstalledNeedsRestart}
         onUseInstalled={onUseInstalled}
+        onNext={onNext}
       />,
     );
 
@@ -466,6 +569,7 @@ describe("ProviderInstallStage", () => {
         hasInstalled={false}
         onInstalledNeedsRestart={onInstalledNeedsRestart}
         onUseInstalled={onUseInstalled}
+        onNext={onNext}
       />,
     );
 
@@ -496,6 +600,7 @@ describe("ProviderInstallStage", () => {
         hasInstalled={false}
         onInstalledNeedsRestart={onInstalledNeedsRestart}
         onUseInstalled={onUseInstalled}
+        onNext={onNext}
       />,
     );
 
@@ -510,6 +615,7 @@ describe("ProviderInstallStage", () => {
         hasInstalled
         onInstalledNeedsRestart={onInstalledNeedsRestart}
         onUseInstalled={onUseInstalled}
+        onNext={onNext}
       />,
     );
 

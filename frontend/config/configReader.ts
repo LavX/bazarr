@@ -47,6 +47,19 @@ export default function overrideEnv(env: Record<string, string>) {
     try {
       const apiKey = reader.getValue("auth", "apikey");
 
+      // Stored secrets are encrypted at rest and only the backend holds the
+      // key, so the ciphertext is not an API key. Passing it on sends the dev
+      // server into a 401 on every call, which arrives as a login screen with
+      // no explanation of why the credentials it already has are being
+      // refused.
+      if (typeof apiKey === "string" && apiKey.startsWith("enc:v1:")) {
+        throw new Error(
+          "the API key in the config file is encrypted at rest. Read it from " +
+            "the running backend's page (window.Bazarr.apiKey) and set " +
+            "VITE_API_KEY in frontend/.env.local",
+        );
+      }
+
       env["VITE_API_KEY"] = apiKey;
       process.env["VITE_API_KEY"] = apiKey;
     } catch (err) {

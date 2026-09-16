@@ -736,7 +736,11 @@ def test_unrelated_saves_do_not_emit_a_sports_event(monkeypatch):
 
 def test_sports_library_settings_survive_a_save(monkeypatch):
     """The sports library selections round-trip through the settings save the
-    way the movie and series ones do."""
+    way the movie and series ones do.
+
+    Only Plex's, now: Jellyfin's libraries are instance rows and its whole
+    section is import-only, so a settings save carrying one is refused rather
+    than writing a value nothing reads."""
     from app import config
 
     executed = []
@@ -756,26 +760,20 @@ def test_sports_library_settings_survive_a_save(monkeypatch):
 
     previous_plex = config.settings.plex.sports_library
     previous_plex_ids = config.settings.plex.sports_library_ids
-    previous_jellyfish = config.settings.jellyfin.sports_library
-    previous_jellyfin_ids = config.settings.jellyfin.sports_library_ids
     try:
         config.save_settings(
             [
                 ("settings-plex-sports_library", ["Sports"]),
                 ("settings-plex-sports_library_ids", ["3"]),
-                ("settings-jellyfin-sports_library", ["Sports"]),
-                ("settings-jellyfin-sports_library_ids", ["9"]),
             ]
         )
         assert config.settings.plex.sports_library == ["Sports"]
         assert config.settings.plex.sports_library_ids == ["3"]
-        assert config.settings.jellyfin.sports_library == ["Sports"]
-        assert config.settings.jellyfin.sports_library_ids == ["9"]
+        with pytest.raises(ValidationError):
+            config.save_settings([("settings-jellyfin-sports_library_ids", ["9"])])
     finally:
         config.settings.plex.sports_library = previous_plex
         config.settings.plex.sports_library_ids = previous_plex_ids
-        config.settings.jellyfin.sports_library = previous_jellyfish
-        config.settings.jellyfin.sports_library_ids = previous_jellyfin_ids
 
 
 @pytest.mark.parametrize('enabled', [True, False])

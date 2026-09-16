@@ -58,21 +58,21 @@ describe("Connections page", () => {
     });
   });
 
-  it("switches to the Plex tab and shows its config", async () => {
+  it("switches to the Plex tab and shows its instance list", async () => {
     const user = userEvent.setup();
     customRender(<SettingsConnectionsView />);
     await user.click(await screen.findByRole("tab", { name: /plex/i }));
     await waitFor(() => {
-      expect(screen.getByText("Use Plex Media Server")).toBeInTheDocument();
+      expect(screen.getByText("Use Plex")).toBeInTheDocument();
     });
+    expect(await screen.findByText("Plex instances")).toBeInTheDocument();
   });
 });
 
-it("switches to Jellyfin and preserves its configuration section", async () => {
+it("switches to Jellyfin and shows its instance list", async () => {
   customRender(<SettingsConnectionsView />);
   await userEvent.click(await screen.findByRole("tab", { name: "Jellyfin" }));
-  expect(
-    await screen.findByText("Use Jellyfin Media Server"),
-  ).toBeInTheDocument();
+  expect(await screen.findByText("Use Jellyfin")).toBeInTheDocument();
+  expect(await screen.findByText("Jellyfin instances")).toBeInTheDocument();
   expect(screen.getByRole("switch", { name: "Enabled" })).toBeInTheDocument();
 });

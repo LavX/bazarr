@@ -9,9 +9,10 @@ from threading import Condition, RLock, Thread
 from . import resolution
 from .events import SubtitleMutation
 from .http import MediaServerError
+from .instances import LIBRARY_KEYS, VALID_KINDS, needs_path_mappings
 from .paths import _media_path, map_media_path
 
-_SERVERS = ("emby", "silo")
+_SERVERS = VALID_KINDS
 _OPERATIONS = {"download", "upload", "delete", "sync", "translate", "combine", "edit"}
 _ERROR_CODES = {
     "configuration_changed", "connection_disabled", "connection_error", "internal_error", "invalid_response",
@@ -185,6 +186,12 @@ def _client(server, snapshot):
     if server == "emby":
         from emby.client import EmbyClient
         return EmbyClient(snapshot.url, snapshot.apikey, snapshot.verify_ssl)
+    if server == "jellyfin":
+        from jellyfin.refresh import JellyfinRefreshClient
+        return JellyfinRefreshClient(snapshot)
+    if server == "plex":
+        from plex.refresh import PlexRefreshClient
+        return PlexRefreshClient(snapshot)
     from silo.client import SiloClient
     return SiloClient(snapshot.url, snapshot.apikey, snapshot.verify_ssl)
 
@@ -237,10 +244,19 @@ class RefreshDispatcher:
                 server = snapshot.id
                 state = self._server(server)
                 _revision, snapshot, changing = self._connection(server, state)
-                if not snapshot.enabled:
+                if not snapshot.enabled or not snapshot.refreshes(media_type):
+                    continue
+                # A destination that cannot reach this video is not asked to.
+                # For Emby and Silo that is a path no mapping covers; for
+                # Jellyfin and Plex it is a media type with no library chosen,
+                # which is how their scalar settings behaved and is the only
+                # scope either of them has for the file.
+                if snapshot.kind in LIBRARY_KEYS and not snapshot.libraries(media_type):
                     continue
                 try:
-                    map_media_path(event.video_path, snapshot.mappings(), require_library=snapshot.kind == 'silo')
+                    if needs_path_mappings(snapshot.kind):
+                        map_media_path(event.video_path, snapshot.mappings(),
+                                       require_library=snapshot.kind == 'silo')
                 except MediaServerError as error:
                     if error.code == 'mapping_missing':
                         continue
@@ -293,7 +309,11 @@ class RefreshDispatcher:
         with subtitle_write_locks(event.video_path, event.subtitle_path):
             pass
         guard()
-        mapped = map_media_path(event.video_path, snapshot.mappings(), require_library=server == "silo")
+        mapped = (map_media_path(event.video_path, snapshot.mappings(), require_library=server == "silo")
+                  if needs_path_mappings(server) else None)
+        if server in LIBRARY_KEYS and not snapshot.libraries(event.media_type):
+            # The libraries were emptied after this target was queued.
+            raise MediaServerError("library_missing")
         if server == "silo" and _media_path(event.subtitle_path).parent != _media_path(event.video_path).parent:
             raise MediaServerError("sidecar_unsupported")
         with self.client_factory(server, snapshot) as client:
@@ -340,13 +360,26 @@ class RefreshDispatcher:
             # so a recording scans there exactly as a movie does; routing it to
             # the library instead submitted a recursive scan of a whole, often
             # shared, library for every publication and could never confirm.
-            supported &= ({resolution.LIBRARY} if server == "emby"
-                          else {resolution.PATH, resolution.LIBRARY})
+            supported &= ({resolution.PATH, resolution.LIBRARY} if server == "silo"
+                          else {resolution.LIBRARY})
         metadata = (self.metadata_factory(event)
                     if supported & {resolution.PROVIDER_ID, resolution.TITLE_YEAR} else None)
         if metadata is None:
             supported -= {resolution.PROVIDER_ID, resolution.TITLE_YEAR}
-        if server == "emby":
+        if server in ("jellyfin", "plex"):
+            # Neither resolves by path, so neither is handed a mapped path and
+            # neither is asked for one. Their library rung takes the libraries
+            # the user chose on the destination instead.
+            available = {
+                resolution.PROVIDER_ID: (lambda: client.refresh_by_provider_id(
+                    event.media_type, metadata, ensure_current=guard), "requested"),
+                resolution.LIBRARY: (lambda: client.refresh_library(
+                    event.media_type, ensure_current=guard, coalesce=coalesce), "requested"),
+            }
+            if server == "jellyfin":
+                available[resolution.TITLE_YEAR] = (lambda: client.refresh_by_title_year(
+                    event.media_type, metadata, ensure_current=guard), "requested")
+        elif server == "emby":
             # item_missing is Emby saying it holds no such file, which is a
             # miss; item_ambiguous and every strict acceptance refusal are not,
             # and must not be laundered into a refresh of something broader.

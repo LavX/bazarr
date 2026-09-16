@@ -37,9 +37,7 @@ from subtitles.tools.subsync_engines import (SubtitlePublication, write_subtitle
 
 from .sync import sync_subtitles, _index_keep_all_outputs
 from .post_processing import postprocessing
-from plex.operations import (plex_set_movie_added_date_now, plex_set_episode_added_date_now, plex_refresh_item,
-                             plex_update_sports_library)
-from jellyfin.operations import jellyfin_refresh_item, jellyfin_update_sports_library
+from plex.operations import plex_set_movie_added_date_now, plex_set_episode_added_date_now
 
 
 def _refresh_uploaded_subtitles(video_path, subtitle_path, sonarr_series_id=None, sonarr_episode_id=None,
@@ -61,50 +59,20 @@ def _refresh_upload_consumers(media_type, metadata, arr_instance_id):
     if media_type == 'sports':
         # Sportarr offers only an untargeted whole-library scan, so one rescan
         # per affected owner is requested behind the per-instance transport,
-        # non-blocking. The media servers key their library refresh on an
-        # identifier a sports event has not got, so their configured sports
-        # libraries are scanned instead. The event re-index is what makes the
-        # upload visible.
+        # non-blocking. The media servers refresh through the publication the
+        # upload already dispatched, which falls to their configured sports
+        # libraries. The event re-index is what makes the upload visible.
         from sportarr.notify import notify_rescan
-        if settings.general.use_plex:
-            sports_library = settings.plex.sports_library
-            if isinstance(sports_library, str):
-                sports_library = [sports_library] if sports_library else []
-            if sports_library:
-                callbacks.append(('Plex', plex_update_sports_library))
-        if settings.general.use_jellyfin:
-            sports_library_ids = settings.jellyfin.sports_library_ids
-            if isinstance(sports_library_ids, str):
-                sports_library_ids = [sports_library_ids] if sports_library_ids else []
-            if sports_library_ids:
-                callbacks.append(('Jellyfin', jellyfin_update_sports_library))
         notify_rescan(arr_instance_id)
-        for consumer, callback in callbacks:
-            try:
-                callback()
-            except Exception as exc:
-                logging.warning('BAZARR upload refresh failed for %s (%s)', consumer, type(exc).__name__)
         return
     if media_type == 'series':
         callbacks.append(('Sonarr', lambda: notify_sonarr(
             metadata.sonarrSeriesId,
             arr_client=client_for_instance(database, arr_instance_id, enabled_only=False))))
-        if settings.general.use_plex and settings.plex.update_series_library:
-            callbacks.append(('Plex', lambda: plex_refresh_item(
-                metadata.imdbId, is_movie=False, season=metadata.season, episode=metadata.episode)))
-        if settings.general.use_jellyfin and settings.jellyfin.update_series_library:
-            callbacks.append(('Jellyfin', lambda: jellyfin_refresh_item(
-                metadata.imdbId, is_movie=False, season=metadata.season, episode=metadata.episode,
-                tvdb_id=metadata.tvdbId)))
     else:
         callbacks.append(('Radarr', lambda: notify_radarr(
             metadata.radarrId,
             arr_client=client_for_instance(database, arr_instance_id, enabled_only=False))))
-        if settings.general.use_plex and settings.plex.update_movie_library:
-            callbacks.append(('Plex', lambda: plex_refresh_item(metadata.imdbId, is_movie=True)))
-        if settings.general.use_jellyfin and settings.jellyfin.update_movie_library:
-            callbacks.append(('Jellyfin', lambda: jellyfin_refresh_item(
-                metadata.imdbId, is_movie=True, tmdb_id=metadata.tmdbId)))
     for consumer, callback in callbacks:
         try:
             callback()
