@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   Alert,
+  Anchor,
   Button,
   Group,
   Modal,
@@ -19,7 +20,7 @@ import type {
 import { Check, Section } from "@/pages/Settings/components";
 import { useStagedValues } from "@/pages/Settings/utilities/FormValues";
 import { useSettingValue } from "@/pages/Settings/utilities/hooks";
-import { kindName } from "./kinds";
+import { GUIDE_ANCHORS, GUIDE_URL, kindName } from "./kinds";
 import MediaServerInstanceCard from "./MediaServerInstanceCard";
 import MediaServerInstanceFormModal from "./MediaServerInstanceFormModal";
 import styles from "@/pages/Settings/Connections/Connections.module.scss";
@@ -88,7 +89,16 @@ export default function MediaServerSection({
         <Text size="sm" c="dimmed">
           Notify {name} about movie and episode subtitle changes.
           {kind === "silo" &&
-            " Subtitle sidecars must be beside the video file."}
+            " Subtitle sidecars must be beside the video file."}{" "}
+          <Anchor
+            c="light-dark(var(--mantine-color-brand-7), var(--mantine-color-brand-4))"
+            href={`${GUIDE_URL}${GUIDE_ANCHORS[kind]}`}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Read the media servers guide
+          </Anchor>
+          .
         </Text>
       </Section>
       <Section header={`${name} instances`}>

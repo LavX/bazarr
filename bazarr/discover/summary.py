@@ -1057,7 +1057,12 @@ def _onboarding(instances):
                       "summary": "No Sonarr or Radarr instance is connected yet. "
                                  "Discover works without one.",
                       "target": "/settings/connections"})
-    if not (settings.translator.openrouter_url or "").strip():
+    # The API key, not the service URL. openrouter_url defaults to a non-empty
+    # placeholder host, so keying off it meant this item could never appear on
+    # the install it exists for: the fresh one that has not set translation up.
+    # The key is also what the onboarding wizard's Finish step reads, so the
+    # two views agree about whether translation is configured.
+    if not (settings.translator.openrouter_api_key or "").strip():
         items.append({"id": "translator",
                       "summary": "The optional AI translator is not configured.",
                       "target": "/settings/translator"})

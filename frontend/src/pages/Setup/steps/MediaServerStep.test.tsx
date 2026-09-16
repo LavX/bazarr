@@ -29,11 +29,22 @@ describe("MediaServerStep", () => {
     } as unknown as ReturnType<typeof useSettingsMutation>);
   });
 
-  it("Skip advances without writing any settings", async () => {
+  it("renders no skip control of its own", () => {
+    // The wizard shell owns the one skip control; see steps/index.test.tsx.
+    customRender(<MediaServerStep onNext={onNext} />);
+
+    expect(
+      screen.queryByRole("button", { name: /skip/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("Continue with nothing filled in writes no settings", async () => {
     const user = userEvent.setup();
     customRender(<MediaServerStep onNext={onNext} />);
 
-    await user.click(screen.getByRole("button", { name: /skip/i }));
+    await user.click(
+      screen.getByRole("button", { name: /continue without a server/i }),
+    );
 
     expect(mutate).not.toHaveBeenCalled();
     expect(onNext).toHaveBeenCalled();

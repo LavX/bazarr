@@ -33,6 +33,10 @@ from sonarr.blacklist import blacklist_log
 
 _TRACEBACK_RE = re.compile(r'File "(.*?providers[\\/].*?)", line (\d+)')
 _PROVIDER_HUB_REGISTRATION_DONE = False
+# Plugin ids already reported for claiming a Bazarr settings section. The overlay
+# below runs on every search and download, so without this the same install
+# writes the same line for the life of the process.
+_REPORTED_RESERVED_SECTION_PLUGINS = set()
 
 
 def _ensure_provider_hub_registered():
@@ -497,14 +501,31 @@ def get_providers_auth():
     except Exception:
         logging.exception("Unable to load Provider Hub provider config")
     try:
+        from provider_hub.manifest import reserved_settings_sections
         from provider_hub.state import active_installations
+        reserved_sections = reserved_settings_sections()
         for installation in active_installations():
             manifest = installation.manifest
             schema = manifest.get("config_schema") if isinstance(manifest, dict) else {}
             properties = schema.get("properties") if isinstance(schema, dict) else {}
             if not isinstance(properties, dict):
                 continue
-            section = settings.get(installation.provider_id, {}) if hasattr(settings, "get") else {}
+            if installation.provider_id in reserved_sections:
+                # The section named after this plugin is one of Bazarr's own, not
+                # the plugin's. validate_manifest refuses such an id at install and
+                # at every boot, so getting here means a manifest slipped past it,
+                # and copying the section's keys into the worker config would hand
+                # the plugin that section's credentials (sonarr.apikey, plex.token,
+                # auth.password) on every search. Its own stored config and the
+                # schema defaults still apply.
+                if installation.provider_id not in _REPORTED_RESERVED_SECTION_PLUGINS:
+                    _REPORTED_RESERVED_SECTION_PLUGINS.add(installation.provider_id)
+                    logging.error("Refusing to read the %s settings section for Provider Hub plugin %s: "
+                                  "that section belongs to Bazarr, not to the plugin",
+                                  installation.provider_id, installation.provider_id)
+                section = {}
+            else:
+                section = settings.get(installation.provider_id, {}) if hasattr(settings, "get") else {}
             config = dict(provider_configs.get(installation.provider_id, {}))
             for key, field in properties.items():
                 if not isinstance(field, dict):

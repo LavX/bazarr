@@ -1,5 +1,5 @@
 import { FunctionComponent, useCallback, useState } from "react";
-import { Alert, Button, Text as MantineText } from "@mantine/core";
+import { Alert, Anchor, Button, Text as MantineText } from "@mantine/core";
 import { useSeerrTestConnectionMutation } from "@/apis/hooks/seerr";
 import {
   Check,
@@ -139,7 +139,16 @@ const SeerrSection: FunctionComponent = () => {
           <MantineText size="sm" c="dimmed">
             Works with Seerr, Jellyseerr and Overseerr. Requests from Bazarr+
             are made with this API key. Requested as the Seerr owner and
-            approved immediately.
+            approved immediately.{" "}
+            <Anchor
+              c="light-dark(var(--mantine-color-brand-7), var(--mantine-color-brand-4))"
+              href="https://lavx.github.io/bazarr/guides/seerr.html"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Read the Seerr guide
+            </Anchor>
+            .
           </MantineText>
           <SeerrTestButton />
         </Section>

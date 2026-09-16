@@ -22,8 +22,8 @@ import type { WizardStepProps } from "./types";
  * Optional onboarding step for an external media server. Plex (manual token
  * auth) and Jellyfin each get a tab with the minimal connection fields, saved
  * as the first instance of that kind alongside its master switch. Both are
- * fully optional: only filled tabs are persisted, and Skip advances writing
- * nothing.
+ * fully optional: only filled tabs are persisted, and Continue with nothing
+ * filled in writes nothing. The skip control belongs to the wizard shell.
  *
  * Plex writes twice on purpose. The instance row is what refreshes subtitles,
  * and the account scalars are what the recently-added dates, the webhook helper
@@ -206,9 +206,6 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
               Back
             </Button>
           )}
-          <Button variant="subtle" color="gray" onClick={onNext}>
-            Skip
-          </Button>
         </Group>
         <Button
           onClick={() => (rejected.length ? onNext() : void handleContinue())}
