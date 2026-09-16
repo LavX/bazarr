@@ -1016,3 +1016,91 @@ def test_saving_an_api_key_by_hand_reaches_the_destination(plex_account_api, mon
     row, = MediaServerInstanceRepository(schema_session).list('plex')
     assert row.url == 'http://plex.example:32400'
     assert MediaServerInstanceRepository(schema_session).get_decrypted_api_key(row.id) == 'typed-key'
+
+
+def test_signing_out_does_not_let_the_next_startup_point_plex_at_localhost(schema_session):
+    """Logging out resets ip, port and auth_method to what Plex ships with.
+
+    The reconcile that follows would otherwise compose http://127.0.0.1:32400
+    out of those defaults and write localhost over the address the destination
+    actually had, and a later sign-in would switch that on.
+    """
+    from media_servers.plex_account import sync_plex_instance
+    from media_servers.repository import MediaServerInstanceRepository
+    repo = MediaServerInstanceRepository(schema_session)
+    config = plex_settings(auth_method='oauth', token='token',
+                           server_url='https://plex.example:32400')
+    row = sync_plex_instance(schema_session, config)
+
+    # Sign-out, exactly as the handler leaves the scalars.
+    config.general.use_plex = False
+    config.plex.token = ''
+    config.plex.auth_method = 'apikey'
+    config.plex.ip = '127.0.0.1'
+    config.plex.port = 32400
+    config.plex.ssl = False
+    config.plex.server_url = ''
+    sync_plex_instance(schema_session, config, signed_out=True)
+    assert repo.get(row.id).url == 'https://plex.example:32400'
+
+    # The restart that follows reconciles from those same defaults.
+    sync_plex_instance(schema_session, config)
+    assert repo.get(row.id).url == 'https://plex.example:32400'
+
+    # An address someone actually configured still replaces it.
+    config.plex.ip = 'plex.example'
+    config.plex.apikey = 'typed-key'
+    sync_plex_instance(schema_session, config, signed_in=True)
+    assert repo.get(row.id).url == 'http://plex.example:32400'
+
+
+def test_saving_a_key_after_a_sign_out_switches_the_destination_back_on(plex_account_api,
+                                                                        schema_session):
+    """The key save is a sign-in, and a sign-in cannot depend on a scalar that
+    the sign-out switched off and this handler had not turned back on."""
+    from media_servers.plex_account import sync_plex_instance
+    from media_servers.repository import MediaServerInstanceRepository
+    client, config = plex_account_api
+    config.plex.ip = 'plex.example'
+    config.plex.apikey = 'first-key'
+    row = sync_plex_instance(schema_session, config)
+    repo = MediaServerInstanceRepository(schema_session)
+
+    assert client.post('/api/plex/oauth/logout', headers=HEADERS, json={}).status_code == 200
+    assert bool(repo.get(row.id).enabled) is False
+    assert config.general.use_plex is False
+
+    config.plex.ip = 'plex.example'
+    assert client.post('/api/plex/apikey', headers=HEADERS,
+                       json={'apikey': 'second-key'}).status_code == 200
+    assert bool(repo.get(row.id).enabled) is True
+    assert config.general.use_plex is True
+    assert repo.get_decrypted_api_key(row.id) == 'second-key'
+
+
+def test_an_account_with_nothing_configured_still_binds_the_row_it_owns(schema_session):
+    """A reconcile that changes no field still records which row is the
+    account's, or the fallback could hand it a row someone added by hand."""
+    from media_servers.plex_account import sync_plex_instance
+    from media_servers.repository import MediaServerInstanceRepository
+    repo = MediaServerInstanceRepository(schema_session)
+    owned = repo.create(kind='plex', name='Account', url='https://account.example:32400',
+                        api_key='key', enabled=True, verify_ssl=False, path_mappings=[])
+    # Nothing in the account section, so the reconcile has no field to write.
+    config = plex_settings()
+    writes = []
+
+    assert sync_plex_instance(schema_session, config,
+                              persist=lambda: writes.append(True)).id == owned.id
+    assert config.plex.instance_id == owned.id, 'the no-op reconcile still binds the owner'
+    assert writes == [True]
+
+    # Now a second row exists, and the recorded id is what keeps them apart.
+    hand_added = repo.create(kind='plex', name='Hand added', url='https://hand.example:32400',
+                             api_key='other', enabled=True, verify_ssl=True, path_mappings=[])
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'account-token'
+    config.plex.server_url = 'https://moved.example:32400'
+    assert sync_plex_instance(schema_session, config, signed_in=True).id == owned.id
+    assert repo.get(owned.id).url == 'https://moved.example:32400'
+    assert repo.get(hand_added.id).url == 'https://hand.example:32400'

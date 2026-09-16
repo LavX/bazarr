@@ -82,18 +82,15 @@ def backfill_instances(session, settings):
     Plex's step is not an import. Its account panel still writes the scalars
     every time the user signs in, saves a key or picks a server, so its row is
     reconciled here on every startup instead, which is idempotent and never
-    duplicates.
+    duplicates. It runs after the others so that a publication from it, if one
+    ever happens again, cannot see a partial marker set.
     """
     repo = MediaServerInstanceRepository(session)
     results = {}
     for kind in VALID_KINDS:
+        if kind == 'plex':
+            continue
         try:
-            if kind == 'plex':
-                from .plex_account import sync_plex_instance
-                created = sync_plex_instance(session, settings, persist=_persist) is not None
-                _stamp_once(session, kind)
-                results[kind] = {'created': created}
-                continue
             with atomic(session, durable=True):
                 if session.get(TableMediaServerImports, kind) is not None:
                     results[kind] = {'created': False}
@@ -106,7 +103,28 @@ def backfill_instances(session, settings):
             session.rollback()
             logging.warning('BAZARR native media server import failed for %s; retrying on next startup', kind)
             results[kind] = {'created': False, 'error_code': 'migration_failed'}
+    results['plex'] = _reconcile_plex(session, settings)
     return results
+
+
+def _reconcile_plex(session, settings):
+    """Bring the Plex account's row in step, and stamp only if that worked.
+
+    An account with nothing configured is not a failure: there is simply no
+    destination yet, and the kind is stamped so its rows are dispatched. A
+    database error is, and leaves it unstamped and therefore blocked, which is
+    the same rule the other three follow.
+    """
+    from .plex_account import apply_plex_account
+    try:
+        _row, created = apply_plex_account(session, settings, persist=_persist)
+        _stamp_once(session, 'plex')
+        return {'created': created}
+    except Exception:
+        session.rollback()
+        logging.warning('BAZARR native media server import failed for plex; retrying on next startup')
+        logging.debug('Plex destination reconcile failed', exc_info=True)
+        return {'created': False, 'error_code': 'migration_failed'}
 
 
 def _stamp_once(session, kind):

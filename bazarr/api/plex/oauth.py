@@ -821,6 +821,9 @@ class PlexApiKey(Resource):
             settings.plex.apikey = apikey
             settings.plex.apikey_encrypted = False
             settings.plex.auth_method = 'apikey'
+            # Signing out switched Plex off. Typing in a key is the user asking
+            # for it back, so the master switch goes with the destination.
+            settings.general.use_plex = True
 
             write_config()
             # Typing in a key is the same explicit "use Plex" as signing in.

@@ -299,7 +299,7 @@ def test_a_live_plex_and_jellyfin_install_imports_the_way_the_box_is_configured(
                                         blocked_kinds=set(VALID_KINDS) - set(stamped))
     assert configuration.blocked_kinds == frozenset()
     assert configuration.read(plex.id)[1].kind == 'plex'
-    assert configuration.read(jellyfin.id)[1].kind == 'jellyfin' 
+    assert configuration.read(jellyfin.id)[1].kind == 'jellyfin'
 
 
 def test_already_migrated_emby_and_silo_rows_survive_the_plex_and_jellyfin_import(autocommit_session):
@@ -333,3 +333,70 @@ def test_the_live_plex_row_is_reconciled_rather_than_duplicated_on_every_startup
     assert values['options']['movie_libraries'] == ['Films 4K']
     assert values['refresh_episodes'] is False
     assert values['url'] == 'https://plex.example.test:443'
+
+
+def test_the_runtime_configuration_sees_every_kind_the_import_stamped(autocommit_session, monkeypatch):
+    """Built the way the process builds it, during the import, not after it.
+
+    The shared configuration is constructed once and cached for the life of the
+    process, from whichever markers exist at that instant. Anything that builds
+    it mid-import freezes a partial set and blocks the kinds that had not been
+    stamped yet, for the whole first process after an upgrade. A test that
+    hand-builds one afterwards cannot see that, so this one lets the runtime
+    build it and only then asks what is visible.
+    """
+    from app import config as app_config, database as app_database
+    from media_servers import dispatcher
+    from media_servers.backfill import backfill_instances
+    from media_servers.instances import VALID_KINDS
+    from media_servers.repository import MediaServerInstanceRepository
+    from test_media_server_instances import payload
+
+    config = live_box_settings()
+    config.general.secrets_encryption_key = 'synthetic-durable-key'
+    for kind in ('emby', 'silo'):
+        setattr(config.general, 'use_' + kind, True)
+    monkeypatch.setattr(app_config, 'settings', config)
+    monkeypatch.setattr(app_config, 'write_config', lambda: None)
+    monkeypatch.setattr(app_database, 'database', autocommit_session)
+    monkeypatch.setattr(dispatcher, '_configuration', None)
+    repo = MediaServerInstanceRepository(autocommit_session)
+    existing = {kind: repo.create(**payload(kind)) for kind in ('emby', 'silo')}
+
+    backfill_instances(autocommit_session, config)
+
+    native = dispatcher.get_native_configuration()
+    assert native.blocked_kinds == frozenset()
+    rows = {row.kind: row for row in repo.list()}
+    assert set(rows) == set(VALID_KINDS)
+    for kind in VALID_KINDS:
+        assert native.read(rows[kind].id)[1].kind == kind
+    for kind, row in existing.items():
+        assert native.read(row.id)[1].id == row.id
+
+
+def test_a_plex_reconcile_that_could_not_reach_the_database_leaves_the_kind_blocked(
+        autocommit_session, monkeypatch):
+    from app.database import TableMediaServerImports
+    from media_servers import plex_account
+    from media_servers.backfill import backfill_instances
+    from media_servers.instances import VALID_KINDS
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError('synthetic database failure')
+
+    monkeypatch.setattr(plex_account, 'apply_plex_account', fail)
+    config = live_box_settings()
+    results = backfill_instances(autocommit_session, config)
+    assert results['plex'] == {'created': False, 'error_code': 'migration_failed'}
+    blocked = [kind for kind in VALID_KINDS
+               if autocommit_session.get(TableMediaServerImports, kind) is None]
+    assert blocked == ['plex']
+
+
+def test_the_plex_result_says_created_only_when_a_row_was_created(autocommit_session):
+    from media_servers.backfill import backfill_instances
+    config = live_box_settings()
+    assert backfill_instances(autocommit_session, config)['plex'] == {'created': True}
+    # The next startup reconciles the same row, and has created nothing.
+    assert backfill_instances(autocommit_session, config)['plex'] == {'created': False}
