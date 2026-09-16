@@ -5,7 +5,7 @@ import {
   faTriangleExclamation,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { useDiscoverSummary } from "@/apis/hooks/discover";
+import { summaryUnreadable, useDiscoverSummary } from "@/apis/hooks/discover";
 import styles from "./Discover.module.scss";
 
 /**
@@ -25,11 +25,15 @@ export default function NeedsAttention() {
   const attention = summary.data?.attention;
   const items = attention?.items ?? [];
   // A source that could not be read is its own kind of finding: the honest
-  // answer is that this is not the whole picture, not that all is well.
+  // answer is that this is not the whole picture, not that all is well. A read
+  // that failed outright, or that answered with a body carrying no attention
+  // component at all, is the same finding: nothing here was checked.
   const unreadable =
-    attention !== undefined &&
-    (attention.availability !== "available" ||
-      attention.unknown_sources.length > 0);
+    summaryUnreadable(summary) ||
+    (summary.data !== undefined &&
+      (attention === undefined ||
+        attention.availability !== "available" ||
+        (attention.unknown_sources?.length ?? 0) > 0));
   if (!items.length && !unreadable) return null;
   return (
     <section

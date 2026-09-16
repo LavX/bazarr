@@ -64,6 +64,11 @@ export interface ProviderInstallStageProps {
   // Switch to the configure sub-stage without restarting (providers already
   // installed). Only surfaced when hasInstalled is true.
   onUseInstalled: () => void;
+  // Recover from the one state this step cannot be answered from: the catalog
+  // is where its only control gets its choices, so an install that cannot
+  // reach it has nothing to select, "Install & restart" stays disabled, and
+  // the rest of the wizard was unreachable. Not a way to decline the step.
+  onNext: () => void;
   onBack?: () => void;
 }
 
@@ -125,6 +130,7 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   hasInstalled,
   onInstalledNeedsRestart,
   onUseInstalled,
+  onNext,
   onBack,
 }) => {
   const { data: catalog } = useProviderHubCatalog();
@@ -462,7 +468,20 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
 
       {choices.length === 0 ? (
         <Alert color="gray" title="No providers available">
-          No installable providers were found in the catalog.
+          <Stack gap="sm" align="flex-start">
+            <Text size="sm">
+              No installable providers were found in the catalog. You can add
+              them later from the Subtitle Hub.
+            </Text>
+            {/* Only with nothing installed either: an install that already has
+                providers is offered them above, and this step is answerable.
+                A catalog that loaded normally never reaches this branch. */}
+            {!hasInstalled && (
+              <Button variant="default" onClick={onNext}>
+                Continue without providers
+              </Button>
+            )}
+          </Stack>
         </Alert>
       ) : (
         <Stack gap="sm">

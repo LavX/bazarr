@@ -183,3 +183,17 @@ it("warns that findings are incomplete when only part of the picture was read", 
     await screen.findByText("There may be more than this."),
   ).toBeInTheDocument();
 });
+
+// The same distinction one step earlier: a body that is not a summary at all
+// leaves this panel with nothing to report, which is not the same fact as
+// there being nothing to report.
+it("admits it could not check when the answer is not a summary", async () => {
+  served = {
+    message:
+      "The server could not verify that you are authorized to access the URL requested.",
+  };
+  render();
+  expect(
+    await screen.findByText("This check could not be completed."),
+  ).toBeInTheDocument();
+});

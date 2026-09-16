@@ -572,6 +572,28 @@
   }
 }
 
+/* The single line that stands in for the library half on an install that has
+   no library. Deliberately not a panel: a bordered block here would be the
+   "your library" section again under another name. */
+.libraryHint {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 18px;
+  color: var(--bz-text-secondary);
+  font-size: 0.875rem;
+  a {
+    color: var(--bh-accent);
+    font-weight: 600;
+    white-space: nowrap;
+    text-decoration: none;
+    &:hover {
+      text-decoration: underline;
+    }
+  }
+}
+
 .stamp {
   color: var(--bz-text-tertiary);
   font-size: 0.75rem;

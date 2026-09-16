@@ -22,10 +22,14 @@ import { useDocumentTitle } from "@mantine/hooks";
 import { faMagnifyingGlass } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useSystemSettings } from "@/apis/hooks";
-import { useDiscoverMetadata } from "@/apis/hooks/discover";
+import {
+  summaryUnreadable,
+  useDiscoverMetadata,
+  useDiscoverSummary,
+} from "@/apis/hooks/discover";
 import { useLanguageProfiles, useLanguages } from "@/apis/hooks/languages";
 import { useProviderHubProviders } from "@/apis/hooks/providerHub";
-import { useAppTitle } from "@/apis/hooks/site";
+import { useAppTitle, useEnabledStatus } from "@/apis/hooks/site";
 import { useDiscover } from "@/contexts/Discover";
 import {
   discoverPageKey,
@@ -410,6 +414,40 @@ export default function Discover() {
   // it as seeded so the field says where it came from.
   const profiles = useLanguageProfiles();
   const settings = useSystemSettings();
+
+  // Whether this install has a library of its own to show at all.
+  //
+  // The summary already answers this exactly: it carries the "library"
+  // onboarding item precisely when no arr instance is enabled, and reports
+  // state new_installation for an install nothing has been done to. Either
+  // one means every panel in the library half would be describing something
+  // that is not there, and a column of empty panels is a worse answer than
+  // the global catalog the page can actually fill. An install that has an
+  // enabled instance but has not finished indexing keeps the half: the hero
+  // is what tells the reader a scan is running.
+  //
+  // The integration flags are read first because they are already in hand on
+  // the first paint, so an install with a library keeps opening with it
+  // rather than having it arrive a round trip later and push the page down.
+  const { sonarr, radarr, sportarr } = useEnabledStatus();
+  const summary = useDiscoverSummary();
+  const noEnabledInstance =
+    summary.data !== undefined &&
+    (summary.data.state === "new_installation" ||
+      (summary.data.onboarding?.items ?? []).some(
+        (item) => item.id === "library",
+      ));
+  // A read that failed is not a report that there is no library, but there is
+  // nothing truthful to fill the half with either, so the global catalog holds
+  // the page and the note below says the check did not happen.
+  const unreadableSummary = summaryUnreadable(summary);
+  const showLibraryHalf =
+    (sonarr || radarr || sportarr) && !noEnabledInstance && !unreadableSummary;
+  // One line rather than a block, and only where the half above it is gone:
+  // the summary's own wording for the same fact, carrying its own destination.
+  const libraryHint = showLibraryHalf
+    ? undefined
+    : summary.data?.onboarding?.items?.find((item) => item.id === "library");
   const seedAttempted = useRef(false);
   useEffect(() => {
     if (seedAttempted.current || draft.language) return;
@@ -674,15 +712,33 @@ export default function Discover() {
                     library: what it holds, what is broken, what is missing, what
                     just arrived. The feeds below it are the world's. Each half
                     opens with a hero so neither reads as a preamble to the
-                    other. */}
-                <LibraryHero />
-                <NeedsAttention />
-                {/* Outstanding work before completed work. The hero already
-                    carries the reassurance that automation is running, so a
-                    second full section of successes ahead of the gaps pushed
-                    the only actionable part of the page further down. */}
-                <WantedQueue />
-                <LibraryActivity />
+                    other, and where there is no library the world's half is the
+                    whole page rather than the second half of one. */}
+                {showLibraryHalf ? (
+                  <>
+                    <LibraryHero />
+                    <NeedsAttention />
+                    {/* Outstanding work before completed work. The hero already
+                        carries the reassurance that automation is running, so a
+                        second full section of successes ahead of the gaps pushed
+                        the only actionable part of the page further down. */}
+                    <WantedQueue />
+                    <LibraryActivity />
+                  </>
+                ) : (
+                  <>
+                    {/* A summary that could not be read is not a report that
+                        there is no library, so the page still says the check
+                        did not happen rather than quietly dropping it. */}
+                    {unreadableSummary && <NeedsAttention />}
+                    {libraryHint && (
+                      <p className={styles.libraryHint}>
+                        {libraryHint.summary}
+                        <Link to={libraryHint.target}>Connect a library</Link>
+                      </p>
+                    )}
+                  </>
+                )}
                 <Trending />
                 {state.browsing.trendingFilter !== "movie" && (
                   <RecentEpisodes />
