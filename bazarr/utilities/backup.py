@@ -628,13 +628,27 @@ def prepare_restore(filename):
         logging.exception(f'Unable to delete backup archive {dest_zip_file_path}')  # noqa: G004
 
     if success:
-        logging.debug('time to restart')
-        from app.server import webserver
-        if webserver is not None:
-            webserver.close_all()
-        restart_bazarr()
+        logging.debug('Restore staged')
 
     return success
+
+
+# Close and os._exit on the request thread is what dropped the PATCH before
+# 2xx could leave; a short delay lets the response flush first.
+RESTORE_RESTART_DELAY_SECONDS = 1.0
+
+
+def _restart_after_restore():
+    from app.server import webserver
+    if webserver is not None:
+        webserver.close_all()
+    restart_bazarr()
+
+
+def schedule_restore_restart():
+    """Queue the process restart after the restore HTTP response can leave."""
+    from threading import Timer
+    Timer(RESTORE_RESTART_DELAY_SECONDS, _restart_after_restore).start()
 
 
 def backup_rotation():

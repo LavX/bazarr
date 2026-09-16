@@ -80,7 +80,11 @@ class SystemApi extends BaseApi {
   }
 
   async restoreBackups(filename: string) {
-    await this.patch("/backups", { filename });
+    const response = await this.patch<{ restart: boolean; message: string }>(
+      "/backups",
+      { filename },
+    );
+    return response.data;
   }
 
   async deleteBackups(filename: string) {
