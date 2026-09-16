@@ -65,4 +65,18 @@ describe("SeerrSection", () => {
       screen.getByText(/Requested as the Seerr owner and approved immediately/),
     ).toBeInTheDocument();
   });
+
+  // The states this integration reports, and the fact that it never approves
+  // anything, are explained on the guide and nowhere in the form.
+  it("points at the Seerr guide", async () => {
+    renderSettingsSection(<SeerrSection />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("switch", { name: "Enabled" }));
+    expect(
+      screen.getByRole("link", { name: "Read the Seerr guide" }),
+    ).toHaveAttribute(
+      "href",
+      "https://lavx.github.io/bazarr/guides/seerr.html",
+    );
+  });
 });
