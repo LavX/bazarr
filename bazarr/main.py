@@ -26,14 +26,14 @@ from app.requirements import ensure_requirements  # noqa: E402
 
 ensure_requirements(args.no_update)
 
-from app.check_update import apply_update, check_releases, check_if_new_update  # noqa: E402
+from app.check_update import install_downloaded_update, check_releases, check_if_new_update  # noqa: E402
 from app.config import settings, configure_proxy_func, base_url  # noqa: E402, F401
 from init import *  # noqa: E402, F403
 import logging  # noqa: E402
 
-# Install downloaded update
+# Install downloaded update, unless updating is somebody else's job
 if bazarr_version != '':
-    apply_update()
+    install_downloaded_update()
 
 # Check for new update and install latest
 if args.no_update or not settings.general.auto_update:

@@ -386,7 +386,7 @@ __MOVIES_VOLUME__
 __TV_VOLUME__
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:size=512m
     cap_drop:
       - ALL
     cap_add:

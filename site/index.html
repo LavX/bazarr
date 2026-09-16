@@ -503,6 +503,8 @@
 
       <p class="prose">That is enough to start. Two optional companions are worth knowing about: <strong>FlareSolverr</strong>, which lets the OpenSubtitles.org plugin get past Cloudflare challenges, and the <strong>AI translator sidecar</strong>, if you want translation. Both are covered in the <a href="guides/getting-started.html">getting started guide</a>, which also walks through your first login.</p>
 
+      <p class="prose">The starter above leaves out the four hardening keys the image is built for, which freeze its filesystem and take away every Linux capability it does not need. They are four lines, and the <a href="guides/getting-started.html#container-hardening">getting started guide</a> shows the compose file with them in place, along with the equivalent <code class="inline">docker run</code> flags. Use that one for anything you intend to keep running.</p>
+
       <p class="prose">There is also a one-line installer that writes the compose file for you and asks where your media lives. It runs a script from this site, so read it first if that matters to you, and it does for a lot of people: <a href="https://github.com/LavX/bazarr/blob/gh-pages/install.sh" rel="noopener">the exact file it fetches is here</a>.</p>
 
       <div class="code">

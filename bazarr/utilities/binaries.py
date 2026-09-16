@@ -57,8 +57,11 @@ def get_binaries_from_json():
 def legacy_binaries_dir():
     """Where releases up to v2.6 downloaded to: `bin` beside the application.
 
-    Still read so an upgrade keeps the ffmpeg, unrar and alass it already has
-    instead of fetching them again. Never written any more.
+    Still read so an upgrade keeps the binaries it already has instead of
+    fetching them again. binaries.json lists ffmpeg and ffprobe, which is the
+    whole of what this downloader manages; unrar and alass come from the image
+    or from the operator's PATH and never pass through here. Never written any
+    more.
     """
     return os.path.realpath(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'bin'))
 
@@ -71,10 +74,13 @@ def binaries_dir():
     imports on its next restart, and this downloader was the one runtime writer
     that forced the whole tree open.
 
-    The configuration directory is not always reachable: the sports analysis
-    worker refuses application imports by design, and the alass shim runs with
-    no Bazarr around it at all. Those fall back to the old location, which is
-    writable wherever it was writable before.
+    The configuration directory is not always reachable. The sports analysis
+    worker calls get_binary() for its parser with an import hook that refuses
+    `app` imports by design and an environment scrubbed down to PATH, so neither
+    source of the path resolves there. That falls back to the old location,
+    which is writable wherever it was writable before, and in the image it never
+    arises: ffmpeg, ffprobe and mediainfo are installed by apt, so which() finds
+    them and nothing is ever downloaded.
     """
     try:
         from app.get_args import args

@@ -155,7 +155,7 @@
       - /path/to/tv:/tv
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:size=512m
     cap_drop:
       - ALL
     cap_add:
@@ -214,7 +214,7 @@
       </div>
 
       <h2 id="container-hardening">Container hardening</h2>
-      <p>The hardening keys above (<code>read_only</code>, <code>tmpfs</code>, <code>cap_drop</code>, <code>cap_add</code>, <code>security_opt</code>) are what the image is built for. Bazarr+ owns its application tree as root and writes everything at runtime under <code>/config</code>, so freezing the rest of the filesystem costs nothing and keeps a provider plugin's worker process from rewriting the code Bazarr+ imports on its next restart. The <code>/tmp</code> tmpfs is not optional: subtitle extraction, archive handling and the sync engines all write temporary files.</p>
+      <p>The hardening keys above (<code>read_only</code>, <code>tmpfs</code>, <code>cap_drop</code>, <code>cap_add</code>, <code>security_opt</code>) are what the image is built for. Bazarr+ owns its application tree as root and writes everything at runtime under <code>/config</code>, so freezing the rest of the filesystem costs nothing and keeps a provider plugin's worker process from rewriting the code Bazarr+ imports on its next restart. The <code>/tmp</code> tmpfs is what gives back the one writable path outside <code>/config</code> that is still needed: subtitle bundle downloads spill into it once they outgrow their in-memory buffer, the Provider Hub and sports workers put their per-request temporary directories there, and the alass shim falls back to it when the config cache cannot hold an executable. Extraction and the sync engines do not need it, they already work under <code>/config/cache</code> and beside the destination file. Keep the <code>size=</code> cap: an uncapped tmpfs may grow to half of host RAM, and it is charged to the host rather than to the container.</p>
 
       <p>The three capabilities added back are the ones the startup needs while it is still root: <code>CHOWN</code> to hand <code>/config</code> to your <code>PUID:PGID</code>, and <code>SETUID</code> and <code>SETGID</code> to become that user. Bazarr+ itself, and every Provider Hub worker it starts, runs afterwards with no capabilities at all.</p>
 
@@ -228,7 +228,7 @@
         <pre id="hardening-flags"><code>docker run -d \
   --name bazarr \
   --read-only \
-  --tmpfs /tmp \
+  --tmpfs /tmp:size=512m \
   --cap-drop ALL \
   --cap-add CHOWN --cap-add SETUID --cap-add SETGID \
   --security-opt no-new-privileges:true \
