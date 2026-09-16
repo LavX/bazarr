@@ -1,10 +1,16 @@
 /* eslint-disable camelcase -- API fixtures retain transport field names. */
-import { createMemoryRouter, Link, RouterProvider } from "react-router";
+import {
+  createMemoryRouter,
+  Link,
+  RouterProvider,
+  useNavigate,
+} from "react-router";
 import { Button, useMantineColorScheme } from "@mantine/core";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import queryClient from "@/apis/queries";
+import { useDiscover } from "@/contexts/Discover";
 import { AllProviders } from "@/providers";
 import { act, rawRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
@@ -957,4 +963,528 @@ it("restores completed subtitle results through browser Back and Forward without
     await router.navigate(-1);
   });
   expect(screen.queryByText("The.Matrix.1999.1080p")).not.toBeInTheDocument();
+});
+
+describe("Discover return from local work", () => {
+  const emptyActivity = {
+    availability: "available",
+    observed_at: "2026-09-01T12:00:00Z",
+    complete: true,
+    truncated: false,
+    unknown_sources: [],
+    running_count: 0,
+    queued_count: 0,
+    scheduled_count: 0,
+    running: [],
+    queued: [],
+    scheduled: [],
+  };
+
+  const emptyWanted = {
+    availability: "available",
+    observed_at: "2026-09-01T12:00:00Z",
+    requirements: 0,
+    episode_requirements: 0,
+    movie_requirements: 0,
+    media_count: 0,
+    unknown_media_count: 0,
+    complete: true,
+    qualifications: [],
+    by_instance: [],
+  };
+
+  function summary(overrides: Record<string, unknown> = {}) {
+    return {
+      generated_at: "2026-09-01T12:00:00Z",
+      state: "quiet",
+      activity: emptyActivity,
+      wanted: emptyWanted,
+      arrivals: [],
+      arrivals_status: {
+        availability: "available",
+        observed_at: "2026-09-01T12:00:00Z",
+        complete: true,
+        truncated: false,
+        candidate_limit: 25,
+        display_limit: 4,
+        qualifications: [],
+      },
+      attention: {
+        availability: "available",
+        observed_at: "2026-09-01T12:00:00Z",
+        complete: true,
+        unknown_sources: [],
+        items: [],
+      },
+      onboarding: {
+        availability: "available",
+        observed_at: "2026-09-01T12:00:00Z",
+        complete: true,
+        items: [],
+      },
+      ...overrides,
+    };
+  }
+
+  let served = summary();
+
+  beforeEach(() => {
+    served = summary();
+    server.use(
+      http.get("/api/discover/summary", () => HttpResponse.json(served)),
+    );
+  });
+
+  function browseDiscover() {
+    const router = createMemoryRouter(
+      [
+        {
+          path: "/discover",
+          element: (
+            <>
+              <DetailEntry />
+              <Discover />
+            </>
+          ),
+        },
+        { path: "/system/tasks", element: <div>Local activity page</div> },
+        { path: "/history/series", element: <div>Local history page</div> },
+      ],
+      { initialEntries: ["/discover"] },
+    );
+    rawRender(
+      <AllProviders>
+        <RouterProvider router={router} />
+      </AllProviders>,
+    );
+    return router;
+  }
+
+  /** Enters the title detail on demand. The homepage carries no retrieval
+   * controls, so focus and scroll restoration tests reach the detail this way
+   * instead of by typing into a homepage form. Setting both sides together
+   * keeps the detail on its retrieval page: typing an IMDb identifier into the
+   * detail form would clear the selection and return to the homepage. */
+  function DetailEntry() {
+    const navigate = useNavigate();
+    const { updateBrowsing, updateDraft } = useDiscover();
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          void navigate("/discover?movie=900");
+          updateBrowsing({
+            selectedId: 900,
+            selectedSource: "tmdb",
+            selectedType: "movie",
+            selectedSeason: null,
+            selectedEpisode: null,
+          });
+          updateDraft({
+            mediaType: "movie",
+            imdbId: "tt1234567",
+            language: "eng",
+            season: "",
+            episode: "",
+          });
+        }}
+      >
+        Enter detail
+      </button>
+    );
+  }
+
+  function discoverFixtures() {
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: { theme: "auto", use_sonarr: false, use_radarr: false },
+          discover: {
+            tmdb_configured: false,
+            metadata_revision: "summary-one",
+            locale: "en-US",
+          },
+        }),
+      ),
+      http.get("/api/system/languages", () =>
+        HttpResponse.json([
+          { name: "English", code3: "eng", code2: "en", enabled: false },
+        ]),
+      ),
+    );
+  }
+
+  /**
+   * Drives window scroll, paint frames and element geometry the way the page
+   * owner sees them. jsdom reports a zero scroll offset and never paints, so a
+   * restoration that runs in a requestAnimationFrame is invisible without this.
+   */
+  function scrollHarness(controlTop: number, headerHeight = 112) {
+    const scrollDescriptor = Object.getOwnPropertyDescriptor(window, "scrollY");
+    const heightDescriptor = Object.getOwnPropertyDescriptor(
+      window,
+      "innerHeight",
+    );
+    // The page reconciles against the real app shell header, which these focused
+    // renders do not mount. Give it one so the reveal path is actually exercised.
+    const shell = document.createElement("header");
+    shell.className = "mantine-AppShell-header";
+    document.body.append(shell);
+    const nativeRect = HTMLElement.prototype.getBoundingClientRect;
+    const setScroll = (top: number) =>
+      Object.defineProperty(window, "scrollY", {
+        configurable: true,
+        value: top,
+      });
+    const rect = vi
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: HTMLElement) {
+        if (["SELECT", "INPUT", "BUTTON"].includes(this.tagName))
+          return new DOMRect(0, controlTop - window.scrollY, 200, 44);
+        if (this.tagName === "HEADER")
+          return new DOMRect(0, 0, 320, headerHeight);
+        return nativeRect.call(this);
+      });
+    const scrollTo = vi
+      .spyOn(window, "scrollTo")
+      .mockImplementation((options: number | ScrollToOptions) => {
+        if (typeof options === "object") setScroll(options.top ?? 0);
+      });
+    const frames = new Map<number, FrameRequestCallback>();
+    let frameId = 0;
+    const requestFrame = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((callback) => {
+        frames.set(++frameId, callback);
+        return frameId;
+      });
+    const cancelFrame = vi
+      .spyOn(window, "cancelAnimationFrame")
+      .mockImplementation((id) => {
+        frames.delete(id);
+      });
+    Object.defineProperty(window, "innerHeight", {
+      configurable: true,
+      value: 900,
+    });
+    setScroll(0);
+    return {
+      setScroll,
+      paint: () =>
+        act(() => {
+          const pending = [...frames.values()];
+          frames.clear();
+          pending.forEach((callback) => callback(performance.now()));
+        }),
+      pending: () => frames.size,
+      restore: () => {
+        shell.remove();
+        rect.mockRestore();
+        scrollTo.mockRestore();
+        requestFrame.mockRestore();
+        cancelFrame.mockRestore();
+        if (scrollDescriptor)
+          Object.defineProperty(window, "scrollY", scrollDescriptor);
+        if (heightDescriptor)
+          Object.defineProperty(window, "innerHeight", heightDescriptor);
+      },
+    };
+  }
+
+  it("shows search, the start of discovery and the summary together", async () => {
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          // A connected library, because the library half of the page is only
+          // shown to an install that has one.
+          general: { theme: "auto", use_sonarr: true, use_radarr: false },
+          discover: {
+            tmdb_configured: false,
+            metadata_revision: "summary-one",
+            locale: "en-US",
+          },
+        }),
+      ),
+      http.get("/api/system/languages", () =>
+        HttpResponse.json([
+          { name: "English", code3: "eng", code2: "en", enabled: false },
+        ]),
+      ),
+    );
+    served = summary({
+      wanted: { ...emptyWanted, requirements: 3, media_count: 2 },
+    });
+    browseDiscover();
+
+    expect(await screen.findByText("Your library")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Discover" })).toBeVisible();
+    // The homepage carries no retrieval controls. Search and the summary sit
+    // together there; the retrieval controls live on the detail.
+    expect(screen.queryByLabelText("Subtitle language")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /Find subtitles/ }),
+    ).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Enter detail" }));
+    expect(await findSelectInput("Subtitle language")).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: /Find subtitles/ }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Your library")).not.toBeInTheDocument();
+  });
+
+  it("records a return target so leaving for local work restores Discover", async () => {
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: { theme: "auto", use_sonarr: false, use_radarr: false },
+          discover: {
+            tmdb_configured: false,
+            metadata_revision: "summary-one",
+            locale: "en-US",
+          },
+        }),
+      ),
+      http.get("/api/system/languages", () =>
+        HttpResponse.json([
+          { name: "English", code3: "eng", code2: "en", enabled: false },
+        ]),
+      ),
+    );
+    const router = browseDiscover();
+    await userEvent.click(screen.getByRole("button", { name: "Enter detail" }));
+    const imdb = await screen.findByLabelText("IMDb ID");
+    expect(imdb).toHaveValue("tt1234567");
+
+    await userEvent.click(screen.getByRole("link", { name: "History" }));
+    await waitFor(() =>
+      expect(screen.getByText("Local history page")).toBeVisible(),
+    );
+
+    await waitFor(() => router.navigate(-1));
+    await waitFor(() =>
+      expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt1234567"),
+    );
+    expect(screen.queryByText("Your Bazarr+")).not.toBeInTheDocument();
+  });
+
+  it("restores the retrieval control and the scroll offset after returning from local work", async () => {
+    discoverFixtures();
+    // The control sits comfortably in view at the saved offset, so the exact
+    // offset survives and no reveal adjustment is needed.
+    const harness = scrollHarness(3338);
+    try {
+      const router = browseDiscover();
+      await userEvent.click(
+        screen.getByRole("button", { name: "Enter detail" }),
+      );
+      const language = await findSelectInput("Subtitle language");
+      await act(async () => {
+        language.focus();
+        language.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+      });
+      harness.setScroll(3038);
+      await act(async () => {
+        window.dispatchEvent(new Event("scroll"));
+      });
+
+      await userEvent.click(screen.getByRole("link", { name: "History" }));
+      await waitFor(() =>
+        expect(screen.getByText("Local history page")).toBeVisible(),
+      );
+      // The browser applies its own offset on a history return.
+      harness.setScroll(742);
+
+      await waitFor(() => router.navigate(-1));
+      await findSelectInput("Subtitle language");
+      harness.paint();
+
+      const restored = selectInput("Subtitle language");
+      expect(restored).toHaveFocus();
+      expect(window.scrollY).toBe(3038);
+      const bounds = restored.getBoundingClientRect();
+      expect(bounds.top).toBeGreaterThanOrEqual(112);
+      expect(bounds.bottom).toBeLessThanOrEqual(900);
+    } finally {
+      harness.restore();
+    }
+  });
+
+  it("reveals the restored control when the saved offset would hide it behind the shell", async () => {
+    discoverFixtures();
+    // The control sits under the app shell header at the saved offset.
+    const harness = scrollHarness(3000);
+    try {
+      const router = browseDiscover();
+      await userEvent.click(
+        screen.getByRole("button", { name: "Enter detail" }),
+      );
+      const imdb = await screen.findByLabelText("IMDb ID");
+      await act(async () => {
+        imdb.focus();
+        imdb.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+      });
+      harness.setScroll(2980);
+      await act(async () => {
+        window.dispatchEvent(new Event("scroll"));
+      });
+      await userEvent.click(screen.getByRole("link", { name: "History" }));
+      await waitFor(() =>
+        expect(screen.getByText("Local history page")).toBeVisible(),
+      );
+      harness.setScroll(0);
+      await waitFor(() => router.navigate(-1));
+      await screen.findByLabelText("IMDb ID");
+      harness.paint();
+
+      const restored = screen.getByLabelText("IMDb ID");
+      expect(restored).toHaveFocus();
+      // Reconciled up from the saved 2980 so the control clears the header.
+      expect(window.scrollY).toBeLessThan(2980);
+      expect(restored.getBoundingClientRect().top).toBeGreaterThanOrEqual(112);
+    } finally {
+      harness.restore();
+    }
+  });
+
+  it("never steals focus or scroll on a first visit", async () => {
+    discoverFixtures();
+    const harness = scrollHarness(3040);
+    try {
+      browseDiscover();
+      await userEvent.click(
+        screen.getByRole("button", { name: "Enter detail" }),
+      );
+      await findSelectInput("Subtitle language");
+      // Opening a title schedules its requested scroll to the top.
+      harness.paint();
+      expect(selectInput("Subtitle language")).not.toHaveFocus();
+      expect(screen.getByLabelText("IMDb ID")).not.toHaveFocus();
+      expect(window.scrollY).toBe(0);
+    } finally {
+      harness.restore();
+    }
+  });
+
+  it("cancels the restoration when the page leaves again before paint", async () => {
+    discoverFixtures();
+    const harness = scrollHarness(3040);
+    try {
+      const router = browseDiscover();
+      await userEvent.click(
+        screen.getByRole("button", { name: "Enter detail" }),
+      );
+      const language = await findSelectInput("Subtitle language");
+      await act(async () => {
+        language.focus();
+        language.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+      });
+      harness.setScroll(3038);
+      await act(async () => {
+        window.dispatchEvent(new Event("scroll"));
+      });
+      await userEvent.click(screen.getByRole("link", { name: "History" }));
+      await waitFor(() =>
+        expect(screen.getByText("Local history page")).toBeVisible(),
+      );
+      harness.setScroll(0);
+      await waitFor(() => router.navigate(-1));
+      await findSelectInput("Subtitle language");
+      await waitFor(() => router.navigate("/system/tasks"));
+      await waitFor(() =>
+        expect(screen.getByText("Local activity page")).toBeVisible(),
+      );
+      harness.paint();
+      expect(window.scrollY).toBe(0);
+    } finally {
+      harness.restore();
+    }
+  });
+
+  it("restores a control in the results region, which no other owner claims", async () => {
+    discoverFixtures();
+    server.use(
+      http.post("/api/discover/search", async ({ request }) => {
+        const context = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({
+          search_id: "return-search",
+          context: { ...context, matching_mode: "title" },
+          status: "complete",
+          checked_at: "2026-09-08T10:00:00Z",
+          attempted_at: "2026-09-08T10:00:00Z",
+          cache_status: "fresh",
+          coverage: {
+            complete: true,
+            configured_count: 1,
+            completed_count: 1,
+            providers: [
+              {
+                provider: "catalog-fixture",
+                status: "success",
+                result_count: 1,
+                elapsed_ms: 5,
+                reason: null,
+                retry_at: null,
+              },
+            ],
+          },
+          results: [
+            {
+              id: "return-result",
+              search_id: "return-search",
+              provider: "catalog-fixture",
+              language: "eng",
+              language_variant: null,
+              release: "Northern.Light.S02E05.1080p.WEB-DL",
+              uploader: null,
+              scope: "unknown",
+              hearing_impaired: null,
+              matches: ["imdb_id"],
+              compatibility_score: 10,
+              compatibility_score_max: 119,
+              rating: null,
+              checked_at: "2026-09-08T10:00:00Z",
+              expires_at: "2099-01-01T00:00:00Z",
+              stale: false,
+            },
+          ],
+        });
+      }),
+    );
+    const harness = scrollHarness(3338);
+    try {
+      const router = browseDiscover();
+      await userEvent.click(
+        screen.getByRole("button", { name: "Enter detail" }),
+      );
+      const imdb = await screen.findByLabelText("IMDb ID");
+      expect(imdb).toHaveValue("tt1234567");
+      await pickOption(userEvent, "Subtitle language", "English");
+      await userEvent.click(
+        screen.getByRole("button", { name: /Find subtitles/ }),
+      );
+      const preview = await screen.findByRole("button", { name: "Preview" });
+      await act(async () => {
+        preview.focus();
+        preview.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+      });
+      harness.setScroll(3038);
+      await act(async () => {
+        window.dispatchEvent(new Event("scroll"));
+      });
+
+      await userEvent.click(screen.getByRole("link", { name: "History" }));
+      await waitFor(() =>
+        expect(screen.getByText("Local history page")).toBeVisible(),
+      );
+      harness.setScroll(759);
+      await waitFor(() => router.navigate(-1));
+      await screen.findByRole("button", { name: "Preview" });
+      harness.paint();
+
+      expect(screen.getByRole("button", { name: "Preview" })).toHaveFocus();
+      expect(window.scrollY).toBe(3038);
+    } finally {
+      harness.restore();
+    }
+  });
 });
