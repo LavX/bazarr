@@ -25,8 +25,6 @@ from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.sync import sync_subtitles
 from app.config import settings, empty_values, get_array_from
 from app.event_handler import event_stream
-from plex.operations import plex_refresh_item
-from jellyfin.operations import jellyfin_refresh_item
 
 
 from ..utils import authenticate
@@ -693,34 +691,11 @@ def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id, 
         # by local id. Resolve it scoped to the owning instance.
         from utilities.media_ids import local_episode_id
         event_stream(type="episode", payload=local_episode_id(id, arr_instance_id))
-
-        if settings.general.use_plex and settings.plex.update_series_library:
-            plex_refresh_item(
-                metadata.imdbId,
-                is_movie=False,
-                season=metadata.season,
-                episode=metadata.episode,
-            )
-        if settings.general.use_jellyfin and settings.jellyfin.update_series_library:
-            jellyfin_refresh_item(
-                metadata.imdbId,
-                is_movie=False,
-                season=metadata.season,
-                episode=metadata.episode,
-                tvdb_id=metadata.tvdbId,
-            )
     else:
         store_subtitles_movie(
             path_mappings.path_replace_reverse_instance(video_path, arr_instance_id, 'movie'), video_path
         , arr_instance_id=arr_instance_id)
         event_stream(type="movie", payload=id)
-
-        if settings.general.use_plex and settings.plex.update_movie_library:
-            plex_refresh_item(metadata.imdbId, is_movie=True)
-        if settings.general.use_jellyfin and settings.jellyfin.update_movie_library:
-            jellyfin_refresh_item(
-                metadata.imdbId, is_movie=True, tmdb_id=metadata.tmdbId
-            )
 
 
 def subtitles_lang_from_filename(path):

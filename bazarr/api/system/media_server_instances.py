@@ -30,6 +30,22 @@ class MediaServerInstances(Resource):
         return service.create_instance(database, _body())
 
 
+@api_ns_system_media_server_instances.route(_ROOT + '/probe')
+class MediaServerProbe(Resource):
+    @authenticate
+    def post(self):
+        """Test unsaved connection settings for any destination kind."""
+        return service.probe_connection(_body())
+
+
+@api_ns_system_media_server_instances.route(_ROOT + '/probe-libraries')
+class MediaServerProbeLibraries(Resource):
+    @authenticate
+    def post(self):
+        """List libraries for unsaved connection settings of any kind."""
+        return service.probe_connection(_body(), libraries=True)
+
+
 @api_ns_system_media_server_instances.route(_ROOT + '/<string:instance_id>')
 class MediaServerInstance(Resource):
     @authenticate

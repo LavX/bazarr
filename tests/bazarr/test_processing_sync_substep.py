@@ -67,69 +67,53 @@ def test_movie_substep_sync_does_not_track_parent_job_progress():
     assert sync_mock.call_args.kwargs.get("track_job_progress") is not False
 
 
-def test_sports_media_refresh_fires_only_for_configured_sports_libraries(monkeypatch):
-    """A sports write must refresh a server only when it has a sports library
-    configured: the Plex and Jellyfin refresh helpers are gated on their sports
-    library settings, and the Emby and Silo dispatcher notification is gated on
-    those master switches."""
+def test_sports_media_refresh_publishes_once_for_any_configured_destination(monkeypatch):
+    """A sports write reaches every destination through one publication.
+
+    No kind is called from here any more: each destination falls to its own
+    configured sports library on the library rung, so the only gate left is
+    whether any media server is switched on at all."""
     from app.config import settings
     from subtitles import processing
 
-    calls = []
     notified = []
-    monkeypatch.setattr(processing, "plex_update_sports_library", lambda: calls.append("plex"))
-    monkeypatch.setattr(processing, "jellyfin_update_sports_library", lambda: calls.append("jellyfin"))
     monkeypatch.setattr(processing, "notify_subtitle_mutation", notified.append)
+    for kind in ("plex", "jellyfin", "emby", "silo"):
+        monkeypatch.setattr(settings.general, "use_" + kind, False)
+
+    processing.refresh_sports_media_servers("/sports/Event.mkv", "/sports/Event.en.srt", 1)
+    assert notified == []
+
     monkeypatch.setattr(settings.general, "use_plex", True)
-    monkeypatch.setattr(settings.general, "use_jellyfin", True)
-    monkeypatch.setattr(settings.general, "use_emby", False)
-    monkeypatch.setattr(settings.general, "use_silo", False)
-    monkeypatch.setattr(settings.plex, "sports_library", [])
-    monkeypatch.setattr(settings.jellyfin, "sports_library_ids", [])
-
     processing.refresh_sports_media_servers("/sports/Event.mkv", "/sports/Event.en.srt", 1)
-    assert calls == []
-    assert notified == []
-
-    monkeypatch.setattr(settings.plex, "sports_library", ["Sports"])
-    monkeypatch.setattr(settings.jellyfin, "sports_library_ids", ["10"])
-    processing.refresh_sports_media_servers("/sports/Event.mkv", "/sports/Event.en.srt", 1)
-    assert calls == ["plex", "jellyfin"]
-    assert notified == []
+    assert len(notified) == 1
 
     monkeypatch.setattr(settings.general, "use_emby", True)
     monkeypatch.setattr(settings.general, "use_silo", True)
-    calls.clear()
+    monkeypatch.setattr(settings.general, "use_jellyfin", True)
     processing.refresh_sports_media_servers("/sports/Event.mkv", "/sports/Event.en.srt", 1)
-    assert calls == ["plex", "jellyfin"]
-    assert len(notified) == 1
-    assert notified[0].media_type == "sports"
-    assert notified[0].operation == "download"
-    assert notified[0].arr_instance_id == 1
-    assert notified[0].video_path == "/sports/Event.mkv"
+    # Still one publication, whatever is switched on. Fan-out is the
+    # dispatcher's job, and doing it here would refresh each kind twice.
+    assert len(notified) == 2
+    assert notified[-1].media_type == "sports"
+    assert notified[-1].operation == "download"
+    assert notified[-1].arr_instance_id == 1
+    assert notified[-1].video_path == "/sports/Event.mkv"
 
 
 def test_sports_process_subtitle_calls_the_media_server_refresh(monkeypatch):
-    """Processing refreshes configured libraries and reports the exact file owner."""
+    """Processing publishes the sports write and reports the exact file owner."""
     from types import SimpleNamespace
     from contextlib import nullcontext
     from subzero.language import Language
     from app.config import settings
-    from jellyfin import operations as jellyfin
-    from plex import operations as plex
     from languages import get_languages
     from subtitles import processing
 
-    refreshed, published = [], []
+    published = []
     monkeypatch.setattr(settings.general, "use_plex", True)
     monkeypatch.setattr(settings.general, "use_jellyfin", True)
     monkeypatch.setattr(settings.general, "use_emby", True)
-    monkeypatch.setattr(settings.plex, "sports_library", ["Sports"])
-    monkeypatch.setattr(settings.jellyfin, "sports_library_ids", ["sports-id"])
-    monkeypatch.setattr(plex, "get_plex_server", lambda: SimpleNamespace(library=SimpleNamespace(
-        section=lambda name: SimpleNamespace(update=lambda: refreshed.append(("plex", name))))))
-    monkeypatch.setattr(jellyfin, "get_jellyfin_client", lambda: SimpleNamespace(
-        refresh_item=lambda library: refreshed.append(("jellyfin", library))))
     monkeypatch.setattr(processing, "notify_subtitle_mutation", published.append)
     monkeypatch.setattr(processing, "_defaul_sync_checker", lambda subtitle: False)
     monkeypatch.setattr(processing, "_postprocessing_config", lambda *args: (False, "", False, 0))
@@ -148,7 +132,6 @@ def test_sports_process_subtitle_calls_the_media_server_refresh(monkeypatch):
 
     assert result.path == "/sports/x.mkv"
     assert result.subs_path == "/sports/x.en.srt"
-    assert refreshed == [("plex", "Sports"), ("jellyfin", "sports-id")]
     assert len(published) == 1
     assert published[0].arr_instance_id == 42
     assert published[0].video_path == "/tmp/x.mkv"

@@ -52,6 +52,28 @@ def _build_pooled_session(verify: bool) -> requests.Session:
     return s
 
 
+def plex_server_for(baseurl: str, token: str, verify: bool = False) -> PlexServer:
+    """A pooled PlexServer for one explicit endpoint.
+
+    Native destinations carry their own URL and token rather than reading the
+    scalar settings, so the cache is keyed the same way but the credentials
+    come from the caller. Same cache, same FIFO bound: a destination rotation
+    evicts old entries instead of leaking them.
+    """
+    cache_key = (baseurl, token, verify)
+    with _plex_cache_lock:
+        cached = _plex_cache.get(cache_key)
+        if cached is not None:
+            _plex_cache.move_to_end(cache_key)
+            return cached
+        session = _build_pooled_session(verify=verify)
+        plex_server = PlexServer(baseurl, token, session=session)
+        _plex_cache[cache_key] = plex_server
+        while len(_plex_cache) > _PLEX_CACHE_MAX_ENTRIES:
+            _plex_cache.popitem(last=False)
+        return plex_server
+
+
 def get_plex_server() -> PlexServer:
     """Connect to the Plex server and return the server instance.
 
@@ -89,25 +111,7 @@ def get_plex_server() -> PlexServer:
         # the original code unconditionally set ``session.verify = False``.
         # If TLS verification ever becomes user-configurable for Plex, plumb
         # that flag through to the cache key as well.
-        verify = False
-        cache_key = (baseurl, token, verify)
-
-        with _plex_cache_lock:
-            cached = _plex_cache.get(cache_key)
-            if cached is not None:
-                # Move-to-end to keep the most-recently-used at the tail
-                # so eviction continues to drop the oldest entry.
-                _plex_cache.move_to_end(cache_key)
-                return cached
-
-            session = _build_pooled_session(verify=verify)
-            plex_server = PlexServer(baseurl, token, session=session)
-
-            _plex_cache[cache_key] = plex_server
-            while len(_plex_cache) > _PLEX_CACHE_MAX_ENTRIES:
-                _plex_cache.popitem(last=False)
-
-            return plex_server
+        return plex_server_for(baseurl, token, False)
 
     except Exception as e:
         logger.error(f"Failed to connect to Plex server: {e}")  # noqa: G004

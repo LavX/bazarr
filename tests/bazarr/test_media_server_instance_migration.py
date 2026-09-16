@@ -10,7 +10,19 @@ from sqlalchemy.orm import sessionmaker
 def legacy(**overrides):
     rows = {kind: SimpleNamespace(url='', apikey='', verify_ssl=True, path_mappings=[])
             for kind in ('emby', 'silo')}
-    return SimpleNamespace(general=SimpleNamespace(use_emby=False, use_silo=False), **(rows | overrides))
+    rows['jellyfin'] = SimpleNamespace(url='', apikey='', verify_ssl=True, path_mappings=[],
+                                       update_movie_library=False, update_series_library=False,
+                                       movie_library_ids=[], series_library_ids=[],
+                                       sports_library_ids=[], refresh_method='immediate')
+    # Plex keeps the shipped ip/port defaults so an untouched install imports
+    # nothing, which is what the scalar settings mean.
+    rows['plex'] = SimpleNamespace(auth_method='apikey', ip='127.0.0.1', port=32400, ssl=False,
+                                   apikey='', token='', server_url='', verify_ssl=False,
+                                   path_mappings=[], update_movie_library=False,
+                                   update_series_library=False, movie_library=[],
+                                   series_library=[], sports_library=[])
+    general = SimpleNamespace(use_emby=False, use_silo=False, use_jellyfin=False, use_plex=False)
+    return SimpleNamespace(general=general, **(rows | overrides))
 
 
 @pytest.fixture
@@ -136,3 +148,68 @@ def test_malformed_import_is_sanitized_and_does_not_activate_kind(autocommit_ses
     native.publish(repo.snapshot(created.id, config))
     assert native.list() == ()
     assert 'private.example' not in caplog.text and 'private-key' not in caplog.text
+
+
+def test_jellyfin_singleton_imports_its_toggles_libraries_and_refresh_method(autocommit_session):
+    from media_servers.backfill import backfill_instances
+    from media_servers.repository import MediaServerInstanceRepository
+    config = legacy(jellyfin=SimpleNamespace(
+        url='http://jellyfin.example', apikey='jf-key', verify_ssl=False, path_mappings=[],
+        update_movie_library=True, update_series_library=False,
+        movie_library_ids=['lib-movies'], series_library_ids=['lib-shows'],
+        sports_library_ids='lib-sports', refresh_method='async'))
+    config.general.use_jellyfin = True
+    assert backfill_instances(autocommit_session, config)['jellyfin']['created'] is True
+    repo = MediaServerInstanceRepository(autocommit_session)
+    row, = repo.list('jellyfin')
+    values = repo.values(row)
+    assert (values['url'], values['enabled'], values['verify_ssl']) == ('http://jellyfin.example', True, False)
+    assert repo.get_decrypted_api_key(row.id) == 'jf-key'
+    assert (values['refresh_movies'], values['refresh_episodes']) == (True, False)
+    # A scalar that has held a bare string as often as a list becomes a list.
+    assert values['options'] == {'movie_library_ids': ['lib-movies'],
+                                 'series_library_ids': ['lib-shows'],
+                                 'sports_library_ids': ['lib-sports'],
+                                 'refresh_method': 'async'}
+    # Jellyfin never needed path mappings and must not start needing them.
+    assert values['path_mappings'] == []
+    assert repo.snapshot(row.id, config).configuration_error is None
+
+
+@pytest.mark.parametrize('auth_method,expected_url,expected_key', [
+    ('apikey', 'https://plex.example:32400', 'plex-key'),
+    ('oauth', 'http://plex.example/direct', 'plex-token')])
+def test_plex_singleton_imports_whichever_endpoint_it_authenticates_against(
+        autocommit_session, auth_method, expected_url, expected_key):
+    from media_servers.backfill import backfill_instances
+    from media_servers.repository import MediaServerInstanceRepository
+    config = legacy(plex=SimpleNamespace(
+        auth_method=auth_method, ip='plex.example', port=32400, ssl=True, apikey='plex-key',
+        token='plex-token', server_url='http://plex.example/direct', verify_ssl=False,
+        path_mappings=[], update_movie_library=True, update_series_library=True,
+        movie_library=['Films'], series_library='Shows', sports_library=[]))
+    config.general.use_plex = True
+    assert backfill_instances(autocommit_session, config)['plex']['created'] is True
+    repo = MediaServerInstanceRepository(autocommit_session)
+    row, = repo.list('plex')
+    values = repo.values(row)
+    assert values['url'] == expected_url
+    assert repo.get_decrypted_api_key(row.id) == expected_key
+    assert values['options'] == {'movie_libraries': ['Films'], 'series_libraries': ['Shows'],
+                                 'sports_libraries': []}
+    assert values['path_mappings'] == []
+
+
+def test_an_untouched_plex_install_is_stamped_without_a_row(autocommit_session):
+    """Plex ships an ip, a port and verify_ssl off, so none of them is evidence.
+
+    Without this the shipped defaults would compose a URL and create a Plex
+    destination for every user who has never opened the Plex settings.
+    """
+    from app.database import TableMediaServerImports
+    from media_servers.backfill import backfill_instances
+    from media_servers.repository import MediaServerInstanceRepository
+    config = legacy()
+    assert backfill_instances(autocommit_session, config)['plex'] == {'created': False}
+    assert autocommit_session.get(TableMediaServerImports, 'plex') is not None
+    assert MediaServerInstanceRepository(autocommit_session).list('plex') == []

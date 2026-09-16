@@ -2,7 +2,46 @@
 
 import BaseApi from "./base";
 
-export type MediaServerKind = "emby" | "silo";
+export type MediaServerKind = "emby" | "jellyfin" | "plex" | "silo";
+export const MEDIA_SERVER_KINDS: MediaServerKind[] = [
+  "emby",
+  "jellyfin",
+  "plex",
+  "silo",
+];
+// Emby and Silo resolve a publication by its path, so they need mappings.
+// Jellyfin and Plex resolve the item themselves and never have.
+export const KINDS_WITH_PATH_MAPPINGS: MediaServerKind[] = ["emby", "silo"];
+export const KINDS_WITH_LIBRARIES: MediaServerKind[] = ["jellyfin", "plex"];
+// What each kind keeps in its own options blob, by the media type it scopes.
+export const LIBRARY_OPTION_KEYS: Record<
+  "jellyfin" | "plex",
+  { movie: string; series: string; sports: string }
+> = {
+  jellyfin: {
+    movie: "movie_library_ids",
+    series: "series_library_ids",
+    sports: "sports_library_ids",
+  },
+  plex: {
+    movie: "movie_libraries",
+    series: "series_libraries",
+    sports: "sports_libraries",
+  },
+};
+export type MediaServerOptions = {
+  movie_library_ids?: string[];
+  series_library_ids?: string[];
+  sports_library_ids?: string[];
+  refresh_method?: "immediate" | "async";
+  movie_libraries?: string[];
+  series_libraries?: string[];
+  sports_libraries?: string[];
+};
+const LIBRARY_LIST_KEYS = [
+  ...Object.values(LIBRARY_OPTION_KEYS.jellyfin),
+  ...Object.values(LIBRARY_OPTION_KEYS.plex),
+];
 export type PathMapping = {
   local_path: string;
   remote_path: string;
@@ -17,11 +56,21 @@ export type MediaServerInstance = {
   verify_ssl: boolean;
   api_key_set: boolean;
   path_mappings: PathMapping[];
+  refresh_movies: boolean;
+  refresh_episodes: boolean;
+  options: MediaServerOptions;
 };
 export type MediaServerUpdate = Partial<
   Pick<
     MediaServerInstance,
-    "name" | "enabled" | "url" | "verify_ssl" | "path_mappings"
+    | "name"
+    | "enabled"
+    | "url"
+    | "verify_ssl"
+    | "path_mappings"
+    | "refresh_movies"
+    | "refresh_episodes"
+    | "options"
   >
 > & { api_key?: string; clear_api_key?: boolean };
 export type MediaServerCreate = MediaServerUpdate & {
@@ -40,10 +89,12 @@ export type ConnectionOverrides = {
   clear_api_key?: boolean;
   verify_ssl?: boolean;
 };
-export type SiloLibrary = {
+export type MediaServerLibrary = {
   id: string;
   name: string;
-  type: "movies" | "series";
+  type: string;
+  // Silo is the only kind that reports the roots a library holds, and the only
+  // one that needs them: its path mappings are checked against them.
   paths: string[];
 };
 export type RefreshStatus = {
@@ -76,12 +127,27 @@ function safeInstance(row: MediaServerInstance): MediaServerInstance {
   if (
     !row ||
     typeof row.id !== "string" ||
-    !["emby", "silo"].includes(row.kind) ||
+    !MEDIA_SERVER_KINDS.includes(row.kind) ||
     typeof row.name !== "string" ||
     typeof row.enabled !== "boolean" ||
     typeof row.url !== "string" ||
     typeof row.verify_ssl !== "boolean" ||
     typeof row.api_key_set !== "boolean" ||
+    typeof row.refresh_movies !== "boolean" ||
+    typeof row.refresh_episodes !== "boolean" ||
+    !row.options ||
+    typeof row.options !== "object" ||
+    Array.isArray(row.options) ||
+    // A library handle reaches a picker and comes back on the next save, so a
+    // non-string here would be written back as one.
+    LIBRARY_LIST_KEYS.some((key) => {
+      const value = (row.options as Record<string, unknown>)[key];
+      return (
+        value !== undefined &&
+        (!Array.isArray(value) ||
+          value.some((handle) => typeof handle !== "string"))
+      );
+    }) ||
     !Array.isArray(row.path_mappings) ||
     row.path_mappings.some(
       (mapping) =>
@@ -111,6 +177,9 @@ function safeInstance(row: MediaServerInstance): MediaServerInstance {
         ? {}
         : { library_id: mapping.library_id }),
     })),
+    refresh_movies: row.refresh_movies,
+    refresh_episodes: row.refresh_episodes,
+    options: row.options,
   };
 }
 
@@ -163,7 +232,10 @@ class MediaServersApi extends BaseApi {
     }, "Could not delete media server instance");
   }
 
-  private probe(path: string, input: ConnectionInput | ConnectionOverrides) {
+  private probe(
+    path: string,
+    input: (ConnectionInput | ConnectionOverrides) & { kind?: MediaServerKind },
+  ) {
     return safeRequest(async (): Promise<ConnectionTestResult> => {
       const { data } = await this.postRaw<ConnectionTestResult>(path, input);
       if (!data || typeof data.success !== "boolean") throw new Error();
@@ -182,8 +254,11 @@ class MediaServersApi extends BaseApi {
     }, "Connection test failed");
   }
 
+  // One route for every kind: which server is being added is a value in the
+  // request, not a different endpoint. The per-kind routes that predate the
+  // destination layer still answer for API compatibility.
   testConnection(kind: MediaServerKind, input: ConnectionInput) {
-    return this.probe(`/${kind}/test-connection`, input);
+    return this.probe(`${instancesPath}/probe`, { ...input, kind });
   }
 
   testExisting(id: string, input: ConnectionOverrides = {}) {
@@ -192,11 +267,11 @@ class MediaServersApi extends BaseApi {
 
   private loadLibraries(
     path: string,
-    input: ConnectionInput | ConnectionOverrides,
+    input: (ConnectionInput | ConnectionOverrides) & { kind?: MediaServerKind },
   ) {
     return safeRequest(async () => {
       const response = await this.postRaw<{
-        data: SiloLibrary[];
+        data: MediaServerLibrary[];
         error_code: string | null;
       }>(path, input);
       const { data, error_code: errorCode } = response.data;
@@ -209,9 +284,11 @@ class MediaServersApi extends BaseApi {
             typeof library.id !== "string" ||
             !library.id ||
             typeof library.name !== "string" ||
-            !["movies", "series"].includes(library.type) ||
-            !Array.isArray(library.paths) ||
-            library.paths.some((path) => typeof path !== "string"),
+            typeof library.type !== "string" ||
+            // Only Silo reports roots, so their absence is not a bad response.
+            (library.paths !== undefined &&
+              (!Array.isArray(library.paths) ||
+                library.paths.some((path) => typeof path !== "string"))),
         )
       )
         throw new Error();
@@ -219,13 +296,16 @@ class MediaServersApi extends BaseApi {
         id: library.id,
         name: library.name,
         type: library.type,
-        paths: library.paths,
+        paths: library.paths ?? [],
       }));
-    }, "Could not load Silo libraries");
+    }, "Could not load media server libraries");
   }
 
-  libraries(input: ConnectionInput) {
-    return this.loadLibraries("/silo/libraries", input);
+  libraries(kind: MediaServerKind, input: ConnectionInput) {
+    return this.loadLibraries(`${instancesPath}/probe-libraries`, {
+      ...input,
+      kind,
+    });
   }
 
   librariesExisting(id: string, input: ConnectionOverrides = {}) {

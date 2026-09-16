@@ -1212,7 +1212,11 @@ def restore_persisted_settings():
 
 _native_settings_save_lock = threading.RLock()
 
-NATIVE_MASTER_KEYS = {'settings-general-use_emby', 'settings-general-use_silo'}
+# Every kind's master switch, so flipping one republishes that kind's saved
+# snapshots. A kind missing from here keeps refreshing after the user turned it
+# off, until the next restart.
+NATIVE_MASTER_KEYS = {'settings-general-use_' + kind
+                      for kind in ('emby', 'jellyfin', 'plex', 'silo')}
 
 
 def _save_settings_with_native(settings_items, *, strict_metadata=False, on_metadata_persisted=None):

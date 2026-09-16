@@ -9,7 +9,8 @@ from sqlalchemy import select
 
 from app.database import TableMediaServerInstances
 from .http import MediaServerError
-from .instances import ConnectionSnapshot, validate_connection, validate_fields
+from .instances import (ConnectionSnapshot, TOGGLES, parse_options, validate_connection,
+                        validate_fields, validate_options)
 
 
 @contextmanager
@@ -100,10 +101,13 @@ class MediaServerInstanceRepository:
     def values(self, row, *, decrypt_key=True):
         return dict(kind=row.kind, name=row.name, enabled=bool(row.enabled), url=row.url,
                     verify_ssl=bool(row.verify_ssl), api_key=self.retained_api_key(row.id) if decrypt_key else '',
-                    path_mappings=json.loads(row.path_mappings))
+                    path_mappings=json.loads(row.path_mappings),
+                    refresh_movies=bool(row.refresh_movies), refresh_episodes=bool(row.refresh_episodes),
+                    options=parse_options(row.options))
 
     def create(self, kind, name, **fields):
-        values = dict(kind=kind, name=name, enabled=False, url='', verify_ssl=True, api_key='', path_mappings=[])
+        values = dict(kind=kind, name=name, enabled=False, url='', verify_ssl=True, api_key='',
+                      path_mappings=[], refresh_movies=True, refresh_episodes=True, options={})
         values.update(fields)
         validate_fields(dict(kind=kind, name=name, **fields), create=True)
         values.pop('clear_api_key', None)
@@ -117,7 +121,10 @@ class MediaServerInstanceRepository:
             row = TableMediaServerInstances(id=str(uuid4()), kind=values['kind'], name=values['name'],
                                            enabled=int(values['enabled']), url=values['url'],
                                            verify_ssl=int(values['verify_ssl']), api_key=encrypted,
-                                           path_mappings=json.dumps(values['path_mappings']), revision=1)
+                                           path_mappings=json.dumps(values['path_mappings']),
+                                           refresh_movies=int(values.get('refresh_movies', True)),
+                                           refresh_episodes=int(values.get('refresh_episodes', True)),
+                                           options=json.dumps(values.get('options') or {}), revision=1)
             self.session.add(row)
             self.session.flush()
         return row
@@ -132,6 +139,10 @@ class MediaServerInstanceRepository:
             values['api_key'] = ''
         values.update({key: value for key, value in fields.items()
                        if key != 'clear_api_key' and (key != 'api_key' or value)})
+        if 'options' in fields:
+            # An update carries no kind, so the closed key set is checked here,
+            # against the kind the row already has.
+            validate_options(row.kind, fields['options'])
         try:
             validate_connection(values)
         except MediaServerError:
@@ -146,10 +157,12 @@ class MediaServerInstanceRepository:
         if fields.get('clear_api_key'):
             encrypted = ''
         with atomic(self.session):
-            for key in ('name', 'url', 'enabled', 'verify_ssl'):
-                setattr(row, key, int(values[key]) if key in {'enabled', 'verify_ssl'} else values[key])
+            for key in ('name', 'url', 'enabled', 'verify_ssl', *TOGGLES):
+                setattr(row, key, (int(values[key]) if key in {'enabled', 'verify_ssl', *TOGGLES}
+                                   else values[key]))
             row.api_key = encrypted
             row.path_mappings = json.dumps(values['path_mappings'])
+            row.options = json.dumps(values.get('options') or {})
             row.revision += 1
             self.session.flush()
         return row
@@ -175,13 +188,15 @@ class MediaServerInstanceRepository:
         mappings = json.loads(row.path_mappings)
         try:
             validate_connection(dict(kind=row.kind, name=row.name, enabled=bool(row.enabled), url=row.url,
-                                     api_key=key, path_mappings=mappings))
+                                     api_key=key, path_mappings=mappings, options=parse_options(row.options)))
         except MediaServerError as exc:
             error = error or exc.code
         return ConnectionSnapshot(row.id, row.kind, row.name, bool(row.enabled),
                                   getattr(settings.general, 'use_' + row.kind) is True,
                                   row.url, key, bool(row.verify_ssl),
-                                  tuple(tuple(sorted(item.items())) for item in mappings), row.revision, error)
+                                  tuple(tuple(sorted(item.items())) for item in mappings),
+                                  bool(row.refresh_movies), bool(row.refresh_episodes),
+                                  json.dumps(parse_options(row.options)), row.revision, error)
 
     def snapshots(self, settings, *, kinds=None):
         return [self.snapshot(row.id, settings) for row in self.list() if kinds is None or row.kind in kinds]
@@ -190,4 +205,6 @@ class MediaServerInstanceRepository:
 def to_safe_dict(row):
     return dict(id=row.id, kind=row.kind, name=row.name, enabled=bool(row.enabled), url=row.url,
                 verify_ssl=bool(row.verify_ssl), api_key_set=bool(row.api_key),
-                path_mappings=json.loads(row.path_mappings))
+                path_mappings=json.loads(row.path_mappings),
+                refresh_movies=bool(row.refresh_movies), refresh_episodes=bool(row.refresh_episodes),
+                options=parse_options(row.options))

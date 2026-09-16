@@ -76,7 +76,7 @@ def probe_instance(session, instance_id, body, *, libraries=False):
         return {'error_code': 'not_found'}, 404
     try:
         validate_fields(body, probe=True)
-        if libraries and row.kind != 'silo':
+        if libraries and row.kind == 'emby':
             raise MediaServerError('invalid_kind')
         key = '' if body.get('clear_api_key') else body.get('api_key') or repo.get_decrypted_api_key(instance_id)
         url, verify_ssl = body.get('url', row.url), body.get('verify_ssl', bool(row.verify_ssl))
@@ -86,8 +86,78 @@ def probe_instance(session, instance_id, body, *, libraries=False):
     except MediaServerError as error:
         return ({'data': [], 'error_code': error.code} if libraries else
                 {'success': False, 'error_code': error.code}), 400
-    if row.kind == 'emby':
+    return _probe(row.kind, url, key, verify_ssl, libraries), 200
+
+
+def probe_connection(body, *, libraries=False):
+    """Probe connection settings that have not been saved as an instance yet.
+
+    One route for every kind, because which server is being added is a value in
+    the request, not a different endpoint. The per-kind endpoints that predate
+    the destination layer still answer for compatibility.
+    """
+    from .http import parse_verify_ssl, validate_server_url
+    empty = {'data': [], 'error_code': None} if libraries else {'success': False}
+    try:
+        if not isinstance(body, dict) or set(body) - {'kind', 'url', 'apikey', 'verify_ssl'}:
+            raise MediaServerError('invalid_settings')
+        kind = body.get('kind')
+        if kind not in VALID_KINDS:
+            raise MediaServerError('invalid_kind')
+        url, key = body.get('url'), body.get('apikey')
+        if not all(isinstance(value, str) and value.strip() for value in (url, key)):
+            raise MediaServerError('missing_credentials')
+        validate_server_url(url)
+        verify_ssl = parse_verify_ssl(body.get('verify_ssl', True))
+        if libraries and kind == 'emby':
+            raise MediaServerError('invalid_kind')
+    except MediaServerError as error:
+        return dict(empty, error_code=error.code), 400
+    return _probe(kind, url, key, verify_ssl, libraries), 200
+
+
+def _probe(kind, url, key, verify_ssl, libraries):
+    if kind == 'emby':
         from emby.operations import emby_test_connection
-        return emby_test_connection(url, key, verify_ssl), 200
+        return emby_test_connection(url, key, verify_ssl)
+    if kind == 'jellyfin':
+        return _jellyfin_probe(url, key, verify_ssl, libraries)
+    if kind == 'plex':
+        return _plex_probe(url, key, verify_ssl, libraries)
     from silo.operations import silo_get_libraries, silo_test_connection
-    return (silo_get_libraries if libraries else silo_test_connection)(url, key, verify_ssl), 200
+    return (silo_get_libraries if libraries else silo_test_connection)(url, key, verify_ssl)
+
+
+def _jellyfin_probe(url, key, verify_ssl, libraries):
+    """Jellyfin's own probe, in the shape the destination endpoints return.
+
+    The singleton's callers expect `libraries`/`error_code`; the destination
+    endpoints answer `data`/`error_code`, the same shape Silo already returns,
+    so one library picker serves every kind.
+    """
+    from jellyfin.operations import jellyfin_get_libraries, jellyfin_test_connection
+    if not libraries:
+        return jellyfin_test_connection(url, key, verify_ssl=verify_ssl)
+    result = jellyfin_get_libraries(url, key, verify_ssl=verify_ssl, include_all=True)
+    return {'data': [{'id': row['id'], 'name': row['name'], 'type': row['type']}
+                     for row in result['libraries']], 'error_code': result['error_code']}
+
+
+def _plex_probe(url, key, verify_ssl, libraries):
+    """Plex sections, addressed by name because that is what Plex refreshes by."""
+    from plex.operations import plex_server_for
+    types = {'movie': 'movies', 'show': 'series'}
+    try:
+        server = plex_server_for(url, key, bool(verify_ssl))
+        # A section carries no id Plex will refresh by, so its title is the
+        # handle, which is also what the scalar settings stored.
+        data = [{'id': section.title, 'name': section.title,
+                 'type': types.get(section.type, section.type)}
+                for section in server.library.sections()]
+    except Exception:
+        return ({'data': [], 'error_code': 'connection_error'} if libraries
+                else {'success': False, 'error_code': 'connection_error'})
+    if libraries:
+        return {'data': data, 'error_code': None}
+    return {'success': True, 'server_name': getattr(server, 'friendlyName', '') or '',
+            'version': getattr(server, 'version', '') or ''}

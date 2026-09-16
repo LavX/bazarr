@@ -3,13 +3,14 @@
 import { Button, Group, Select, Stack, Text, TextInput } from "@mantine/core";
 import type {
   MediaServerKind,
+  MediaServerLibrary,
   PathMapping,
-  SiloLibrary,
 } from "@/apis/raw/mediaServers";
+import { kindName } from "./kinds";
 
 interface Props {
   kind: MediaServerKind;
-  libraries?: SiloLibrary[];
+  libraries?: MediaServerLibrary[];
   value: PathMapping[];
   onChange: (value: PathMapping[]) => void;
 }
@@ -37,10 +38,10 @@ export default function PathMappings({
     <Stack gap="md">
       <Text size="sm" c="dimmed">
         Local path is the folder as Bazarr sees it. Server path is the same
-        folder as {isSilo ? "Silo" : "Emby"} sees it. Add a mapping for each
-        media folder, even when both paths are the same. Mappings select which
-        local videos notify this instance. A path matching several instances
-        refreshes each one.
+        folder as {kindName(kind)} sees it. Add a mapping for each media folder,
+        even when both paths are the same. Mappings select which local videos
+        notify this instance. A path matching several instances refreshes each
+        one.
         {isSilo && " Select the Silo library that contains that server folder."}
       </Text>
       {mappings.map((mapping, index) => {

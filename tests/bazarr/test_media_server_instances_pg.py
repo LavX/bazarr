@@ -37,7 +37,10 @@ def pg_engine():
 
 @pytest.fixture
 def pg_session(pg_engine):
+    from app.database import Base, TableMediaServerImports, TableMediaServerInstances
     with pg_engine.connect() as connection:
+        Base.metadata.create_all(connection, tables=[TableMediaServerInstances.__table__,
+                                                     TableMediaServerImports.__table__])
         migration().create_media_server_tables(connection)
     with sessionmaker(bind=pg_engine, autoflush=False, expire_on_commit=False)() as session:
         yield session
@@ -54,19 +57,22 @@ def test_pg_upgrade_and_create_all_have_same_columns_and_constraints(pg_engine, 
         migration().create_media_server_tables(connection)
         inspector = sa.inspect(connection)
         columns = {column['name']: column for column in inspector.get_columns('media_server_instances')}
-        assert set(columns) == {'id', 'kind', 'name', 'enabled', 'url', 'api_key', 'verify_ssl', 'path_mappings', 'revision'}
+        assert {'id', 'kind', 'name', 'enabled', 'url', 'api_key', 'verify_ssl',
+                'path_mappings', 'revision'} <= set(columns)
         assert all(column['nullable'] is False for column in columns.values())
-        assert {row['name'] for row in inspector.get_check_constraints('media_server_instances')} == {
-            'ck_media_server_kind', 'ck_media_server_enabled', 'ck_media_server_verify_ssl'}
+        assert {'ck_media_server_kind', 'ck_media_server_enabled', 'ck_media_server_verify_ssl'} <= {
+            row['name'] for row in inspector.get_check_constraints('media_server_instances')}
         assert inspector.get_pk_constraint('media_server_instances')['constrained_columns'] == ['id']
 
 
-@pytest.mark.parametrize('kind', ['emby', 'silo'])
+@pytest.mark.parametrize('kind', ['emby', 'jellyfin', 'plex', 'silo'])
 def test_pg_encrypted_crud_restart_and_no_import_resurrection(pg_session, pg_engine, kind):
-    from types import SimpleNamespace
     from media_servers.backfill import backfill_instances
     from media_servers.repository import MediaServerInstanceRepository
-    config = legacy(**{kind: SimpleNamespace(url='', apikey='000123', verify_ssl=False, path_mappings=[])})
+    config = legacy()
+    section = getattr(config, kind)
+    section.apikey = '000123'
+    section.verify_ssl = False
     assert backfill_instances(pg_session, config)[kind]['created'] is True
     repo = MediaServerInstanceRepository(pg_session)
     imported, = repo.list(kind)

@@ -7,8 +7,6 @@ Telegram configured every sports download, upgrade and translate happened
 silently and the user had no reason to believe anything had run.
 """
 
-from types import SimpleNamespace
-
 import pytest
 
 from test_sportarr_kind_migration import migration_engine  # noqa: F401
@@ -206,24 +204,22 @@ def test_live_syncs_are_the_only_ones_that_can_report_the_found_nothing_notice()
 
 @pytest.fixture
 def sports_refresh_targets(monkeypatch):
+    """Sportarr's own batching, and the one publication every destination shares.
+
+    The media servers are no longer called from here: each of them refreshes
+    its configured sports library off the publication, on its own worker, with
+    its own pending state. What this fixture still has to hold is that Sportarr
+    gets one rescan per owner per batch and that no publication is lost.
+    """
     from app.config import settings
-    from jellyfin import operations as jellyfin
-    from plex import operations as plex
     from sportarr import notify
     from subtitles import processing
 
     refreshed = []
     publications = []
-    monkeypatch.setattr(settings.general, 'use_plex', True)
-    monkeypatch.setattr(settings.plex, 'sports_library', ['Sports', 'Other Sports'])
-    monkeypatch.setattr(settings.general, 'use_jellyfin', True)
-    monkeypatch.setattr(settings.jellyfin, 'sports_library_ids', ['sports-id', 'other-sports-id'])
-    monkeypatch.setattr(settings.general, 'use_emby', True)
+    for kind in ('plex', 'jellyfin', 'emby'):
+        monkeypatch.setattr(settings.general, 'use_' + kind, True)
     monkeypatch.setattr(processing, 'notify_subtitle_mutation', publications.append)
-    monkeypatch.setattr(plex, 'get_plex_server', lambda: SimpleNamespace(library=SimpleNamespace(
-        section=lambda name: SimpleNamespace(update=lambda: refreshed.append(('plex', name))))))
-    monkeypatch.setattr(jellyfin, 'get_jellyfin_client', lambda: SimpleNamespace(
-        refresh_item=lambda library: refreshed.append(('jellyfin', library))))
 
     class InlineThread:
         def __init__(self, target, args=(), **kwargs):
@@ -254,11 +250,7 @@ def test_sports_batch_coalesces_whole_library_refreshes_and_preserves_publicatio
                 raise error('operation stopped after published files')
     except (JobCancelled, ValueError):
         pass
-    assert sorted(refreshed, key=str) == sorted([
-        ('plex', 'Sports'), ('plex', 'Other Sports'),
-        ('jellyfin', 'sports-id'), ('jellyfin', 'other-sports-id'),
-        ('sportarr', 1), ('sportarr', 2),
-    ], key=str)
+    assert sorted(refreshed, key=str) == sorted([('sportarr', 1), ('sportarr', 2)], key=str)
     assert [event.arr_instance_id for event in publications] == [1, 1, 2]
     assert [event.subtitle_path for event in publications] == ['/sports/61.en.srt', '/sports/62.en.srt', '/sports/63.en.srt']
 
@@ -275,15 +267,18 @@ def test_nested_sports_batches_flush_only_after_the_last_publication(sports_refr
         assert refreshed == []
         refresh_sports_media_servers('/sports/last.mkv', '/sports/last.en.srt', 1)
         notify_rescan(1)
-    assert len(refreshed) == 5
+    assert refreshed == [('sportarr', 1)]
 
 
-def test_individual_sports_publication_still_refreshes_its_libraries(sports_refresh_targets):
+def test_an_individual_sports_publication_is_dispatched_once_to_every_destination(sports_refresh_targets):
     from subtitles.processing import refresh_sports_media_servers
 
     refreshed, publications = sports_refresh_targets
     refresh_sports_media_servers('/sports/one.mkv', '/sports/one.en.srt', 1)
-    assert len(refreshed) == 4
+    # One publication reaches every destination; fanning out to each kind from
+    # here as well would refresh the two that used to be singletons twice, and
+    # Sportarr is not asked at all outside a batch.
+    assert refreshed == []
     assert len(publications) == 1
 
 
@@ -312,7 +307,4 @@ def test_single_provider_publication_refreshes_even_when_processing_fails(manual
     assert outcome.publication['published'] is True
     assert outcome.publication['status'] == ('published_with_warnings' if failure else 'published')
     assert (folder / '1' / 'event.en.srt').exists()
-    assert sorted(refreshed, key=str) == sorted([
-        ('plex', 'Sports'), ('plex', 'Other Sports'),
-        ('jellyfin', 'sports-id'), ('jellyfin', 'other-sports-id'), ('sportarr', 1),
-    ], key=str)
+    assert refreshed == [('sportarr', 1)]

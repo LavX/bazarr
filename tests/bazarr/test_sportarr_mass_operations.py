@@ -650,10 +650,8 @@ def test_mass_sports_mod_refreshes_once_for_successful_files(sports_toolbox, spo
     assert not (folder / '1' / 'event.en.hi.srt').exists()
     if end != 'success':
         assert sibling.read_bytes() == original
-    assert refreshed.count(('plex', 'Sports')) == 1
-    assert refreshed.count(('plex', 'Other Sports')) == 1
-    assert refreshed.count(('jellyfin', 'sports-id')) == 1
-    assert refreshed.count(('jellyfin', 'other-sports-id')) == 1
+    # One Sportarr rescan per affected owner, however many files the batch
+    # touched. The media servers coalesce their own scans on their own workers.
     assert refreshed.count(('sportarr', 1)) == 1
     assert refreshed.count(('sportarr', 2)) == (1 if end == 'success' else 0)
 
@@ -712,8 +710,6 @@ def test_mass_mod_cancellation_preserves_only_completed_publications(
         assert not source.exists()
         assert (folder / '1' / 'event.en.srt').exists()
         assert ['en', '/sports/event.en.srt'] in [entry[:2] for entry in indexed]
-        assert refreshed.count(('plex', 'Sports')) == 1
-        assert refreshed.count(('jellyfin', 'sports-id')) == 1
         assert refreshed.count(('sportarr', 1)) == 1
 
 

@@ -29,9 +29,8 @@ import {
 } from "@/apis/hooks";
 import type { ArrInstance, ArrKind } from "@/apis/raw/arrInstances";
 import { Layout, Section } from "@/pages/Settings/components";
-import JellyfinSection from "@/pages/Settings/Jellyfin/JellyfinSection";
 import MediaServerSection from "@/pages/Settings/MediaServers/MediaServerSection";
-import PlexSection from "@/pages/Settings/Plex/PlexSection";
+import PlexAccountSection from "@/pages/Settings/Plex/PlexAccountSection";
 import RadarrSection from "@/pages/Settings/Radarr/RadarrSection";
 import SeerrSection from "@/pages/Settings/Seerr/SeerrSection";
 import SonarrSection from "@/pages/Settings/Sonarr/SonarrSection";
@@ -305,11 +304,12 @@ const SettingsConnectionsView: FunctionComponent = () => {
         </Tabs.Panel>
 
         <Tabs.Panel value="plex">
-          <PlexSection />
+          <MediaServerSection kind="plex" />
+          <PlexAccountSection />
         </Tabs.Panel>
 
         <Tabs.Panel value="jellyfin">
-          <JellyfinSection />
+          <MediaServerSection kind="jellyfin" />
         </Tabs.Panel>
         <Tabs.Panel value="emby">
           <MediaServerSection kind="emby" />

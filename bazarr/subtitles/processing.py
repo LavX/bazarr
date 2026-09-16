@@ -18,11 +18,8 @@ from arr_instances.resolution import client_for_instance, scoped
 from plex.operations import (  # noqa: F401
     plex_set_movie_added_date_now,
     plex_update_library,
-    plex_update_sports_library,
     plex_set_episode_added_date_now,
-    plex_refresh_item,
 )
-from jellyfin.operations import jellyfin_refresh_item, jellyfin_update_sports_library
 from app.event_handler import event_stream
 
 from .utils import _get_download_code3
@@ -269,28 +266,15 @@ def _postprocessing_config(media_type, arr_instance_id):
 def refresh_sports_media_servers(video_path, subtitle_path, arr_instance_id, *, publish_notification=True):
     """Tell every configured media server a sports subtitle changed.
 
-    Series and movies refresh through item-level helpers keyed on identifiers a
-    sports event has not got. Each server's configured SPORTS library is scanned
-    instead, and a server with no sports library configured is left alone. Emby
-    and Silo instances refresh through the same publication dispatcher movies
-    and episodes use, scoped to their saved path mappings, so an instance whose
-    mappings do not cover this video is never asked to scan anything.
+    Series and movies resolve by identifiers a sports event has not got, so
+    every destination falls to its configured SPORTS library, and a destination
+    with no sports library configured is left alone. Every kind refreshes
+    through the same publication dispatcher movies and episodes use, scoped to
+    its saved configuration, so a destination that cannot reach this video is
+    never asked to scan anything.
     """
-    from sportarr.notify import request_media_server_refresh
-
-    if settings.general.use_plex is True:
-        sports_library = settings.plex.sports_library
-        if isinstance(sports_library, str):
-            sports_library = [sports_library] if sports_library else []
-        if sports_library:
-            request_media_server_refresh(plex_update_sports_library)
-    if settings.general.use_jellyfin is True:
-        sports_library_ids = settings.jellyfin.sports_library_ids
-        if isinstance(sports_library_ids, str):
-            sports_library_ids = [sports_library_ids] if sports_library_ids else []
-        if sports_library_ids:
-            request_media_server_refresh(jellyfin_update_sports_library)
-    if publish_notification and (settings.general.use_emby is True or settings.general.use_silo is True):
+    if publish_notification and any(getattr(settings.general, 'use_' + kind) is True
+                                    for kind in ('emby', 'jellyfin', 'plex', 'silo')):
         notify_subtitle_mutation(
             SubtitleMutation('sports', video_path, subtitle_path, 'download', arr_instance_id))
 
@@ -465,18 +449,8 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         event_stream(type='series', action='update', payload=episode_metadata.sonarrSeriesId)
         event_stream(type='episode-wanted', action='delete',
                      payload=episode_metadata.sonarrEpisodeId)
-        if settings.general.use_plex is True:
-            if settings.plex.update_series_library is True:
-                # Use specific item refresh instead of full library scan
-                plex_refresh_item(episode_metadata.imdbId, is_movie=False,
-                                season=episode_metadata.season, episode=episode_metadata.episode)
-            if settings.plex.set_episode_added is True:
-                plex_set_episode_added_date_now(episode_metadata)
-        if settings.general.use_jellyfin is True:
-            if settings.jellyfin.update_series_library is True:
-                jellyfin_refresh_item(episode_metadata.imdbId, is_movie=False,
-                                      season=episode_metadata.season, episode=episode_metadata.episode,
-                                      tvdb_id=episode_metadata.tvdbId)
+        if settings.general.use_plex is True and settings.plex.set_episode_added is True:
+            plex_set_episode_added_date_now(episode_metadata)
 
     else:
         reversed_path = path_mappings.path_replace_reverse_instance(
@@ -486,16 +460,8 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         notify_radarr(movie_metadata.radarrId,
                       arr_client=client_for_instance(database, movie_metadata.arr_instance_id, enabled_only=False))
         event_stream(type='movie-wanted', action='delete', payload=movie_metadata.radarrId)
-        if settings.general.use_plex is True:
-            if settings.plex.set_movie_added is True:
-                plex_set_movie_added_date_now(movie_metadata)
-            if settings.plex.update_movie_library is True:
-                # Use specific item refresh instead of full library scan
-                plex_refresh_item(movie_metadata.imdbId, is_movie=True)
-        if settings.general.use_jellyfin is True:
-            if settings.jellyfin.update_movie_library is True:
-                jellyfin_refresh_item(movie_metadata.imdbId, is_movie=True,
-                                      tmdb_id=movie_metadata.tmdbId)
+        if settings.general.use_plex is True and settings.plex.set_movie_added is True:
+            plex_set_movie_added_date_now(movie_metadata)
 
     # Call external webhook after all processing is complete if enabled
     call_external_webhook(
