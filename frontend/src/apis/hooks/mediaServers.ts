@@ -143,6 +143,18 @@ export function useMediaServerStatus(kind: MediaServerKind, id: string) {
   });
 }
 
+export function useRefreshMediaServerLibraries(
+  kind: MediaServerKind,
+  id: string,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.mediaServers.refreshLibraries(id),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: statusKey(kind, id) }),
+  });
+}
+
 export function useRetryPendingMediaServer(kind: MediaServerKind, id: string) {
   const queryClient = useQueryClient();
   return useMutation({

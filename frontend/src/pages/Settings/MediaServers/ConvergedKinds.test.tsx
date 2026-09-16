@@ -147,6 +147,45 @@ it("keeps a library handle the server did not list rather than dropping it", asy
 });
 
 it.each(["jellyfin", "plex"] as const)(
+  "%s can be asked to rescan its libraries without anything being queued",
+  async (kind) => {
+    // Retry only drains queued targets, so an idle instance had no way to ask
+    // the server to re-read itself at all.
+    const asked: string[] = [];
+    setup(kind);
+    server.use(
+      http.post(`${item}/refresh-libraries`, ({ request }) => {
+        asked.push(request.url);
+        return HttpResponse.json({ requested: 3 });
+      }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Refresh libraries" }),
+    );
+    expect(
+      await screen.findByText(/Asked the server to rescan 3 libraries/),
+    ).toBeInTheDocument();
+    expect(asked).toHaveLength(1);
+  },
+);
+
+it("names a blocked one-time import instead of blaming the connection", async () => {
+  setup("jellyfin");
+  server.use(
+    http.get("/api/system/media-server-instances/:id/status", () =>
+      HttpResponse.json({
+        pending: 0,
+        state: "unconfirmed",
+        error_code: "migration_failed",
+      }),
+    ),
+  );
+  expect(
+    await screen.findByText(/one-time import of this kind's old settings/),
+  ).toBeInTheDocument();
+});
+
+it.each(["jellyfin", "plex"] as const)(
   "tells a %s user to choose a library rather than to check path mappings",
   async (kind) => {
     setup(kind);

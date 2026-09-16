@@ -212,6 +212,7 @@ def sports_refresh_targets(monkeypatch):
     gets one rescan per owner per batch and that no publication is lost.
     """
     from app.config import settings
+    from media_servers import events
     from sportarr import notify
     from subtitles import processing
 
@@ -219,7 +220,11 @@ def sports_refresh_targets(monkeypatch):
     publications = []
     for kind in ('plex', 'jellyfin', 'emby'):
         monkeypatch.setattr(settings.general, 'use_' + kind, True)
+    # Both publication routes, because that is what "the media servers were
+    # told" now means: the sports helper publishes through processing, and a
+    # file the writer rewrote publishes through its own callback.
     monkeypatch.setattr(processing, 'notify_subtitle_mutation', publications.append)
+    monkeypatch.setattr(events, 'notify_subtitle_mutation', publications.append)
 
     class InlineThread:
         def __init__(self, target, args=(), **kwargs):

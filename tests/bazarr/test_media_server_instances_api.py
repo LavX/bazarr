@@ -237,3 +237,24 @@ def test_unsaved_library_probe_is_refused_for_the_kind_that_has_none(instance_ap
     response = instance_api.post(ROOT + '/probe-libraries', json=body, headers=HEADERS)
     assert response.status_code == 400
     assert response.json == {'data': [], 'error_code': 'invalid_kind'}
+
+
+def test_refresh_libraries_is_authenticated_and_reports_what_it_asked_for(instance_api, monkeypatch):
+    from media_servers import libraries
+    from media_servers.http import MediaServerError
+    created = instance_api.post(ROOT, json=payload('emby'), headers=HEADERS)
+    path = ROOT + '/' + created.json['id'] + '/refresh-libraries'
+    assert instance_api.post(path).status_code == 401
+    assert instance_api.post(ROOT + '/1/refresh-libraries', headers=HEADERS).status_code == 404
+
+    monkeypatch.setattr(libraries, 'refresh_libraries', lambda instance_id: 4)
+    response = instance_api.post(path, headers=HEADERS)
+    assert response.status_code == 200 and response.json == {'requested': 4}
+
+    def refuse(_instance_id):
+        raise MediaServerError('library_missing')
+
+    monkeypatch.setattr(libraries, 'refresh_libraries', refuse)
+    response = instance_api.post(path, headers=HEADERS)
+    assert response.status_code == 400
+    assert response.json == {'requested': 0, 'error_code': 'library_missing'}

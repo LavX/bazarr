@@ -263,7 +263,7 @@ def _postprocessing_config(media_type, arr_instance_id):
     return use_pp, cmd, use_threshold, threshold
 
 
-def refresh_sports_media_servers(video_path, subtitle_path, arr_instance_id, *, publish_notification=True):
+def refresh_sports_media_servers(video_path, subtitle_path, arr_instance_id):
     """Tell every configured media server a sports subtitle changed.
 
     Series and movies resolve by identifiers a sports event has not got, so
@@ -273,8 +273,8 @@ def refresh_sports_media_servers(video_path, subtitle_path, arr_instance_id, *, 
     its saved configuration, so a destination that cannot reach this video is
     never asked to scan anything.
     """
-    if publish_notification and any(getattr(settings.general, 'use_' + kind) is True
-                                    for kind in ('emby', 'jellyfin', 'plex', 'silo')):
+    if any(getattr(settings.general, 'use_' + kind) is True
+           for kind in ('emby', 'jellyfin', 'plex', 'silo')):
         notify_subtitle_mutation(
             SubtitleMutation('sports', video_path, subtitle_path, 'download', arr_instance_id))
 
@@ -326,9 +326,9 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         # one below.
         #
         # The media-server refresh happens later in this function, through
-        # refresh_sports_media_servers: plex and jellyfin scan their configured
-        # sports libraries, and Emby and Silo go through the native publication
-        # dispatcher.
+        # refresh_sports_media_servers, which publishes once to the dispatcher.
+        # Every kind then scans its own configured sports libraries on its own
+        # worker.
         instance = validate()
         if path != context.mapped_path:
             raise ValueError('Sports subtitle path does not match its event')

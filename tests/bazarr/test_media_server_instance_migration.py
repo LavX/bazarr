@@ -95,14 +95,26 @@ def test_row_and_import_marker_are_atomic_and_retryable(autocommit_session, monk
     assert len(MediaServerInstanceRepository(autocommit_session).list(kind)) == 1
 
 
-def test_empty_scalar_stamped_without_dummy_and_never_imports_later(autocommit_session):
+def test_an_empty_scalar_creates_nothing_and_does_not_spend_the_one_import(autocommit_session):
+    """Nothing configured is not an import, so the marker is not spent on it.
+
+    Stamping the shipped defaults would leave a user who configures that kind
+    later, by hand in config.yaml, with settings nothing ever reads.
+    """
     from app.database import TableMediaServerImports
     from media_servers.backfill import backfill_instances
     from media_servers.repository import MediaServerInstanceRepository
     config = legacy()
     backfill_instances(autocommit_session, config)
-    assert all(autocommit_session.get(TableMediaServerImports, kind) for kind in ('emby', 'silo'))
-    config.emby.url = 'http://stale.example'
+    assert not any(autocommit_session.get(TableMediaServerImports, kind) for kind in ('emby', 'silo'))
+    assert MediaServerInstanceRepository(autocommit_session).list() == []
+    config.emby.url = 'http://emby.example'
+    backfill_instances(autocommit_session, config)
+    rows = MediaServerInstanceRepository(autocommit_session).list()
+    assert [row.kind for row in rows] == ['emby']
+    assert autocommit_session.get(TableMediaServerImports, 'emby') is not None
+    # And that import is still the only one: a deleted row stays deleted.
+    MediaServerInstanceRepository(autocommit_session).delete(rows[0].id)
     backfill_instances(autocommit_session, config)
     assert MediaServerInstanceRepository(autocommit_session).list() == []
 
@@ -200,16 +212,114 @@ def test_plex_singleton_imports_whichever_endpoint_it_authenticates_against(
     assert values['path_mappings'] == []
 
 
-def test_an_untouched_plex_install_is_stamped_without_a_row(autocommit_session):
-    """Plex ships an ip, a port and verify_ssl off, so none of them is evidence.
+def test_an_untouched_plex_install_gets_no_destination(autocommit_session):
+    """Plex ships an ip and a port, so a composed URL is not evidence of setup.
 
-    Without this the shipped defaults would compose a URL and create a Plex
-    destination for every user who has never opened the Plex settings.
+    Without this the shipped defaults would create a Plex destination for every
+    user who has never opened the Plex settings. The credential is what counts.
     """
-    from app.database import TableMediaServerImports
     from media_servers.backfill import backfill_instances
     from media_servers.repository import MediaServerInstanceRepository
     config = legacy()
     assert backfill_instances(autocommit_session, config)['plex'] == {'created': False}
-    assert autocommit_session.get(TableMediaServerImports, 'plex') is not None
     assert MediaServerInstanceRepository(autocommit_session).list('plex') == []
+
+
+def live_box_settings():
+    """The config shape a real upgrade lands on, from a live Plex install.
+
+    Mirrors the scalar shape reported from a configured box, with a synthetic
+    hostname: an OAuth account pointed at an explicit https URL on port 443
+    while ip and port are still the shipped 127.0.0.1:32400, TLS verification
+    off, library handles stored as strings, both per-type opt-ins on, and Emby
+    and Silo already migrated so their sections are empty.
+    """
+    config = legacy(
+        plex=SimpleNamespace(
+            auth_method='oauth', ip='127.0.0.1', port=32400, ssl=False,
+            apikey='', token='plex-account-token',
+            server_url='https://plex.example.test:443',
+            server_connections=['https://plex.example.test:443'],
+            verify_ssl=False, update_movie_library=True, update_series_library=True,
+            movie_library=['Movies'], series_library=['TV Shows'], sports_library=[],
+            movie_library_ids=['1'], series_library_ids=['2'], sports_library_ids=[],
+            set_movie_added=True, set_episode_added=True, instance_id=''),
+        jellyfin=SimpleNamespace(
+            url='http://jellyfin.example.test:8096', apikey='jellyfin-api-key',
+            verify_ssl=True, path_mappings=[], update_movie_library=True,
+            update_series_library=True, movie_library_ids=['a' * 32],
+            series_library_ids=['b' * 32], sports_library_ids=[],
+            refresh_method='immediate'))
+    config.general.use_plex = True
+    config.general.use_jellyfin = True
+    return config
+
+
+def test_a_live_plex_and_jellyfin_install_imports_the_way_the_box_is_configured(autocommit_session):
+    from media_servers.backfill import backfill_instances
+    from media_servers.repository import MediaServerInstanceRepository
+    config = live_box_settings()
+    results = backfill_instances(autocommit_session, config)
+    assert results['plex']['created'] is True and results['jellyfin']['created'] is True
+    repo = MediaServerInstanceRepository(autocommit_session)
+
+    plex, = repo.list('plex')
+    values = repo.values(plex)
+    # The OAuth endpoint, not the legacy ip and port that are still sitting
+    # there at their shipped defaults.
+    assert values['url'] == 'https://plex.example.test:443'
+    assert values['verify_ssl'] is False and values['enabled'] is True
+    assert repo.get_decrypted_api_key(plex.id) == 'plex-account-token'
+    assert (values['refresh_movies'], values['refresh_episodes']) == (True, True)
+    # Plex refreshes a section by its title, which is what the account panel
+    # stored alongside the ids, so the titles are what the row carries.
+    assert values['options'] == {'movie_libraries': ['Movies'],
+                                 'series_libraries': ['TV Shows'],
+                                 'sports_libraries': []}
+    assert config.plex.instance_id == plex.id
+
+    jellyfin, = repo.list('jellyfin')
+    values = repo.values(jellyfin)
+    assert values['url'] == 'http://jellyfin.example.test:8096'
+    assert values['verify_ssl'] is True and values['enabled'] is True
+    assert repo.get_decrypted_api_key(jellyfin.id) == 'jellyfin-api-key'
+    assert (values['refresh_movies'], values['refresh_episodes']) == (True, True)
+    assert values['options'] == {'movie_library_ids': ['a' * 32],
+                                 'series_library_ids': ['b' * 32],
+                                 'sports_library_ids': [],
+                                 'refresh_method': 'immediate'}
+    for row in (plex, jellyfin):
+        assert repo.snapshot(row.id, config).configuration_error is None
+
+
+def test_already_migrated_emby_and_silo_rows_survive_the_plex_and_jellyfin_import(autocommit_session):
+    """Their sections are empty because the earlier import already moved them."""
+    from media_servers.backfill import backfill_instances
+    from media_servers.repository import MediaServerInstanceRepository
+    from test_media_server_instances import payload
+    repo = MediaServerInstanceRepository(autocommit_session)
+    existing = {kind: repo.create(**payload(kind)) for kind in ('emby', 'silo')}
+    config = live_box_settings()
+    backfill_instances(autocommit_session, config)
+    for kind, row in existing.items():
+        assert [item.id for item in repo.list(kind)] == [row.id]
+        assert repo.get_decrypted_api_key(row.id) == 'opaque-A'
+
+
+def test_the_live_plex_row_is_reconciled_rather_than_duplicated_on_every_startup(autocommit_session):
+    from media_servers.backfill import backfill_instances
+    from media_servers.repository import MediaServerInstanceRepository
+    config = live_box_settings()
+    backfill_instances(autocommit_session, config)
+    repo = MediaServerInstanceRepository(autocommit_session)
+    row, = repo.list('plex')
+    # The user edits the libraries on the instance; a later startup must not
+    # put the scalars back over them.
+    repo.update(row.id, options={'movie_libraries': ['Films 4K'], 'series_libraries': [],
+                                 'sports_libraries': []}, refresh_episodes=False)
+    backfill_instances(autocommit_session, config)
+    values = repo.values(repo.get(row.id))
+    assert [item.id for item in repo.list('plex')] == [row.id]
+    assert values['options']['movie_libraries'] == ['Films 4K']
+    assert values['refresh_episodes'] is False
+    assert values['url'] == 'https://plex.example.test:443'

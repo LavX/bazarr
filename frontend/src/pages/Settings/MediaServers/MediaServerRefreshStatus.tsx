@@ -7,6 +7,7 @@ import {
 } from "@mantine/core";
 import {
   useMediaServerStatus,
+  useRefreshMediaServerLibraries,
   useRetryPendingMediaServer,
 } from "@/apis/hooks/mediaServers";
 import type {
@@ -41,6 +42,8 @@ function getStatusErrorMessage(
       return KINDS_WITH_PATH_MAPPINGS.includes(kind)
         ? null
         : "This instance has no library selected for that kind of media, so there is nothing to scan. Choose one and retry.";
+    case "migration_failed":
+      return "The one-time import of this kind's old settings did not finish, so its instances are not being refreshed. Restarting Bazarr retries it.";
     default:
       return null;
   }
@@ -58,6 +61,7 @@ export default function MediaServerRefreshStatus({
   const { kind, id } = instance;
   const status = useMediaServerStatus(kind, id);
   const retry = useRetryPendingMediaServer(kind, id);
+  const rescan = useRefreshMediaServerLibraries(kind, id);
   const currentStatus = !status.isError ? status.data : undefined;
   const statusErrorMessage =
     currentStatus && getStatusErrorMessage(currentStatus.error_code, kind);
@@ -103,7 +107,10 @@ export default function MediaServerRefreshStatus({
         </MantineText>
       )}
       <MantineText size="sm" c="dimmed">
-        Retry pending uses the saved connection settings.
+        Retry pending uses the saved connection settings, and only drains
+        refreshes that are already queued. Refresh libraries asks the server to
+        re-read everything this instance is pointed at, whether or not anything
+        is queued.
       </MantineText>
       {!enabled && (
         <MantineText size="sm" c="dimmed">
@@ -131,6 +138,15 @@ export default function MediaServerRefreshStatus({
         >
           Retry pending
         </Button>
+        <Button
+          type="button"
+          variant="light"
+          loading={rescan.isPending}
+          disabled={!enabled || hasChanges}
+          onClick={() => rescan.mutate()}
+        >
+          Refresh libraries
+        </Button>
       </Group>
       {retry.isSuccess && (
         <Alert color="gray">Queued {refreshCount(retry.data.queued)}.</Alert>
@@ -139,6 +155,18 @@ export default function MediaServerRefreshStatus({
         <Alert color="red">
           Could not queue pending refreshes. Check the saved connection and try
           again.
+        </Alert>
+      )}
+      {rescan.isSuccess && (
+        <Alert color="gray">
+          Asked the server to rescan {rescan.data.requested}{" "}
+          {rescan.data.requested === 1 ? "library" : "libraries"}.
+        </Alert>
+      )}
+      {rescan.isError && (
+        <Alert color="red">
+          Could not refresh libraries. Check the saved connection and the
+          libraries this instance is pointed at.
         </Alert>
       )}
     </Stack>

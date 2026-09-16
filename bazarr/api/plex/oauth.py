@@ -71,6 +71,16 @@ def decrypt_token(encrypted_token):
     return encrypted_token
 
 
+def sync_plex_account(**kwargs):
+    """Carry an account change onto the Plex destination row.
+
+    Imported lazily so this module keeps loading when the destination layer is
+    unavailable, which is the same reason its own failures are swallowed.
+    """
+    from media_servers.plex_account import sync_plex_account as sync
+    return sync(**kwargs)
+
+
 def generate_client_id():
     return str(uuid.uuid4())
 
@@ -362,6 +372,9 @@ class PlexPinCheck(Resource):
 
                 try:
                     write_config()
+                    # The account now holds the credential the refresh worker
+                    # needs, so its destination row has to hold it too.
+                    sync_plex_account()
                     pin_cache.delete(pin_id)
 
                     logger.info(
@@ -761,6 +774,9 @@ class PlexLogout(Resource):
             settings.general.use_plex = False
 
             write_config()
+            # Switched off and stripped of its credential, not deleted: signing
+            # back in keeps the libraries and toggles the user chose.
+            sync_plex_account(signed_out=True)
 
             return {'success': True}
         except Exception as e:
@@ -806,6 +822,7 @@ class PlexApiKey(Resource):
             settings.plex.auth_method = 'apikey'
 
             write_config()
+            sync_plex_account()
 
             logger.debug("API key saved")
             return {'success': True, 'message': 'API key saved securely'}
@@ -927,6 +944,9 @@ class PlexSelectServer(Resource):
         # Store all connection URIs for round-robin fallback
         settings.plex.server_connections = connections if connections else [connection_uri]
         write_config()
+        # A different server is a different destination URL; the token is
+        # unchanged and is deliberately not resent.
+        sync_plex_account()
 
         return {
             'data': {

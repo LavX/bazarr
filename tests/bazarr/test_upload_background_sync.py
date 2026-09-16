@@ -179,7 +179,7 @@ def test_saved_upload_refreshes_consumers_when_sync_setup_fails(upload_flow, mon
     assert refreshes[0][1] == (10 if media_type == 'series' else 30,)
     assert [event.media_type for event in published] == [
         'episode' if media_type == 'series' else 'movie']
-    assert published[0].operation == 'upload' 
+    assert published[0].operation == 'upload'
 
 
 @pytest.mark.parametrize("media_type", ["movie", "series"])

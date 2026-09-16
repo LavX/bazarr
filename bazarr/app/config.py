@@ -439,6 +439,9 @@ validators = [
     Validator('plex.migration_timestamp', must_exist=True, default='', is_type_of=(int, float, str)),
     Validator('plex.disable_auto_migration', must_exist=True, default=False, is_type_of=bool),
     Validator('plex.client_identifier', must_exist=True, default='', is_type_of=str),
+    # The destination row this account owns. Recorded rather than inferred so a
+    # second Plex instance added by hand is never taken over by the account.
+    Validator('plex.instance_id', must_exist=True, default='', is_type_of=str),
 
     # emby section
     Validator('emby.url', must_exist=True, default='', is_type_of=str),
@@ -1875,6 +1878,21 @@ def sync_checker(subtitle):
 
 
 # Plex OAuth Migration Functions
+def _sync_plex_destination():
+    """Keep the Plex destination row in step with an account change here.
+
+    The automatic API-key-to-OAuth migration swaps which credential the account
+    authenticates with, in both directions. A row still holding the other one
+    would refresh with a credential the account no longer has.
+    """
+    try:
+        from media_servers.plex_account import sync_plex_account
+        sync_plex_account()
+    except Exception:
+        logging.debug('Could not carry the migrated Plex account onto its destination',
+                      exc_info=True)
+
+
 def migrate_plex_config():
     # Generate encryption key if not exists or is empty
     existing_key = settings.plex.get('encryption_key')
@@ -2230,6 +2248,9 @@ def migrate_apikey_to_oauth():
             settings.plex.apikey = ''
             settings.plex.apikey_encrypted = False
             write_config()
+            # The account authenticates with the token now, so the destination
+            # row must stop holding the API key that was just removed.
+            _sync_plex_destination()
             logging.info("Legacy API key permanently removed after successful OAuth migration")
             
         except Exception as e:
@@ -2257,6 +2278,8 @@ def migrate_apikey_to_oauth():
             settings.plex.disable_auto_migration = False  # Allow retry
             
             write_config()
+            # Back on the API key, so the destination row goes back with it.
+            _sync_plex_destination()
             
             # Test the rollback
             try:

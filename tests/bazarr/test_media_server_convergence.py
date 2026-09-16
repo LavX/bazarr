@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+HEADERS = {'X-API-KEY': 'synthetic-bazarr-key'}
 IDS = {'jellyfin': 'd2a4c6e8-1111-4b0a-9c3d-0a1b2c3d4e5f',
        'plex': 'f1e2d3c4-2222-4b0a-9c3d-0a1b2c3d4e5f'}
 # Jellyfin addresses every item, libraries included, by a 32-character hex id,
@@ -257,8 +258,9 @@ def test_one_unreachable_destination_does_not_hold_up_the_other(jellyfin_server)
     probe.bind(('127.0.0.1', 0))
     dead_port = probe.getsockname()[1]
     probe.close()
-    dead = replace(snapshot('plex', f'http://127.0.0.1:{dead_port}'), kind='jellyfin',
-                   id=IDS['plex'], options_json=live.options_json)
+    # A real Plex destination, not a second Jellyfin wearing its id: isolation
+    # has to hold across kinds, which is the whole point of the shared layer.
+    dead = snapshot('plex', f'http://127.0.0.1:{dead_port}')
     jellyfin_server.items[MOVIE_LIBRARY] = [{'Id': 'ff' * 16, 'Name': 'Metropolis', 'Path': '/m/x.mkv',
                                              'ProviderIds': {'Imdb': 'tt0017136'}}]
     configuration = NativeConfiguration(settings(), snapshots=[live, dead])
@@ -305,15 +307,46 @@ def test_jellyfin_never_asks_the_title_rung_without_a_year(jellyfin_server):
     assert jellyfin_server.calls == []
 
 
-def test_the_delete_path_dispatches_instead_of_calling_any_server_inline():
-    """Deleting a subtitle publishes it, and that is the only refresh left."""
-    import inspect
-    from subtitles.tools import delete
-    source = inspect.getsource(delete)
-    assert 'publication_callback' in source
-    for name in ('plex_refresh_item', 'jellyfin_refresh_item',
-                 'plex_update_sports_library', 'jellyfin_update_sports_library'):
-        assert name not in source
+@pytest.mark.parametrize('media_type,kwargs,expected', [
+    ('movies', {'radarr_id': 30}, 'movie'),
+    ('series', {'sonarr_series_id': 5, 'sonarr_episode_id': 9}, 'episode'),
+])
+def test_deleting_a_subtitle_dispatches_the_publication(tmp_path, monkeypatch,
+                                                        media_type, kwargs, expected):
+    """The delete path's only media server refresh is the publication itself.
+
+    Driven through ``delete_subtitles`` rather than read out of its source, so
+    a future caller that removes the publication callback fails here instead of
+    passing a grep.
+    """
+    from media_servers import events
+    from subtitles.tools import delete as delete_mod
+
+    subtitle = tmp_path / 'movie.en.srt'
+    subtitle.write_text('1\n')
+    video = tmp_path / 'movie.mkv'
+    video.write_text('')
+    published = []
+    monkeypatch.setattr(events, 'notify_subtitle_mutation', published.append)
+    for name in ('history_log', 'history_log_movie', 'store_subtitles',
+                 'store_subtitles_movie', 'call_external_webhook', 'event_stream'):
+        monkeypatch.setattr(delete_mod, name, lambda *args, **kwargs: None)
+    monkeypatch.setattr(delete_mod, 'language_from_alpha2', lambda code: 'English')
+    monkeypatch.setattr(delete_mod, 'client_for_instance', lambda *args, **kwargs: None)
+    monkeypatch.setattr(delete_mod, 'notify_sonarr', lambda *args, **kwargs: None)
+    monkeypatch.setattr(delete_mod, 'notify_radarr', lambda *args, **kwargs: None)
+    monkeypatch.setattr(delete_mod.path_mappings, 'path_replace_instance',
+                        lambda path, *args: path)
+    monkeypatch.setattr(delete_mod.path_mappings, 'path_replace_reverse_instance',
+                        lambda path, *args: path)
+
+    assert delete_mod.delete_subtitles(media_type=media_type, language='en', forced=False,
+                                       hi=False, media_path=str(video),
+                                       subtitles_path=str(subtitle), arr_instance_id=7,
+                                       **kwargs) is True
+    assert not subtitle.exists()
+    assert [(event.media_type, event.operation, event.arr_instance_id)
+            for event in published] == [(expected, 'delete', 7)]
 
 
 @pytest.mark.parametrize('kind', ['jellyfin', 'plex'])
@@ -471,3 +504,316 @@ def test_a_stored_blob_validation_never_saw_is_nothing_configured(stored):
     assert snap.libraries('movie') == []
     assert snap.options() == ({} if stored != '{"movie_library_ids": "one"}'
                               else {'movie_library_ids': 'one'})
+
+
+# --- The Plex account owning its destination row -----------------------------
+
+def plex_settings(**overrides):
+    """The scalar Plex account, as a fresh install ships it."""
+    section = dict(auth_method='apikey', ip='127.0.0.1', port=32400, ssl=False,
+                   apikey='', token='', server_url='', verify_ssl=False,
+                   path_mappings=[], update_movie_library=True, update_series_library=True,
+                   movie_library=[], series_library=[], sports_library=[], instance_id='')
+    section.update(overrides)
+    # A durable master key, so encrypting the credential never tries to mint one
+    # and write it back through the real config file.
+    general = SimpleNamespace(use_emby=False, use_silo=False, use_jellyfin=False, use_plex=True,
+                              secrets_encryption_key='synthetic-durable-key')
+    return SimpleNamespace(general=general, plex=SimpleNamespace(**section),
+                           emby=SimpleNamespace(url='', apikey='', verify_ssl=True, path_mappings=[]),
+                           silo=SimpleNamespace(url='', apikey='', verify_ssl=True, path_mappings=[]),
+                           jellyfin=SimpleNamespace(url='', apikey='', verify_ssl=True,
+                                                    path_mappings=[], update_movie_library=False,
+                                                    update_series_library=False, movie_library_ids=[],
+                                                    series_library_ids=[], sports_library_ids=[],
+                                                    refresh_method='immediate'))
+
+
+def test_signing_in_with_oauth_creates_the_plex_destination(schema_session):
+    """The Critical case: a new install signs in and gets a refreshable row.
+
+    Nothing has ever written the Plex scalars before this point, so there is no
+    row to update and no field in the instance form to paste a token into. The
+    account transitions have to create it.
+    """
+    from media_servers.plex_account import sync_plex_instance
+    from media_servers.repository import MediaServerInstanceRepository
+    config = plex_settings()
+    assert sync_plex_instance(schema_session, config) is None, 'nothing configured yet'
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'plex-oauth-token'
+    # Signing in comes before picking a server, so there is still nothing to
+    # connect to and nothing to create.
+    assert sync_plex_instance(schema_session, config) is None
+    assert MediaServerInstanceRepository(schema_session).list('plex') == []
+    config.plex.server_url = 'https://plex.example:32400'
+    row = sync_plex_instance(schema_session, config)
+    repo = MediaServerInstanceRepository(schema_session)
+    assert row is not None and [item.id for item in repo.list('plex')] == [row.id]
+    assert (row.url, bool(row.enabled)) == ('https://plex.example:32400', True)
+    assert repo.get_decrypted_api_key(row.id) == 'plex-oauth-token'
+    assert config.plex.instance_id == row.id
+
+
+def test_the_account_updates_its_row_through_every_transition(schema_session):
+    """Re-sign-in, a server switch and sign-out all land on the same row."""
+    from media_servers.plex_account import sync_plex_instance
+    from media_servers.repository import MediaServerInstanceRepository
+    repo = MediaServerInstanceRepository(schema_session)
+    config = plex_settings(auth_method='oauth', token='first-token',
+                           server_url='https://first.example:32400')
+    row = sync_plex_instance(schema_session, config)
+
+    # A server switch carries the URL and leaves the token alone.
+    config.plex.server_url = 'https://second.example:32400'
+    assert sync_plex_instance(schema_session, config).id == row.id
+    assert repo.get(row.id).url == 'https://second.example:32400'
+    assert repo.get_decrypted_api_key(row.id) == 'first-token'
+
+    # Signing out switches the row off and strips the credential, and keeps it.
+    config.general.use_plex = False
+    config.plex.token = ''
+    sync_plex_instance(schema_session, config, signed_out=True)
+    assert bool(repo.get(row.id).enabled) is False
+    assert repo.get(row.id).api_key == ''
+    assert len(repo.list('plex')) == 1
+
+    # Signing back in reuses that row rather than adding a second.
+    config.general.use_plex = True
+    config.plex.token = 'second-token'
+    assert sync_plex_instance(schema_session, config).id == row.id
+    assert bool(repo.get(row.id).enabled) is True
+    assert repo.get_decrypted_api_key(row.id) == 'second-token'
+    assert len(repo.list('plex')) == 1
+
+
+def test_switching_auth_method_replaces_the_credential_on_the_row(schema_session):
+    """The automatic apikey-to-OAuth migration, and its rollback."""
+    from media_servers.plex_account import sync_plex_instance
+    from media_servers.repository import MediaServerInstanceRepository
+    repo = MediaServerInstanceRepository(schema_session)
+    config = plex_settings(apikey='legacy-key', ip='plex.example', ssl=True)
+    row = sync_plex_instance(schema_session, config)
+    assert repo.get(row.id).url == 'https://plex.example:32400'
+    assert repo.get_decrypted_api_key(row.id) == 'legacy-key'
+
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'migrated-token'
+    config.plex.server_url = 'https://direct.example:32400'
+    config.plex.apikey = ''
+    sync_plex_instance(schema_session, config)
+    assert repo.get(row.id).url == 'https://direct.example:32400'
+    assert repo.get_decrypted_api_key(row.id) == 'migrated-token'
+
+    config.plex.auth_method = 'apikey'
+    config.plex.apikey = 'legacy-key'
+    config.plex.token = ''
+    sync_plex_instance(schema_session, config)
+    assert repo.get(row.id).url == 'https://plex.example:32400'
+    assert repo.get_decrypted_api_key(row.id) == 'legacy-key'
+
+
+def test_a_second_plex_instance_added_by_hand_is_never_taken_over(schema_session):
+    from media_servers.plex_account import sync_plex_instance
+    from media_servers.repository import MediaServerInstanceRepository
+    repo = MediaServerInstanceRepository(schema_session)
+    config = plex_settings(auth_method='oauth', token='account-token',
+                           server_url='https://account.example:32400')
+    owned = sync_plex_instance(schema_session, config)
+    other = repo.create(kind='plex', name='Second', url='https://other.example:32400',
+                        api_key='other-key', enabled=True, verify_ssl=True, path_mappings=[])
+    config.plex.server_url = 'https://moved.example:32400'
+    assert sync_plex_instance(schema_session, config).id == owned.id
+    assert repo.get(other.id).url == 'https://other.example:32400'
+    assert repo.get_decrypted_api_key(other.id) == 'other-key'
+
+
+def test_an_unconfigured_kind_is_not_stamped_so_a_later_import_still_runs(schema_session):
+    """The other half of the Critical: a spent marker blocks the import forever."""
+    from app.database import TableMediaServerImports
+    from media_servers.backfill import backfill_instances
+    from media_servers.repository import MediaServerInstanceRepository
+    config = plex_settings()
+    assert backfill_instances(schema_session, config)['emby'] == {'created': False}
+    assert schema_session.get(TableMediaServerImports, 'emby') is None
+    config.emby.url = 'http://emby.example'
+    config.emby.apikey = 'emby-key'
+    assert backfill_instances(schema_session, config)['emby'] == {'created': True}
+    assert schema_session.get(TableMediaServerImports, 'emby') is not None
+    assert len(MediaServerInstanceRepository(schema_session).list('emby')) == 1
+
+
+def test_the_startup_import_reconciles_plex_rather_than_importing_it_once(schema_session):
+    """Plex's scalars keep changing, so its row is reconciled every startup."""
+    from media_servers.backfill import backfill_instances
+    from media_servers.repository import MediaServerInstanceRepository
+    repo = MediaServerInstanceRepository(schema_session)
+    config = plex_settings(auth_method='oauth', token='token',
+                           server_url='https://plex.example:32400')
+    assert backfill_instances(schema_session, config)['plex'] == {'created': True}
+    row, = repo.list('plex')
+    config.plex.server_url = 'https://moved.example:32400'
+    backfill_instances(schema_session, config)
+    assert [item.id for item in repo.list('plex')] == [row.id]
+    assert repo.get(row.id).url == 'https://moved.example:32400'
+
+
+# --- Refreshing every library a destination is scoped to ---------------------
+
+class _Rescanner:
+    def __init__(self, kind, answers=None):
+        from media_servers.instances import KIND_STEPS
+        self.REFRESH_STEPS = KIND_STEPS[kind]
+        self.calls = []
+        self.answers = answers
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        pass
+
+    def refresh_library(self, *args, **_kwargs):
+        self.calls.append(args)
+        if self.answers is None:
+            return {'status': 'requested'}
+        return self.answers.get(args, None)
+
+
+def _rescan(monkeypatch, snap, client):
+    """The real refresh_libraries, on the saved snapshot, with a fake client.
+
+    ``refresh_libraries`` resolves both of these from the dispatcher at call
+    time, so patching them there is what it actually reads.
+    """
+    from media_servers import dispatcher, libraries
+    configuration = dispatcher.NativeConfiguration(settings(), snapshots=[snap])
+    monkeypatch.setattr(dispatcher, '_configuration', configuration)
+    monkeypatch.setattr(dispatcher, '_client', lambda *_args: client)
+    return libraries.refresh_libraries(snap.id)
+
+
+@pytest.mark.parametrize('kind', ['jellyfin', 'plex'])
+def test_refreshing_libraries_asks_for_every_configured_type(monkeypatch, kind):
+    """The button retry never was: it scans without anything being queued."""
+    client = _Rescanner(kind)
+    assert _rescan(monkeypatch, snapshot(kind), client) == 3
+    assert client.calls == [('movie',), ('episode',), ('sports',)]
+
+
+def test_refreshing_libraries_skips_a_type_with_nothing_chosen(monkeypatch):
+    keys = {'movie_library_ids': [MOVIE_LIBRARY]}
+    client = _Rescanner('jellyfin')
+    assert _rescan(monkeypatch, snapshot('jellyfin', options=keys), client) == 1
+    assert client.calls == [('movie',)]
+
+
+def test_refreshing_libraries_refuses_when_the_instance_points_at_none(monkeypatch):
+    from media_servers.http import MediaServerError
+    client = _Rescanner('plex')
+    with pytest.raises(MediaServerError) as error:
+        _rescan(monkeypatch, snapshot('plex', options={}), client)
+    assert error.value.code == 'library_missing'
+    assert client.calls == []
+
+
+def test_refreshing_libraries_refuses_a_destination_that_is_switched_off(monkeypatch):
+    from media_servers.http import MediaServerError
+    client = _Rescanner('plex')
+    with pytest.raises(MediaServerError) as error:
+        _rescan(monkeypatch, replace(snapshot('plex'), instance_enabled=False), client)
+    assert error.value.code == 'connection_disabled'
+    assert client.calls == []
+
+
+def test_a_scope_the_server_holds_no_library_for_is_not_a_failure(monkeypatch):
+    """A rung that answers nothing is that library missing, not a broken scan."""
+    client = _Rescanner('plex', answers={('movie',): {'status': 'requested'}})
+    assert _rescan(monkeypatch, snapshot('plex'), client) == 1
+    assert client.calls == [('movie',), ('episode',), ('sports',)]
+
+
+# --- The real OAuth handlers, against a faked Plex ---------------------------
+
+@pytest.fixture
+def plex_account_api(schema_session, monkeypatch):
+    """The Plex account endpoints, on a real app, with plex.tv faked out."""
+    from api import api_bp
+    from api.plex import oauth
+    from app import config as app_config
+    from app import database as app_database
+    from flask import Flask
+
+    # api.utils bound the real settings when it was imported, so the API-key
+    # check reads that one whatever this fixture swaps in for the handlers.
+    monkeypatch.setitem(app_config.settings.auth, 'apikey', 'synthetic-bazarr-key')
+    config = plex_settings()
+    monkeypatch.setattr(app_config, 'settings', config)
+    monkeypatch.setattr(oauth, 'settings', config)
+    monkeypatch.setattr(oauth, 'write_config', lambda: None)
+    monkeypatch.setattr(app_database, 'database', schema_session)
+    monkeypatch.setattr(oauth, 'validate_plex_token',
+                        lambda token: {'id': 7, 'username': 'someone', 'email': 'a@b.example'})
+    app = Flask(__name__)
+    app.register_blueprint(api_bp)
+    return app.test_client(), config
+
+
+def test_the_oauth_pin_handler_creates_the_plex_destination(plex_account_api, monkeypatch,
+                                                            schema_session):
+    from api.plex import oauth
+    from media_servers.repository import MediaServerInstanceRepository
+    client, config = plex_account_api
+    monkeypatch.setattr(oauth.pin_cache, 'get', lambda pin: {'client_id': 'bazarr'})
+    monkeypatch.setattr(oauth.pin_cache, 'delete', lambda pin: None)
+    monkeypatch.setattr(oauth.requests, 'get', lambda *args, **kwargs: SimpleNamespace(
+        status_code=200, raise_for_status=lambda: None,
+        json=lambda: {'authToken': 'fresh-plex-token'}))
+
+    response = client.get('/api/plex/oauth/pin/123/check', headers=HEADERS)
+    assert response.status_code == 200 and response.json['data']['authenticated'] is True
+    # The picker is the second half of the same flow, and it is what gives the
+    # destination an address to refresh.
+    assert client.post('/api/plex/select-server', headers=HEADERS, json={
+        'machineIdentifier': 'abc', 'name': 'Attic',
+        'uri': 'https://plex.example:32400'}).status_code == 200
+    row, = MediaServerInstanceRepository(schema_session).list('plex')
+    assert bool(row.enabled) is True
+    assert row.url == 'https://plex.example:32400'
+    assert MediaServerInstanceRepository(schema_session).get_decrypted_api_key(row.id) == 'fresh-plex-token'
+    assert config.plex.instance_id == row.id
+
+
+def test_selecting_a_server_moves_the_destination_and_signing_out_disables_it(
+        plex_account_api, monkeypatch, schema_session):
+    from media_servers.plex_account import sync_plex_instance
+    from media_servers.repository import MediaServerInstanceRepository
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'existing-token'
+    config.plex.server_url = 'https://first.example:32400'
+    row = sync_plex_instance(schema_session, config)
+    repo = MediaServerInstanceRepository(schema_session)
+
+    response = client.post('/api/plex/select-server', headers=HEADERS, json={
+        'machineIdentifier': 'abc', 'name': 'Attic', 'uri': 'https://second.example:32400'})
+    assert response.status_code == 200
+    assert repo.get(row.id).url == 'https://second.example:32400'
+    assert repo.get_decrypted_api_key(row.id) == 'existing-token'
+
+    assert client.post('/api/plex/oauth/logout', headers=HEADERS, json={}).status_code == 200
+    assert bool(repo.get(row.id).enabled) is False
+    assert repo.get(row.id).api_key == ''
+    assert len(repo.list('plex')) == 1
+
+
+def test_saving_an_api_key_by_hand_reaches_the_destination(plex_account_api, monkeypatch,
+                                                           schema_session):
+    from media_servers.repository import MediaServerInstanceRepository
+    client, config = plex_account_api
+    config.plex.ip = 'plex.example'
+    response = client.post('/api/plex/apikey', headers=HEADERS, json={'apikey': 'typed-key'})
+    assert response.status_code == 200
+    row, = MediaServerInstanceRepository(schema_session).list('plex')
+    assert row.url == 'http://plex.example:32400'
+    assert MediaServerInstanceRepository(schema_session).get_decrypted_api_key(row.id) == 'typed-key'

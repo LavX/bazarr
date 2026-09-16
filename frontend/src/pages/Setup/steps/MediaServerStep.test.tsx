@@ -80,8 +80,17 @@ describe("MediaServerStep", () => {
       verify_ssl: false,
       api_key: "plex-token",
     });
+    // Both halves: the row refreshes subtitles, and the account scalars are
+    // what the recently-added dates, the webhook helper and Autopulse read.
     expect(mutate).toHaveBeenCalledWith(
-      expect.objectContaining({ "settings-general-use_plex": true }),
+      expect.objectContaining({
+        "settings-general-use_plex": true,
+        "settings-plex-ip": "10.0.0.9",
+        "settings-plex-port": 32400,
+        "settings-plex-ssl": false,
+        "settings-plex-apikey": "plex-token",
+        "settings-plex-auth_method": "apikey",
+      }),
     );
     expect(onNext).toHaveBeenCalled();
   });

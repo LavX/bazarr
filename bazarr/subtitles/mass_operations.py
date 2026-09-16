@@ -1021,14 +1021,11 @@ def _process_subtitle_item(item, action, options, job_id):
                 return False
             from sportarr.notify import notify_rescan
             from subtitles.indexer.sports import store_subtitles_sports
-            from subtitles.processing import refresh_sports_media_servers
 
             owner = item['arr_instance_id']
             try:
                 store_subtitles_sports(item['sports_event_id'], owner)
             finally:
-                refresh_sports_media_servers(
-                    item['video_path'], output_path, owner, publish_notification=False)
                 notify_rescan(owner)
             try:
                 event_stream(type='sports', payload=item['sports_event_id'])

@@ -5,7 +5,6 @@ import distributionHub from "./distributionHub";
 import episodes from "./episodes";
 import files from "./files";
 import history from "./history";
-import jellyfin from "./jellyfin";
 import mediaServers from "./mediaServers";
 import movies from "./movies";
 import plex from "./plex";
@@ -23,7 +22,6 @@ const api = {
   discover,
   episodes,
   files,
-  jellyfin,
   movies,
   mediaServers,
   series,

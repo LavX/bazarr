@@ -22,23 +22,12 @@ def _string_list(value):
     return [item for item in value if isinstance(item, str) and item.strip()]
 
 
-def _plex_url(section):
-    """Whichever endpoint the configured authentication method points at."""
-    if getattr(section, 'auth_method', 'apikey') == 'oauth':
-        return section.server_url if isinstance(section.server_url, str) else ''
-    scheme = 'https' if section.ssl else 'http'
-    if not isinstance(section.ip, str) or not section.ip:
-        return ''
-    return f'{scheme}://{section.ip}:{int(section.port)}'
-
-
 def _legacy_values(settings, kind):
     section = getattr(settings, kind)
     enabled = getattr(settings.general, 'use_' + kind)
     if kind == 'plex':
-        url = _plex_url(section)
-        api_key = (section.token if getattr(section, 'auth_method', 'apikey') == 'oauth'
-                   else section.apikey)
+        from .plex_account import account_credential, account_url
+        url, api_key = account_url(section), account_credential(section)
     else:
         url, api_key = section.url, section.apikey
     values = dict(kind=kind, name=kind.capitalize(), enabled=enabled,
@@ -72,31 +61,41 @@ def _legacy_values(settings, kind):
 
 
 def _configured(values):
-    """Whether these scalars are a destination or just the shipped defaults.
-
-    Plex is the exception. Its URL is composed from an ip and a port that
-    default to 127.0.0.1:32400, and its verify_ssl defaults to off, so neither
-    is evidence that anyone configured Plex. A credential, an enabled switch or
-    a chosen library is.
-    """
+    """Whether these scalars are a destination or just the shipped defaults."""
     libraries = any(values['options'].get(key) for key in LIBRARY_KEYS.get(values['kind'], ()))
-    if values['kind'] == 'plex':
-        return bool(values['enabled'] or values['api_key'] or libraries)
     return bool(values['enabled'] or values['url'] or values['api_key']
                 or values['path_mappings'] or values['verify_ssl'] is False or libraries)
 
 
 def backfill_instances(session, settings):
+    """Import each kind's scalar settings once, and keep Plex's row in step.
+
+    Plex is not a one-time import. Its account panel still writes the scalars
+    every time the user signs in, saves a key or picks a server, so its row is
+    reconciled on every startup instead, which is idempotent and never
+    duplicates. The other three are import-once behind a durable marker.
+
+    A kind with nothing configured is not stamped. Stamping it would spend the
+    one import on the shipped defaults and leave a user who configures that
+    kind later, by hand in config.yaml, with settings nothing ever reads.
+    """
     repo = MediaServerInstanceRepository(session)
     results = {}
     for kind in VALID_KINDS:
         try:
+            if kind == 'plex':
+                from .plex_account import sync_plex_instance
+                results[kind] = {'created': sync_plex_instance(session, settings) is not None}
+                continue
             with atomic(session, durable=True):
                 if session.get(TableMediaServerImports, kind) is not None:
                     results[kind] = {'created': False}
                     continue
                 values = _legacy_values(settings, kind)
-                row = repo.import_values(values) if _configured(values) else None
+                if not _configured(values):
+                    results[kind] = {'created': False}
+                    continue
+                row = repo.import_values(values)
                 _record_import(session, kind)
             results[kind] = {'created': row is not None}
         except Exception:

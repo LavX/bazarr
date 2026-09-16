@@ -88,6 +88,23 @@ class MediaServerInstanceStatus(Resource):
             return {'pending': 0, 'state': 'unconfirmed', 'error_code': 'migration_failed'}, 200
 
 
+@api_ns_system_media_server_instances.route(_ROOT + '/<string:instance_id>/refresh-libraries')
+class MediaServerInstanceLibraryRefresh(Resource):
+    @authenticate
+    def post(self, instance_id):
+        """Rescan every library this destination is scoped to, now."""
+        from media_servers.libraries import refresh_libraries
+        body, status = service.get_instance(database, instance_id)
+        if status != 200:
+            return body, status
+        try:
+            return {'requested': refresh_libraries(instance_id)}, 200
+        except MediaServerError as error:
+            return {'requested': 0, 'error_code': error.code}, 400
+        except Exception:
+            return {'requested': 0, 'error_code': 'connection_error'}, 400
+
+
 @api_ns_system_media_server_instances.route(_ROOT + '/<string:instance_id>/retry-pending')
 class MediaServerInstanceRetry(Resource):
     @authenticate

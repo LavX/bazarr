@@ -661,7 +661,6 @@ def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id, 
     if media_type == "sports":
         from sportarr.notify import notify_rescan
         from subtitles.indexer.sports import store_subtitles_sports
-        from subtitles.processing import refresh_sports_media_servers
 
         try:
             # Best effort, the way every other re-index that runs after a
@@ -675,10 +674,9 @@ def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id, 
             except Exception:
                 logging.exception('BAZARR could not reindex sports event %s after a subtitle action', id)
         finally:
-            # Sync and mods already dispatch the individual file publication.
-            # Only the whole-library destinations need a refresh here.
-            refresh_sports_media_servers(
-                video_path, subtitles_path, arr_instance_id, publish_notification=False)
+            # Sync and mods already dispatched the individual file publication,
+            # which is every media server's refresh. Only Sportarr still needs
+            # its own untargeted rescan from here.
             notify_rescan(arr_instance_id)
         event_stream(type="sports", payload=id)
         return

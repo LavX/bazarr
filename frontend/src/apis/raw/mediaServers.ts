@@ -333,6 +333,17 @@ class MediaServersApi extends BaseApi {
     }, "Refresh status unavailable");
   }
 
+  refreshLibraries(id: string) {
+    return safeRequest(async () => {
+      const { data } = await this.postRaw<{
+        requested: number;
+        error_code?: string;
+      }>(`${itemPath(id)}/refresh-libraries`, {});
+      if (!data || !Number.isInteger(data.requested)) throw new Error();
+      return { requested: data.requested };
+    }, "Could not refresh libraries");
+  }
+
   retryPending(id: string) {
     return safeRequest(async () => {
       const { data } = await this.postRaw<{ queued: number }>(

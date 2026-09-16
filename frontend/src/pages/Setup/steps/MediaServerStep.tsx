@@ -24,6 +24,11 @@ import type { WizardStepProps } from "./types";
  * as the first instance of that kind alongside its master switch. Both are
  * fully optional: only filled tabs are persisted, and Skip advances writing
  * nothing.
+ *
+ * Plex writes twice on purpose. The instance row is what refreshes subtitles,
+ * and the account scalars are what the recently-added dates, the webhook helper
+ * and the Autopulse generator still read, so a wizard that wrote only the row
+ * would leave those three with no credential.
  */
 const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   const settings = useSettingsMutation();
@@ -55,6 +60,11 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
     const rows: MediaServerCreate[] = [];
 
     if (plexFilled) {
+      payload["settings-plex-ip"] = plexIp.trim();
+      payload["settings-plex-port"] = Number(plexPort);
+      payload["settings-plex-ssl"] = plexSsl;
+      payload["settings-plex-apikey"] = plexToken.trim();
+      payload["settings-plex-auth_method"] = "apikey";
       payload["settings-general-use_plex"] = true;
       rows.push({
         kind: "plex",
