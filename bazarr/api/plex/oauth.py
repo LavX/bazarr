@@ -520,7 +520,6 @@ class PlexServers(Resource):
                     # Collect all connections for parallel testing
                     connection_candidates = []
                     connections = []
-                    all_device_connection_uris = []  # Store ALL URIs before testing
                     for conn in device.get('connections', []):
                         connection_data = {
                             'uri': conn['uri'],
@@ -530,7 +529,6 @@ class PlexServers(Resource):
                             'local': conn.get('local', False)
                         }
                         connection_candidates.append(connection_data)
-                        all_device_connection_uris.append(conn['uri'])  # Store ALL URIs
 
                     # Test all connections in parallel using threads
                     if connection_candidates:
@@ -572,18 +570,6 @@ class PlexServers(Resource):
                             'device': device.get('device')
                         }
                         servers.append(server_data)
-
-                        # Update stored connections if this is the currently selected server
-                        selected_machine_id = settings.plex.get('server_machine_id')
-                        if selected_machine_id and device['clientIdentifier'] == selected_machine_id:
-                            # Store ALL connection URIs (not just the working ones) for round-robin fallback
-                            settings.plex.server_connections = all_device_connection_uris
-                            # Update best connection if it changed
-                            if bestConnection:
-                                settings.plex.server_url = bestConnection['uri']
-                                settings.plex.server_local = bestConnection.get('local', False)
-                            write_config()
-                            logger.debug(f"Auto-updated connections for server {device['name']}: {len(all_device_connection_uris)} total, {len(connections)} available")
 
             return {'data': servers}
 
