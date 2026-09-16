@@ -73,9 +73,11 @@ class SubtitlePublication:
         self.source_version = source_version
         with self.state:
             self.source_revision = self.state.revision(source_path)
-            # A preview owns its workspace outright, so it needs no media owner.
-            # Library sources still have to prove one: this branch cannot be
-            # reached from a media folder, and nothing else is relaxed.
+            # Every destination below is a sibling of the source, so asking about
+            # the source's directory answers for all of them. A preview owns its
+            # workspace outright and needs no media owner; library sources still
+            # have to prove one, and this branch cannot be reached from a media
+            # folder, so nothing else is relaxed.
             self.preview = is_preview_destination(source_path)
             self.owns_destinations = (self.preview
                                       or sync_output_owner_is_unique(video_path, source_path))

@@ -1,5 +1,6 @@
 # coding=utf-8
 
+import codecs
 import hashlib
 import json
 import logging
@@ -1184,6 +1185,15 @@ class EditorSync(Resource):
         if fmt not in ('srt', 'vtt', 'ass', 'ssa', 'sub', 'smi', 'mpl', 'txt'):
             return 'Invalid format; must be one of srt, vtt, ass, ssa, sub, smi, mpl, txt', 400
 
+        # The body names the codec its content is written in, and it is also what the
+        # worker reads the aligned result back with. An unknown name is the caller's
+        # mistake, so it is refused here rather than raising LookupError later, once
+        # the temporary files already exist.
+        try:
+            codecs.lookup(encoding)
+        except (LookupError, TypeError):
+            return 'Invalid encoding', 400
+
         try:
             media_id = int(media_id)
         except (ValueError, TypeError):
@@ -1200,26 +1210,30 @@ class EditorSync(Resource):
         if not os.path.isfile(video_path):
             return 'Video file not found', 404
 
+        import threading
+
         ext = f'.{fmt}'
         # The editor previews an alignment: nothing here is a library subtitle until
         # the user saves the content back. Input and engine outputs share a directory
         # of Bazarr's own, which keeps generated names off the media folder and gives
         # the destinations an owner that does not depend on the video's stem.
         preview_workspace = create_preview_workspace()
-        fd, tmp_in = tempfile.mkstemp(suffix=ext, prefix='bazarr_sync_', dir=preview_workspace)
-        os.write(fd, content.encode(encoding))
-        os.close(fd)
-        tmp_out = tmp_in.replace(ext, f'.synced{ext}')
-
-        import threading
-
-        job_key = f'editor_sync_{hashlib.md5(tmp_in.encode()).hexdigest()[:8]}'
-        _editor_sync_jobs[job_key] = {'status': 'running', 'content': None, 'message': 'Starting sync...'}
-
-        # Submit to the jobs queue for visibility in Jobs Manager. A queue that
-        # refuses the job leaves nobody to run the cleanup timer, so the workspace
-        # is dropped here rather than left behind for the life of the process.
+        job_key = None
+        # Once the workspace exists, only the queued job's cleanup timer removes it,
+        # so everything up to a successful hand-off unwinds here instead. Content the
+        # named codec cannot represent is the realistic way in.
         try:
+            fd, tmp_in = tempfile.mkstemp(suffix=ext, prefix='bazarr_sync_', dir=preview_workspace)
+            try:
+                os.write(fd, content.encode(encoding))
+            finally:
+                os.close(fd)
+            tmp_out = tmp_in.replace(ext, f'.synced{ext}')
+
+            job_key = f'editor_sync_{hashlib.md5(tmp_in.encode()).hexdigest()[:8]}'
+            _editor_sync_jobs[job_key] = {'status': 'running', 'content': None, 'message': 'Starting sync...'}
+
+            # Submit to the jobs queue for visibility in Jobs Manager.
             queue_job_id = jobs_queue.feed_jobs_pending_queue(
                 job_name='Editor Sync',
                 module='api.editor.editor',

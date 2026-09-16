@@ -1,5 +1,6 @@
 """Native notifications follow real file publication, not secondary callbacks."""
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -465,6 +466,29 @@ def test_editor_preview_cleans_up_its_private_workspace(upload_flow, monkeypatch
         callback()
     assert not run.workspace.exists()
     assert flow.video.exists()
+
+
+def test_editor_preview_unwinds_when_the_content_cannot_be_encoded(upload_flow, mutations, monkeypatch):
+    """A codec that cannot represent the content must not strand a workspace."""
+    from api.editor import editor
+    from subtitles.tools import subsync_engines
+    flow = upload_flow
+    opened = []
+    real_create = subsync_engines.create_preview_workspace
+    monkeypatch.setattr(editor, 'create_preview_workspace',
+                        lambda: opened.append(real_create()) or opened[-1])
+    registered = set(subsync_engines._preview_workspaces)
+    known_jobs = set(editor._editor_sync_jobs)
+
+    with pytest.raises(UnicodeEncodeError):
+        _drive_editor_preview(flow, monkeypatch, encoding='ascii',
+                              content='1\n00:00:01,000 --> 00:00:02,000\nSzinkroniz\u00e1lt\n')
+
+    assert opened, 'the endpoint never reached the workspace it had to clean up'
+    assert not os.path.exists(opened[0])
+    assert set(subsync_engines._preview_workspaces) == registered
+    assert set(editor._editor_sync_jobs) == known_jobs
+    assert mutations == []
 
 
 def test_library_sync_after_a_preview_keeps_the_video_owner(upload_flow, mutations, monkeypatch):
