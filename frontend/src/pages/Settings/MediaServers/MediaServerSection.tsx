@@ -91,7 +91,9 @@ export default function MediaServerSection({
             : "Notify Silo about movie and episode subtitle changes. Subtitle sidecars must be beside the video file."}{" "}
           <Anchor
             c="light-dark(var(--mantine-color-brand-7), var(--mantine-color-brand-4))"
-            href="https://lavx.github.io/bazarr/guides/media-servers.html"
+            href={`https://lavx.github.io/bazarr/guides/media-servers.html${
+              kind === "silo" ? "#silo" : ""
+            }`}
             target="_blank"
             rel="noreferrer"
           >

@@ -144,7 +144,7 @@
       <p>Every instance owns its own enabled state, URL, key, TLS setting, path mappings, Silo library choices, queued refreshes, status and retry action. Nothing is shared between two instances of the same kind.</p>
 
       <div class="note">
-        <strong>Upgrading from a single server?</strong> Your existing Emby or Silo configuration is imported once into an instance on the first start after upgrading, and a durable marker stops it running twice. There is nothing to re-enter.
+        <strong>Both are new in v2.7.</strong> Neither Emby nor Silo existed in any earlier Bazarr+ release, so there is no single-server setup to carry over and nothing to migrate. Every instance here is one you add.
       </div>
 
       <h2 id="path-mappings">Path mappings, and when you need them</h2>
@@ -169,7 +169,7 @@
         <li><strong>Title and year.</strong> After the path, because two metadata fields are a guess and a guess must not pre-empt proof. The candidate still has to hold the file for this rung to accept it.</li>
         <li><strong>Library refresh.</strong> Last, because it is the broadest thing any server can be asked to do. It is what reaches a file Emby has not indexed yet at all.</li>
       </ol>
-      <p>Movies and episodes both, and all seven publication types. If you used Emby with an older Bazarr+, note that it previously refreshed movies only, and only on download and upload. Both of those restrictions are gone.</p>
+      <p>Movies and episodes both, and all seven publication types. Emby support is new in v2.7, so there is no older behaviour to unlearn: this is how it has always worked.</p>
 
       <h2 id="silo">Silo</h2>
       <p>Silo climbs two rungs: the <strong>exact path</strong>, then a <strong>library scan</strong>. Movies and episodes both, and all seven publication types, exactly like Emby.</p>
@@ -185,14 +185,17 @@
         <strong>Silo only sees sidecar subtitles.</strong> Silo refreshes subtitles stored beside the video file. If your subtitle folder setting puts them somewhere else, Silo has nothing to find, and the instance reports exactly that: "Silo only refreshes subtitles stored beside the video file. Move the subtitle there, then retry."
       </div>
 
+      <h2 id="sports">Sports</h2>
+      <p>Sports recordings publish to both servers as well, on a shorter ladder: a sports event carries no provider identifiers, so the identity rungs cannot answer for one. Silo keeps its full path rung, because its file scan takes only a library and a path and does not care what kind of media it is, so a recording scans exactly as a movie does. Emby is left with the library refresh, because the typed item lookup its other rungs use has no sports item type to ask for.</p>
+
       <h2 id="refresh-status">Reading the status on an instance card</h2>
       <p>Each instance card carries its own refresh state. Five states, and they mean different amounts:</p>
       <ul>
         <li><strong>No pending refreshes.</strong> Nothing is queued for this instance.</li>
         <li><strong>Refresh pending.</strong> Queued but not yet sent, with the number of queued refreshes beside it.</li>
         <li><strong>Refresh sent.</strong> The server accepted the request. This is as far as a submitted request can be known.</li>
-        <li><strong>Refresh confirmed.</strong> The refresh was observed through to completion, which Silo's watched file scan can prove.</li>
-        <li><strong>Refresh unconfirmed.</strong> The request went out and Bazarr+ could not establish that it finished. Worth a look; not the same as a failure.</li>
+        <li><strong>Refresh confirmed.</strong> The refresh was observed through to completion, which Silo's watched file scan can prove. Read it precisely, and the card says so too: "Confirmation means the server finished a scan, not that it found the subtitle."</li>
+        <li><strong>Refresh unconfirmed.</strong> The request went out and Bazarr+ could not establish that it finished. Worth a look; not the same as a failure. On Silo there is one cause you can actually fix, and the card names it: "When Silo runs across machines, synchronize the application/event-publisher and database clocks so refresh completion can be confirmed."</li>
       </ul>
       <p><strong>Retry pending</strong> drains the queue for that instance, using the <em>saved</em> connection settings, not whatever is typed into the form. Save your changes first, and if the instance or its master switch is off, turn them on and save before retrying.</p>
 
@@ -215,6 +218,8 @@
       <p><strong>Silo mappings show as unavailable.</strong> The Silo library a mapping points at is gone, disabled, or was never loaded. Press <strong>Load libraries</strong> and pick the library again. Saved mappings are preserved when a library load fails.</p>
 
       <p><strong>"No supported libraries found" on Silo.</strong> Silo only offers movie and series libraries here, and only enabled ones. Enable one in Silo, and check that the API key can see it.</p>
+
+      <p><strong>Silo refreshes stay unconfirmed.</strong> When Silo runs across machines, synchronize the application/event-publisher and database clocks so refresh completion can be confirmed. Bazarr+ watches Silo's scan events and matches them against the scan it asked for; clocks that disagree between the application, the event publisher and the database make that match impossible, so a scan that really did finish is reported as unconfirmed.</p>
 
       <p><strong>Emby refreshes the wrong item.</strong> That is what the ladder's ordering exists to prevent, and the most likely cause is a mapping that points two instances at overlapping folders. A path that matches several instances refreshes each of them, by design.</p>
 

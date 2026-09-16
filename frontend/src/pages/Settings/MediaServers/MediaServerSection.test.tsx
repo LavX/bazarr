@@ -723,12 +723,14 @@ it.each([
 
 // Path mappings, the five refresh states and what each server can match on are
 // explained on the guide and nowhere in the form.
-it.each(["emby", "silo"] as const)("points %s at the guide", async (kind) => {
+// One page, two servers, so Silo lands on its own section rather than the top
+// of a page whose first half is about Emby.
+it.each([
+  ["emby", "https://lavx.github.io/bazarr/guides/media-servers.html"],
+  ["silo", "https://lavx.github.io/bazarr/guides/media-servers.html#silo"],
+] as const)("points %s at its part of the guide", async (kind, href) => {
   setup(kind);
   expect(
     await screen.findByRole("link", { name: "Read the media servers guide" }),
-  ).toHaveAttribute(
-    "href",
-    "https://lavx.github.io/bazarr/guides/media-servers.html",
-  );
+  ).toHaveAttribute("href", href);
 });
