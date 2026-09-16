@@ -73,7 +73,12 @@ class SubtitlePublication:
         self.source_version = source_version
         with self.state:
             self.source_revision = self.state.revision(source_path)
-            self.owns_destinations = sync_output_owner_is_unique(video_path, source_path)
+            # A preview owns its workspace outright, so it needs no media owner.
+            # Library sources still have to prove one: this branch cannot be
+            # reached from a media folder, and nothing else is relaxed.
+            self.preview = is_preview_destination(source_path)
+            self.owns_destinations = (self.preview
+                                      or sync_output_owner_is_unique(video_path, source_path))
             self.destinations = {
                 str(path): (self.state.revision(path), subtitle_source_version(path))
                 for path in (engine_output_path(source_path, engine) for engine in SYNC_ENGINES)
@@ -262,6 +267,59 @@ def write_subtitle_file(video_path, destination, content, written_paths=None,
                               if written_paths is not None else None) as temporary:
         with open(temporary, 'wb') as handle:
             handle.write(content)
+
+
+# The subtitle editor aligns content that is not a library subtitle yet: its source
+# and every engine output are throwaway files the user still has to save explicitly
+# before anything reaches the library. Those runs get a directory of their own so
+# their destinations have an owner without borrowing the video's, which is what the
+# editor's default keep-all alignment needs and what its temporary file name, on its
+# own, can never prove.
+PREVIEW_WORKSPACE_PREFIX = 'bazarr-sync-preview-'
+
+_preview_workspaces = set()
+_preview_workspaces_guard = Lock()
+
+
+def _preview_workspace_key(path):
+    return os.path.normcase(os.path.realpath(str(path)))
+
+
+def create_preview_workspace():
+    """Open a private directory whose generated subtitle names belong to one run."""
+    directory = tempfile.mkdtemp(prefix=PREVIEW_WORKSPACE_PREFIX)
+    with _preview_workspaces_guard:
+        _preview_workspaces.add(_preview_workspace_key(directory))
+    return directory
+
+
+def discard_preview_workspace(directory):
+    """Drop a preview workspace and whatever the run left inside it.
+
+    Only a directory this process opened is removed. An unrecognized path is
+    left alone: the cleanup timer outlives the run, and a stale or forged value
+    must never turn into a recursive delete of a real folder.
+    """
+    if not directory:
+        return
+    key = _preview_workspace_key(directory)
+    with _preview_workspaces_guard:
+        recognized = key in _preview_workspaces
+        _preview_workspaces.discard(key)
+    if recognized:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def is_preview_destination(path):
+    """Answer whether a destination sits in a preview namespace we opened.
+
+    Recognition is by the directories create_preview_workspace() actually made,
+    not by their names: the answer decides whether a write skips library
+    ownership validation, and a name prefix is a guess anything on disk can
+    imitate. Nothing under a media folder can ever match.
+    """
+    with _preview_workspaces_guard:
+        return _preview_workspace_key(os.path.dirname(str(path))) in _preview_workspaces
 
 
 def _normalized_media_stem(path):
