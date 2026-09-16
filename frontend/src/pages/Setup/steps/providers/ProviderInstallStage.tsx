@@ -38,6 +38,11 @@ export interface ProviderInstallStageProps {
   // Switch to the configure sub-stage without restarting (providers already
   // installed). Only surfaced when hasInstalled is true.
   onUseInstalled: () => void;
+  // Leave the step without installing anything. Providers are the one part of
+  // this wizard that can be unreachable from inside it: an install with no
+  // catalog has nothing to select, and "Install & restart" stays disabled
+  // until something is, which left the remaining steps unreachable.
+  onNext: () => void;
   onBack?: () => void;
 }
 
@@ -69,6 +74,7 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   hasInstalled,
   onInstalledNeedsRestart,
   onUseInstalled,
+  onNext,
   onBack,
 }) => {
   const { data: catalog } = useProviderHubCatalog();
@@ -266,6 +272,12 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
               Use already-installed providers
             </Button>
           )}
+          {/* The Subtitle Hub covers the same ground afterwards, which is what
+              the empty-catalog notice above already says to a reader who has
+              no catalog to pick from. */}
+          <Button variant="subtle" color="gray" onClick={onNext}>
+            Skip for now
+          </Button>
         </Group>
         <Button
           onClick={() => void handleInstall()}

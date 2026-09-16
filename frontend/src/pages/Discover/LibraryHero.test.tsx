@@ -501,3 +501,40 @@ it("still reports idle when it has never fetched anything", async () => {
   render();
   expect(await screen.findByText("Subtitle jobs idle")).toBeInTheDocument();
 });
+
+// A 200 is not a promise that the body is a summary. A reverse proxy's sign-in
+// page, an authentication message and the SPA's own index.html all arrive as a
+// truthy body with none of the summary's components in it, and reaching into
+// one of those took the whole page down with "Cannot read properties of
+// undefined (reading 'availability')".
+it("says local activity is unreadable when the answer is not a summary", async () => {
+  served = {
+    message:
+      "The server could not verify that you are authorized to access the URL requested.",
+  };
+  render();
+  expect(
+    await screen.findByText("Local activity could not be read."),
+  ).toBeInTheDocument();
+  // Counts stay unknown rather than being drawn as a reassuring zero.
+  await waitFor(async () =>
+    expect(await statFor("Series")).toHaveTextContent("Unknown"),
+  );
+});
+
+it("renders a summary whose activity is missing the lists it usually carries", async () => {
+  served = summary({
+    activity: {
+      availability: "available",
+      observed_at: "2026-09-01T12:00:00Z",
+      complete: true,
+      truncated: false,
+      unknown_sources: [],
+      running_count: 0,
+      queued_count: 0,
+      scheduled_count: null,
+    },
+  });
+  render();
+  expect(await screen.findByText("Subtitle jobs idle")).toBeInTheDocument();
+});

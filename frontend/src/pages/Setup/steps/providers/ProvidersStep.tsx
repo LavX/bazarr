@@ -50,6 +50,7 @@ const ProvidersStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   return (
     <ProviderInstallStage
       hasInstalled={hasInstalled}
+      onNext={onNext}
       onInstalledNeedsRestart={() => {
         // The install stage owns the restart overlay + resume; nothing to do
         // here beyond letting it take over the view.

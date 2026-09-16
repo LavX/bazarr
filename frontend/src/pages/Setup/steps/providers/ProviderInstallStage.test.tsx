@@ -45,6 +45,7 @@ const mutateAsync = vi.fn();
 const restart = vi.fn();
 const onInstalledNeedsRestart = vi.fn();
 const onUseInstalled = vi.fn();
+const onNext = vi.fn();
 
 function setCatalog(entries: unknown[]) {
   mockedCatalog.mockReturnValue({
@@ -91,6 +92,30 @@ describe("ProviderInstallStage", () => {
     vi.useRealTimers();
   });
 
+  // A first-run install with no reachable catalog has nothing to select, and
+  // the only other control on the step is disabled until something is. The
+  // wizard has four more steps after this one, so a reader who cannot reach
+  // the catalog was stranded two thirds of the way through it.
+  it("offers a way past the step when there is nothing to install", async () => {
+    const user = userEvent.setup();
+    setCatalog([]);
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    expect(screen.getByText(/no providers available/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /install & restart/i }),
+    ).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: /skip for now/i }));
+    expect(onNext).toHaveBeenCalledTimes(1);
+  });
+
   it("installs each selected provider, then restarts and shows the overlay", async () => {
     const user = userEvent.setup();
     customRender(
@@ -98,6 +123,7 @@ describe("ProviderInstallStage", () => {
         hasInstalled={false}
         onInstalledNeedsRestart={onInstalledNeedsRestart}
         onUseInstalled={onUseInstalled}
+        onNext={onNext}
       />,
     );
 
@@ -139,6 +165,7 @@ describe("ProviderInstallStage", () => {
         hasInstalled={false}
         onInstalledNeedsRestart={onInstalledNeedsRestart}
         onUseInstalled={onUseInstalled}
+        onNext={onNext}
       />,
     );
 
@@ -164,6 +191,7 @@ describe("ProviderInstallStage", () => {
         hasInstalled={false}
         onInstalledNeedsRestart={onInstalledNeedsRestart}
         onUseInstalled={onUseInstalled}
+        onNext={onNext}
       />,
     );
 
@@ -178,6 +206,7 @@ describe("ProviderInstallStage", () => {
         hasInstalled
         onInstalledNeedsRestart={onInstalledNeedsRestart}
         onUseInstalled={onUseInstalled}
+        onNext={onNext}
       />,
     );
 
