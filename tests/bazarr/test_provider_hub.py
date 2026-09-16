@@ -234,6 +234,223 @@ def test_manifest_rejects_built_in_provider_shadowing():
         validate_manifest(manifest, built_in_provider_ids={"opensubtitles"})
 
 
+def test_manifest_rejects_provider_id_naming_a_bazarr_settings_section():
+    # The pool overlay copies every key a plugin declares in its config_schema
+    # out of the settings section named after the plugin, so an id that names one
+    # of Bazarr's own sections is a credential handout: sonarr.apikey,
+    # plex.token, auth.password, postgresql.password. The reserved set is derived
+    # from the settings validators, never hand-kept here, so a section added
+    # later is covered the day it is declared.
+    from provider_hub.manifest import (
+        ManifestValidationError,
+        reserved_settings_sections,
+        validate_manifest,
+    )
+
+    reserved = reserved_settings_sections()
+    # Two floors under the loop below, because a loop over whatever the set
+    # happens to hold stops testing a section the day it silently leaves it.
+    # The literal one is the sections the leak was found on; the derived one is
+    # every section the secret store keeps a credential in that no provider owns,
+    # so the two cannot drift apart as the secret registry grows.
+    assert {
+        "anticaptcha",
+        "auth",
+        "captchaai",
+        "compat_endpoint",
+        "deathbycaptcha",
+        "discover",
+        "emby",
+        "general",
+        "jellyfin",
+        "omdb",
+        "plex",
+        "postgresql",
+        "proxy",
+        "radarr",
+        "seerr",
+        "silo",
+        "sonarr",
+        "translator",
+    } <= reserved
+    assert _secret_bearing_non_provider_sections() <= reserved
+
+    for section in sorted(reserved):
+        with pytest.raises(ManifestValidationError, match="settings section"):
+            validate_manifest(
+                _manifest(provider_id=section, name=section.title()),
+                built_in_provider_ids=set(),
+            )
+
+
+def _secret_bearing_non_provider_sections():
+    """Sections the secret store keeps a credential in that no provider owns.
+
+    Derived from secret_store.registry rather than listed here, so a credential
+    added to a new section is covered by the reserved-section rule the day it is
+    registered.
+    """
+    from provider_hub.migration import (
+        MIGRATED_BUILT_IN_PROVIDER_IDS,
+        RETIRED_BUILT_IN_PROVIDER_IDS,
+    )
+    from secret_store.registry import (
+        IMPORT_ONLY_SECTIONS,
+        SYSTEM_SECRETS,
+        USER_VISIBLE_SECRET_LISTS,
+        USER_VISIBLE_SECRETS,
+        WRITE_ONLY_SECRETS,
+    )
+    from subliminal_patch.extensions import provider_registry
+
+    secret_paths = (
+        USER_VISIBLE_SECRETS
+        | USER_VISIBLE_SECRET_LISTS
+        | SYSTEM_SECRETS
+        | WRITE_ONLY_SECRETS
+    )
+    sections = {path.split(".", 1)[0] for path in secret_paths} | set(IMPORT_ONLY_SECTIONS)
+    return sections - (
+        set(provider_registry.names())
+        | MIGRATED_BUILT_IN_PROVIDER_IDS
+        | RETIRED_BUILT_IN_PROVIDER_IDS
+    )
+
+
+def test_a_registered_hub_plugin_cannot_unreserve_a_section_for_itself():
+    # Hub plugins register into the same provider registry as the built-ins, so
+    # reading that registry back without subtracting them would let the very
+    # plugin the rule exists to stop turn its id into a "provider-owned" section
+    # and unreserve it, which is the same trap registry.py's shadow gate names.
+    import provider_hub.registry as hub_registry
+    from provider_hub.manifest import (
+        ManifestValidationError,
+        reserved_settings_sections,
+        validate_manifest,
+    )
+    from subliminal_patch.extensions import provider_registry
+
+    class ImpostorProvider:
+        pass
+
+    assert "sonarr" in reserved_settings_sections()
+
+    provider_registry.register("sonarr", ImpostorProvider)
+    hub_registry._REGISTERED_PROVIDER_HUB_IDS.add("sonarr")
+    try:
+        assert "sonarr" in reserved_settings_sections()
+        with pytest.raises(ManifestValidationError, match="settings section"):
+            validate_manifest(
+                _manifest(provider_id="sonarr", name="Sonarr"),
+                built_in_provider_ids=set(),
+            )
+    finally:
+        hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard("sonarr")
+        if "sonarr" in provider_registry:
+            del provider_registry["sonarr"]
+
+
+def test_manifest_validation_refuses_when_the_reserved_set_cannot_be_derived(monkeypatch):
+    # The reserved set is half of a security gate. Failing open would accept a
+    # plugin calling itself sonarr and the pool overlay would then hand it the
+    # section, so a derivation that cannot run has to refuse instead.
+    import sys
+
+    from provider_hub.manifest import (
+        ManifestValidationError,
+        reserved_settings_sections,
+        validate_manifest,
+    )
+
+    monkeypatch.setitem(sys.modules, "app.config", None)
+
+    with pytest.raises(ManifestValidationError, match="reserved"):
+        reserved_settings_sections()
+    with pytest.raises(ManifestValidationError, match="reserved"):
+        validate_manifest(_manifest(), built_in_provider_ids=set())
+
+
+def test_manifest_validation_refuses_an_empty_reserved_derivation(monkeypatch):
+    # Same refusal for settings that import but declare nothing: an empty set
+    # reserves nothing at all, which is indistinguishable from no rule.
+    import sys
+    from types import SimpleNamespace
+
+    from provider_hub.manifest import ManifestValidationError, validate_manifest
+
+    monkeypatch.setitem(sys.modules, "app.config", SimpleNamespace(validators=[]))
+
+    with pytest.raises(ManifestValidationError, match="reserved"):
+        validate_manifest(_manifest(), built_in_provider_ids=set())
+
+
+def test_settings_section_provider_id_is_rejected_from_a_trusted_source():
+    # No built-in provider owns one of these sections, so there is nothing for
+    # the trusted shadow gate to grant: the rejection holds for every install
+    # source, trusted catalog and local upload alike.
+    from provider_hub.manifest import ManifestValidationError, validate_manifest
+    from provider_hub.migration import validation_built_in_provider_ids
+    from provider_hub.service import _built_in_provider_ids
+
+    manifest = _manifest(provider_id="sonarr", name="Sonarr")
+    manifest["source"] = dict(manifest["source"], trusted=True)
+
+    with pytest.raises(ManifestValidationError, match="settings section"):
+        validate_manifest(
+            manifest,
+            built_in_provider_ids=validation_built_in_provider_ids(
+                "sonarr", _built_in_provider_ids(), trusted=True
+            ),
+        )
+
+
+def test_reserved_settings_sections_leave_provider_owned_sections_alone():
+    # Catalog plugins reuse built-in provider ids on purpose (subdl, whisperai,
+    # titlovi and the rest of the migration allowlist), and every one of those
+    # ids is also a settings section. Reserving them would reject those manifests
+    # and drop the plugins from the pool on the next boot, so the reserved set is
+    # only ever the sections no provider owns.
+    from provider_hub.manifest import reserved_settings_sections, validate_manifest
+    from provider_hub.migration import (
+        MIGRATED_BUILT_IN_PROVIDER_IDS,
+        RETIRED_BUILT_IN_PROVIDER_IDS,
+    )
+    from subliminal_patch.extensions import provider_registry
+
+    provider_owned = (
+        set(provider_registry.names())
+        | MIGRATED_BUILT_IN_PROVIDER_IDS
+        | RETIRED_BUILT_IN_PROVIDER_IDS
+    )
+    assert not reserved_settings_sections() & provider_owned
+
+    for provider_id in ("subdl", "whisperai", "titlovi", "opensubtitlescom", "subf2m"):
+        validate_manifest(
+            _manifest(provider_id=provider_id, name=provider_id.title()),
+            built_in_provider_ids=set(),
+        )
+
+
+def test_a_plugins_own_config_section_never_becomes_reserved():
+    # Saving a plugin's Settings card writes its config into config.yaml under
+    # the plugin's id, so the plugin's own section is in the live settings object
+    # from the next boot on. Deriving the reserved set from the stored sections
+    # instead of the validators would make the plugin reserve itself out of the
+    # pool the moment its user configured it.
+    from app.config import settings
+    from provider_hub.manifest import reserved_settings_sections, validate_manifest
+
+    settings.set("configuredhub", {"api_key": "configured-by-the-user"})
+    try:
+        assert "configuredhub" not in reserved_settings_sections()
+        validate_manifest(
+            _manifest(provider_id="configuredhub", name="Configured Hub"),
+            built_in_provider_ids=set(),
+        )
+    finally:
+        settings.set("configuredhub", {})
+
+
 @pytest.mark.parametrize(
     "requirement",
     [
