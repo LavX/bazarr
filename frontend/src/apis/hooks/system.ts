@@ -290,7 +290,12 @@ export function useRestoreBackups() {
     mutationKey: [QueryKeys.System, QueryKeys.Backups],
     mutationFn: (filename: string) => api.system.restoreBackups(filename),
 
-    onSuccess: () => {
+    onSuccess: (data) => {
+      const message =
+        data && typeof data === "object" && typeof data.message === "string"
+          ? data.message
+          : "Restore staged; Bazarr will restart to apply it";
+      showNotification(notification.info("Backup restored", message));
       void client.invalidateQueries({
         queryKey: [QueryKeys.System, QueryKeys.Backups],
       });

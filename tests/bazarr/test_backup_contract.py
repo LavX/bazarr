@@ -218,6 +218,51 @@ def _stage_restore(backup_env, database_name):
         (backup_env.restore_dir / database_name).write_text('dump', encoding='utf-8')
 
 
+def _write_backup_archive(backup_env, database_name, stamp='2026.09.16_12.00.00'):
+    """A well-named archive the restore endpoint will accept."""
+    archive = backup_env.backup_dir / f'bazarr_backup_v1.2.3_{stamp}.zip'
+    with zipfile.ZipFile(archive, 'w') as zip_file:
+        zip_file.writestr('config.yaml', 'general:\n  port: 7000\n')
+        zip_file.writestr(database_name, 'database-bytes')
+    return archive
+
+
+def _capture_timers(monkeypatch):
+    """Record Timer(delay, fn) without starting the thread."""
+    scheduled = []
+
+    class CapturedTimer:
+        def __init__(self, delay, function, args=None, kwargs=None):
+            self.delay = delay
+            self.function = function
+            self.args = args or ()
+            self.kwargs = kwargs or {}
+            scheduled.append(self)
+
+        def start(self):
+            return None
+
+        def fire(self):
+            return self.function(*self.args, **self.kwargs)
+
+    monkeypatch.setattr('threading.Timer', CapturedTimer)
+    return scheduled
+
+
+def _call_restore_patch(backup_env, monkeypatch, filename):
+    """Invoke SystemBackups.patch the way the other backup API test does."""
+    from flask import Flask
+
+    monkeypatch.setenv('PATH', backup_env.original_path)
+    import api.system.backups as backups_api
+    monkeypatch.setenv('PATH', str(backup_env.tools_dir))
+
+    app = Flask(__name__)
+    with app.test_request_context('/api/system/backups', method='PATCH',
+                                  data={'filename': filename}):
+        return backups_api.SystemBackups.patch.__wrapped__(backups_api.SystemBackups())
+
+
 def test_postgres_restore_runs_pg_restore_with_the_clean_flags(backup_env, monkeypatch):
     _enable_postgresql(backup_env, monkeypatch)
     log_path = _write_fake_tool(str(backup_env.tools_dir), 'pg_restore')
@@ -598,4 +643,68 @@ def test_an_unparseable_connection_url_does_not_escape_as_a_boot_failure(backup_
     _write_fake_tool(str(backup_env.tools_dir), 'pg_restore')
     _stage_restore(backup_env, 'bazarr_postgres.dump')
     assert backup_env.module.restore_from_backup() is False
+    assert backup_env.restarts == []
+
+
+RESTORE_STAGED_BODY = {
+    'restart': True,
+    'message': 'Restore staged; Bazarr will restart to apply it',
+}
+
+
+def test_restore_api_returns_success_before_restart(backup_env, monkeypatch):
+    """PATCH must answer 2xx before restart_bazarr runs.
+
+    prepare_restore used to call webserver.close_all() and restart_bazarr()
+    (os._exit) on the request thread, so the 204 never left. Docker's
+    supervisor proxy then answered 503 for the dropped upstream. This fails
+    when restart runs before the view returns.
+    """
+    monkeypatch.setattr(backup_env.settings.postgresql, 'enabled', False)
+    archive = _write_backup_archive(backup_env, 'bazarr.db')
+    scheduled = _capture_timers(monkeypatch)
+
+    order = []
+    monkeypatch.setattr(backup_env.module, 'restart_bazarr', lambda: order.append('restart'))
+
+    result = _call_restore_patch(backup_env, monkeypatch, archive.name)
+    order.append('response')
+
+    body, status = result
+    assert (status, body, order) == (200, RESTORE_STAGED_BODY, ['response'])
+    assert scheduled
+    scheduled[0].fire()
+    assert order == ['response', 'restart']
+
+
+def test_restore_api_postgres_archive_also_answers_before_restart(backup_env, monkeypatch):
+    _enable_postgresql(backup_env, monkeypatch)
+    archive = _write_backup_archive(backup_env, 'bazarr_postgres.dump',
+                                    stamp='2026.09.16_12.00.01')
+    scheduled = _capture_timers(monkeypatch)
+
+    order = []
+    monkeypatch.setattr(backup_env.module, 'restart_bazarr', lambda: order.append('restart'))
+
+    result = _call_restore_patch(backup_env, monkeypatch, archive.name)
+    order.append('response')
+
+    body, status = result
+    assert (status, body, order) == (200, RESTORE_STAGED_BODY, ['response'])
+    assert scheduled
+    scheduled[0].fire()
+    assert order == ['response', 'restart']
+
+
+def test_restore_api_failure_is_still_500_and_does_not_schedule_restart(backup_env, monkeypatch):
+    monkeypatch.setattr(backup_env.settings.postgresql, 'enabled', False)
+    archive = backup_env.backup_dir / 'bazarr_backup_v1.2.3_2026.09.16_12.00.02.zip'
+    archive.write_bytes(b'PK\x03\x04 this is not a zip file at all')
+    scheduled = _capture_timers(monkeypatch)
+
+    body, status = _call_restore_patch(backup_env, monkeypatch, archive.name)
+
+    assert status == 500
+    assert body == 'Error while restoring backup. Check logs.'
+    assert scheduled == []
     assert backup_env.restarts == []
