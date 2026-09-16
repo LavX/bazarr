@@ -7,7 +7,7 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useSystemSettings } from "@/apis/hooks";
-import { useDiscoverSummary } from "@/apis/hooks/discover";
+import { summaryUnreadable, useDiscoverSummary } from "@/apis/hooks/discover";
 import type { DiscoverArrival } from "@/types/discover";
 import { readableTime } from "./feedText";
 import styles from "./Discover.module.scss";
@@ -96,13 +96,16 @@ export default function LibraryActivity() {
   const summary = useDiscoverSummary();
   const settings = useSystemSettings();
   const data = summary.data;
-  const librarySetup = data?.onboarding.items.find(
+  const librarySetup = data?.onboarding?.items?.find(
     (item) => item.id === "library",
   );
   const arrivals = data?.arrivals ?? [];
+  // Every component here is read as optional: a body that answered 200 without
+  // them is unavailable, which is the same thing this strip already says about
+  // a failed read.
   const unavailable =
-    !summary.isPending &&
-    (summary.isError || data?.arrivals_status.availability !== "available");
+    summaryUnreadable(summary) ||
+    (data !== undefined && data.arrivals_status?.availability !== "available");
   const historyCategories = [
     ...(settings.data?.general.use_sonarr ||
     arrivals.some((item) => item.kind === "episode")

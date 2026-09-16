@@ -697,7 +697,9 @@ it("shows search, the start of discovery and the summary together", async () => 
   server.use(
     http.get("/api/system/settings", () =>
       HttpResponse.json({
-        general: { theme: "auto", use_sonarr: false, use_radarr: false },
+        // A connected library, because the library half of the page is only
+        // shown to an install that has one.
+        general: { theme: "auto", use_sonarr: true, use_radarr: false },
         discover: {
           tmdb_configured: false,
           metadata_revision: "summary-one",

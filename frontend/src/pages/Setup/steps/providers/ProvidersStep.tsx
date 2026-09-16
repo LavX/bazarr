@@ -60,6 +60,7 @@ const ProvidersStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   return (
     <ProviderInstallStage
       hasInstalled={hasInstalled}
+      onNext={onNext}
       onInstalledNeedsRestart={handleInstalledNeedsRestart}
       onUseInstalled={handleUseInstalled}
       onBack={onBack}
