@@ -85,16 +85,21 @@ describe("OnboardingWizardView", () => {
     expect(screen.getByText(/step 3 of 12/i)).toBeInTheDocument();
   });
 
-  it("the discover path asks for no instance at all", async () => {
+  it("the discover path asks for no arr instance at all", async () => {
     const user = userEvent.setup();
     customRender(<OnboardingWizardView />);
 
     await answerIntent(user, /find subtitles for anything/i);
 
+    // Seerr, not Sonarr: it is what makes the request button on a title work,
+    // and this is the reader most likely to use it.
     expect(
-      await screen.findByRole("heading", { name: /subtitle languages/i }),
+      await screen.findByRole("heading", { name: /^seerr$/i }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/step 3 of 7/i)).toBeInTheDocument();
+    expect(screen.getByText(/step 3 of 8/i)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: /^sonarr$/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("changing the answer re-filters the rail and keeps the answer", async () => {
@@ -118,9 +123,9 @@ describe("OnboardingWizardView", () => {
     await user.click(screen.getByRole("button", { name: /^continue$/i }));
 
     expect(
-      await screen.findByRole("heading", { name: /subtitle languages/i }),
+      await screen.findByRole("heading", { name: /^seerr$/i }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/step 3 of 7/i)).toBeInTheDocument();
+    expect(screen.getByText(/step 3 of 8/i)).toBeInTheDocument();
   });
 
   it("the shell renders the skip control for an optional step", async () => {
@@ -157,7 +162,7 @@ describe("OnboardingWizardView", () => {
     // between pressing Finish and the app taking over.
     const user = userEvent.setup();
     localStorage.setItem("bazarr.onboarding.intent", "discover");
-    localStorage.setItem("bazarr.onboarding.step", "6");
+    localStorage.setItem("bazarr.onboarding.step", "7");
     let onSuccess: (() => void) | undefined;
     mutate.mockImplementation(
       (_input: unknown, opts?: { onSuccess?: () => void }) => {
@@ -177,7 +182,7 @@ describe("OnboardingWizardView", () => {
     expect(
       screen.getByRole("heading", { name: /you are all set/i }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/step 7 of 7/i)).toBeInTheDocument();
+    expect(screen.getByText(/step 8 of 8/i)).toBeInTheDocument();
   });
 
   it("Skip setup saves setup_complete and navigates home", async () => {

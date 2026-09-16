@@ -70,10 +70,12 @@ export const ONBOARDING_STEPS: WizardStepDef[] = [
     Component: MediaServerStep,
   },
   {
+    // On both paths. Connecting Seerr is what makes the request button on a
+    // title work, and the reader with no arr instance is exactly the one who
+    // reaches for it, so the Discover path is the last place to hide it.
     key: "seerr",
     label: "Seerr",
     optional: true,
-    paths: ["library"],
     Component: SeerrStep,
   },
   {

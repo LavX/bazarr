@@ -135,9 +135,11 @@ describe("FinishStep", () => {
 
     customRender(<FinishStep onNext={vi.fn()} />);
 
-    // No line about a step this user was never shown.
+    // No line about a step this user was never shown. Seerr is on both paths,
+    // so it stays.
     expect(screen.queryByText(/sonarr/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/plex media server/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/seerr skipped/i)).toBeInTheDocument();
     expect(
       screen.getByText(/search for any film or series/i),
     ).toBeInTheDocument();
@@ -205,7 +207,7 @@ describe("FinishStep", () => {
   it("counts a configured translator as done", () => {
     localStorage.setItem("bazarr.onboarding.intent", "discover");
     setGeneral(
-      { enabled_providers: ["opensubtitles"] },
+      { enabled_providers: ["opensubtitles"], use_seerr: true },
       { openrouter_api_key: "sk-or-xyz" },
     );
 

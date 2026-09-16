@@ -86,6 +86,30 @@ function failOnly(...names: string[]) {
   );
 }
 
+// Promise.allSettled plus the state writes behind it take several microtask
+// turns to reach the DOM, and a zero-length fake-timer advance only flushes
+// one. waitFor is not an option here: under fake timers it advances the clock,
+// which is the very thing these tests are measuring.
+async function settleInstalls() {
+  for (let i = 0; i < 10; i += 1) {
+    await vi.advanceTimersByTimeAsync(0);
+  }
+}
+
+/** One countdown second: move the clock, then let the re-render land. */
+async function tick() {
+  await vi.advanceTimersByTimeAsync(1000);
+  await settleInstalls();
+}
+
+/** `seconds` countdown seconds, one at a time. Each tick schedules the next
+ *  from an effect, so they cannot be collapsed into a single long advance. */
+async function tickSeconds(seconds: number) {
+  for (let i = 0; i < seconds; i += 1) {
+    await tick();
+  }
+}
+
 async function selectAndInstall(user: UserEvent, ...names: RegExp[]) {
   for (const name of names) {
     await user.click(screen.getByRole("checkbox", { name }));
@@ -231,14 +255,98 @@ describe("ProviderInstallStage", () => {
     expect(
       screen.getAllByText(/installed, waiting for the restart/i),
     ).toHaveLength(2);
-    // Two of three staged, so the restart is on offer, not yet taken: the
-    // failure list has to be readable before the page bounces.
+  });
+
+  it("restarts a partial run on its own once the countdown expires", async () => {
+    // A staged provider that never activates is a worse state to leave someone
+    // in than a restart they watched coming, so the restart is not optional.
+    // The delay only buys time to read the failures and retry them.
+    vi.useFakeTimers();
+    setCatalog([opensubtitlesEntry, subsceneEntry, gestdownEntry]);
+    failOnly("subscene");
+
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /opensubtitles/i }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /subscene/i }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /gestdown/i }));
+    fireEvent.click(screen.getByRole("button", { name: /install & restart/i }));
+    await settleInstalls();
+
+    expect(
+      screen.getByText(/restarting in 10s to activate 2 of 3 providers/i),
+    ).toBeInTheDocument();
     expect(restart).not.toHaveBeenCalled();
 
-    await user.click(
-      screen.getByRole("button", { name: /restart and continue/i }),
+    await tick();
+    expect(
+      screen.getByText(/restarting in 9s to activate 2 of 3 providers/i),
+    ).toBeInTheDocument();
+    expect(restart).not.toHaveBeenCalled();
+
+    await tickSeconds(9);
+    expect(restart).toHaveBeenCalledTimes(1);
+    expect(onInstalledNeedsRestart).toHaveBeenCalled();
+    expect(screen.getByText(/restarting bazarr/i)).toBeInTheDocument();
+  });
+
+  it("retrying the failures cancels the pending restart", async () => {
+    vi.useFakeTimers();
+    setCatalog([opensubtitlesEntry, subsceneEntry, gestdownEntry]);
+    failOnly("subscene");
+
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+      />,
     );
-    expect(restart).toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /opensubtitles/i }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /subscene/i }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /gestdown/i }));
+    fireEvent.click(screen.getByRole("button", { name: /install & restart/i }));
+    await settleInstalls();
+    expect(screen.getByText(/restarting in 10s/i)).toBeInTheDocument();
+
+    // A retry that is still in flight. The countdown must not run out under it.
+    mutateAsync.mockImplementation(() => new Promise(() => {}));
+    fireEvent.click(screen.getByRole("button", { name: /retry the failure/i }));
+    await settleInstalls();
+
+    expect(screen.queryByText(/restarting in/i)).not.toBeInTheDocument();
+
+    await tickSeconds(30);
+    expect(restart).not.toHaveBeenCalled();
+  });
+
+  it("Restart now skips the countdown", async () => {
+    const user = userEvent.setup();
+    setCatalog([opensubtitlesEntry, subsceneEntry, gestdownEntry]);
+    failOnly("subscene");
+
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+      />,
+    );
+
+    await selectAndInstall(user, /opensubtitles/i, /subscene/i, /gestdown/i);
+    await screen.findByText(/restarting in 10s/i);
+
+    await user.click(screen.getByRole("button", { name: /restart now/i }));
+
+    expect(restart).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText(/restarting bazarr/i)).toBeInTheDocument();
   });
 
   it("does not restart when nothing staged", async () => {
@@ -262,6 +370,7 @@ describe("ProviderInstallStage", () => {
     expect(restart).not.toHaveBeenCalled();
     expect(onInstalledNeedsRestart).not.toHaveBeenCalled();
     expect(screen.queryByText(/restarting bazarr/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/restarting in/i)).not.toBeInTheDocument();
   });
 
   it("retries only the providers that failed", async () => {

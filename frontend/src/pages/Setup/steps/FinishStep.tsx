@@ -128,13 +128,13 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
         : "Jellyfin media server skipped",
       done: useJellyfin,
     },
+  ];
+
+  const sharedLines: SummaryLine[] = [
     {
       label: useSeerr ? "Seerr connected" : "Seerr skipped",
       done: useSeerr,
     },
-  ];
-
-  const sharedLines: SummaryLine[] = [
     {
       label: profileCount
         ? `Language profile created (${profileCount})`
@@ -177,7 +177,7 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
       where: "Settings, Connections",
     });
   }
-  if (!discoverPath && !useSeerr) {
+  if (!useSeerr) {
     skipped.push({
       label: "Seerr is not connected, so requests are unavailable",
       where: "Settings, Connections",

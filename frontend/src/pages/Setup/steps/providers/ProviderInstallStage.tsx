@@ -37,6 +37,14 @@ import { redirectToSetup } from "./redirect";
 // connections while it bounces, so failed polls are expected and ignored.
 const HEALTH_POLL_INTERVAL_MS = 5000;
 
+// How long a partial run holds the outcome list on screen before it restarts
+// anyway. A staged provider that never activates is a worse state to leave
+// someone in than a restart they watched coming, so the restart is not
+// optional; the delay is there to make the failures readable and to give the
+// reader a chance to retry them first.
+const PARTIAL_RESTART_SECONDS = 10;
+const COUNTDOWN_TICK_MS = 1000;
+
 export interface ProviderInstallStageProps {
   hasInstalled: boolean;
   // Called after installs succeed and a restart is kicked off. ProvidersStep
@@ -117,10 +125,18 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   const [restarting, setRestarting] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [outcomes, setOutcomes] = useState<InstallOutcome[] | null>(null);
+  // Seconds left before a partial run restarts on its own; null when no
+  // countdown is running (a clean run, an all-failed run, or one the reader
+  // has cancelled by retrying).
+  const [countdown, setCountdown] = useState<number | null>(null);
   // Mirrors `outcomes` so a retry can fold its results into the previous run
   // without reading state through an updater (which StrictMode double-invokes).
   const outcomesRef = useRef<InstallOutcome[]>([]);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // The restart is reachable from three places (a clean run, the countdown
+  // expiring, the button). Firing it twice would send a second bounce request
+  // into a backend that is already going down.
+  const restartStartedRef = useRef(false);
 
   const choices: CatalogChoice[] = (catalog?.entries ?? [])
     .map((entry) => {
@@ -199,6 +215,11 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   }, []);
 
   const beginRestart = useCallback(() => {
+    if (restartStartedRef.current) {
+      return;
+    }
+    restartStartedRef.current = true;
+    setCountdown(null);
     setRestarting(true);
     onInstalledNeedsRestart();
     restart(undefined, {
@@ -252,13 +273,31 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
       if (merged.every((outcome) => !outcome.staged)) {
         return;
       }
-      if (fresh.every((outcome) => outcome.staged)) {
-        // A clean run has nothing to report, so go straight to the restart.
+      if (merged.every((outcome) => outcome.staged)) {
+        // Nothing left to report, so go straight to the restart.
         beginRestart();
+        return;
       }
+      // Partial: the outcomes stay readable, then the restart happens anyway.
+      setCountdown(PARTIAL_RESTART_SECONDS);
     },
     [beginRestart, install],
   );
+
+  useEffect(() => {
+    if (countdown === null) {
+      return;
+    }
+    if (countdown <= 0) {
+      beginRestart();
+      return;
+    }
+    const timer = setTimeout(
+      () => setCountdown((current) => (current === null ? null : current - 1)),
+      COUNTDOWN_TICK_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [beginRestart, countdown]);
 
   const handleInstall = useCallback(() => {
     outcomesRef.current = [];
@@ -272,6 +311,8 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   const staged = (outcomes ?? []).filter((outcome) => outcome.staged);
 
   const handleRetryFailed = useCallback(() => {
+    // Retrying is the reader saying "wait", so the pending restart stops.
+    setCountdown(null);
     const retry = choices.filter((choice) =>
       failed.some((outcome) => outcome.providerId === choice.providerId),
     );
@@ -310,6 +351,11 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
               ? "Every provider you picked was attempted. The ones that installed are staged and will load when Bazarr+ restarts."
               : "Every provider you picked was attempted and none of them installed, so there is nothing to restart for."}
           </Text>
+          {countdown !== null && (
+            <Text fw={600} role="status">
+              {`Restarting in ${countdown}s to activate ${staged.length} of ${outcomes.length} providers`}
+            </Text>
+          )}
         </Stack>
 
         <List spacing="sm" center>
@@ -350,7 +396,7 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
             {failed.length === 1 ? "failure" : `${failed.length} failures`}
           </Button>
           {staged.length > 0 ? (
-            <Button onClick={beginRestart}>Restart and continue</Button>
+            <Button onClick={beginRestart}>Restart now</Button>
           ) : (
             <Button
               variant="subtle"

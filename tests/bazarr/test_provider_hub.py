@@ -4553,6 +4553,8 @@ _ENABLED_PROVIDERS_SEQUENCE_CHILD = '''\
 import json
 import os
 import sys
+import threading
+import time
 
 ROOT = os.environ["BAZARR_REPO_ROOT"]
 sys.path.insert(0, os.path.join(ROOT, "bazarr"))
@@ -4565,10 +4567,47 @@ assert os.path.realpath(args.config_dir) == os.path.realpath(
 ), "child resolved config_dir to %r" % (args.config_dir,)
 
 from app.config import config_yaml_file
+from provider_hub import service
 from provider_hub.service import _bazarr_enabled_providers, _set_bazarr_provider_enabled
 
 ids = json.loads(os.environ["PROVIDER_IDS"])
 returned = [_set_bazarr_provider_enabled(provider_id, True) for provider_id in ids]
+
+sequential_in_memory = list(_bazarr_enabled_providers())
+
+# Concurrent half. A parallel install run reaches _set_bazarr_provider_enabled
+# from several threads at once; widening the gap between its read and its write
+# turns the lost update from a rare interleaving into a certainty, so the lock
+# is what the assertion is really measuring.
+_real_read = service._bazarr_enabled_providers
+
+
+def _slow_read():
+    value = _real_read()
+    time.sleep(0.05)
+    return value
+
+
+service._bazarr_enabled_providers = _slow_read
+
+threaded_ids = json.loads(os.environ["THREADED_PROVIDER_IDS"])
+errors = []
+
+
+def _enable(provider_id):
+    try:
+        service._set_bazarr_provider_enabled(provider_id, True)
+    except Exception as error:  # noqa: BLE001
+        errors.append(repr(error))
+
+
+threads = [threading.Thread(target=_enable, args=(pid,)) for pid in threaded_ids]
+for thread in threads:
+    thread.start()
+for thread in threads:
+    thread.join()
+
+service._bazarr_enabled_providers = _real_read
 
 from dynaconf import Dynaconf
 
@@ -4576,17 +4615,20 @@ on_disk = Dynaconf(settings_file=config_yaml_file, core_loaders=["YAML"]).as_dic
 
 print("__RESULT__" + json.dumps({
     "returned": returned,
+    "sequential_in_memory": sequential_in_memory,
     "in_memory": list(_bazarr_enabled_providers()),
     "on_disk": list(on_disk.get("GENERAL", {}).get("enabled_providers") or []),
+    "thread_errors": errors,
 }))
 '''
 
 
-def test_sequential_installs_keep_every_enabled_provider(tmp_path):
+def test_installs_keep_every_enabled_provider_sequentially_and_in_parallel(tmp_path):
     import sys
 
     repo_root = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", ".."))
     provider_ids = ["hubalpha", "hubbravo", "hubcharlie"]
+    threaded_ids = ["hubpara1", "hubpara2", "hubpara3", "hubpara4", "hubpara5"]
 
     script = tmp_path / "enabled_providers_sequence.py"
     script.write_text(_ENABLED_PROVIDERS_SEQUENCE_CHILD, encoding="utf-8")
@@ -4596,6 +4638,7 @@ def test_sequential_installs_keep_every_enabled_provider(tmp_path):
         "BAZARR_REPO_ROOT": repo_root,
         "EXPECTED_CONFIG_DIR": str(tmp_path),
         "PROVIDER_IDS": json.dumps(provider_ids),
+        "THREADED_PROVIDER_IDS": json.dumps(threaded_ids),
         "SZ_USER_AGENT": "test",
         "BAZARR_VERSION": "test",
         "NO_CLI": "false",
@@ -4619,5 +4662,9 @@ def test_sequential_installs_keep_every_enabled_provider(tmp_path):
     result = json.loads(line[len(marker):])
 
     assert result["returned"] == [True, True, True]
-    assert result["in_memory"] == provider_ids
-    assert result["on_disk"] == provider_ids
+    assert result["sequential_in_memory"] == provider_ids
+    assert result["thread_errors"] == []
+
+    # Order is not a contract once threads are in play, membership is.
+    assert sorted(result["in_memory"]) == sorted(provider_ids + threaded_ids)
+    assert sorted(result["on_disk"]) == sorted(provider_ids + threaded_ids)

@@ -85,6 +85,7 @@ describe("onboarding step registry", () => {
     expect(keys).toEqual([
       "welcome",
       "intent",
+      "seerr",
       "languages",
       "providers",
       "translator",
