@@ -77,6 +77,13 @@ LABEL org.opencontainers.image.title="Bazarr+" \
 # extracted via unar (from Debian main); unrar is used instead when an
 # operator installs it, since it is not in Debian main. p7zip-full stays for
 # zip/7z archives and as the last-resort RAR fallback in init_binaries().
+# postgresql-client supplies pg_dump and pg_restore, which backup and restore
+# shell out to when the instance runs on PostgreSQL. Without them a PostgreSQL
+# backup refuses to run at all, so they belong in the image rather than in the
+# operator's setup notes. Debian's client puts a version-selecting perl wrapper
+# in front of the binaries, which is where most of its ~40 MB goes; taking the
+# binaries out of the package by hand would save that but would stop them
+# getting security updates with the rest of the image.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
@@ -86,6 +93,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libpq5 \
     mediainfo \
     p7zip-full \
+    postgresql-client \
     unar \
     bash \
     gosu \
