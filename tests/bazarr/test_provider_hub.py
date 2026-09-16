@@ -4531,3 +4531,93 @@ def test_failed_initial_catalog_refresh_waits_for_explicit_retry(tmp_path, monke
     assert len(attempts) == 2
     assert recovered["last_checked_at"]
     assert recovered["last_error"] is None
+
+
+# ---------------------------------------------------------------------------
+# enabled_providers across a run of back-to-back installs
+#
+# The onboarding wizard lets a user tick several providers and install them in
+# one go, and the report was "installing multiple providers might end up
+# installing only the first". Two very different faults produce that symptom: an
+# install that fails and stops the run, or an install that succeeds and then
+# vanishes because the next one read a stale enabled_providers and wrote it back
+# without the previous entry. _set_bazarr_provider_enabled read-modify-writes
+# that list, so this pins the second possibility shut: three sequential installs
+# leave all three ids in the list, in memory and on disk.
+#
+# It runs in a child process with its own config dir because it exercises the
+# real settings singleton and a real write_config(); doing that in the test
+# process would rewrite the repository's own config.
+
+_ENABLED_PROVIDERS_SEQUENCE_CHILD = '''\
+import json
+import os
+import sys
+
+ROOT = os.environ["BAZARR_REPO_ROOT"]
+sys.path.insert(0, os.path.join(ROOT, "bazarr"))
+sys.path.insert(0, os.path.join(ROOT, "custom_libs"))
+
+from app.get_args import args
+
+assert os.path.realpath(args.config_dir) == os.path.realpath(
+    os.environ["EXPECTED_CONFIG_DIR"]
+), "child resolved config_dir to %r" % (args.config_dir,)
+
+from app.config import config_yaml_file
+from provider_hub.service import _bazarr_enabled_providers, _set_bazarr_provider_enabled
+
+ids = json.loads(os.environ["PROVIDER_IDS"])
+returned = [_set_bazarr_provider_enabled(provider_id, True) for provider_id in ids]
+
+from dynaconf import Dynaconf
+
+on_disk = Dynaconf(settings_file=config_yaml_file, core_loaders=["YAML"]).as_dict()
+
+print("__RESULT__" + json.dumps({
+    "returned": returned,
+    "in_memory": list(_bazarr_enabled_providers()),
+    "on_disk": list(on_disk.get("GENERAL", {}).get("enabled_providers") or []),
+}))
+'''
+
+
+def test_sequential_installs_keep_every_enabled_provider(tmp_path):
+    import sys
+
+    repo_root = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    provider_ids = ["hubalpha", "hubbravo", "hubcharlie"]
+
+    script = tmp_path / "enabled_providers_sequence.py"
+    script.write_text(_ENABLED_PROVIDERS_SEQUENCE_CHILD, encoding="utf-8")
+
+    env = dict(os.environ)
+    env.update({
+        "BAZARR_REPO_ROOT": repo_root,
+        "EXPECTED_CONFIG_DIR": str(tmp_path),
+        "PROVIDER_IDS": json.dumps(provider_ids),
+        "SZ_USER_AGENT": "test",
+        "BAZARR_VERSION": "test",
+        "NO_CLI": "false",
+    })
+
+    proc = subprocess.run(
+        [sys.executable, str(script), "-c", str(tmp_path)],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert proc.returncode == 0, (
+        f"child crashed\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+
+    marker = "__RESULT__"
+    line = next((ln for ln in proc.stdout.splitlines() if ln.startswith(marker)), None)
+    assert line is not None, f"child produced no result\nstdout:\n{proc.stdout}"
+    result = json.loads(line[len(marker):])
+
+    assert result["returned"] == [True, True, True]
+    assert result["in_memory"] == provider_ids
+    assert result["on_disk"] == provider_ids

@@ -1,4 +1,4 @@
-import userEvent from "@testing-library/user-event";
+import userEvent, { UserEvent } from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   useProviderHubCatalog,
@@ -67,6 +67,31 @@ const subsceneEntry = {
   trusted: true,
   manifest: { id: "subscene", name: "Subscene" },
 };
+
+const gestdownEntry = {
+  provider_id: "gestdown",
+  name: "Gestdown",
+  version: "1.0.0",
+  trusted: true,
+  manifest: { id: "gestdown", name: "Gestdown" },
+};
+
+// Fails only the named providers, so a run can be set up to fail the first
+// selection, the last, or all of them.
+function failOnly(...names: string[]) {
+  mutateAsync.mockImplementation(({ manifest }: { manifest: LooseObject }) =>
+    names.includes(manifest.id as string)
+      ? Promise.reject(new Error(`${manifest.id as string} is unavailable`))
+      : Promise.resolve(undefined),
+  );
+}
+
+async function selectAndInstall(user: UserEvent, ...names: RegExp[]) {
+  for (const name of names) {
+    await user.click(screen.getByRole("checkbox", { name }));
+  }
+  await user.click(screen.getByRole("button", { name: /install & restart/i }));
+}
 
 describe("ProviderInstallStage", () => {
   beforeEach(() => {
@@ -155,6 +180,121 @@ describe("ProviderInstallStage", () => {
     await vi.advanceTimersByTimeAsync(5000);
 
     expect(mockedRedirect).toHaveBeenCalledTimes(1);
+  });
+
+  it("attempts every selection when the first one fails", async () => {
+    // The loop this replaced awaited each install in turn with no catch: the
+    // first rejection ended the run, the two behind it were never attempted,
+    // and the unhandled rejection left the button sitting there saying nothing.
+    const user = userEvent.setup();
+    setCatalog([opensubtitlesEntry, subsceneEntry, gestdownEntry]);
+    failOnly("opensubtitles");
+
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+      />,
+    );
+
+    await selectAndInstall(user, /opensubtitles/i, /subscene/i, /gestdown/i);
+
+    await waitFor(() => {
+      expect(mutateAsync).toHaveBeenCalledTimes(3);
+    });
+    for (const entry of [opensubtitlesEntry, subsceneEntry, gestdownEntry]) {
+      expect(mutateAsync).toHaveBeenCalledWith({ manifest: entry.manifest });
+    }
+  });
+
+  it("names which providers installed and which failed, and why", async () => {
+    const user = userEvent.setup();
+    setCatalog([opensubtitlesEntry, subsceneEntry, gestdownEntry]);
+    failOnly("subscene");
+
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+      />,
+    );
+
+    await selectAndInstall(user, /opensubtitles/i, /subscene/i, /gestdown/i);
+
+    expect(
+      await screen.findByText(/some providers did not install/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Subscene")).toBeInTheDocument();
+    expect(screen.getByText(/subscene is unavailable/i)).toBeInTheDocument();
+    expect(
+      screen.getAllByText(/installed, waiting for the restart/i),
+    ).toHaveLength(2);
+    // Two of three staged, so the restart is on offer, not yet taken: the
+    // failure list has to be readable before the page bounces.
+    expect(restart).not.toHaveBeenCalled();
+
+    await user.click(
+      screen.getByRole("button", { name: /restart and continue/i }),
+    );
+    expect(restart).toHaveBeenCalled();
+  });
+
+  it("does not restart when nothing staged", async () => {
+    const user = userEvent.setup();
+    setCatalog([opensubtitlesEntry, subsceneEntry]);
+    failOnly("opensubtitles", "subscene");
+
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+      />,
+    );
+
+    await selectAndInstall(user, /opensubtitles/i, /subscene/i);
+
+    expect(
+      await screen.findByText(/no provider installed/i),
+    ).toBeInTheDocument();
+    expect(restart).not.toHaveBeenCalled();
+    expect(onInstalledNeedsRestart).not.toHaveBeenCalled();
+    expect(screen.queryByText(/restarting bazarr/i)).not.toBeInTheDocument();
+  });
+
+  it("retries only the providers that failed", async () => {
+    const user = userEvent.setup();
+    setCatalog([opensubtitlesEntry, subsceneEntry, gestdownEntry]);
+    failOnly("subscene");
+
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+      />,
+    );
+
+    await selectAndInstall(user, /opensubtitles/i, /subscene/i, /gestdown/i);
+    await screen.findByText(/subscene is unavailable/i);
+
+    mutateAsync.mockClear();
+    failOnly();
+    await user.click(
+      screen.getByRole("button", { name: /retry the failure/i }),
+    );
+
+    await waitFor(() => {
+      expect(mutateAsync).toHaveBeenCalledTimes(1);
+    });
+    expect(mutateAsync).toHaveBeenCalledWith({
+      manifest: subsceneEntry.manifest,
+    });
+    // Nothing is left failing, so the run finishes the way a clean one does.
+    expect(await screen.findByText(/restarting bazarr/i)).toBeInTheDocument();
+    expect(restart).toHaveBeenCalled();
   });
 
   it("offers Use already-installed providers only when hasInstalled is true", async () => {

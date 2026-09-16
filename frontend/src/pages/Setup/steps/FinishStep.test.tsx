@@ -51,15 +51,19 @@ function setProfiles(data: unknown) {
   } as unknown as ReturnType<typeof useLanguageProfiles>);
 }
 
-function setGeneral(general: Partial<Settings.General>) {
+function setGeneral(
+  general: Partial<Settings.General>,
+  translator: Partial<Settings.Translator> = {},
+) {
   mockedUseSystemSettings.mockReturnValue({
-    data: { general },
+    data: { general, translator },
   } as unknown as ReturnType<typeof useSystemSettings>);
 }
 
 describe("FinishStep", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
     setArrInstances([
       { id: 1, kind: "sonarr", name: "Main Sonarr" },
       { id: 2, kind: "radarr", name: "Main Radarr" },
@@ -116,5 +120,100 @@ describe("FinishStep", () => {
     customRender(<FinishStep onNext={vi.fn()} onBack={vi.fn()} />);
 
     expect(screen.getByRole("button", { name: /back/i })).toBeInTheDocument();
+  });
+
+  it("lands a Discover user on /discover and never mentions an arr", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
+    setArrInstances([]);
+    let onSuccess: (() => void) | undefined;
+    mutate.mockImplementation(
+      (_input: unknown, opts?: { onSuccess?: () => void }) => {
+        onSuccess = opts?.onSuccess;
+      },
+    );
+
+    customRender(<FinishStep onNext={vi.fn()} />);
+
+    // No line about a step this user was never shown.
+    expect(screen.queryByText(/sonarr/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/plex media server/i)).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/search for any film or series/i),
+    ).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: /finish and open discover/i }),
+    );
+    onSuccess?.();
+
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("/discover"));
+  });
+
+  it("tells a library user their first scan is running", () => {
+    localStorage.setItem("bazarr.onboarding.intent", "library");
+
+    customRender(<FinishStep onNext={vi.fn()} />);
+
+    expect(
+      screen.getByText(/first library scan starts now/i),
+    ).toBeInTheDocument();
+  });
+
+  it("lists what was skipped and where it lives", () => {
+    localStorage.setItem("bazarr.onboarding.intent", "library");
+    setArrInstances([]);
+    setGeneral({
+      use_plex: false,
+      use_jellyfin: false,
+      enabled_providers: ["opensubtitles"],
+    });
+
+    customRender(<FinishStep onNext={vi.fn()} />);
+
+    expect(screen.getByText(/what you left for later/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/no sonarr, radarr or sportarr instance is connected/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/ai translation has no api key yet/i),
+    ).toBeInTheDocument();
+  });
+
+  it("forgets the stored intent on the way out", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
+    let onSuccess: (() => void) | undefined;
+    mutate.mockImplementation(
+      (_input: unknown, opts?: { onSuccess?: () => void }) => {
+        onSuccess = opts?.onSuccess;
+      },
+    );
+
+    customRender(<FinishStep onNext={vi.fn()} />);
+
+    await user.click(
+      screen.getByRole("button", { name: /finish and open discover/i }),
+    );
+    onSuccess?.();
+
+    await waitFor(() =>
+      expect(localStorage.getItem("bazarr.onboarding.intent")).toBeNull(),
+    );
+  });
+
+  it("counts a configured translator as done", () => {
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
+    setGeneral(
+      { enabled_providers: ["opensubtitles"] },
+      { openrouter_api_key: "sk-or-xyz" },
+    );
+
+    customRender(<FinishStep onNext={vi.fn()} />);
+
+    expect(screen.getByText(/ai translation configured/i)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/what you left for later/i),
+    ).not.toBeInTheDocument();
   });
 });
