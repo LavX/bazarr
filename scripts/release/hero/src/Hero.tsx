@@ -22,7 +22,7 @@ import {
   useVideoConfig,
 } from "remotion";
 
-import { drawAtlas } from "./Atlas";
+import { drawAtlasGores } from "./AtlasGores";
 import { drawClockwork } from "./Clockwork";
 import { Ctx, getBackdrop, Geometry, paintGrade, paintGrain, paintText, paintVignette } from "./brand";
 import { FONT_FAMILY } from "./theme";
@@ -118,7 +118,7 @@ export const Hero: React.FC<HeroProps> = ({ version, codename, seed, loopFrames 
 
     // 2. motif
     if (codename.toLowerCase() === "atlas") {
-      drawAtlas(c, geo, { frame, dur });
+      drawAtlasGores(c, geo, { frame, dur });
     } else {
       drawClockwork(c, geo, { frame, dur });
     }
