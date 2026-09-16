@@ -293,6 +293,7 @@ jobs:
             tests/bazarr/test_compat_cache.py \
             tests/bazarr/test_config.py \
             tests/bazarr/test_config_save.py \
+            tests/bazarr/test_container_hardening.py \
             tests/bazarr/test_embedded_history_indexer.py \
             tests/bazarr/test_encryption.py \
             tests/bazarr/test_extra_languages.py \

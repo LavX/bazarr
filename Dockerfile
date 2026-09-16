@@ -98,7 +98,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     bash \
     gosu \
     curl \
-    && mkdir -p /app/bazarr/bin /config /defaults \
+    && mkdir -p /config /defaults \
     && groupadd -g 1000 bazarr \
     && useradd -u 1000 -g bazarr -d /config -s /bin/bash bazarr
 
@@ -132,6 +132,18 @@ COPY package_info /app/bazarr/package_info
 # Copy pre-built frontend (built in GitHub Actions workflow for caching)
 # This layer only rebuilds when frontend/build changes
 COPY frontend/build ./frontend/build
+
+# The application tree belongs to root and to nobody else. Bazarr runs as
+# PUID:PGID, and a runtime user who can write /app/bazarr can replace the code
+# the host imports on its next restart, which would leave the Provider Hub's
+# worker subprocess a fault boundary rather than a security one. Everything
+# written at runtime lives under /config instead.
+#
+# COPY already lands as root:root, so this asserts the property rather than
+# imposing it: a chown -R here would rewrite the metadata of every file and add
+# a second copy of the whole tree to the image for no gain. The build fails if
+# anything under /app is owned by someone else or is group/other writable.
+RUN test -z "$(find /app \( ! -user root -o -perm /go=w \) -print -quit)"
 
 # Set environment variables
 ENV HOME="/config" \
