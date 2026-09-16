@@ -274,6 +274,7 @@ jobs:
           pytest \
             tests/bazarr/test_anti_captcha_config.py \
             tests/bazarr/test_app_notifier.py \
+            tests/bazarr/test_backup_contract.py \
             tests/bazarr/test_auto_translation_profile.py \
             tests/bazarr/test_ci_guard_list.py \
             tests/bazarr/test_combine_aligner.py \
