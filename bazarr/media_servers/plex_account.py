@@ -63,7 +63,7 @@ def _account_row(repo, settings):
     return next((row for row in rows if row.id == saved), rows[0] if rows else None)
 
 
-def sync_plex_instance(session, settings, *, signed_out=False, persist=None):
+def sync_plex_instance(session, settings, *, signed_in=False, signed_out=False, persist=None):
     """Carry the account's URL and credential onto its destination row.
 
     Idempotent: startup and every account transition call it, and it creates the
@@ -72,11 +72,13 @@ def sync_plex_instance(session, settings, *, signed_out=False, persist=None):
     user who signs back in keeps the libraries and toggles they chose.
 
     What it carries onto an existing row is the connection and nothing else.
-    ``enabled`` and ``verify_ssl`` are written when the row is created, and
-    ``enabled`` again on sign-out, because those are the account speaking. On an
-    ordinary reconcile they are the user's own instance settings, and rewriting
-    them from the scalars would undo an instance a user switched off, or a TLS
-    setting they changed, at the next startup.
+    ``verify_ssl`` is written only when the row is created; on an ordinary
+    reconcile it is the user's own instance setting, and rewriting it from the
+    scalars would undo a change they made at the next startup. ``enabled`` is
+    the same, with two exceptions that are the account speaking rather than the
+    reconcile: ``signed_out`` switches the destination off, and ``signed_in``
+    switches it back on, because a user completing a sign-in is saying to use
+    Plex. Switching servers while signed in is neither, and leaves it alone.
 
     ``persist`` writes the config once the owner id changes, so the row this
     account owns survives a restart instead of being re-guessed from whichever
@@ -92,15 +94,12 @@ def sync_plex_instance(session, settings, *, signed_out=False, persist=None):
         url, credential = account_url(settings.plex), account_credential(settings.plex)
         verify_ssl = bool(getattr(settings.plex, 'verify_ssl', False))
         enabled = getattr(settings.general, 'use_plex', False) is True
-        if not signed_out and not url:
-            # Signed in but no server picked yet, which is the normal order of
-            # the OAuth flow. There is nothing to connect to, and the server
-            # picker is the next step; it calls back here with both.
-            return None
         if row is None:
-            if signed_out or not credential:
-                # Nothing to connect with, so there is no destination yet. The
-                # next transition that produces a credential creates it.
+            if signed_out or not credential or not url:
+                # Nothing to connect with or nowhere to connect to, so there is
+                # no destination yet. Signing in comes before picking a server,
+                # which is the normal order of the OAuth flow; the picker is the
+                # next step and it calls back here with both.
                 return None
             # The library scoping and the per-type opt-ins are seeded from the
             # scalars this once, because the account panel is where they were
@@ -111,11 +110,20 @@ def sync_plex_instance(session, settings, *, signed_out=False, persist=None):
         elif signed_out:
             repo.update(row.id, enabled=False, clear_api_key=True)
         else:
-            fields = dict(url=url)
+            fields = {}
+            # A URL the account has not got yet is not a URL to write: signing
+            # in again after a sign-out keeps the address the row already has
+            # until the picker supplies a new one.
+            if url:
+                fields['url'] = url
             # An unchanged credential is not resent, so a server switch cannot
             # blank the token by carrying an empty field along with the URL.
             if credential:
                 fields['api_key'] = credential
+            if signed_in and (url or row.url):
+                fields['enabled'] = enabled
+            if not fields:
+                return row
             repo.update(row.id, **fields)
         recorded = getattr(settings.plex, 'instance_id', '') != row.id
         settings.plex.instance_id = row.id
@@ -151,7 +159,7 @@ def _publish(session, settings, instance_id):
                       'running workers', exc_info=True)
 
 
-def sync_plex_account(*, signed_out=False):
+def sync_plex_account(*, signed_in=False, signed_out=False):
     """The request-side entry point, on the app's own session.
 
     The account handlers write the config before calling here, so the owner id
@@ -159,4 +167,5 @@ def sync_plex_account(*, signed_out=False):
     """
     from app.config import settings, write_config
     from app.database import database
-    return sync_plex_instance(database, settings, signed_out=signed_out, persist=write_config)
+    return sync_plex_instance(database, settings, signed_in=signed_in,
+                              signed_out=signed_out, persist=write_config)

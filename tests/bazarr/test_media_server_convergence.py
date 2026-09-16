@@ -580,23 +580,26 @@ def test_the_account_updates_its_row_through_every_transition(schema_session):
     assert repo.get(row.id).api_key == ''
     assert len(repo.list('plex')) == 1
 
-    # Signing back in reuses that row rather than adding a second, and restores
-    # the credential. Whether the instance is switched on is the user's, so the
-    # account does not reach into it.
+    # Signing back in reuses that row rather than adding a second, restores the
+    # credential, and switches it back on: completing a sign-in is the user
+    # saying to use Plex. The address it had is kept until a server is picked.
     config.general.use_plex = True
     config.plex.token = 'second-token'
-    assert sync_plex_instance(schema_session, config).id == row.id
+    config.plex.server_url = ''
+    assert sync_plex_instance(schema_session, config, signed_in=True).id == row.id
     assert repo.get_decrypted_api_key(row.id) == 'second-token'
-    assert bool(repo.get(row.id).enabled) is False
+    assert bool(repo.get(row.id).enabled) is True
+    assert repo.get(row.id).url == 'https://second.example:32400'
     assert len(repo.list('plex')) == 1
 
 
 def test_a_reconcile_never_reverts_the_instance_settings_a_user_changed(schema_session):
     """The account owns the connection; the toggles on the row are the user's.
 
-    Rewriting them from the scalars on every startup and every account change
+    Rewriting them from the scalars on every startup and every server switch
     would switch an instance a user turned off back on, and undo a TLS setting
-    they changed, behind their back.
+    they changed, behind their back. Only a sign-in and a sign-out speak for the
+    account, and neither of those is a server switch.
     """
     from media_servers.plex_account import sync_plex_instance
     from media_servers.repository import MediaServerInstanceRepository
@@ -612,6 +615,10 @@ def test_a_reconcile_never_reverts_the_instance_settings_a_user_changed(schema_s
     assert saved['url'] == 'https://moved.example:32400'
     assert saved['enabled'] is False and saved['verify_ssl'] is True
     assert saved['refresh_episodes'] is False
+
+    # And a plain startup reconcile is not a server switch either.
+    sync_plex_instance(schema_session, config)
+    assert repo.values(repo.get(row.id))['enabled'] is False
 
 
 def test_the_owner_id_survives_a_restart_and_keeps_the_row_it_was_bound_to(schema_session):
@@ -942,6 +949,61 @@ def test_selecting_a_server_moves_the_destination_and_signing_out_disables_it(
     assert bool(repo.get(row.id).enabled) is False
     assert repo.get(row.id).api_key == ''
     assert len(repo.list('plex')) == 1
+
+
+def test_signing_back_in_through_the_handlers_switches_the_destination_on(
+        plex_account_api, monkeypatch, schema_session):
+    """Sign-out disables the row; completing a sign-in turns it back on.
+
+    Driven through the real endpoints, because the re-enable has to survive the
+    order the handlers run in: the PIN step has no server URL yet at that point,
+    and the picker that follows is a server switch, which must not touch the
+    toggle on its own.
+    """
+    from api.plex import oauth
+    from media_servers.plex_account import sync_plex_instance
+    from media_servers.repository import MediaServerInstanceRepository
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'first-token'
+    config.plex.server_url = 'https://first.example:32400'
+    row = sync_plex_instance(schema_session, config)
+    repo = MediaServerInstanceRepository(schema_session)
+    assert bool(repo.get(row.id).enabled) is True
+
+    assert client.post('/api/plex/oauth/logout', headers=HEADERS, json={}).status_code == 200
+    assert bool(repo.get(row.id).enabled) is False
+
+    monkeypatch.setattr(oauth.pin_cache, 'get', lambda pin: {'client_id': 'bazarr'})
+    monkeypatch.setattr(oauth.pin_cache, 'delete', lambda pin: None)
+    monkeypatch.setattr(oauth.requests, 'get', lambda *args, **kwargs: SimpleNamespace(
+        status_code=200, raise_for_status=lambda: None,
+        json=lambda: {'authToken': 'second-token'}))
+    assert client.get('/api/plex/oauth/pin/123/check', headers=HEADERS).status_code == 200
+    assert bool(repo.get(row.id).enabled) is True
+    assert repo.get_decrypted_api_key(row.id) == 'second-token'
+    # The address it had is kept until the picker supplies a new one.
+    assert repo.get(row.id).url == 'https://first.example:32400'
+    assert len(repo.list('plex')) == 1
+
+
+def test_a_server_switch_leaves_a_hand_disabled_destination_disabled(
+        plex_account_api, schema_session):
+    from media_servers.plex_account import sync_plex_instance
+    from media_servers.repository import MediaServerInstanceRepository
+    client, config = plex_account_api
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'token'
+    config.plex.server_url = 'https://first.example:32400'
+    row = sync_plex_instance(schema_session, config)
+    repo = MediaServerInstanceRepository(schema_session)
+    repo.update(row.id, enabled=False)
+
+    assert client.post('/api/plex/select-server', headers=HEADERS, json={
+        'machineIdentifier': 'abc', 'name': 'Attic',
+        'uri': 'https://second.example:32400'}).status_code == 200
+    assert repo.get(row.id).url == 'https://second.example:32400'
+    assert bool(repo.get(row.id).enabled) is False
 
 
 def test_saving_an_api_key_by_hand_reaches_the_destination(plex_account_api, monkeypatch,

@@ -373,8 +373,9 @@ class PlexPinCheck(Resource):
                 try:
                     write_config()
                     # The account now holds the credential the refresh worker
-                    # needs, so its destination row has to hold it too.
-                    sync_plex_account()
+                    # needs, so its destination row has to hold it too, and a
+                    # completed sign-in switches it back on after a sign-out.
+                    sync_plex_account(signed_in=True)
                     pin_cache.delete(pin_id)
 
                     logger.info(
@@ -822,7 +823,8 @@ class PlexApiKey(Resource):
             settings.plex.auth_method = 'apikey'
 
             write_config()
-            sync_plex_account()
+            # Typing in a key is the same explicit "use Plex" as signing in.
+            sync_plex_account(signed_in=True)
 
             logger.debug("API key saved")
             return {'success': True, 'message': 'API key saved securely'}
@@ -944,8 +946,11 @@ class PlexSelectServer(Resource):
         # Store all connection URIs for round-robin fallback
         settings.plex.server_connections = connections if connections else [connection_uri]
         write_config()
-        # A different server is a different destination URL; the token is
-        # unchanged and is deliberately not resent.
+        # A different server is a different destination URL. The token is
+        # unchanged and is deliberately not resent, and switching servers is not
+        # itself a sign-in, so it leaves the instance toggle alone: the PIN step
+        # above already switched the row back on, and a first sign-in creates
+        # the row here already enabled.
         sync_plex_account()
 
         return {
