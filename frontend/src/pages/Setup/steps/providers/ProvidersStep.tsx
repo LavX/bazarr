@@ -1,4 +1,4 @@
-import { FC, useState } from "react";
+import { FC, useCallback, useState } from "react";
 import { Center, Loader } from "@mantine/core";
 import { useProviderHubProviders } from "@/apis/hooks";
 import type { WizardStepProps } from "@/pages/Setup/steps/types";
@@ -27,6 +27,16 @@ const ProvidersStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   const [override, setOverride] = useState<Stage | null>(null);
   const stage: Stage = override ?? (hasInstalled ? "configure" : "install");
 
+  // Stable identity matters here: the install stage builds its restart callback
+  // from this prop, and its partial-install countdown re-arms its one second
+  // tick whenever that callback changes. An inline arrow would hand it a new
+  // function on every render of this component and keep resetting the tick.
+  const handleInstalledNeedsRestart = useCallback(() => {
+    // The install stage owns the restart overlay + resume; nothing to do
+    // here beyond letting it take over the view.
+  }, []);
+  const handleUseInstalled = useCallback(() => setOverride("configure"), []);
+
   // Wait for the installed-providers list before choosing a stage, so a resume
   // after the install-restart does not flash the install catalog first.
   if (override === null && providersQuery.isLoading) {
@@ -50,11 +60,8 @@ const ProvidersStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   return (
     <ProviderInstallStage
       hasInstalled={hasInstalled}
-      onInstalledNeedsRestart={() => {
-        // The install stage owns the restart overlay + resume; nothing to do
-        // here beyond letting it take over the view.
-      }}
-      onUseInstalled={() => setOverride("configure")}
+      onInstalledNeedsRestart={handleInstalledNeedsRestart}
+      onUseInstalled={handleUseInstalled}
       onBack={onBack}
     />
   );

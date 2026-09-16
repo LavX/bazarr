@@ -296,6 +296,89 @@ describe("ProviderInstallStage", () => {
     expect(screen.getByText(/restarting bazarr/i)).toBeInTheDocument();
   });
 
+  it("announces the countdown twice, not once a second", async () => {
+    // A polite live region that changes every second enqueues ten messages in
+    // ten seconds and a screen reader needs three or four to read each, so the
+    // queue would still be draining after the page had bounced. Two messages,
+    // both naming the way out, and the ticking number says nothing.
+    vi.useFakeTimers();
+    setCatalog([opensubtitlesEntry, subsceneEntry, gestdownEntry]);
+    failOnly("subscene");
+
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /opensubtitles/i }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /subscene/i }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /gestdown/i }));
+    fireEvent.click(screen.getByRole("button", { name: /install & restart/i }));
+    await settleInstalls();
+
+    const live = screen.getByRole("status");
+    expect(live).toHaveTextContent(
+      "Restarting in 10 seconds to activate 2 of 3 providers. Retry the failures to cancel.",
+    );
+
+    // The visible ticker is not the live region and announces nothing.
+    const ticker = screen.getByText(
+      /restarting in 10s to activate 2 of 3 providers/i,
+    );
+    expect(ticker).toHaveAttribute("aria-hidden", "true");
+    expect(ticker).not.toBe(live);
+    expect(live).not.toHaveTextContent(/10s/);
+
+    // Six seconds of ticking, and the announcement has not moved.
+    await tickSeconds(6);
+    expect(
+      screen.getByText(/restarting in 4s to activate 2 of 3 providers/i),
+    ).toBeInTheDocument();
+    expect(live).toHaveTextContent(
+      "Restarting in 10 seconds to activate 2 of 3 providers. Retry the failures to cancel.",
+    );
+
+    // One last warning with three seconds left, then silence until the bounce.
+    await tick();
+    expect(live).toHaveTextContent(
+      "Restarting in 3 seconds. Retry the failures to cancel.",
+    );
+    await tickSeconds(2);
+    expect(live).toHaveTextContent(
+      "Restarting in 3 seconds. Retry the failures to cancel.",
+    );
+  });
+
+  it("stops announcing once the restart is cancelled", async () => {
+    vi.useFakeTimers();
+    setCatalog([opensubtitlesEntry, subsceneEntry, gestdownEntry]);
+    failOnly("subscene");
+
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /opensubtitles/i }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /subscene/i }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /gestdown/i }));
+    fireEvent.click(screen.getByRole("button", { name: /install & restart/i }));
+    await settleInstalls();
+    expect(screen.getByRole("status")).toHaveTextContent(/restarting in 10/i);
+
+    mutateAsync.mockImplementation(() => new Promise(() => {}));
+    fireEvent.click(screen.getByRole("button", { name: /retry the failure/i }));
+    await settleInstalls();
+
+    expect(screen.getByRole("status")).toHaveTextContent("");
+  });
+
   it("retrying the failures cancels the pending restart", async () => {
     vi.useFakeTimers();
     setCatalog([opensubtitlesEntry, subsceneEntry, gestdownEntry]);

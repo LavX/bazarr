@@ -12,6 +12,7 @@ import {
   TextInput,
   ThemeIcon,
   Title,
+  VisuallyHidden,
 } from "@mantine/core";
 import {
   faCircleCheck,
@@ -44,6 +45,16 @@ const HEALTH_POLL_INTERVAL_MS = 5000;
 // reader a chance to retry them first.
 const PARTIAL_RESTART_SECONDS = 10;
 const COUNTDOWN_TICK_MS = 1000;
+
+// The countdown is announced twice, not ten times. A polite live region whose
+// text changes every second enqueues one message per tick, and a screen reader
+// needs three or four seconds to read each: the queue could not drain before
+// the restart fired, so the reader would still be hearing "7 seconds" after the
+// page had bounced, and would have to find the cancel control inside that
+// noise. So: one message when the countdown starts, naming the delay in words
+// and naming the way out, one more with three seconds left, and the ticking
+// number carries no announcement at all.
+const FINAL_ANNOUNCEMENT_SECONDS = 3;
 
 export interface ProviderInstallStageProps {
   hasInstalled: boolean;
@@ -129,6 +140,10 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   // countdown is running (a clean run, an all-failed run, or one the reader
   // has cancelled by retrying).
   const [countdown, setCountdown] = useState<number | null>(null);
+  // What the live region says. Separate from `countdown` so the region can
+  // mount empty with the panel and then change, which is what makes a screen
+  // reader treat it as an update rather than as pre-existing content.
+  const [announcement, setAnnouncement] = useState("");
   // Mirrors `outcomes` so a retry can fold its results into the previous run
   // without reading state through an updater (which StrictMode double-invokes).
   const outcomesRef = useRef<InstallOutcome[]>([]);
@@ -309,6 +324,26 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
 
   const failed = (outcomes ?? []).filter((outcome) => !outcome.staged);
   const staged = (outcomes ?? []).filter((outcome) => outcome.staged);
+  const stagedCount = staged.length;
+  const attemptedCount = (outcomes ?? []).length;
+
+  useEffect(() => {
+    if (countdown === null) {
+      setAnnouncement("");
+      return;
+    }
+    if (countdown === PARTIAL_RESTART_SECONDS) {
+      setAnnouncement(
+        `Restarting in ${PARTIAL_RESTART_SECONDS} seconds to activate ${stagedCount} of ${attemptedCount} providers. Retry the failures to cancel.`,
+      );
+      return;
+    }
+    if (countdown === FINAL_ANNOUNCEMENT_SECONDS) {
+      setAnnouncement(
+        `Restarting in ${FINAL_ANNOUNCEMENT_SECONDS} seconds. Retry the failures to cancel.`,
+      );
+    }
+  }, [attemptedCount, countdown, stagedCount]);
 
   const handleRetryFailed = useCallback(() => {
     // Retrying is the reader saying "wait", so the pending restart stops.
@@ -352,10 +387,11 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
               : "Every provider you picked was attempted and none of them installed, so there is nothing to restart for."}
           </Text>
           {countdown !== null && (
-            <Text fw={600} role="status">
+            <Text fw={600} aria-hidden>
               {`Restarting in ${countdown}s to activate ${staged.length} of ${outcomes.length} providers`}
             </Text>
           )}
+          <VisuallyHidden role="status">{announcement}</VisuallyHidden>
         </Stack>
 
         <List spacing="sm" center>
