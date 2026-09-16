@@ -18,7 +18,8 @@ import type { WizardStepProps } from "./types";
  * Optional onboarding step for an external media server. Plex (manual apikey
  * auth) and Jellyfin each get a tab with the minimal connection fields, written
  * straight to the matching settings keys. Both are fully optional: only filled
- * tabs are persisted, and Skip advances writing nothing.
+ * tabs are persisted, and Continue with nothing filled in writes nothing. The
+ * skip control belongs to the wizard shell.
  */
 const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   const settings = useSettingsMutation();
@@ -152,9 +153,6 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
               Back
             </Button>
           )}
-          <Button variant="subtle" color="gray" onClick={onNext}>
-            Skip
-          </Button>
         </Group>
         <Button onClick={handleContinue} loading={settings.isPending}>
           {anythingFilled ? "Continue" : "Continue without a server"}

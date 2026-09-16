@@ -25,7 +25,6 @@ import type { WizardStepProps } from "./types";
 
 export interface ArrStepProps extends WizardStepProps {
   kind: "sonarr" | "radarr" | "sportarr";
-  required?: boolean;
 }
 
 const KIND_META: Record<
@@ -48,8 +47,11 @@ function normalizeBaseUrl(value: string) {
  * connection, then on Continue creates the instance, flips use_<kind> on, and
  * advances. Idempotent: if an instance of this kind already exists, it shows a
  * connected state and Continue advances without creating a duplicate.
+ *
+ * Every arr kind is optional, including Sonarr: Bazarr+ runs with no instance
+ * at all. Skipping is the shell's job, so there is no skip control here.
  */
-const ArrStep: FC<ArrStepProps> = ({ kind, required, onNext }) => {
+const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack }) => {
   const meta = KIND_META[kind];
 
   const { data: instances } = useArrInstances();
@@ -122,7 +124,14 @@ const ArrStep: FC<ArrStepProps> = ({ kind, required, onNext }) => {
         <Alert color="green" title="Already connected">
           {existing.name}
         </Alert>
-        <Group justify="flex-end">
+        <Group justify="space-between">
+          <Group gap="sm">
+            {onBack && (
+              <Button variant="default" onClick={onBack}>
+                Back
+              </Button>
+            )}
+          </Group>
           <Button onClick={handleContinue}>Continue</Button>
         </Group>
       </Stack>
@@ -222,15 +231,13 @@ const ArrStep: FC<ArrStepProps> = ({ kind, required, onNext }) => {
       )}
 
       <Group justify="space-between">
-        {required ? (
-          <Button variant="subtle" color="gray" onClick={onNext}>
-            Skip for now
-          </Button>
-        ) : (
-          <Button variant="subtle" color="gray" onClick={onNext}>
-            Skip
-          </Button>
-        )}
+        <Group gap="sm">
+          {onBack && (
+            <Button variant="default" onClick={onBack}>
+              Back
+            </Button>
+          )}
+        </Group>
         <Button onClick={handleContinue} loading={create.isPending}>
           Continue
         </Button>
