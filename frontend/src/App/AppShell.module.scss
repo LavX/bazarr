@@ -247,6 +247,15 @@
   width: 24px;
   justify-content: center;
 }
+// The compass is a filled disc that paints to the edge of its viewBox, so in
+// the rail's 16px box it stands 2px taller than the play, film and hub glyphs
+// around it and closes on the label under it. Padding trims the glyph alone:
+// the icon box, the gap and the label all stay where every other entry has
+// them.
+.railLink[href$="/discover"] svg {
+  box-sizing: border-box;
+  padding: 1px;
+}
 .railBadge {
   position: absolute;
   top: -5px;
