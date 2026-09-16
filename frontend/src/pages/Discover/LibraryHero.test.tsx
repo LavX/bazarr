@@ -1,11 +1,44 @@
 /* eslint-disable camelcase -- API fixture fields keep their transport names. */
+/// <reference types="node" />
 import { createMemoryRouter, RouterProvider } from "react-router";
 import { http, HttpResponse } from "msw";
+import { readFileSync } from "node:fs";
 import { beforeEach, expect, it, vi } from "vitest";
 import { AllProviders } from "@/providers";
 import { act, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import LibraryHero from "./LibraryHero";
+
+const discoverStyles = readFileSync(
+  "src/pages/Discover/Discover.module.scss",
+  "utf8",
+);
+
+/**
+ * The block that restyles library-hero descendants when the panel has no
+ * backdrop. jsdom does not apply this module's rules to computed styles, so
+ * the stylesheet itself is what we can assert: cream over artwork stays
+ * elsewhere, and this block has to exist for the three copy-only descendants
+ * to take page ink on a light card.
+ */
+function noArtworkHeroBlock(source: string): string {
+  const marker = '.libraryFeature[data-artwork="false"]';
+  const start = source.indexOf(marker);
+  if (start < 0) return "";
+  let depth = 0;
+  let started = false;
+  for (let i = start; i < source.length; i += 1) {
+    const ch = source[i];
+    if (ch === "{") {
+      depth += 1;
+      started = true;
+    } else if (ch === "}") {
+      depth -= 1;
+      if (started && depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  return "";
+}
 
 const quietActivity = {
   availability: "available",
@@ -409,6 +442,34 @@ it("keeps its shape when nothing in the library has artwork", async () => {
   render();
   const hero = await screen.findByRole("region", { name: /your library/i });
   expect(hero).toHaveAttribute("data-artwork", "false");
+});
+
+it("paints the status, schedule and jobs link in page ink when there is no artwork", async () => {
+  served = summary({ arrivals: [arrival({ backdrop_url: null })] });
+  render();
+  const hero = await screen.findByRole("region", { name: /your library/i });
+  const panel = hero.querySelector("article");
+  if (!panel) throw new Error("Library hero has no panel");
+  expect(panel).toHaveAttribute("data-artwork", "false");
+
+  const status = await screen.findByText(/subtitle jobs idle · last fetched/i);
+  const schedule = screen.getByText("Next: Sync series in 12 minutes");
+  const allJobs = screen.getByRole("link", { name: /all jobs/i });
+  expect(panel).toContainElement(status);
+  expect(panel).toContainElement(schedule);
+  expect(panel).toContainElement(allJobs);
+
+  // jsdom does not apply this CSS module to computed styles (styleSheets
+  // stay empty for it, getComputedStyle cannot see the cream). The
+  // stylesheet is the thing that has to change: the no-artwork panel must
+  // restyle these three to page ink, because their cream is more specific
+  // than the panel rule and vanishes them on a light card.
+  const block = noArtworkHeroBlock(discoverStyles);
+  expect(block).toMatch(/\.heroStatus[\s\S]*--bz-text-primary/);
+  expect(block).toMatch(/\.heroStatus[\s\S]*background/);
+  expect(block).toMatch(/\.heroSchedule[\s\S]*--bz-text-secondary/);
+  expect(block).toMatch(/\.heroActions[\s\S]*--bz-text-secondary/);
+  expect(block).not.toMatch(/#fff8f0/);
 });
 
 it("counts media items, not language requirements, per kind", async () => {
