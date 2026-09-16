@@ -33,6 +33,9 @@ function instance(
         ...(kind === "silo" ? { library_id: "0007" } : {}),
       },
     ],
+    refresh_movies: true,
+    refresh_episodes: true,
+    options: {},
     ...overrides,
   };
 }
@@ -471,10 +474,13 @@ it.each(["emby", "silo"] as const)(
     let probe: unknown;
     setup(kind, false, []);
     server.use(
-      http.post(`/api/${kind}/test-connection`, async ({ request }) => {
-        probe = await request.json();
-        return HttpResponse.json({ success: true });
-      }),
+      http.post(
+        "/api/system/media-server-instances/probe",
+        async ({ request }) => {
+          probe = await request.json();
+          return HttpResponse.json({ success: true });
+        },
+      ),
       http.post("/api/system/media-server-instances", async ({ request }) => {
         const body = (await request.json()) as LooseObject;
         writes.push(body);
@@ -519,6 +525,7 @@ it.each(["emby", "silo"] as const)(
     await userEvent.click(modal.getByRole("button", { name: "Test" }));
     await modal.findByText("Connection succeeded.");
     expect(probe).toEqual({
+      kind,
       url: `https://${kind}.example/prefix`,
       apikey: "0007",
       verify_ssl: false,
@@ -536,6 +543,9 @@ it.each(["emby", "silo"] as const)(
         enabled: false,
         verify_ssl: false,
         path_mappings: [],
+        refresh_movies: true,
+        refresh_episodes: true,
+        options: {},
       },
     ]);
   },
@@ -723,11 +733,14 @@ it.each([
 
 // Path mappings, the five refresh states and what each server can match on are
 // explained on the guide and nowhere in the form.
-// One page, two servers, so Silo lands on its own section rather than the top
-// of a page whose first half is about Emby.
+// One page, four servers, so Silo lands on its own section rather than the top
+// of a page whose first half is about Emby. Jellyfin and Plex have no section
+// on it yet and land on the page, whose shared half is what they need.
 it.each([
   ["emby", "https://lavx.github.io/bazarr/guides/media-servers.html"],
   ["silo", "https://lavx.github.io/bazarr/guides/media-servers.html#silo"],
+  ["jellyfin", "https://lavx.github.io/bazarr/guides/media-servers.html"],
+  ["plex", "https://lavx.github.io/bazarr/guides/media-servers.html"],
 ] as const)("points %s at its part of the guide", async (kind, href) => {
   setup(kind);
   expect(

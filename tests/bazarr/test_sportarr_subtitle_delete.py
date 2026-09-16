@@ -145,10 +145,11 @@ def test_a_failed_removal_records_no_history():
 
 
 def test_no_item_level_media_server_refresh_for_sports():
-    """The item-level Plex/Jellyfin refresh helpers stay out of the sports
-    branch: a sports event has no identifiers for them to resolve. The sports
-    branch refreshes the configured sports libraries and requests the
-    Sportarr whole-library rescan instead."""
+    """No media server is called from the sports branch at all: a sports event
+    has no identifiers for an item-level refresh to resolve, and every
+    destination now reaches its configured sports library through the deletion
+    this branch already published. Calling one from here as well would refresh
+    it twice, and only for the two kinds that used to be singletons."""
     import inspect
 
     from subtitles.tools import delete
@@ -156,10 +157,8 @@ def test_no_item_level_media_server_refresh_for_sports():
     source = inspect.getsource(delete.delete_subtitles)
     start = source.rindex("if media_type == 'sports':")
     sports = source[start : source.index("if media_type == 'series':", start)]
-    assert "plex_refresh_item" not in sports
-    assert "jellyfin_refresh_item" not in sports
-    assert "plex_update_sports_library()" in sports
-    assert "jellyfin_update_sports_library()" in sports
+    assert "plex" not in sports
+    assert "jellyfin" not in sports
 
 
 def test_sports_delete_requests_one_rescan_and_publishes_to_the_dispatcher():

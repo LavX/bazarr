@@ -1095,10 +1095,9 @@ def test_sports_sync_refreshes_final_outputs_once_even_after_partial_cancellatio
     output = folder / '1/event.en.hi.ffsubsync.srt'
     assert output.exists()
     assert len(published) == 1
-    assert sorted(refreshed, key=str) == sorted([
-        ('plex', 'Sports'), ('plex', 'Other Sports'),
-        ('jellyfin', 'sports-id'), ('jellyfin', 'other-sports-id'), ('sportarr', 1),
-    ], key=str)
+    # One rescan for the owner, once, whatever the engines did. Every media
+    # server refreshes off that single publication on its own worker.
+    assert refreshed == [('sportarr', 1)]
 
 
 @pytest.mark.parametrize('filters, expected', [

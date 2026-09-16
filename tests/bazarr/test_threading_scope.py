@@ -342,9 +342,6 @@ def test_delete_subtitles_routes_rescan_to_owning_instance(monkeypatch, tmp_path
             return _R()
 
     monkeypatch.setattr(delete_mod, "database", _Db())
-    monkeypatch.setattr(
-        delete_mod.settings, "general",
-        SimpleNamespace(use_plex=False, use_jellyfin=False), raising=False)
 
     ok = delete_mod.delete_subtitles(
         media_type="movie", language="en", forced=False, hi=False,

@@ -94,7 +94,7 @@ def test_all_item_operations_require_authentication(instance_api, method, suffix
 
 
 def test_invalid_filters_and_numerical_ids_are_not_coerced(instance_api):
-    assert instance_api.get(ROOT + '?kind=jellyfin', headers=HEADERS).status_code == 400
+    assert instance_api.get(ROOT + '?kind=roku', headers=HEADERS).status_code == 400
     assert instance_api.get(ROOT + '/1', headers=HEADERS).status_code == 404
 
 
@@ -204,3 +204,57 @@ def test_a_broken_destination_can_still_be_turned_off(instance_api, schema_sessi
     assert bool(saved.enabled) is False
     # Turning it back on has no usable connection and must still be refused.
     assert instance_api.patch(path, json={'enabled': True}, headers=HEADERS).status_code == 400
+
+
+@pytest.mark.parametrize('kind', ['emby', 'jellyfin', 'plex', 'silo'])
+def test_unsaved_connection_probes_take_the_kind_as_a_value(instance_api, monkeypatch, kind):
+    """One route for every kind, so adding a destination is not a per-kind path."""
+    from media_servers import service
+    seen = []
+    monkeypatch.setattr(service, '_probe', lambda *args: seen.append(args) or {'success': True})
+    body = {'kind': kind, 'url': 'http://server.example', 'apikey': 'key', 'verify_ssl': False}
+    assert instance_api.post(ROOT + '/probe', json=body).status_code == 401
+    response = instance_api.post(ROOT + '/probe', json=body, headers=HEADERS)
+    assert response.status_code == 200 and response.json == {'success': True}
+    assert seen == [(kind, 'http://server.example', 'key', False, False)]
+
+
+@pytest.mark.parametrize('body,code', [
+    ({'kind': 'roku', 'url': 'http://a.example', 'apikey': 'k'}, 'invalid_kind'),
+    ({'kind': 'emby', 'url': 'http://a.example'}, 'missing_credentials'),
+    ({'kind': 'emby', 'url': 'not-a-url', 'apikey': 'k'}, 'invalid_url'),
+    ({'kind': 'emby', 'url': 'http://a.example', 'apikey': 'k', 'extra': 1}, 'invalid_settings'),
+])
+def test_unsaved_probe_refuses_malformed_settings(instance_api, body, code):
+    response = instance_api.post(ROOT + '/probe', json=body, headers=HEADERS)
+    assert response.status_code == 400
+    assert response.json == {'success': False, 'error_code': code}
+
+
+def test_unsaved_library_probe_is_refused_for_the_kind_that_has_none(instance_api):
+    """Emby scopes its libraries through path mappings and lists none here."""
+    body = {'kind': 'emby', 'url': 'http://emby.example', 'apikey': 'key'}
+    response = instance_api.post(ROOT + '/probe-libraries', json=body, headers=HEADERS)
+    assert response.status_code == 400
+    assert response.json == {'data': [], 'error_code': 'invalid_kind'}
+
+
+def test_refresh_libraries_is_authenticated_and_reports_what_it_asked_for(instance_api, monkeypatch):
+    from media_servers import libraries
+    from media_servers.http import MediaServerError
+    created = instance_api.post(ROOT, json=payload('emby'), headers=HEADERS)
+    path = ROOT + '/' + created.json['id'] + '/refresh-libraries'
+    assert instance_api.post(path).status_code == 401
+    assert instance_api.post(ROOT + '/1/refresh-libraries', headers=HEADERS).status_code == 404
+
+    monkeypatch.setattr(libraries, 'refresh_libraries', lambda instance_id: 4)
+    response = instance_api.post(path, headers=HEADERS)
+    assert response.status_code == 200 and response.json == {'requested': 4}
+
+    def refuse(_instance_id):
+        raise MediaServerError('library_missing')
+
+    monkeypatch.setattr(libraries, 'refresh_libraries', refuse)
+    response = instance_api.post(path, headers=HEADERS)
+    assert response.status_code == 400
+    assert response.json == {'requested': 0, 'error_code': 'library_missing'}

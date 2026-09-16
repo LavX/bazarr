@@ -7,10 +7,10 @@ import type { MediaServerKind } from "@/apis/raw/mediaServers";
 import { act, renderHook, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import {
+  useMediaServerLibraries,
   useMediaServerStatus,
   useMediaServerTest,
   useSaveMediaServerInstance,
-  useSiloLibraries,
 } from "./mediaServers";
 
 function queryWrapper() {
@@ -73,7 +73,7 @@ it("does not show another server's previous status while its own status is loadi
 it("discards late read-only results after credentials change without caching the API key", async () => {
   let finish: (() => void) | undefined;
   server.use(
-    http.post("/api/silo/test-connection", async () => {
+    http.post("/api/system/media-server-instances/probe", async () => {
       await new Promise<void>((resolve) => {
         finish = resolve;
       });
@@ -123,7 +123,7 @@ it("discards late read-only results after credentials change without caching the
 
 it("clears loaded Silo library choices after the URL, key or TLS setting changes", async () => {
   server.use(
-    http.post("/api/silo/libraries", () =>
+    http.post("/api/system/media-server-instances/probe-libraries", () =>
       HttpResponse.json({
         data: [{ id: "0007", name: "TV", type: "series", paths: ["/tv"] }],
         error_code: null,
@@ -137,7 +137,7 @@ it("clears loaded Silo library choices after the URL, key or TLS setting changes
     verify_ssl: true,
   };
   const { result, rerender, unmount } = renderHook(
-    (input) => useSiloLibraries(input),
+    (input) => useMediaServerLibraries("silo", input),
     { wrapper, initialProps },
   );
   try {
@@ -237,6 +237,9 @@ it("saves a credential from its closure and keeps only safe DTO state on success
     verify_ssl: true,
     api_key_set: true,
     path_mappings: [],
+    refresh_movies: true,
+    refresh_episodes: true,
+    options: {},
   };
   server.use(
     http.patch(

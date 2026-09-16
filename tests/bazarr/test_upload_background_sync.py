@@ -139,15 +139,11 @@ def upload_flow(monkeypatch, tmp_path):
 @pytest.mark.parametrize("failure", ["settings", "enqueue"])
 def test_saved_upload_refreshes_consumers_when_sync_setup_fails(upload_flow, monkeypatch, media_type, failure):
     from app.config import settings
+    from media_servers import events
     from subtitles import sync, upload
 
     flow = upload_flow
-    refreshes = []
-    monkeypatch.setattr(settings.general, 'use_plex', True)
-    monkeypatch.setattr(settings.general, 'use_jellyfin', True)
-    for service in (settings.plex, settings.jellyfin):
-        monkeypatch.setattr(service, 'update_movie_library', True)
-        monkeypatch.setattr(service, 'update_series_library', True)
+    refreshes, published = [], []
     monkeypatch.setattr(settings.plex, 'set_episode_added', False)
     monkeypatch.setattr(settings.plex, 'set_movie_added', False)
 
@@ -157,8 +153,11 @@ def test_saved_upload_refreshes_consumers_when_sync_setup_fails(upload_flow, mon
             refreshes.append((name, args, kwargs))
         return refresh
 
-    for name in ('notify_sonarr', 'notify_radarr', 'plex_refresh_item', 'jellyfin_refresh_item'):
+    for name in ('notify_sonarr', 'notify_radarr'):
         monkeypatch.setattr(upload, name, consumer(name))
+    # Every media server refreshes through this one publication now, so that is
+    # what proves they were told, not a per-kind inline call.
+    monkeypatch.setattr(events, 'notify_subtitle_mutation', published.append)
 
     def fail(*args, **kwargs):
         raise RuntimeError('controlled sync setup failure')
@@ -176,11 +175,11 @@ def test_saved_upload_refreshes_consumers_when_sync_setup_fails(upload_flow, mon
     assert len(flow.history) == 1
     assert not flow.queue.jobs_pending_queue
     assert [name for name, args, kwargs in refreshes] == [
-        'notify_sonarr' if media_type == 'series' else 'notify_radarr',
-        'plex_refresh_item', 'jellyfin_refresh_item']
+        'notify_sonarr' if media_type == 'series' else 'notify_radarr']
     assert refreshes[0][1] == (10 if media_type == 'series' else 30,)
-    assert refreshes[1][2]['is_movie'] == (media_type == 'movie')
-    assert refreshes[2][2]['is_movie'] == (media_type == 'movie')
+    assert [event.media_type for event in published] == [
+        'episode' if media_type == 'series' else 'movie']
+    assert published[0].operation == 'upload'
 
 
 @pytest.mark.parametrize("media_type", ["movie", "series"])
@@ -626,15 +625,11 @@ def test_sync_reindex_cannot_restore_a_listing_after_successful_delete(upload_fl
 @pytest.mark.parametrize("output_mode", ["overwrite", "keep_all"])
 def test_review_sync_publication_refreshes_external_consumers(upload_flow, monkeypatch, media_type, output_mode):
     from app.config import settings
+    from media_servers import events
     from subtitles import upload
 
     flow = upload_flow
     monkeypatch.setattr(settings.subsync, "output_mode", output_mode)
-    monkeypatch.setattr(settings.general, "use_plex", True)
-    monkeypatch.setattr(settings.general, "use_jellyfin", True)
-    for name in ("update_series_library", "update_movie_library"):
-        monkeypatch.setattr(settings.plex, name, True)
-        monkeypatch.setattr(settings.jellyfin, name, True)
     monkeypatch.setattr(settings.plex, "set_movie_added", False)
     monkeypatch.setattr(settings.plex, "set_episode_added", False)
     refreshes = []
@@ -642,20 +637,22 @@ def test_review_sync_publication_refreshes_external_consumers(upload_flow, monke
     def refresh(consumer, *args, **kwargs):
         refreshes.append((consumer, {path.name: path.read_text() for path in flow.video.parent.glob("*.srt")}))
 
-    for name in ("notify_sonarr", "notify_radarr", "plex_refresh_item", "jellyfin_refresh_item"):
+    for name in ("notify_sonarr", "notify_radarr"):
         monkeypatch.setattr(upload, name, lambda *args, _consumer=name, **kwargs: refresh(_consumer, *args, **kwargs))
+    monkeypatch.setattr(events, "notify_subtitle_mutation",
+                        lambda event: refresh("media servers", event))
     flow.submit(media_type)
     upload_job, upload_thread = flow.start()
     upload_thread.join(2)
     assert upload_job.status == "completed"
-    assert len(refreshes) == 3
+    assert len(refreshes) == 2
     flow.release_engine.set()
     sync_job, sync_thread = flow.start()
     sync_thread.join(3)
     assert sync_job.status == "completed"
-    assert len(refreshes) == 6, "external consumers were not refreshed after sync publication"
+    assert len(refreshes) == 4, "external consumers were not refreshed after sync publication"
     expected = "Video.en.ffsubsync.srt" if output_mode == "keep_all" else "Video.en.srt"
-    assert all("Synced" in files[expected] for _, files in refreshes[3:])
+    assert all("Synced" in files[expected] for _, files in refreshes[2:])
     assert len(flow.history) == 1
     assert len(flow.notifications) == 1, "sync publication repeated the upload notification"
 

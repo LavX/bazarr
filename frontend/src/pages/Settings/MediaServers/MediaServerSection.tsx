@@ -20,6 +20,7 @@ import type {
 import { Check, Section } from "@/pages/Settings/components";
 import { useStagedValues } from "@/pages/Settings/utilities/FormValues";
 import { useSettingValue } from "@/pages/Settings/utilities/hooks";
+import { GUIDE_ANCHORS, GUIDE_URL, kindName } from "./kinds";
 import MediaServerInstanceCard from "./MediaServerInstanceCard";
 import MediaServerInstanceFormModal from "./MediaServerInstanceFormModal";
 import styles from "@/pages/Settings/Connections/Connections.module.scss";
@@ -68,7 +69,7 @@ export default function MediaServerSection({
 }: {
   kind: MediaServerKind;
 }) {
-  const name = kind === "emby" ? "Emby" : "Silo";
+  const name = kindName(kind);
   const enabledKey = `settings-general-use_${kind}`;
   const savedEnabled =
     useSettingValue<boolean>(enabledKey, { original: true }) ?? false;
@@ -86,14 +87,12 @@ export default function MediaServerSection({
       <Section header={`Use ${name}`}>
         <Check label="Enabled" settingKey={enabledKey} />
         <Text size="sm" c="dimmed">
-          {kind === "emby"
-            ? "Notify Emby about movie and episode subtitle changes."
-            : "Notify Silo about movie and episode subtitle changes. Subtitle sidecars must be beside the video file."}{" "}
+          Notify {name} about movie and episode subtitle changes.
+          {kind === "silo" &&
+            " Subtitle sidecars must be beside the video file."}{" "}
           <Anchor
             c="light-dark(var(--mantine-color-brand-7), var(--mantine-color-brand-4))"
-            href={`https://lavx.github.io/bazarr/guides/media-servers.html${
-              kind === "silo" ? "#silo" : ""
-            }`}
+            href={`${GUIDE_URL}${GUIDE_ANCHORS[kind]}`}
             target="_blank"
             rel="noreferrer"
           >

@@ -29,7 +29,6 @@ export enum QueryKeys {
   Range = "range",
   All = "all",
   Plex = "plex",
-  Jellyfin = "jellyfin",
   Seerr = "seerr",
   Translator = "translator",
 }

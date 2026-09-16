@@ -101,12 +101,16 @@ export function useMediaServerTest(
   return mutation;
 }
 
-export function useSiloLibraries(input: ConnectionOverrides, id?: string) {
+export function useMediaServerLibraries(
+  kind: MediaServerKind,
+  input: ConnectionOverrides,
+  id?: string,
+) {
   const mutation = useMutation({
     mutationFn: () =>
       id
         ? api.mediaServers.librariesExisting(id, input)
-        : api.mediaServers.libraries({
+        : api.mediaServers.libraries(kind, {
             url: input.url ?? "",
             apikey: input.api_key ?? "",
             verify_ssl: input.verify_ssl ?? true,
@@ -116,6 +120,7 @@ export function useSiloLibraries(input: ConnectionOverrides, id?: string) {
   useEffect(
     () => reset(),
     [
+      kind,
       id,
       input.url,
       input.api_key,
@@ -135,6 +140,18 @@ export function useMediaServerStatus(kind: MediaServerKind, id: string) {
     placeholderData: undefined,
     staleTime: 0,
     refetchInterval: 10000,
+  });
+}
+
+export function useRefreshMediaServerLibraries(
+  kind: MediaServerKind,
+  id: string,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.mediaServers.refreshLibraries(id),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: statusKey(kind, id) }),
   });
 }
 

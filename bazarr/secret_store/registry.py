@@ -34,9 +34,13 @@ The dynaconf API serializer flattens nested settings to that form
 before checking, so this stays simple.
 """
 
-# These legacy sections remain encrypted for one-time database import, but
-# their values are never exposed or edited through the general settings API.
-IMPORT_ONLY_SECTIONS = frozenset({'emby', 'silo'})
+# Sections whose connection settings are now instance rows. They remain
+# encrypted for the one-time database import, but their values are never
+# exposed or edited through the general settings API, because a save would
+# write a value nothing reads. Plex is not here: its section still holds the
+# account, the recently-added dates and the webhook and Autopulse
+# configuration, none of which is a refresh.
+IMPORT_ONLY_SECTIONS = frozenset({'emby', 'jellyfin', 'silo'})
 
 USER_VISIBLE_SECRETS = frozenset({
     # Bazarr's own admin login (username + password) and the API key that
