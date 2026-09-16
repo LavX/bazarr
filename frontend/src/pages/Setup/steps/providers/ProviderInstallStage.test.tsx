@@ -50,6 +50,9 @@ const onNext = vi.fn();
 function setCatalog(entries: unknown[]) {
   mockedCatalog.mockReturnValue({
     data: { sources: [], entries },
+    // Settled: the stage reads this to tell an empty catalog from one that has
+    // not answered yet.
+    isPending: false,
   } as unknown as ReturnType<typeof useProviderHubCatalog>);
 }
 
@@ -165,6 +168,30 @@ describe("ProviderInstallStage", () => {
       screen.getByRole("button", { name: /continue without providers/i }),
     );
     expect(onNext).toHaveBeenCalledTimes(1);
+  });
+
+  // An answer that has not arrived is not an empty one. Reading the list while
+  // the query was still in flight reported a catalog with nothing in it on a
+  // healthy install, offered a recovery from a state it was not in, and then
+  // replaced both a moment later.
+  it("says nothing about the catalog while it is still being read", () => {
+    mockedCatalog.mockReturnValue({
+      data: undefined,
+      isPending: true,
+    } as unknown as ReturnType<typeof useProviderHubCatalog>);
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    expect(screen.queryByText(/no providers available/i)).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /continue without providers/i }),
+    ).toBeNull();
   });
 
   // It is a recovery, not a way to decline the step: a reader who can see the

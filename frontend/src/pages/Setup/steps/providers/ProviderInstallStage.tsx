@@ -133,7 +133,7 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   onNext,
   onBack,
 }) => {
-  const { data: catalog } = useProviderHubCatalog();
+  const { data: catalog, isPending: catalogPending } = useProviderHubCatalog();
   const install = useProviderHubInstall();
   const { restart } = useSystem();
 
@@ -466,7 +466,15 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
         </Text>
       </Stack>
 
-      {choices.length === 0 ? (
+      {catalogPending ? (
+        // A catalog still on its way has not told us it is empty. Reading the
+        // list before it arrives said "No providers available" on a healthy
+        // install, with a recovery from a state it was not in, and then
+        // replaced both with the catalog a moment later.
+        <Stack align="center" py="xl">
+          <Loader />
+        </Stack>
+      ) : choices.length === 0 ? (
         <Alert color="gray" title="No providers available">
           <Stack gap="sm" align="flex-start">
             <Text size="sm">
