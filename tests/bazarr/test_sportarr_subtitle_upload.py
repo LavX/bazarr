@@ -97,6 +97,7 @@ def test_no_consumer_refresh_is_attempted_for_sports():
     assert "return" in sports
     assert "notify_sonarr" not in sports
     assert "plex_refresh_item" not in sports
+    assert "jellyfin" not in sports
 
 
 def test_an_invalid_extension_is_rejected_before_any_work():
@@ -112,33 +113,20 @@ def test_an_invalid_extension_is_rejected_before_any_work():
 
 def test_upload_consumers_for_sports_request_one_rescan(monkeypatch):
     """An upload is a live write: Sportarr gets exactly one whole-library
-    rescan request for the owner, and unconfigured media servers are left
-    alone."""
-    from app.config import settings
+    rescan request for the owner, and no media server is called from here.
+
+    Every destination now refreshes through the publication the upload already
+    dispatched, so calling one again from this path would refresh it twice."""
     from sportarr import notify as sportarr_notify
     from subtitles import upload
 
     requested = []
-    refreshes = []
     monkeypatch.setattr(sportarr_notify, "notify_rescan", lambda owner: requested.append(owner))
-    monkeypatch.setattr(upload, "plex_update_sports_library",
-                        lambda: refreshes.append("plex"))
-    monkeypatch.setattr(upload, "jellyfin_update_sports_library",
-                        lambda: refreshes.append("jellyfin"))
-    monkeypatch.setattr(settings.general, "use_plex", True)
-    monkeypatch.setattr(settings.general, "use_jellyfin", True)
-    monkeypatch.setattr(settings.plex, "sports_library", [])
-    monkeypatch.setattr(settings.jellyfin, "sports_library_ids", [])
 
     upload._refresh_upload_consumers("sports", None, 7)
     assert requested == [7]
-    assert refreshes == []
-
-    monkeypatch.setattr(settings.plex, "sports_library", ["Sports"])
-    monkeypatch.setattr(settings.jellyfin, "sports_library_ids", ["10"])
     upload._refresh_upload_consumers("sports", None, 7)
     assert requested == [7, 7]
-    assert refreshes == ["plex", "jellyfin"]
 
 
 @pytest.fixture

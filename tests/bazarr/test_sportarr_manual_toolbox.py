@@ -105,8 +105,8 @@ def test_postprocessing_makes_no_media_server_call_for_sports():
 
     source = inspect.getsource(subtitles.postprocess_subtitles)
     sports_branch = source[source.index('if media_type == "sports":'):source.index('if media_type == "episode":')]
-    assert "plex_refresh_item" not in sports_branch
-    assert "jellyfin_refresh_item" not in sports_branch
+    assert "plex" not in sports_branch
+    assert "jellyfin" not in sports_branch
 
 
 @pytest.fixture
@@ -185,14 +185,10 @@ def test_toolbox_refreshes_destinations_once_after_a_renaming_mod(sports_toolbox
     refreshes = []
     publications = []
     monkeypatch.setattr(settings.general, 'use_plex', True)
-    monkeypatch.setattr(settings.plex, 'sports_library', ['Sports'])
     monkeypatch.setattr(settings.general, 'use_jellyfin', True)
-    monkeypatch.setattr(settings.jellyfin, 'sports_library_ids', ['sports-id'])
     monkeypatch.setattr(settings.general, 'use_emby', True)
     monkeypatch.setattr(events, 'notify_subtitle_mutation', publications.append)
     monkeypatch.setattr(processing, 'notify_subtitle_mutation', publications.append)
-    monkeypatch.setattr(processing, 'plex_update_sports_library', lambda: refreshes.append('plex'))
-    monkeypatch.setattr(processing, 'jellyfin_update_sports_library', lambda: refreshes.append('jellyfin'))
     monkeypatch.setattr(notify, 'notify_rescan', lambda owner: refreshes.append(('sportarr', owner)))
     assert run_toolbox(endpoint, monkeypatch, action='remove_HI',
                        path=str(folder / '1' / 'event.en.hi.srt')) == ('', 204)
@@ -202,7 +198,7 @@ def test_toolbox_refreshes_destinations_once_after_a_renaming_mod(sports_toolbox
     session.expire_all()
     entries = ast.literal_eval(session.get(TableSportsEvents, 61).subtitles)
     assert ['en', '/sports/event.en.srt'] in [entry[:2] for entry in entries]
-    assert sorted(refreshes, key=str) == sorted(['plex', 'jellyfin', ('sportarr', 1)], key=str)
+    assert refreshes == [('sportarr', 1)]
     assert [(event.operation, event.subtitle_path) for event in publications] == [('edit', str(output))]
 
 

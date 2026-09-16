@@ -7,9 +7,8 @@ from media_servers.events import publication_callback
 from subliminal.subtitle import SUBTITLE_EXTENSIONS
 
 from app.event_handler import event_stream
-from app.config import settings
-from app.database import database, TableShows, TableEpisodes, TableMovies, select
-from arr_instances.resolution import scoped, client_for_instance
+from app.database import database
+from arr_instances.resolution import client_for_instance
 from languages.get_languages import language_from_alpha2
 from utilities.path_mappings import path_mappings
 from utilities.autopulse_webhook import call_external_webhook
@@ -22,8 +21,6 @@ from sonarr.history import history_log
 from radarr.history import history_log_movie
 from sonarr.notify import notify_sonarr
 from radarr.notify import notify_radarr
-from plex.operations import plex_refresh_item, plex_update_sports_library
-from jellyfin.operations import jellyfin_refresh_item, jellyfin_update_sports_library
 
 
 def _delete_subtitle_file(media_path, subtitle_path, on_publish=None, revalidate=None):
@@ -81,9 +78,6 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
         def prr(p):
             return path_mappings.path_replace_reverse_instance(p, arr_instance_id, "sports")
 
-        # A sports event has no imdb or tvdb id to refresh a media server with,
-        # so nothing is looked up here.
-        metadata = None
     elif media_type == 'series':
         def pr(p):
             return path_mappings.path_replace_instance(p, arr_instance_id, "series")
@@ -91,22 +85,12 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
         def prr(p):
             return path_mappings.path_replace_reverse_instance(p, arr_instance_id, "series")
 
-        metadata = database.execute(scoped(
-            select(TableEpisodes.season, TableEpisodes.episode, TableShows.imdbId, TableShows.tvdbId)
-            .join(TableShows)
-            .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id),
-            TableEpisodes.arr_instance_id, arr_instance_id)).first()
     else:
         def pr(p):
             return path_mappings.path_replace_instance(p, arr_instance_id, "movie")
 
         def prr(p):
             return path_mappings.path_replace_reverse_instance(p, arr_instance_id, "movie")
-
-        metadata = database.execute(scoped(
-            select(TableMovies.imdbId, TableMovies.tmdbId)
-            .where(TableMovies.radarrId == radarr_id),
-            TableMovies.arr_instance_id, arr_instance_id)).first()
 
     result = ProcessSubtitlesResult(message=f"{language_string} subtitles deleted from disk.",
                                     reversed_path=prr(media_path),
@@ -149,21 +133,10 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
         # One whole-library Sportarr rescan per affected owner, behind the
         # per-instance transport and non-blocking; Sportarr exposes only that
         # untargeted scan. The media servers refresh their configured sports
-        # libraries instead of an item the event carries no identifier for.
+        # libraries through the deletion this path already published, instead
+        # of an item the event carries no identifier for.
         from sportarr.notify import notify_rescan
         notify_rescan(arr_instance_id)
-        if settings.general.use_plex:
-            sports_library = settings.plex.sports_library
-            if isinstance(sports_library, str):
-                sports_library = [sports_library] if sports_library else []
-            if sports_library:
-                plex_update_sports_library()
-        if settings.general.use_jellyfin:
-            sports_library_ids = settings.jellyfin.sports_library_ids
-            if isinstance(sports_library_ids, str):
-                sports_library_ids = [sports_library_ids] if sports_library_ids else []
-            if sports_library_ids:
-                jellyfin_update_sports_library()
 
         call_external_webhook(
             subtitle_path=subtitles_path,
@@ -188,13 +161,6 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
         event_stream(type='series', action='update', payload=sonarr_series_id)
         event_stream(type='episode-wanted', action='update', payload=sonarr_episode_id)
 
-        if settings.general.use_plex and settings.plex.update_series_library:
-            plex_refresh_item(metadata.imdbId, is_movie=False, season=metadata.season,
-                              episode=metadata.episode)
-        if settings.general.use_jellyfin and settings.jellyfin.update_series_library:
-            jellyfin_refresh_item(metadata.imdbId, is_movie=False, season=metadata.season,
-                                  episode=metadata.episode, tvdb_id=metadata.tvdbId)
-
         # Call external webhook after all processing is complete
         call_external_webhook(
             subtitle_path=subtitles_path,
@@ -214,12 +180,6 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
         notify_radarr(radarr_id,
                       arr_client=client_for_instance(database, arr_instance_id, enabled_only=False))
         event_stream(type='movie-wanted', action='update', payload=radarr_id)
-
-        if settings.general.use_plex and settings.plex.update_movie_library:
-            plex_refresh_item(metadata.imdbId, is_movie=True)
-        if settings.general.use_jellyfin and settings.jellyfin.update_movie_library:
-            jellyfin_refresh_item(metadata.imdbId, is_movie=True,
-                                  tmdb_id=metadata.tmdbId)
 
         # Call external webhook after all processing is complete
         call_external_webhook(

@@ -224,9 +224,11 @@ class TableAnnouncements(Base):
 class TableMediaServerInstances(Base):
     __tablename__ = 'media_server_instances'
     __table_args__ = (
-        CheckConstraint("kind IN ('emby', 'silo')", name='ck_media_server_kind'),
+        CheckConstraint("kind IN ('emby', 'jellyfin', 'plex', 'silo')", name='ck_media_server_kind'),
         CheckConstraint('enabled IN (0, 1)', name='ck_media_server_enabled'),
         CheckConstraint('verify_ssl IN (0, 1)', name='ck_media_server_verify_ssl'),
+        CheckConstraint('refresh_movies IN (0, 1)', name='ck_media_server_refresh_movies'),
+        CheckConstraint('refresh_episodes IN (0, 1)', name='ck_media_server_refresh_episodes'),
     )
 
     id = mapped_column(Text, primary_key=True)
@@ -237,12 +239,22 @@ class TableMediaServerInstances(Base):
     api_key = mapped_column(Text, nullable=False, default='', server_default='')
     verify_ssl = mapped_column(Integer, nullable=False, default=1, server_default='1')
     path_mappings = mapped_column(Text, nullable=False, default='[]', server_default='[]')
+    # Whether this destination refreshes movies or episodes is a property of
+    # the instance, not of the server product, so it lives beside the rest of
+    # what every kind has rather than in the per-kind options blob.
+    refresh_movies = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    refresh_episodes = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    # What is genuinely kind-specific: Jellyfin's library ids and refresh
+    # method, Plex's library section names. Emby and Silo scope their libraries
+    # through path_mappings and leave this empty.
+    options = mapped_column(Text, nullable=False, default='{}', server_default='{}')
     revision = mapped_column(Integer, nullable=False, default=1, server_default='1')
 
 
 class TableMediaServerImports(Base):
     __tablename__ = 'media_server_imports'
-    __table_args__ = (CheckConstraint("kind IN ('emby', 'silo')", name='ck_media_server_import_kind'),)
+    __table_args__ = (CheckConstraint("kind IN ('emby', 'jellyfin', 'plex', 'silo')",
+                                      name='ck_media_server_import_kind'),)
 
     kind = mapped_column(Text, primary_key=True)
 

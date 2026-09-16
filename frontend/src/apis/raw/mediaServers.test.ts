@@ -19,14 +19,17 @@ it.each(["emby", "silo"] as const)(
     let received: unknown;
     let requestUrl = "";
     server.use(
-      http.post(`/api/${kind}/test-connection`, async ({ request }) => {
-        received = await request.json();
-        requestUrl = request.url;
-        return HttpResponse.json({
-          success: true,
-          server_name: "Media server",
-        });
-      }),
+      http.post(
+        "/api/system/media-server-instances/probe",
+        async ({ request }) => {
+          received = await request.json();
+          requestUrl = request.url;
+          return HttpResponse.json({
+            success: true,
+            server_name: "Media server",
+          });
+        },
+      ),
     );
     expect(await api.mediaServers.testConnection(kind, input)).toEqual({
       success: true,
@@ -36,6 +39,7 @@ it.each(["emby", "silo"] as const)(
       url: "https://silo.example/prefix",
       apikey: "0007",
       verify_ssl: false,
+      kind,
     });
     expect(new URL(requestUrl).search).toBe("");
   },
@@ -43,7 +47,7 @@ it.each(["emby", "silo"] as const)(
 
 it("preserves Silo native library types, paths and string IDs", async () => {
   server.use(
-    http.post("/api/silo/libraries", () =>
+    http.post("/api/system/media-server-instances/probe-libraries", () =>
       HttpResponse.json({
         data: [
           { id: "0007", name: "TV", type: "series", paths: ["/media/tv"] },
@@ -58,7 +62,7 @@ it("preserves Silo native library types, paths and string IDs", async () => {
       }),
     ),
   );
-  expect(await api.mediaServers.libraries(input)).toEqual([
+  expect(await api.mediaServers.libraries("silo", input)).toEqual([
     { id: "0007", name: "TV", type: "series", paths: ["/media/tv"] },
     { id: "0010", name: "Films", type: "movies", paths: ["/media/films"] },
   ]);
@@ -66,17 +70,17 @@ it("preserves Silo native library types, paths and string IDs", async () => {
 
 it("distinguishes an empty library response from a failed probe", async () => {
   server.use(
-    http.post("/api/silo/libraries", () =>
+    http.post("/api/system/media-server-instances/probe-libraries", () =>
       HttpResponse.json({ data: [], error_code: null }),
     ),
   );
-  expect(await api.mediaServers.libraries(input)).toEqual([]);
+  expect(await api.mediaServers.libraries("silo", input)).toEqual([]);
   server.use(
-    http.post("/api/silo/libraries", () =>
+    http.post("/api/system/media-server-instances/probe-libraries", () =>
       HttpResponse.json({ data: [], error_code: "connection_error" }),
     ),
   );
-  await expect(api.mediaServers.libraries(input)).rejects.toThrow();
+  await expect(api.mediaServers.libraries("silo", input)).rejects.toThrow();
 });
 
 it("does not treat missing or malformed status endpoints as idle success", async () => {
@@ -119,21 +123,39 @@ it.each(["emby", "silo"] as const)(
 
 it.each([
   { id: 7, name: "TV", type: "series", paths: ["/tv"] },
-  { id: "7", name: "Audio", type: "music", paths: ["/audio"] },
+  { id: "7", name: 9, type: "series", paths: ["/tv"] },
+  { id: "7", name: "TV", type: 5, paths: ["/tv"] },
   { id: "7", name: "TV", type: "series", paths: null },
+  { id: "7", name: "TV", type: "series", paths: [7] },
 ])(
   "rejects invalid native library choices without coercing IDs or types",
   async (library) => {
     server.use(
-      http.post("/api/silo/libraries", () =>
+      http.post("/api/system/media-server-instances/probe-libraries", () =>
         HttpResponse.json({ data: [library], error_code: null }),
       ),
     );
-    await expect(api.mediaServers.libraries(input)).rejects.toThrow(
-      "Could not load Silo libraries",
+    await expect(api.mediaServers.libraries("silo", input)).rejects.toThrow(
+      "Could not load media server libraries",
     );
   },
 );
+
+it("accepts a library that reports no roots, which only Silo does", async () => {
+  // Jellyfin and Plex address a library by handle and report no paths, so an
+  // absent paths field is a normal response, not a malformed one.
+  server.use(
+    http.post(`${item}/libraries`, () =>
+      HttpResponse.json({
+        data: [{ id: "lib-1", name: "Films", type: "movies" }],
+        error_code: null,
+      }),
+    ),
+  );
+  expect(await api.mediaServers.librariesExisting(id)).toEqual([
+    { id: "lib-1", name: "Films", type: "movies", paths: [] },
+  ]);
+});
 
 it("rejects malformed retry acceptance instead of claiming work was queued", async () => {
   server.use(
@@ -156,6 +178,9 @@ it("uses item probes with saved-key overrides and omits credential fields from D
     verify_ssl: true,
     api_key_set: true,
     path_mappings: [],
+    refresh_movies: true,
+    refresh_episodes: false,
+    options: { movie_libraries: ["Films"] },
   };
   const received: unknown[] = [];
   server.use(

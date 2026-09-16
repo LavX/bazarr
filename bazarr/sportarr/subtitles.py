@@ -399,7 +399,7 @@ def save_sports_subtitle(
     """Reusable save entrypoint for manual and automatic sports provider downloads."""
     from app.notifier import send_notifications_sports
     from subtitles.manual import _save_downloaded_subtitles
-    from subtitles.processing import process_subtitle, refresh_sports_media_servers
+    from subtitles.processing import process_subtitle
     from subtitles.tools.mods import get_subzero_mods
     from subtitles.tools.subsync_engines import subtitle_write_locks
     from utilities.helper import get_target_folder
@@ -421,9 +421,8 @@ def save_sports_subtitle(
 
     def published(output_path):
         # Record the physical write before later processing can fail or stop.
-        # The batch flushes these scans after the final outputs are settled.
-        refresh_sports_media_servers(
-            path, output_path, context.arr_instance_id, publish_notification=False)
+        # The batch flushes these rescans after the final outputs are settled;
+        # the media servers were already told by the file publication itself.
         notify_rescan(context.arr_instance_id)
 
     def validate(destination=None):
