@@ -52,6 +52,10 @@ database in neither state. The log says so plainly, keeps the extracted dump bes
 `bazarr_postgres.dump.failed`, and names the backup folder the archive came from, so the restore can be
 retried. That database must not be used until it has been restored again or rebuilt.
 
+A restore refused before `pg_restore` was ever started is a different thing and says so. Missing client
+tools, no database name configured and an unparseable connection URL all stop the restore before the
+database is touched, and the log says nothing was changed and names what to fix.
+
 ## Backups do not cross engines
 
 An archive made on SQLite cannot be restored into a PostgreSQL instance, or the other way round: the dump

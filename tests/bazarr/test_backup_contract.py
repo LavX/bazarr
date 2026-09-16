@@ -312,6 +312,83 @@ def test_prepare_restore_does_not_restart_on_an_archive_without_the_database(bac
     assert os.listdir(backup_env.restore_dir) == []
 
 
+PRE_LAUNCH_WORDING = 'refused before pg_restore was started'
+MID_RESTORE_WORDING = 'partially restored'
+
+
+def test_pg_restore_missing_from_path_does_not_claim_the_database_may_be_corrupt(backup_env, monkeypatch,
+                                                                                 caplog):
+    _enable_postgresql(backup_env, monkeypatch)
+    _stage_restore(backup_env, 'bazarr_postgres.dump')
+
+    with caplog.at_level('ERROR'):
+        assert backup_env.module.restore_from_backup() is False
+
+    assert backup_env.restarts == []
+    assert PRE_LAUNCH_WORDING in caplog.text
+    assert 'nothing was changed' in caplog.text
+    assert MID_RESTORE_WORDING not in caplog.text
+    assert 'pg_restore was not found on PATH' in caplog.text
+    assert os.listdir(backup_env.restore_dir) == []
+
+
+def test_no_configured_database_does_not_claim_the_database_may_be_corrupt(backup_env, monkeypatch, caplog):
+    _enable_postgresql(backup_env, monkeypatch)
+    monkeypatch.setattr(backup_env.settings.postgresql, 'database', '')
+    _write_fake_tool(str(backup_env.tools_dir), 'pg_restore')
+    _stage_restore(backup_env, 'bazarr_postgres.dump')
+
+    with caplog.at_level('ERROR'):
+        assert backup_env.module.restore_from_backup() is False
+
+    assert backup_env.restarts == []
+    assert PRE_LAUNCH_WORDING in caplog.text
+    assert MID_RESTORE_WORDING not in caplog.text
+    assert 'nothing to restore into' in caplog.text
+
+
+def test_an_unparseable_url_does_not_claim_the_database_may_be_corrupt(backup_env, monkeypatch, caplog):
+    _enable_postgresql(backup_env, monkeypatch)
+    monkeypatch.setattr(backup_env.settings.postgresql, 'url', 'postgresql://user@host:notaport/db')
+    _write_fake_tool(str(backup_env.tools_dir), 'pg_restore')
+    _stage_restore(backup_env, 'bazarr_postgres.dump')
+
+    with caplog.at_level('ERROR'):
+        assert backup_env.module.restore_from_backup() is False
+
+    assert backup_env.restarts == []
+    assert PRE_LAUNCH_WORDING in caplog.text
+    assert MID_RESTORE_WORDING not in caplog.text
+    assert 'cannot be parsed' in caplog.text
+
+
+def test_a_dump_that_cannot_be_moved_aside_keeps_the_whole_staged_backup(backup_env, monkeypatch, caplog):
+    _enable_postgresql(backup_env, monkeypatch)
+    _write_fake_tool(str(backup_env.tools_dir), 'pg_restore', exit_code=1,
+                     stderr='pg_restore: error: connection to server failed')
+    _stage_restore(backup_env, 'bazarr_postgres.dump')
+
+    real_replace = backup_env.module.os.replace
+
+    def failing_replace(source, destination):
+        if str(destination).endswith('.failed'):
+            raise OSError('read-only file system')
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(backup_env.module.os, 'replace', failing_replace)
+
+    with caplog.at_level('ERROR'):
+        assert backup_env.module.restore_from_backup() is False
+
+    assert backup_env.restarts == []
+    assert MID_RESTORE_WORDING in caplog.text
+    assert 'could not be moved aside' in caplog.text
+    assert 'the next start will try this restore again' in caplog.text
+    # The whole staged set survives, so the next start can finish the job and
+    # nothing deletes the dump the message points at.
+    assert sorted(os.listdir(backup_env.restore_dir)) == ['bazarr_postgres.dump', 'config.yaml']
+
+
 def test_a_failing_pg_restore_says_the_database_may_be_half_restored(backup_env, monkeypatch, caplog):
     _enable_postgresql(backup_env, monkeypatch)
     _write_fake_tool(str(backup_env.tools_dir), 'pg_restore', exit_code=1,

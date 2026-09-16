@@ -54,6 +54,18 @@ class BackupError(Exception):
     pass
 
 
+class PostgresRestoreStartedError(BackupError):
+    """pg_restore ran and failed, so the target database is no longer provably intact.
+
+    Raised only once the process has been launched. Everything that goes wrong
+    before that (no client tools, no database configured, an unparseable
+    connection URL) leaves the database untouched, and telling an operator
+    their database might be corrupt when it demonstrably is not sends them
+    rebuilding it for nothing.
+    """
+    pass
+
+
 def _postgres_enabled():
     """Whether this instance runs on PostgreSQL, the way app.database decides it.
 
@@ -119,12 +131,16 @@ def _postgres_connection_arguments(connection):
     return arguments
 
 
-def _run_postgres_tool(tool_name, command, connection):
-    """Run a PostgreSQL client tool and raise BackupError unless it succeeds.
+def _run_postgres_tool(tool_name, command, connection, ran_error=BackupError):
+    """Run a PostgreSQL client tool and raise unless it succeeds.
 
     The password goes through PGPASSWORD rather than the command line or the
     connection URL: every process on the host can read another process' command
     line.
+
+    `ran_error` is the class used when the tool ran and failed, so a caller
+    whose tool changes the database as it goes can tell that apart from a tool
+    that never started.
     """
     environment = os.environ.copy()
     if connection['password']:
@@ -135,11 +151,12 @@ def _run_postgres_tool(tool_name, command, connection):
     try:
         result = subprocess.run(command, env=environment, capture_output=True, text=True, check=False)
     except OSError as error:
+        # The process never started, so nothing it would have done happened.
         raise BackupError(f'Unable to run {tool_name}: {error}') from error
 
     if result.returncode != 0:
-        raise BackupError(f'{tool_name} exited with code {result.returncode}: '
-                          f'{result.stderr.strip() or "no output"}')
+        raise ran_error(f'{tool_name} exited with code {result.returncode}: '
+                        f'{result.stderr.strip() or "no output"}')
     return result
 
 
@@ -230,7 +247,7 @@ def _restore_postgres_database(dump_path):
                _postgres_connection_arguments(connection) + [dump_path])
     logging.debug('Restoring PostgreSQL database %s from %s', connection['database'], dump_path)
     try:
-        _run_postgres_tool('pg_restore', command, connection)
+        _run_postgres_tool('pg_restore', command, connection, ran_error=PostgresRestoreStartedError)
     except BackupError as error:
         if not _errors_are_only_unknown_parameters(str(error)):
             raise
@@ -283,7 +300,7 @@ def _wrong_engine_archive_message():
         engine, expected = 'SQLite', SQLITE_ARCHIVE_NAME
     if not os.path.isfile(os.path.join(get_restore_path(), present)):
         return None
-    return f'This backup holds {holds}; this instance runs {engine} and needs {expected}.' 
+    return f'This backup holds {holds}; this instance runs {engine} and needs {expected}.'
 
 
 def _clear_restore_directory():
@@ -496,9 +513,9 @@ def restore_from_backup():
 
     try:
         _restore_database(restore_database_path, dest_database_path)
-    except (BackupError, OSError, shutil.Error):
+    except (BackupError, OSError, shutil.Error) as error:
         _delete_file(staged_config_path)
-        if _postgres_enabled():
+        if isinstance(error, PostgresRestoreStartedError):
             # pg_restore drops the existing objects before it loads the new
             # ones and there is no transaction around that, so a failure
             # partway leaves the database in neither state. Saying "nothing was
@@ -507,15 +524,39 @@ def restore_from_backup():
             try:
                 os.replace(restore_database_path, failed_dump_path)
             except OSError:
-                failed_dump_path = restore_database_path
-            logging.exception('Restoring the PostgreSQL database failed partway. pg_restore drops the '
-                              'existing objects before it loads the new ones and cannot undo that, so '
-                              'this database may now be partially restored and must not be used until '
-                              'it has been restored again or rebuilt. Bazarr will not restart. The '
-                              'extracted dump has been kept at %s and the backup archive it came from '
-                              'is still in %s, so the restore can be retried.',
-                              failed_dump_path, get_backup_path())
-            _delete_file(restore_config_path)
+                dump_moved_aside = False
+            else:
+                dump_moved_aside = True
+
+            if dump_moved_aside:
+                logging.exception('Restoring the PostgreSQL database failed partway. pg_restore drops '
+                                  'the existing objects before it loads the new ones and cannot undo '
+                                  'that, so this database may now be partially restored and must not be '
+                                  'used until it has been restored again or rebuilt. Bazarr will not '
+                                  'restart. The extracted dump has been kept at %s and the backup '
+                                  'archive it came from is still in %s, so the restore can be retried.',
+                                  failed_dump_path, get_backup_path())
+                _delete_file(restore_config_path)
+            else:
+                # The dump could not be moved aside, so the staged set is left
+                # whole. Deleting the configuration beside it would make the
+                # next start read the dump as a partial backup and delete the
+                # very file this message points at.
+                logging.exception('Restoring the PostgreSQL database failed partway. pg_restore drops '
+                                  'the existing objects before it loads the new ones and cannot undo '
+                                  'that, so this database may now be partially restored and must not be '
+                                  'used until it has been restored again or rebuilt. Bazarr will not '
+                                  'restart. The extracted dump could not be moved aside either, so the '
+                                  'whole extracted backup has been left in %s and the next start will '
+                                  'try this restore again.', get_restore_path())
+        elif _postgres_enabled():
+            # Nothing reached pg_restore, so the database is exactly as it was.
+            logging.exception('The restore was refused before pg_restore was started, so the database '
+                              'was not touched and nothing was changed. Fix the problem reported above '
+                              'and try the restore again. Bazarr will not restart, the files staged for '
+                              'the restore have been discarded so the next start does not retry it '
+                              'silently, and the backup archive itself is untouched.')
+            _clear_restore_directory()
         else:
             logging.exception('Restoring the backup failed. Bazarr will not restart, and the files '
                               'staged for the restore have been discarded so the next start does not '
