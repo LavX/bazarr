@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Media Servers in Bazarr+: Emby and Silo subtitle refresh</title>
+  <meta name="description" content="Connect any number of Emby and Silo servers to Bazarr+ so a new subtitle appears without a full library rescan. Path mappings, the refresh states, and each server's limits.">
+  <link rel="canonical" href="https://lavx.github.io/bazarr/guides/media-servers.html">
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Media Servers in Bazarr+: Emby and Silo subtitle refresh">
+  <meta property="og:description" content="Connect any number of Emby and Silo servers to Bazarr+ so a new subtitle appears without a full library rescan. Path mappings, the refresh states, and each server's limits.">
+  <meta property="og:url" content="https://lavx.github.io/bazarr/guides/media-servers.html">
+  <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Bazarr+ subtitle management dashboard">
+  <meta property="og:site_name" content="Bazarr+">
+  <meta property="og:locale" content="en_US">
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Media Servers in Bazarr+: Emby and Silo subtitle refresh">
+  <meta name="twitter:description" content="Connect any number of Emby and Silo servers to Bazarr+ so a new subtitle appears without a full library rescan. Path mappings, the refresh states, and each server's limits.">
+  <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
+
+  <!-- Geist font: self-hosted -->
+  <link rel="preload" href="../fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
+
+  <link rel="icon" href="../favicon.ico" sizes="any">
+  <meta name="theme-color" content="#121125">
+  <link rel="apple-touch-icon" href="../apple-touch-icon.png">
+  <link rel="stylesheet" href="../css/site.css">
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [
+      {
+        "@type": "ListItem",
+        "position": 1,
+        "name": "Home",
+        "item": "https://lavx.github.io/bazarr/"
+      },
+      {
+        "@type": "ListItem",
+        "position": 2,
+        "name": "Guides",
+        "item": "https://lavx.github.io/bazarr/guides/"
+      },
+      {
+        "@type": "ListItem",
+        "position": 3,
+        "name": "Media Servers",
+        "item": "https://lavx.github.io/bazarr/guides/media-servers.html"
+      }
+    ]
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "TechArticle",
+    "headline": "Media Servers",
+    "description": "Connect any number of Emby and Silo servers to Bazarr+ so a new subtitle shows up without a full library rescan.",
+    "url": "https://lavx.github.io/bazarr/guides/media-servers.html",
+    "author": {
+      "@type": "Person",
+      "name": "LavX",
+      "sameAs": "https://github.com/LavX"
+    },
+    "isPartOf": {
+      "@type": "WebSite",
+      "name": "Bazarr+",
+      "url": "https://lavx.github.io/bazarr/"
+    }
+  }
+  </script>
+</head>
+<body>
+
+<a class="skip" href="#main-content">Skip to content</a>
+
+<header class="nav">
+  <div class="container">
+    <a class="wordmark" href="../" aria-label="Bazarr+"><img src="../screenshots/logo128.png" width="32" height="32" alt="" decoding="async"><span>Bazarr<b>+</b></span></a>
+    <nav aria-label="Primary">
+      <ul>
+        <li class="nav-inpage"><a href="../#what">What it does</a></li>
+        <li class="nav-deep"><a href="../#proof">Screenshots</a></li>
+        <li class="nav-inpage"><a href="../#compare">Compare</a></li>
+        <li><a href="../#start">Install</a></li>
+        <li class="nav-deep"><a href="../#faq">FAQ</a></li>
+        <li class="nav-deep"><a href="../#next">Roadmap</a></li>
+        <li class="nav-sep"><a href="./" aria-current="page">Guides</a></li>
+        <li class="nav-offsite"><a href="https://github.com/LavX/bazarr" rel="noopener">GitHub</a></li>
+        <li class="nav-offsite"><a href="https://discord.gg/fpp5JXmB8f" rel="noopener">Discord</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<main id="main-content" class="guide-page">
+  <div class="container">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <a href="../">Home</a><span class="sep">/</span><a href="./">Guides</a><span class="sep">/</span><span>Media Servers</span>
+    </nav>
+    <h1>Media Servers (Emby &amp; Silo) <span class="badge-new" aria-label="New in v2.7">v2.7</span></h1>
+
+    <nav class="guide-rail" id="guide-rail" aria-label="On this page"></nav>
+
+    <article class="content">
+
+      <p class="lede">Bazarr+ v2.7 (Atlas) connects to as many Emby and Silo servers as you run, not one of each. When a subtitle is written, every server whose folders cover that file is told about it, so the track appears without you triggering a full library rescan, and one server being down does not hold up the rest.</p>
+
+      <h2 id="what-a-connection-does">What a media server connection does</h2>
+      <p>Bazarr+ writes a subtitle next to your video. Your media server does not notice on its own: it indexed that folder some time ago and has no reason to look again until its next scheduled scan. So the subtitle exists on disk and does not exist as far as the player is concerned, sometimes for hours.</p>
+      <p>A media server connection closes that window. After Bazarr+ writes the file it tells the server which item changed, and the server re-reads just that item. Seven kinds of change do this: <strong>download, upload, delete, sync, translate, combine</strong> and <strong>edit</strong>. All seven work for movies and for episodes, on both servers.</p>
+
+      <div class="note">
+        <strong>It is not a library scanner.</strong> Bazarr+ does not index your library for the server, import anything, or change metadata. It sends one refresh for one item and stops. A server that is unreachable simply does not get told, and Bazarr+ keeps the refresh to retry rather than losing it.
+      </div>
+
+      <div class="note">
+        <strong>Jellyfin and Plex are not on this page yet.</strong> They have their own connections in Bazarr+ today and they work differently from the two below. They join this page as sections of their own once they move onto the same shared layer.
+      </div>
+
+      <h2 id="several-servers">Connecting several servers</h2>
+      <p>In Bazarr+, go to <strong>Settings &gt; Connections</strong> and open the <strong>Emby</strong> or <strong>Silo</strong> tab. Each has two parts: one master switch, and any number of instances under it.</p>
+
+      <ol class="steps">
+        <li>Turn <strong>Enabled</strong> on. That is the master switch for this kind of server; with it off, none of its instances do anything.</li>
+        <li>Click <strong>Add instance</strong>. Give it a <strong>Name</strong> you will recognise in a list, since everything else on the card is reported against that name.</li>
+        <li><strong>Instance enabled</strong> is per instance. Turning one off leaves its siblings untouched.</li>
+        <li><strong>Server URL</strong>: the full URL including any path prefix, for example <code class="inline">http://emby:8096</code>. Credentials belong in the API key field, not in the URL.</li>
+        <li><strong>API Key</strong>: stored encrypted at rest and never returned by the API. Editing an instance lets you keep, replace or clear it.</li>
+        <li><strong>Verify SSL certificate</strong>: applies to HTTPS connections only.</li>
+        <li><strong>Test</strong>. It uses the fields in front of you, including unsaved changes. On Silo, <strong>Load libraries</strong> does too. Note what Test does and does not prove: "Test checks access, not refresh permission."</li>
+        <li>Add <strong>path mappings</strong>, below, then <strong>Save</strong>.</li>
+      </ol>
+
+      <p>Every instance owns its own enabled state, URL, key, TLS setting, path mappings, Silo library choices, queued refreshes, status and retry action. Nothing is shared between two instances of the same kind.</p>
+
+      <div class="note">
+        <strong>Upgrading from a single server?</strong> Your existing Emby or Silo configuration is imported once into an instance on the first start after upgrading, and a durable marker stops it running twice. There is nothing to re-enter.
+      </div>
+
+      <h2 id="path-mappings">Path mappings, and when you need them</h2>
+      <p>Bazarr+ and your media server both see the same files, usually at different paths, because each container mounts the library where it likes. A mapping is one pair: the folder as Bazarr+ sees it, and the same folder as that server sees it.</p>
+      <p>Mappings do two jobs, and the second one is the one people miss:</p>
+      <ul>
+        <li>They <strong>translate the path</strong>, so the server is told about a file at an address it can actually resolve.</li>
+        <li>They <strong>select which videos notify this instance</strong>. A file outside every mapping on an instance is not that instance's file, and it is skipped silently rather than reported as an error. This is how two servers holding different halves of a library stay out of each other's way.</li>
+      </ul>
+      <p>So you add a mapping for each media folder <em>even when both paths are identical</em>. An instance with no mapping covering a file never hears about it.</p>
+      <p>A path that matches several instances refreshes every one of them. Where two mappings on the same instance both match, the more specific one wins; two equally specific mappings that both match are ambiguous and the refresh is refused rather than guessed at.</p>
+
+      <div class="note">
+        <strong>On Silo, a mapping also names a library.</strong> Load libraries first, then pick the Silo library that contains that server folder for each mapping. Silo addresses media by library and path, so a mapping with no library selected cannot be used.
+      </div>
+
+      <h2 id="emby">Emby</h2>
+      <p>Emby answers every question Bazarr+ can ask, so it climbs the full ladder and stops at the first rung that resolves the item. In order:</p>
+      <ol>
+        <li><strong>Provider ID.</strong> IMDb, plus TMDB for a movie or TVDB for a series, matched through Emby's <code>AnyProviderIdEquals</code> filter. First because an identifier names the item on its own, which is what survives a wrong path mapping. An episode carries no identifier of its own, so this rung finds the series and the season and episode numbers pick the file underneath it.</li>
+        <li><strong>Exact path.</strong> Second because it is the only thing that proves one specific file.</li>
+        <li><strong>Title and year.</strong> After the path, because two metadata fields are a guess and a guess must not pre-empt proof. The candidate still has to hold the file for this rung to accept it.</li>
+        <li><strong>Library refresh.</strong> Last, because it is the broadest thing any server can be asked to do. It is what reaches a file Emby has not indexed yet at all.</li>
+      </ol>
+      <p>Movies and episodes both, and all seven publication types. If you used Emby with an older Bazarr+, note that it previously refreshed movies only, and only on download and upload. Both of those restrictions are gone.</p>
+
+      <h2 id="silo">Silo</h2>
+      <p>Silo climbs two rungs: the <strong>exact path</strong>, then a <strong>library scan</strong>. Movies and episodes both, and all seven publication types, exactly like Emby.</p>
+      <p>The path rung is a real per-file scan on Silo's own native API, and Bazarr+ watches it through to completion, so a Silo refresh is confirmed rather than merely requested. When Silo answers that it cannot scan that path, which it does for a path it cannot place in a library or a container its scanner does not read, Bazarr+ climbs to a library scan. That one is submitted rather than watched: a full scan outlives any deadline worth holding a worker on. A batch that lands every file on this rung submits one scan for the library rather than one per video.</p>
+
+      <p>Two things Silo cannot do. Both are Silo's ceilings, not decisions Bazarr+ made, and both are stated here so the behaviour is not mistaken for a bug in Bazarr+:</p>
+      <ul>
+        <li><strong>No identifier or title matching.</strong> Silo's Jellyfin-compatible API returns items with no <code>ProviderIds</code> field at all, confirmed against Silo 10.12.0, so there is nothing for a provider-ID or a title match to compare against. That is why the path is the first rung Silo can climb rather than the second.</li>
+        <li><strong>No Jellyfin-style per-item refresh.</strong> Silo's compatibility layer does not route <code>POST /Items/{id}/Refresh</code> at all, answering 404, so the request a Jellyfin client would make does not exist there. Filed upstream as <a href="https://github.com/Silo-Server/silo-server/issues/1013" target="_blank" rel="noopener">Silo-Server/silo-server#1013</a>. Bazarr+ works around it by using Silo's own native scan endpoint instead, which is why the path rung works at all, with the library scan as the fallback beneath it.</li>
+      </ul>
+
+      <div class="note note-warning">
+        <strong>Silo only sees sidecar subtitles.</strong> Silo refreshes subtitles stored beside the video file. If your subtitle folder setting puts them somewhere else, Silo has nothing to find, and the instance reports exactly that: "Silo only refreshes subtitles stored beside the video file. Move the subtitle there, then retry."
+      </div>
+
+      <h2 id="refresh-status">Reading the status on an instance card</h2>
+      <p>Each instance card carries its own refresh state. Five states, and they mean different amounts:</p>
+      <ul>
+        <li><strong>No pending refreshes.</strong> Nothing is queued for this instance.</li>
+        <li><strong>Refresh pending.</strong> Queued but not yet sent, with the number of queued refreshes beside it.</li>
+        <li><strong>Refresh sent.</strong> The server accepted the request. This is as far as a submitted request can be known.</li>
+        <li><strong>Refresh confirmed.</strong> The refresh was observed through to completion, which Silo's watched file scan can prove.</li>
+        <li><strong>Refresh unconfirmed.</strong> The request went out and Bazarr+ could not establish that it finished. Worth a look; not the same as a failure.</li>
+      </ul>
+      <p><strong>Retry pending</strong> drains the queue for that instance, using the <em>saved</em> connection settings, not whatever is typed into the form. Save your changes first, and if the instance or its master switch is off, turn them on and save before retrying.</p>
+
+      <div class="note">
+        <strong>Queue overflow.</strong> If the queue for one instance overflows, the card says so: retrying covers the refreshes it kept, but the ones it dropped need a fresh change to be re-sent. It does not silently pretend they went out.
+      </div>
+
+      <h2 id="failure-isolation">One bad server does not break the others</h2>
+      <p>Each server with queued work gets its own background worker. A server that is paused, stopped or simply slow confines the problem to its own instance: the others carry on refreshing, and the failed instance keeps its queue for <strong>Retry pending</strong> to drain once it is back. Disabling one instance leaves its siblings untouched, and a mapping mistake fails only on the instance that is miswired.</p>
+      <p>Changing an instance's connection settings stops the refresh that was already in flight against the old settings rather than letting it finish against the new ones. The queued work is kept and marked, not thrown away, so <strong>Retry pending</strong> sends it under the settings you actually saved.</p>
+
+      <h2 id="troubleshooting">Troubleshooting</h2>
+
+      <p><strong>Nothing reaches a server, and no error appears.</strong> Almost always path mappings: a file outside every mapping on that instance is deliberately skipped in silence. Check that a mapping covers the folder the video is in, as Bazarr+ sees it.</p>
+
+      <p><strong>Test passes but refreshes fail.</strong> Test checks access, not refresh permission, and it says so on the form. An API key that can read the server may still not be allowed to trigger a refresh.</p>
+
+      <p><strong>Silo reports that a subtitle is unsupported.</strong> The subtitle is not beside the video file. See the warning under Silo above.</p>
+
+      <p><strong>Silo mappings show as unavailable.</strong> The Silo library a mapping points at is gone, disabled, or was never loaded. Press <strong>Load libraries</strong> and pick the library again. Saved mappings are preserved when a library load fails.</p>
+
+      <p><strong>"No supported libraries found" on Silo.</strong> Silo only offers movie and series libraries here, and only enabled ones. Enable one in Silo, and check that the API key can see it.</p>
+
+      <p><strong>Emby refreshes the wrong item.</strong> That is what the ladder's ordering exists to prevent, and the most likely cause is a mapping that points two instances at overlapping folders. A path that matches several instances refreshes each of them, by design.</p>
+
+      <h2 id="next-steps">Next steps</h2>
+      <ul>
+        <li><a href="getting-started.html">Getting Started</a> if you have not connected Sonarr and Radarr yet</li>
+        <li><a href="seerr.html">Seerr Requests</a> to request a missing title from Overseerr, Jellyseerr or Seerr</li>
+        <li><a href="external-integration.html">External Integration</a> for the Jellyfin plugin and the VLC extension</li>
+        <li><a href="subtitle-processing.html">Subtitle Processing</a> for combined subtitles, embedded tracks and sync</li>
+        <li><a href="bulk-operations.html">Bulk Operations</a> for acting on a whole library at once</li>
+      </ul>
+
+    </article>
+  </div>
+</main>
+
+<!-- Footer -->
+<footer>
+  <div class="container">
+    <p>Bazarr+ is a hard fork of <a class="inline" href="https://github.com/morpheus65535/bazarr" rel="noopener">Bazarr</a>, GPL-3, maintained by <a class="inline" href="https://github.com/LavX" rel="noopener">LavX</a>.</p>
+    <ul>
+      <li><a href="../">Home</a></li>
+      <li><a href="getting-started.html">Getting Started</a></li>
+      <li><a href="migration.html">Migration</a></li>
+      <li><a href="provider-hub.html">Provider Hub</a></li>
+      <li><a href="ai-translation.html">AI Translation</a></li>
+      <li><a href="bulk-operations.html">Bulk Operations</a></li>
+      <li><a href="external-integration.html">External Integration</a></li>
+      <li><a href="./">All guides</a></li>
+      <li><a href="https://github.com/LavX/bazarr/releases" rel="noopener">Releases</a></li>
+      <li><a href="https://github.com/LavX/bazarr/issues" rel="noopener">Issues</a></li>
+      <li><a href="https://github.com/LavX/bazarr/wiki" rel="noopener">Wiki</a></li>
+      <li><a href="https://discord.gg/fpp5JXmB8f" rel="noopener">Discord</a></li>
+    </ul>
+  </div>
+</footer>
+
+<script src="../js/site.js"></script>
+
+</body>
+</html>

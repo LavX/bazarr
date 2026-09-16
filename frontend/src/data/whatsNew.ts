@@ -126,7 +126,7 @@ export const whatsNew: Record<string, WhatsNewSlide[]> = {
     },
     {
       title: "Several Emby and Silo servers, not one of each",
-      body: "Add as many Emby and Silo servers as you run, each with its own URL, encrypted key, TLS setting and path mappings, the way Sonarr and Radarr already worked. A new subtitle is refreshed on every server whose mappings cover that file, and one unreachable server no longer holds up the rest. Emby also matches an item by provider id, then title and year, then exact path, so it refreshes episodes now and not only movies. Your existing single-server Emby and Silo settings are imported once.",
+      body: "Add as many Emby and Silo servers as you run, each with its own URL, encrypted key, TLS setting and path mappings, the way Sonarr and Radarr already worked. A new subtitle is refreshed on every server whose mappings cover that file, and one unreachable server no longer holds up the rest. Emby also matches an item by provider id, then exact path, then title and year, so it refreshes episodes now and not only movies. Your existing single-server Emby and Silo settings are imported once. The Emby and Silo sections in Connections link out to a guide covering path mappings, the refresh states and what each server can match on.",
       icon: faServer,
       cta: { label: "Open Connections", to: "/settings/connections" },
     },
