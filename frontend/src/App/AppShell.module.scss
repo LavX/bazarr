@@ -247,6 +247,16 @@
   width: 24px;
   justify-content: center;
 }
+// Glyphs do not all paint the same share of their viewBox: the compass, the
+// trophy, the clock and the excluded sheet run edge to edge, so in the rail's
+// 16px box they stand 2px taller than the play, film and hub glyphs and close
+// on the label under them. Padding trims those glyphs alone, so every entry's
+// ink lands on one band while the icon box, the gap and the label stay where
+// they are. NavigationRail decides which glyphs carry it.
+.railLink .trimmedGlyph {
+  box-sizing: border-box;
+  padding: 1px;
+}
 .railBadge {
   position: absolute;
   top: -5px;
