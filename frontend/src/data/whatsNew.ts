@@ -25,7 +25,11 @@ import {
 export interface WhatsNewSlide {
   /** Short headline for the change. */
   title: string;
-  /** One to three lines describing it. */
+  /**
+   * Plain-language prose describing it, two to five sentences. The modal wraps
+   * and scrolls it, so the bodies from v2.6.0 on run to a short paragraph;
+   * verified rendering at 400px and 1280px wide.
+   */
   body: string;
   /** Optional imported asset URL; takes priority over `icon`. */
   image?: string;
@@ -134,7 +138,7 @@ export const whatsNew: Record<string, WhatsNewSlide[]> = {
     },
     {
       title: "SmartFast routing: cheaper OpenRouter translations if you switch",
-      body: "SmartFast asks OpenRouter for an endpoint that is cheap and still fast enough, rather than the fastest one at any price. Nothing changes on your install: you stay on Fastest until you pick SmartFast yourself under Settings, AI Translator, Provider Routing. It is worth the click because the September benchmark runs kept landing Fastest on endpoints priced around twice the cheapest endpoint serving the same model. SmartFast needs AI Subtitle Translator 2.0.0 or newer and an older service refuses it, so update the translator before you switch.",
+      body: "SmartFast asks OpenRouter for an endpoint that is cheap and still fast enough, rather than the fastest one at any price. Nothing changes on your install: your current routing is kept until you pick SmartFast yourself under Settings, AI Translator, Provider Routing. It is worth the click if you are on Fastest, which is where every install that predates the routing selector sits: the September benchmark runs kept landing it on endpoints priced around twice the cheapest endpoint serving the same model. SmartFast needs AI Subtitle Translator 2.0.0 or newer and an older service refuses it, so update the translator before you switch.",
       icon: faGaugeHigh,
       cta: { label: "Open Translator settings", to: "/settings/translator" },
     },

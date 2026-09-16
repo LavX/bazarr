@@ -80,8 +80,10 @@ describe("v2.7.0 Atlas slides", () => {
   it("names the Seerr flavours and says approval stays in Seerr", () => {
     const slide = findSlide("Seerr");
     expect(slide).toBeDefined();
+    // Whole words: "Seerr" is a substring of both the others, so toContain
+    // would pass on a body that named Overseerr and nothing else.
     ["Overseerr", "Jellyseerr", "Seerr"].forEach((flavour) =>
-      expect(slide!.body).toContain(flavour),
+      expect(slide!.body).toMatch(new RegExp(`\\b${flavour}\\b`)),
     );
     expect(slide!.body).toContain("approval stays in Seerr");
   });
