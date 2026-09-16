@@ -1,5 +1,6 @@
 # coding=utf-8
 
+import codecs
 import hashlib
 import json
 import logging
@@ -21,7 +22,8 @@ from app.database import (TableArrInstances, TableEpisodes, TableMovies, TableSh
 from app.get_args import args
 from utilities.path_mappings import path_mappings
 from api.subtitles.content import resolve_subtitle_path  # noqa: F401
-from subtitles.tools.subsync_engines import is_sync_engine_language_key
+from subtitles.tools.subsync_engines import (create_preview_workspace, discard_preview_workspace,
+                                             is_sync_engine_language_key)
 
 from ..utils import authenticate
 
@@ -1033,7 +1035,8 @@ _editor_sync_jobs = {}  # job_key -> {status, content, message}
 
 
 def run_editor_sync(job_key, video_path, tmp_in, tmp_out, encoding, max_offset, gss, reference,
-                    no_fix_framerate=True, vad=None, job_id=None, output_mode='keep_all', enabled_engines=None):
+                    no_fix_framerate=True, vad=None, job_id=None, output_mode='keep_all', enabled_engines=None,
+                    preview_workspace=None):
     """Background sync worker. Called by jobs_queue."""
     from app.jobs_queue import jobs_queue
 
@@ -1136,6 +1139,8 @@ def run_editor_sync(job_key, video_path, tmp_in, tmp_out, encoding, max_offset, 
                         os.unlink(p)
                     except OSError:
                         pass
+            # Engine outputs land beside the input, so the workspace goes too.
+            discard_preview_workspace(preview_workspace)
         threading.Timer(600, cleanup).start()
 
 
@@ -1180,6 +1185,15 @@ class EditorSync(Resource):
         if fmt not in ('srt', 'vtt', 'ass', 'ssa', 'sub', 'smi', 'mpl', 'txt'):
             return 'Invalid format; must be one of srt, vtt, ass, ssa, sub, smi, mpl, txt', 400
 
+        # The body names the codec its content is written in, and it is also what the
+        # worker reads the aligned result back with. An unknown name is the caller's
+        # mistake, so it is refused here rather than raising LookupError later, once
+        # the temporary files already exist.
+        try:
+            codecs.lookup(encoding)
+        except (LookupError, TypeError):
+            return 'Invalid encoding', 400
+
         try:
             media_id = int(media_id)
         except (ValueError, TypeError):
@@ -1196,39 +1210,56 @@ class EditorSync(Resource):
         if not os.path.isfile(video_path):
             return 'Video file not found', 404
 
-        ext = f'.{fmt}'
-        fd, tmp_in = tempfile.mkstemp(suffix=ext, prefix='bazarr_sync_')
-        os.write(fd, content.encode(encoding))
-        os.close(fd)
-        tmp_out = tmp_in.replace(ext, f'.synced{ext}')
-
         import threading
 
-        job_key = f'editor_sync_{hashlib.md5(tmp_in.encode()).hexdigest()[:8]}'
-        _editor_sync_jobs[job_key] = {'status': 'running', 'content': None, 'message': 'Starting sync...'}
+        ext = f'.{fmt}'
+        # The editor previews an alignment: nothing here is a library subtitle until
+        # the user saves the content back. Input and engine outputs share a directory
+        # of Bazarr's own, which keeps generated names off the media folder and gives
+        # the destinations an owner that does not depend on the video's stem.
+        preview_workspace = create_preview_workspace()
+        job_key = None
+        # Once the workspace exists, only the queued job's cleanup timer removes it,
+        # so everything up to a successful hand-off unwinds here instead. Content the
+        # named codec cannot represent is the realistic way in.
+        try:
+            fd, tmp_in = tempfile.mkstemp(suffix=ext, prefix='bazarr_sync_', dir=preview_workspace)
+            try:
+                os.write(fd, content.encode(encoding))
+            finally:
+                os.close(fd)
+            tmp_out = tmp_in.replace(ext, f'.synced{ext}')
 
-        # Submit to the jobs queue for visibility in Jobs Manager
-        queue_job_id = jobs_queue.feed_jobs_pending_queue(
-            job_name='Editor Sync',
-            module='api.editor.editor',
-            func='run_editor_sync',
-            kwargs={
-                'job_key': job_key,
-                'video_path': video_path,
-                'tmp_in': tmp_in,
-                'tmp_out': tmp_out,
-                'encoding': encoding,
-                'max_offset': max_offset,
-                'gss': gss,
-                'reference': reference,
-                'no_fix_framerate': no_fix_framerate,
-                'vad': vad,
-                'output_mode': output_mode,
-                'enabled_engines': enabled_engines,
-            },
-            is_progress=True,
-            progress_max=3,
-        )
+            job_key = f'editor_sync_{hashlib.md5(tmp_in.encode()).hexdigest()[:8]}'
+            _editor_sync_jobs[job_key] = {'status': 'running', 'content': None, 'message': 'Starting sync...'}
+
+            # Submit to the jobs queue for visibility in Jobs Manager.
+            queue_job_id = jobs_queue.feed_jobs_pending_queue(
+                job_name='Editor Sync',
+                module='api.editor.editor',
+                func='run_editor_sync',
+                kwargs={
+                    'job_key': job_key,
+                    'video_path': video_path,
+                    'tmp_in': tmp_in,
+                    'tmp_out': tmp_out,
+                    'encoding': encoding,
+                    'max_offset': max_offset,
+                    'gss': gss,
+                    'reference': reference,
+                    'no_fix_framerate': no_fix_framerate,
+                    'vad': vad,
+                    'output_mode': output_mode,
+                    'enabled_engines': enabled_engines,
+                    'preview_workspace': preview_workspace,
+                },
+                is_progress=True,
+                progress_max=3,
+            )
+        except BaseException:
+            _editor_sync_jobs.pop(job_key, None)
+            discard_preview_workspace(preview_workspace)
+            raise
 
         # Force-start in a separate thread so it doesn't wait behind other queued jobs
         threading.Thread(
