@@ -33,6 +33,10 @@ from sonarr.blacklist import blacklist_log
 
 _TRACEBACK_RE = re.compile(r'File "(.*?providers[\\/].*?)", line (\d+)')
 _PROVIDER_HUB_REGISTRATION_DONE = False
+# Plugin ids already reported for claiming a Bazarr settings section. The overlay
+# below runs on every search and download, so without this the same install
+# writes the same line for the life of the process.
+_REPORTED_RESERVED_SECTION_PLUGINS = set()
 
 
 def _ensure_provider_hub_registered():
@@ -514,9 +518,11 @@ def get_providers_auth():
                 # the plugin that section's credentials (sonarr.apikey, plex.token,
                 # auth.password) on every search. Its own stored config and the
                 # schema defaults still apply.
-                logging.error("Refusing to read the %s settings section for Provider Hub plugin %s: "
-                              "that section belongs to Bazarr, not to the plugin",
-                              installation.provider_id, installation.provider_id)
+                if installation.provider_id not in _REPORTED_RESERVED_SECTION_PLUGINS:
+                    _REPORTED_RESERVED_SECTION_PLUGINS.add(installation.provider_id)
+                    logging.error("Refusing to read the %s settings section for Provider Hub plugin %s: "
+                                  "that section belongs to Bazarr, not to the plugin",
+                                  installation.provider_id, installation.provider_id)
                 section = {}
             else:
                 section = settings.get(installation.provider_id, {}) if hasattr(settings, "get") else {}

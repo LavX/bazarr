@@ -1,4 +1,5 @@
 import inspect
+import logging
 
 import pytest
 from subliminal_patch.core import Language
@@ -295,6 +296,22 @@ class TestProviderHubSettingsOverlay:
             config.set("sonarr.apikey", original)
 
         assert auth["sonarr"]["apikey"] == "plugin-own-key"
+
+    def test_a_blocked_plugin_is_reported_once_per_process(self, monkeypatch, caplog):
+        # The overlay runs on every search and download, so reporting per call
+        # would have one bad install writing the same line forever.
+        monkeypatch.setattr(get_providers, "_REPORTED_RESERVED_SECTION_PLUGINS", set())
+        self._patch_hub(monkeypatch, "plex", {"apikey": "plugin-own-key"})
+
+        with caplog.at_level(logging.ERROR):
+            get_providers.get_providers_auth()
+            get_providers.get_providers_auth()
+
+        reports = [
+            record for record in caplog.records
+            if "Refusing to read the plex settings section" in record.getMessage()
+        ]
+        assert len(reports) == 1
 
     def test_plugin_reads_its_own_settings_section(self, monkeypatch):
         config = get_providers.settings

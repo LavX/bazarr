@@ -90,8 +90,15 @@ def _bazarr_settings_sections() -> set[str]:
     """
     try:
         from app.config import validators as settings_validators
-    except Exception:
-        return set()
+    except Exception as error:
+        # Refuse rather than permit. This set is one half of a security gate, and
+        # an empty one lets every id through: the install check would accept a
+        # plugin calling itself sonarr and the pool overlay would then hand it
+        # the section. The caller treats the refusal as an invalid manifest,
+        # which drops the plugin instead of arming it.
+        raise ManifestValidationError(
+            "cannot decide which settings sections are reserved: Bazarr settings are unavailable"
+        ) from error
 
     sections = set()
     for validator in settings_validators:
@@ -99,6 +106,10 @@ def _bazarr_settings_sections() -> set[str]:
             section = str(name).split(".", 1)[0].strip().lower()
             if section:
                 sections.add(section)
+    if not sections:
+        raise ManifestValidationError(
+            "cannot decide which settings sections are reserved: no settings sections were found"
+        )
     return sections
 
 
@@ -113,7 +124,13 @@ def _provider_owned_settings_sections() -> set[str]:
     sections = set(MIGRATED_BUILT_IN_PROVIDER_IDS) | set(RETIRED_BUILT_IN_PROVIDER_IDS)
     try:
         from subliminal_patch.extensions import provider_registry
-        sections |= {str(name) for name in provider_registry.names()}
+        from .registry import _REGISTERED_PROVIDER_HUB_IDS
+        # Registered hub plugins live in the same registry as the built-ins, and
+        # a plugin must never be the thing that unreserves a section for itself,
+        # so subtract them exactly as the shadow gate in registry.py does. Both
+        # imports sit in the one try on purpose: losing either drops the whole
+        # registry term, which only widens the reserved set.
+        sections |= {str(name) for name in provider_registry.names()} - _REGISTERED_PROVIDER_HUB_IDS
     except Exception:
         pass
     return sections
@@ -129,6 +146,11 @@ def reserved_settings_sections() -> set[str]:
     sections are Bazarr's own, so the rejection holds for every install source:
     there is no built-in provider behind them for the trusted shadow gate to hand
     over.
+
+    Raises ManifestValidationError when the set cannot be derived. Both callers
+    take that as the safe direction: validation drops the manifest, and the pool
+    overlay skips the settings overlay for every plugin rather than read a
+    section it cannot vouch for.
     """
     return _bazarr_settings_sections() - _provider_owned_settings_sections()
 
