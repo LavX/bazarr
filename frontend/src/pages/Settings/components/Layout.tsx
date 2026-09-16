@@ -73,9 +73,21 @@ const Layout: FunctionComponent<Props> = (props) => {
     }
   }, []);
 
+  // A settings refetch has several causes: the refresh the app runs when the
+  // socket first reports online, the one it runs again on every reconnect, and
+  // the reload that follows a save. Only the save is meant to clear the form.
+  // Resetting on every refetch threw away whatever the user had staged while a
+  // response was in flight, took the Save control with it, and posted nothing.
+  const savedRef = useRef(false);
+
   useOnValueChange(isRefetching, (value) => {
+    if (value || !savedRef.current) {
+      return;
+    }
+
+    savedRef.current = false;
+
     if (
-      !value &&
       !Object.keys(form.values.settings).some(
         (key) =>
           key.startsWith("settings-discover-") ||
@@ -96,6 +108,9 @@ const Layout: FunctionComponent<Props> = (props) => {
         mutate(settingsToSubmit, {
           onSuccess: () => {
             setMetadataRefreshFailed(false);
+            // The reload this save triggers is the refetch allowed to clear the
+            // form.
+            savedRef.current = true;
             if (
               Object.keys(settingsToSubmit).some(
                 (key) =>
@@ -121,6 +136,7 @@ const Layout: FunctionComponent<Props> = (props) => {
       try {
         await mutateAsync(settingsToSubmit);
         setMetadataRefreshFailed(false);
+        savedRef.current = true;
       } catch (error) {
         handleSaveError(error);
         throw error;

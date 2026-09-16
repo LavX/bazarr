@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Seerr Requests in Bazarr+: Overseerr, Jellyseerr and Seerr</title>
+  <meta name="description" content="Connect Bazarr+ to Overseerr, Jellyseerr or Seerr and request a title straight from the Discover page. Connection setup, the season picker, and what every state means.">
+  <link rel="canonical" href="https://lavx.github.io/bazarr/guides/seerr.html">
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Seerr Requests in Bazarr+: Overseerr, Jellyseerr and Seerr">
+  <meta property="og:description" content="Connect Bazarr+ to Overseerr, Jellyseerr or Seerr and request a title straight from the Discover page. Connection setup, the season picker, and what every state means.">
+  <meta property="og:url" content="https://lavx.github.io/bazarr/guides/seerr.html">
+  <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Bazarr+ subtitle management dashboard">
+  <meta property="og:site_name" content="Bazarr+">
+  <meta property="og:locale" content="en_US">
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Seerr Requests in Bazarr+: Overseerr, Jellyseerr and Seerr">
+  <meta name="twitter:description" content="Connect Bazarr+ to Overseerr, Jellyseerr or Seerr and request a title straight from the Discover page. Connection setup, the season picker, and what every state means.">
+  <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
+
+  <!-- Geist font: self-hosted -->
+  <link rel="preload" href="../fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
+
+  <link rel="icon" href="../favicon.ico" sizes="any">
+  <meta name="theme-color" content="#121125">
+  <link rel="apple-touch-icon" href="../apple-touch-icon.png">
+  <link rel="stylesheet" href="../css/site.css">
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [
+      {
+        "@type": "ListItem",
+        "position": 1,
+        "name": "Home",
+        "item": "https://lavx.github.io/bazarr/"
+      },
+      {
+        "@type": "ListItem",
+        "position": 2,
+        "name": "Guides",
+        "item": "https://lavx.github.io/bazarr/guides/"
+      },
+      {
+        "@type": "ListItem",
+        "position": 3,
+        "name": "Seerr Requests",
+        "item": "https://lavx.github.io/bazarr/guides/seerr.html"
+      }
+    ]
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "TechArticle",
+    "headline": "Seerr Requests",
+    "description": "Connect Bazarr+ to Overseerr, Jellyseerr or Seerr and request a title from the Discover page, with a season picker for shows.",
+    "url": "https://lavx.github.io/bazarr/guides/seerr.html",
+    "author": {
+      "@type": "Person",
+      "name": "LavX",
+      "sameAs": "https://github.com/LavX"
+    },
+    "isPartOf": {
+      "@type": "WebSite",
+      "name": "Bazarr+",
+      "url": "https://lavx.github.io/bazarr/"
+    }
+  }
+  </script>
+</head>
+<body>
+
+<a class="skip" href="#main-content">Skip to content</a>
+
+<header class="nav">
+  <div class="container">
+    <a class="wordmark" href="../" aria-label="Bazarr+"><img src="../screenshots/logo128.png" width="32" height="32" alt="" decoding="async"><span>Bazarr<b>+</b></span></a>
+    <nav aria-label="Primary">
+      <ul>
+        <li class="nav-inpage"><a href="../#what">What it does</a></li>
+        <li class="nav-deep"><a href="../#proof">Screenshots</a></li>
+        <li class="nav-inpage"><a href="../#compare">Compare</a></li>
+        <li><a href="../#start">Install</a></li>
+        <li class="nav-deep"><a href="../#faq">FAQ</a></li>
+        <li class="nav-deep"><a href="../#next">Roadmap</a></li>
+        <li class="nav-sep"><a href="./" aria-current="page">Guides</a></li>
+        <li class="nav-offsite"><a href="https://github.com/LavX/bazarr" rel="noopener">GitHub</a></li>
+        <li class="nav-offsite"><a href="https://discord.gg/fpp5JXmB8f" rel="noopener">Discord</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<main id="main-content" class="guide-page">
+  <div class="container">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <a href="../">Home</a><span class="sep">/</span><a href="./">Guides</a><span class="sep">/</span><span>Seerr Requests</span>
+    </nav>
+    <h1>Seerr Requests <span class="badge-new" aria-label="New in v2.7">v2.7</span></h1>
+
+    <nav class="guide-rail" id="guide-rail" aria-label="On this page"></nav>
+
+    <article class="content">
+
+      <p class="lede">Bazarr+ v2.7 (Atlas) can ask your request manager for a title you do not own yet. The Discover page already shows any film or show, whether or not it is in your library; with Seerr connected, a title that is missing gets a request button beside it, and Bazarr+ reports what your request manager already knows about that title.</p>
+
+      <h2 id="what-it-is">What it is</h2>
+      <p>Discover searches subtitles for any title, including titles your library has never held. That leaves an obvious gap: you find the film, you want the film, and nothing on the page can do anything about it. This closes that gap for people who already run a request manager.</p>
+      <p>Bazarr+ does not become a request manager itself. It reads the state of a title from your server, offers the one action that state allows, and hands the request over. Everything after that, approval, quality profiles, download clients, notifications, stays exactly where it already was.</p>
+
+      <div class="note">
+        <strong>It is entirely optional.</strong> The control renders nothing at all when Seerr is not configured, and nothing at all for a title with no TMDB identity. If you do not run a request manager, Discover behaves exactly as it did before.
+      </div>
+
+      <h2 id="which-servers">Which servers it talks to</h2>
+      <p>Three servers in one family, all speaking the same request API:</p>
+      <ul>
+        <li><strong><a href="https://overseerr.dev/" target="_blank" rel="noopener">Overseerr</a></strong>, the original, for Plex libraries.</li>
+        <li><strong><a href="https://github.com/fallenbagel/jellyseerr" target="_blank" rel="noopener">Jellyseerr</a></strong>, the fork that adds Jellyfin and Emby.</li>
+        <li><strong>Seerr</strong>, the current continuation of that line.</li>
+      </ul>
+      <p>They are close enough to share one integration and different enough that the differences matter. Bazarr+ works out which one it is talking to from the fields the server returns on <code>/api/v1/settings/public</code>, not from its version string, because development images report a commit hash where a version belongs.</p>
+      <p>The difference that has to be detected is the blocklist. Overseerr uses media status 6 for <em>deleted</em>; Jellyseerr and Seerr use 6 for <em>blocklisted</em> and 7 for deleted. Reading that wrong would make a blocklisted title look like a fresh one, offer a request, and have the server refuse it. Bazarr+ re-checks the server's capabilities every few minutes, so turning a 4K lane on in Seerr, or changing its application URL, shows up here on its own.</p>
+
+      <h2 id="connect-it">Connecting it</h2>
+      <p>In Bazarr+, go to <strong>Settings &gt; Connections</strong> and open the <strong>Seerr</strong> tab.</p>
+
+      <ol class="steps">
+        <li>Turn <strong>Enabled</strong> on. The connection fields stay hidden until you do.</li>
+        <li><strong>Seerr URL</strong>: how Bazarr+ reaches the server, for example <code class="inline">http://seerr:5055</code>. If both run in the same Docker network, use the container name rather than an IP address.</li>
+        <li><strong>API key</strong>: from your request manager, under <strong>Settings &gt; General &gt; API Key</strong>. It is stored encrypted at rest and never written to a log line, the same treatment the Sonarr, Radarr and Jellyfin keys beside it get.</li>
+        <li><strong>Verify SSL certificate</strong>: only shown when your URL is <code class="inline">https://</code>, since there is nothing to verify over plain HTTP. Leave it on unless the server uses a self-signed certificate.</li>
+        <li><strong>Browser URL</strong>: optional, and only used for the "Open in Seerr" link. Leave it empty to use the application URL the server reports, falling back to the Seerr URL above. Fill it in when Bazarr+ reaches the server on an internal address your browser cannot open.</li>
+        <li>Click <strong>Test</strong>. A working connection turns the button green and names the server, its version, and the user the API key acts as, for example <code class="inline">Jellyseerr 2.7.3 as Owner</code>.</li>
+        <li><strong>Save.</strong></li>
+      </ol>
+
+      <div class="note">
+        <strong>The key decides who requests.</strong> An API key acts as its owner, and Seerr auto-approves what its owner asks for. That is why the button says so before you press it. If the test reports a user who cannot request both movies and series, Bazarr+ warns you there and then, because every request would be refused.
+      </div>
+
+      <h2 id="requesting-a-title">Requesting a title from Discover</h2>
+      <p>Open any title from Discover. Next to the library chip that says whether you already hold it, the page adds what your request manager knows and the action that goes with it:</p>
+
+      <ul>
+        <li><strong>Request in Seerr</strong> for a title the server has never seen. One click for a film.</li>
+        <li><strong>Request seasons</strong> for a show where some seasons are already there.</li>
+        <li><strong>Awaiting approval</strong> or <strong>Processing</strong> while a request is in flight, with a link into the server itself.</li>
+        <li><strong>Declined</strong> or <strong>Failed</strong>: the state is stated and the action is offered again.</li>
+        <li><strong>Ready in Seerr</strong> or <strong>Blocklisted in Seerr</strong>: a label, and no action, because there is nothing to ask for.</li>
+      </ul>
+
+      <p>A 4K request is offered only where the server actually has a 4K lane configured and the acting user is allowed to use it. When both lanes are open, the request opens a small dialog so you can pick.</p>
+
+      <p>If the server is unreachable, the page says so with a <strong>Retry</strong> beside it rather than hiding the failure. If the server rejects the API key, you get one notice per browser session with a link into settings, instead of the same complaint on every title you open.</p>
+
+      <h2 id="season-picker">The season picker</h2>
+      <p>A show opens a picker with nothing preselected, so an accidental confirm cannot request a whole series. Seasons are sorted into three groups:</p>
+
+      <ul>
+        <li><strong>Already in Seerr</strong>: seasons the server holds or has already been asked for. These are plain text, not greyed-out checkboxes, so the reason is readable with a keyboard or a screen reader instead of being implied by a disabled control.</li>
+        <li><strong>In your Bazarr+ library</strong>: seasons you already have a copy of. Selectable, because there are good reasons to want them again, but grouped apart so you see what you are doing.</li>
+        <li><strong>Available to request</strong>: everything else.</li>
+      </ul>
+
+      <p>The button counts what you picked, so it reads <strong>Request 3 seasons</strong> rather than a bare Confirm. Where the server forbids partial series requests, or does not report seasons for the 4K lane, or the season list is simply unavailable, the picker collapses to a single <strong>Request all seasons</strong> action and says which of those it is.</p>
+
+      <div class="note">
+        <strong>Specials.</strong> Season 0 appears only when the server has special episodes enabled. With that off, a show whose only listed season is 0 has nothing to request, and the picker says so rather than offering a request the server would answer with a no-op.
+      </div>
+
+      <h2 id="what-the-states-mean">What the states mean</h2>
+      <p>Four words carry most of the meaning on this page, and two of them are easy to misread.</p>
+
+      <ul>
+        <li><strong>Available</strong>: the server has the title and it is ready to watch. For a show, a season is available only at that exact state; a season that is pending, approved or partially available is still in flight, not ready.</li>
+        <li><strong>Requested</strong>: someone has already asked for it and the request is open, whether it is waiting for approval, approved and downloading, or failed and retryable. Bazarr+ reads the newest non-4K request for the title, so a finished request that the server left sitting at "approved" does not hide a newer state.</li>
+        <li><strong>Requestable</strong>: this is the one worth reading twice. For a show, requestable means <em>not blocklisted</em>, and nothing more. It does not mean any season is actually free to ask for. A completed series that the server already holds in full is still requestable in that narrow sense, because TMDB can list a season the server has never heard of. Bazarr+ therefore works the seasons out separately and hides the button when the grouping comes back with nothing selectable, so you are never sent into a dialog whose confirm is already disabled. For a film the word behaves the way you would expect: requestable means the server does not know it yet, or knows it as deleted, and no request is open.</li>
+        <li><strong>Blocklisted</strong>: someone has deliberately excluded the title on the server. It is reported as a label and no action is offered, because the server would refuse anyway. Note that this state only exists on Jellyseerr and Seerr; Overseerr has no blocklist, which is exactly why the flavour has to be detected first.</li>
+      </ul>
+
+      <h2 id="what-it-never-does">What it never does</h2>
+      <p>The boundary is deliberate and worth stating plainly.</p>
+      <ul>
+        <li><strong>It never approves anything.</strong> Bazarr+ creates a request and stops. Approval, and the policy around it, stay in your request manager. If the API key belongs to the owner, the server auto-approves on its own side, which is the server's behaviour and not Bazarr+ acting on your behalf.</li>
+        <li><strong>It never declines, deletes or blocklists.</strong> There is no path from here to removing a request or a title.</li>
+        <li><strong>It never touches quality profiles, root folders or download clients.</strong> Those are the server's, and the request carries none of them.</li>
+        <li><strong>It never requests on its own.</strong> Nothing here is scheduled or automatic. Every request is one you clicked.</li>
+        <li><strong>It does not change subtitles.</strong> A request has no effect on searching, scoring or downloading subtitles. Once the title arrives in Sonarr or Radarr, Bazarr+ picks it up the way it picks up anything else.</li>
+      </ul>
+
+      <h2 id="troubleshooting">Troubleshooting</h2>
+
+      <p><strong>No request control appears on a title.</strong> Three ordinary reasons: the integration is off, the title has no TMDB identity Bazarr+ can resolve, or it is a film you already own that the server has never seen. The last one is deliberate: offering to request a film sitting on your own disk is noise.</p>
+
+      <p><strong>"Seerr rejected the API key."</strong> The key is wrong, or it was regenerated on the server. Copy it again from <strong>Settings &gt; General &gt; API Key</strong> there and press <strong>Test</strong> here. The notice appears once per browser session, so reload after fixing it.</p>
+
+      <p><strong>"Seerr blocked the request. Disable CSRF protection in Seerr's network settings."</strong> The server is set to reject API calls that arrive without a browser's CSRF token, which an API key integration cannot send. Turn that option off in the server's network settings.</p>
+
+      <p><strong>"Seerr refused the request: quota exceeded."</strong> The acting user has a request quota and has spent it. Raise or clear the quota for that user on the server.</p>
+
+      <p><strong>"Seerr refused the request: the owner lacks permission."</strong> The user behind the API key cannot request this media type. The connection test reports this before you hit it, so run the test and read the user it names.</p>
+
+      <p><strong>A show says its season details are unavailable.</strong> The season list comes from TMDB, not from the request manager. When it cannot be read, the picker offers a whole-series request instead of guessing.</p>
+
+      <p><strong>"Your library check is incomplete."</strong> Discover could not read your whole library for this title, so the "In your Bazarr+ library" group is a floor rather than a complete answer. The request still works; just check the groups before confirming.</p>
+
+      <h2 id="next-steps">Next steps</h2>
+      <ul>
+        <li><a href="getting-started.html">Getting Started</a> if you have not connected Sonarr and Radarr yet</li>
+        <li><a href="external-integration.html">External Integration</a> for the Jellyfin plugin and the VLC extension</li>
+        <li><a href="provider-hub.html">Provider Hub</a> for installable catalog providers</li>
+        <li><a href="ai-translation.html">AI Translation Setup</a> for translating what you do get hold of</li>
+        <li><a href="bulk-operations.html">Bulk Operations</a> for acting on a whole library at once</li>
+      </ul>
+
+    </article>
+  </div>
+</main>
+
+<!-- Footer -->
+<footer>
+  <div class="container">
+    <p>Bazarr+ is a hard fork of <a class="inline" href="https://github.com/morpheus65535/bazarr" rel="noopener">Bazarr</a>, GPL-3, maintained by <a class="inline" href="https://github.com/LavX" rel="noopener">LavX</a>.</p>
+    <ul>
+      <li><a href="../">Home</a></li>
+      <li><a href="getting-started.html">Getting Started</a></li>
+      <li><a href="migration.html">Migration</a></li>
+      <li><a href="provider-hub.html">Provider Hub</a></li>
+      <li><a href="ai-translation.html">AI Translation</a></li>
+      <li><a href="bulk-operations.html">Bulk Operations</a></li>
+      <li><a href="external-integration.html">External Integration</a></li>
+      <li><a href="./">All guides</a></li>
+      <li><a href="https://github.com/LavX/bazarr/releases" rel="noopener">Releases</a></li>
+      <li><a href="https://github.com/LavX/bazarr/issues" rel="noopener">Issues</a></li>
+      <li><a href="https://github.com/LavX/bazarr/wiki" rel="noopener">Wiki</a></li>
+      <li><a href="https://discord.gg/fpp5JXmB8f" rel="noopener">Discord</a></li>
+    </ul>
+  </div>
+</footer>
+
+<script src="../js/site.js"></script>
+
+</body>
+</html>

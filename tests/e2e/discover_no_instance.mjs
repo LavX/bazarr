@@ -168,16 +168,27 @@ try {
   // wizard, not a tour of its forms.
   const ACTIONS = [
     "Get started",
+    // The one state the providers step cannot otherwise be answered from.
+    "Continue without providers",
+    "Skip this step",
     "Skip for now",
     "Skip",
     "Continue without a server",
     "Continue",
+    // The last step names where it is sending the reader on this path.
+    "Finish and open Discover",
     "Finish",
   ];
   const seen = [];
   for (let taken = 0; taken < ONBOARDING_STEP_LIMIT; taken += 1) {
     const label = (await page.locator("header").first().innerText()).trim();
     seen.push(label.replace(/\s+/g, " "));
+    // The wizard asks which path to walk before anything else. This walk is
+    // the one an install with no Sonarr, Radarr or Sportarr takes.
+    const discoverPath = page.getByRole("radio", {
+      name: /find subtitles for anything/i,
+    });
+    if (await discoverPath.count()) await discoverPath.first().check();
     // The languages step will not advance until something is picked, and a
     // profile is the one thing this walk has to leave behind.
     const languages = page.getByLabel("Languages", { exact: true });

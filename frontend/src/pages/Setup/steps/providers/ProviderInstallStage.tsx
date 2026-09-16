@@ -4,15 +4,23 @@ import {
   Button,
   Checkbox,
   Group,
+  List,
   Loader,
   ScrollArea,
   Stack,
   Text,
   TextInput,
+  ThemeIcon,
   Title,
+  VisuallyHidden,
 } from "@mantine/core";
-import { faMagnifyingGlass } from "@fortawesome/free-solid-svg-icons";
+import {
+  faCircleCheck,
+  faCircleExclamation,
+  faMagnifyingGlass,
+} from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { AxiosError } from "axios";
 import {
   useProviderHubCatalog,
   useProviderHubInstall,
@@ -29,6 +37,24 @@ import { redirectToSetup } from "./redirect";
 // How often we re-check the backend after the restart. The backend drops
 // connections while it bounces, so failed polls are expected and ignored.
 const HEALTH_POLL_INTERVAL_MS = 5000;
+
+// How long a partial run holds the outcome list on screen before it restarts
+// anyway. A staged provider that never activates is a worse state to leave
+// someone in than a restart they watched coming, so the restart is not
+// optional; the delay is there to make the failures readable and to give the
+// reader a chance to retry them first.
+const PARTIAL_RESTART_SECONDS = 10;
+const COUNTDOWN_TICK_MS = 1000;
+
+// The countdown is announced twice, not ten times. A polite live region whose
+// text changes every second enqueues one message per tick, and a screen reader
+// needs three or four seconds to read each: the queue could not drain before
+// the restart fired, so the reader would still be hearing "7 seconds" after the
+// page had bounced, and would have to find the cancel control inside that
+// noise. So: one message when the countdown starts, naming the delay in words
+// and naming the way out, one more with three seconds left, and the ticking
+// number carries no announcement at all.
+const FINAL_ANNOUNCEMENT_SECONDS = 3;
 
 export interface ProviderInstallStageProps {
   hasInstalled: boolean;
@@ -53,6 +79,13 @@ interface CatalogChoice {
   manifest: ProviderHubManifest;
 }
 
+interface InstallOutcome {
+  providerId: string;
+  name: string;
+  staged: boolean;
+  error?: string;
+}
+
 function describeEntry(
   entry: ProviderHubCatalogEntry,
   manifest: ProviderHubManifest,
@@ -64,11 +97,34 @@ function describeEntry(
   return entry.source ?? entry.source_name ?? undefined;
 }
 
+// Why one provider did not install, in the backend's own words where it gave
+// any. A failure the user cannot name is a failure they cannot act on.
+function describeInstallError(reason: unknown): string {
+  if (reason instanceof AxiosError) {
+    const data = reason.response?.data as { message?: string } | undefined;
+    if (data?.message) {
+      return data.message;
+    }
+  }
+  if (reason instanceof Error && reason.message) {
+    return reason.message;
+  }
+  return "The install failed and Bazarr+ gave no reason.";
+}
+
 /**
  * First Providers sub-stage. The user picks installable providers from the
  * catalog; installing them stages new code on disk, which requires a restart
  * to load. After the restart the wizard resumes via a hard redirect to /setup
  * (see redirectToSetup) and lands on the configure stage.
+ *
+ * Every selected provider is attempted, whatever the others do. The run used to
+ * be a loop of awaited installs with no catch: the first rejection ended it,
+ * every later provider was never tried, the rejection escaped an async callback
+ * unhandled and the restart never happened, so the button simply stopped
+ * spinning. Now the outcomes are collected per provider and shown, the restart
+ * is gated on at least one provider having staged, and the failures can be
+ * retried on their own without re-installing what already worked.
  */
 const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   hasInstalled,
@@ -84,7 +140,24 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   const [selected, setSelected] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [restarting, setRestarting] = useState(false);
+  const [installing, setInstalling] = useState(false);
+  const [outcomes, setOutcomes] = useState<InstallOutcome[] | null>(null);
+  // Seconds left before a partial run restarts on its own; null when no
+  // countdown is running (a clean run, an all-failed run, or one the reader
+  // has cancelled by retrying).
+  const [countdown, setCountdown] = useState<number | null>(null);
+  // What the live region says. Separate from `countdown` so the region can
+  // mount empty with the panel and then change, which is what makes a screen
+  // reader treat it as an update rather than as pre-existing content.
+  const [announcement, setAnnouncement] = useState("");
+  // Mirrors `outcomes` so a retry can fold its results into the previous run
+  // without reading state through an updater (which StrictMode double-invokes).
+  const outcomesRef = useRef<InstallOutcome[]>([]);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // The restart is reachable from three places (a clean run, the countdown
+  // expiring, the button). Firing it twice would send a second bounce request
+  // into a backend that is already going down.
+  const restartStartedRef = useRef(false);
 
   const choices: CatalogChoice[] = (catalog?.entries ?? [])
     .map((entry) => {
@@ -162,18 +235,12 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
     };
   }, []);
 
-  const handleInstall = useCallback(async () => {
-    const toInstall = choices.filter((choice) =>
-      selected.includes(choice.providerId),
-    );
-    if (toInstall.length === 0) {
+  const beginRestart = useCallback(() => {
+    if (restartStartedRef.current) {
       return;
     }
-
-    for (const choice of toInstall) {
-      await install.mutateAsync({ manifest: choice.manifest });
-    }
-
+    restartStartedRef.current = true;
+    setCountdown(null);
     setRestarting(true);
     onInstalledNeedsRestart();
     restart(undefined, {
@@ -183,14 +250,115 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
     });
     // Some restart paths resolve before the connection drops; poll regardless.
     startHealthPoll();
-  }, [
-    choices,
-    install,
-    onInstalledNeedsRestart,
-    restart,
-    selected,
-    startHealthPoll,
-  ]);
+  }, [onInstalledNeedsRestart, restart, startHealthPoll]);
+
+  // Runs `targets` together and folds the results into `outcomes`, keeping any
+  // provider that is not in this run exactly as it was. That is what makes a
+  // retry of the failed subset additive rather than a fresh verdict.
+  const runInstall = useCallback(
+    async (targets: CatalogChoice[]) => {
+      if (targets.length === 0) {
+        return;
+      }
+      setInstalling(true);
+      const results = await Promise.allSettled(
+        targets.map((choice) =>
+          install.mutateAsync({ manifest: choice.manifest }),
+        ),
+      );
+      const fresh: InstallOutcome[] = targets.map((choice, index) => {
+        const result = results[index];
+        return result.status === "fulfilled"
+          ? { providerId: choice.providerId, name: choice.name, staged: true }
+          : {
+              providerId: choice.providerId,
+              name: choice.name,
+              staged: false,
+              error: describeInstallError(result.reason),
+            };
+      });
+
+      const byId = new Map(
+        outcomesRef.current.map((outcome) => [outcome.providerId, outcome]),
+      );
+      for (const outcome of fresh) {
+        byId.set(outcome.providerId, outcome);
+      }
+      const merged = Array.from(byId.values());
+      outcomesRef.current = merged;
+      setOutcomes(merged);
+      setInstalling(false);
+
+      // Nothing staged means nothing new to load, so a restart would only cost
+      // the user a minute and tell them nothing. Leave the failures on screen.
+      if (merged.every((outcome) => !outcome.staged)) {
+        return;
+      }
+      if (merged.every((outcome) => outcome.staged)) {
+        // Nothing left to report, so go straight to the restart.
+        beginRestart();
+        return;
+      }
+      // Partial: the outcomes stay readable, then the restart happens anyway.
+      setCountdown(PARTIAL_RESTART_SECONDS);
+    },
+    [beginRestart, install],
+  );
+
+  useEffect(() => {
+    if (countdown === null) {
+      return;
+    }
+    if (countdown <= 0) {
+      beginRestart();
+      return;
+    }
+    const timer = setTimeout(
+      () => setCountdown((current) => (current === null ? null : current - 1)),
+      COUNTDOWN_TICK_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [beginRestart, countdown]);
+
+  const handleInstall = useCallback(() => {
+    outcomesRef.current = [];
+    setOutcomes(null);
+    return runInstall(
+      choices.filter((choice) => selected.includes(choice.providerId)),
+    );
+  }, [choices, runInstall, selected]);
+
+  const failed = (outcomes ?? []).filter((outcome) => !outcome.staged);
+  const staged = (outcomes ?? []).filter((outcome) => outcome.staged);
+  const stagedCount = staged.length;
+  const attemptedCount = (outcomes ?? []).length;
+
+  useEffect(() => {
+    if (countdown === null) {
+      setAnnouncement("");
+      return;
+    }
+    if (countdown === PARTIAL_RESTART_SECONDS) {
+      setAnnouncement(
+        `Restarting in ${PARTIAL_RESTART_SECONDS} seconds to activate ${stagedCount} of ${attemptedCount} providers. Retry the failures to cancel.`,
+      );
+      return;
+    }
+    if (countdown === FINAL_ANNOUNCEMENT_SECONDS) {
+      setAnnouncement(
+        `Restarting in ${FINAL_ANNOUNCEMENT_SECONDS} seconds. Retry the failures to cancel.`,
+      );
+    }
+  }, [attemptedCount, countdown, stagedCount]);
+
+  const handleRetryFailed = useCallback(() => {
+    // Retrying is the reader saying "wait", so the pending restart stops.
+    setCountdown(null);
+    const retry = choices.filter((choice) =>
+      failed.some((outcome) => outcome.providerId === choice.providerId),
+    );
+    return runInstall(retry);
+  }, [choices, failed, runInstall]);
 
   if (restarting) {
     return (
@@ -206,6 +374,83 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
         <Button variant="subtle" onClick={() => redirectToSetup()}>
           Taking too long? Reload now
         </Button>
+      </Stack>
+    );
+  }
+
+  if (outcomes !== null) {
+    return (
+      <Stack gap="lg">
+        <Stack gap="xs">
+          <Title order={2}>
+            {staged.length > 0
+              ? "Some providers did not install"
+              : "No provider installed"}
+          </Title>
+          <Text c="dimmed">
+            {staged.length > 0
+              ? "Every provider you picked was attempted. The ones that installed are staged and will load when Bazarr+ restarts."
+              : "Every provider you picked was attempted and none of them installed, so there is nothing to restart for."}
+          </Text>
+          {countdown !== null && (
+            <Text fw={600} aria-hidden>
+              {`Restarting in ${countdown}s to activate ${staged.length} of ${outcomes.length} providers`}
+            </Text>
+          )}
+          <VisuallyHidden role="status">{announcement}</VisuallyHidden>
+        </Stack>
+
+        <List spacing="sm" center>
+          {outcomes.map((outcome) => (
+            <List.Item
+              key={outcome.providerId}
+              icon={
+                <ThemeIcon
+                  color={outcome.staged ? "green" : "red"}
+                  size={20}
+                  radius="xl"
+                >
+                  <FontAwesomeIcon
+                    icon={outcome.staged ? faCircleCheck : faCircleExclamation}
+                    size="xs"
+                  />
+                </ThemeIcon>
+              }
+            >
+              <Text>{outcome.name}</Text>
+              <Text size="sm" c="dimmed">
+                {outcome.staged
+                  ? "Installed, waiting for the restart"
+                  : outcome.error}
+              </Text>
+            </List.Item>
+          ))}
+        </List>
+
+        <Group justify="space-between">
+          <Button
+            variant="default"
+            onClick={() => void handleRetryFailed()}
+            loading={installing}
+            disabled={failed.length === 0}
+          >
+            Retry the{" "}
+            {failed.length === 1 ? "failure" : `${failed.length} failures`}
+          </Button>
+          {staged.length > 0 ? (
+            <Button onClick={beginRestart}>Restart now</Button>
+          ) : (
+            <Button
+              variant="subtle"
+              onClick={() => {
+                outcomesRef.current = [];
+                setOutcomes(null);
+              }}
+            >
+              Pick different providers
+            </Button>
+          )}
+        </Group>
       </Stack>
     );
   }
@@ -288,7 +533,7 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
         </Group>
         <Button
           onClick={() => void handleInstall()}
-          loading={install.isPending}
+          loading={installing}
           disabled={selected.length === 0}
         >
           Install &amp; restart

@@ -24,6 +24,12 @@ const labels: Record<string, string> = {
   blacklist: "Excluded",
   "distribution-hub": "Distribution Hub",
 };
+// FontAwesome glyphs do not paint the same share of their viewBox. These run
+// edge to edge, so at the rail's 16px icon box they stand 2px taller than the
+// play, film and hub glyphs beside them and close on the label underneath.
+// The stylesheet trims them by a pixel so the whole rail keeps one ink band.
+const fullBleedGlyphs = new Set(["compass", "trophy", "clock", "file-excel"]);
+
 function visible(route: CustomRouteObject) {
   return (
     !route.hidden &&
@@ -66,7 +72,12 @@ export default function NavigationRail({
     const connectionStatus = badge === "LIVE" || badge === "DOWN";
     const iconWithBadge = (
       <span className={styles.railIcon}>
-        <FontAwesomeIcon icon={icon} />
+        <FontAwesomeIcon
+          icon={icon}
+          className={
+            fullBleedGlyphs.has(icon.iconName) ? styles.trimmedGlyph : undefined
+          }
+        />
         {Boolean(badge) && (
           <span
             className={

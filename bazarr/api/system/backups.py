@@ -31,9 +31,11 @@ class SystemBackups(Resource):
     @api_ns_system_backups.doc(parser=None)
     @api_ns_system_backups.response(204, 'Success')
     @api_ns_system_backups.response(401, 'Not Authenticated')
+    @api_ns_system_backups.response(500, 'Error while starting backup. Check logs.')
     def post(self):
         """Create a new backup"""
-        backup_to_zip()
+        if not backup_to_zip():
+            return 'Unable to start the backup. Check logs.', 500
         return '', 204
 
     patch_request_parser = reqparse.RequestParser()

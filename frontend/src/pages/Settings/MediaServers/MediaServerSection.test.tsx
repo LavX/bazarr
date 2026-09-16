@@ -714,7 +714,23 @@ it.each([
   "says every subtitle change reaches %s, not only new ones",
   async (kind, copy) => {
     setup(kind);
-    expect(await screen.findByText(copy)).toBeInTheDocument();
+    // Substring, because the guide link sits in the same paragraph, so the
+    // element's text content no longer equals this sentence on its own.
+    expect(await screen.findByText(copy, { exact: false })).toBeInTheDocument();
     expect(screen.queryByText(/subtitle additions/i)).not.toBeInTheDocument();
   },
 );
+
+// Path mappings, the five refresh states and what each server can match on are
+// explained on the guide and nowhere in the form.
+// One page, two servers, so Silo lands on its own section rather than the top
+// of a page whose first half is about Emby.
+it.each([
+  ["emby", "https://lavx.github.io/bazarr/guides/media-servers.html"],
+  ["silo", "https://lavx.github.io/bazarr/guides/media-servers.html#silo"],
+] as const)("points %s at its part of the guide", async (kind, href) => {
+  setup(kind);
+  expect(
+    await screen.findByRole("link", { name: "Read the media servers guide" }),
+  ).toHaveAttribute("href", href);
+});

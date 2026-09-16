@@ -414,6 +414,23 @@ services:
       - /path/to/movies:/movies
       - /path/to/tv:/tv
 
+    # Container hardening. The image is built to run this way: the application
+    # tree is owned by root and everything written at runtime goes to /config.
+    # The three capabilities are what the startup needs while it is still root,
+    # to take ownership of /config and to become PUID:PGID. Drop read_only if
+    # you mount your own source tree over /app/bazarr.
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+
 networks:
   default:
     name: bazarr-network

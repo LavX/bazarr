@@ -3868,13 +3868,19 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 14px 22px;
+  // The row gap is also what separates the controls from the note that wraps
+  // below them, so it carries the page's control-to-help-text step (12px,
+  // as .primaryHint uses) rather than a value of its own.
+  gap: 12px 22px;
 }
 .libraryStatus {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  min-height: 36px;
+  // Same height, same padding and same icon-to-label step as the request
+  // button beside it: two pills in one row that differ in any of the three
+  // read as a mistake.
+  gap: var(--mantine-spacing-xs);
+  min-height: 42px;
   padding: 6px 12px;
   border-radius: 6px;
   font-size: 13px;
@@ -3911,10 +3917,12 @@
 // that reads as disabled over hero artwork, so this matches the library chip
 // standing next to it: same height, same border, same quiet ground.
 .discover .seerrRequest {
-  // Matched to .openLibrary, the action standing next to it, rather than to
-  // the status chip: two adjacent buttons of different heights read as a
-  // mistake, and measured 42 against 36 before this.
+  // Matched to .openLibrary and to the library chip, the items standing next
+  // to it: one height for every item in the row. The padding is spelled out
+  // because Mantine's compact size pulls a button with a left section in to
+  // 5px, which left this pill tighter than the chip.
   min-height: 42px;
+  padding-inline: 12px;
   border-radius: 7px;
   font-size: 13px;
   color: var(--detail-muted);

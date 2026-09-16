@@ -1,5 +1,6 @@
 """Native notifications follow real file publication, not secondary callbacks."""
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -329,6 +330,185 @@ def test_editor_alignment_is_temporary_until_real_content_save(upload_flow, muta
         assert mutations[0].video_path == str(flow.video)
     finally:
         editor._editor_sync_jobs.pop(key, None)
+
+
+def _drive_editor_preview(flow, monkeypatch, **payload):
+    """Align through the real endpoint, the way the editor's timing panel asks.
+
+    The panel sends no output mode and no engine list, so the request that
+    reproduces a user's alignment is the one that omits them.
+    """
+    from api.editor import editor
+    from app.config import settings
+
+    monkeypatch.setattr(settings.auth, 'apikey', 'editor-preview-test-key')
+    monkeypatch.setattr(editor, '_resolve_video_path', lambda *args, **kwargs: str(flow.video))
+    monkeypatch.setattr('threading.Thread', Mock())
+    scheduled = []
+    monkeypatch.setattr('threading.Timer', lambda _delay, callback: SimpleNamespace(
+        start=lambda: scheduled.append(callback)))
+
+    body = {'mediaType': 'movie', 'mediaId': 30, 'arrInstanceId': 7, 'language': 'en',
+            'content': '1\n00:00:01,000 --> 00:00:02,000\nEditor content\n', 'format': 'srt',
+            'encoding': 'utf-8', 'maxOffsetSeconds': 120, 'gss': False, 'noFixFramerate': True}
+    body.update(payload)
+    app = Flask(__name__)
+    headers = {'X-API-KEY': settings.auth.apikey}
+    with app.test_request_context(json=body, headers=headers):
+        accepted, status = editor.EditorSync().post()
+    assert status == 202, accepted
+    job = flow.queue.jobs_pending_queue[-1]
+    editor.run_editor_sync(**job.kwargs)
+    with app.test_request_context(query_string={'jobKey': accepted['jobKey']}, headers=headers):
+        result, _status = editor.EditorSync().get()
+    return SimpleNamespace(result=result, kwargs=job.kwargs, scheduled=scheduled,
+                           workspace=Path(job.kwargs['tmp_in']).parent)
+
+
+def test_editor_keep_all_preview_aligns_without_claiming_a_library_destination(upload_flow, mutations, monkeypatch):
+    from api.subtitles import content
+    flow = upload_flow
+    library_subtitle = flow.video.with_suffix('.en.srt')
+    library_subtitle.write_text('Original library subtitle')
+    media_folder = sorted(path.name for path in flow.video.parent.iterdir())
+    flow.release_engine.set()
+
+    run = _drive_editor_preview(flow, monkeypatch)
+
+    assert run.kwargs['output_mode'] == 'keep_all'
+    assert run.result['status'] == 'completed', run.result
+    assert 'Synced' in run.result['content']
+    assert [item['engine'] for item in run.result['results']] == ['ffsubsync']
+    assert mutations == []
+    assert library_subtitle.read_text() == 'Original library subtitle'
+    assert sorted(path.name for path in flow.video.parent.iterdir()) == media_folder
+
+    # Publication is the user's explicit save, not the alignment that preceded it.
+    monkeypatch.setattr(content, 'resolve_subtitle_path', lambda *args, **kwargs:
+                        (str(library_subtitle), {'mediaPath': str(flow.video), 'arrInstanceId': 7}))
+    monkeypatch.setattr(content, '_refresh_media_subtitles', Mock())
+    app = Flask(__name__)
+    with app.test_request_context(json={'content': run.result['content']},
+                                  headers={'If-Match': content.generate_etag(str(library_subtitle))}):
+        assert content._save_subtitle_content('movie', 30, 'en', arr_instance_id=7).status_code == 204
+    assert [event.operation for event in mutations] == ['edit']
+    assert 'Synced' in library_subtitle.read_text()
+
+
+def test_editor_overwrite_preview_still_returns_aligned_content(upload_flow, mutations, monkeypatch):
+    flow = upload_flow
+    library_subtitle = flow.video.with_suffix('.en.srt')
+    library_subtitle.write_text('Original library subtitle')
+    media_folder = sorted(path.name for path in flow.video.parent.iterdir())
+    flow.release_engine.set()
+
+    run = _drive_editor_preview(flow, monkeypatch, outputMode='overwrite')
+
+    assert run.kwargs['output_mode'] == 'overwrite'
+    assert run.result['status'] == 'completed', run.result
+    assert 'Synced' in run.result['content']
+    assert mutations == []
+    assert library_subtitle.read_text() == 'Original library subtitle'
+    assert sorted(path.name for path in flow.video.parent.iterdir()) == media_folder
+
+
+def test_editor_preview_returns_each_enabled_engine_result(upload_flow, mutations, monkeypatch):
+    from app.config import settings
+    from subtitles.tools import subsyncer
+    flow = upload_flow
+    monkeypatch.setattr(settings.subsync, 'enabled_engines', ['ffsubsync', 'alass'])
+
+    def external(self, engine, output_path, video_path):
+        output_path.write_text('1\n00:00:05,000 --> 00:00:06,000\nAligned by ' + engine + '\n')
+        return {'offset_seconds': 0, 'framerate_scale_factor': 1}
+
+    monkeypatch.setattr(subsyncer.SubSyncer, '_run_external_engine', external)
+    flow.release_engine.set()
+
+    run = _drive_editor_preview(flow, monkeypatch)
+
+    assert run.result['status'] == 'completed', run.result
+    contents = {item['engine']: item['content'] for item in run.result['results']}
+    assert sorted(contents) == ['alass', 'ffsubsync']
+    assert 'Synced' in contents['ffsubsync'] and 'Aligned by alass' in contents['alass']
+    assert mutations == []
+
+
+def test_editor_preview_cancellation_publishes_and_keeps_nothing(upload_flow, mutations, monkeypatch):
+    from app.jobs_queue import JobCancelled
+    from subtitles.tools import subsyncer
+    flow = upload_flow
+
+    def cancel(self, output_path, **kwargs):
+        raise JobCancelled()
+
+    monkeypatch.setattr(subsyncer.SubSyncer, '_run_ffsubsync_engine', cancel)
+    media_folder = sorted(path.name for path in flow.video.parent.iterdir())
+
+    run = _drive_editor_preview(flow, monkeypatch)
+
+    assert run.result['status'] == 'failed', run.result
+    assert mutations == []
+    assert not list(run.workspace.glob('*.ffsubsync.srt'))
+    assert sorted(path.name for path in flow.video.parent.iterdir()) == media_folder
+
+
+def test_editor_preview_cleans_up_its_private_workspace(upload_flow, monkeypatch):
+    flow = upload_flow
+    flow.release_engine.set()
+
+    run = _drive_editor_preview(flow, monkeypatch)
+
+    assert run.result['status'] == 'completed', run.result
+    assert run.workspace.is_dir() and list(run.workspace.glob('*.ffsubsync.srt'))
+    assert run.scheduled, 'the preview never scheduled its own cleanup'
+    for callback in run.scheduled:
+        callback()
+    assert not run.workspace.exists()
+    assert flow.video.exists()
+
+
+def test_editor_preview_unwinds_when_the_content_cannot_be_encoded(upload_flow, mutations, monkeypatch):
+    """A codec that cannot represent the content must not strand a workspace."""
+    from api.editor import editor
+    from subtitles.tools import subsync_engines
+    flow = upload_flow
+    opened = []
+    real_create = subsync_engines.create_preview_workspace
+    monkeypatch.setattr(editor, 'create_preview_workspace',
+                        lambda: opened.append(real_create()) or opened[-1])
+    registered = set(subsync_engines._preview_workspaces)
+    known_jobs = set(editor._editor_sync_jobs)
+
+    with pytest.raises(UnicodeEncodeError):
+        _drive_editor_preview(flow, monkeypatch, encoding='ascii',
+                              content='1\n00:00:01,000 --> 00:00:02,000\nSzinkroniz\u00e1lt\n')
+
+    assert opened, 'the endpoint never reached the workspace it had to clean up'
+    assert not os.path.exists(opened[0])
+    assert set(subsync_engines._preview_workspaces) == registered
+    assert set(editor._editor_sync_jobs) == known_jobs
+    assert mutations == []
+
+
+def test_library_sync_after_a_preview_keeps_the_video_owner(upload_flow, mutations, monkeypatch):
+    from subtitles import sync
+    flow = upload_flow
+    source = flow.video.with_suffix('.en.srt')
+    source.write_text('Original')
+    flow.release_engine.set()
+
+    assert _drive_editor_preview(flow, monkeypatch).result['status'] == 'completed'
+    assert mutations == []
+
+    sync.sync_subtitles(video_path=str(flow.video), srt_path=str(source), srt_lang='en', forced=False, hi=False,
+                        percent_score=0, job_id='sync', force_sync=True, radarr_id=30, arr_instance_id=7,
+                        track_job_progress=False)
+
+    assert 'Synced' in source.read_text()
+    assert len(mutations) == 1
+    assert (mutations[0].operation, mutations[0].video_path, mutations[0].subtitle_path,
+            mutations[0].arr_instance_id) == ('sync', str(flow.video), str(source), 7)
 
 
 @pytest.mark.parametrize('media_type', ['movie', 'episode'])
