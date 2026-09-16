@@ -3,11 +3,16 @@ import { Text } from "@mantine/core";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
+import queryClient from "@/apis/queries";
+import App from "@/App";
+import { latestWhatsNewVersion } from "@/data/whatsNew";
 import { useFormActions } from "@/pages/Settings/utilities/FormValues";
 import { AllProviders } from "@/providers";
-import { customRender, rawRender, screen, waitFor } from "@/tests";
+import { act, customRender, rawRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
-import { Password } from "./forms";
+import { setOnlineStatus } from "@/utilities/event";
+import { markWhatsNewSeen } from "@/utilities/whatsNew";
+import { Check, Password, Text as TextField } from "./forms";
 import Layout from "./Layout";
 import LayoutModal from "./LayoutModal";
 
@@ -356,4 +361,208 @@ it("keeps Save and Leave values out of the active development logger", async () 
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
   }
+});
+
+describe("Settings layout refetch", () => {
+  const persisted = () => ({
+    general: { theme: "auto" },
+    sonarr: { ssl: false, ip: "sonarr.internal" },
+  });
+
+  function serveSettings(body: () => LooseObject = persisted) {
+    server.use(
+      http.get("/api/system/settings", () => HttpResponse.json(body())),
+    );
+  }
+
+  // Holds every further settings response open, so an edit can be staged while
+  // a refresh is in flight. That is the window the race lives in: on the real
+  // page the edit disappeared when the held response finally landed.
+  function holdSettings(body: () => LooseObject = persisted) {
+    let release!: () => void;
+    let markReached!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const reached = new Promise<void>((resolve) => (markReached = resolve));
+
+    server.use(
+      http.get("/api/system/settings", async () => {
+        markReached();
+        await held;
+        return HttpResponse.json(body());
+      }),
+    );
+
+    return { reached, release };
+  }
+
+  const stagedFields = (
+    <Layout name="Test Settings">
+      <Check label="Use SSL" settingKey="settings-sonarr-ssl" />
+      <TextField label="Address" settingKey="settings-sonarr-ip" />
+    </Layout>
+  );
+
+  async function waitForHydration() {
+    await waitFor(() => {
+      expect(screen.getByLabelText("Address")).toHaveValue("sonarr.internal");
+    });
+  }
+
+  async function stageBothFields(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByLabelText("Use SSL"));
+    await user.type(screen.getByLabelText("Address"), "-staged");
+
+    expect(
+      await screen.findByRole("button", { name: "Save 2 pending changes" }),
+    ).toBeInTheDocument();
+  }
+
+  async function expectStillStaged() {
+    await waitFor(() => {
+      expect(queryClient.isFetching()).toBe(0);
+    });
+
+    expect(screen.getByLabelText("Use SSL")).toBeChecked();
+    expect(screen.getByLabelText("Address")).toHaveValue(
+      "sonarr.internal-staged",
+    );
+    expect(
+      screen.getByRole("button", { name: "Save 2 pending changes" }),
+    ).toBeInTheDocument();
+  }
+
+  function mountSettingsInApp() {
+    // The wizard would otherwise cover the page on a fresh profile.
+    markWhatsNewSeen(latestWhatsNewVersion);
+    // The shell around the page has queries of its own, and the refresh the
+    // socket triggers hits every one of them.
+    server.use(
+      http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
+      http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
+    );
+    serveSettings();
+
+    const router = createMemoryRouter([
+      {
+        path: "/",
+        element: <App />,
+        children: [{ index: true, element: stagedFields }],
+      },
+    ]);
+
+    rawRender(
+      <AllProviders>
+        <RouterProvider router={router} />
+      </AllProviders>,
+    );
+
+    return router;
+  }
+
+  it("keeps staged values through the startup refresh", async () => {
+    const user = userEvent.setup();
+    const router = mountSettingsInApp();
+
+    try {
+      await waitForHydration();
+
+      // The socket reporting online for the first time refreshes every active
+      // query, the settings this page is built from included.
+      const settings = holdSettings();
+      await act(async () => {
+        setOnlineStatus(true);
+      });
+      await settings.reached;
+
+      await stageBothFields(user);
+
+      settings.release();
+      await expectStillStaged();
+    } finally {
+      router.dispose();
+    }
+  });
+
+  it("keeps staged values through a reconnect refresh", async () => {
+    const user = userEvent.setup();
+    const router = mountSettingsInApp();
+
+    try {
+      await waitForHydration();
+
+      await act(async () => {
+        setOnlineStatus(true);
+      });
+      await waitFor(() => {
+        expect(queryClient.isFetching()).toBe(0);
+      });
+
+      const settings = holdSettings();
+      await act(async () => {
+        setOnlineStatus(false);
+      });
+      await act(async () => {
+        setOnlineStatus(true);
+      });
+      await settings.reached;
+
+      await stageBothFields(user);
+
+      settings.release();
+      await expectStillStaged();
+    } finally {
+      router.dispose();
+    }
+  });
+
+  it("clears the form once a successful save has been reloaded", async () => {
+    let stored = persisted();
+    const submitted: LooseObject[] = [];
+    serveSettings(() => stored);
+    server.use(
+      http.post("/api/system/settings", async ({ request }) => {
+        const values = Object.fromEntries((await request.formData()).entries());
+        submitted.push(values);
+        stored = {
+          ...stored,
+          sonarr: {
+            ...stored.sonarr,
+            ssl: values["settings-sonarr-ssl"] === "true",
+          },
+        };
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+
+    const user = userEvent.setup();
+    customRender(
+      <Layout name="Test Settings">
+        <Check label="Use SSL" settingKey="settings-sonarr-ssl" />
+        <TextField label="Address" settingKey="settings-sonarr-ip" />
+      </Layout>,
+    );
+
+    await waitForHydration();
+
+    const settings = holdSettings(() => stored);
+    await user.click(screen.getByLabelText("Use SSL"));
+    await user.click(
+      await screen.findByRole("button", { name: "Save 1 pending change" }),
+    );
+
+    await waitFor(() => expect(submitted).toHaveLength(1));
+    expect(submitted[0]["settings-sonarr-ssl"]).toBe("true");
+
+    // The reload a save triggers is the one refresh that is meant to clear the
+    // form: what was staged is what the backend now holds.
+    await settings.reached;
+    settings.release();
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("button", { name: /save/i }),
+      ).not.toBeInTheDocument();
+    });
+    expect(screen.getByLabelText("Use SSL")).toBeChecked();
+  });
 });
