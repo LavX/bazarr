@@ -24,6 +24,29 @@ const envelope = {
   locale: "en-US",
 };
 
+// One episode still missing a subtitle, so "Still missing" is a section that
+// would render if the library half were shown. Without it that heading is
+// absent on its own terms and asserting its absence proves nothing.
+const missingEpisode = {
+  id: 701,
+  series_id: 801,
+  sonarrSeriesId: 101,
+  sonarrEpisodeId: 201,
+  arr_instance_id: 1,
+  seriesTitle: "Northern Light",
+  episode_number: "1x1",
+  episodeTitle: "Pilot",
+  missing_subtitles: [
+    { name: "Hungarian", code2: "hu", code3: "hun", forced: false, hi: false },
+  ],
+  audio_language: [],
+  monitored: true,
+  tags: [],
+  sceneName: null,
+  hearing_impaired: false,
+  seriesType: "standard",
+};
+
 const libraryOnboarding = {
   id: "library",
   summary:
@@ -114,6 +137,12 @@ function serve(
     ),
     http.get("/api/system/languages", () => HttpResponse.json([])),
     http.get("/api/system/languages/profiles", () => HttpResponse.json([])),
+    http.get("/api/episodes/wanted", () =>
+      HttpResponse.json({ data: [missingEpisode], total: 1 }),
+    ),
+    http.get("/api/movies/wanted", () =>
+      HttpResponse.json({ data: [], total: 0 }),
+    ),
     http.get("/api/discover/metadata/status", () =>
       HttpResponse.json({ data: envelope }),
     ),
@@ -171,7 +200,7 @@ it("opens on the global catalog when no arr instance is enabled", async () => {
   expect(screen.queryByText("Your library")).not.toBeInTheDocument();
   expect(screen.queryByText("Recently fetched")).not.toBeInTheDocument();
   expect(screen.queryByText("Needs attention")).not.toBeInTheDocument();
-  expect(screen.queryByText("Missing subtitles")).not.toBeInTheDocument();
+  expect(screen.queryByText("Still missing")).not.toBeInTheDocument();
   // One line in place of the half, carrying the summary's own wording.
   expect(
     await screen.findByRole("link", { name: "Connect a library" }),
@@ -196,6 +225,9 @@ it("hides the half for an enabled integration whose instances are all off", asyn
     await screen.findByRole("link", { name: "Connect a library" }),
   ).toBeInTheDocument();
   expect(screen.queryByText("Your library")).not.toBeInTheDocument();
+  // Sonarr is on and an episode is missing a subtitle, so this heading is one
+  // the page would have rendered had the half been shown.
+  expect(screen.queryByText("Still missing")).not.toBeInTheDocument();
 });
 
 it("keeps the half for a connected library that has indexed nothing yet", async () => {
@@ -203,6 +235,9 @@ it("keeps the half for a connected library that has indexed nothing yet", async 
   open();
   expect(await screen.findByText("Your library")).toBeInTheDocument();
   expect(await screen.findByText("Recently fetched")).toBeInTheDocument();
+  // The other side of the assertion the two hidden cases make: this is the
+  // section whose absence they are pinning.
+  expect(await screen.findByText("Still missing")).toBeInTheDocument();
   await globalHero();
   expect(
     screen.queryByRole("link", { name: "Connect a library" }),
@@ -213,11 +248,11 @@ it("opens on the global catalog when the summary cannot be read", async () => {
   serve({ use_sonarr: true }, "unreadable");
   open();
   await globalHero();
-  // eslint-disable-next-line no-console
   // The check that did not happen still gets said, and nothing crashes.
   expect(
     await screen.findByText("This check could not be completed."),
   ).toBeInTheDocument();
   expect(screen.queryByText("Your library")).not.toBeInTheDocument();
   expect(screen.queryByText("Recently fetched")).not.toBeInTheDocument();
+  expect(screen.queryByText("Still missing")).not.toBeInTheDocument();
 });
