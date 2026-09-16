@@ -1,4 +1,10 @@
-import { FunctionComponent, ReactNode, useCallback, useMemo } from "react";
+import {
+  FunctionComponent,
+  ReactNode,
+  useCallback,
+  useMemo,
+  useRef,
+} from "react";
 import {
   Button,
   Container,
@@ -37,8 +43,14 @@ const LayoutModal: FunctionComponent<Props> = (props) => {
     },
   });
 
+  // Same rule as the settings page: only the reload that follows a save may
+  // clear the form. A startup or reconnect refresh must leave staged values
+  // alone, or an edit made while the response is in flight is lost silently.
+  const savedRef = useRef(false);
+
   useOnValueChange(isRefetching, (value) => {
-    if (!value) {
+    if (!value && savedRef.current) {
+      savedRef.current = false;
       form.reset();
     }
   });
@@ -50,7 +62,11 @@ const LayoutModal: FunctionComponent<Props> = (props) => {
         const settingsToSubmit = { ...settings };
         runHooks(hooks, settingsToSubmit);
         LOG("info", "submitting settings", Object.keys(settingsToSubmit));
-        mutate(settingsToSubmit);
+        mutate(settingsToSubmit, {
+          onSuccess: () => {
+            savedRef.current = true;
+          },
+        });
         // wait for settings to be validated before callback
         // let the user see the spinning indicator on the Save button before the modal closes
         setTimeout(() => {
