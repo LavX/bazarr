@@ -95,26 +95,21 @@ def test_row_and_import_marker_are_atomic_and_retryable(autocommit_session, monk
     assert len(MediaServerInstanceRepository(autocommit_session).list(kind)) == 1
 
 
-def test_an_empty_scalar_creates_nothing_and_does_not_spend_the_one_import(autocommit_session):
-    """Nothing configured is not an import, so the marker is not spent on it.
+def test_an_empty_scalar_creates_nothing_but_still_stamps_the_kind(autocommit_session):
+    """Nothing configured still spends the import, because the marker is also
+    the dispatcher's gate: an unstamped kind has every destination dropped.
 
-    Stamping the shipped defaults would leave a user who configures that kind
-    later, by hand in config.yaml, with settings nothing ever reads.
+    A stale scalar therefore cannot resurrect a destination later either, which
+    is the property this has always had.
     """
     from app.database import TableMediaServerImports
     from media_servers.backfill import backfill_instances
     from media_servers.repository import MediaServerInstanceRepository
     config = legacy()
     backfill_instances(autocommit_session, config)
-    assert not any(autocommit_session.get(TableMediaServerImports, kind) for kind in ('emby', 'silo'))
+    assert all(autocommit_session.get(TableMediaServerImports, kind) for kind in ('emby', 'silo'))
     assert MediaServerInstanceRepository(autocommit_session).list() == []
-    config.emby.url = 'http://emby.example'
-    backfill_instances(autocommit_session, config)
-    rows = MediaServerInstanceRepository(autocommit_session).list()
-    assert [row.kind for row in rows] == ['emby']
-    assert autocommit_session.get(TableMediaServerImports, 'emby') is not None
-    # And that import is still the only one: a deleted row stays deleted.
-    MediaServerInstanceRepository(autocommit_session).delete(rows[0].id)
+    config.emby.url = 'http://stale.example'
     backfill_instances(autocommit_session, config)
     assert MediaServerInstanceRepository(autocommit_session).list() == []
 
@@ -290,6 +285,21 @@ def test_a_live_plex_and_jellyfin_install_imports_the_way_the_box_is_configured(
                                  'refresh_method': 'immediate'}
     for row in (plex, jellyfin):
         assert repo.snapshot(row.id, config).configuration_error is None
+
+    # Both kinds are stamped, so neither is blocked and both rows reach the
+    # dispatcher. An unstamped kind is dropped on publish and its status reads
+    # migration_failed forever, which is what a Plex row without one did.
+    from app.database import TableMediaServerImports
+    from media_servers.dispatcher import NativeConfiguration
+    from media_servers.instances import VALID_KINDS
+    stamped = [kind for kind in VALID_KINDS
+               if autocommit_session.get(TableMediaServerImports, kind) is not None]
+    assert set(stamped) == set(VALID_KINDS)
+    configuration = NativeConfiguration(config, snapshots=repo.snapshots(config, kinds=stamped),
+                                        blocked_kinds=set(VALID_KINDS) - set(stamped))
+    assert configuration.blocked_kinds == frozenset()
+    assert configuration.read(plex.id)[1].kind == 'plex'
+    assert configuration.read(jellyfin.id)[1].kind == 'jellyfin' 
 
 
 def test_already_migrated_emby_and_silo_rows_survive_the_plex_and_jellyfin_import(autocommit_session):

@@ -70,14 +70,19 @@ def _configured(values):
 def backfill_instances(session, settings):
     """Import each kind's scalar settings once, and keep Plex's row in step.
 
-    Plex is not a one-time import. Its account panel still writes the scalars
-    every time the user signs in, saves a key or picks a server, so its row is
-    reconciled on every startup instead, which is idempotent and never
-    duplicates. The other three are import-once behind a durable marker.
+    The marker is two things at once, and both matter. It is the one-time
+    import latch, and it is the dispatcher's per-kind gate: a kind with no
+    marker is blocked, so `NativeConfiguration.publish` drops its snapshots and
+    every destination of that kind is invisible to refreshes, whether the
+    import created it or a user did in Connections. So each kind is stamped
+    once its step has run without error, configured or not. Only a failure
+    leaves a kind unstamped, which is the one case where its destinations
+    should not be refreshed from settings that could not be read.
 
-    A kind with nothing configured is not stamped. Stamping it would spend the
-    one import on the shipped defaults and leave a user who configures that
-    kind later, by hand in config.yaml, with settings nothing ever reads.
+    Plex's step is not an import. Its account panel still writes the scalars
+    every time the user signs in, saves a key or picks a server, so its row is
+    reconciled here on every startup instead, which is idempotent and never
+    duplicates.
     """
     repo = MediaServerInstanceRepository(session)
     results = {}
@@ -85,17 +90,16 @@ def backfill_instances(session, settings):
         try:
             if kind == 'plex':
                 from .plex_account import sync_plex_instance
-                results[kind] = {'created': sync_plex_instance(session, settings) is not None}
+                created = sync_plex_instance(session, settings, persist=_persist) is not None
+                _stamp_once(session, kind)
+                results[kind] = {'created': created}
                 continue
             with atomic(session, durable=True):
                 if session.get(TableMediaServerImports, kind) is not None:
                     results[kind] = {'created': False}
                     continue
                 values = _legacy_values(settings, kind)
-                if not _configured(values):
-                    results[kind] = {'created': False}
-                    continue
-                row = repo.import_values(values)
+                row = repo.import_values(values) if _configured(values) else None
                 _record_import(session, kind)
             results[kind] = {'created': row is not None}
         except Exception:
@@ -103,3 +107,15 @@ def backfill_instances(session, settings):
             logging.warning('BAZARR native media server import failed for %s; retrying on next startup', kind)
             results[kind] = {'created': False, 'error_code': 'migration_failed'}
     return results
+
+
+def _stamp_once(session, kind):
+    with atomic(session, durable=True):
+        if session.get(TableMediaServerImports, kind) is None:
+            _record_import(session, kind)
+
+
+def _persist():
+    """Write the config, so a recorded owner id survives the restart."""
+    from app.config import write_config
+    write_config()

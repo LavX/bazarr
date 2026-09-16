@@ -63,13 +63,24 @@ def _account_row(repo, settings):
     return next((row for row in rows if row.id == saved), rows[0] if rows else None)
 
 
-def sync_plex_instance(session, settings, *, signed_out=False):
+def sync_plex_instance(session, settings, *, signed_out=False, persist=None):
     """Carry the account's URL and credential onto its destination row.
 
     Idempotent: startup and every account transition call it, and it creates the
     row only when the account has something to connect with. ``signed_out``
     clears the credential and switches the row off rather than deleting it, so a
     user who signs back in keeps the libraries and toggles they chose.
+
+    What it carries onto an existing row is the connection and nothing else.
+    ``enabled`` and ``verify_ssl`` are written when the row is created, and
+    ``enabled`` again on sign-out, because those are the account speaking. On an
+    ordinary reconcile they are the user's own instance settings, and rewriting
+    them from the scalars would undo an instance a user switched off, or a TLS
+    setting they changed, at the next startup.
+
+    ``persist`` writes the config once the owner id changes, so the row this
+    account owns survives a restart instead of being re-guessed from whichever
+    Plex row happens to sort first.
 
     Never raises into a caller that was doing something else: an account change
     that could not reach the database is logged and retried by the next one, and
@@ -100,14 +111,17 @@ def sync_plex_instance(session, settings, *, signed_out=False):
         elif signed_out:
             repo.update(row.id, enabled=False, clear_api_key=True)
         else:
-            fields = dict(url=url, verify_ssl=verify_ssl, enabled=enabled)
+            fields = dict(url=url)
             # An unchanged credential is not resent, so a server switch cannot
             # blank the token by carrying an empty field along with the URL.
             if credential:
                 fields['api_key'] = credential
             repo.update(row.id, **fields)
+        recorded = getattr(settings.plex, 'instance_id', '') != row.id
         settings.plex.instance_id = row.id
         session.commit()
+        if recorded and persist is not None:
+            persist()
         _publish(session, settings, row.id)
         return row
     except Exception:
@@ -138,7 +152,11 @@ def _publish(session, settings, instance_id):
 
 
 def sync_plex_account(*, signed_out=False):
-    """The request-side entry point, on the app's own session."""
-    from app.config import settings
+    """The request-side entry point, on the app's own session.
+
+    The account handlers write the config before calling here, so the owner id
+    this records needs a write of its own to reach disk.
+    """
+    from app.config import settings, write_config
     from app.database import database
-    return sync_plex_instance(database, settings, signed_out=signed_out)
+    return sync_plex_instance(database, settings, signed_out=signed_out, persist=write_config)

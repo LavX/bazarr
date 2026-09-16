@@ -12,6 +12,8 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+from test_media_server_instances import payload
+
 HEADERS = {'X-API-KEY': 'synthetic-bazarr-key'}
 IDS = {'jellyfin': 'd2a4c6e8-1111-4b0a-9c3d-0a1b2c3d4e5f',
        'plex': 'f1e2d3c4-2222-4b0a-9c3d-0a1b2c3d4e5f'}
@@ -578,13 +580,84 @@ def test_the_account_updates_its_row_through_every_transition(schema_session):
     assert repo.get(row.id).api_key == ''
     assert len(repo.list('plex')) == 1
 
-    # Signing back in reuses that row rather than adding a second.
+    # Signing back in reuses that row rather than adding a second, and restores
+    # the credential. Whether the instance is switched on is the user's, so the
+    # account does not reach into it.
     config.general.use_plex = True
     config.plex.token = 'second-token'
     assert sync_plex_instance(schema_session, config).id == row.id
-    assert bool(repo.get(row.id).enabled) is True
     assert repo.get_decrypted_api_key(row.id) == 'second-token'
+    assert bool(repo.get(row.id).enabled) is False
     assert len(repo.list('plex')) == 1
+
+
+def test_a_reconcile_never_reverts_the_instance_settings_a_user_changed(schema_session):
+    """The account owns the connection; the toggles on the row are the user's.
+
+    Rewriting them from the scalars on every startup and every account change
+    would switch an instance a user turned off back on, and undo a TLS setting
+    they changed, behind their back.
+    """
+    from media_servers.plex_account import sync_plex_instance
+    from media_servers.repository import MediaServerInstanceRepository
+    repo = MediaServerInstanceRepository(schema_session)
+    config = plex_settings(auth_method='oauth', token='token',
+                           server_url='https://plex.example:32400')
+    row = sync_plex_instance(schema_session, config)
+    repo.update(row.id, enabled=False, verify_ssl=True, refresh_episodes=False)
+
+    config.plex.server_url = 'https://moved.example:32400'
+    sync_plex_instance(schema_session, config)
+    saved = repo.values(repo.get(row.id))
+    assert saved['url'] == 'https://moved.example:32400'
+    assert saved['enabled'] is False and saved['verify_ssl'] is True
+    assert saved['refresh_episodes'] is False
+
+
+def test_the_owner_id_survives_a_restart_and_keeps_the_row_it_was_bound_to(schema_session):
+    """Two Plex rows, and the account owns the second one.
+
+    Without persisting the id the fallback is whichever row sorts first over
+    random UUIDs, so a restart could hand the account someone else's row.
+    """
+    from media_servers.plex_account import sync_plex_instance
+    from media_servers.repository import MediaServerInstanceRepository
+    repo = MediaServerInstanceRepository(schema_session)
+    config = plex_settings(auth_method='oauth', token='first-token',
+                           server_url='https://first.example:32400')
+    first = repo.create(kind='plex', name='Hand added', url='https://hand.example:32400',
+                        api_key='hand-key', enabled=True, verify_ssl=True, path_mappings=[])
+    owned = repo.create(kind='plex', name='Account', url='https://first.example:32400',
+                        api_key='first-token', enabled=True, verify_ssl=False, path_mappings=[])
+    config.plex.instance_id = owned.id
+
+    writes = []
+    config.plex.server_url = 'https://second.example:32400'
+    assert sync_plex_instance(schema_session, config,
+                              persist=lambda: writes.append(config.plex.instance_id)).id == owned.id
+    # Already recorded, so nothing new to write.
+    assert writes == []
+
+    # The restart: a fresh settings object carrying only what reached disk.
+    restarted = plex_settings(auth_method='oauth', token='first-token',
+                              server_url='https://third.example:32400',
+                              instance_id=config.plex.instance_id)
+    assert sync_plex_instance(schema_session, restarted).id == owned.id
+    assert repo.get(owned.id).url == 'https://third.example:32400'
+    assert repo.get(first.id).url == 'https://hand.example:32400'
+
+
+def test_a_newly_recorded_owner_id_is_written_to_disk(schema_session):
+    from media_servers.plex_account import sync_plex_instance
+    config = plex_settings(auth_method='oauth', token='token',
+                           server_url='https://plex.example:32400')
+    writes = []
+    row = sync_plex_instance(schema_session, config, persist=lambda: writes.append(True))
+    assert config.plex.instance_id == row.id
+    assert writes == [True], 'the id the account was just bound to has to survive a restart'
+    # A reconcile that changes nothing does not rewrite the config.
+    sync_plex_instance(schema_session, config, persist=lambda: writes.append(True))
+    assert writes == [True]
 
 
 def test_switching_auth_method_replaces_the_credential_on_the_row(schema_session):
@@ -628,19 +701,83 @@ def test_a_second_plex_instance_added_by_hand_is_never_taken_over(schema_session
     assert repo.get_decrypted_api_key(other.id) == 'other-key'
 
 
-def test_an_unconfigured_kind_is_not_stamped_so_a_later_import_still_runs(schema_session):
-    """The other half of the Critical: a spent marker blocks the import forever."""
+def test_a_fresh_install_stamps_every_kind_so_new_destinations_are_dispatched(schema_session):
+    """The marker is also the dispatcher's gate, not only the import latch.
+
+    A kind with no marker is blocked: `NativeConfiguration.publish` drops its
+    snapshots and `read` refuses it, so a destination the user adds in
+    Connections or the wizard is invisible to refreshes and its status reads
+    migration_failed forever. On a fresh install nothing is configured, so
+    leaving those kinds unstamped strands every one of them.
+    """
     from app.database import TableMediaServerImports
+    from media_servers.backfill import backfill_instances
+    from media_servers.dispatcher import NativeConfiguration
+    from media_servers.instances import VALID_KINDS
+    from media_servers.repository import MediaServerInstanceRepository
+    config = plex_settings()
+    config.general.use_plex = False
+    results = backfill_instances(schema_session, config)
+    assert all(results[kind] == {'created': False} for kind in VALID_KINDS)
+    assert all(schema_session.get(TableMediaServerImports, kind) is not None for kind in VALID_KINDS)
+    assert MediaServerInstanceRepository(schema_session).list() == []
+
+    # Now the user adds one of each by hand, as the Connections page does.
+    repo = MediaServerInstanceRepository(schema_session)
+    rows = {kind: repo.create(**payload(kind)) for kind in VALID_KINDS if kind != 'plex'}
+    rows['plex'] = repo.create(kind='plex', name='Plex', url='https://plex.example:32400',
+                               api_key='key', enabled=True, verify_ssl=False, path_mappings=[])
+    for kind in VALID_KINDS:
+        setattr(config.general, 'use_' + kind, True)
+    stamped = [kind for kind in VALID_KINDS
+               if schema_session.get(TableMediaServerImports, kind) is not None]
+    configuration = NativeConfiguration(config, snapshots=repo.snapshots(config, kinds=stamped),
+                                        blocked_kinds=set(VALID_KINDS) - set(stamped))
+    assert configuration.blocked_kinds == frozenset()
+    for kind, row in rows.items():
+        assert configuration.read(row.id)[1].kind == kind
+
+
+def test_only_a_kind_whose_import_failed_stays_blocked(schema_session, monkeypatch):
+    from app.database import TableMediaServerImports
+    from media_servers import backfill
+    from media_servers.instances import VALID_KINDS
+    config = plex_settings()
+    config.emby.url = 'http://emby.example'
+    config.emby.apikey = 'emby-key'
+    original = backfill._record_import
+
+    def fail(session, kind):
+        if kind == 'emby':
+            raise RuntimeError('synthetic import failure')
+        original(session, kind)
+
+    monkeypatch.setattr(backfill, '_record_import', fail)
+    results = backfill.backfill_instances(schema_session, config)
+    assert results['emby'] == {'created': False, 'error_code': 'migration_failed'}
+    blocked = [kind for kind in VALID_KINDS
+               if schema_session.get(TableMediaServerImports, kind) is None]
+    assert blocked == ['emby']
+
+
+def test_a_wizard_created_jellyfin_row_is_not_joined_by_a_phantom_import(schema_session):
+    """The wizard writes use_jellyfin and a row, and no settings.jellyfin.*.
+
+    With the marker stamped on the first startup, that state cannot make a
+    second import at the next one and leave the user with two Jellyfin rows.
+    """
     from media_servers.backfill import backfill_instances
     from media_servers.repository import MediaServerInstanceRepository
     config = plex_settings()
-    assert backfill_instances(schema_session, config)['emby'] == {'created': False}
-    assert schema_session.get(TableMediaServerImports, 'emby') is None
-    config.emby.url = 'http://emby.example'
-    config.emby.apikey = 'emby-key'
-    assert backfill_instances(schema_session, config)['emby'] == {'created': True}
-    assert schema_session.get(TableMediaServerImports, 'emby') is not None
-    assert len(MediaServerInstanceRepository(schema_session).list('emby')) == 1
+    config.general.use_plex = False
+    backfill_instances(schema_session, config)
+    repo = MediaServerInstanceRepository(schema_session)
+    wizard = repo.create(kind='jellyfin', name='Jellyfin', url='http://jellyfin.example:8096',
+                         api_key='jf-key', enabled=True, verify_ssl=True, path_mappings=[])
+    config.general.use_jellyfin = True
+
+    assert backfill_instances(schema_session, config)['jellyfin'] == {'created': False}
+    assert [row.id for row in repo.list('jellyfin')] == [wizard.id]
 
 
 def test_the_startup_import_reconciles_plex_rather_than_importing_it_once(schema_session):
