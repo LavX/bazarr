@@ -1006,6 +1006,69 @@ def test_a_server_switch_leaves_a_hand_disabled_destination_disabled(
     assert bool(repo.get(row.id).enabled) is False
 
 
+def test_listing_plex_servers_does_not_rewrite_the_selected_connection(plex_account_api,
+                                                                       monkeypatch):
+    """Opening the Plex tab lists servers. That GET must not persist a
+    newly-won connection. Account features still read the plex.* scalars, and
+    subtitle refreshes read the destination row, which only moves on an
+    explicit pick. If listing re-picks a LAN address over the reverse-proxied
+    one, the two surfaces diverge without the user choosing anything.
+    """
+    from api.plex import oauth
+    client, config = plex_account_api
+    stored_url = 'https://proxy.example:443'
+    lan_url = 'https://192.168.1.10:32400'
+    stored_connections = [stored_url, lan_url]
+    config.plex.auth_method = 'oauth'
+    config.plex.token = 'oauth-token'
+    config.plex.server_machine_id = 'machine-abc'
+    config.plex.server_url = stored_url
+    config.plex.server_local = False
+    config.plex.server_connections = list(stored_connections)
+    config.plex.get = lambda key, default=None: getattr(config.plex, key, default)
+
+    writes = []
+    monkeypatch.setattr(oauth, 'write_config', lambda: writes.append(True))
+    monkeypatch.setattr(oauth, 'test_plex_connection', lambda uri, token: (
+        True, 5 if uri == lan_url else 50))
+
+    class _Resources:
+        status_code = 200
+        headers = {'content-type': 'application/json'}
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [{
+                'name': 'Attic',
+                'clientIdentifier': 'machine-abc',
+                'provides': 'server',
+                'owned': True,
+                'connections': [
+                    {'uri': stored_url, 'protocol': 'https',
+                     'address': 'proxy.example', 'port': 443, 'local': False},
+                    {'uri': lan_url, 'protocol': 'https',
+                     'address': '192.168.1.10', 'port': 32400, 'local': True},
+                ],
+                'productVersion': '1.40.0',
+                'platform': 'Linux',
+                'device': 'PC',
+            }]
+
+    monkeypatch.setattr(oauth.requests, 'get', lambda *args, **kwargs: _Resources())
+
+    response = client.get('/api/plex/oauth/servers', headers=HEADERS)
+    assert response.status_code == 200
+    servers = response.json['data']
+    assert len(servers) == 1
+    assert servers[0]['bestConnection']['uri'] == lan_url
+    assert config.plex.server_url == stored_url
+    assert config.plex.server_local is False
+    assert config.plex.server_connections == stored_connections
+    assert writes == []
+
+
 def test_saving_an_api_key_by_hand_reaches_the_destination(plex_account_api, monkeypatch,
                                                            schema_session):
     from media_servers.repository import MediaServerInstanceRepository
