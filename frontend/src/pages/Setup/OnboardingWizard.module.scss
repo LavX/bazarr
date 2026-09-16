@@ -125,3 +125,52 @@
   box-shadow: var(--bz-shadow-float);
   padding: 32px;
 }
+
+// The shell's own skip control and the one-line note a step that cannot be
+// skipped shows instead. Both sit under the card, outside it, so there is
+// visibly one place where skipping lives.
+.stepSkip {
+  display: flex;
+  justify-content: center;
+}
+
+.stepNote {
+  font-size: 13px;
+  text-align: center;
+  color: var(--bz-text-tertiary);
+}
+
+// The rail carries up to twelve nodes on the library path, and a dot plus a
+// connector has a floor of ~58px at the desktop sizes above, which is wider
+// than a phone. Shrink both rather than wrapping the rail: a wrapped row of
+// connectors trailing into nothing reads as broken, and the header already
+// names the current step in words.
+@media (max-width: 640px) {
+  .dot {
+    width: 22px;
+    height: 22px;
+    font-size: 11px;
+  }
+
+  .connector {
+    min-width: 4px;
+    margin: 0 3px;
+  }
+}
+
+@media (max-width: 440px) {
+  .dot {
+    width: 18px;
+    height: 18px;
+    font-size: 10px;
+  }
+
+  .connector {
+    min-width: 2px;
+    margin: 0 2px;
+  }
+
+  .card {
+    padding: 20px;
+  }
+}

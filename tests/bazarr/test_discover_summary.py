@@ -739,7 +739,7 @@ def test_optional_library_and_translator_are_onboarding_not_failure(summary_data
     import sys
     from app.config import settings
     from discover.summary import get_summary
-    monkeypatch.setattr(settings.translator, "openrouter_url", "")
+    monkeypatch.setattr(settings.translator, "openrouter_api_key", "")
     # The SignalR module is present and unstarted on every running Bazarr, so
     # this criterion has to be asserted against that shape rather than against
     # a fixture that removed the module the production process always has.
@@ -753,6 +753,32 @@ def test_optional_library_and_translator_are_onboarding_not_failure(summary_data
         assert item["target"].startswith("/")
     assert summary["wanted"]["requirements"] == 0
     assert summary["wanted"]["complete"] is True
+
+
+def test_translator_onboarding_item_tracks_the_api_key_not_the_service_url(summary_database,
+                                                                          quiet_queue,
+                                                                          monkeypatch):
+    """The item has to be able to fire on a default config.
+
+    openrouter_url ships with a non-empty placeholder host, so keying the item
+    off it meant it never appeared on the one install it is for. The API key is
+    empty until somebody sets translation up, and it is what the onboarding
+    wizard's Finish step reads, so the two cannot disagree.
+    """
+    import sys
+    from app.config import settings
+    from discover.summary import get_summary
+    monkeypatch.setitem(sys.modules, "app.signalr_client", _started_signalr())
+
+    # Default config: the service URL is set, the key is not.
+    assert (settings.translator.openrouter_url or "").strip()
+    monkeypatch.setattr(settings.translator, "openrouter_api_key", "")
+    items = {item["id"] for item in get_summary()["onboarding"]["items"]}
+    assert "translator" in items
+
+    monkeypatch.setattr(settings.translator, "openrouter_api_key", "sk-or-configured")
+    items = {item["id"] for item in get_summary()["onboarding"]["items"]}
+    assert "translator" not in items
 
 
 @pytest.mark.parametrize("configured", ["setup_complete", "use_sonarr", "provider"])
@@ -893,7 +919,7 @@ def test_an_unused_library_is_never_reported_as_a_disconnected_live_sync(summary
     from discover.summary import get_summary
     monkeypatch.setattr(settings.general, "use_sonarr", False)
     monkeypatch.setattr(settings.general, "use_radarr", False)
-    monkeypatch.setattr(settings.translator, "openrouter_url", "")
+    monkeypatch.setattr(settings.translator, "openrouter_api_key", "")
     monkeypatch.setitem(sys.modules, "app.signalr_client", _started_signalr())
 
     summary = get_summary()

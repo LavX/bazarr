@@ -84,28 +84,40 @@ def _set_bazarr_provider_enabled(provider_id: str, enabled: bool) -> bool:
 
     Returns True when the on-disk config changed. Logs and swallows
     failures so a hub action never aborts on a settings hiccup.
+
+    The read, the edit and the write are one critical section. Installing
+    several providers at once reaches this from several threads: the venv
+    lock in venv.py serializes only the pip work and is released before the
+    caller gets here, and write_config takes CONFIG_LOCK around the file
+    write alone, not around the read. Two installs finishing in the same
+    window would each read the list before the other wrote it, and the
+    second write would drop the first provider: a successful install that
+    vanishes. CONFIG_LOCK is reentrant, so the write_config below still
+    takes it on the same thread.
     """
     try:
         from app.config import settings, write_config
+        from discover.metadata import CONFIG_LOCK
     except Exception:
         return False
-    current = list(_bazarr_enabled_providers())
-    if enabled and provider_id not in current:
-        current.append(provider_id)
-    elif not enabled and provider_id in current:
-        current = [item for item in current if item != provider_id]
-    else:
-        return False
-    try:
-        settings.general.enabled_providers = current
-        write_config()
-        return True
-    except Exception:
-        import logging
-        logging.getLogger(__name__).exception(
-            "Failed to sync enabled_providers for %s", provider_id
-        )
-        return False
+    with CONFIG_LOCK:
+        current = list(_bazarr_enabled_providers())
+        if enabled and provider_id not in current:
+            current.append(provider_id)
+        elif not enabled and provider_id in current:
+            current = [item for item in current if item != provider_id]
+        else:
+            return False
+        try:
+            settings.general.enabled_providers = current
+            write_config()
+            return True
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "Failed to sync enabled_providers for %s", provider_id
+            )
+            return False
 
 
 def utcnow_iso() -> str:
