@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useLayoutEffect, useRef } from "react";
+import { FormEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Link,
   useLocation,
@@ -10,6 +10,7 @@ import {
   Anchor,
   Button,
   Checkbox,
+  CloseButton,
   Group,
   SegmentedControl,
   Stack,
@@ -41,6 +42,10 @@ import DiscoverSelect from "./DiscoverSelect";
 import { readableTime } from "./feedText";
 import LibraryActivity from "./LibraryActivity";
 import LibraryHero from "./LibraryHero";
+import {
+  dismissLibraryNotice,
+  isLibraryNoticeDismissed,
+} from "./libraryNotice";
 import LocalCopyPicker from "./LocalCopyPicker";
 import NeedsAttention from "./NeedsAttention";
 import ProviderCoverage from "./ProviderCoverage";
@@ -443,11 +448,15 @@ export default function Discover() {
   const unreadableSummary = summaryUnreadable(summary);
   const showLibraryHalf =
     (sonarr || radarr || sportarr) && !noEnabledInstance && !unreadableSummary;
-  // One line rather than a block, and only where the half above it is gone:
-  // the summary's own wording for the same fact, carrying its own destination.
-  const libraryHint = showLibraryHalf
-    ? undefined
-    : summary.data?.onboarding?.items?.find((item) => item.id === "library");
+  // Where the half above it is gone, the summary's own wording for the same
+  // fact stands in its place, carrying its own destination. It is a notice
+  // rather than a fixture of the page: a reader who has read it once can close
+  // it, and the close is remembered on this browser.
+  const [noticeClosed, setNoticeClosed] = useState(isLibraryNoticeDismissed);
+  const libraryHint =
+    showLibraryHalf || noticeClosed
+      ? undefined
+      : summary.data?.onboarding?.items?.find((item) => item.id === "library");
   const seedAttempted = useRef(false);
   useEffect(() => {
     if (seedAttempted.current || draft.language) return;
@@ -732,10 +741,19 @@ export default function Discover() {
                         did not happen rather than quietly dropping it. */}
                     {unreadableSummary && <NeedsAttention />}
                     {libraryHint && (
-                      <p className={styles.libraryHint}>
-                        {libraryHint.summary}
-                        <Link to={libraryHint.target}>Connect a library</Link>
-                      </p>
+                      <div className={styles.libraryNotice}>
+                        <p className={styles.libraryNoticeCopy}>
+                          {libraryHint.summary}
+                          <Link to={libraryHint.target}>Connect a library</Link>
+                        </p>
+                        <CloseButton
+                          aria-label="Dismiss the connect a library notice"
+                          onClick={() => {
+                            dismissLibraryNotice();
+                            setNoticeClosed(true);
+                          }}
+                        />
+                      </div>
                     )}
                   </>
                 )}

@@ -3,9 +3,11 @@
  *
  * The page it checks is the one an install with nothing connected actually
  * gets: the global catalog opens the page, no panel describes a library that
- * is not there, and the first-run wizard can be walked to its end without
- * connecting anything. Run it through discover_no_instance.py, which boots the
- * backend it drives on a fresh configuration directory.
+ * is not there, the sidebar offers no library page, the connect-a-library
+ * notice closes and stays closed, and the first-run wizard can be walked to
+ * its end without connecting anything. Run it through
+ * discover_no_instance.py, which boots the backend it drives on a fresh
+ * configuration directory.
  *
  * Usage: node discover_no_instance.mjs <base-url> <screenshot-dir>
  */
@@ -161,7 +163,64 @@ try {
   );
   await page.setViewportSize({ width: 1280, height: 900 });
 
-  console.log("3. the first-run wizard walks to its end without a library");
+  console.log(
+    "3. the sidebar and the notice describe an install with no library",
+  );
+  // A dialog opened over the page swallows clicks; the notice is driven by a
+  // click, so clear whatever is up first. Harmless when nothing is open.
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(600);
+  const nav = page.getByRole("navigation", { name: "Main navigation" });
+  // Scoped to the sidebar: Discover's own trending filter carries buttons
+  // named "Movies" and "Series" further down the page.
+  for (const label of [
+    "Series",
+    "Movies",
+    "Sports",
+    "History",
+    "Wanted",
+    "Excluded",
+  ]) {
+    const links = await nav
+      .getByRole("link", { name: label, exact: true })
+      .count();
+    const menus = await nav
+      .getByRole("button", { name: label, exact: true })
+      .count();
+    check(links + menus === 0, `the sidebar offers no ${label} entry`);
+  }
+  // Everything that is not library-dependent is still there.
+  for (const label of [
+    "Subtitle Hub",
+    "Distribution Hub",
+    "Settings",
+    "System",
+  ]) {
+    check(
+      (await nav.getByRole("link", { name: label }).count()) +
+        (await nav.getByRole("button", { name: label }).count()) >
+        0,
+      `the sidebar keeps ${label}`,
+    );
+  }
+  const notice = page.getByRole("button", {
+    name: "Dismiss the connect a library notice",
+  });
+  check((await notice.count()) === 1, "the notice can be closed");
+  await notice.click();
+  await page.waitForTimeout(400);
+  const noticeLink = page.getByRole("link", { name: "Connect a library" });
+  check((await noticeLink.count()) === 0, "closing the notice removes it");
+  await page.reload({ waitUntil: "load" });
+  await page.waitForTimeout(2000);
+  check(
+    (await page.getByRole("link", { name: "Connect a library" }).count()) === 0,
+    "the closed notice stays closed after a reload",
+  );
+  await assertGlobalOnly(page, "notice closed");
+  await shoot(page, "discover-notice-closed-1280");
+
+  console.log("4. the first-run wizard walks to its end without a library");
   await page.goto(`${base}/setup`, { waitUntil: "load" });
   // Each step is taken by whichever of these it offers, preferring the one
   // that connects nothing: this walk is the no-library path through the
@@ -222,7 +281,7 @@ try {
     `the wizard ends on Discover (ended on ${new URL(page.url()).pathname})`,
   );
 
-  console.log("4. the finished install still opens on the global catalog");
+  console.log("5. the finished install still opens on the global catalog");
   await page.waitForTimeout(1500);
   await assertGlobalOnly(page, "after the wizard");
   await shoot(page, "discover-after-wizard-1280");
