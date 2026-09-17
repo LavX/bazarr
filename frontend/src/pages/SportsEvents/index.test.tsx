@@ -1284,8 +1284,11 @@ it.each([false, true])(
           : /subtitle index refreshed/,
       ),
     ).toBeInTheDocument();
+    // A download that succeeded reports no failure. The sentence a failure
+    // carries is now the backend's own, so the one fixed string the failure
+    // path can still render is the fallback for a failure that said nothing.
     expect(
-      screen.queryByText("Download failed. Search again and retry."),
+      screen.queryByText("The request failed and said nothing further."),
     ).not.toBeInTheDocument();
     // Re-queried rather than reusing the handle captured above: the modal
     // re-renders when the sports query is invalidated, which can replace the

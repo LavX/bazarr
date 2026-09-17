@@ -1,4 +1,21 @@
 import React, { useCallback, useMemo, useState } from "react";
+
+/**
+ * The sentence a failed request came back with.
+ *
+ * The request layer reads the backend's own `message` off a failed response and
+ * puts it on the error (`apis/raw/client.ts`), and it deliberately does not
+ * raise a notification for 409 and 412 so the caller can say something more
+ * useful than "Error 409". Before this, the caller threw the error away and
+ * showed a fixed sentence, so a failure that knew exactly why it failed arrived
+ * as a shrug.
+ */
+function failureText(error: unknown): string {
+  return error instanceof Error && error.message
+    ? error.message
+    : "The request failed and said nothing further.";
+}
+
 import {
   Alert,
   Anchor,
@@ -109,7 +126,7 @@ export function ManualSearchView<T extends SupportType>(props: Props<T>) {
 
   const [downloadedKey, setDownloadedKey] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
-  const [downloadError, setDownloadError] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   const columns = useMemo<ColumnDef<SearchResultType>[]>(
     () => [
@@ -228,12 +245,12 @@ export function ManualSearchView<T extends SupportType>(props: Props<T>) {
                 if (!item) return;
 
                 setDownloading(true);
-                setDownloadError(false);
+                setDownloadError(null);
                 try {
                   await download(item, result);
                   setDownloadedKey(resultKey);
-                } catch {
-                  setDownloadError(true);
+                } catch (error) {
+                  setDownloadError(failureText(error));
                 } finally {
                   setDownloading(false);
                 }
@@ -276,11 +293,9 @@ export function ManualSearchView<T extends SupportType>(props: Props<T>) {
           data={results.data ?? []}
         ></PageTable>
       </Collapse>
-      {downloadError && (
-        <Alert color="red">Download failed. Search again and retry.</Alert>
-      )}
+      {downloadError && <Alert color="red">{downloadError}</Alert>}
       {results.isError && (
-        <Alert color="red">Search failed. Please try again.</Alert>
+        <Alert color="red">{failureText(results.error)}</Alert>
       )}
       <Divider></Divider>
       <Button
