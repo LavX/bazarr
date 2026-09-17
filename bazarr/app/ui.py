@@ -2,13 +2,14 @@
 
 import os
 import ipaddress
+import re
 import socket
 import time
 import requests
 import mimetypes
 
 from flask import (request, abort, render_template, Response, send_file, stream_with_context, Blueprint,
-                   redirect)
+                   jsonify, redirect)
 from functools import wraps
 from urllib.parse import unquote, urlparse
 
@@ -649,6 +650,34 @@ def proxy_service(service):
                 code=last_response_code)
 
 
+# The connection-test proxy exists to read one version string out of a
+# Sonarr/Radarr style handshake, and the far end is a URL the caller chose, so
+# everything it sends back is caller influenced. Bound what may be echoed to the
+# shape a version string can have instead of passing the response through.
+_VERSION_MAX_LENGTH = 64
+_VERSION_PATTERN = re.compile(r'[A-Za-z0-9][A-Za-z0-9._+-]*')
+
+
+def _handshake_version(payload):
+    """Return the version from a status handshake, or None when it is not one.
+
+    None means the far end answered 200 with something that is not a version
+    string: wrong service, a captive portal, an HTML error page that happens to
+    parse, or a field long enough to be a payload rather than a version.
+    """
+    if not isinstance(payload, dict):
+        return None
+    version = payload.get('version')
+    if not isinstance(version, str):
+        return None
+    version = version.strip()
+    if not version or len(version) > _VERSION_MAX_LENGTH:
+        return None
+    if not _VERSION_PATTERN.fullmatch(version):
+        return None
+    return version
+
+
 @ui_bp.route('/test', methods=['GET'])
 @ui_bp.route('/test/<protocol>/<path:url>', methods=['GET'])
 @check_login
@@ -675,10 +704,15 @@ def proxy(protocol, url):
     else:
         if result.status_code == 200:
             try:
-                version = result.json()['version']
-                return dict(status=True, version=version, code=result.status_code)
+                version = _handshake_version(result.json())
             except Exception:
+                version = None
+            if version is None:
                 return dict(status=False, error='Error Occurred. Check your settings.', code=result.status_code)
+            # jsonify rather than a bare dict: the body is JSON, and saying so
+            # at the return site keeps the content type out of the reader's
+            # assumptions, Flask's and a static analyser's alike.
+            return jsonify(status=True, version=version, code=result.status_code)
         elif result.status_code == 401:
             return dict(status=False, error='Access Denied. Check API key.', code=result.status_code)
         elif result.status_code == 404:
