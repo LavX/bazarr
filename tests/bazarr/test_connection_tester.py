@@ -647,6 +647,78 @@ def test_handshake_version_refuses_everything_else(payload):
     assert _handshake_version(payload) is None
 
 
+def test_service_proxy_does_not_echo_a_hostile_version(monkeypatch):
+    """The route the settings page actually calls must not pass the far end
+    through either.
+
+    Control flow matters here: a 200 that is not a handshake is not a verdict,
+    it is one candidate failing, so the remaining status paths still have to be
+    tried before the route gives up. Sonarr and Radarr carry two paths, and the
+    legacy one is tried first, so a hostile body on the first must not stop the
+    v3 probe.
+    """
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **kw: [_addr("10.0.0.5")])
+    hostile = MagicMock(status_code=200)
+    hostile.json.return_value = {"version": "<script>alert(1)</script>"}
+    with patch("app.ui.requests.get", return_value=hostile) as fake_get:
+        app = _build_app()
+        client = app.test_client()
+        _login(client)
+        r = client.get("/test/sonarr?url=http://sonarr.lan:8989&apikey=k")
+        body = r.get_json()
+        assert body["status"] is False
+        assert body["error"] == "Error Occurred. Check your settings."
+        assert body["code"] == 200
+        assert "script" not in r.get_data(as_text=True)
+        # Both status paths were still attempted; the bad body did not end the
+        # probe early.
+        assert fake_get.call_count == 2
+        urls = [c.args[0] for c in fake_get.call_args_list]
+        assert urls[0].endswith("/api/system/status")
+        assert urls[1].endswith("/api/v3/system/status")
+
+
+def test_service_proxy_recovers_when_only_the_second_path_is_the_handshake(monkeypatch):
+    """A junk 200 on the legacy path must not cost the user a working test."""
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **kw: [_addr("10.0.0.5")])
+    junk = MagicMock(status_code=200)
+    junk.json.return_value = {"service": "something else"}
+    good = MagicMock(status_code=200)
+    good.json.return_value = {"version": "4.0.10.2544"}
+    with patch("app.ui.requests.get", side_effect=[junk, good]):
+        app = _build_app()
+        client = app.test_client()
+        _login(client)
+        r = client.get("/test/sonarr?url=http://sonarr.lan:8989&apikey=k")
+        assert r.get_json() == {"status": True, "version": "4.0.10.2544", "code": 200}
+
+
+def test_service_proxy_keeps_the_whisper_404_shape(monkeypatch):
+    """whisper-asr-webservice serves no /status, so the probe 404s and the
+    settings page renders its own "no version found" hint off code 404.
+
+    The version constraint only ever runs on a 200 body, so it cannot reach this
+    path. Pin that, because the hint is the only thing a WhisperAI user sees.
+    """
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **kw: [_addr("10.0.0.5")])
+    missing = MagicMock(status_code=404)
+    missing.json.return_value = {"detail": "Not Found"}
+    with patch("app.ui.requests.get", return_value=missing):
+        app = _build_app()
+        client = app.test_client()
+        _login(client)
+        r = client.get("/test/whisperai?url=http://whisper.lan:9000")
+        body = r.get_json()
+        assert body["status"] is False
+        assert body["code"] == 404
+
+
 def test_legacy_proxy_does_not_echo_a_hostile_version(monkeypatch):
     """A 200 from the far end is not licence to pass its bytes back.
 
