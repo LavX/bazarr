@@ -149,7 +149,7 @@ RUNTIME_REQUIREMENTS = {
     "rarfile": ("rarfile", "==4.5"),
     "requests": ("requests", "==2.34.2"),
     "retry": ("retry", "==0.9.2"),
-    "semver": ("semver", "==3.0.4"),
+    "semver": ("semver", "==3.1.0"),
     "signalrcore": ("signalrcore", "==1.0.2"),
     "six": ("six", "==1.17.0"),
     "sqlalchemy": ("sqlalchemy", "==2.0.52"),
