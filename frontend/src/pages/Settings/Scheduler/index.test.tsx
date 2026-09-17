@@ -21,6 +21,7 @@ describe("Scheduler settings", () => {
             upgrade_frequency: 12,
             days_to_upgrade_subs: 7,
             upgrade_manual: true,
+            upgrade_translated: false,
           },
           sonarr: {
             series_sync: 60,

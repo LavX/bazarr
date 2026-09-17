@@ -346,11 +346,16 @@ def get_queries_condition_parameters():
     minimum_timestamp = (datetime.now() - timedelta(days=int(days_to_upgrade_subs)))
 
     # action=7 (EmbeddedSource) intentionally excluded: embedded subs are source
-    # quality and should not be upgraded
-    if settings.general.upgrade_manual:
-        query_actions = [1, 2, 3, 4, 6]
-    else:
-        query_actions = [1, 3]
+    # quality and should not be upgraded. Manual downloads/uploads (2, 4) and
+    # translations (6) are separate opt-ins; both default off on a new install.
+    query_actions = [1]
+    if getattr(settings.general, 'upgrade_manual', False):
+        query_actions.append(2)
+    query_actions.append(3)
+    if getattr(settings.general, 'upgrade_manual', False):
+        query_actions.append(4)
+    if getattr(settings.general, 'upgrade_translated', False):
+        query_actions.append(6)
 
     return [minimum_timestamp, query_actions]
 
