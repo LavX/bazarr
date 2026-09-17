@@ -16,7 +16,12 @@
 </p>
 
 <p align="center">
-  <strong>Multiple Sonarr/Radarr instances</strong> · <strong>Provider Hub</strong> plugin catalog · <strong>Distribution Hub</strong> multi-tenant subtitle API · combined bilingual/trilingual subtitles · AI translation via OpenRouter (300+ LLMs) · multi-engine subtitle sync · Subtitle Editor with video preview and waveform · OpenSubtitles.org native plugin · security hardening, API key encryption at rest, no tracking · Python 3.14
+  <strong>Works with no library at all.</strong> Search, preview and download subtitles for any film or show with no Sonarr, Radarr or Sportarr connected.<br>
+  <strong>Or point it at your stack.</strong> Native <strong>Sonarr</strong>, <strong>Radarr</strong> and <strong>Sportarr</strong> library sources. Native <strong>Plex</strong>, <strong>Jellyfin</strong>, <strong>Emby</strong> and <strong>Silo</strong> refresh.
+</p>
+
+<p align="center">
+  New UI with Discover as the homepage · <strong>Multiple Sonarr/Radarr/Sportarr instances</strong> · <strong>Provider Hub</strong> plugin catalog · <strong>Distribution Hub</strong> multi-tenant subtitle API · combined bilingual/trilingual subtitles · AI translation via OpenRouter (300+ LLMs) · multi-engine subtitle sync · Subtitle Editor with video preview and waveform · OpenSubtitles.org native plugin · security hardening, API key encryption at rest, no tracking · Python 3.14
 </p>
 
 <p align="center">
@@ -30,6 +35,12 @@
 ## What is Bazarr+?
 
 Bazarr+ is a hard fork of [Bazarr](https://github.com/morpheus65535/bazarr) by morpheus65535. It keeps the subtitle management workflow you already know (Sonarr/Radarr integration, language profiles, scheduled searches, scoring) and builds on top of it: an installable provider plugin system, a multi-tenant subtitle API you can hand to other apps, AI translation, combined subtitle output, and a hardened, no-telemetry runtime.
+
+**It no longer needs a library.** Bazarr+ runs as a standalone subtitle aggregator. Discover is the homepage: search any film or show by title or IMDb identity, browse trending titles, digital releases and recent episodes, then search, preview and download a subtitle for it. That works against an empty library, with no Sonarr, Radarr or Sportarr connection at all. Metadata comes from TMDB through the application's own built-in key, so there is nothing to configure before it works, and supplying your own key is an optional override. Where a title does happen to be in your library, Discover says so, and if you run Seerr, Jellyseerr or Overseerr, a title page can request it.
+
+**It also talks to your stack natively.** Sonarr, Radarr and Sportarr feed it a library. Plex, Jellyfin, Emby and Silo get refreshed when a subtitle lands. Those are two different jobs, and [Native integrations](#native-integrations) says which is which.
+
+**The UI is new.** Discover replaced the dashboard as the page you land on, the first-run wizard asks what you want to do rather than assuming Sonarr, and Statistics is a real page under System.
 
 It is a drop-in container replacement for upstream Bazarr. Point it at your existing `/config`, start it, and your media, profiles, and providers carry over. See [Switching from upstream Bazarr?](#switching-from-upstream-bazarr) before you migrate.
 
@@ -53,19 +64,58 @@ Bazarr+ uses its own versioning starting at v2.0.0, unrelated to upstream versio
 
 ## At a Glance
 
+### Native integrations
+
+Bazarr+ integrates natively with seven applications, and they do two different jobs. Reading them as one list is the most common way to misconfigure an install.
+
+**Library sources** tell Bazarr+ what media exists. Each kind is multi-instance: register as many servers of it as you run, and every action stays scoped to the instance that owns the item.
+
+| Source | What it brings | Instances |
+|--------|----------------|-----------|
+| **Sonarr** | Series and episodes | Any number |
+| **Radarr** | Movies | Any number |
+| **Sportarr** | Sports events | Any number |
+
+Sports is a first-class media type, not a side channel. It shares the subtitle workflows series and movies use: manual search, download, upload, editing, sync, translation, combine, Wanted, History, Excluded and global search.
+
+You need none of the three. With no library source configured at all, Bazarr+ still works as a standalone aggregator through Discover.
+
+**Media servers** are refresh destinations. When a subtitle lands, Bazarr+ asks the servers that cover that file to rescan it, so the subtitle actually shows up in the player. All four now sit on one multi-instance layer, so two Jellyfin servers or three Embys are fine, and refreshes run on a background worker per server with pending state and retry, so one unreachable server does not hold up the others.
+
+| Server | How it finds the item | Path mappings |
+|--------|-----------------------|---------------|
+| **Emby** | Provider id, then exact path, then title and year, then a library refresh | Required |
+| **Silo** | Exact path, with a library-scan fallback | Required |
+| **Jellyfin** | Provider id, then title and year, then its configured libraries | Not needed |
+| **Plex** | IMDB guid, then a section update | Not needed |
+
+Emby and Silo are new here. Jellyfin and Plex were single-server and moved onto the same layer.
+
+Two limits worth knowing before you set this up:
+
+- **Silo cannot match on provider identifiers.** Its Jellyfin-compatible API returns items with no `ProviderIds` field, confirmed against Silo 10.12.0, so there is nothing to match against. Silo uses the exact-path rung with a library-scan fallback instead, and Bazarr+ watches that scan to completion, so a Silo refresh is confirmed rather than merely requested.
+- **Plex is converged for refreshes only.** Its account panel, OAuth server discovery, webhook and Autopulse helpers still read the single set of Plex settings, so this is not full Plex multi-instance parity.
+
+### Compared with upstream Bazarr
+
 | Feature | Upstream Bazarr | Bazarr+ |
 |---------|-----------------|---------|
-| **Multiple Sonarr/Radarr instances** | One Sonarr + one Radarr only | Register any number of Sonarr and Radarr servers and manage them as a single library. Every sync, search, manual search, download, upgrade, blacklist, history, wanted, scan-disk and mass-edit action stays scoped to the instance that owns each item, so colliding upstream IDs across servers never cross-contaminate. Webhooks, SignalR, the cover-image proxy, root folders, path mappings and Plex updates all resolve per instance. First-class PostgreSQL. |
+| **Standalone subtitle aggregator** | Not available | Discover is the homepage and works against an empty library. Search any film or show by title or IMDb identity, browse trending titles, digital releases and recent episodes, then search, preview and download a subtitle, with no Sonarr, Radarr or Sportarr connected. TMDB metadata works out of the box through a built-in key; your own key is an optional override. |
+| **Sports as a media type** | Not available | Sportarr joins Sonarr and Radarr as a library instance kind, and Sports gets the same subtitle workflows and views as series and movies. |
+| **Media server refresh** | One Plex and one Jellyfin | Plex, Jellyfin, Emby and Silo on one multi-instance layer, with a per-server background worker, pending targets and retry. Emby and Silo are new; Plex is converged for refreshes only. |
+| **Request a title in Seerr** | Not available | A Discover title page can request a title in Seerr, Jellyseerr or Overseerr. Requests are made as the Seerr owner, which auto-approves and dispatches immediately. |
+| **Statistics** | A downloads chart under History | Its own page under System with five tabs, Activity, Providers, Quality, Distribution and Translator, driven by one shared row of timeframe, action, provider and language filters. |
+| **Multiple Sonarr/Radarr/Sportarr instances** | One Sonarr + one Radarr only | Register any number of Sonarr, Radarr and Sportarr servers and manage them as a single library. Every sync, search, manual search, download, upgrade, blacklist, history, wanted, scan-disk and mass-edit action stays scoped to the instance that owns each item, so colliding upstream IDs across servers never cross-contaminate. Webhooks, SignalR, the cover-image proxy, root folders, path mappings and Plex updates all resolve per instance. First-class PostgreSQL. |
 | **Per-instance subtitle settings** | Not available | Each instance can override how subtitles are produced (Subzero mods, custom post-processing, sync engines, keep-lyrics) and carry its own default language profile; settings resolve against the media's owning instance rather than a single global default. |
 | **Compressed-archive uploads** | Not available | Drop a `.zip`, `.rar` or `.7z` of subtitles into the upload modal. Archives are expanded in memory (zip-slip-safe, with entry and size caps) and fed into the normal upload flow, with reliable drag-and-drop across the whole show/movie page. |
-| **First-run setup wizard** | None (a fresh install lands on the settings page with no guidance) | A guided, skippable wizard walks a new install through Sonarr, Radarr, optional Plex/Jellyfin, a language profile, and installing plus enabling subtitle providers. It handles the restart that installing providers requires and resumes where you left off, then finishes with a few general basics. Existing installs are never interrupted. |
+| **First-run setup wizard** | None (a fresh install lands on the settings page with no guidance) | A guided wizard that asks what you want first: run a library and have subtitles fetched automatically, or find subtitles for anything with no library. The answer filters the steps. Every library step is optional, Sonarr included; media servers, Seerr and the translator key are optional too; only languages and providers are not, and each says why in one line. It handles the restart that installing providers requires and resumes where you left off. Existing installs are never interrupted. |
 | **Provider Hub (catalog plugins)** | Not available | Marketplace for installable subtitle provider plugins. Catalog sources, trust labels, staged activation, worker validation, isolated environments, activity log. Catalog plugins can replace shipped built-ins, and enabled built-ins can opt in to auto-install from the official catalog on startup (off by default). Local `.zip` package installs supported. |
 | **Distribution Hub (multi-tenant subtitle API)** | Not available | Multi-tenant control plane for the OpenSubtitles-compatible API. Named API keys, editable tiers, per-window metering and rate limits, per-key provider scoping. Two first-party clients: [Jellyfin plugin](https://github.com/LavX/jellyfin-plugin-bazarr-plus) and [VLSub Bazarr+](https://github.com/LavX/vlsub-bazarr-plus). |
 | **Combined subtitles (bilingual / trilingual)** | Not available | Composes existing on-disk subtitles into a single bilingual or trilingual SRT or ASS file, per language profile or on demand. Pure composition, never triggers translation. |
 | **Translate from embedded tracks** | Not available | Embedded (in-container) text tracks score at 100% source quality and can be translated directly. Bitmap tracks (PGS/VobSub) are rejected with a clear error. |
 | **Multi-engine subtitle sync** | Single engine | Multiple sync engines with a side-by-side output comparison before you keep a result. The configured maximum offset is an acceptance threshold for engines that report their offset (ffsubsync and autosubsync; alass reports only success or failure), and a keep-all sync job's outcome names the engines that failed instead of reporting an unqualified success. |
 | **Scoring controls** | Fixed scoring | Per-provider score modifiers weight any provider up or down, Provider Hub candidates are scored on their release information, movie edition is preserved in matching, and release-type mismatches trigger a notification. |
-| **Jellyfin Library Refresh** | Basic refresh (since upstream v1.6.0) | HTTPS with optional self-signed cert acceptance, per-library overrides, secret redaction, response cap, "Refresh now" Maintenance card |
+| **Jellyfin Library Refresh** | Basic refresh (since upstream v1.6.0) | HTTPS with optional self-signed cert acceptance, per-library overrides, secret redaction, response cap, and a per-instance "Refresh libraries" action |
 | **Provider Priority** | [Rejected](https://bazarr.featureupvote.com/suggestions/112323/provider-prioritization) (62 votes) | Dual mode: priority order with early stop, or classic simultaneous |
 | **OpenSubtitles.org (native plugin)** | Not available | Provider Hub plugin that scrapes in-process via ai-cloudscraper with inline Anubis proof-of-work solving; FlareSolverr recommended for Cloudflare challenges |
 | **AI Subtitle Translator (OpenRouter)** | Not available | 300+ LLMs + any custom model ID |
@@ -144,11 +194,27 @@ python3 docker/supervisor.py --config ./data --port 6767
 **Notes:**
 - The `--config` flag sets where the database, logs, and settings are stored
 - The supervisor runs a lightweight aiohttp server on the same port, serving the frontend instantly and proxying API requests to the backend. You get a startup screen with progress stages while the backend initializes, and automatic restart on crashes.
-- Media paths are configured in the web UI under Settings > Sonarr/Radarr
+- Media paths are configured in the web UI under Settings > Connections. None of that is required to start: with no library connected, Discover still searches and downloads subtitles for any title
 
 ---
 
 ### Screenshots
+
+New in v2.7.0. Discover is the page Bazarr+ opens on, and the second shot is the whole argument of this release: a subtitle search running against a title that is not in the library, on an install that needs no library at all.
+
+| Discover as the homepage | Subtitle search for a title you do not have |
+|:---:|:---:|
+| ![Discover](screenshot/discover-home.png "Discover as the homepage, with the library banner, the Still missing queue and Recently fetched") | ![Discover subtitle search](screenshot/discover-title-subtitle-search.png "A Discover title page marked Not in your library, listing subtitle results from several providers with preview and download on each") |
+
+| Every integration on one page | Sport as a media type of its own |
+|:---:|:---:|
+| ![Connections](screenshot/connections-instances.png "The Connections settings page with tabs for Sonarr, Radarr, Sportarr, Plex, Jellyfin, Emby, Silo and Seerr") | ![Sports](screenshot/sports-events.png "A motorsport league page listing events grouped by season with their subtitle languages") |
+
+| Statistics under System |
+|:---:|
+| ![Statistics](screenshot/statistics-activity.png "The Statistics page on its Activity tab with a per-day download chart") |
+
+Earlier releases:
 
 | Series with batch actions | Mass translate dialog |
 |:---:|:---:|
@@ -167,6 +233,42 @@ python3 docker/supervisor.py --config ./data --port 6767
 <details>
 <summary><strong>Feature Details</strong></summary>
 
+### Discover: Standalone Subtitle Aggregator
+Discover is the page Bazarr+ lands on, and it does not need a library. Search any film or show by title or IMDb identity, browse trending titles, digital releases and recent episodes, then search, preview and download a subtitle for the title you picked. An install with no Sonarr, Radarr or Sportarr connection works this way from first boot.
+
+- **No key to obtain**: metadata comes from TMDB through the application's own built-in key, so Discover works with nothing configured. Supplying your own TMDB key is an optional override
+- **Browsing costs nothing at a provider**: browsing and refreshing never contact subtitle providers. Provider work happens only when you run an explicit search, which then shows per-provider progress and separates providers that cannot serve this request from providers that are unavailable
+- **Preview before you commit**: a formatted preview opens beneath the selected result, and download is a single fetch on that exact row
+- **Your library, where there is one**: Discover optionally matches a title against a copy in the local library. Where an install has a library, the page opens with a hero over the fanart of the most recent fetch, a "Still missing" queue grouped per library, and a "Needs attention" panel surfacing throttled providers, disconnected library sync and unreachable root folders. Where there is none, the global half is the whole page
+- **Request in Seerr**: if you run Seerr, Jellyseerr or Overseerr, a title page can request the title, with a season picker for shows. Requests are made as the Seerr owner, which auto-approves and dispatches immediately, and the page says so next to the action
+
+### Sports and Sportarr
+Sportarr is a library instance kind alongside Sonarr and Radarr, and Sports is a first-class media type rather than a parallel implementation beside series and movies. It uses the shared subtitle workflows and views: manual search and download, uploads, subtitle editing and promotion, synchronization, translation, combine, scheduled work, Wanted, History, Excluded, global search and library actions. Settings support global defaults and per-instance overrides, and the owning instance is preserved throughout, including through asynchronous work, file access, history and provider callbacks.
+
+### Media Server Refresh: Emby, Silo, Jellyfin and Plex
+When a subtitle is downloaded or uploaded, Bazarr+ asks every enabled media server that covers that file to rescan the item, so the subtitle actually appears in the server. All four kinds sit on one multi-instance layer, so you can register several Emby, Silo, Jellyfin or Plex servers and they each keep their own enabled state, URL, encrypted API key, TLS verification, path mappings, library choices, pending targets, status and retry action. Refreshes run on a background worker per server, so one unreachable server does not block the others. Everything lives under Settings > Connections as named instance cards with per-instance enable, Test, Edit, Delete and Retry pending.
+
+- **Resolution ladder**: a refresh target is resolved by walking a ladder and stopping at the first rung the server's adapter supports and resolves. Emby walks provider id, exact path, title and year, then a library refresh. Jellyfin walks provider id, title and year, then its configured libraries. Plex walks the IMDB guid, then a section update
+- **Path mappings where they are needed, and only there**: Emby and Silo declare the exact-path rung and need mappings. Jellyfin and Plex do not declare it and have never needed them, and that requirement is now a consequence of the declared capability rather than a convention
+- **Silo's ceiling is measured**: Silo's Jellyfin-compatible API returns items with no `ProviderIds` field, confirmed against Silo 10.12.0, so neither identity rung has anything to match on. Silo uses exact path with a library-scan fallback, and Bazarr+ observes the scan to completion, so a Silo refresh is confirmed rather than merely requested
+- **Plex, for refreshes only**: Plex refreshes go through the instance row, but its account panel, OAuth server discovery, webhook and Autopulse helpers still read the single set of Plex settings. Opening the Plex tab no longer re-tests your servers and writes a new pick back to configuration as a side effect; listing is read-only, and the stored connection changes when you pick a server or sign in
+- **Refresh libraries on demand**: every kind that declares the library rung gets a per-instance "Refresh libraries" action, scoped the way that kind scopes: chosen libraries for Jellyfin and Plex, mapping library ids for Silo, mapped roots for Emby
+
+### Jellyfin Hardening
+The base Jellyfin integration shipped upstream in v1.6.0; Bazarr+ carried it earlier (cherry-picked from upstream's `development` before that release). Bazarr+ adds the polish: an explicit `verify_ssl` toggle so HTTPS Jellyfin instances with self-signed certs work, humanised empty/loading/error states in the LibrarySelector, Atmospheric Dark conventions on the Settings page, and a hardening pass: API keys kept out of URL strings (header only), secret redaction in logs, response cap to prevent runaway downloads, ID validation on incoming `ProviderIds`, and streamed responses closed on read failure.
+
+This pairs with the Distribution Hub to make the Bazarr+ and Jellyfin loop symmetric: library refresh is Bazarr+ to Jellyfin (push); the Distribution Hub API is Jellyfin to Bazarr+ (pull).
+
+### Statistics
+Statistics is a page of its own at `/system/statistics`, first in the System submenu. `GET /api/history/metrics` aggregates all three history tables (series, movies, sports) in SQL over the same timeframe, action, provider and language filters, and the filter row sits on the page so narrowing to one provider survives a tab switch. Five tabs, each plotting something:
+
+- **Activity**: the daily download chart, plus total with media split, per-day average, busiest day, and the share that arrived without a manual search
+- **Providers**: downloads per provider, mean match quality, and blacklist rate, so a provider high on both is visible as the one to turn off
+- **Quality**: match-score distribution, languages counted with `:hi` and `:forced` separately, and how each subtitle arrived
+- **Distribution** and **Translator**: the existing panels, reused rather than copied
+
+Scores are normalised per media type before averaging, because episodes score out of 360 and movies out of 180. Panels reading from bounded sources say what the data cannot say: a capped deque of ten renders as "10+" and is labelled recent rather than total, expired provider throttles are current state and never a rate, and a null duration renders as a dash rather than `0ms`.
+
 ### Multiple Sonarr/Radarr Instances
 The OpenSubtitles era of Bazarr+ assumed one Sonarr and one Radarr. Bazarr+ removes that assumption: register multiple Sonarr and Radarr servers in a single Bazarr+ and treat them as one library, while every action stays scoped to the instance that actually owns each item. Single-instance setups keep working exactly as before; multi-instance is purely additive.
 
@@ -174,7 +276,7 @@ The OpenSubtitles era of Bazarr+ assumed one Sonarr and one Radarr. Bazarr+ remo
 - **Scoped end to end**: sync, search, manual search, download, upgrade, blacklist (add and remove), history, wanted, scan-disk and mass-edit all route to the correct instance
 - **Per-instance routing for the whole stack**: webhooks for Sonarr, Radarr and Plex resolve per instance (with a configurable webhook URL per instance), SignalR maintains a client per server on its own connection, and the cover-image proxy, root folders and path mappings are each resolved against the owning instance
 - **Plex fanout**: Plex library updates can fan out to every configured server
-- **One Connections page**: Sonarr, Radarr, Plex and Jellyfin live together under a single tabbed Settings > Connections page, mirroring the Subtitle Hub layout
+- **One Connections page**: Sonarr, Radarr, Sportarr, Plex, Jellyfin, Emby, Silo and Seerr live together under a single tabbed Settings > Connections page, mirroring the Subtitle Hub layout
 - **First-class PostgreSQL**: the schema, backfill, and a native Postgres cutover path are all covered and tested
 
 ### Per-Instance Subtitle Settings
@@ -184,11 +286,14 @@ Each instance can override how subtitles are produced, and Bazarr+ resolves the 
 Drop a `.zip`, `.rar` or `.7z` of subtitles into the upload modal and Bazarr+ expands it in memory (zip-slip-safe, with entry and size caps) before feeding the contents into the normal upload flow. Drag-and-drop is reliable inside the upload modal and across the whole show/movie page: manual episode picks are preserved and the modal no longer closes mid-extraction.
 
 ### First-Run Setup Wizard
-A fresh install used to drop you on the General settings page with no direction. Now a guided, full-screen wizard at `/setup` walks a new user through the whole stack: connect Sonarr and Radarr (with a live connection test), optionally add Plex or Jellyfin, pick languages and create a language profile, install and enable at least one subtitle provider, and confirm a few general basics. It is fully skippable, and it never auto-triggers for an install that already has any configuration.
+A fresh install used to drop you on the General settings page with no direction. Now a guided, full-screen wizard at `/setup` opens with a question instead of a form: run Sonarr, Radarr or Sportarr and have subtitles fetched automatically, or find subtitles for anything with no library. The answer filters the step rail and nothing else, it is wizard-local with no backend setting written, and either answer can be changed later in Settings. It never auto-triggers for an install that already has any configuration.
 
-- **Survives the provider restart**: installing providers stages new code that needs a restart to load. The wizard restarts Bazarr+, shows a clear status with a manual reload escape hatch, waits for the backend to come back, and resumes on the provider configure step.
+- **Every library step is optional, Sonarr included**: the wizard was written when Bazarr+ could do nothing without Sonarr, and it registered Sonarr as required behind a "Skip for now" button that promised a return it never made. Media servers, Seerr and a translator key are optional steps too. Only languages and providers are not, and each says why in one line: nothing to fetch without a language, nothing to fetch from without a provider.
+- **One way to skip**: the wizard shell owns skippability, so there is one control and one label everywhere, and the Providers step can be skipped even when the catalog is unreachable.
+- **Every provider you picked is installed**: picking several providers used to install only the first, silently. Each selection is attempted now, per-provider outcomes are rendered with the backend's own failure message, and the failed subset is retryable in place without re-installing what worked.
+- **Survives the provider restart**: installing providers stages new code that needs a restart to load. The wizard restarts Bazarr+ after a visible countdown, shows a clear status with a manual reload escape hatch, waits for the backend to come back, and resumes on the provider configure step.
 - **Just the essentials**: the configure step shows only the credentials a provider needs to start working; the full set of advanced options stays in Settings > Providers.
-- **Out of your way**: it marks setup complete on finish or skip, so it never appears again, and the upgrade "What's New" dialog stays out of the wizard's way.
+- **Out of your way**: it marks setup complete on finish or skip, so it never appears again, and the upgrade "What's New" dialog stays out of the wizard's way. A reader who chose the no-library path lands on Discover.
 
 ### Provider Hub
 Bazarr+ turns subtitle providers into installable plugins. Provider Hub lives under Settings > Providers and adds Marketplace, Updates, Sources, My Providers, and Activity views to the provider settings area.
@@ -219,11 +324,6 @@ Bazarr+ exposes an OpenSubtitles-compatible REST API (`/api/v1`) so external cli
 - **Usage UI**: Overview cards and a 30-day usage chart, a per-key usage tooltip, and an idempotent legacy seed that preserves your existing shared token as an unlimited default key so older clients keep working
 
 The Distribution Hub replaces the old Settings > External Integration page. `/settings/external` now redirects to `/distribution-hub`, and your previous shared token is recoverable from the default key's "Reveal token" action.
-
-### Jellyfin Library Refresh
-The base Jellyfin integration shipped upstream in v1.6.0; Bazarr+ carried it earlier (cherry-picked from upstream's `development` before that release). Bazarr+ adds the polish: an explicit `verify_ssl` toggle so HTTPS Jellyfin instances with self-signed certs work, humanised empty/loading/error states in the LibrarySelector, a "Refresh now" Maintenance card to verify connectivity without doing a real download, Atmospheric Dark conventions on the Settings page, and a hardening pass: API keys kept out of URL strings (header only), secret redaction in logs, response cap to prevent runaway downloads, ID validation on incoming `ProviderIds`, and streamed responses closed on read failure.
-
-This pairs with the Distribution Hub to make the Bazarr+ and Jellyfin loop symmetric: library refresh is Bazarr+ to Jellyfin (push); the Distribution Hub API is Jellyfin to Bazarr+ (pull).
 
 ### API Key Encryption at Rest
 Every sensitive credential Bazarr+ stores on disk is AES-encrypted under a per-instance master key. Protected fields include all provider API keys, Sonarr/Radarr keys, the Plex token (unified under the shared master key), the OpenRouter key for the AI translator, and the Distribution Hub admin token. The settings API masks `SYSTEM_SECRETS` in `/api/system/settings` responses so the frontend never sees raw secrets, only a sentinel. The auth password hash is never returned to the UI.
@@ -277,6 +377,10 @@ Subtitle synchronization can run through more than one engine. Run a sync from t
 
 ### Subtitle Editor
 A full browser-based subtitle editor accessible from the subtitle action menu. No desktop software needed.
+
+![Subtitle editor](screenshot/subtitle-editor.png "The subtitle editor: cue list with gap detection at the left, the film playing with the current line burned over it at the right, and the waveform beneath with every cue drawn as a block")
+
+The film plays against the cue list, the current line is editable beside it, and the waveform beneath draws every cue as a block so a mistimed line is visible before you hear it.
 
 | Keyboard shortcuts | AI Translate with reference |
 |:---:|:---:|
@@ -627,7 +731,8 @@ This fork is maintained by **LavX**. Explore more projects and services:
 Where Bazarr+ is heading. Plans shift, but the direction is steady.
 
 - **v2.6.0 "Clockwork"**: correctness pass. Databases created by upstream Bazarr are adopted instead of crash-looping, sync results are checked against the offset you configured rather than merely bounded by it, Provider Hub candidates are scored on their release information, mass translate can work from an embedded subtitle track, and per-provider score modifiers let you weight a provider up or down.
-- **Next on the v2 line**: Discover, which searches and pulls subtitles for any title whether or not it is in your library; a rebuilt in-process translator with a model catalog and per-profile engine choice instead of a sidecar container; search inside your subtitles, so a half-remembered line of dialogue finds the episode; and a standalone mode that runs without Sonarr and Radarr.
+- **v2.7.0 "Atlas"**: the release that changed what Bazarr+ is for. Discover became the homepage and works against an empty library, so Bazarr+ runs as a standalone subtitle aggregator with no Sonarr, Radarr or Sportarr at all. Sports arrived as a third media type with Sportarr as an instance kind, Emby and Silo joined Jellyfin and Plex on one multi-instance media server layer, Statistics got a page of its own under System, and the first-run wizard was rebuilt to ask what you want rather than assume Sonarr.
+- **Next on the v2 line**: a rebuilt in-process translator with a model catalog and per-profile engine choice instead of a sidecar container, and search inside your subtitles, so a half-remembered line of dialogue finds the episode.
 - **v3.0.0 "Galaxy"**: peer-to-peer subtitle sharing, a self-organizing mesh of Bazarr+ instances.
 
 ---
