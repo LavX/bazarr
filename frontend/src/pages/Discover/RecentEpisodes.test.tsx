@@ -312,7 +312,10 @@ it.each(["unverified", "conflict"])(
       await user.click(
         screen.getByRole("button", { name: "Enter episode numbers manually" }),
       );
+      // Prefilled from the link, so the numbers are replaced, not appended.
+      await user.clear(screen.getByRole("textbox", { name: "Season" }));
       await user.type(screen.getByRole("textbox", { name: "Season" }), "3");
+      await user.clear(screen.getByRole("textbox", { name: "Episode" }));
       await user.type(screen.getByRole("textbox", { name: "Episode" }), "7");
       expect(
         screen.getByRole("button", { name: "Find subtitles" }),

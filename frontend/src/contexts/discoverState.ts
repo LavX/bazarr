@@ -6,7 +6,6 @@ import type {
   DiscoverSearchSnapshot,
   DiscoverSelection,
   MetadataEpisode,
-  MetadataShow,
   MetadataSource,
   MetadataTitle,
   RecentEpisodeContext,
@@ -184,15 +183,15 @@ export function searchSelection(
     if (draft.manualEntry && !draft.manualConfirmed) return null;
     const identity = draft.episodeIdentity;
     if (identity?.identity_status === "conflict") return null;
-    if (
-      identity &&
-      (identity.show_imdb_id !== imdbId ||
-        identity.show_title !== draft.title ||
-        (identity.show_year ?? undefined) !== draft.year ||
-        identity.show_id !== draft.showId ||
-        identity.show_tvdb_id !== (draft.showTvdbId ?? null))
-    )
-      return null;
+    // An identity the show now contradicts cannot run a search on its own, but
+    // it must not stand in the way of a confirmed manual one either: a reader
+    // who confirmed season and episode by hand has taken over exactly the
+    // numbering this identity would have supplied. It is left out of that
+    // request, because the server re-derives the mapping from the series
+    // identity and rejects a manual search carrying a superseded episode.
+    const identityFits =
+      identity === undefined || episodeMatchesShow(identity, draftShow(draft));
+    if (!identityFits && !draft.manualConfirmed) return null;
     if (
       !draft.manualConfirmed &&
       (!identity ||
@@ -202,7 +201,7 @@ export function searchSelection(
     )
       return null;
     /* eslint-disable camelcase -- transport field names */
-    if (identity) selection.episode_identity = identity;
+    if (identity && identityFits) selection.episode_identity = identity;
     if (draft.showId !== undefined) selection.show_id = draft.showId;
     if (draft.manualConfirmed) selection.manual_confirmed = true;
     /* eslint-enable camelcase */
@@ -226,18 +225,64 @@ export function episodeIdentityKey(
     : null;
 }
 
+/**
+ * The show an episode has to belong to, as the five compared fields. A show
+ * item and the draft hold the same five under different names, so typing the
+ * comparison over the fields rather than over either holder is what lets both
+ * callers share one predicate instead of hand-copying it.
+ */
+/* eslint-disable camelcase -- the episode's show_* fields and the show item's
+   own names, which are what the two callers actually hold. */
+export interface ShowIdentity {
+  id: number | null | undefined;
+  imdb_id: string | null | undefined;
+  tvdb_id: number | null | undefined;
+  title: string | null | undefined;
+  year: number | null | undefined;
+}
+
+/**
+ * A missing value is missing whichever way a payload spells it. The read routes
+ * omit a nullable id rather than sending null on some paths and send null on
+ * others, and a title with no TVDB id at all is exactly the title whose
+ * numbering cannot be verified, so refusing it for `null !== undefined` would
+ * report a contradiction the source never made.
+ */
+function sameAbsent<T>(
+  left: T | null | undefined,
+  right: T | null | undefined,
+): boolean {
+  return (left ?? undefined) === (right ?? undefined);
+}
+
 export function episodeMatchesShow(
   episode: MetadataEpisode,
-  show: MetadataShow,
+  show: ShowIdentity,
 ): boolean {
   return (
     episode.show_id === show.id &&
-    episode.show_imdb_id === show.imdb_id &&
-    episode.show_tvdb_id === show.tvdb_id &&
+    sameAbsent(episode.show_imdb_id, show.imdb_id) &&
+    sameAbsent(episode.show_tvdb_id, show.tvdb_id) &&
     episode.show_title === show.title &&
-    episode.show_year === show.year
+    sameAbsent(episode.show_year, show.year)
   );
 }
+
+/**
+ * The draft's spelling of the show an episode must belong to. The draft keeps
+ * the IMDb id as the reader typed it and the request lowercases and trims it,
+ * so the normalisation happens here, once, rather than in a second comparison.
+ */
+function draftShow(draft: DiscoverDraft): ShowIdentity {
+  return {
+    id: draft.showId,
+    imdb_id: draft.imdbId.trim().toLowerCase(),
+    tvdb_id: draft.showTvdbId,
+    title: draft.title,
+    year: draft.year,
+  };
+}
+/* eslint-enable camelcase */
 
 /**
  * The target a chosen copy belongs to.
