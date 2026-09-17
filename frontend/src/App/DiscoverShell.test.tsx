@@ -205,32 +205,29 @@ describe("Discover application shell", () => {
     expect(screen.getByRole("link", { name: "Series" })).toBeInTheDocument();
   });
 
-  it("offers setup instead of presenting disabled libraries as configured", async () => {
+  it("drops the library sections when no library is attached", async () => {
     state.sonarr = false;
     state.radarr = false;
-    const { user, router } = renderShell();
+    const { user } = renderShell();
     const nav = await screen.findByRole("navigation", {
       name: "Main navigation",
     });
+    // A library that is not attached is not a destination, and it is not a
+    // setup entry either: the sidebar describes the install the reader has.
     expect(
-      within(nav).getByRole("link", {
-        name: "Series, set up a library connection",
-      }),
-    ).toHaveAttribute("href", "/settings/connections");
-    expect(
-      within(nav).getByRole("link", {
-        name: "Movies, set up a library connection",
-      }),
-    ).toHaveAttribute("href", "/settings/connections");
-    expect(
-      within(nav).queryByRole("link", { name: "Wanted" }),
+      within(nav).queryByRole("link", { name: /^(Series|Movies)$/ }),
     ).not.toBeInTheDocument();
-    await user.click(
-      within(nav).getByRole("link", {
-        name: "Series, set up a library connection",
-      }),
-    );
-    expect(router.state.location.pathname).toBe("/settings/connections");
+    expect(
+      within(nav).queryByRole("button", { name: "Missing" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(nav).queryByRole("button", { name: "History" }),
+    ).not.toBeInTheDocument();
+    // Connections stays reachable, through Settings.
+    await user.click(within(nav).getByRole("button", { name: "Settings" }));
+    expect(
+      await screen.findByRole("menuitem", { name: "Connections" }),
+    ).toHaveAttribute("href", "/settings/connections");
   });
 
   it("keeps settings and the jobs manager reachable through System", async () => {
@@ -344,7 +341,7 @@ describe("Discover application shell", () => {
   });
 });
 
-it("uses the same disabled-library setup destination in global search and navigation", async () => {
+it("points a disabled library's global search result at the setup page", async () => {
   state.sonarr = false;
   const { user } = renderShell();
   const search = await screen.findByLabelText("Search");
