@@ -366,12 +366,57 @@
       <h2 id="proof-h">The interface</h2>
       <p class="lede">Screenshots from the running application. Nothing here is a mockup. v2.7.0 rebuilt what you meet first: Discover is the homepage, the setup wizard asks what you want to do instead of insisting on Sonarr, and Statistics has a page of its own under System.</p>
 
-      <!-- Captures of the v2.7.0 interface belong at the top of this grid:
-           same figure / button / picture pattern as the shots below, a WebP
-           at full width plus a 640w WebP for the narrow source, the PNG as
-           the img fallback, and alt text that describes the frame rather
-           than naming it. -->
       <div class="shots">
+        <figure class="shot">
+          <button type="button" data-full="screenshots/v2.7.0/discover-home.webp" aria-label="Enlarge: Discover as the Bazarr+ homepage">
+            <picture>
+              <source type="image/webp" srcset="screenshots/v2.7.0/discover-home.webp 3200w" sizes="(max-width: 900px) 100vw, 560px">
+              <img src="screenshots/v2.7.0/discover-home.png" width="1280" height="800" loading="lazy" decoding="async" alt="The Discover page as the Bazarr+ homepage: a library banner over artwork with counts for series, movies, episodes, sports events and subtitles fetched, buttons for the episodes, movies and sports events that still need subtitles, a Still missing queue in three columns, and a Recently fetched row">
+            </picture>
+          </button>
+          <figcaption>Discover is the page Bazarr+ opens on. With a library it leads with what is still missing and what arrived last.</figcaption>
+        </figure>
+
+        <figure class="shot">
+          <button type="button" data-full="screenshots/v2.7.0/discover-title-subtitle-search.webp" aria-label="Enlarge: searching subtitles for a title that is not in the library">
+            <picture>
+              <source type="image/webp" srcset="screenshots/v2.7.0/discover-title-subtitle-search.webp 3200w" sizes="(max-width: 900px) 100vw, 560px">
+              <img src="screenshots/v2.7.0/discover-title-subtitle-search.png" width="1280" height="1180" loading="lazy" decoding="async" alt="A Discover title page for a film marked as not in the library, listing subtitle results from several providers, each row offering a preview and a download">
+            </picture>
+          </button>
+          <figcaption>No library needed: search any title, read the result in a preview, download the one you want. <a href="#standalone">How that works</a></figcaption>
+        </figure>
+
+        <figure class="shot">
+          <button type="button" data-full="screenshots/v2.7.0/connections-instances.webp" aria-label="Enlarge: the Connections settings page">
+            <picture>
+              <source type="image/webp" srcset="screenshots/v2.7.0/connections-instances.webp 3200w" sizes="(max-width: 900px) 100vw, 560px">
+              <img src="screenshots/v2.7.0/connections-instances.png" width="1280" height="800" loading="lazy" decoding="async" alt="The Connections settings page with tabs for Sonarr, Radarr, Sportarr, Plex, Jellyfin, Emby, Silo and Seerr, showing a registered Sonarr server as an instance card with test, edit and enable controls">
+            </picture>
+          </button>
+          <figcaption>Every integration on one page, each server its own instance with its own settings. <a href="#connects">What connects to what</a></figcaption>
+        </figure>
+
+        <figure class="shot">
+          <button type="button" data-full="screenshots/v2.7.0/sports-events.webp" aria-label="Enlarge: a sports league page">
+            <picture>
+              <source type="image/webp" srcset="screenshots/v2.7.0/sports-events.webp 3200w" sizes="(max-width: 900px) 100vw, 560px">
+              <img src="screenshots/v2.7.0/sports-events.png" width="1280" height="800" loading="lazy" decoding="async" alt="A motorsport league page in Bazarr+ listing events grouped by season, each row carrying its subtitle languages and actions">
+            </picture>
+          </button>
+          <figcaption>Sport is a media type of its own now, with the same subtitle workflow episodes and films get.</figcaption>
+        </figure>
+
+        <figure class="shot">
+          <button type="button" data-full="screenshots/v2.7.0/statistics-activity.webp" aria-label="Enlarge: the Statistics page">
+            <picture>
+              <source type="image/webp" srcset="screenshots/v2.7.0/statistics-activity.webp 3200w" sizes="(max-width: 900px) 100vw, 560px">
+              <img src="screenshots/v2.7.0/statistics-activity.png" width="1280" height="800" loading="lazy" decoding="async" alt="The Statistics page under System, on its Activity tab, with a per-day download chart and summary figures above it">
+            </picture>
+          </button>
+          <figcaption>Statistics has a page of its own under System, with one filter row across every tab.</figcaption>
+        </figure>
+
         <figure class="shot">
           <button type="button" data-full="screenshots/editor-translate.webp" aria-label="Enlarge: the subtitle editor with video preview, waveform and AI translation">
             <picture>
