@@ -195,7 +195,11 @@ it("distinguishes an empty season from a metadata outage and offers confirmed ma
   await user.click(
     screen.getByRole("button", { name: "Enter episode numbers manually" }),
   );
+  // The manual fields arrive prefilled with the link's own numbering, so the
+  // reader replaces what is there rather than appending to it.
+  await user.clear(screen.getByRole("textbox", { name: "Season" }));
   await user.type(screen.getByRole("textbox", { name: "Season" }), "0");
+  await user.clear(screen.getByRole("textbox", { name: "Episode" }));
   await user.type(screen.getByRole("textbox", { name: "Episode" }), "3");
   await pickOption(user, "Subtitle language", "English");
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
@@ -500,7 +504,10 @@ it.each([
             name: "Enter episode numbers manually",
           }),
         );
+        // Prefilled from the link, so the numbers are replaced, not appended.
+        await user.clear(screen.getByRole("textbox", { name: "Season" }));
         await user.type(screen.getByRole("textbox", { name: "Season" }), "0");
+        await user.clear(screen.getByRole("textbox", { name: "Episode" }));
         await user.type(screen.getByRole("textbox", { name: "Episode" }), "3");
         await user.click(
           screen.getByLabelText(
@@ -548,11 +555,16 @@ it.each([
         screen.queryByText(/Verified TVDB default order/),
       ).not.toBeInTheDocument();
       expect(screen.getByText(/Show details changed/)).toBeInTheDocument();
+      // The manual path is not gated on the guard. It was hidden here on
+      // purpose, and that hiding is what turned a warning into a dead end: a
+      // reader whose show mapping cannot be repaired by a refetch is exactly
+      // the reader who has to enter the numbers by hand. Conflicts still hide
+      // it, because a conflict is a known contradiction rather than an absence.
       expect(
-        screen.queryByRole("button", {
+        screen.getByRole("button", {
           name: "Enter episode numbers manually",
         }),
-      ).not.toBeInTheDocument();
+      ).toBeInTheDocument();
       expect(screen.getByDisplayValue("1. Home")).toBeInTheDocument();
       expect(selectInput("Subtitle language")).toHaveValue("English");
       finish?.();
@@ -610,7 +622,10 @@ it.each([
             name: "Enter episode numbers manually",
           }),
         );
+        // Prefilled from the link, so the numbers are replaced, not appended.
+        await user.clear(screen.getByRole("textbox", { name: "Season" }));
         await user.type(screen.getByRole("textbox", { name: "Season" }), "0");
+        await user.clear(screen.getByRole("textbox", { name: "Episode" }));
         await user.type(screen.getByRole("textbox", { name: "Episode" }), "3");
         await user.click(
           screen.getByLabelText(
@@ -687,3 +702,165 @@ it.each([
     }
   },
 );
+
+it("clears a tripped guard by refetching the show as well as the episode", async () => {
+  let agreeing = true;
+  let showFetches = 0;
+  let episodeFetches = 0;
+  server.use(
+    http.get("/api/discover/metadata/shows/100", () => {
+      showFetches += 1;
+      return HttpResponse.json({
+        data: {
+          ...envelope,
+          item: agreeing ? show : { ...show, tvdb_id: 999 },
+        },
+      });
+    }),
+    http.get("/api/discover/metadata/shows/100/seasons/2/episodes/1", () => {
+      episodeFetches += 1;
+      return HttpResponse.json({ data: { ...envelope, episode } });
+    }),
+  );
+  const { user } = browse("/discover?show=100&season=2&episode=1");
+  await screen.findByDisplayValue("1. Home");
+  expect(screen.queryByText(/Show details changed/)).not.toBeInTheDocument();
+  agreeing = false;
+  await queryClient.invalidateQueries({ queryKey: METADATA_QUERY_KEY });
+  expect(await screen.findByText(/Show details changed/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
+  // The episode was never the disagreeing side, so only a show refetch can put
+  // the two back in agreement, and the automatic attempt is latched per parent
+  // identity. Without this control the page has no way out of its own warning.
+  const before = { show: showFetches, episode: episodeFetches };
+  agreeing = true;
+  await user.click(screen.getByRole("button", { name: "Refresh details" }));
+  await waitFor(() => expect(showFetches).toBeGreaterThan(before.show));
+  await waitFor(() => expect(episodeFetches).toBeGreaterThan(before.episode));
+  await waitFor(() =>
+    expect(screen.queryByText(/Show details changed/)).not.toBeInTheDocument(),
+  );
+});
+
+it("keeps a confirmed manual search possible while the guard is up", async () => {
+  server.use(
+    http.get("/api/discover/metadata/shows/100", () =>
+      HttpResponse.json({
+        data: { ...envelope, item: { ...show, tvdb_id: 999 } },
+      }),
+    ),
+  );
+  const { user } = browse("/discover?show=100&season=2&episode=1");
+  await screen.findByDisplayValue("1. Home");
+  await screen.findByText(/Show details changed/);
+  // The reader's own numbering does not need the mapping the page could not
+  // verify. Refusing it would leave the warning with no way past it, which is
+  // what the page did before.
+  await user.click(
+    screen.getByRole("button", { name: "Enter episode numbers manually" }),
+  );
+  expect(screen.getByRole("textbox", { name: "Season" })).toHaveValue("2");
+  expect(screen.getByRole("textbox", { name: "Episode" })).toHaveValue("1");
+  await pickOption(user, "Subtitle language", "English");
+  expect(screen.getByRole("button", { name: "Find subtitles" })).toBeDisabled();
+  await user.click(
+    screen.getByLabelText(
+      "I confirm this series IMDb ID and the manual season and episode numbers",
+    ),
+  );
+  await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+  await waitFor(() => expect(requests).toHaveLength(1));
+  expect(requests[0]).toMatchObject({
+    show_id: 100,
+    imdb_id: "tt1234567",
+    title: "Northern Light",
+    year: 2020,
+    season: 2,
+    episode: 1,
+    manual_confirmed: true,
+  });
+  // The superseded identity describes the mapping the reader overrode, and the
+  // server rejects a manual search that carries it.
+  expect(requests[0]).not.toHaveProperty("episode_identity");
+});
+
+it("explains numbering that cannot be verified instead of calling it stale", async () => {
+  const unverified = {
+    ...episode,
+    identity_status: "unverified",
+    target_season: null,
+    target_episode: null,
+    numbering: null,
+    show_tvdb_id: null,
+  };
+  server.use(
+    http.get("/api/discover/metadata/shows/100", () =>
+      HttpResponse.json({
+        data: { ...envelope, item: { ...show, tvdb_id: null } },
+      }),
+    ),
+    http.get("/api/discover/metadata/shows/100/seasons/2/episodes/1", () =>
+      HttpResponse.json({ data: { ...envelope, episode: unverified } }),
+    ),
+  );
+  const { user } = browse("/discover?show=100&season=2&episode=1");
+  expect(
+    await screen.findByText(/cannot be verified automatically/),
+  ).toBeInTheDocument();
+  // Nothing changed and no retry can help, so neither may be implied here.
+  expect(screen.queryByText(/Show details changed/)).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: /Refresh/ }),
+  ).not.toBeInTheDocument();
+  await user.click(
+    screen.getByRole("button", { name: "Enter episode numbers manually" }),
+  );
+  // The numbering the reader followed is the numbering they confirm.
+  expect(screen.getByRole("textbox", { name: "Season" })).toHaveValue("2");
+  expect(screen.getByRole("textbox", { name: "Episode" })).toHaveValue("1");
+  await pickOption(user, "Subtitle language", "English");
+  await user.click(
+    screen.getByLabelText(
+      "I confirm this series IMDb ID and the manual season and episode numbers",
+    ),
+  );
+  await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+  await waitFor(() => expect(requests).toHaveLength(1));
+  expect(requests[0]).toMatchObject({
+    show_id: 100,
+    imdb_id: "tt1234567",
+    season: 2,
+    episode: 1,
+    manual_confirmed: true,
+  });
+});
+
+it("says why an unverified title is unverified even when its episode disagrees", async () => {
+  server.use(
+    http.get("/api/discover/metadata/shows/100/seasons/2/episodes/1", () =>
+      HttpResponse.json({
+        data: {
+          ...envelope,
+          episode: {
+            ...episode,
+            identity_status: "unverified",
+            target_season: null,
+            target_episode: null,
+            numbering: null,
+            show_tvdb_id: null,
+          },
+        },
+      }),
+    ),
+  );
+  browse("/discover?show=100&season=2&episode=1");
+  expect(
+    await screen.findByText(/cannot be verified automatically/),
+  ).toBeInTheDocument();
+  // The episode has no TVDB mapping at all, so "details changed" would be a
+  // claim about staleness the page cannot make.
+  expect(screen.queryByText(/Show details changed/)).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: /Refresh/ }),
+  ).not.toBeInTheDocument();
+});

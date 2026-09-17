@@ -37,7 +37,19 @@ export default function EpisodePicker({
     undefined,
     season !== null && number !== null,
   );
+  // The same query the detail page already holds. The guard compares two
+  // fetched objects, so whichever one is wrong has to be refetchable from
+  // here: refetching only the episode repeats a request whose answer was never
+  // the disagreeing side.
+  const showDetails = useDiscoverMetadata(
+    `shows/${show.id}`,
+    undefined,
+    true,
+    "show",
+    "tmdb",
+  );
   const refetchEpisode = details.refetch;
+  const refetchShow = showDetails.refetch;
   const received = details.data?.episode;
   const episode =
     received ??
@@ -53,7 +65,6 @@ export default function EpisodePicker({
     if (
       !received ||
       !episode ||
-      !parentMatches ||
       episode.show_id !== show.id ||
       episode.season !== season ||
       episode.episode !== number
@@ -64,13 +75,26 @@ export default function EpisodePicker({
       episodeIdentityKey(episode)
     )
       return;
+    // Adoption is deliberately not gated on the episode agreeing with the show
+    // item. The three conditions above already pin it to this link's own show,
+    // season and number, so it is the source's current answer for the episode
+    // the reader asked for, and refusing while a disagreement lasts is what
+    // made the warning unrecoverable.
     updateDraft({
       mediaType: "episode",
       showId: episode.show_id,
-      showTvdbId: episode.show_tvdb_id,
-      imdbId: episode.show_imdb_id ?? "",
-      title: episode.show_title,
-      year: episode.show_year ?? undefined,
+      // The episode carries its own view of the show's identity, which is the
+      // view a search is gated on. Writing a disagreeing one over the show
+      // item's would leave the request carrying the mapping the warning above
+      // is about, so the show item's copy stands until the two agree.
+      ...(parentMatches
+        ? {
+            showTvdbId: episode.show_tvdb_id,
+            imdbId: episode.show_imdb_id ?? "",
+            title: episode.show_title,
+            year: episode.show_year ?? undefined,
+          }
+        : {}),
       episodeIdentity: episode,
       season: episode.target_season?.toString() ?? "",
       episode: episode.target_episode?.toString() ?? "",
@@ -92,21 +116,26 @@ export default function EpisodePicker({
     if (!parentMatches && reconciliation.current !== parentKey) {
       reconciliation.current = parentKey;
       void refetchEpisode();
+      void refetchShow();
     }
-  }, [parentMatches, parentKey, refetchEpisode]);
+  }, [parentMatches, parentKey, refetchEpisode, refetchShow]);
   const unavailable = seasons.isError || seasons.data?.status === "unavailable";
   const conflicting = episode?.identity_status === "conflict";
+  const unverified = episode?.identity_status === "unverified";
   const needsManual =
     show.seasons === null ||
     show.seasons.length === 0 ||
     unavailable ||
-    episode?.identity_status === "unverified";
+    unverified;
+  // The link's own numbering is the only numbering the page knows here, so the
+  // reader confirms or corrects it rather than retyping what they just
+  // followed. An edit still wins: these are ordinary draft fields.
   const beginManual = () =>
     updateDraft({
       manualEntry: true,
       manualConfirmed: false,
-      season: "",
-      episode: "",
+      season: season?.toString() ?? "",
+      episode: number?.toString() ?? "",
     });
   const seasonRows = useMemo(() => show.seasons ?? [], [show.seasons]);
   const episodeRows =
@@ -223,26 +252,34 @@ export default function EpisodePicker({
             </Button>
           </Alert>
         )}
-      {episode && !parentMatches && (
+      {episode && !parentMatches && !unverified && (
         <Alert color="yellow">
-          Show details changed. Refresh this episode before searching.
+          Show details changed. Refresh the episode and the show before
+          searching.
           <Button
             type="button"
             variant="subtle"
-            onClick={() => void details.refetch()}
+            onClick={() => {
+              void refetchEpisode();
+              void refetchShow();
+            }}
           >
-            Refresh episode
+            Refresh details
           </Button>
         </Alert>
       )}
-      {episode &&
-        parentMatches &&
-        episode.identity_status === "unverified" &&
-        !draft.manualEntry && (
-          <Text size="sm">
-            Confirm this episode’s season and number to search.
-          </Text>
-        )}
+      {/* Nothing changed here and nothing can be refreshed into place: the
+          metadata source carries no TVDB mapping for this title, so its season
+          and episode numbers cannot be computed. Said in the title's own terms
+          rather than as a fault, and with the manual path next to it, because
+          confirming the numbering by hand is the only route to a search. */}
+      {unverified && !draft.manualEntry && (
+        <Text size="sm">
+          This title has no TVDB series id at the metadata source, so its season
+          and episode numbers cannot be verified automatically. Confirm this
+          episode's season and number to search.
+        </Text>
+      )}
       {conflicting && (
         <Alert color="red">
           Episode numbering does not match between metadata sources. Refresh
@@ -257,10 +294,9 @@ export default function EpisodePicker({
         </Alert>
       )}
       {show.imdb_id &&
-        parentMatches &&
         !conflicting &&
         !draft.manualEntry &&
-        (showOptions || needsManual) && (
+        (showOptions || needsManual || !parentMatches) && (
           <Button
             type="button"
             variant="subtle"
