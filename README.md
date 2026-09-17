@@ -378,6 +378,10 @@ Subtitle synchronization can run through more than one engine. Run a sync from t
 ### Subtitle Editor
 A full browser-based subtitle editor accessible from the subtitle action menu. No desktop software needed.
 
+![Subtitle editor](screenshot/subtitle-editor.png "The subtitle editor: cue list with gap detection at the left, the film playing with the current line burned over it at the right, and the waveform beneath with every cue drawn as a block")
+
+The film plays against the cue list, the current line is editable beside it, and the waveform beneath draws every cue as a block so a mistimed line is visible before you hear it.
+
 | Keyboard shortcuts | AI Translate with reference |
 |:---:|:---:|
 | ![Shortcuts](screenshot/editor-shortcuts.png) | ![Translate](screenshot/editor-translate.png) |
