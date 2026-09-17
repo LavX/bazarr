@@ -226,21 +226,11 @@ body::after {
     border-right: none;
   }
 
-  .mantine-AppShell-header {
-    // The header is a floating pill on a band. A transparent band let content
-    // scroll past on either side of the pill and be sliced by it: a page
-    // title read "ver". Frosted ground instead: whatever passes beneath dims
-    // and blurs uniformly across the full width, at every scroll position.
-    background: color-mix(
-      in srgb,
-      var(--bz-surface-ground) 97%,
-      transparent
-    ) !important;
-    backdrop-filter: blur(16px) saturate(1.15);
-    -webkit-backdrop-filter: blur(16px) saturate(1.15);
-    border: none !important;
-    padding: 8px !important;
-  }
+  // The header's background is deliberately not styled here. It belongs to the
+  // module that also owns the at-rest state and the fade between the two
+  // (App/AppShell.module.scss). A rule here cannot outrank a two-class module
+  // selector, so the last one written against content showing through the band
+  // lost silently and the symptom came back.
 }
 
 // Global Paper/Card styling
