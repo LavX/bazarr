@@ -171,14 +171,21 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ steps.images.outputs.list }}
-          # `latest` only ever points at a versioned release, never a
-          # bare master commit. A docs-only push to master used to
-          # quietly overwrite `latest` with whatever was on HEAD; we
-          # require a real `v*` tag (or a manual workflow_dispatch with
-          # version_tag) for the moving pointer to advance.
+          # `latest` only ever points at a finished release, never a
+          # bare master commit and never a pre-release. A docs-only push
+          # to master used to quietly overwrite `latest` with whatever
+          # was on HEAD, so the pointer advances only for a real `v*`
+          # tag or a deliberate dispatch. Both forms additionally have to
+          # name a final version: an RC or beta is built from
+          # development with a `-rcN`/`-beta.N` suffix, and publishing
+          # that as `latest` hands every `docker pull` user unreleased
+          # code. Test builds belong in build-docker-manual.yml, which
+          # has an explicit push_latest input defaulting to false.
           tags: |
-            # Latest only on tag push or workflow_dispatch
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version_tag != '') }}
+            # Latest only for a final version, and only from a tag push
+            # or a dispatch on master. A `-` in the version means a
+            # pre-release, which never moves the pointer.
+            type=raw,value=latest,enable=${{ (startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-')) || (github.event_name == 'workflow_dispatch' && inputs.version_tag != '' && github.ref == 'refs/heads/master' && !contains(inputs.version_tag, '-')) }}
             # Version tag (e.g., v2.0.0) - emitted always so master
             # pushes still get the computed semver from git describe.
             type=raw,value=${{ steps.version.outputs.fork_version }}
