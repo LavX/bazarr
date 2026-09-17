@@ -29,8 +29,21 @@ def _private_auth_errors(actual_method):
     return wrapper
 
 
-def _scope(credential):
-    return hmac.new(_SCOPE_SECRET, str(credential).encode("utf-8"), hashlib.sha256).digest()
+def _scope(api_key):
+    """Return an unforgeable per-process handle for the API key in force.
+
+    This is not password storage, and the right primitive is not a password
+    hash. The handle binds an in-flight Discover download to the API key that
+    authorised it, so rotating the key invalidates outstanding downloads, and it
+    is what the result cache partitions on, so the key itself never has to be
+    held in a long-lived object. What has to hold is unforgeable equality
+    against a value this process already has in memory, which a keyed hash under
+    a random per-process key gives. Offline crack resistance, the property a
+    slow KDF buys, defends nothing here: the handle is never stored, never
+    leaves the process, and is only ever read by hmac.compare_digest. A KDF
+    would only add per-request cost.
+    """
+    return hmac.new(_SCOPE_SECRET, str(api_key).encode("utf-8"), hashlib.sha256).digest()
 
 
 def _authority():
