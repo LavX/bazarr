@@ -1,5 +1,5 @@
 import React, { forwardRef, useCallback, useEffect, useMemo } from "react";
-import { Group, Text, Tooltip } from "@mantine/core";
+import { Badge, Group, Popover, Text, Tooltip } from "@mantine/core";
 import { faBookmark as farBookmark } from "@fortawesome/free-regular-svg-icons";
 import {
   faBookmark,
@@ -25,6 +25,49 @@ import {
   isSyncOutputSubtitle,
 } from "@/utilities/subtitles";
 import { Subtitle } from "./components";
+
+/**
+ * How many subtitle badges an episode row draws before the rest go behind a
+ * count.
+ *
+ * A release can carry several dozen embedded tracks and Apple TV+ WEB-DLs run
+ * past eighty, and the row used to draw every one of them in a single
+ * nowrap line. Flex items shrink, so past a certain count each badge was
+ * squeezed below the width of its own label and the column read as a row of
+ * single letters that pushed the table wider than its container.
+ *
+ * Wrapping alone keeps them legible but lets one episode own the page, so the
+ * row wraps up to this many and the remainder moves behind a count that opens.
+ */
+const MAX_CELL_SUBTITLES = 12;
+
+function SubtitlesOverflow({
+  count,
+  children,
+}: {
+  count: number;
+  children: React.ReactNode;
+}) {
+  return (
+    <Popover position="bottom-start" withArrow shadow="md" withinPortal>
+      <Popover.Target>
+        <Badge
+          variant="light"
+          color="gray"
+          style={{ cursor: "pointer", flexShrink: 0 }}
+          aria-label={`Show the ${count} further subtitles on this episode`}
+        >
+          +{count}
+        </Badge>
+      </Popover.Target>
+      <Popover.Dropdown>
+        <Group gap="xs" wrap="wrap" maw={420}>
+          {children}
+        </Group>
+      </Popover.Dropdown>
+    </Popover>
+  );
+}
 import tableStyles from "@/components/tables/BaseTable.module.scss";
 
 interface Props {
@@ -106,26 +149,44 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
             );
           }
 
-          const subtitles = filteredSubtitles.map((val, idx) => (
+          // Files before tracks. A release can carry several dozen embedded
+          // tracks and a handful of files, and the files are the ones a reader
+          // can act on, so they must not be the ones an overflow cuts off.
+          const files = filteredSubtitles.filter((val) => val.path);
+          const embedded = filteredSubtitles.filter((val) => !val.path);
+
+          const render = (val: Subtitle, idx: number, kind: string) => (
             <Subtitle
-              key={BuildKey(idx, val.code2, "valid")}
+              key={BuildKey(idx, val.code2, kind)}
               seriesId={seriesId}
               episodeId={episodeId}
               arrInstanceId={episode.arr_instance_id}
               subtitle={val}
               availableSubtitles={episode.subtitles}
             ></Subtitle>
-          ));
+          );
 
-          return [...missing, ...subtitles];
+          return [
+            ...missing,
+            ...files.map((val, idx) => render(val, idx, "file")),
+            ...embedded.map((val, idx) => render(val, idx, "embedded")),
+          ];
           // onlyDesired/profileItems are captured from the parent; the row re-renders
           // via the parent when they change, so they belong in the deps.
           // eslint-disable-next-line react-hooks/exhaustive-deps
         }, [episode, seriesId, onlyDesired, profileItems]);
 
+        const visible = elements.slice(0, MAX_CELL_SUBTITLES);
+        const overflow = elements.length - visible.length;
+
         return (
-          <Group gap="xs" wrap="nowrap">
-            {elements}
+          <Group gap="xs" wrap="wrap">
+            {visible}
+            {overflow > 0 && (
+              <SubtitlesOverflow count={overflow}>
+                {elements.slice(MAX_CELL_SUBTITLES)}
+              </SubtitlesOverflow>
+            )}
           </Group>
         );
       },
