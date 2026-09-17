@@ -52,7 +52,12 @@ def test_same_origin_mode_follows_forwarded_headers():
         }
     )
 
-    assert "https://bazarr.example" in allowed
+    # _cors_allowed_origins returns the list of origins engineio will accept:
+    # the origin it computed from the connection itself, then the forwarded one.
+    # Assert the list, because an origin policy is exact membership, and a
+    # substring test over it would pass for an origin that merely contains this
+    # one.
+    assert allowed == ["http://127.0.0.1:6767", "https://bazarr.example"]
 
 
 @pytest.mark.parametrize(
