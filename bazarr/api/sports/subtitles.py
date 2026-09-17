@@ -80,9 +80,13 @@ class SportsSearch(Resource):
             return {'message': str(exc)}, 404
         except ValueError as exc:
             return {"message": str(exc)}, 400
-        except OSError:
+        except OSError as exc:
+            # manual_search answers with the reason as its return value and
+            # sportarr/subtitles.py re-raises it as the OSError argument, so the
+            # exception carries the sentence the user needs. The constant is
+            # only for a raise that arrived without one.
             return {
-                "message": "Could not search this sports file. Check its accessibility and providers."
+                "message": str(exc) or "Could not search this sports file. Check its accessibility and providers."
             }, 409
 
 
@@ -105,9 +109,12 @@ class SportsDownload(Resource):
             return {'message': str(exc)}, 404
         except ValueError as exc:
             return {"message": str(exc)}, 400
-        except OSError:
+        except OSError as exc:
+            # Same contract as the search route above: the reason is the
+            # sentence manual_download_subtitle returned, and the constant only
+            # covers a raise that carried none.
             return {
-                "message": "Subtitle was not published. Check the file and provider before trying again."
+                "message": str(exc) or "Subtitle was not published. Check the file and provider before trying again."
             }, 409
 
 

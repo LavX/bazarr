@@ -231,6 +231,7 @@ jobs:
             tests/bazarr/test_ui.py \
             tests/bazarr/test_utilities_video_analyzer.py \
             tests/bazarr/test_sportarr_sync_references.py \
+            tests/bazarr/test_sportarr_retrieval_diagnostics.py \
             tests/bazarr/test_sportarr_subtitle_file_download.py \
             tests/bazarr/test_sportarr_editor.py \
             tests/bazarr/test_sportarr_combine.py \
