@@ -200,6 +200,22 @@ python3 docker/supervisor.py --config ./data --port 6767
 
 ### Screenshots
 
+New in v2.7.0. Discover is the page Bazarr+ opens on, and the second shot is the whole argument of this release: a subtitle search running against a title that is not in the library, on an install that needs no library at all.
+
+| Discover as the homepage | Subtitle search for a title you do not have |
+|:---:|:---:|
+| ![Discover](screenshot/discover-home.png "Discover as the homepage, with the library banner, the Still missing queue and Recently fetched") | ![Discover subtitle search](screenshot/discover-title-subtitle-search.png "A Discover title page marked Not in your library, listing subtitle results from several providers with preview and download on each") |
+
+| Every integration on one page | Sport as a media type of its own |
+|:---:|:---:|
+| ![Connections](screenshot/connections-instances.png "The Connections settings page with tabs for Sonarr, Radarr, Sportarr, Plex, Jellyfin, Emby, Silo and Seerr") | ![Sports](screenshot/sports-events.png "A motorsport league page listing events grouped by season with their subtitle languages") |
+
+| Statistics under System |
+|:---:|
+| ![Statistics](screenshot/statistics-activity.png "The Statistics page on its Activity tab with a per-day download chart") |
+
+Earlier releases:
+
 | Series with batch actions | Mass translate dialog |
 |:---:|:---:|
 | ![Series Batch Actions](screenshot/series-batch-actions.png "Series list with batch toolbar and subtitle tools") | ![Mass Translate](screenshot/mass-translate.png "Mass translate dialog with model and language selection") |
