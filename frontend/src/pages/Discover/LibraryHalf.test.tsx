@@ -1,10 +1,11 @@
 /* eslint-disable camelcase -- API fixtures retain transport field names. */
 import { createMemoryRouter, RouterProvider } from "react-router";
+import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { beforeEach, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import queryClient from "@/apis/queries";
 import { AllProviders } from "@/providers";
-import { rawRender, screen } from "@/tests";
+import { rawRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import Discover from "./testHarness";
 
@@ -165,7 +166,7 @@ function open() {
     ],
     { initialEntries: ["/discover"] },
   );
-  rawRender(
+  return rawRender(
     <AllProviders>
       <RouterProvider router={router} />
     </AllProviders>,
@@ -255,4 +256,63 @@ it("opens on the global catalog when the summary cannot be read", async () => {
   expect(screen.queryByText("Your library")).not.toBeInTheDocument();
   expect(screen.queryByText("Recently fetched")).not.toBeInTheDocument();
   expect(screen.queryByText("Still missing")).not.toBeInTheDocument();
+});
+
+// The notice is read once. Leaving it up on every visit is the nag it exists
+// to avoid, so the close has to outlive the page.
+describe("the connect a library notice", () => {
+  function noLibrarySummary() {
+    return summary({
+      state: "new_installation",
+      onboarding: {
+        availability: "available",
+        observed_at: "2026-09-01T12:00:00Z",
+        complete: true,
+        items: [libraryOnboarding],
+      },
+    });
+  }
+
+  it("closes and stays closed across a fresh mount", async () => {
+    serve({ use_sonarr: false, use_radarr: false }, noLibrarySummary());
+    const view = open();
+    await globalHero();
+    expect(
+      await screen.findByText(libraryOnboarding.summary),
+    ).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: "Dismiss the connect a library notice",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByText(libraryOnboarding.summary),
+      ).not.toBeInTheDocument(),
+    );
+    // The close is remembered, not hidden for the rest of this render.
+    view.unmount();
+    open();
+    await globalHero();
+    expect(
+      screen.queryByText(libraryOnboarding.summary),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "Connect a library" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("is still offered to a reader who has not closed it", async () => {
+    serve({ use_sonarr: false, use_radarr: false }, noLibrarySummary());
+    open();
+    await globalHero();
+    expect(
+      await screen.findByRole("link", { name: "Connect a library" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "Dismiss the connect a library notice",
+      }),
+    ).toBeInTheDocument();
+  });
 });

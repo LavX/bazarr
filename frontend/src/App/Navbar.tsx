@@ -165,28 +165,6 @@ const AppNavbar: FunctionComponent = () => {
                       route={route}
                     />
                   ))}
-                  {group.label === "Media" &&
-                    navRoutes
-                      .find((route) => route.path === "settings")
-                      ?.children?.some(
-                        (route: CustomRouteObject) =>
-                          route.path === "connections" && !route.hidden,
-                      ) &&
-                    navRoutes
-                      .filter(
-                        (route) =>
-                          ["series", "movies", "sports"].includes(
-                            route.path ?? "",
-                          ) && route.hidden,
-                      )
-                      .map((route) => (
-                        <NavbarItem
-                          key={route.path}
-                          name={`Set up ${route.name?.toLowerCase()}`}
-                          link="/settings/connections"
-                          icon={route.icon}
-                        />
-                      ))}
                 </div>
               );
             })}
@@ -234,11 +212,7 @@ const AppNavbar: FunctionComponent = () => {
           className={shellStyles.rail}
           aria-label="Main navigation"
         >
-          <NavigationRail
-            groups={groups}
-            routes={navRoutes}
-            onOpenJobs={openJobs}
-          />
+          <NavigationRail groups={groups} onOpenJobs={openJobs} />
         </AppShell.Navbar>
       )}
       <NotificationDrawer

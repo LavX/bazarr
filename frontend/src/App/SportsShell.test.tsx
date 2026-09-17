@@ -123,7 +123,7 @@ it.each([
   expect(router.state.location.pathname).toBe(`/${path}/sports`);
 });
 
-it("switches disabled Sports to setup in the rail and global search", async () => {
+it("drops disabled Sports from the rail and keeps its setup destination in global search", async () => {
   const { user, router } = renderShell();
   await screen.findByRole("link", { name: "Sports" });
   enabled = false;
@@ -132,21 +132,24 @@ it("switches disabled Sports to setup in the rail and global search", async () =
       queryKey: [QueryKeys.System, QueryKeys.Settings],
     });
   });
-  const setup = await screen.findByRole("link", {
-    name: "Sports, set up a library connection",
-  });
-  expect(setup).toHaveAttribute("href", "/settings/connections");
+  // Off means off: the rail no longer carries a dead Sports page, and it does
+  // not put a setup entry where the page was either. The global search keeps
+  // one, because there a reader is looking for something rather than reading
+  // the install's own shape.
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("link", { name: /sports/i }),
+    ).not.toBeInTheDocument(),
+  );
   expect(
     screen.queryByRole("button", { name: "Wanted" }),
   ).not.toBeInTheDocument();
   await user.type(screen.getByLabelText("Search"), "Sports");
-  expect(
-    await within(
-      await screen.findByRole("region", { name: "Pages" }),
-    ).findByRole("link", { name: "Sports" }),
-  ).toHaveAttribute("href", "/settings/connections");
-  await user.keyboard("{Escape}");
-  await user.click(setup);
+  const result = await within(
+    await screen.findByRole("region", { name: "Pages" }),
+  ).findByRole("link", { name: "Sports" });
+  expect(result).toHaveAttribute("href", "/settings/connections");
+  await user.click(result);
   expect(router.state.location.pathname).toBe("/settings/connections");
 });
 
@@ -159,17 +162,20 @@ it.each([true, false])(
     const menu = await screen.findByRole("button", { name: "Open navigation" });
     await user.click(menu);
     const drawer = await screen.findByRole("dialog", { name: "Navigation" });
-    const sports = await within(drawer).findByRole("link", {
-      name: isEnabled ? /^Sports/ : "Set up sports",
-    });
-    expect(sports).toHaveAttribute(
-      "href",
-      isEnabled ? "/sports" : "/settings/connections",
-    );
-    await user.click(sports);
-    expect(router.state.location.pathname).toBe(
-      isEnabled ? "/sports" : "/settings/connections",
-    );
+    const sports = within(drawer).queryByRole("link", { name: /sports/i });
+    if (isEnabled) {
+      expect(sports).toHaveAttribute("href", "/sports");
+      await user.click(sports!);
+      expect(router.state.location.pathname).toBe("/sports");
+    } else {
+      // The drawer mirrors the rail: nothing for a library that is not there,
+      // and no setup entry standing in for it. Settings still leads out.
+      expect(sports).not.toBeInTheDocument();
+      expect(
+        within(drawer).getByRole("link", { name: "Settings" }),
+      ).toBeInTheDocument();
+      await user.keyboard("{Escape}");
+    }
     await waitFor(() =>
       expect(
         screen.queryByRole("dialog", { name: "Navigation" }),

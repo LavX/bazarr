@@ -572,17 +572,40 @@
   }
 }
 
-/* The single line that stands in for the library half on an install that has
-   no library. Deliberately not a panel: a bordered block here would be the
-   "your library" section again under another name. */
-.libraryHint {
+/* What stands in for the library half on an install that has no library, and
+   the way out of it. A soft strip rather than a panel, the same raised tint the
+   rest of the page uses for its quiet surfaces: a bordered card here would be
+   the "your library" section again under another name, and the close control
+   is what makes it a notice rather than a paragraph that never goes away. */
+.libraryNotice {
   display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 18px;
+  padding: 8px 8px 8px 14px;
+  border-radius: 12px;
+  background: var(--bz-surface-raised);
+  color: var(--bz-text-secondary);
+  font-size: 0.875rem;
+  /* The button is Mantine's, so it arrives with Mantine's colours: the page
+     carries its own day/night pair and the two do not have to agree. */
+  :global(.mantine-CloseButton-root) {
+    color: var(--bz-text-secondary);
+    &:hover {
+      color: var(--bz-text-primary);
+    }
+  }
+}
+
+.libraryNoticeCopy {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
   flex-wrap: wrap;
   align-items: baseline;
   gap: 8px;
-  margin: 0 0 18px;
-  color: var(--bz-text-secondary);
-  font-size: 0.875rem;
+  margin: 0;
   a {
     color: var(--bh-accent);
     font-weight: 600;

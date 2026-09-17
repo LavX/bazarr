@@ -1,12 +1,6 @@
 import { NavLink, useLocation } from "react-router";
 import { Badge, Menu, Tooltip } from "@mantine/core";
-import {
-  faChevronRight,
-  faCircle,
-  faFilm,
-  faPlay,
-  faTrophy,
-} from "@fortawesome/free-solid-svg-icons";
+import { faChevronRight, faCircle } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import logoSrc from "@/assets/images/logo_no_orb128.png";
 import { useNavbar } from "@/contexts/Navbar";
@@ -39,22 +33,15 @@ function visible(route: CustomRouteObject) {
 
 export default function NavigationRail({
   groups,
-  routes,
   onOpenJobs,
 }: {
   groups: { label: string; items: CustomRouteObject[] }[];
-  routes: CustomRouteObject[];
   onOpenJobs: () => void;
 }) {
   const { show } = useNavbar();
   const { pathname } = useLocation();
-  const connections = routes
-    .find((r) => r.path === "settings")
-    ?.children?.find(
-      (r: CustomRouteObject) => r.path === "connections" && !r.hidden,
-    );
-  function item(route: CustomRouteObject, setup = false) {
-    const path = setup ? "/settings/connections" : pathJoin("/", route.path!);
+  function item(route: CustomRouteObject) {
+    const path = pathJoin("/", route.path!);
     const label = labels[route.path!] ?? route.name!;
     const icon = route.icon ?? faCircle;
     const badge =
@@ -109,8 +96,7 @@ export default function NavigationRail({
             .join(", ") || `${badge} items`
       : undefined;
     const children: CustomRouteObject[] = route.children?.filter(visible) ?? [];
-    const isCurrent =
-      !setup && (pathname === path || pathname.startsWith(path + "/"));
+    const isCurrent = pathname === path || pathname.startsWith(path + "/");
     if (children.length && !route.element) {
       return (
         <Menu
@@ -167,17 +153,14 @@ export default function NavigationRail({
     return (
       <Tooltip
         key={route.path}
-        label={
-          setup ? `Set up ${label.toLowerCase()} in Connections` : route.name
-        }
+        label={route.name}
         position="right"
         openDelay={500}
       >
         <NavLink
           to={path}
-          aria-label={setup ? `${label}, set up a library connection` : label}
+          aria-label={label}
           aria-description={description}
-          aria-current={setup ? "false" : undefined}
           className={styles.railLink}
           onClick={() => show(false)}
         >
@@ -206,27 +189,6 @@ export default function NavigationRail({
             className={styles.railGroup}
           >
             {group.items.map((route) => item(route))}
-            {group.label === "Media" &&
-              connections &&
-              ["series", "movies", "sports"]
-                .filter(
-                  (path) => !group.items.some((route) => route.path === path),
-                )
-                .map((path) =>
-                  item(
-                    {
-                      path,
-                      name: labels[path],
-                      icon:
-                        path === "series"
-                          ? faPlay
-                          : path === "sports"
-                            ? faTrophy
-                            : faFilm,
-                    },
-                    true,
-                  ),
-                )}
           </div>
         ))}
       </div>
