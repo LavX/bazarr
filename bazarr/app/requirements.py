@@ -119,7 +119,7 @@ RUNTIME_REQUIREMENTS = {
     "fcache": ("fcache", "==0.6.0"),
     "fese": ("fese", "==0.3.0"),
     "ffmpeg": ("ffmpeg-python", "==0.2.0"),
-    "ffsubsync": ("ffsubsync", "==0.5.0"),
+    "ffsubsync": ("ffsubsync", "==0.5.1"),
     "autosubsync": ("autosubsync", "==1.0.1"),
     "filetype": ("filetype", "==1.2.0"),
     "flask": ("Flask", "==3.1.3"),
