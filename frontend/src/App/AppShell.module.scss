@@ -14,31 +14,41 @@
   .appHeader {
     padding: 0 !important;
     border: 0 !important;
+    // The only rule that sets this background. It outranks a plain class on
+    // specificity, which is how a second copy of it in the global sheet lost
+    // without saying so.
+    //
     // Transparent at rest so whatever the page puts at its top, the Discover
     // hero's glow among it, carries on through this band instead of ending at
     // a hard horizontal seam. Nothing is behind the header at scroll zero: the
     // shell already offsets the content by the header's height.
     background: transparent !important;
-    backdrop-filter: none;
+    // Prefixed first, standard last, on both pairs. The production minifier
+    // treats the two as one property and keeps whichever came last, so writing
+    // the standard form first leaves only the prefixed one in the bundle, and
+    // Chromium does not implement the prefixed one. The blur then works on the
+    // dev server and silently stops applying in a release build.
     -webkit-backdrop-filter: none;
+    backdrop-filter: none;
     transition:
       background-color 180ms ease,
       backdrop-filter 180ms ease,
       box-shadow 180ms ease;
     &[data-scrolled="true"] {
-      // Content is passing underneath now, so the header needs a surface. A
-      // translucent one keeps the page readable through it without letting it
-      // compete with the page title and the search field.
+      // Content is passing underneath now, so the band takes the ground's own
+      // colour at almost full opacity. The opacity is the load-bearing part:
+      // anything legible through it arrives inside the page title, because the
+      // title sits on the surface a heading is crossing. The blur only softens
+      // what little reaches through, so it is an enhancement and never the
+      // thing the band's legibility rests on.
       background: color-mix(
         in srgb,
-        var(--bz-surface-base) 72%,
+        var(--bz-surface-ground) 97%,
         transparent
       ) !important;
-      backdrop-filter: blur(16px) saturate(1.15);
-      // Paired deliberately: without the prefixed property a WebKit engine
-      // that needs it applies no blur at all, and a 72% transparent band then
-      // shows the content scrolling underneath straight through the title.
+      // Same ordering rule as the at-rest pair above.
       -webkit-backdrop-filter: blur(16px) saturate(1.15);
+      backdrop-filter: blur(16px) saturate(1.15);
       box-shadow: 0 1px 0 var(--bz-border-interactive);
     }
     @media (prefers-reduced-motion: reduce) {
