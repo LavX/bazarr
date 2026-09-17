@@ -24,7 +24,8 @@ alongside the previous heroes.
 
 - `src/theme.ts` brand constants and the loop's timing contract
 - `src/brand.ts` the atmosphere, ported from `site/hero/`: backdrop, grade, grain, vignette, title block
-- `src/Clockwork.tsx` the v2.6.0 motif. A new release replaces this file
+- `src/Clockwork.tsx` the v2.6.0 motif, and `src/AtlasGlobe.tsx` the v2.7.0 one.
+  One file per release; `Hero.tsx` picks the motif by codename
 - `src/Hero.tsx` the shell that stacks the layers. Shared across releases
 
 Only the motif changes between releases. The palette, the navy atmosphere and the
