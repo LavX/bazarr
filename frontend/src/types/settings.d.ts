@@ -88,6 +88,7 @@ declare namespace Settings {
     update_restart: boolean;
     upgrade_frequency: number;
     upgrade_manual: boolean;
+    upgrade_translated: boolean;
     use_embedded_subs: boolean;
     use_jellyfin?: boolean;
     use_emby?: boolean;

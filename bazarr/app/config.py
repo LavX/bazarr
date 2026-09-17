@@ -100,6 +100,23 @@ def normalize_stored_provider_routing(stored_routing):
         return stored_routing
     return UPGRADED_PROVIDER_ROUTING
 
+
+def migrate_upgrade_subtitle_toggles(settings, existing_config) -> bool:
+    """Split the combined manual/translated upgrade toggle.
+
+    New installs get both off via validator defaults. Existing configs keep
+    whatever they already stored for ``upgrade_manual``, or the old default
+    (on) if the key was missing. Translated upgrades start off and are never
+    copied from the old combined value.
+    """
+    if settings.get('general.upgrade_translated') is not None:
+        return False
+    settings['general.upgrade_translated'] = False
+    if existing_config and settings.get('general.upgrade_manual') is None:
+        settings['general.upgrade_manual'] = True
+    return True
+
+
 ONE_HUNDRED_YEARS_IN_MINUTES = 52560000
 ONE_HUNDRED_YEARS_IN_HOURS = 876000
 
@@ -244,7 +261,8 @@ validators = [
     Validator('general.upgrade_frequency', must_exist=True, default=12, is_type_of=int,
               is_in=[6, 12, 24, 168, ONE_HUNDRED_YEARS_IN_HOURS]),
     Validator('general.days_to_upgrade_subs', must_exist=True, default=7, is_type_of=int, gte=0, lte=30),
-    Validator('general.upgrade_manual', must_exist=True, default=True, is_type_of=bool),
+    Validator('general.upgrade_manual', must_exist=True, default=False, is_type_of=bool),
+    Validator('general.upgrade_translated', must_exist=True, default=False, is_type_of=bool),
     Validator('general.anti_captcha_provider', must_exist=True, default=None, is_type_of=(NoneType, str),
               is_in=[None, 'anti-captcha', 'death-by-captcha', 'captchaai']),
     Validator('general.wanted_search_frequency', must_exist=True, default=6, is_type_of=int, 
@@ -796,6 +814,7 @@ if os.path.getsize(config_yaml_file) > 0:
         logging.info("Existing configuration has no usable OpenRouter provider routing (%r); keeping %s, "
                      "which every AI Subtitle Translator version serves.", stored_routing,
                      UPGRADED_PROVIDER_ROUTING)
+    migrate_upgrade_subtitle_toggles(settings, existing_config=True)
 
 failed_validator = True
 while failed_validator:

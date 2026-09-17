@@ -24,6 +24,7 @@ def upgrade_db(monkeypatch):
         general=SimpleNamespace(
             days_to_upgrade_subs=365,
             upgrade_manual=False,
+            upgrade_translated=False,
             upgrade_subs=True,
             # get_upgradable_media_ids gained a sports branch, gated on the
             # master toggle so a non-sports install does not pay for the query.

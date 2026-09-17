@@ -1435,6 +1435,7 @@ def test_provider_upgrades_and_replacements_do_not_translate_existing_sources(
     if mode == 'upgrade':
         monkeypatch.setattr(settings.general, 'upgrade_subs', True)
         monkeypatch.setattr(settings.general, 'upgrade_manual', True)
+        monkeypatch.setattr(settings.general, 'upgrade_translated', False)
         monkeypatch.setattr(settings.general, 'days_to_upgrade_subs', 30)
         result = workflows.upgrade_sports_subtitles(job_id='fixture', arr_instance_id=1)
         assert result['data'][0]['downloads'] == 1
@@ -1471,7 +1472,8 @@ def test_translated_null_score_upgrades_use_zero_baseline_and_keep_owned_selecti
 
     automatic, _, workflows, _, session, _ = workflow_library
     monkeypatch.setattr(settings.general, 'upgrade_subs', True)
-    monkeypatch.setattr(settings.general, 'upgrade_manual', manual)
+    monkeypatch.setattr(settings.general, 'upgrade_manual', False)
+    monkeypatch.setattr(settings.general, 'upgrade_translated', manual)
     monkeypatch.setattr(settings.general, 'days_to_upgrade_subs', 30)
     for event_id, owner in [(61, 1), (62, 2)]:
         automatic.search_event(event_id, owner)
@@ -1515,7 +1517,8 @@ def test_translated_upgrade_support_keeps_other_upgrade_exclusions(workflow_libr
 
     automatic, _, workflows, _, session, _ = workflow_library
     monkeypatch.setattr(settings.general, 'upgrade_subs', True)
-    monkeypatch.setattr(settings.general, 'upgrade_manual', True)
+    monkeypatch.setattr(settings.general, 'upgrade_manual', False)
+    monkeypatch.setattr(settings.general, 'upgrade_translated', True)
     monkeypatch.setattr(settings.general, 'days_to_upgrade_subs', 30)
     automatic.search_event(61, 1)
     values = dict(action=6, score=None)
@@ -1638,7 +1641,8 @@ def test_sports_upgrade_marker_uses_the_latest_history_row_including_ties(workfl
     monkeypatch.setattr(batch, 'database', session)
     monkeypatch.setattr(settings.general, 'use_sportarr', True)
     monkeypatch.setattr(settings.general, 'upgrade_subs', True)
-    monkeypatch.setattr(settings.general, 'upgrade_manual', True)
+    monkeypatch.setattr(settings.general, 'upgrade_manual', False)
+    monkeypatch.setattr(settings.general, 'upgrade_translated', True)
     monkeypatch.setattr(settings.general, 'days_to_upgrade_subs', 30)
     now = datetime.now()
     for ident, action, score in [(100, 6, None), (101, later_action, later_score)]:
@@ -1665,6 +1669,7 @@ def test_an_older_history_row_is_not_flagged_upgradable(workflow_library, monkey
     automatic, _, workflows, _, session, _ = workflow_library
     monkeypatch.setattr(settings.general, 'upgrade_subs', True)
     monkeypatch.setattr(settings.general, 'upgrade_manual', True)
+    monkeypatch.setattr(settings.general, 'upgrade_translated', False)
     monkeypatch.setattr(settings.general, 'days_to_upgrade_subs', 30)
     automatic.search_event(61, 1)
     older = session.execute(sa.select(TableHistorySports)).scalars().one()
