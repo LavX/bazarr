@@ -172,6 +172,12 @@ export const whatsNew: Record<string, WhatsNewSlide[]> = {
       icon: faTag,
       cta: { label: "Open System Status", to: "/system/status" },
     },
+    {
+      title: "Translated upgrades are their own switch, and off",
+      body: "Translated subtitles shared the upgrade toggle with manual downloads, and that toggle was on by default, so the upgrade job kept replacing a translation with a provider listing every cycle even when the score did not improve. Settings, Subtitles now has one switch for manually downloaded or uploaded subtitles and another for translated ones. Both are off on a new install. On this upgrade your manual setting is kept and translated upgrades are off, so turn them on if you want provider subtitles to replace your translations.",
+      icon: faSliders,
+      cta: { label: "Open Subtitles settings", to: "/settings/subtitles" },
+    },
   ],
   "2.6.2": [
     {
