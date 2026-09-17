@@ -23,8 +23,13 @@
     // a hard horizontal seam. Nothing is behind the header at scroll zero: the
     // shell already offsets the content by the header's height.
     background: transparent !important;
-    backdrop-filter: none;
+    // Prefixed first, standard last, on both pairs. The production minifier
+    // treats the two as one property and keeps whichever came last, so writing
+    // the standard form first leaves only the prefixed one in the bundle, and
+    // Chromium does not implement the prefixed one. The blur then works on the
+    // dev server and silently stops applying in a release build.
     -webkit-backdrop-filter: none;
+    backdrop-filter: none;
     transition:
       background-color 180ms ease,
       backdrop-filter 180ms ease,
@@ -41,11 +46,9 @@
         var(--bz-surface-ground) 97%,
         transparent
       ) !important;
-      backdrop-filter: blur(16px) saturate(1.15);
-      // Paired deliberately: without the prefixed property a WebKit engine
-      // that needs it applies no blur at all, and the band loses the softening
-      // its unprefixed sibling gets.
+      // Same ordering rule as the at-rest pair above.
       -webkit-backdrop-filter: blur(16px) saturate(1.15);
+      backdrop-filter: blur(16px) saturate(1.15);
       box-shadow: 0 1px 0 var(--bz-border-interactive);
     }
     @media (prefers-reduced-motion: reduce) {
