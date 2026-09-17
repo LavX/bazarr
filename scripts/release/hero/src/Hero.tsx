@@ -22,6 +22,7 @@ import {
   useVideoConfig,
 } from "remotion";
 
+import { drawAtlasGores } from "./AtlasGores";
 import { drawClockwork } from "./Clockwork";
 import { Ctx, getBackdrop, Geometry, paintGrade, paintGrain, paintText, paintVignette } from "./brand";
 import { FONT_FAMILY } from "./theme";
@@ -116,7 +117,11 @@ export const Hero: React.FC<HeroProps> = ({ version, codename, seed, loopFrames 
     c.drawImage(getBackdrop(geo, seed), 0, 0);
 
     // 2. motif
-    drawClockwork(c, geo, { frame, dur });
+    if (codename.toLowerCase() === "atlas") {
+      drawAtlasGores(c, geo, { frame, dur });
+    } else {
+      drawClockwork(c, geo, { frame, dur });
+    }
 
     // 3. type. The shimmer crosses the codename once per loop, entering and
     // leaving fully outside the glyphs so the loop point shows no band.

@@ -21,9 +21,9 @@ export const RemotionRoot: React.FC = () => {
       height={HEIGHT}
       defaultProps={
         {
-          version: "2.6.0",
-          codename: "Clockwork",
-          seed: 260,
+          version: "2.7.0",
+          codename: "Atlas",
+          seed: 270,
         } satisfies HeroProps
       }
     />
@@ -59,9 +59,9 @@ export const RemotionRoot: React.FC = () => {
       height={HEIGHT}
       defaultProps={
         {
-          version: "2.6.0",
-          codename: "Clockwork",
-          seed: 260,
+          version: "2.7.0",
+          codename: "Atlas",
+          seed: 270,
           loopFrames: DURATION,
         } satisfies HeroProps
       }
