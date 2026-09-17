@@ -137,7 +137,7 @@ RUNTIME_REQUIREMENTS = {
     "json_tricks": ("json_tricks", "==3.17.3"),
     "knowit": ("knowit", "==0.6.1"),
     "lxml": ("lxml", ">=6.1.1"),
-    "msgpack": ("msgpack", "==1.2.1"),  # signalrcore over-pins ==1.1.2; we install signalrcore --no-deps
+    "msgpack": ("msgpack", "==1.2.2"),  # signalrcore over-pins ==1.1.2; we install signalrcore --no-deps
     "numpy": ("numpy", ">=2.5.2,<2.6.0"),
     "PIL": ("Pillow", ">=12.3.0"),
     "plexapi": ("plexapi", ">=4.18.2"),
