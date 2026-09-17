@@ -1069,19 +1069,24 @@
 
 .targetFields {
   display: grid;
-  // The first column holds the segmented Movie / Episode pair, which needs
-  // its full width rather than a fraction that clips the second label.
-  grid-template-columns: minmax(176px, 0.7fr) minmax(180px, 1.25fr) minmax(
-      180px,
-      1fr
-    );
+  // The track list is written per media type rather than fixed at the widest
+  // case: a track the current mode never fills is an empty column on the right
+  // of the row.
+  // The segmented pair is sized by its own labels rather than by a share of the
+  // row, because the track list changes with the media type and a share would
+  // resize the pair every time it is flipped. The 176px floor is what its two
+  // labels need before either is clipped.
+  grid-template-columns: minmax(176px, max-content) minmax(180px, 1fr);
   gap: 16px;
   align-items: start;
 
+  // Episode mode adds the season and episode pair. The IMDb ID is where the
+  // typing happens, so it keeps the larger share of what is left and the two
+  // number fields stay closer to the width their contents want.
   &:has(.episodeFields) {
     grid-template-columns:
-      minmax(176px, 0.75fr) minmax(150px, 1.2fr) minmax(145px, 1fr)
-      minmax(160px, 1fr);
+      minmax(176px, max-content) minmax(180px, 1.5fr)
+      minmax(240px, 1fr);
   }
 }
 
@@ -1901,6 +1906,11 @@
   .targetFields:has(.episodeFields) {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+  // Half a row is too narrow for two number fields. The pair takes the second
+  // row across both columns and splits it between them.
+  .episodeFields {
+    grid-column: 1 / -1;
+  }
 }
 
 @media (max-width: 700px) {
@@ -2117,7 +2127,10 @@
 .field {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  // The label sits on the same line as the Mantine labels beside it, so the
+  // control under it has to start where their inputs start. Mantine spaces a
+  // label from its input with the label's own line box, not with a gap.
+  gap: 0;
 }
 
 .fieldLabel {

@@ -287,6 +287,26 @@ describe("Discover retrieval", () => {
     expect(screen.getByLabelText("Search")).toBeEnabled();
   });
 
+  it("keeps the IMDb helper below its input so the manual row shares one input line", async () => {
+    const { user } = renderDiscover();
+    await selectTarget(user);
+    await openSearchOptions(user);
+    await user.click(screen.getByRole("radio", { name: "Episode" }));
+    const imdb = screen.getByLabelText("IMDb ID");
+    // The helper is load-bearing: it is the only thing on the page that says
+    // which of the two IMDb IDs the field wants, and it stays the field's
+    // accessible description wherever it is drawn.
+    expect(imdb).toHaveAccessibleDescription("Use the series IMDb ID.");
+    // Mantine renders a description between the label and the input by default,
+    // which drops this input a line below the season and episode fields beside
+    // it. The row keeps one input line only while the helper follows the input
+    // rather than preceding it.
+    const helper = screen.getByText("Use the series IMDb ID.");
+    expect(
+      imdb.compareDocumentPosition(helper) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it.each(["Search subtitles by IMDb ID", "Search providers by release name"])(
     "opens %s from an empty catalog without showing homepage retrieval controls",
     async (action) => {

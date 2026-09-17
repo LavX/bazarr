@@ -945,6 +945,16 @@ export default function Discover() {
                           ? "Use the series IMDb ID."
                           : "Use the film IMDb ID."
                       }
+                      // Same helper placement as the language field above.
+                      // Mantine's default puts the description between the
+                      // label and the input, which drops this input a line
+                      // below the season and episode fields beside it.
+                      inputWrapperOrder={[
+                        "label",
+                        "input",
+                        "description",
+                        "error",
+                      ]}
                       onChange={(event) => {
                         updateDraft({
                           imdbId: event.currentTarget.value,
