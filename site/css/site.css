@@ -358,6 +358,55 @@ h3 {
 .layer p { margin: 0; color: var(--ink-2); max-width: 62ch; }
 .layer p .term { color: var(--ink); border-bottom: 1px dotted var(--amber-line); cursor: help; }
 
+/* --- the two ways to run it ----------------------------------------------- */
+/* Two panels rather than one paragraph with a clause in it. The release changed
+   what the product is, so a reader who only skims has to be able to see that
+   there are two answers now, not one answer with an exception. The amber rule
+   marks the one that is new; it is the only thing on the page that moved. */
+.paths {
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px;
+  background: var(--hair); border: 1px solid var(--hair);
+  border-radius: var(--radius); overflow: hidden;
+}
+.path { padding: 30px; background: var(--plane-1); }
+.path-new { background: var(--plane-2); box-shadow: inset 3px 0 0 var(--amber); }
+.path-name {
+  font-size: 0.78rem; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--ink-3); margin-bottom: 14px;
+}
+.path-new .path-name { color: var(--amber); }
+.path h3 { margin-bottom: 8px; max-width: 28ch; }
+.path p { margin: 0; color: var(--ink-2); }
+.path p + p { margin-top: 13px; }
+
+/* --- what it connects to --------------------------------------------------- */
+/* The seven applications are not interchangeable: three say what media exists,
+   four are told when a subtitle lands. A grid of logos would flatten that, and a
+   reader who cannot see the split configures one of them as the other. */
+.wiring {
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px;
+  background: var(--hair); border: 1px solid var(--hair);
+  border-radius: var(--radius); overflow: hidden; margin-bottom: 30px;
+}
+.wire { padding: 30px; background: var(--plane-1); }
+/* One step brighter than the eyebrow labels in the layer stack above. These
+   two carry the distinction the section exists to make, and --ink-faint at
+   this size measures 2.6:1, which is below the 4.5:1 small text needs. */
+.wire-role {
+  font-size: 0.78rem; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--ink-3); margin-bottom: 14px;
+}
+.wire h3 { margin-bottom: 16px; max-width: 28ch; }
+.wire p { margin: 0; color: var(--ink-2); }
+.apps { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; margin: 0 0 18px; padding: 0; }
+.apps li {
+  display: inline-flex; align-items: baseline; gap: 8px;
+  padding: 7px 13px; border: 1px solid var(--hair-strong);
+  border-radius: var(--radius); background: var(--plane-3);
+  color: var(--ink); font-size: 0.94rem;
+}
+.apps .since { margin-left: 0; color: var(--ink-2); }
+
 /* --- proof ---------------------------------------------------------------- */
 .shots { display: grid; grid-template-columns: repeat(2, 1fr); gap: 28px; }
 .shot { display: flex; flex-direction: column; gap: 12px; }
@@ -607,6 +656,7 @@ footer ul { display: flex; flex-wrap: wrap; gap: 8px 24px; list-style: none; mar
    --------------------------------------------------------------------------- */
 @media (max-width: 900px) {
   .shots { grid-template-columns: 1fr; }
+  .paths, .wiring { grid-template-columns: 1fr; }
   .layer { grid-template-columns: 1fr; gap: 10px; padding: 24px; }
   .layer-name { padding-top: 0; }
   .depthkey { display: none; }
@@ -616,6 +666,7 @@ footer ul { display: flex; flex-wrap: wrap; gap: 8px 24px; list-style: none; mar
   body { font-size: 16px; }
   .container { padding: 0 20px; }
   section { padding: 76px 0; }
+  .path, .wire { padding: 24px; }
   .nav ul { gap: 18px; }
   .nav ul a { font-size: 0.86rem; white-space: nowrap; }
 
