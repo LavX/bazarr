@@ -275,9 +275,9 @@ export default function EpisodePicker({
           confirming the numbering by hand is the only route to a search. */}
       {unverified && !draft.manualEntry && (
         <Text size="sm">
-          This title has no TVDB series id at the metadata source, so its season
-          and episode numbers cannot be verified automatically. Confirm this
-          episode's season and number to search.
+          This title has no complete TVDB mapping at the metadata source, so its
+          season and episode numbers cannot be verified automatically. Confirm
+          this episode's season and number to search.
         </Text>
       )}
       {conflicting && (
