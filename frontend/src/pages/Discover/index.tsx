@@ -757,7 +757,7 @@ export default function Discover() {
                     )}
                   </>
                 )}
-                <Trending />
+                <Trending showIntro={showLibraryHalf} />
                 {state.browsing.trendingFilter !== "movie" && (
                   <RecentEpisodes />
                 )}
