@@ -178,9 +178,15 @@ beforeEach(() => {
   queryClient.clear();
 });
 
-/** The global half's own hero, which must be what opens the page. */
-async function globalHero() {
-  return screen.findByRole("heading", { name: "Beyond your library" });
+/**
+ * The global catalog, which must be what opens the page.
+ *
+ * Named by its region rather than its heading: on an install with no library
+ * the heading is deliberately gone, and the region keeps the same name either
+ * way, so one assertion covers both states.
+ */
+async function globalCatalog() {
+  return screen.findByRole("region", { name: "Beyond your library" });
 }
 
 it("opens on the global catalog when no arr instance is enabled", async () => {
@@ -197,7 +203,7 @@ it("opens on the global catalog when no arr instance is enabled", async () => {
     }),
   );
   open();
-  await globalHero();
+  await globalCatalog();
   expect(screen.queryByText("Your library")).not.toBeInTheDocument();
   expect(screen.queryByText("Recently fetched")).not.toBeInTheDocument();
   expect(screen.queryByText("Needs attention")).not.toBeInTheDocument();
@@ -221,7 +227,7 @@ it("hides the half for an enabled integration whose instances are all off", asyn
     }),
   );
   open();
-  await globalHero();
+  await globalCatalog();
   expect(
     await screen.findByRole("link", { name: "Connect a library" }),
   ).toBeInTheDocument();
@@ -239,7 +245,7 @@ it("keeps the half for a connected library that has indexed nothing yet", async 
   // The other side of the assertion the two hidden cases make: this is the
   // section whose absence they are pinning.
   expect(await screen.findByText("Still missing")).toBeInTheDocument();
-  await globalHero();
+  await globalCatalog();
   expect(
     screen.queryByRole("link", { name: "Connect a library" }),
   ).not.toBeInTheDocument();
@@ -248,7 +254,7 @@ it("keeps the half for a connected library that has indexed nothing yet", async 
 it("opens on the global catalog when the summary cannot be read", async () => {
   serve({ use_sonarr: true }, "unreadable");
   open();
-  await globalHero();
+  await globalCatalog();
   // The check that did not happen still gets said, and nothing crashes.
   expect(
     await screen.findByText("This check could not be completed."),
@@ -276,7 +282,7 @@ describe("the connect a library notice", () => {
   it("closes and stays closed across a fresh mount", async () => {
     serve({ use_sonarr: false, use_radarr: false }, noLibrarySummary());
     const view = open();
-    await globalHero();
+    await globalCatalog();
     expect(
       await screen.findByText(libraryOnboarding.summary),
     ).toBeInTheDocument();
@@ -293,7 +299,7 @@ describe("the connect a library notice", () => {
     // The close is remembered, not hidden for the rest of this render.
     view.unmount();
     open();
-    await globalHero();
+    await globalCatalog();
     expect(
       screen.queryByText(libraryOnboarding.summary),
     ).not.toBeInTheDocument();
@@ -305,7 +311,7 @@ describe("the connect a library notice", () => {
   it("is still offered to a reader who has not closed it", async () => {
     serve({ use_sonarr: false, use_radarr: false }, noLibrarySummary());
     open();
-    await globalHero();
+    await globalCatalog();
     expect(
       await screen.findByRole("link", { name: "Connect a library" }),
     ).toBeInTheDocument();

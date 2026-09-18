@@ -227,6 +227,26 @@ beforeEach(() => {
 });
 
 it("marks where the page stops describing the reader's own library", async () => {
+  // The heading is a line drawn between two halves, so it is only there when
+  // there are two: this is the install that has a library, and the case with
+  // none is asserted below.
+  server.use(
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({
+        general: {
+          theme: "auto",
+          use_sonarr: true,
+          use_radarr: false,
+          setup_complete: true,
+        },
+        discover: {
+          tmdb_configured: configured,
+          metadata_revision: revision,
+          locale: "en-US",
+        },
+      }),
+    ),
+  );
   browse();
   // Without this the local sections above and the global feeds below ran
   // together, and the feeds read as though they were still about the library.
@@ -240,6 +260,28 @@ it("marks where the page stops describing the reader's own library", async () =>
     ),
   ).toBeInTheDocument();
   // The section it opens is the one holding the global feed controls.
+  expect(
+    screen.getByRole("region", { name: /beyond your library/i }),
+  ).toContainElement(
+    screen.getByRole("group", { name: /global trending media/i }),
+  );
+});
+
+it("drops the heading with no library, and keeps the catalog it introduced", async () => {
+  // With no library half there is no "above" for the heading to divide from,
+  // and promising the catalog as a contrast to a library the reader does not
+  // have says nothing. The feeds themselves are the whole page here, so they
+  // stay, and the region keeps its name for a screen reader.
+  browse();
+  expect(
+    await screen.findByRole("group", { name: /global trending media/i }),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("heading", { name: /beyond your library/i }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByText(/trending worldwide, whether or not you already have/i),
+  ).not.toBeInTheDocument();
   expect(
     screen.getByRole("region", { name: /beyond your library/i }),
   ).toContainElement(

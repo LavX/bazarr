@@ -43,7 +43,16 @@ const filters: { value: TrendingMediaType; label: string }[] = [
   { value: "series", label: "Series" },
 ];
 
-export default function Trending() {
+export default function Trending({
+  showIntro = true,
+}: {
+  // The heading is the line where the page stops being about this install:
+  // everything above it was counted from the reader's own library, everything
+  // below is the wider catalog. With no library half there is no "above" for it
+  // to divide the page from, and a heading promising the catalog as a contrast
+  // to a library the reader does not have says nothing.
+  showIntro?: boolean;
+} = {}) {
   const { state, updateBrowsing, updateDraft } = useDiscover();
   const navigate = useNavigate();
   const { browsing } = state;
@@ -169,22 +178,30 @@ export default function Trending() {
       data?.status === "authentication_failed");
   return (
     <>
-      <section aria-labelledby="bh-global-title" className={styles.spotlight}>
+      <section
+        aria-labelledby={showIntro ? "bh-global-title" : undefined}
+        // The section keeps a name without its visible heading, so the region
+        // is still announced as something rather than as an unnamed group.
+        aria-label={showIntro ? undefined : "Beyond your library"}
+        className={styles.spotlight}
+      >
         {/* The line where the page stops being about this install. Everything
             above it was counted from the reader's own library; everything below
             is the wider catalog, most of which they do not have. Without a
             heading saying so, the two halves ran together and the feeds read as
             though they were still describing the library. */}
-        <div className={styles.globalIntro}>
-          <h2 id="bh-global-title">
-            <FontAwesomeIcon icon={faGlobe} aria-hidden="true" />
-            Beyond your library
-          </h2>
-          <p>
-            Films and series trending worldwide, whether or not you already have
-            them.
-          </p>
-        </div>
+        {showIntro && (
+          <div className={styles.globalIntro}>
+            <h2 id="bh-global-title">
+              <FontAwesomeIcon icon={faGlobe} aria-hidden="true" />
+              Beyond your library
+            </h2>
+            <p>
+              Films and series trending worldwide, whether or not you already
+              have them.
+            </p>
+          </div>
+        )}
         <div className={styles.filterRow}>
           <div
             role="group"
