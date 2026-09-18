@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useId, useRef } from "react";
 import { useBlocker } from "react-router";
-import { Button, Group, Stack, Text } from "@mantine/core";
+import { Button, Stack, Text } from "@mantine/core";
 import { modals } from "@mantine/modals";
+import styles from "./routers.module.scss";
 
 export function usePrompt(
   when: boolean,
@@ -86,7 +87,13 @@ export function usePrompt(
             <Text size="sm" c="var(--bz-text-tertiary)">
               {message}
             </Text>
-            <Group justify="flex-end" mt="lg" gap="xs">
+            {/* One row, or a deliberate column when there is no room for one.
+                See the stylesheet: a wrapping row put the third button on a
+                line of its own. */}
+            <div
+              className={styles.actions}
+              style={{ marginTop: "var(--mantine-spacing-lg)" }}
+            >
               {/* The visible label carries the meaning, and there is no
                   aria-label overriding it. A reader using voice control says
                   the words on the button, so an accessible name that does not
@@ -123,7 +130,7 @@ export function usePrompt(
                     : "Save and leave"}
                 </Button>
               )}
-            </Group>
+            </div>
           </Stack>
         ),
       };
