@@ -579,7 +579,12 @@
    is what makes it a notice rather than a paragraph that never goes away. */
 .libraryNotice {
   display: flex;
-  align-items: flex-start;
+  // Centred, not top-aligned: the close button is taller than a line of this
+  // copy, so aligning both to the top left the text sitting 11px above the
+  // button's own centre and the strip read as two things at different heights.
+  // Centring also keeps the button against the middle of the copy when the
+  // sentence wraps on a narrow screen.
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
   margin: 0 0 18px;
