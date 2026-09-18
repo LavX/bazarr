@@ -1,4 +1,4 @@
-import { FC, useMemo, useState } from "react";
+import { FC, useEffect, useMemo, useState } from "react";
 import {
   Anchor,
   Button,
@@ -12,7 +12,11 @@ import {
   TextInput,
   Title,
 } from "@mantine/core";
-import { useProviderHubProviders, useSettingsMutation } from "@/apis/hooks";
+import {
+  useProviderHubProviders,
+  useSettingsMutation,
+  useSystemSettings,
+} from "@/apis/hooks";
 import type {
   ProviderHubInstallation,
   ProviderHubManifest,
@@ -110,6 +114,13 @@ export interface ProviderConfigureStageProps {
  * and, once enabled, the credential fields derived from the provider manifest.
  * Continue is hard-gated until at least one provider is enabled, then persists
  * the enabled set plus each provider's per-field settings.
+ *
+ * The toggles start from the enabled providers Bazarr+ already has, rather than
+ * from an empty set. "Install recommended" enables its providers as it installs
+ * them, so this screen is where that has to show up, or the reader is asked to
+ * answer the same question twice; and because Continue writes the whole list,
+ * starting empty would silently turn off everything already on the moment they
+ * ticked one provider by hand.
  */
 const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
   onNext,
@@ -117,15 +128,28 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
   onInstallMore,
 }) => {
   const { data: providers } = useProviderHubProviders();
+  const { data: systemSettings } = useSystemSettings();
   const settings = useSettingsMutation();
 
   const installed = useMemo(() => providers ?? [], [providers]);
 
   const [enabled, setEnabled] = useState<string[]>([]);
+  // Until the reader touches a toggle, the toggles follow the truth: the
+  // settings query is the same list the backend reads for a provider's enabled
+  // state, and it is refreshed by the write that enabled the recommended set.
+  // Once the reader has answered for themselves, their answer stands.
+  const [answered, setAnswered] = useState(false);
+  useEffect(() => {
+    if (answered) {
+      return;
+    }
+    setEnabled(systemSettings?.general?.enabled_providers ?? []);
+  }, [answered, systemSettings]);
   // Keyed by `${providerId}::${fieldKey}` so different providers never collide.
   const [values, setValues] = useState<Record<string, string | boolean>>({});
 
   const toggleEnabled = (providerId: string) => {
+    setAnswered(true);
     setEnabled((current) =>
       current.includes(providerId)
         ? current.filter((id) => id !== providerId)

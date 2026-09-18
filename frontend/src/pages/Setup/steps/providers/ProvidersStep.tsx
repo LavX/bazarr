@@ -19,10 +19,21 @@ type Stage = "install" | "configure";
  * wrongly drop the user back on the install list. Instead we wait for the query
  * (loader), then derive: installed providers present -> configure. An explicit
  * user choice (`override`) wins so "install more" / "use installed" still work.
+ * "Installed" means a loaded version (active_version), not merely a row: see the
+ * note on hasInstalled below.
  */
 const ProvidersStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   const providersQuery = useProviderHubProviders();
-  const hasInstalled = (providersQuery.data ?? []).length > 0;
+  // A run stages its providers the moment each install answers, so counting any
+  // row at all flipped this step to configure while the install stage was still
+  // working: the outcome report and the restart that activates what was just
+  // installed never rendered, and the redirect that follows the restart then
+  // landed on top of a configure stage the reader had started answering. Only a
+  // provider that has a loaded version counts, which is what "installed" means
+  // on resume as well.
+  const hasInstalled = (providersQuery.data ?? []).some(
+    (provider) => provider.active_version != null,
+  );
 
   const [override, setOverride] = useState<Stage | null>(null);
   const stage: Stage = override ?? (hasInstalled ? "configure" : "install");

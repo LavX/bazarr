@@ -24,7 +24,9 @@ import { AxiosError } from "axios";
 import {
   useProviderHubCatalog,
   useProviderHubInstall,
+  useSettingsMutation,
   useSystem,
+  useSystemSettings,
 } from "@/apis/hooks";
 import api from "@/apis/raw";
 import type {
@@ -32,6 +34,7 @@ import type {
   ProviderHubManifest,
 } from "@/apis/raw/providerHub";
 import { parseManifest } from "@/pages/Settings/Providers/hub/utils";
+import { isRecommendedProvider } from "./recommended";
 import { redirectToSetup } from "./redirect";
 
 // How often we re-check the backend after the restart. The backend drops
@@ -55,6 +58,10 @@ const COUNTDOWN_TICK_MS = 1000;
 // and naming the way out, one more with three seconds left, and the ticking
 // number carries no announcement at all.
 const FINAL_ANNOUNCEMENT_SECONDS = 3;
+
+// Ties the one line explaining the recommended set to the button that acts on
+// it, so a screen reader hears what the set is along with the control.
+const RECOMMENDED_HINT_ID = "provider-install-recommended-hint";
 
 export interface ProviderInstallStageProps {
   hasInstalled: boolean;
@@ -125,6 +132,13 @@ function describeInstallError(reason: unknown): string {
  * spinning. Now the outcomes are collected per provider and shown, the restart
  * is gated on at least one provider having staged, and the failures can be
  * retried on their own without re-installing what already worked.
+ *
+ * The recommended set (see recommended.ts for what qualifies) is installed
+ * through that same run, and adds one step: the providers that staged are also
+ * enabled before the restart, so the reader who clicked it has a working search
+ * after the restart instead of a list of checkboxes to answer again. The
+ * settings write happens before the restart is fired, never after: the wizard
+ * navigates away from this page the moment Bazarr+ answers again.
  */
 const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   hasInstalled,
@@ -136,12 +150,18 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   const { data: catalog, isPending: catalogPending } = useProviderHubCatalog();
   const install = useProviderHubInstall();
   const { restart } = useSystem();
+  const settingsMutation = useSettingsMutation();
+  const { data: systemSettings } = useSystemSettings();
 
   const [selected, setSelected] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [restarting, setRestarting] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [outcomes, setOutcomes] = useState<InstallOutcome[] | null>(null);
+  // Why the recommended set installed but could not be enabled, in the
+  // settings API's own words. Staged providers still restart into place, so
+  // this is a note on the outcome list, not a reason to hold the restart.
+  const [enableError, setEnableError] = useState<string | null>(null);
   // Seconds left before a partial run restarts on its own; null when no
   // countdown is running (a clean run, an all-failed run, or one the reader
   // has cancelled by retrying).
@@ -153,6 +173,11 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   // Mirrors `outcomes` so a retry can fold its results into the previous run
   // without reading state through an updater (which StrictMode double-invokes).
   const outcomesRef = useRef<InstallOutcome[]>([]);
+  // The ids the recommended action asked to enable once they stage. Empty for
+  // every other run, which installs and nothing more. A retry of the recommended
+  // run keeps the ids that are still missing, so a provider that installs on the
+  // second attempt is enabled with the rest.
+  const enableOnStageRef = useRef<Set<string>>(new Set());
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // The restart is reachable from three places (a clean run, the countdown
   // expiring, the button). Firing it twice would send a second bounce request
@@ -196,6 +221,15 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
     // choices is rebuilt from catalog each render; filtering it is cheap.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [catalog, query]);
+
+  // The recommended set is a property of the catalog, not of the search box, so
+  // it is read off `choices` and never off `visible`: typing a query must not
+  // change what the button offers to install.
+  const recommended = useMemo(
+    () => choices.filter(isRecommendedProvider),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [catalog],
+  );
 
   const toggle = useCallback((providerId: string) => {
     setSelected((current) =>
@@ -252,6 +286,36 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
     startHealthPoll();
   }, [onInstalledNeedsRestart, restart, startHealthPoll]);
 
+  // Enables `ids` without dropping the providers already enabled, which on a
+  // fresh install is nothing and on a second visit is whatever the reader had
+  // turned on before. A failure is reported, not thrown: the providers are
+  // already staged and a restart will still load them.
+  const enableProviders = useCallback(
+    async (ids: string[]) => {
+      const current = systemSettings?.general?.enabled_providers;
+      if (current === undefined) {
+        // Writing without knowing the current list would replace it, and the
+        // readers who have one are the ones this must not do that to. Say so
+        // rather than turn their providers off quietly.
+        setEnableError(
+          "the providers that are already enabled could not be read",
+        );
+        return;
+      }
+      try {
+        await settingsMutation.mutateAsync({
+          "settings-general-enabled_providers": Array.from(
+            new Set([...current, ...ids]),
+          ),
+        });
+        setEnableError(null);
+      } catch (reason) {
+        setEnableError(describeInstallError(reason));
+      }
+    },
+    [settingsMutation, systemSettings],
+  );
+
   // Runs `targets` together and folds the results into `outcomes`, keeping any
   // provider that is not in this run exactly as it was. That is what makes a
   // retry of the failed subset additive rather than a fresh verdict.
@@ -261,6 +325,7 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
         return;
       }
       setInstalling(true);
+      setEnableError(null);
       const results = await Promise.allSettled(
         targets.map((choice) =>
           install.mutateAsync({ manifest: choice.manifest }),
@@ -286,6 +351,20 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
       }
       const merged = Array.from(byId.values());
       outcomesRef.current = merged;
+
+      // Before the restart, never after: the wizard leaves this page as soon as
+      // Bazarr+ answers again. Only the providers that actually staged are
+      // enabled, so a partial run enables exactly what installed.
+      const toEnable = merged
+        .filter(
+          (outcome) =>
+            outcome.staged && enableOnStageRef.current.has(outcome.providerId),
+        )
+        .map((outcome) => outcome.providerId);
+      if (toEnable.length > 0) {
+        await enableProviders(toEnable);
+      }
+
       setOutcomes(merged);
       setInstalling(false);
 
@@ -302,7 +381,7 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
       // Partial: the outcomes stay readable, then the restart happens anyway.
       setCountdown(PARTIAL_RESTART_SECONDS);
     },
-    [beginRestart, install],
+    [beginRestart, enableProviders, install],
   );
 
   useEffect(() => {
@@ -321,12 +400,28 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   }, [beginRestart, countdown]);
 
   const handleInstall = useCallback(() => {
+    // A hand-picked run installs and stops there, exactly as it always has. The
+    // reader answers the enable step on the next screen, where the configured
+    // providers are listed.
+    enableOnStageRef.current = new Set();
     outcomesRef.current = [];
     setOutcomes(null);
     return runInstall(
       choices.filter((choice) => selected.includes(choice.providerId)),
     );
   }, [choices, runInstall, selected]);
+
+  const handleInstallRecommended = useCallback(() => {
+    const ids = recommended.map((choice) => choice.providerId);
+    // Ticking the set as it installs is what makes the button legible: the
+    // reader sees all of it named in the list and in the count before the
+    // restart, and a provider they untick here is simply not installed.
+    enableOnStageRef.current = new Set(ids);
+    setSelected(ids);
+    outcomesRef.current = [];
+    setOutcomes(null);
+    return runInstall(recommended);
+  }, [recommended, runInstall]);
 
   const failed = (outcomes ?? []).filter((outcome) => !outcome.staged);
   const staged = (outcomes ?? []).filter((outcome) => outcome.staged);
@@ -360,6 +455,20 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
     return runInstall(retry);
   }, [choices, failed, runInstall]);
 
+  // The installs staged and the restart is still happening, so this is not a
+  // failure to act on here: it names the one thing the button promised and
+  // could not do, and where to do it instead. It is rendered in both of the
+  // views a run can end on, because a clean run never shows the outcome list.
+  const enableFailure =
+    enableError === null ? null : (
+      <Alert color="yellow" title="Installed, but not enabled">
+        <Text size="sm">
+          Bazarr+ could not enable these providers: {enableError} Enable them on
+          the next screen, or in Settings, Providers.
+        </Text>
+      </Alert>
+    );
+
   if (restarting) {
     return (
       <Stack align="center" justify="center" gap="lg" mih={260} py="xl">
@@ -371,6 +480,7 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
             once Bazarr+ is back, usually within a minute.
           </Text>
         </Stack>
+        {enableFailure}
         <Button variant="subtle" onClick={() => redirectToSetup()}>
           Taking too long? Reload now
         </Button>
@@ -399,6 +509,8 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
           )}
           <VisuallyHidden role="status">{announcement}</VisuallyHidden>
         </Stack>
+
+        {enableFailure}
 
         <List spacing="sm" center>
           {outcomes.map((outcome) => (
@@ -493,6 +605,24 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
         </Alert>
       ) : (
         <Stack gap="sm">
+          {recommended.length > 0 && (
+            <Stack gap={4} align="flex-start">
+              <Button
+                variant="light"
+                onClick={() => void handleInstallRecommended()}
+                loading={installing}
+                aria-describedby={RECOMMENDED_HINT_ID}
+              >
+                Install {recommended.length} recommended{" "}
+                {recommended.length === 1 ? "provider" : "providers"}
+              </Button>
+              <Text size="sm" c="dimmed" id={RECOMMENDED_HINT_ID}>
+                Providers that need no account and no extra service to work.
+                They are installed and enabled together, and Bazarr+ restarts
+                once to load them. Picking your own below still works.
+              </Text>
+            </Stack>
+          )}
           <TextInput
             placeholder="Search providers"
             leftSection={<FontAwesomeIcon icon={faMagnifyingGlass} />}

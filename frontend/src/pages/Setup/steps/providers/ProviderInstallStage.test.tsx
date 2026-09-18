@@ -3,7 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   useProviderHubCatalog,
   useProviderHubInstall,
+  useSettingsMutation,
   useSystem,
+  useSystemSettings,
 } from "@/apis/hooks";
 import api from "@/apis/raw";
 import { customRender, fireEvent, screen, waitFor } from "@/tests";
@@ -17,7 +19,9 @@ vi.mock("@/apis/hooks", async (importOriginal) => {
     ...actual,
     useProviderHubCatalog: vi.fn(),
     useProviderHubInstall: vi.fn(),
+    useSettingsMutation: vi.fn(),
     useSystem: vi.fn(),
+    useSystemSettings: vi.fn(),
   };
 });
 
@@ -37,11 +41,14 @@ vi.mock("./redirect", () => ({
 
 const mockedCatalog = vi.mocked(useProviderHubCatalog);
 const mockedInstall = vi.mocked(useProviderHubInstall);
+const mockedSettingsMutation = vi.mocked(useSettingsMutation);
+const mockedSystemSettings = vi.mocked(useSystemSettings);
 const mockedSystem = vi.mocked(useSystem);
 const mockedStatus = vi.mocked(api.system.status);
 const mockedRedirect = vi.mocked(redirectToSetup);
 
 const mutateAsync = vi.fn();
+const settingsMutateAsync = vi.fn();
 const restart = vi.fn();
 const onInstalledNeedsRestart = vi.fn();
 const onUseInstalled = vi.fn();
@@ -54,6 +61,12 @@ function setCatalog(entries: unknown[]) {
     // not answered yet.
     isPending: false,
   } as unknown as ReturnType<typeof useProviderHubCatalog>);
+}
+
+function setEnabledProviders(ids: string[]) {
+  mockedSystemSettings.mockReturnValue({
+    data: { general: { enabled_providers: ids } },
+  } as unknown as ReturnType<typeof useSystemSettings>);
 }
 
 const opensubtitlesEntry = {
@@ -78,6 +91,49 @@ const gestdownEntry = {
   version: "1.0.0",
   trusted: true,
   manifest: { id: "gestdown", name: "Gestdown" },
+};
+
+// Shaped like the real catalog entries: no credentials, nothing required, and
+// no helper service, which is what the recommended set is read from. `id`
+// carries the provider id as well, which is the key failOnly() rejects on.
+function recommendedEntry(providerId: string, name: string) {
+  return {
+    provider_id: providerId,
+    name,
+    version: "1.0.0",
+    trusted: true,
+    manifest: {
+      id: providerId,
+      provider_id: providerId,
+      name,
+      config_schema: {
+        type: "object",
+        properties: { request_delay_ms: { type: "integer", default: 0 } },
+      },
+    },
+  };
+}
+
+const subtitlecatEntry = recommendedEntry("subtitlecat", "SubtitleCat");
+const tvsubtitlesEntry = recommendedEntry("tvsubtitles", "TVsubtitles");
+
+// Not recommended: an API key is a signup, and it is required, so this one is
+// only reachable by ticking it by hand.
+const subdlEntry = {
+  provider_id: "subdl",
+  name: "SubDL",
+  version: "1.0.0",
+  trusted: true,
+  manifest: {
+    provider_id: "subdl",
+    name: "SubDL",
+    secret_fields: ["api_key"],
+    config_schema: {
+      type: "object",
+      required: ["api_key"],
+      properties: { api_key: { type: "string", secret: true } },
+    },
+  },
 };
 
 // Fails only the named providers, so a run can be set up to fail the first
@@ -125,11 +181,17 @@ describe("ProviderInstallStage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     setCatalog([opensubtitlesEntry, subsceneEntry]);
+    setEnabledProviders([]);
     mutateAsync.mockResolvedValue(undefined);
+    settingsMutateAsync.mockResolvedValue(undefined);
     mockedInstall.mockReturnValue({
       mutateAsync,
       isPending: false,
     } as unknown as ReturnType<typeof useProviderHubInstall>);
+    mockedSettingsMutation.mockReturnValue({
+      mutateAsync: settingsMutateAsync,
+      isPending: false,
+    } as unknown as ReturnType<typeof useSettingsMutation>);
     restart.mockImplementation((opts?: { onSuccess?: () => void }) => {
       opts?.onSuccess?.();
     });
@@ -624,5 +686,246 @@ describe("ProviderInstallStage", () => {
     );
 
     expect(onUseInstalled).toHaveBeenCalled();
+  });
+
+  // The ask was one action that installs and enables everything that needs no
+  // account and no extra service, so that a reader who does not know which of
+  // sixty providers will just work is not left to guess.
+  it("installs the recommended set, enables it, then restarts", async () => {
+    const user = userEvent.setup();
+    setCatalog([subtitlecatEntry, tvsubtitlesEntry, subdlEntry]);
+
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    // What the set means, and how many it is, are both readable before the
+    // click: the count is the button, the reason is the line under it.
+    const button = screen.getByRole("button", {
+      name: /install 2 recommended providers/i,
+    });
+    const hint = screen.getByText(/no account and no extra service/i);
+    expect(button).toHaveAttribute("aria-describedby", hint.id);
+
+    await user.click(button);
+
+    await waitFor(() => {
+      expect(mutateAsync).toHaveBeenCalledTimes(2);
+    });
+    expect(mutateAsync).toHaveBeenCalledWith({
+      manifest: subtitlecatEntry.manifest,
+    });
+    expect(mutateAsync).toHaveBeenCalledWith({
+      manifest: tvsubtitlesEntry.manifest,
+    });
+    // SubDL was never attempted: it asks for an API key.
+    expect(mutateAsync).not.toHaveBeenCalledWith({
+      manifest: subdlEntry.manifest,
+    });
+
+    // Enabled before the restart, never after: the page is gone by then.
+    await waitFor(() => {
+      expect(settingsMutateAsync).toHaveBeenCalledWith({
+        "settings-general-enabled_providers": ["subtitlecat", "tvsubtitles"],
+      });
+    });
+    await waitFor(() => {
+      expect(restart).toHaveBeenCalled();
+    });
+  });
+
+  it("keeps the providers that were already enabled", async () => {
+    const user = userEvent.setup();
+    setCatalog([subtitlecatEntry]);
+    setEnabledProviders(["opensubtitlescom"]);
+
+    customRender(
+      <ProviderInstallStage
+        hasInstalled
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /install 1 recommended provider/i }),
+    );
+
+    await waitFor(() => {
+      expect(settingsMutateAsync).toHaveBeenCalledWith({
+        "settings-general-enabled_providers": [
+          "opensubtitlescom",
+          "subtitlecat",
+        ],
+      });
+    });
+  });
+
+  it("reads the recommended set off the catalog, not off the search box", async () => {
+    const user = userEvent.setup();
+    setCatalog([subtitlecatEntry, tvsubtitlesEntry, subdlEntry]);
+
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    await user.type(screen.getByPlaceholderText(/search providers/i), "subdl");
+
+    // The list narrows; what the button offers does not.
+    expect(
+      screen.getByRole("checkbox", { name: /subdl/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /install 2 recommended providers/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("enables only what staged when part of a recommended install fails", async () => {
+    const user = userEvent.setup();
+    setCatalog([subtitlecatEntry, tvsubtitlesEntry]);
+    failOnly("tvsubtitles");
+
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /install 2 recommended providers/i }),
+    );
+
+    await waitFor(() => {
+      expect(settingsMutateAsync).toHaveBeenCalledWith({
+        "settings-general-enabled_providers": ["subtitlecat"],
+      });
+    });
+    // The same per-provider report the hand-picked run gives.
+    expect(
+      await screen.findByText(/some providers did not install/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/tvsubtitles is unavailable/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/installed, waiting for the restart/i),
+    ).toBeInTheDocument();
+  });
+
+  it("reports an enable that failed, and restarts anyway", async () => {
+    const user = userEvent.setup();
+    setCatalog([subtitlecatEntry]);
+    settingsMutateAsync.mockRejectedValue(new Error("config write failed"));
+
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /install 1 recommended provider/i }),
+    );
+
+    expect(
+      await screen.findByText(/installed, but not enabled/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/config write failed/i)).toBeInTheDocument();
+    // Staged providers still load: the enable can be fixed on the next screen.
+    await waitFor(() => {
+      expect(restart).toHaveBeenCalled();
+    });
+  });
+
+  // Enabling is a union with what is already enabled, so a list that cannot be
+  // read is a list that must not be written: replacing it would turn off
+  // providers the reader had already chosen.
+  it("leaves the enabled list alone when it cannot be read", async () => {
+    const user = userEvent.setup();
+    setCatalog([subtitlecatEntry]);
+    mockedSystemSettings.mockReturnValue({
+      data: undefined,
+    } as unknown as ReturnType<typeof useSystemSettings>);
+
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /install 1 recommended provider/i }),
+    );
+
+    expect(
+      await screen.findByText(/installed, but not enabled/i),
+    ).toBeInTheDocument();
+    expect(settingsMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("installs and nothing more when providers are picked by hand", async () => {
+    const user = userEvent.setup();
+    setCatalog([subtitlecatEntry, subdlEntry]);
+
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    await user.click(screen.getByRole("checkbox", { name: /subtitlecat/i }));
+    await user.click(
+      screen.getByRole("button", { name: /install & restart/i }),
+    );
+
+    await waitFor(() => {
+      expect(restart).toHaveBeenCalled();
+    });
+    expect(settingsMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("offers no recommended action when nothing in the catalog qualifies", () => {
+    setCatalog([subdlEntry]);
+
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: /recommended/i }),
+    ).not.toBeInTheDocument();
+    // The step is still answerable by hand, exactly as before.
+    expect(
+      screen.getByRole("checkbox", { name: /subdl/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /install & restart/i }),
+    ).toBeInTheDocument();
   });
 });
