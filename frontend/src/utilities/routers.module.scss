@@ -1,0 +1,27 @@
+// The three ways out of the leave prompt.
+//
+// They share one row, which is not what a flex row does on its own here: left
+// to wrap, the third dropped onto a line of its own and the same choice read
+// twice, once as a pair and once as a stray. Three 44px-tall targets carrying
+// these labels need roughly 370px, and the dialog body at a 320px viewport is
+// nearer 288, so forbidding the wrap would have pushed them off the edge where
+// they are the only way out. Under that width they stack instead, each one a
+// full-width target, which is what a narrow screen wants anyway. The stack
+// keeps the source order rather than reversing it, so what a sighted reader
+// sees and what the tab key walks stay the same sequence.
+.actions {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  gap: var(--mantine-spacing-xs);
+
+  @media (max-width: 30em) {
+    flex-direction: column;
+    align-items: stretch;
+
+    > * {
+      width: 100%;
+    }
+  }
+}
