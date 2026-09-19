@@ -1,6 +1,8 @@
 .group {
   border-radius: var(--bz-radius-lg);
-  margin: 8px 12px;
+  // Matching the reduced vertical padding: the two together were most of the
+  // band's height on a row with nothing selected.
+  margin: 4px 12px;
 
   @include mantine.light {
     background-color: var(--mantine-color-gray-1);

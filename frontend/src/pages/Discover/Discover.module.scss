@@ -1320,37 +1320,6 @@
 // Concept type and spacing throughout: a 16px head, a 12px working title, a
 // 15px current task over an 11px scope line, a 4px amber bar, 11px arrival
 // rows with small tiles, and a Wanted row with its count right aligned.
-.localSummary {
-  display: flex;
-  flex-direction: column;
-  background: transparent;
-  border: 0;
-  border-left: 1px solid var(--bz-border-card);
-  padding: 0 0 0 22px;
-  h2 {
-    font-size: 1rem;
-    font-weight: 600;
-    letter-spacing: -0.02em;
-    color: var(--bz-text-primary);
-  }
-  p {
-    color: var(--bz-text-secondary);
-  }
-  a {
-    min-height: 44px;
-    display: inline-flex;
-    align-items: center;
-  }
-  strong {
-    font-variant-numeric: tabular-nums;
-  }
-  ul {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-  }
-}
-
 // The concept's rail head: the title on the left, the system-details arrow
 // on the right. The refresh control stays beside the arrow, drawn quiet so
 // the head keeps the concept's weight.
@@ -1791,24 +1760,11 @@
   .spotlight {
     order: -1;
   }
-  .homepageLayout[data-page="home"] .localSummary {
-    order: -2;
-  }
-  .homepageLayout[data-page="title"] .localSummary {
-    order: 1;
-    margin-top: 24px;
-  }
   // One column, so the rail's left seam would dangle at the screen's margin.
   // The concept's narrow treatment moves the seam to the bottom, separating
   // the reader's Bazarr+ from the discovery above it. The disclosure summary
   // returns here as the visible control it already is, keeping its
   // remembered open state.
-  .localSummary {
-    margin-bottom: 36px;
-    padding: 14px 16px 4px;
-    border: 0;
-    border-bottom: 1px solid var(--bz-border-card);
-  }
   .panelSummary {
     display: flex;
     align-items: center;
@@ -1867,9 +1823,6 @@
     min-height: 24px;
     margin-bottom: 5px;
   }
-  .localSummary h2 {
-    font-size: 0.8125rem;
-  }
   .current {
     padding-bottom: 5px;
   }
@@ -1889,47 +1842,6 @@
   .current .queueLink {
     margin-top: 5px;
   }
-  .localSummary[data-system="busy"] .current,
-  .localSummary[data-system="attention"] .current {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 3px 8px;
-    align-items: center;
-    .workingTitle {
-      grid-column: 1;
-      grid-row: 1;
-    }
-    .taskTitle {
-      display: none;
-    }
-    .taskScope {
-      grid-column: 1;
-      grid-row: 2;
-    }
-    .progressLine {
-      grid-column: 2;
-      grid-row: 1;
-      margin: 0;
-    }
-    .queueLink {
-      grid-column: 2;
-      grid-row: 2;
-      margin: 0;
-    }
-    .progress {
-      grid-column: 1 / -1;
-      grid-row: 3;
-      margin-top: 3px;
-    }
-    .taskMore,
-    .panelNote,
-    .countsLine {
-      grid-column: 1 / -1;
-    }
-  }
-}
-
-@media (max-width: 1000px) {
   .targetFields,
   .targetFields:has(.episodeFields) {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3218,14 +3130,6 @@
   .headActions a {
     min-width: 26px;
   }
-  .localSummary .panelHead {
-    min-height: 32px;
-    margin-bottom: 30px;
-  }
-  .localSummary .panelHead h2 {
-    white-space: nowrap;
-    font-size: 16px;
-  }
   .current {
     padding-bottom: 22px;
   }
@@ -3249,13 +3153,6 @@
   }
   .discover .header {
     margin-bottom: 20px;
-  }
-  .discover .localSummary {
-    padding: 18px 0 12px;
-    margin-bottom: 10px;
-  }
-  .discover .localSummary .panelHead {
-    margin-bottom: 12px;
   }
   .discover .current {
     padding-bottom: 4px;
@@ -3360,9 +3257,6 @@
 .discover .wantedRow {
   margin-top: 0;
   border-top: 0;
-}
-.discover .localSummary .panelHead {
-  margin-bottom: 22px;
 }
 .discover .panelStack.recent {
   margin-top: 0;
@@ -3638,10 +3532,6 @@
     .homepageContent,
     :global(#bh-browse) {
       display: block;
-    }
-    .localSummary {
-      order: 0;
-      margin-top: 32px;
     }
     .spotlight .feature {
       min-height: 320px;
@@ -4911,12 +4801,19 @@
   font-weight: 600;
   letter-spacing: 0.01em;
   max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   svg {
     width: 12px;
     flex: 0 0 auto;
+  }
+  // The truncation lives on the label, not on the pill. On the pill it did
+  // nothing, because the thing being clipped was an anonymous flex item.
+  // min-width: 0 is what lets a flex item shrink below its content width, which
+  // is the other half of eliding here.
+  .heroStatusText {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   &[data-tone="quiet"] svg {
     color: #6fd48b;
