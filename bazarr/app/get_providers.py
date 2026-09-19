@@ -275,8 +275,11 @@ def get_providers():
         if reason:
             now = datetime.datetime.now()
             if now < until:
-                logging.debug("Not using %s until %s, because of: %s", provider,
-                              until.strftime("%y/%m/%d %H:%M"), reason)
+                # INFO rather than DEBUG: a provider being skipped until a later
+                # hour is a decision about what the reader gets, and it is the
+                # line a report about a provider that "does nothing" needs.
+                logging.info("Not using %s until %s, because of: %s", provider,
+                             until.strftime("%y/%m/%d %H:%M"), reason)
                 providers_list.remove(provider)
             else:
                 logging.info("Using %s again after %s, (disabled because: %s)", provider, throttle_desc, reason)
