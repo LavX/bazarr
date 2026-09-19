@@ -291,6 +291,10 @@ validators = [
     Validator('log.exclude_filter', must_exist=True, default='', is_type_of=str, cast=str),
     Validator('log.ignore_case', must_exist=True, default=False, is_type_of=bool),
     Validator('log.use_regex', must_exist=True, default=False, is_type_of=bool),
+    # Logger names whose third-party level ceiling general.debug is allowed to
+    # lift. Empty by default: socketio.server and apscheduler at DEBUG are most
+    # of a debug-mode log, so asking for them back is opt-in.
+    Validator('log.verbose_loggers', must_exist=True, default=[], is_type_of=list),
 
     # auth section
     Validator('auth.apikey', must_exist=True, default=hexlify(os.urandom(16)).decode(), is_type_of=str),
@@ -975,6 +979,7 @@ array_keys = ['excluded_tags',
               'excluded_sports',
               'remove_profile_tags',
               'language_equals',
+              'verbose_loggers',
               'blacklisted_languages',
               'blacklisted_providers',
               'movie_library',

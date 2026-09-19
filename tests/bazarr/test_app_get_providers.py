@@ -248,6 +248,37 @@ class TestProviderIsUsable:
         )
         assert get_providers.provider_is_usable("opensubtitlescom")
 
+    def test_a_throttled_provider_says_so_above_debug(self, monkeypatch, caplog):
+        """Skipping a provider changes what the reader gets, so the line has to be
+        readable without general.debug. It was logging.debug, and a report that
+        "provider X does nothing" is exactly what that line answers. Pinned here
+        rather than in the level table, because the root logger would accept an
+        INFO record either way: only the call site says which level it is emitted
+        at."""
+        import datetime
+
+        monkeypatch.setattr(
+            get_providers.settings.general, "enabled_providers", ["opensubtitlescom"]
+        )
+        until = datetime.datetime.now() + datetime.timedelta(hours=1)
+        monkeypatch.setattr(
+            get_providers, "tp", {"opensubtitlescom": ("WorkerError", until, "5 minutes")}
+        )
+        # The hub registration gate is once per process, and the provider-hub tests
+        # in this same pytest process need it still unconsumed so their state file is
+        # read when they set it. This test is about the level of the throttle line.
+        monkeypatch.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
+
+        with caplog.at_level(logging.INFO):
+            # None, not [], is how an empty provider list comes back.
+            assert get_providers.get_providers() is None
+
+        record = next(
+            record for record in caplog.records
+            if "Not using opensubtitlescom" in record.getMessage()
+        )
+        assert record.levelno == logging.INFO
+
 
 class TestProviderHubSettingsOverlay:
     """The pool overlay copies a plugin's declared config keys out of the

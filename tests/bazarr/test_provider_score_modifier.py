@@ -23,7 +23,13 @@ class _Subtitle:
         self.hash_verifiable = False
 
     def __repr__(self):
-        return f'<_Subtitle {self.provider_name}>'
+        # Tolerant of the missing attribute on purpose: one test deletes
+        # provider_name to prove the scorer handles a subtitle without one, and
+        # the fork logs every scored candidate at INFO, so the repr is formatted
+        # by the logging module during that test. pytest fails a test whose log
+        # message cannot be formatted, and the subject here is the score, not the
+        # repr.
+        return f'<_Subtitle {getattr(self, "provider_name", None)}>'
 
 
 @pytest.fixture

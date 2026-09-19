@@ -128,6 +128,88 @@ class UnwantedWaitressMessageFilter(logging.Filter):
         return wanted
 
 
+# Per-logger levels as (level in a normal install, level with general.debug on).
+#
+# Every logger this module grades appears here once, in both columns, so a logger
+# cannot end up debug-only or normal-only. The two columns are deliberately not
+# symmetric: what a bug report needs is a line that is already there before anyone
+# asks the reporter to enable debug and reproduce, so the normal column is the one
+# that has to carry the provider lifecycle.
+#
+# `subliminal_patch` and `subzero` are Bazarr+'s own vendored fork under custom_libs/,
+# not third-party dependencies, so they do not get the ERROR or CRITICAL a foreign
+# library gets. A diagnosis needs `Terminating provider whisperai` as much as it needs
+# the discard warning beside it, and that line is INFO: a WARNING floor would drop it
+# from exactly the install that has to be read. Genuinely foreign libraries keep the
+# floor they already had, and no floor here is lower than the one it replaces.
+LOGGER_LEVELS = {
+    'alembic.runtime.migration': (logging.CRITICAL, logging.DEBUG),
+    'apprise': (logging.WARNING, logging.DEBUG),
+    'apscheduler': (logging.WARNING, logging.DEBUG),
+    'engineio.server': (logging.ERROR, logging.DEBUG),
+    'ffsubsync.aligners': (logging.ERROR, logging.DEBUG),
+    'ffsubsync.ffsubsync': (logging.ERROR, logging.DEBUG),
+    'ffsubsync.speech_transformers': (logging.ERROR, logging.DEBUG),
+    'ffsubsync.subtitle_parser': (logging.ERROR, logging.DEBUG),
+    'ga4mp.ga4mp': (logging.ERROR, logging.WARNING),
+    # Debug-only upstream, so in a normal install it inherits the root level. Spelled
+    # out at INFO to keep that, rather than let a future root change move it.
+    'git': (logging.INFO, logging.DEBUG),
+    'SignalRCoreClient': (logging.CRITICAL, logging.WARNING),
+    'socketio.server': (logging.ERROR, logging.DEBUG),
+    'srt': (logging.ERROR, logging.DEBUG),
+    'subliminal': (logging.CRITICAL, logging.DEBUG),
+    'subliminal_patch': (logging.INFO, logging.DEBUG),
+    'subzero': (logging.WARNING, logging.DEBUG),
+    'websocket': (logging.CRITICAL, logging.WARNING),
+}
+
+# Loggers Bazarr+ does not own that emit a line per event rather than a line per
+# decision. general.debug may not take these below their ceiling: one DEBUG emit per
+# socket broadcast is most of a debug-mode log, and nothing diagnosable is knowable
+# only from `emitting event "data" to all [/]`, because the payload is already
+# reconstructable from the emitting caller's own logging. WARNING and ERROR are
+# untouched, so a transport or scheduler fault still surfaces. log.verbose_loggers
+# names the exceptions for someone debugging that transport on purpose.
+LOGGER_LEVEL_CEILINGS = {
+    'apscheduler': logging.WARNING,
+    'engineio.server': logging.WARNING,
+    'socketio.server': logging.WARNING,
+}
+
+
+def _verbose_loggers():
+    """Logger names whose ceiling general.debug is allowed to lift.
+
+    Ships empty. A single name read back from the config file as a string is split
+    on commas and whitespace so a one-name list still lifts exactly that name.
+    """
+    configured = settings.get('log.verbose_loggers') or []
+    if isinstance(configured, str):
+        configured = re.split(r'[,\s]+', configured)
+    return {str(name).strip() for name in configured if str(name).strip()}
+
+
+def resolve_logger_levels(debug=False):
+    """The level each graded logger gets, as {name: level}.
+
+    Kept apart from configure_logging so the decision can be asserted without
+    installing handlers and a file on the root logger.
+    """
+    verbose = _verbose_loggers()
+    levels = {}
+    for name, (normal_level, debug_level) in LOGGER_LEVELS.items():
+        level = debug_level if debug else normal_level
+        ceiling = LOGGER_LEVEL_CEILINGS.get(name)
+        if debug and ceiling is not None and name not in verbose:
+            # max() is the more restrictive of the two, which is the ceiling's job.
+            # A normal install's own level is already at or above the ceiling, so
+            # verbose_loggers is only ever consulted in debug.
+            level = max(level, ceiling)
+        levels[name] = level
+    return levels
+
+
 def configure_logging(debug=False):
     warnings.simplefilter('ignore', category=ResourceWarning)
 
@@ -163,42 +245,14 @@ def configure_logging(debug=False):
     fh.setLevel(logging.DEBUG)
     logger.addHandler(fh)
 
+    for name, level in resolve_logger_levels(debug).items():
+        logging.getLogger(name).setLevel(level)
+
     if debug:
-        logging.getLogger("alembic.runtime.migration").setLevel(logging.DEBUG)
-        logging.getLogger("apscheduler").setLevel(logging.DEBUG)
-        logging.getLogger("subliminal").setLevel(logging.DEBUG)
-        logging.getLogger("subliminal_patch").setLevel(logging.DEBUG)
-        logging.getLogger("subzero").setLevel(logging.DEBUG)
-        logging.getLogger("git").setLevel(logging.DEBUG)
-        logging.getLogger("apprise").setLevel(logging.DEBUG)
-        logging.getLogger("engineio.server").setLevel(logging.DEBUG)
-        logging.getLogger("socketio.server").setLevel(logging.DEBUG)
-        logging.getLogger("ffsubsync.subtitle_parser").setLevel(logging.DEBUG)
-        logging.getLogger("ffsubsync.speech_transformers").setLevel(logging.DEBUG)
-        logging.getLogger("ffsubsync.ffsubsync").setLevel(logging.DEBUG)
-        logging.getLogger("ffsubsync.aligners").setLevel(logging.DEBUG)
-        logging.getLogger("srt").setLevel(logging.DEBUG)
         logging.debug('Bazarr version: %s', os.environ["BAZARR_VERSION"])
         logging.debug('Bazarr branch: %s', settings.general.branch)
         logging.debug('Operating system: %s', platform.platform())
         logging.debug('Python version: %s', platform.python_version())
-    else:
-        logging.getLogger("alembic.runtime.migration").setLevel(logging.CRITICAL)
-        logging.getLogger("apscheduler").setLevel(logging.WARNING)
-        logging.getLogger("apprise").setLevel(logging.WARNING)
-        logging.getLogger("subliminal").setLevel(logging.CRITICAL)
-        logging.getLogger("subliminal_patch").setLevel(logging.CRITICAL)
-        logging.getLogger("subzero").setLevel(logging.ERROR)
-        logging.getLogger("engineio.server").setLevel(logging.ERROR)
-        logging.getLogger("socketio.server").setLevel(logging.ERROR)
-        logging.getLogger("ffsubsync.subtitle_parser").setLevel(logging.ERROR)
-        logging.getLogger("ffsubsync.speech_transformers").setLevel(logging.ERROR)
-        logging.getLogger("ffsubsync.ffsubsync").setLevel(logging.ERROR)
-        logging.getLogger("ffsubsync.aligners").setLevel(logging.ERROR)
-        logging.getLogger("srt").setLevel(logging.ERROR)
-        logging.getLogger("SignalRCoreClient").setLevel(logging.CRITICAL)
-        logging.getLogger("websocket").setLevel(logging.CRITICAL)
-        logging.getLogger("ga4mp.ga4mp").setLevel(logging.ERROR)
 
     logging.getLogger("waitress").setLevel(logging.INFO)
     logging.getLogger("waitress").addFilter(UnwantedWaitressMessageFilter())
