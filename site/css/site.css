@@ -34,11 +34,21 @@
   --plane-2: #1a1a2e;  /* a panel lifted off the ground */
   --plane-3: #22223a;  /* a cel held closest to the reader */
 
-  /* --- ink --- */
+  /* --- ink: three levels, and there is no fourth --- */
+  /* These were four. `--ink-faint` at 0.30 measured 2.52:1 on plane 0, 2.58:1
+     on plane 1, 2.61:1 on plane 2 and 2.59:1 on plane 3, against the 4.5:1
+     small text needs, and it reached every guide page because `.breadcrumb`
+     and `.guide-rail a` carry it. The alpha that would clear AA is 0.4634 on
+     plane 0 up to 0.4838 on plane 3, and a single value at 0.49 sits three
+     hundredths under `--ink-3` at 0.52: two levels that measure the same and
+     read the same. So the labels, captions and version markers it carried are
+     `--ink-3` now, which measures 4.97:1 at worst. The three glyph sites went
+     the same way rather than keeping a fainter value for non-text use: at
+     4.97:1 to 5.41:1 they clear the 3:1 non-text floor with room over, so a
+     fourth level bought nothing anywhere on the page. */
   --ink: #fff8e1;
   --ink-2: rgba(255, 248, 225, 0.74);
   --ink-3: rgba(255, 248, 225, 0.52);
-  --ink-faint: rgba(255, 248, 225, 0.30);
 
   --hair: rgba(255, 248, 225, 0.10);
   --hair-strong: rgba(255, 248, 225, 0.18);
@@ -303,19 +313,6 @@ html:not(.js) .cels > .cue:first-child { opacity: 1; transform: none; }
 .cel.translated { color: var(--amber-bright); font-size: clamp(0.94rem, 1.5vw, 1.34rem); }
 .cel.is-off { display: none; }
 
-/* The depth key. It names the planes, and it is the same component the guides
-   reuse as their table of contents rail. */
-.depthkey {
-  position: absolute; right: 32px; bottom: 92px;
-  display: flex; flex-direction: column; align-items: flex-end; gap: 9px;
-  font-size: 0.72rem; letter-spacing: 0.14em; text-transform: uppercase;
-  color: var(--ink-faint);
-}
-.depthkey span { display: flex; align-items: center; gap: 9px; transition: color 0.4s var(--ease); }
-.depthkey i { display: block; width: 34px; height: 1px; background: var(--hair-strong); transform: scaleX(0.59); transform-origin: right center; transition: transform 0.4s var(--ease), background 0.4s var(--ease); }
-.depthkey span.on { color: var(--amber-bright); }
-.depthkey span.on i { transform: none; background: var(--amber-bright); }
-
 /* ---------------------------------------------------------------------------
    Sections
    --------------------------------------------------------------------------- */
@@ -351,7 +348,7 @@ h3 {
 .layer:hover { background: var(--plane-2); }
 .layer-name {
   font-size: 0.78rem; letter-spacing: 0.14em; text-transform: uppercase;
-  color: var(--ink-faint);
+  color: var(--ink-3);
   padding-top: 4px;
 }
 .layer h3 { margin-bottom: 6px; }
@@ -389,9 +386,9 @@ h3 {
   border-radius: var(--radius); overflow: hidden; margin-bottom: 30px;
 }
 .wire { padding: 30px; background: var(--plane-1); }
-/* One step brighter than the eyebrow labels in the layer stack above. These
-   two carry the distinction the section exists to make, and --ink-faint at
-   this size measures 2.6:1, which is below the 4.5:1 small text needs. */
+/* Same value as the eyebrow labels in the layer stack above, deliberately.
+   They used to differ, and the difference was a fainter ink that measured
+   2.6:1, which is why these two never used it. */
 .wire-role {
   font-size: 0.78rem; letter-spacing: 0.14em; text-transform: uppercase;
   color: var(--ink-3); margin-bottom: 14px;
@@ -433,12 +430,12 @@ h3 {
 .cluster { margin-top: 46px; }
 .cluster > h3 {
   font-size: 0.78rem; letter-spacing: 0.14em; text-transform: uppercase;
-  color: var(--ink-faint); font-weight: 500;
+  color: var(--ink-3); font-weight: 500;
   padding-bottom: 12px; border-bottom: 1px solid var(--hair); margin-bottom: 0;
 }
 .cmp { width: 100%; border-collapse: collapse; }
-.cmp caption { text-align: left; color: var(--ink-faint); font-size: 0.78rem; padding: 10px 0; }
-.cmp th { text-align: left; font-weight: 500; font-size: 0.78rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-faint); padding: 14px 16px; border-bottom: 1px solid var(--hair); }
+.cmp caption { text-align: left; color: var(--ink-3); font-size: 0.78rem; padding: 10px 0; }
+.cmp th { text-align: left; font-weight: 500; font-size: 0.78rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-3); padding: 14px 16px; border-bottom: 1px solid var(--hair); }
 .cmp td { padding: 16px; border-bottom: 1px solid var(--hair); vertical-align: top; font-size: 0.94rem; }
 .cmp tr:last-child td { border-bottom: 0; }
 .cmp .feature { color: var(--ink); font-weight: 500; width: 26%; }
@@ -446,9 +443,9 @@ h3 {
 .cmp .plus { color: var(--ink-2); }
 .cmp .plus strong { color: var(--ink); font-weight: 600; }
 .mark { display: inline-block; width: 1.1em; margin-right: 6px; }
-.mark.no { color: var(--ink-faint); }
+.mark.no { color: var(--ink-3); }
 .mark.yes { color: var(--amber); }
-.since { font-size: 0.72rem; color: var(--ink-faint); letter-spacing: 0.06em; margin-left: 6px; white-space: nowrap; }
+.since { font-size: 0.72rem; color: var(--ink-3); letter-spacing: 0.06em; margin-left: 6px; white-space: nowrap; }
 
 /* --- code ----------------------------------------------------------------- */
 .code { border: 1px solid var(--hair); border-radius: var(--radius); overflow: hidden; background: var(--plane-0); margin: 22px 0; }
@@ -494,7 +491,7 @@ code.inline {
   font: 500 1.06rem 'Geist Variable', sans-serif;
 }
 .faq-trigger:hover { color: var(--amber-bright); }
-.faq-trigger svg { flex: none; width: 18px; height: 18px; color: var(--ink-faint); transition: transform 0.3s var(--ease), color 0.3s var(--ease); }
+.faq-trigger svg { flex: none; width: 18px; height: 18px; color: var(--ink-3); transition: transform 0.3s var(--ease), color 0.3s var(--ease); }
 .faq-item.open .faq-trigger svg { transform: rotate(180deg); color: var(--amber); }
 
 /* Animating to intrinsic height, so an open answer cannot be clipped by a
@@ -533,7 +530,7 @@ code.inline {
 .horizon .horizon-when {
   display: block; margin: 3px 0 12px;
   font-size: 0.72rem; letter-spacing: 0.13em; text-transform: uppercase;
-  color: var(--ink-faint);
+  color: var(--ink-3);
 }
 .horizon p { margin: 0 0 10px; color: var(--ink-2); }
 .horizon ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 11px; }
@@ -548,7 +545,7 @@ code.inline {
 .horizon > .mid::before { background: var(--ink-3); }
 
 /* far: still legible, deliberately not competing with the near planes */
-.horizon > .far::before { background: var(--ink-faint); }
+.horizon > .far::before { background: var(--ink-3); }
 .horizon > .far h3 { color: var(--ink-2); }
 .horizon > .far p { color: var(--ink-3); }
 
@@ -659,7 +656,6 @@ footer ul { display: flex; flex-wrap: wrap; gap: 8px 24px; list-style: none; mar
   .paths, .wiring { grid-template-columns: 1fr; }
   .layer { grid-template-columns: 1fr; gap: 10px; padding: 24px; }
   .layer-name { padding-top: 0; }
-  .depthkey { display: none; }
 }
 
 @media (max-width: 720px) {
@@ -678,7 +674,7 @@ footer ul { display: flex; flex-wrap: wrap; gap: 8px 24px; list-style: none; mar
   .cmp tr { padding: 18px 0; border-bottom: 1px solid var(--hair); }
   .cmp td { border: 0; padding: 0; }
   .cmp .feature { font-size: 1.06rem; margin-bottom: 8px; width: auto; }
-  .cmp .up { font-size: 0.86rem; color: var(--ink-faint); margin-bottom: 6px; width: auto; }
+  .cmp .up { font-size: 0.86rem; color: var(--ink-3); margin-bottom: 6px; width: auto; }
   .cmp .up::before { content: 'Upstream: '; }
   .cmp .plus { color: var(--ink-2); }
 
@@ -691,7 +687,7 @@ footer ul { display: flex; flex-wrap: wrap; gap: 8px 24px; list-style: none; mar
   .opts tr { padding: 16px 0; border-bottom: 1px solid var(--hair); }
   .opts td { border: 0; padding: 0; }
   .opts td:first-child { font-size: 1.02rem; margin-bottom: 6px; }
-  .opts td:last-child { font-size: 0.86rem; color: var(--ink-faint); margin-top: 6px; }
+  .opts td:last-child { font-size: 0.86rem; color: var(--ink-3); margin-top: 6px; }
   .opts td:last-child::before { content: 'Needs AI Subtitle Translator '; }
 }
 
@@ -758,30 +754,11 @@ footer ul { display: flex; flex-wrap: wrap; gap: 8px 24px; list-style: none; mar
    honest state; it is never replaced with an approximation. */
 .stats { display: flex; flex-wrap: wrap; gap: 14px 40px; margin: 26px 0 0; align-self: flex-start; }
 .stats div { display: flex; flex-direction: column; gap: 2px; }
-.stats dt { font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); }
+.stats dt { font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-3); }
 .stats dd { margin: 0; font-size: 1.06rem; color: var(--ink-3); }
 .stats dd.live { color: var(--ink); }
 .stats dd a { color: inherit; }
 .stats dd time { color: var(--ink-3); font-size: 0.86rem; margin-left: 4px; }
-
-/* The depth key is now a control, so it has to read and behave as one. */
-.depthkey { align-items: flex-end; }
-.depthkey-hint {
-  margin: 0 0 4px; font-size: 0.72rem; letter-spacing: 0.1em;
-  text-transform: uppercase; color: var(--ink-faint);
-}
-.depthkey button {
-  display: flex; align-items: center; gap: 9px;
-  background: none; border: 0; padding: 3px 0; cursor: pointer;
-  font: 400 0.72rem 'Geist Variable', sans-serif;
-  letter-spacing: 0.14em; text-transform: uppercase;
-  color: var(--ink-faint);
-  transition: color 0.3s var(--ease);
-}
-.depthkey button:disabled { cursor: default; }
-.depthkey button:not(:disabled):hover { color: var(--ink-2); }
-.depthkey button.on { color: var(--amber-bright); }
-.depthkey button.on i { transform: none; background: var(--amber-bright); }
 
 /* The playhead. A real range input, so it is keyboard operable for free. */
 .scrub {
@@ -806,18 +783,15 @@ footer ul { display: flex; flex-wrap: wrap; gap: 8px 24px; list-style: none; mar
 .scrub input[type="range"]::-moz-range-thumb {
   width: 3px; height: 18px; border: 0; border-radius: 1px; background: var(--amber-bright);
 }
-.scrub output { font-size: 0.72rem; letter-spacing: 0.08em; color: var(--ink-faint); }
+/* The readout sits over the plate, not over a plane: the grade is thin on this
+   side of the hero, so --ink-3 cleared only 4.18:1 against the lightest frame
+   the loop plays. It is a value rather than a label, so it takes --ink-2, which
+   is the ink the rest of the hero's content uses. */
+.scrub output { font-size: 0.72rem; letter-spacing: 0.08em; color: var(--ink-2); }
 .hero.scrubbing { cursor: grabbing; }
 .hero.scrubbing .cel { transition-duration: 0.12s; }
 
 @media (max-width: 900px) {
-  /* the key is a control now, so it stays, it just moves into the flow */
-  .depthkey {
-    display: flex; position: static; align-items: flex-start;
-    margin-top: 28px;
-  }
-  .depthkey button { flex-direction: row-reverse; }
-  .depthkey button i { transform-origin: left center; }
   .scrub { position: static; margin-top: 18px; }
 }
 
@@ -841,7 +815,7 @@ footer ul { display: flex; flex-wrap: wrap; gap: 8px 24px; list-style: none; mar
 .breadcrumb {
   grid-column: 1 / -1;
   padding: 26px 0 0;
-  font-size: 0.86rem; color: var(--ink-faint);
+  font-size: 0.86rem; color: var(--ink-3);
 }
 .breadcrumb a { color: var(--ink-3); }
 .breadcrumb a:hover { color: var(--ink); }
@@ -874,7 +848,7 @@ footer ul { display: flex; flex-wrap: wrap; gap: 8px 24px; list-style: none; mar
 .guide-rail:empty { display: none; }
 .guide-rail a {
   display: flex; align-items: center; gap: 9px;
-  color: var(--ink-faint);
+  color: var(--ink-3);
   transition: color 0.3s var(--ease);
 }
 .guide-rail a::before {
@@ -906,14 +880,14 @@ footer ul { display: flex; flex-wrap: wrap; gap: 8px 24px; list-style: none; mar
 .content figure { margin: 26px 0; }
 .content table { width: 100%; border-collapse: collapse; margin: 22px 0; font-size: 0.94rem; }
 .content th, .content td { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--hair); vertical-align: top; }
-.content th { color: var(--ink-faint); font-size: 0.78rem; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 500; }
+.content th { color: var(--ink-3); font-size: 0.78rem; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 500; }
 
 /* Sentence case: these are captions naming what is in the picture, up to 49
    characters, not micro-labels. Uppercase flattened the proper nouns that make
    them scannable in the first place. */
 .shot-label {
   font-size: 0.76rem; letter-spacing: 0.01em;
-  color: var(--ink-faint); margin-bottom: 8px;
+  color: var(--ink-3); margin-bottom: 8px;
 }
 .screenshot-frame { border: 1px solid var(--hair); border-radius: var(--radius); padding: 12px; background: var(--plane-2); }
 
@@ -1086,11 +1060,6 @@ footer ul { display: flex; flex-wrap: wrap; gap: 8px 24px; list-style: none; mar
 
 #track { display: block; width: 100%; height: auto; }
 
-.hero-screen .depthkey {
-  position: static; flex-direction: row; flex-wrap: wrap;
-  align-items: center; justify-content: center; gap: 8px 22px;
-}
-.hero-screen .depthkey-hint { width: 100%; text-align: center; margin-bottom: 2px; }
 .hero-screen .scrub { position: static; }
 .screen-note {
   margin: 10px 0 0; text-align: right;
@@ -1107,8 +1076,6 @@ footer ul { display: flex; flex-wrap: wrap; gap: 8px 24px; list-style: none; mar
     gap: 40px;
     padding-top: 56px; padding-bottom: 64px;
   }
-  .hero-screen .depthkey { justify-content: flex-start; }
-  .hero-screen .depthkey-hint { text-align: left; }
 }
 
 
@@ -1135,6 +1102,9 @@ footer ul { display: flex; flex-wrap: wrap; gap: 8px 24px; list-style: none; mar
   transition: color 0.2s var(--ease), border-color 0.2s var(--ease), opacity 0.2s var(--ease);
 }
 .scrub .lane[data-track="dialogue"] { border-color: var(--hair-strong); color: var(--ink); }
-.scrub .lane.off { opacity: 0.42; border-color: var(--hair); color: var(--ink-faint); }
+/* The lane that is dropped from the combined subtitle. It carries no opacity
+   any more: 0.42 over a --ink-faint colour rendered at 1.46:1 against the
+   plate, and no value that still dims clears 4.5:1, so the off state is told
+   by the ink and the border rather than by dimming the whole button. */
+.scrub .lane.off { border-color: var(--hair); color: var(--ink-3); }
 .scrub .lane:hover { border-color: var(--amber-bright); }
-.hero-screen .depthkey { display: none; }
