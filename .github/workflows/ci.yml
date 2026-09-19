@@ -461,6 +461,7 @@ jobs:
             tests/bazarr/test_history_wanted_indexes.py \
             tests/bazarr/test_release_type_mismatch_migration.py \
             tests/bazarr/test_upstream_db_adoption.py \
+            tests/bazarr/test_upgrade_translated_loop.py \
             tests/bazarr/test_upstream_db_adoption_pg.py ; do
             echo "::group::$f"
             pytest "$f" -p no:cacheprovider -q

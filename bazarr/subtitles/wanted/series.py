@@ -26,7 +26,7 @@ from subliminal_patch.score import MAX_SCORES
 from ..adaptive_searching import is_search_active, updateFailedAttempts
 from ..download import generate_subtitles
 from ..language_profiles import build_translate_from_map
-from .utils import _find_existing_subtitle_path
+from .utils import _find_existing_subtitle_path, _provider_file_on_disk
 
 
 def _wanted_episode(episode, providers_list, job_id=None):
@@ -110,6 +110,26 @@ def _wanted_episode(episode, providers_list, job_id=None):
                             already_translated.subtitles_path
                         )
                         if local_subs_path and os.path.exists(local_subs_path):
+                            continue
+                        # The translated file is gone, and the upgrade that
+                        # removed it left a provider file for the language
+                        # behind. Translating again would put a row with the 50%
+                        # default back on top of the history and hand the next
+                        # upgrade the same listing to fetch, so a real subtitle
+                        # on disk ends this: it is already better than the
+                        # translation asking to be written.
+                        if _provider_file_on_disk(
+                            episode.subtitles,
+                            language,
+                            already_translated.subtitles_path,
+                            path_replace_fn=path_mappings.path_replace,
+                        ):
+                            logging.debug(
+                                "BAZARR auto-translate (wanted-scan) skipped for %s: "
+                                "language %s is already served by a subtitle from a "
+                                "provider",
+                                video_path, language,
+                            )
                             continue
                     # Fetch additional columns required by postprocess_subtitles
                     # (imdbId/tvdbId for plex/jellyfin refresh). episode_details
