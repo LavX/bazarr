@@ -1099,7 +1099,7 @@ footer ul { display: flex; flex-wrap: wrap; gap: 8px 24px; list-style: none; mar
   letter-spacing: 0.1em;
   color: var(--amber-bright);
   cursor: pointer;
-  transition: color 0.2s var(--ease), border-color 0.2s var(--ease), opacity 0.2s var(--ease);
+  transition: color 0.2s var(--ease), border-color 0.2s var(--ease);
 }
 .scrub .lane[data-track="dialogue"] { border-color: var(--hair-strong); color: var(--ink); }
 /* The lane that is dropped from the combined subtitle. It carries no opacity
