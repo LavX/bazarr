@@ -39,6 +39,11 @@ import {
 interface DiscoverContextValue {
   state: DiscoverState;
   rememberPage: (key: string, page: DiscoverState) => void;
+  /**
+   * Adopt the page filed for a browser history entry. Answers whether the
+   * caller can stop there: true when that page was restored, and true when the
+   * live state already is that page, so the URL must not be derived over it.
+   */
   restorePage: (key: string) => boolean;
   updateBrowsing: (changes: Partial<DiscoverBrowsing>) => void;
   updateDraft: (changes: Partial<DiscoverDraft>) => void;
@@ -133,6 +138,20 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
       Date.now() - entry.savedAt > 30 * 60_000
     )
       return false;
+    // A page is filed as the reader leaves its entry, so a page filed mid-search
+    // holds no results. The answer arrives after that, and it answers the same
+    // search: restoring the page over it would drop a result list the reader
+    // has already paid for, and the generation the restore moves on would
+    // retire that response instead when it has not landed yet. The live state
+    // is the fresher answer to the same search, so it stays, and the caller is
+    // told not to derive the URL over it.
+    const live = currentState.current;
+    if (
+      entry.state.snapshot === null &&
+      (live.snapshot !== null || live.status === "searching") &&
+      discoverContextKey(live.draft) === discoverContextKey(entry.state.draft)
+    )
+      return true;
     generation.current += 1;
     downloadSequence.current += 1;
     previewSequence.current += 1;
