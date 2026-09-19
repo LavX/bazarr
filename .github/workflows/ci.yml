@@ -172,10 +172,14 @@ jobs:
             tests/bazarr/test_gestdown_release_matching.py \
             tests/bazarr/test_dependency_loading.py \
             tests/bazarr/test_signalrcore_compat.py \
+            tests/bazarr/test_app_cors.py \
             tests/bazarr/test_app_get_providers.py \
             tests/bazarr/test_retired_provider_config_compat.py \
             tests/bazarr/test_settings_profile_deletion.py \
             tests/bazarr/test_jellyfin_apikey_location.py \
+            tests/bazarr/test_emby_api.py \
+            tests/bazarr/test_silo_api.py \
+            tests/bazarr/test_media_server_instances_api.py \
             tests/bazarr/test_provider_hub.py \
             tests/bazarr/test_provider_pool_config_reload.py \
             tests/bazarr/test_rar_extraction_production_config.py \
@@ -185,6 +189,7 @@ jobs:
             tests/bazarr/test_archive_member_matching.py \
             tests/bazarr/test_provider_hub_worker_timeout.py \
             tests/bazarr/test_arr_instances_schema.py \
+            tests/bazarr/test_sportarr_instances.py \
             tests/bazarr/test_arr_ownership_columns.py \
             tests/bazarr/test_arr_instance_repository.py \
             tests/bazarr/test_arr_instances_api.py \
@@ -199,6 +204,7 @@ jobs:
             tests/bazarr/test_arr_aux_leaves.py \
             tests/bazarr/test_arr_rootfolder.py \
             tests/bazarr/test_arr_local_id_cutover_migration.py \
+            tests/bazarr/test_activity_registry.py \
             tests/bazarr/test_jobs_queue_progress.py \
             tests/bazarr/test_jobs_concurrency_limit.py \
             tests/bazarr/test_processing_sync_substep.py \
@@ -218,8 +224,25 @@ jobs:
             tests/bazarr/test_security_guards.py \
             tests/bazarr/test_login_backdrops.py \
             tests/bazarr/test_onboarding_flag.py \
+            tests/bazarr/test_session_auth.py \
+            tests/bazarr/test_socket_auth.py \
+            tests/bazarr/test_session_cookie_policy.py \
+            tests/bazarr/test_session_settings_roundtrip.py \
             tests/bazarr/test_ui.py \
             tests/bazarr/test_utilities_video_analyzer.py \
+            tests/bazarr/test_sportarr_sync_references.py \
+            tests/bazarr/test_sportarr_retrieval_diagnostics.py \
+            tests/bazarr/test_sportarr_subtitle_file_download.py \
+            tests/bazarr/test_sportarr_editor.py \
+            tests/bazarr/test_sportarr_combine.py \
+            tests/bazarr/test_sportarr_webhook.py \
+            tests/bazarr/test_sportarr_manual_translate.py \
+            tests/bazarr/test_sportarr_mass_operations.py \
+            tests/bazarr/test_sportarr_pagination.py \
+            tests/bazarr/test_provider_blacklist_attribution.py \
+            tests/bazarr/test_sportarr_translate_source.py \
+            tests/bazarr/test_sportarr_league_sync_route.py \
+            tests/bazarr/test_sportarr_review_round.py \
             tests/bazarr/test_embedded_subtitle_extraction.py \
             tests/subliminal_patch/test_subliminal_rebase.py \
             tests/subliminal_patch/test_embeddedsubtitles.py \
@@ -253,6 +276,7 @@ jobs:
             tests/bazarr/test_anti_captcha_config.py \
             tests/bazarr/test_app_notifier.py \
             tests/bazarr/test_auto_translation_profile.py \
+            tests/bazarr/test_backup_contract.py \
             tests/bazarr/test_ci_guard_list.py \
             tests/bazarr/test_combine_aligner.py \
             tests/bazarr/test_combine_api_dto.py \
@@ -270,6 +294,7 @@ jobs:
             tests/bazarr/test_compat_cache.py \
             tests/bazarr/test_config.py \
             tests/bazarr/test_config_save.py \
+            tests/bazarr/test_container_hardening.py \
             tests/bazarr/test_embedded_history_indexer.py \
             tests/bazarr/test_encryption.py \
             tests/bazarr/test_extra_languages.py \
@@ -277,11 +302,25 @@ jobs:
             tests/bazarr/test_get_video_scenename_fallback.py \
             tests/bazarr/test_jellyfin_client.py \
             tests/bazarr/test_jellyfin_operations.py \
+            tests/bazarr/test_emby_client.py \
+            tests/bazarr/test_silo_client.py \
+            tests/bazarr/test_silo_scans.py \
+            tests/bazarr/test_media_server_paths.py \
+            tests/bazarr/test_media_server_http.py \
+            tests/bazarr/test_media_server_config.py \
+            tests/bazarr/test_media_server_instances.py \
+            tests/bazarr/test_media_server_instance_migration.py \
+            tests/bazarr/test_media_server_dispatcher.py \
+            tests/bazarr/test_media_server_convergence.py \
+            tests/bazarr/test_media_server_resolution.py \
+            tests/bazarr/test_media_server_mutation_hooks.py \
+            tests/bazarr/test_language_profile_guards.py \
             tests/bazarr/test_logging_filters.py \
             tests/bazarr/test_openrouter_provider_routing.py \
             tests/bazarr/test_openrouter_model_migration.py \
             tests/bazarr/test_openrouter_translator_partial.py \
             tests/bazarr/test_openrouter_translator.py \
+            tests/bazarr/test_translation_progress_lifecycle.py \
             tests/bazarr/test_translator_model_migration.py \
             tests/bazarr/test_provider_hub_install_serialization.py \
             tests/bazarr/test_provider_hub_language_fallback.py \
@@ -306,6 +345,7 @@ jobs:
             tests/bazarr/test_translate_job_media_name.py \
             tests/bazarr/test_translator_auth.py \
             tests/bazarr/test_upgrade_embedded_history.py \
+            tests/bazarr/test_upgrade_subtitle_toggles.py \
             tests/subliminal_patch/test_animetosho.py \
             tests/subliminal_patch/test_core.py \
             tests/subliminal_patch/test_prioritized_satisfaction.py \
@@ -332,11 +372,59 @@ jobs:
           set -e
           pip install "psycopg[binary]"
           for f in \
+            tests/bazarr/test_discover_metadata.py tests/bazarr/test_discover_feeds.py \
+            tests/bazarr/test_discover_digital_releases.py tests/bazarr/test_discover_recent_episodes.py \
+            tests/bazarr/test_discover_fallback.py \
+            tests/bazarr/test_discover_library.py \
+            tests/bazarr/test_discover_copy_matching.py \
+            tests/bazarr/test_discover_episodes.py \
+            tests/bazarr/test_discover_search.py \
+            tests/bazarr/test_discover_raw_query.py \
+            tests/bazarr/test_discover_download.py \
+            tests/bazarr/test_discover_preview.py \
+            tests/bazarr/test_discover_summary.py \
+            tests/bazarr/test_seerr_settings.py \
+            tests/bazarr/test_seerr_client.py \
+            tests/bazarr/test_seerr_operations.py \
+            tests/bazarr/test_seerr_api.py \
             tests/bazarr/test_editor_api.py \
             tests/bazarr/test_arr_atomicity_secrets.py \
             tests/bazarr/test_arr_pg_cutover_migration.py \
+            tests/bazarr/test_media_server_instances_pg.py \
+            tests/bazarr/test_media_server_convergence_migration.py \
+            tests/bazarr/test_sportarr_kind_migration.py \
+            tests/bazarr/test_sportarr_library_migration.py \
+            tests/bazarr/test_sportarr_leagues.py \
+            tests/bazarr/test_sportarr_events.py \
+            tests/bazarr/test_sportarr_manual.py \
+            tests/bazarr/test_sportarr_profile_hooks.py \
+            tests/bazarr/test_sportarr_review_callbacks.py \
+            tests/bazarr/test_sportarr_review_guards.py \
+            tests/bazarr/test_sportarr_review_findings.py \
+            tests/bazarr/test_sportarr_output.py \
+            tests/bazarr/test_subtitle_ownership_revision.py \
+            tests/bazarr/test_sportarr_workflows.py \
+            tests/bazarr/test_sportarr_blacklist_recovery.py \
+            tests/bazarr/test_sportarr_artifact_migration.py \
+            tests/bazarr/test_sportarr_indexer.py \
+            tests/bazarr/test_sportarr_indexer_cancellation.py \
+            tests/bazarr/test_sportarr_sse.py \
+            tests/bazarr/test_sportarr_settings.py \
+            tests/bazarr/test_sportarr_scheduler_gate.py \
+            tests/bazarr/test_sportarr_audio_language.py \
+            tests/bazarr/test_sportarr_notifications.py \
+            tests/bazarr/test_sportarr_download_settings.py \
+            tests/bazarr/test_sportarr_upgrade_cleanup.py \
+            tests/bazarr/test_sportarr_wanted_translate.py \
+            tests/bazarr/test_sportarr_observability.py \
+            tests/bazarr/test_sportarr_release_mismatch.py \
+            tests/bazarr/test_sportarr_manual_toolbox.py \
+            tests/bazarr/test_sportarr_subtitle_delete.py \
+            tests/bazarr/test_sportarr_subtitle_upload.py \
             tests/bazarr/test_editor_instance_scope.py \
             tests/bazarr/test_history_blacklist_scope.py \
+            tests/bazarr/test_history_metrics.py \
+            tests/bazarr/test_history_metrics_postgres.py \
             tests/bazarr/test_history_owner_resolution.py \
             tests/bazarr/test_local_id_actions.py \
             tests/bazarr/test_navigation_local_ids.py \
@@ -373,6 +461,7 @@ jobs:
             tests/bazarr/test_history_wanted_indexes.py \
             tests/bazarr/test_release_type_mismatch_migration.py \
             tests/bazarr/test_upstream_db_adoption.py \
+            tests/bazarr/test_upgrade_translated_loop.py \
             tests/bazarr/test_upstream_db_adoption_pg.py ; do
             echo "::group::$f"
             pytest "$f" -p no:cacheprovider -q

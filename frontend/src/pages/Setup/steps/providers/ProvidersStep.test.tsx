@@ -101,6 +101,9 @@ describe("ProvidersStep", () => {
         provider_id: "opensubtitles",
         name: "OpenSubtitles",
         state: "active",
+        // A loaded version is what makes a row an installed provider; a name and
+        // a state alone describe a provider that is still staging.
+        active_version: "1.0.0",
         manifest: { id: "opensubtitles", name: "OpenSubtitles" },
       },
     ]);
@@ -114,5 +117,33 @@ describe("ProvidersStep", () => {
     expect(
       screen.getByRole("button", { name: /continue/i }),
     ).toBeInTheDocument();
+  });
+
+  // A run writes a row per provider as each install answers, so the installed
+  // list fills in while the install stage is still going. Reading any row as
+  // "installed" swapped the sub-stage out from under the run: no outcome report,
+  // no restart, and the post-restart redirect then landed on a configure stage
+  // the reader had already started answering.
+  it("stays on the install stage while a run's providers are only staged", () => {
+    setProviders([
+      {
+        provider_id: "subtitlecat",
+        name: "SubtitleCat",
+        state: "staged",
+        pending_restart: true,
+        active_version: null,
+        staged_version: "1.0.0",
+        manifest: { id: "subtitlecat", name: "SubtitleCat" },
+      },
+    ]);
+
+    customRender(<ProvidersStep onNext={onNext} />);
+
+    expect(
+      screen.getByRole("button", { name: /install & restart/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^continue$/i }),
+    ).not.toBeInTheDocument();
   });
 });

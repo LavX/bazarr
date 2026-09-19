@@ -71,6 +71,16 @@ def decrypt_token(encrypted_token):
     return encrypted_token
 
 
+def sync_plex_account(**kwargs):
+    """Carry an account change onto the Plex destination row.
+
+    Imported lazily so this module keeps loading when the destination layer is
+    unavailable, which is the same reason its own failures are swallowed.
+    """
+    from media_servers.plex_account import sync_plex_account as sync
+    return sync(**kwargs)
+
+
 def generate_client_id():
     return str(uuid.uuid4())
 
@@ -362,6 +372,10 @@ class PlexPinCheck(Resource):
 
                 try:
                     write_config()
+                    # The account now holds the credential the refresh worker
+                    # needs, so its destination row has to hold it too, and a
+                    # completed sign-in switches it back on after a sign-out.
+                    sync_plex_account(signed_in=True)
                     pin_cache.delete(pin_id)
 
                     logger.info(
@@ -506,7 +520,6 @@ class PlexServers(Resource):
                     # Collect all connections for parallel testing
                     connection_candidates = []
                     connections = []
-                    all_device_connection_uris = []  # Store ALL URIs before testing
                     for conn in device.get('connections', []):
                         connection_data = {
                             'uri': conn['uri'],
@@ -516,7 +529,6 @@ class PlexServers(Resource):
                             'local': conn.get('local', False)
                         }
                         connection_candidates.append(connection_data)
-                        all_device_connection_uris.append(conn['uri'])  # Store ALL URIs
 
                     # Test all connections in parallel using threads
                     if connection_candidates:
@@ -558,18 +570,6 @@ class PlexServers(Resource):
                             'device': device.get('device')
                         }
                         servers.append(server_data)
-
-                        # Update stored connections if this is the currently selected server
-                        selected_machine_id = settings.plex.get('server_machine_id')
-                        if selected_machine_id and device['clientIdentifier'] == selected_machine_id:
-                            # Store ALL connection URIs (not just the working ones) for round-robin fallback
-                            settings.plex.server_connections = all_device_connection_uris
-                            # Update best connection if it changed
-                            if bestConnection:
-                                settings.plex.server_url = bestConnection['uri']
-                                settings.plex.server_local = bestConnection.get('local', False)
-                            write_config()
-                            logger.debug(f"Auto-updated connections for server {device['name']}: {len(all_device_connection_uris)} total, {len(connections)} available")
 
             return {'data': servers}
 
@@ -761,6 +761,9 @@ class PlexLogout(Resource):
             settings.general.use_plex = False
 
             write_config()
+            # Switched off and stripped of its credential, not deleted: signing
+            # back in keeps the libraries and toggles the user chose.
+            sync_plex_account(signed_out=True)
 
             return {'success': True}
         except Exception as e:
@@ -804,8 +807,13 @@ class PlexApiKey(Resource):
             settings.plex.apikey = apikey
             settings.plex.apikey_encrypted = False
             settings.plex.auth_method = 'apikey'
+            # Signing out switched Plex off. Typing in a key is the user asking
+            # for it back, so the master switch goes with the destination.
+            settings.general.use_plex = True
 
             write_config()
+            # Typing in a key is the same explicit "use Plex" as signing in.
+            sync_plex_account(signed_in=True)
 
             logger.debug("API key saved")
             return {'success': True, 'message': 'API key saved securely'}
@@ -927,6 +935,12 @@ class PlexSelectServer(Resource):
         # Store all connection URIs for round-robin fallback
         settings.plex.server_connections = connections if connections else [connection_uri]
         write_config()
+        # A different server is a different destination URL. The token is
+        # unchanged and is deliberately not resent, and switching servers is not
+        # itself a sign-in, so it leaves the instance toggle alone: the PIN step
+        # above already switched the row back on, and a first sign-in creates
+        # the row here already enabled.
+        sync_plex_account()
 
         return {
             'data': {

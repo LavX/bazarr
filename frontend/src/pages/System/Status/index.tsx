@@ -33,7 +33,8 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useSystemHealth, useSystemStatus } from "@/apis/hooks";
-import { useInstanceName } from "@/apis/hooks/site";
+import { useAppTitle } from "@/apis/hooks/site";
+import { useSportsAvailability } from "@/apis/hooks/sports";
 import api from "@/apis/raw";
 import { QueryOverlay } from "@/components/async";
 import {
@@ -60,13 +61,21 @@ function Row(props: InfoProps): JSX.Element {
   const { title, children } = props;
   return (
     <Grid columns={10}>
-      <Grid.Col span={2}>
-        <Text size="sm" ta="right" fw="bold">
+      <Grid.Col span={{ base: 4, sm: 2 }} style={{ minWidth: 0 }}>
+        <Text
+          size="sm"
+          ta="right"
+          fw="bold"
+          style={{ overflowWrap: "anywhere" }}
+        >
           {title}
         </Text>
       </Grid.Col>
-      <Grid.Col span={3}>
-        <Text size="sm"> {children}</Text>
+      <Grid.Col span={{ base: 6, sm: 3 }} style={{ minWidth: 0 }}>
+        <Text component="div" size="sm" style={{ overflowWrap: "anywhere" }}>
+          {" "}
+          {children}
+        </Text>
       </Grid.Col>
     </Grid>
   );
@@ -116,6 +125,7 @@ const InfoContainer: FunctionComponent<
 const SystemStatusView: FunctionComponent = () => {
   const health = useSystemHealth();
   const { data: status } = useSystemStatus();
+  const { enabled: sportsEnabled } = useSportsAvailability();
   const openWhatsNew = useOpenWhatsNew();
   const showWhatsNew = hasWhatsNew();
 
@@ -142,7 +152,7 @@ const SystemStatusView: FunctionComponent = () => {
 
   useInterval(update, 1000);
 
-  useDocumentTitle(`Status - ${useInstanceName()} (System)`);
+  useDocumentTitle(`Status - ${useAppTitle()} (System)`);
 
   return (
     <Container fluid>
@@ -192,6 +202,13 @@ const SystemStatusView: FunctionComponent = () => {
           )}
           <Row title="Sonarr Version">{status?.sonarr_version}</Row>
           <Row title="Radarr Version">{status?.radarr_version}</Row>
+          {/* The endpoint has reported this since sports landed and the page
+              never showed it, so there was no way to see which Sportarr
+              Bazarr was actually talking to. Rendered only with Sportarr on,
+              so a two-media install does not gain an empty row. */}
+          {sportsEnabled && (
+            <Row title="Sportarr Version">{status?.sportarr_version}</Row>
+          )}
           <Row title="Operating System">{status?.operating_system}</Row>
           <Row title="Python Version">{status?.python_version}</Row>
           <Row title="Database Engine">{status?.database_engine}</Row>
@@ -234,6 +251,11 @@ const SystemStatusView: FunctionComponent = () => {
           </Row>
         </InfoContainer>
         <InfoContainer title="Credits">
+          <Row title="TMDB">
+            <Label icon={faPaperPlane} link="https://www.themoviedb.org/">
+              Movie and TV metadata
+            </Label>
+          </Row>
           <Row title="TheTVDB">
             <Label icon={faPaperPlane} link="https://thetvdb.com">
               TV series metadata

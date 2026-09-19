@@ -133,6 +133,9 @@ body::after {
 }
 
 :root[data-mantine-color-scheme="dark"] {
+  --bz-action-bg: var(--mantine-color-brand-5);
+  --bz-action-hover: var(--mantine-color-brand-4);
+  --bz-action-fg: var(--mantine-color-dark-9);
   --bz-surface-ground: #121125;
   --bz-surface-base: #121125;
   --bz-surface-raised: #1a1a2e;
@@ -169,6 +172,9 @@ body::after {
 }
 
 :root[data-mantine-color-scheme="light"] {
+  --bz-action-bg: var(--mantine-color-brand-7);
+  --bz-action-hover: var(--mantine-color-brand-8);
+  --bz-action-fg: #ffffff;
   --bz-text-primary: #12121f;
   --bz-text-secondary: #343a40;
   --bz-text-tertiary: #656d76;
@@ -220,11 +226,11 @@ body::after {
     border-right: none;
   }
 
-  .mantine-AppShell-header {
-    background: transparent !important;
-    border: none !important;
-    padding: 8px !important;
-  }
+  // The header's background is deliberately not styled here. It belongs to the
+  // module that also owns the at-rest state and the fade between the two
+  // (App/AppShell.module.scss). A rule here cannot outrank a two-class module
+  // selector, so the last one written against content showing through the band
+  // lost silently and the symptom came back.
 }
 
 // Global Paper/Card styling

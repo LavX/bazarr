@@ -3,6 +3,7 @@
 import logging
 import inspect
 import os
+import pathlib
 import pytest
 import subprocess
 
@@ -658,8 +659,11 @@ def test_sync_subtitles_marks_skipped_progress_complete(mocker):
     )
 
 
-def test_subsyncer_reports_engine_progress(monkeypatch, tmp_path):
+def test_subsyncer_reports_engine_progress(monkeypatch, tmp_path, schema_session):
+    from app import database as db_module
     from subtitles.tools.subsyncer import SubSyncer
+
+    monkeypatch.setattr(db_module, 'database', schema_session)
 
     subtitle = tmp_path / 'Movie.hu.srt'
     _write(subtitle, 'original')
@@ -874,7 +878,11 @@ def test_tagged_sync_output_defers_only_to_an_actual_media_owner(
     rows = [SimpleNamespace(path=str(path), arr_instance_id=None) for path in media_folder.iterdir()
             if path.is_file() and path.suffix.lower() in ('.mkv', '.mp4')]
     db = Mock()
-    db.execute.return_value.all.return_value = rows
+    def execute(statement):
+        model = statement.column_descriptions[0]['entity']
+        selected = [] if model is db_module.TableSportsEvents else rows
+        return SimpleNamespace(all=lambda: selected)
+    db.execute.side_effect = execute
     monkeypatch.setattr(db_module, 'database', db)
     monkeypatch.setattr(path_mappings, 'path_replace_instance', lambda path, *args: path)
     result = add_sync_engine_outputs(str(subtitle_folder), {}, video_path=str(video))
@@ -885,6 +893,77 @@ def test_tagged_sync_output_defers_only_to_an_actual_media_owner(
     else:
         assert set(result) == {subtitle}
         assert result[subtitle].basename == 'en'
+
+
+def test_preview_workspace_is_recognized_only_where_it_was_opened(tmp_path):
+    """A preview namespace is what this process opened, never what a name says."""
+    from subtitles.tools.subsync_engines import (
+        PREVIEW_WORKSPACE_PREFIX,
+        create_preview_workspace,
+        discard_preview_workspace,
+        is_preview_destination,
+    )
+
+    lookalike = tmp_path / f'{PREVIEW_WORKSPACE_PREFIX}forged'
+    lookalike.mkdir()
+    _write(lookalike / 'Movie.en.srt', 'subtitle')
+    assert not is_preview_destination(str(lookalike / 'Movie.en.ffsubsync.srt'))
+    assert not is_preview_destination(str(tmp_path / 'Movie.en.ffsubsync.srt'))
+
+    workspace = create_preview_workspace()
+    try:
+        assert is_preview_destination(os.path.join(workspace, 'bazarr_sync_ab.ffsubsync.srt'))
+        assert not is_preview_destination(os.path.join(workspace, 'nested', 'bazarr_sync_ab.srt'))
+    finally:
+        discard_preview_workspace(workspace)
+    assert not os.path.exists(workspace)
+    assert not is_preview_destination(os.path.join(workspace, 'bazarr_sync_ab.ffsubsync.srt'))
+
+
+def test_discard_preview_workspace_ignores_a_directory_it_never_opened(tmp_path):
+    from subtitles.tools.subsync_engines import PREVIEW_WORKSPACE_PREFIX, discard_preview_workspace
+
+    media_folder = tmp_path / f'{PREVIEW_WORKSPACE_PREFIX}library'
+    media_folder.mkdir()
+    _write(media_folder / 'Movie.mkv', 'video')
+    discard_preview_workspace(str(media_folder))
+    discard_preview_workspace(None)
+    assert (media_folder / 'Movie.mkv').is_file()
+
+
+def test_preview_owns_its_destination_while_a_library_source_still_proves_ownership(tmp_path):
+    """The editor's temporary name is owned in a workspace and nowhere else."""
+    from subtitles.tools.subsync_engines import (
+        SubtitlePublication,
+        create_preview_workspace,
+        discard_preview_workspace,
+        engine_output_path,
+        subtitle_source_version,
+    )
+
+    video = tmp_path / 'Movie.mkv'
+    _write(video, 'video')
+    stray = tmp_path / 'bazarr_sync_ab12.srt'
+    _write(stray, 'subtitle')
+    publication = SubtitlePublication(str(video), str(stray), subtitle_source_version(str(stray)))
+    assert not publication.preview
+    assert not publication.destination_unchanged(engine_output_path(str(stray), 'ffsubsync'))
+
+    owned = tmp_path / 'Movie.en.srt'
+    _write(owned, 'subtitle')
+    publication = SubtitlePublication(str(video), str(owned), subtitle_source_version(str(owned)))
+    assert not publication.preview
+    assert publication.destination_unchanged(engine_output_path(str(owned), 'ffsubsync'))
+
+    workspace = create_preview_workspace()
+    try:
+        preview_source = os.path.join(workspace, 'bazarr_sync_ab12.srt')
+        _write(pathlib.Path(preview_source), 'subtitle')
+        publication = SubtitlePublication(str(video), preview_source, subtitle_source_version(preview_source))
+        assert publication.preview
+        assert publication.destination_unchanged(engine_output_path(preview_source, 'ffsubsync'))
+    finally:
+        discard_preview_workspace(workspace)
 
 
 def test_keep_all_job_name_does_not_claim_original_was_overwritten():

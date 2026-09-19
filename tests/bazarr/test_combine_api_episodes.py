@@ -126,7 +126,7 @@ def _make_result(status, path="", alignment="", reason="", error=""):
 
 
 def _make_db_row(path="/series/Show/S01E01.mkv", sonarr_series_id=7):
-    return type("Row", (), {"path": path, "sonarrSeriesId": sonarr_series_id})()
+    return type("Row", (), {"path": path, "sonarrSeriesId": sonarr_series_id, "arr_instance_id": 7})()
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +154,7 @@ class TestEpisodesSubtitlesCombinePost:
              patch.object(episodes_subtitles_module, 'request', self._make_request({})):
 
             mock_db.execute.return_value = mock_db_result
-            mock_pm.path_replace.return_value = '/mapped/series/Show/S01E01.mkv'
+            mock_pm.path_replace_instance.return_value = '/mapped/series/Show/S01E01.mkv'
             mock_combine.return_value = _make_result(
                 status='built',
                 path='/series/Show/S01E01.en.combined-hu.srt',
@@ -190,7 +190,7 @@ class TestEpisodesSubtitlesCombinePost:
              patch.object(episodes_subtitles_module, 'request', self._make_request(payload)):
 
             mock_db.execute.return_value = mock_db_result
-            mock_pm.path_replace.return_value = '/mapped/series/Show/S01E01.mkv'
+            mock_pm.path_replace_instance.return_value = '/mapped/series/Show/S01E01.mkv'
             mock_combine.return_value = _make_result(
                 status='built',
                 path='/x.srt',
@@ -221,7 +221,7 @@ class TestEpisodesSubtitlesCombinePost:
              patch.object(episodes_subtitles_module, 'request', self._make_request({})):
 
             mock_db.execute.return_value = mock_db_result
-            mock_pm.path_replace.return_value = '/mapped/series/Show/S01E01.mkv'
+            mock_pm.path_replace_instance.return_value = '/mapped/series/Show/S01E01.mkv'
             mock_combine.return_value = _make_result(
                 status='skipped',
                 reason='no rule',
@@ -246,7 +246,7 @@ class TestEpisodesSubtitlesCombinePost:
              patch.object(episodes_subtitles_module, 'request', self._make_request({})):
 
             mock_db.execute.return_value = mock_db_result
-            mock_pm.path_replace.return_value = '/mapped/series/Show/S01E01.mkv'
+            mock_pm.path_replace_instance.return_value = '/mapped/series/Show/S01E01.mkv'
             mock_combine.return_value = _make_result(
                 status='failed',
                 error='malformed SRT',

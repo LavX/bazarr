@@ -10,15 +10,20 @@ from .history import api_ns_list_history
 from .movies import api_ns_list_movies
 from .providers import api_ns_list_providers
 from .series import api_ns_list_series
+from .sports import api_ns_list_sports
 from .subtitles import api_ns_list_subtitles
 from .system import api_ns_list_system
 from .webhooks import api_ns_list_webhooks
 from .plex import api_ns_list_plex
 from .jellyfin import api_ns_list_jellyfin
+from .emby import api_ns_list_emby
+from .silo import api_ns_list_silo
 from .translator import api_ns_list_translator
 from .editor import api_ns_list_editor
 from .provider_hub import api_ns_list_provider_hub
 from .distribution_hub import api_ns_list_distribution_hub
+from .discover import api_ns_list_discover
+from .seerr import api_ns_list_seerr
 from .swaggerui import swaggerui_api_params
 
 api_ns_list = [
@@ -29,15 +34,20 @@ api_ns_list = [
     api_ns_list_movies,
     api_ns_list_providers,
     api_ns_list_series,
+    api_ns_list_sports,
     api_ns_list_subtitles,
     api_ns_list_system,
     api_ns_list_webhooks,
     api_ns_list_plex,
     api_ns_list_jellyfin,
+    api_ns_list_emby,
+    api_ns_list_silo,
     api_ns_list_translator,
     api_ns_list_editor,
     api_ns_list_provider_hub,
     api_ns_list_distribution_hub,
+    api_ns_list_discover,
+    api_ns_list_seerr,
 ]
 
 authorizations = {

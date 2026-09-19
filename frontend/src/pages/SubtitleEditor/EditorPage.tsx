@@ -39,6 +39,12 @@ import {
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import client from "@/apis/raw/client";
+import { useSearchSource } from "@/contexts/UniversalSearch";
+import {
+  readStoredValue,
+  removeStoredValue,
+  writeStoredValue,
+} from "@/utilities/browserStorage";
 import { Environment } from "@/utilities/env";
 import { saveBlobAs } from "@/utilities/files";
 import { isCombinedOutputLanguageKey } from "@/utilities/subtitles";
@@ -60,12 +66,17 @@ import {
   subtitleDocumentReducer,
 } from "./document";
 import EditableCueTable from "./EditableCueTable";
-import { buildEditorAutosaveKey, buildEditorSubtitlesUrl } from "./editorScope";
+import {
+  buildEditorAutosaveKey,
+  buildEditorSubtitlesUrl,
+  editorBreadcrumb,
+} from "./editorScope";
 import EditorToolbar from "./EditorToolbar";
 import JumpToCue from "./JumpToCue";
 import { detectFormat, getParser } from "./parsers";
 import QCPanel from "./QCPanel";
 import SearchReplace from "./SearchReplace";
+import { createSubtitleSearchSource } from "./searchSource";
 import { getSerializer } from "./serializers";
 import ShortcutSheet from "./ShortcutSheet";
 import StatusBar from "./StatusBar";
@@ -200,7 +211,7 @@ export default function EditorPage() {
           metadata: parseResult?.metadata ?? { format },
           cues: docState.cues,
         });
-        localStorage.setItem(
+        writeStoredValue(
           autoSaveKey,
           JSON.stringify({
             content: serialized,
@@ -233,7 +244,7 @@ export default function EditorPage() {
   useEffect(() => {
     if (!autoSaveKey || !loaded) return;
     try {
-      const raw = localStorage.getItem(autoSaveKey);
+      const raw = readStoredValue(autoSaveKey);
       if (!raw) return;
       const saved = JSON.parse(raw);
       const age = Date.now() - saved.timestamp;
@@ -241,10 +252,10 @@ export default function EditorPage() {
         // Less than 24 hours old
         setRecoveryAvailable(saved);
       } else {
-        localStorage.removeItem(autoSaveKey);
+        removeStoredValue(autoSaveKey);
       }
     } catch {
-      localStorage.removeItem(autoSaveKey!);
+      removeStoredValue(autoSaveKey!);
     }
   }, [autoSaveKey, loaded]);
 
@@ -260,12 +271,12 @@ export default function EditorPage() {
       /* ignore */
     }
     setRecoveryAvailable(null);
-    if (autoSaveKey) localStorage.removeItem(autoSaveKey);
+    if (autoSaveKey) removeStoredValue(autoSaveKey);
   }, [recoveryAvailable, autoSaveKey]);
 
   const handleDismissRecovery = useCallback(() => {
     setRecoveryAvailable(null);
-    if (autoSaveKey) localStorage.removeItem(autoSaveKey);
+    if (autoSaveKey) removeStoredValue(autoSaveKey);
   }, [autoSaveKey]);
 
   // Keep etagRef in sync whenever the query result changes (initial load,
@@ -521,7 +532,7 @@ export default function EditorPage() {
             setCreatedSuccessfully(true); // Switch from create to edit mode
             if (autoSaveKey) {
               try {
-                localStorage.removeItem(autoSaveKey);
+                removeStoredValue(autoSaveKey);
               } catch {
                 /* ignore */
               }
@@ -581,7 +592,7 @@ export default function EditorPage() {
             }
             if (autoSaveKey) {
               try {
-                localStorage.removeItem(autoSaveKey);
+                removeStoredValue(autoSaveKey);
               } catch {
                 /* ignore */
               }
@@ -616,7 +627,7 @@ export default function EditorPage() {
                     }
                     if (autoSaveKey) {
                       try {
-                        localStorage.removeItem(autoSaveKey);
+                        removeStoredValue(autoSaveKey);
                       } catch {
                         /* ignore */
                       }
@@ -1030,6 +1041,12 @@ export default function EditorPage() {
   const handleSearchNavigate = useCallback((cueIndex: number) => {
     setSelectedIndex(cueIndex);
   }, []);
+
+  const subtitleSearch = useMemo(
+    () => createSubtitleSearchSource(docState.cues, handleSearchNavigate),
+    [docState.cues, handleSearchNavigate],
+  );
+  useSearchSource(subtitleSearch);
 
   const handleJumpToCue = useCallback((index: number) => {
     setSelectedIndex(index);
@@ -1775,14 +1792,11 @@ export default function EditorPage() {
   }
 
   // Breadcrumb links
-  const isSeries = mediaType === "episode" || mediaType === "series";
-  const listPath = isSeries ? "/series" : "/movies";
-  const listLabel = isSeries ? "Series" : "Movies";
-  const detailPath = data?.mediaId
-    ? isSeries
-      ? `/series/${data.mediaId}`
-      : `/movies/${data.mediaId}`
-    : undefined;
+  const { listPath, listLabel, detailPath } = editorBreadcrumb(
+    mediaType,
+    data?.mediaId,
+    scopedArrInstanceId,
+  );
 
   const selectedCue =
     selectedIndex >= 0 && selectedIndex < docState.cues.length

@@ -69,7 +69,8 @@ def test_save_settings_reconfigures_captcha_on_captchaai_key(monkeypatch):
     from app import config
 
     called = []
-    monkeypatch.setattr(config, "write_config", lambda: None)
+    # A write that reached disk. Anything else is refused.
+    monkeypatch.setattr(config, "write_config", lambda: True)
     monkeypatch.setattr(config, "validate_log_regex", lambda: None)
     monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
     monkeypatch.setattr(config, "configure_captcha_func", lambda: called.append(True))

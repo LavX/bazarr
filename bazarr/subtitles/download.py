@@ -5,6 +5,8 @@ import os
 import sys
 import logging
 from functools import partial
+from media_servers.events import publication_callback
+from arr_instances.resolution import scoped
 import subliminal
 import ast
 
@@ -89,7 +91,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
             languages_that_landed = []
             for language in language_set:
                 # confirm if language is still missing or if cutoff has been reached
-                if check_if_still_required and language not in check_missing_languages(path, media_type):
+                if check_if_still_required and language not in check_missing_languages(path, media_type, arr_instance_id):
                     # cutoff has been reached
                     logging.debug(f"BAZARR this language ({parse_language_object(language)}) is ignored because cutoff "  # noqa: G004
                                   f"has been reached during this search.")
@@ -161,7 +163,10 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                                  chmod=chmod,
                                                                  formats=subtitle_formats,
                                                                  path_decoder=force_unicode,
-                                                                 write_subtitle=partial(write_subtitle_file, path, written_paths=written_paths)
+                                                                 write_subtitle=partial(
+                                                                     write_subtitle_file, path, written_paths=written_paths,
+                                                                     on_publish=publication_callback(
+                                                                         media_type, path, 'download', arr_instance_id))
                                                                  )
                                 if is_upgrade and previous_subtitles_to_delete and written_paths and (
                                         os.path.normcase(os.path.realpath(previous_subtitles_to_delete)) not in
@@ -169,6 +174,8 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                     try:
                                         with subtitle_mutation(path, previous_subtitles_to_delete):
                                             os.remove(previous_subtitles_to_delete)
+                                            publication_callback(media_type, path, 'download', arr_instance_id)(
+                                                previous_subtitles_to_delete)
                                     except OSError:
                                         logging.exception('BAZARR unable to remove superseded subtitle: %s',
                                                           previous_subtitles_to_delete)
@@ -208,7 +215,8 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                 processed_subtitle = process_subtitle(subtitle=subtitle, media_type=media_type,
                                                                       audio_language=audio_language,
                                                                       is_upgrade=is_upgrade, is_manual=False,
-                                                                      path=path, max_score=max_score, job_id=job_id)
+                                                                      path=path, max_score=max_score, job_id=job_id,
+                                                                      arr_instance_id=arr_instance_id)
                                 if not processed_subtitle:
                                     logging.debug(f"BAZARR unable to process this subtitles: {subtitle}")  # noqa: G004
                                     continue
@@ -259,22 +267,21 @@ def parse_language_object(language):
         return language
 
 
-def check_missing_languages(path, media_type):
+def check_missing_languages(path, media_type, arr_instance_id=None):
     # confirm if language is still missing or if cutoff has been reached
+    reversed_path = path_mappings.path_replace_reverse_instance(path, arr_instance_id, media_type)
     if media_type == 'series':
-        confirmed_missing_subs = database.execute(
+        confirmed_missing_subs = database.execute(scoped(
             select(TableEpisodes.missing_subtitles)
-            .where(TableEpisodes.path == path_mappings.path_replace_reverse(path)))\
+            .where(TableEpisodes.path == reversed_path), TableEpisodes.arr_instance_id, arr_instance_id))\
             .first()
     else:
-        confirmed_missing_subs = database.execute(
+        confirmed_missing_subs = database.execute(scoped(
             select(TableMovies.missing_subtitles)
-            .where(TableMovies.path == path_mappings.path_replace_reverse_movie(path)))\
+            .where(TableMovies.path == reversed_path), TableMovies.arr_instance_id, arr_instance_id))\
             .first()
 
     if not confirmed_missing_subs:
-        reversed_path = path_mappings.path_replace_reverse(path) if media_type == 'series' else \
-            path_mappings.path_replace_reverse_movie(path)
         logging.debug(f"BAZARR no media with this path have been found in database: {reversed_path}")  # noqa: G004
         return []
 

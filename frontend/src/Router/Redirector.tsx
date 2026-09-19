@@ -6,28 +6,27 @@ import { useOnboardingState } from "@/pages/Setup/useOnboardingState";
 
 const Redirector: FunctionComponent = () => {
   const { data } = useSystemSettings();
-  const { needsOnboarding } = useOnboardingState();
+  const { needsOnboarding, isLoading } = useOnboardingState();
 
   const navigate = useNavigate();
 
   useEffect(() => {
-    // Fresh installs go to the first-run wizard before any normal routing.
+    // Both reads have to have answered before this decides. needsOnboarding is
+    // true by default while they are in flight, so choosing early sends a
+    // configured install to the wizard, and choosing on settings alone sends a
+    // fresh one past it. Neither is recoverable: this replaces the entry, so
+    // the reader never sees a history entry for what they were sent past.
+    if (isLoading || data === undefined) return;
+
+    // A fresh install meets the wizard before any normal routing.
     if (needsOnboarding) {
       navigate("/setup", { replace: true });
       return;
     }
 
-    if (data) {
-      const { use_sonarr: useSonarr, use_radarr: useRadarr } = data.general;
-      if (useSonarr) {
-        navigate("/series", { replace: true });
-      } else if (useRadarr) {
-        navigate("/movies", { replace: true });
-      } else {
-        navigate("/settings/general", { replace: true });
-      }
-    }
-  }, [data, navigate, needsOnboarding]);
+    // Everything else, configured or not, opens on Discover.
+    navigate("/discover", { replace: true });
+  }, [data, navigate, needsOnboarding, isLoading]);
 
   return <LoadingOverlay visible></LoadingOverlay>;
 };

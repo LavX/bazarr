@@ -2,7 +2,7 @@ import { ReactNode } from "react";
 import { Container } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import { ColumnDef } from "@tanstack/react-table";
-import { useInstanceName } from "@/apis/hooks/site";
+import { useAppTitle } from "@/apis/hooks/site";
 import { UsePaginationQueryResult } from "@/apis/queries/hooks";
 import { QueryPageTable } from "@/components";
 
@@ -19,7 +19,7 @@ function HistoryView<T extends History.Base = History.Base>({
   query,
   toolbar,
 }: Props<T>) {
-  useDocumentTitle(`${name} History - ${useInstanceName()}`);
+  useDocumentTitle(`${name} History - ${useAppTitle()}`);
   return (
     <Container fluid px={0}>
       {toolbar}

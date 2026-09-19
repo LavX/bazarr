@@ -52,3 +52,50 @@ def _find_existing_subtitle_path(subtitles_field, source_lang, path_replace_fn=N
         if code == source_lang and mapped and os.path.exists(mapped):
             return mapped
     return None
+
+
+def _provider_file_on_disk(subtitles_field, language, translated_path, path_replace_fn=None):
+    """True when something other than a translation covers ``language`` on disk.
+
+    The auto-translate guard in both wanted scans keys on the file the last
+    action=6 row points at, and replacing that file is precisely what an upgrade
+    does. The guard therefore fails after every replacement and the translation
+    is queued again, which puts a translated row with the 50% default back on top
+    of the history and lets the next upgrade fetch the same listing a second
+    time. A provider sourced file for the language on disk ends the question.
+
+    ``translated_path`` is the path that action=6 row recorded; that entry is
+    skipped because it is the machine translation, not a provider file. There is
+    no action column to check per file, so the comparison is by path: the scan
+    already knows the translated path and everything else indexed for the
+    language is something the indexer found on disk, which is what this answers.
+
+    What counts mirrors how list_missing_subtitles decides a language is
+    covered, so this cannot disagree with the list the scan is walking: the :hi
+    variant does cover a plain entry, a :forced file does not, and neither does a
+    combined artifact, which is a bilingual stack rather than a subtitle in that
+    language.
+    """
+    if not subtitles_field:
+        return False
+    try:
+        entries = ast.literal_eval(subtitles_field)
+    except (ValueError, SyntaxError):
+        return False
+    base = (language or '').split(':')[0]
+    for entry in entries:
+        if not entry or len(entry) < 2:
+            continue
+        parts = (entry[0] or '').split(':')
+        path = entry[1]
+        if parts[0] != base or not path:
+            continue
+        variants = parts[1:]
+        if 'forced' in variants or any(v.startswith('combined-') for v in variants):
+            continue
+        if translated_path and path == translated_path:
+            continue
+        mapped = path_replace_fn(path) if path_replace_fn else path
+        if mapped and os.path.exists(mapped):
+            return True
+    return False

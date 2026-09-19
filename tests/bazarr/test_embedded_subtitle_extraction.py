@@ -909,7 +909,7 @@ def test_forced_track_selected_by_title(tmp_path):
     Why: knowit only reports forced from the disposition flag, so without the
     title heuristic the extractor fell back to the first language-only track and
     extracted the regular subtitle for a forced request. Regression for the
-    Codex review on https://github.com/LavX/bazarr/pull/228
+    review on https://github.com/LavX/bazarr/pull/228
     """
     from subtitles.tools.translate.batch import extract_embedded_subtitle
 

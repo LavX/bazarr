@@ -8,7 +8,7 @@ from dateutil import rrule
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
 from functools import reduce
 
-from app.database import TableHistory, TableHistoryMovie, database, select
+from app.database import TableHistory, TableHistoryMovie, TableHistorySports, database, select
 
 from ..utils import authenticate
 
@@ -35,9 +35,15 @@ class HistoryStats(Resource):
         'count': fields.Integer(),
     })
 
+    sports_data_model = api_ns_history_stats.model('history_sports_stats_data_model', {
+        'date': fields.String(),
+        'count': fields.Integer(),
+    })
+
     get_response_model = api_ns_history_stats.model('HistoryStatsGetResponse', {
         'series': fields.Nested(series_data_model),
         'movies': fields.Nested(movies_data_model),
+        'sports': fields.Nested(sports_data_model),
     })
 
     @authenticate
@@ -66,31 +72,44 @@ class HistoryStats(Resource):
 
         history_where_clauses = [(TableHistory.timestamp.between(past, now))]
         history_where_clauses_movie = [(TableHistoryMovie.timestamp.between(past, now))]
+        history_where_clauses_sports = [(TableHistorySports.timestamp.between(past, now))]
 
         if action != 'All':
+            # Parsed as a string with an 'All' sentinel, so anything else may
+            # still not be a number. Comparing the raw string matched nothing
+            # against the integer column; int() on it raised out of the handler.
+            try:
+                action = int(action)
+            except (TypeError, ValueError):
+                return 'Action must be a number or "All"', 400
             history_where_clauses.append((TableHistory.action == action))
             history_where_clauses_movie.append((TableHistoryMovie.action == action))
+            history_where_clauses_sports.append((TableHistorySports.action == action))
         else:
             history_where_clauses.append((TableHistory.action.in_([1, 2, 3])))
             history_where_clauses_movie.append((TableHistoryMovie.action.in_([1, 2, 3])))
+            history_where_clauses_sports.append((TableHistorySports.action.in_([1, 2, 3])))
 
         if provider != 'All':
             history_where_clauses.append((TableHistory.provider == provider))
             history_where_clauses_movie.append((TableHistoryMovie.provider == provider))
+            history_where_clauses_sports.append((TableHistorySports.provider == provider))
 
         if language != 'All':
             history_where_clauses.append((TableHistory.language == language))
             history_where_clauses_movie.append((TableHistoryMovie.language == language))
+            history_where_clauses_sports.append((TableHistorySports.language == language))
 
         history_where_clause = reduce(operator.and_, history_where_clauses)
         history_where_clause_movie = reduce(operator.and_, history_where_clauses_movie)
+        history_where_clause_sports = reduce(operator.and_, history_where_clauses_sports)
 
         data_series = [{
             'timestamp': x.timestamp,
             'id': x.id,
         } for x in database.execute(
             select(TableHistory.timestamp, TableHistory.id)
-            .where(history_where_clause))
+            .where(history_where_clause).order_by(TableHistory.timestamp))
             .all()]
         data_series = [{'date': date[0], 'count': sum(1 for item in date[1])} for date in
                        itertools.groupby(list(data_series),
@@ -102,10 +121,24 @@ class HistoryStats(Resource):
             'id': x.id,
         } for x in database.execute(
             select(TableHistoryMovie.timestamp, TableHistoryMovie.id)
-            .where(history_where_clause_movie))
+            .where(history_where_clause_movie).order_by(TableHistoryMovie.timestamp))
             .all()]
         data_movies = [{'date': date[0], 'count': sum(1 for item in date[1])} for date in
                        itertools.groupby(list(data_movies),
+                                         key=lambda x: x['timestamp'].strftime(
+                                             '%Y-%m-%d'))]
+
+        # Sports downloads were absent from the chart entirely, so the tab
+        # silently under-reported for anyone using Sportarr.
+        data_sports = [{
+            'timestamp': x.timestamp,
+            'id': x.id,
+        } for x in database.execute(
+            select(TableHistorySports.timestamp, TableHistorySports.id)
+            .where(history_where_clause_sports).order_by(TableHistorySports.timestamp))
+            .all()]
+        data_sports = [{'date': date[0], 'count': sum(1 for item in date[1])} for date in
+                       itertools.groupby(list(data_sports),
                                          key=lambda x: x['timestamp'].strftime(
                                              '%Y-%m-%d'))]
 
@@ -116,8 +149,12 @@ class HistoryStats(Resource):
                 data_series.append({'date': dt.strftime('%Y-%m-%d'), 'count': 0})
             if not any(d['date'] == dt.strftime('%Y-%m-%d') for d in data_movies):
                 data_movies.append({'date': dt.strftime('%Y-%m-%d'), 'count': 0})
+            if not any(d['date'] == dt.strftime('%Y-%m-%d') for d in data_sports):
+                data_sports.append({'date': dt.strftime('%Y-%m-%d'), 'count': 0})
 
         sorted_data_series = sorted(data_series, key=lambda i: i['date'])
         sorted_data_movies = sorted(data_movies, key=lambda i: i['date'])
+        sorted_data_sports = sorted(data_sports, key=lambda i: i['date'])
 
-        return marshal({'series': sorted_data_series, 'movies': sorted_data_movies}, self.get_response_model)
+        return marshal({'series': sorted_data_series, 'movies': sorted_data_movies,
+                        'sports': sorted_data_sports}, self.get_response_model)

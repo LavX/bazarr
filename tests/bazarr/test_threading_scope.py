@@ -41,6 +41,7 @@ def upgrade_db(monkeypatch):
         general=SimpleNamespace(
             days_to_upgrade_subs=365,
             upgrade_manual=False,
+            upgrade_translated=False,
             upgrade_subs=True,
             use_sonarr=True,
             use_radarr=True,
@@ -342,9 +343,6 @@ def test_delete_subtitles_routes_rescan_to_owning_instance(monkeypatch, tmp_path
             return _R()
 
     monkeypatch.setattr(delete_mod, "database", _Db())
-    monkeypatch.setattr(
-        delete_mod.settings, "general",
-        SimpleNamespace(use_plex=False, use_jellyfin=False), raising=False)
 
     ok = delete_mod.delete_subtitles(
         media_type="movie", language="en", forced=False, hi=False,

@@ -1,4 +1,21 @@
 import React, { useCallback, useMemo, useState } from "react";
+
+/**
+ * The sentence a failed request came back with.
+ *
+ * The request layer reads the backend's own `message` off a failed response and
+ * puts it on the error (`apis/raw/client.ts`), and it deliberately does not
+ * raise a notification for 409 and 412 so the caller can say something more
+ * useful than "Error 409". Before this, the caller threw the error away and
+ * showed a fixed sentence, so a failure that knew exactly why it failed arrived
+ * as a shrug.
+ */
+function failureText(error: unknown): string {
+  return error instanceof Error && error.message
+    ? error.message
+    : "The request failed and said nothing further.";
+}
+
 import {
   Alert,
   Anchor,
@@ -22,17 +39,23 @@ import { ColumnDef } from "@tanstack/react-table";
 import { isString } from "lodash";
 import { Action } from "@/components";
 import Language from "@/components/bazarr/Language";
+import type { SportsSearchTarget } from "@/components/modals/SportsSearchModal";
 import StateIcon from "@/components/StateIcon";
 import PageTable from "@/components/tables/PageTable";
 import { withModal } from "@/modules/modals";
 import { GetItemId } from "@/utilities";
 
-type SupportType = Item.Movie | Item.Episode;
+// A sports caller may hold only the ids and the profile, not a whole event:
+// the wanted page opens this from a row. It reads sceneName optionally and
+// keys on league_id, both of which survive the narrower shape.
+type SupportType = Item.Movie | Item.Episode | SportsSearchTarget;
 
 interface Props<T extends SupportType> {
   download: (item: T, result: SearchResultType) => Promise<void>;
   query: (id?: number) => UseQueryResult<SearchResultType[] | undefined>;
   item: T;
+  searchDisabled?: boolean;
+  preventRepeatDownload?: boolean;
 }
 
 // Stable identity for a search result. SearchResultType has no id field, so we
@@ -81,12 +104,15 @@ const ReleaseInfoCell = React.memo(
 );
 ReleaseInfoCell.displayName = "ReleaseInfoCell";
 
-function ManualSearchView<T extends SupportType>(props: Props<T>) {
+export function ManualSearchView<T extends SupportType>(props: Props<T>) {
   const { download, query: useSearch, item } = props;
 
   const [searchStarted, setSearchStarted] = useState(false);
 
-  const itemId = useMemo(() => GetItemId(item), [item]);
+  const itemId = useMemo(
+    () => ("league_id" in item ? item.id : GetItemId(item)),
+    [item],
+  );
 
   const results = useSearch(searchStarted ? itemId : undefined);
 
@@ -99,6 +125,8 @@ function ManualSearchView<T extends SupportType>(props: Props<T>) {
   }, [results]);
 
   const [downloadedKey, setDownloadedKey] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   const columns = useMemo<ColumnDef<SearchResultType>[]>(
     () => [
@@ -208,19 +236,31 @@ function ManualSearchView<T extends SupportType>(props: Props<T>) {
               label="Download"
               icon={isDownloaded ? faCloudDownloadAlt : faDownload}
               color={isDownloaded ? "brand" : "gray"}
-              disabled={item === null}
+              disabled={
+                item === null ||
+                downloading ||
+                (props.preventRepeatDownload && isDownloaded)
+              }
               onClick={async () => {
                 if (!item) return;
 
-                setDownloadedKey(resultKey);
-                await download(item, result);
+                setDownloading(true);
+                setDownloadError(null);
+                try {
+                  await download(item, result);
+                  setDownloadedKey(resultKey);
+                } catch (error) {
+                  setDownloadError(failureText(error));
+                } finally {
+                  setDownloading(false);
+                }
               }}
             ></Action>
           );
         },
       },
     ],
-    [download, item, downloadedKey],
+    [download, item, downloadedKey, downloading, props.preventRepeatDownload],
   );
 
   const bSceneNameAvailable =
@@ -253,8 +293,17 @@ function ManualSearchView<T extends SupportType>(props: Props<T>) {
           data={results.data ?? []}
         ></PageTable>
       </Collapse>
+      {downloadError && <Alert color="red">{downloadError}</Alert>}
+      {results.isError && (
+        <Alert color="red">{failureText(results.error)}</Alert>
+      )}
       <Divider></Divider>
-      <Button loading={results.isFetching} fullWidth onClick={search}>
+      <Button
+        disabled={props.searchDisabled}
+        loading={results.isFetching}
+        fullWidth
+        onClick={search}
+      >
         {searchButtonText}
       </Button>
     </Stack>

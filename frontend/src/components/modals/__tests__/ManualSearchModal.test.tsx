@@ -393,3 +393,35 @@ describe("ManualSearchModal: Search Again button", () => {
     });
   });
 });
+
+it("keeps a failed download retryable and reports the reason it failed", async () => {
+  const user = userEvent.setup();
+  // The sentence the backend sends when a subtitle arrives and cannot be used.
+  // The request layer puts it on the error, and it is the only thing that says
+  // what to do next, so the modal has to show it rather than a fixed line.
+  const download = vi
+    .fn()
+    .mockRejectedValue(
+      new Error("Downloaded subtitles isn't valid. Check log."),
+    );
+  renderModal([makeSearchResult({ provider: "fixture" })], download);
+  await user.click(screen.getByRole("button", { name: /^search$/i }));
+  await user.click(screen.getByLabelText("Download"));
+  expect(
+    await screen.findByText("Downloaded subtitles isn't valid. Check log."),
+  ).toBeInTheDocument();
+  expect(screen.getByLabelText("Download")).toBeEnabled();
+  await user.click(screen.getByLabelText("Download"));
+  expect(download).toHaveBeenCalledTimes(2);
+});
+
+it("still says something when the failure carries no message", async () => {
+  const user = userEvent.setup();
+  const download = vi.fn().mockRejectedValue({});
+  renderModal([makeSearchResult({ provider: "fixture" })], download);
+  await user.click(screen.getByRole("button", { name: /^search$/i }));
+  await user.click(screen.getByLabelText("Download"));
+  expect(
+    await screen.findByText("The request failed and said nothing further."),
+  ).toBeInTheDocument();
+});

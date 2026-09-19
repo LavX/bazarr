@@ -127,7 +127,7 @@ def test_e2e_plaintext_first_boot_persists_ciphertext_then_decrypts_on_reboot():
 
 
 def test_e2e_first_save_persists_master_key_alongside_ciphertext():
-    """Codex P1 regression: the master key MUST land in the snapshot
+    """Regression: the master key MUST land in the snapshot
     that gets written to disk. Bug pre-fix: encrypt_settings_dict
     deep-copies the input, then encrypt_secret lazy-generates the
     master key on the LIVE settings object - the snapshot still has
@@ -375,7 +375,7 @@ def test_legacy_plex_migration_skips_when_flag_unset():
 def test_legacy_plex_migration_recovers_oauth_token_without_apikey_flag():
     """The Plex OAuth flow stored `settings.plex.token = encrypt_token(...)`
     but never set `apikey_encrypted` - that flag was scoped to the
-    apikey path only. Codex flagged that gating migration on the flag
+    apikey path only. Review flagged that gating migration on the flag
     leaves OAuth users with a legacy ciphertext that the unified
     pipeline then re-encrypts as if it were plaintext, breaking login
     after upgrade.
@@ -440,3 +440,21 @@ def test_legacy_plex_migration_already_unified_is_passthrough():
     migrate_legacy_plex_encryption(settings)
     assert settings.plex.apikey == unified_cipher  # left unchanged
     assert settings.plex.apikey_encrypted is False  # flag cleared
+
+
+def test_write_only_token_first_save_and_reload_preserve_plaintext_only_in_memory(stable_master_key):
+    from dynaconf import Dynaconf
+    from secret_store import has_plaintext_secrets_on_disk
+    initial = {"general": {"secrets_encryption_key": stable_master_key},
+               "discover": {"tmdb_access_token": "synthetic-write-only-token", "locale": "en-US"}}
+    live = Dynaconf(environments=False)
+    live.update(initial)
+    assert has_plaintext_secrets_on_disk(live)
+    encrypted = encrypt_settings_dict(initial)
+    assert is_encrypted(encrypted["discover"]["tmdb_access_token"])
+    rebooted = Dynaconf(environments=False)
+    rebooted.update(encrypted)
+    assert not has_plaintext_secrets_on_disk(rebooted)
+    decrypt_settings_in_place(rebooted)
+    assert rebooted.discover.tmdb_access_token == "synthetic-write-only-token"
+    assert encrypt_settings_dict(encrypted) == encrypted

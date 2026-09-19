@@ -57,6 +57,66 @@ def validate_tags(tags):
     return all(re.match( r'^[a-z0-9_-]+$', item) for item in tags)
 
 
+def normalize_openrouter_provider_order(value):
+    if not isinstance(value, list) or len(value) > 20:
+        raise ValidationError('OpenRouter providers must be a list of at most 20 provider slugs.')
+    normalized = []
+    for provider in value:
+        if not isinstance(provider, str):
+            raise ValidationError('OpenRouter provider slugs must be text.')
+        provider = provider.strip().lower()
+        if len(provider) > 160:
+            raise ValidationError('OpenRouter provider slugs must be at most 160 characters.')
+        if not re.fullmatch(r'[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*', provider):
+            raise ValidationError('OpenRouter providers must contain nonempty provider or endpoint slugs, '
+                                  'such as deepinfra or parasail/fp8.')
+        if provider not in normalized:
+            normalized.append(provider)
+    return normalized
+
+
+# What a new install gets, and what an install that predates the setting gets instead.
+# smartfast needs AI Subtitle Translator 2.0.0; throughput is served by every version, so
+# an upgrade is never moved onto a routing its translator might refuse.
+DEFAULT_PROVIDER_ROUTING = 'smartfast'
+UPGRADED_PROVIDER_ROUTING = 'throughput'
+# Every routing the selector can store. Shared by the validator's is_in and the boot-time
+# normalization below so the two can never drift apart (the translation service module keeps
+# its own mirror, but a value has to satisfy this set before it is ever persisted).
+PROVIDER_ROUTING_VALUES = ('throughput', 'nitro', 'price', 'floor', 'latency', 'default', 'smartfast', 'custom')
+
+
+def normalize_stored_provider_routing(stored_routing):
+    """The routing an existing config should run with, given its stored value.
+
+    A value we understand is kept verbatim. A missing value (``None``) and any value
+    outside ``PROVIDER_ROUTING_VALUES`` are configs we do not understand, and both land
+    on the plain sort every translator serves rather than on the shipped default, which
+    refuses outright ahead of AI Subtitle Translator 2.0.0. A value we failed to parse is
+    not evidence about which translator version is running, so it must not select a mode
+    that can refuse.
+    """
+    if stored_routing in PROVIDER_ROUTING_VALUES:
+        return stored_routing
+    return UPGRADED_PROVIDER_ROUTING
+
+
+def migrate_upgrade_subtitle_toggles(settings, existing_config) -> bool:
+    """Split the combined manual/translated upgrade toggle.
+
+    New installs get both off via validator defaults. Existing configs keep
+    whatever they already stored for ``upgrade_manual``, or the old default
+    (on) if the key was missing. Translated upgrades start off and are never
+    copied from the old combined value.
+    """
+    if settings.get('general.upgrade_translated') is not None:
+        return False
+    settings['general.upgrade_translated'] = False
+    if existing_config and settings.get('general.upgrade_manual') is None:
+        settings['general.upgrade_manual'] = True
+    return True
+
+
 ONE_HUNDRED_YEARS_IN_MINUTES = 52560000
 ONE_HUNDRED_YEARS_IN_HOURS = 876000
 
@@ -99,6 +159,18 @@ validators = [
     # (Socket.IO long-polling parks one worker per open browser tab).
     Validator('general.web_server_threads', must_exist=True, default=32, is_type_of=int, gte=4, lte=100),
     Validator('general.hostname', must_exist=True, default=platform.node(), is_type_of=str),
+    # The one address whose X-Forwarded-* headers waitress may believe. The
+    # default covers only the in-container supervisor hop, so a reverse proxy
+    # running in another container is not trusted until it is named here:
+    # without that the request scheme reads as http behind HTTPS, and every
+    # client shares one rate-limit bucket because remote_addr is the proxy's
+    # address. Empty means trust nothing.
+    #
+    # Deliberately a single address rather than a list: waitress compares the
+    # peer against this value exactly (proxy_headers.py), so a comma-separated
+    # list matches no one and would silently trust less than the old hardcoded
+    # default did.
+    Validator('general.trusted_proxy', must_exist=True, default='127.0.0.1', is_type_of=str, cast=str),
     Validator('general.base_url', must_exist=True, default='', is_type_of=str),
     Validator('general.instance_name', must_exist=True, default='Bazarr+', is_type_of=str,
               apply_default_on_none=True),
@@ -127,25 +199,34 @@ validators = [
     Validator('general.external_webhook_password', must_exist=True, default='', is_type_of=str),
     Validator('general.use_sonarr', must_exist=True, default=False, is_type_of=bool),
     Validator('general.use_radarr', must_exist=True, default=False, is_type_of=bool),
+    Validator('general.use_sportarr', must_exist=True, default=False, is_type_of=bool),
     Validator('general.use_plex', must_exist=True, default=False, is_type_of=bool),
     Validator('general.use_jellyfin', must_exist=True, default=False, is_type_of=bool),
+    Validator('general.use_emby', must_exist=True, default=False, is_type_of=bool),
+    Validator('general.use_silo', must_exist=True, default=False, is_type_of=bool),
+    Validator('general.use_seerr', must_exist=True, default=False, is_type_of=bool),
     # Set True once the first-run onboarding wizard is completed or skipped, so it
     # never auto-triggers again. Defaults False on a fresh install.
     Validator('general.setup_complete', must_exist=True, default=False, is_type_of=bool),
     Validator('general.path_mappings_movie', must_exist=True, default=[], is_type_of=list),
+    Validator('general.path_mappings_sports', must_exist=True, default=[], is_type_of=list),
     Validator('general.serie_tag_enabled', must_exist=True, default=False, is_type_of=bool),
     Validator('general.movie_tag_enabled', must_exist=True, default=False, is_type_of=bool),
+    Validator('general.sports_tag_enabled', must_exist=True, default=False, is_type_of=bool),
     Validator('general.remove_profile_tags', must_exist=True, default=[], is_type_of=list, condition=validate_tags),
     Validator('general.serie_default_enabled', must_exist=True, default=False, is_type_of=bool),
     Validator('general.serie_default_profile', must_exist=True, default='', is_type_of=(int, str)),
     Validator('general.movie_default_enabled', must_exist=True, default=False, is_type_of=bool),
     Validator('general.movie_default_profile', must_exist=True, default='', is_type_of=(int, str)),
+    Validator('general.sports_default_enabled', must_exist=True, default=False, is_type_of=bool),
+    Validator('general.sports_default_profile', must_exist=True, default='', is_type_of=(int, str)),
     Validator('general.page_size', must_exist=True, default=25, is_type_of=int,
               is_in=[25, 50, 100, 250, 500, 1000]),
     Validator('general.theme', must_exist=True, default='auto', is_type_of=str,
               is_in=['auto', 'light', 'dark']),
     Validator('general.show_live_badge', must_exist=True, default=True, is_type_of=bool),
     Validator('general.minimum_score_movie', must_exist=True, default=70, is_type_of=int, gte=0, lte=100),
+    Validator('general.minimum_score_sports', must_exist=True, default=70, is_type_of=int, gte=0, lte=100),
     Validator('general.use_embedded_subs', must_exist=True, default=True, is_type_of=bool),
     Validator('general.embedded_subs_show_desired', must_exist=True, default=True, is_type_of=bool),
     Validator('general.utf8_encode', must_exist=True, default=True, is_type_of=bool),
@@ -180,12 +261,15 @@ validators = [
     Validator('general.upgrade_frequency', must_exist=True, default=12, is_type_of=int,
               is_in=[6, 12, 24, 168, ONE_HUNDRED_YEARS_IN_HOURS]),
     Validator('general.days_to_upgrade_subs', must_exist=True, default=7, is_type_of=int, gte=0, lte=30),
-    Validator('general.upgrade_manual', must_exist=True, default=True, is_type_of=bool),
+    Validator('general.upgrade_manual', must_exist=True, default=False, is_type_of=bool),
+    Validator('general.upgrade_translated', must_exist=True, default=False, is_type_of=bool),
     Validator('general.anti_captcha_provider', must_exist=True, default=None, is_type_of=(NoneType, str),
               is_in=[None, 'anti-captcha', 'death-by-captcha', 'captchaai']),
     Validator('general.wanted_search_frequency', must_exist=True, default=6, is_type_of=int, 
               is_in=[6, 12, 24, 168, ONE_HUNDRED_YEARS_IN_HOURS]),
     Validator('general.wanted_search_frequency_movie', must_exist=True, default=6, is_type_of=int,
+              is_in=[6, 12, 24, 168, ONE_HUNDRED_YEARS_IN_HOURS]),
+    Validator('general.wanted_search_frequency_sports', must_exist=True, default=6, is_type_of=int,
               is_in=[6, 12, 24, 168, ONE_HUNDRED_YEARS_IN_HOURS]),
     Validator('general.subzero_mods', must_exist=True, default='', is_type_of=str),
     Validator('general.subzero_mods_keep_lyrics', must_exist=True, default=False, is_type_of=bool),
@@ -207,6 +291,10 @@ validators = [
     Validator('log.exclude_filter', must_exist=True, default='', is_type_of=str, cast=str),
     Validator('log.ignore_case', must_exist=True, default=False, is_type_of=bool),
     Validator('log.use_regex', must_exist=True, default=False, is_type_of=bool),
+    # Logger names whose third-party level ceiling general.debug is allowed to
+    # lift. Empty by default: socketio.server and apscheduler at DEBUG are most
+    # of a debug-mode log, so asking for them back is opt-in.
+    Validator('log.verbose_loggers', must_exist=True, default=[], is_type_of=list),
 
     # auth section
     Validator('auth.apikey', must_exist=True, default=hexlify(os.urandom(16)).decode(), is_type_of=str),
@@ -214,6 +302,18 @@ validators = [
               is_in=[None, 'basic', 'form']),
     Validator('auth.username', must_exist=True, default='', is_type_of=str, cast=str),
     Validator('auth.password', must_exist=True, default='', is_type_of=str, cast=str),
+    # How long a signed-in browser may sit idle before it has to sign in
+    # again. The window slides forward on each request, so an active browser
+    # stays signed in. Flask's cookie carried no expiry at all, so a session
+    # lasted until the browser was closed, or forever in one that restores
+    # tabs.
+    Validator('auth.session_lifetime_days', must_exist=True, default=30, is_type_of=int, gte=1, lte=365),
+    # Secure flag policy for the session cookie. 'auto' follows the scheme of
+    # the request the cookie is set on, which is what a plain-http LAN install
+    # needs; 'always' is the right answer behind an HTTPS reverse proxy that
+    # this instance cannot detect (see general.trusted_proxy).
+    Validator('auth.cookie_secure', must_exist=True, default='auto', is_type_of=str,
+              is_in=['auto', 'always', 'never']),
 
     # cors section
     Validator('cors.enabled', must_exist=True, default=False, is_type_of=bool),
@@ -244,11 +344,19 @@ validators = [
     Validator('translator.openrouter_reasoning', must_exist=True, default='disabled', is_type_of=str,
               is_in=['disabled', 'low', 'medium', 'high']),
     Validator('translator.openrouter_parallel_batches', must_exist=True, default=4, is_type_of=int, gte=1, lte=8),
-    # Which OpenRouter provider serves the model: throughput (the sidecar's historical default),
-    # nitro/floor (OpenRouter's slug shortcuts, which also unlock the priority/flex tiers),
-    # price, latency, or OpenRouter's own load balancing.
-    Validator('translator.openrouter_provider_routing', must_exist=True, default='throughput', is_type_of=str,
-              is_in=['throughput', 'nitro', 'price', 'floor', 'latency', 'default']),
+    # Which OpenRouter provider serves the model: smartfast (the default, where the sidecar
+    # weighs speed against price itself, per model and per session), throughput (the sidecar's
+    # historical default, fastest and often needlessly expensive), nitro/floor (OpenRouter's
+    # slug shortcuts, which also unlock the priority/flex tiers), price, latency, OpenRouter's
+    # own load balancing, or explicit provider selection.
+    #
+    # smartfast needs AI Subtitle Translator 2.0.0. A new install pointed at an older one is
+    # told to update rather than being routed some other way behind the user's back.
+    Validator('translator.openrouter_provider_routing', must_exist=True,
+              default=DEFAULT_PROVIDER_ROUTING, is_type_of=str,
+              is_in=list(PROVIDER_ROUTING_VALUES)),
+    Validator('translator.openrouter_provider_order', must_exist=True, default=[], is_type_of=list,
+              cast=normalize_openrouter_provider_order),
     Validator('translator.openrouter_encryption_key', must_exist=True, default='', is_type_of=str, cast=str),
     Validator('translator.lingarr_token', must_exist=True, default='', is_type_of=str, cast=str),
 
@@ -299,6 +407,27 @@ validators = [
     Validator('radarr.sync_only_monitored_movies', must_exist=True, default=False, is_type_of=bool),
     Validator('radarr.verify_ssl', must_exist=True, default=False, is_type_of=bool),
 
+    # sportarr section. Behavioural and schedule settings only: connection
+    # details live exclusively in the arr_instances table, because Sportarr has
+    # no single-instance compat path that reads scalars the way sonarr and
+    # radarr do.
+    Validator('sportarr.sports_sync', must_exist=True, default=60, is_type_of=int,
+              is_in=[15, 60, 180, 360, 720, 1440, 10080, ONE_HUNDRED_YEARS_IN_MINUTES]),
+    Validator('sportarr.full_update', must_exist=True, default='Daily', is_type_of=str,
+              is_in=['Manually', 'Daily', 'Weekly']),
+    Validator('sportarr.full_update_day', must_exist=True, default=6, is_type_of=int, gte=0, lte=6),
+    Validator('sportarr.full_update_hour', must_exist=True, default=4, is_type_of=int, gte=0, lte=23),
+    Validator('sportarr.only_monitored', must_exist=True, default=False, is_type_of=bool),
+    Validator('sportarr.sync_only_monitored_leagues', must_exist=True, default=False, is_type_of=bool),
+    Validator('sportarr.sync_only_monitored_events', must_exist=True, default=False, is_type_of=bool),
+    Validator('sportarr.excluded_tags', must_exist=True, default=[], is_type_of=list, condition=validate_tags),
+    Validator('sportarr.excluded_sports', must_exist=True, default=[], is_type_of=list),
+    Validator('sportarr.search_on_sync', must_exist=True, default=True, is_type_of=bool),
+    Validator('sportarr.use_ffprobe_cache', must_exist=True, default=True, is_type_of=bool),
+    # Marker for the one-time enable-flag reconcile in app/database.py. Not a
+    # user setting and not surfaced in the UI.
+    Validator('sportarr.enable_reconciled', must_exist=True, default=False, is_type_of=bool),
+
     # plex section
     Validator('plex.ip', must_exist=True, default='127.0.0.1', is_type_of=str),
     Validator('plex.port', must_exist=True, default=32400, is_type_of=int, gte=1, lte=65535),
@@ -308,6 +437,8 @@ validators = [
     Validator('plex.series_library', must_exist=True, default=[], is_type_of=(str, list)),
     Validator('plex.movie_library_ids', must_exist=True, default=[], is_type_of=list),
     Validator('plex.series_library_ids', must_exist=True, default=[], is_type_of=list),
+    Validator('plex.sports_library', must_exist=True, default=[], is_type_of=(str, list)),
+    Validator('plex.sports_library_ids', must_exist=True, default=[], is_type_of=list),
     Validator('plex.set_movie_added', must_exist=True, default=False, is_type_of=bool),
     Validator('plex.set_episode_added', must_exist=True, default=False, is_type_of=bool),
     Validator('plex.update_movie_library', must_exist=True, default=False, is_type_of=bool),
@@ -330,6 +461,21 @@ validators = [
     Validator('plex.migration_timestamp', must_exist=True, default='', is_type_of=(int, float, str)),
     Validator('plex.disable_auto_migration', must_exist=True, default=False, is_type_of=bool),
     Validator('plex.client_identifier', must_exist=True, default='', is_type_of=str),
+    # The destination row this account owns. Recorded rather than inferred so a
+    # second Plex instance added by hand is never taken over by the account.
+    Validator('plex.instance_id', must_exist=True, default='', is_type_of=str),
+
+    # emby section
+    Validator('emby.url', must_exist=True, default='', is_type_of=str),
+    Validator('emby.apikey', must_exist=True, default='', is_type_of=str),
+    Validator('emby.verify_ssl', must_exist=True, default=True, is_type_of=bool),
+    Validator('emby.path_mappings', must_exist=True, default=[], is_type_of=list),
+
+    # silo section
+    Validator('silo.url', must_exist=True, default='', is_type_of=str),
+    Validator('silo.apikey', must_exist=True, default='', is_type_of=str),
+    Validator('silo.verify_ssl', must_exist=True, default=True, is_type_of=bool),
+    Validator('silo.path_mappings', must_exist=True, default=[], is_type_of=list),
 
     # jellyfin section
     Validator('jellyfin.url', must_exist=True, default='', is_type_of=str),
@@ -338,6 +484,8 @@ validators = [
     Validator('jellyfin.series_library', must_exist=True, default=[], is_type_of=list),
     Validator('jellyfin.movie_library_ids', must_exist=True, default=[], is_type_of=list),
     Validator('jellyfin.series_library_ids', must_exist=True, default=[], is_type_of=list),
+    Validator('jellyfin.sports_library', must_exist=True, default=[], is_type_of=list),
+    Validator('jellyfin.sports_library_ids', must_exist=True, default=[], is_type_of=list),
     Validator('jellyfin.update_movie_library', must_exist=True, default=False, is_type_of=bool),
     Validator('jellyfin.update_series_library', must_exist=True, default=False, is_type_of=bool),
     Validator('jellyfin.refresh_method', must_exist=True, default='immediate', is_type_of=str,
@@ -345,6 +493,14 @@ validators = [
     # Default to verifying TLS like sonarr/radarr/plex; users with self-signed
     # homelab certs can flip this off explicitly. Matches feedback_codeql memory.
     Validator('jellyfin.verify_ssl', must_exist=True, default=True, is_type_of=bool),
+
+    # seerr section (Overseerr, Jellyseerr and Seerr share this API)
+    Validator('seerr.url', must_exist=True, default='', is_type_of=str, cast=str),
+    Validator('seerr.apikey', must_exist=True, default='', is_type_of=str, cast=str),
+    Validator('seerr.verify_ssl', must_exist=True, default=True, is_type_of=bool),
+    # Browser-facing base for links. Empty means Seerr's own applicationUrl,
+    # then the API url above.
+    Validator('seerr.external_url', must_exist=True, default='', is_type_of=str, cast=str),
 
     # proxy section
     Validator('proxy.type', must_exist=True, default=None, is_type_of=(NoneType, str),
@@ -594,6 +750,10 @@ validators = [
     # OMDB: optional title/year resolution for movies that aren't in the
     # local library. Free tier at omdbapi.com (1000 req/day). Empty = skip.
     Validator('omdb.apikey', default='', cast=str),
+    # Validate new credential input before assignment, never interpolate a stored secret.
+    Validator('discover.tmdb_access_token', default=''),
+    Validator('discover.locale', default='en-US'),
+    Validator('general.metadata_language', default=''),
 ]
 
 
@@ -635,6 +795,30 @@ settings = Dynaconf(
 )
 
 settings.validators.register(*validators)
+
+# An install that predates the setting, or whose stored value we cannot make sense of,
+# keeps a sort every translator serves rather than being moved onto the new default.
+#
+# The validator default is written for a NEW install. Applying it to an upgrade would
+# move an install that has been translating happily onto a routing its translator may not
+# implement, and smartfast refuses rather than degrades, so the first symptom would be
+# every translation failing on a service the user never had reason to touch. The setting
+# first shipped in v2.6.2, so every config written before that lacks the key entirely and
+# would otherwise be indistinguishable from a fresh one. A stored value outside the set is
+# the same kind of config we do not understand, and the validation loop below would reset
+# it to the default (smartfast) just the same; normalizing it first prevents that, because
+# a value we failed to parse is not evidence about which translator version is running.
+#
+# A brand new install is the empty file created just above; anything with content in it
+# is an existing config, and existing configs keep the sort they can already be served.
+if os.path.getsize(config_yaml_file) > 0:
+    stored_routing = settings.get('translator.openrouter_provider_routing')
+    if stored_routing not in PROVIDER_ROUTING_VALUES:
+        settings['translator.openrouter_provider_routing'] = normalize_stored_provider_routing(stored_routing)
+        logging.info("Existing configuration has no usable OpenRouter provider routing (%r); keeping %s, "
+                     "which every AI Subtitle Translator version serves.", stored_routing,
+                     UPGRADED_PROVIDER_ROUTING)
+    migrate_upgrade_subtitle_toggles(settings, existing_config=True)
 
 failed_validator = True
 while failed_validator:
@@ -686,7 +870,22 @@ _force_first_save_migration = has_plaintext_secrets_on_disk(settings)
 decrypt_settings_in_place(settings)
 
 
-def write_config():
+class MetadataPersistenceError(Exception):
+    """The requested metadata configuration could not be persisted."""
+
+
+class MetadataFollowupError(Exception):
+    """Metadata settings were persisted, but subsequent application work failed."""
+
+
+def write_config(*, strict_metadata=False):
+    from discover.metadata import CONFIG_LOCK
+    with CONFIG_LOCK:
+        return _write_config(strict_metadata=strict_metadata)
+
+
+def _write_config(*, strict_metadata=False):
+    from secret_store.crypto import mark_master_key_persisted
     # On-disk shape compared in plaintext form: encrypt_secret is non-
     # deterministic (per-payload salt + timestamp), so naive ciphertext
     # comparison would always diff and rewrite config.yaml on every save.
@@ -702,24 +901,32 @@ def write_config():
 
     if in_memory_plaintext == on_disk_plaintext and not _force_first_save_migration:
         logging.debug("Nothing changed when comparing to config file. Skipping write to file.")
-        return
+        mark_master_key_persisted(in_memory_plaintext.get("general", {}).get("secrets_encryption_key"))
+        return True
 
     forced_migration = _force_first_save_migration
     if forced_migration:
         logging.info("secret_store: forcing config rewrite to encrypt plaintext credentials on disk")
 
     try:
+        encrypted_payload = encrypt_settings_dict(in_memory_plaintext)
         write(settings_path=config_yaml_file + '.tmp',
-              settings_data=encrypt_settings_dict(in_memory_plaintext),
+              settings_data=encrypted_payload,
               merge=False)
     except Exception as error:
+        if strict_metadata:
+            raise MetadataPersistenceError("Discover settings could not be saved. Try again.") from None
         logging.exception(f"Exception raised while trying to save temporary settings file: {error}")  # noqa: G004
+        return False
     else:
         try:
             move(config_yaml_file + '.tmp', config_yaml_file)
         except Exception as error:
+            if strict_metadata:
+                raise MetadataPersistenceError("Discover settings could not be saved. Try again.") from None
             logging.exception(f"Exception raised while trying to overwrite settings file with temporary settings "  # noqa: G004
                               f"file: {error}")
+            return False
         else:
             # Only clear the forced-migration flag once the new
             # encrypted config is durably in place. Clearing it on the
@@ -730,6 +937,8 @@ def write_config():
             # never retry, leaving credentials unencrypted on disk.
             if forced_migration:
                 _force_first_save_migration = False
+            mark_master_key_persisted(encrypted_payload.get("general", {}).get("secrets_encryption_key"))
+            return True
 
 
 # OpenRouter retired these ids, including Bazarr's default and documented recommendation.
@@ -763,16 +972,22 @@ array_keys = ['excluded_tags',
               'enabled_integrations',
               'enabled_engines',
               'gemini_keys',
+              'openrouter_provider_order',
               'path_mappings',
               'path_mappings_movie',
+              'path_mappings_sports',
+              'excluded_sports',
               'remove_profile_tags',
               'language_equals',
+              'verbose_loggers',
               'blacklisted_languages',
               'blacklisted_providers',
               'movie_library',
               'series_library',
               'movie_library_ids',
-              'series_library_ids']
+              'series_library_ids',
+              'sports_library',
+              'sports_library_ids']
 
 empty_values = ['', 'None', 'null', 'undefined', None, []]
 
@@ -822,18 +1037,32 @@ write_config()
 
 
 def get_settings():
+    from discover.metadata import CONFIG_LOCK
+    with CONFIG_LOCK:
+        return _get_settings()
+
+
+def _get_settings():
     # API serializer for /api/system/settings. SYSTEM_SECRETS are masked
     # with '***' (key still present so the wire shape is stable, value
     # hidden); USER_VISIBLE_SECRETS pass through unchanged because the
     # in-memory settings already hold their decrypted plaintext.
-    from secret_store import is_system_secret  # noqa: PLC0415, RUF100
+    from secret_store import is_system_secret, is_write_only_secret  # noqa: PLC0415, RUF100
+    from secret_store.registry import IMPORT_ONLY_SECTIONS
     settings_to_return = {}
     for k, v in settings.as_dict().items():
         if isinstance(v, dict):
             k = k.lower()
+            if k in IMPORT_ONLY_SECTIONS:
+                continue
             settings_to_return[k] = dict()
             for subk, subv in v.items():
                 full_path = f"{k}.{subk.lower()}"
+                if is_write_only_secret(full_path):
+                    continue
+                if k == "discover" and subk.lower() in {"tmdb_configured", "tmdb_token_stored",
+                                                        "metadata_revision"}:
+                    continue
                 if is_system_secret(full_path):
                     # Keep empty values literally empty so the UI can
                     # distinguish "not configured" from "configured but
@@ -846,6 +1075,15 @@ def get_settings():
                     settings_to_return[k].update({subk: get_array_from(subv)})
                 else:
                     settings_to_return[k].update({subk: subv})
+    from discover.metadata import configuration, reader_token_stored
+    metadata_config = configuration()
+    # Two separate facts: metadata works at all, which the built-in key makes
+    # true everywhere, and whether the reader saved a key of their own, which
+    # is the only one that can be removed.
+    settings_to_return.setdefault("discover", {}).update({
+        "tmdb_configured": bool(metadata_config.token), "tmdb_token_stored": reader_token_stored(),
+        "metadata_revision": metadata_config.revision})
+    settings_to_return.setdefault("general", {})["metadata_language"] = metadata_config.locale
     return settings_to_return
 
 
@@ -913,18 +1151,208 @@ def _active_provider_hub_provider_ids():
         return set()
 
 
+def _translator_field(settings_items, name):
+    """The value a request carries for ``settings-translator-<name>``, or None.
+
+    Matched on the whole key rather than its last segment. The settings store underneath
+    is case-insensitive, so the name is compared case-insensitively, but the section is
+    not: a key naming some other section must never be read as, or written to, this one.
+    """
+    for key, value in settings_items:
+        parts = key.split('-')
+        if len(parts) == 3 and parts[0] == 'settings' and parts[1] == 'translator' and parts[2].lower() == name:
+            return value
+    return None
+
+
+def _is_provider_order_key(key):
+    """True for settings-translator-openrouter_provider_order in any casing of the name."""
+    parts = key.split('-')
+    return (len(parts) == 3 and parts[0] == 'settings' and parts[1] == 'translator'
+            and parts[2].lower() == 'openrouter_provider_order')
+
+
+def _require_provider_order_for_custom_routing(settings_items):
+    """Refuse custom OpenRouter routing that names no provider.
+
+    The routing and the provider list arrive in the same request and only mean anything
+    together. Stored apart, custom with an empty list saves cleanly and then fails every
+    translation, and by that point the only signal is a failed job.
+
+    Only a request that actually carries one of the two keys is checked. Reading the pair
+    off stored settings for every save made one bad translator config reject saves on
+    every other settings page, which is a worse failure than the one being prevented and
+    lands on a page that cannot fix it.
+    """
+    submitted_routing = _translator_field(settings_items, 'openrouter_provider_routing')
+    submitted_order = _translator_field(settings_items, 'openrouter_provider_order')
+    if submitted_routing is None and submitted_order is None:
+        return
+    routing = submitted_routing
+    if routing is None:
+        routing = getattr(settings.translator, 'openrouter_provider_routing', '')
+    if isinstance(routing, list):
+        routing = routing[0] if routing else ''
+    if str(routing).lower() != 'custom':
+        return
+    order = submitted_order
+    if order is None:
+        order = getattr(settings.translator, 'openrouter_provider_order', [])
+    if not order:
+        raise ValidationError('OpenRouter custom routing requires at least one provider slug. '
+                              'Choose a provider, or pick another routing option.')
+
+
+def validate_metadata_settings(settings_items):
+    from discover.metadata import validate_token
+    allowed = {"settings-discover-tmdb_access_token", "settings-discover-locale",
+               "settings-general-metadata_language"}
+    seen = set()
+    for key, values in settings_items:
+        if not key.lower().startswith("settings-discover-") and key.lower() != "settings-general-metadata_language":
+            continue
+        if key not in allowed or key in seen:
+            raise ValidationError("Invalid Discover setting.")
+        seen.add(key)
+        if not isinstance(values, list) or len(values) != 1:
+            raise ValidationError("Invalid TMDB access token." if key.endswith("tmdb_access_token")
+                                  else "Invalid metadata language.")
+        if key.endswith("tmdb_access_token"):
+            try:
+                validate_token(values[0])
+            except ValueError:
+                raise ValidationError("Invalid TMDB access token.") from None
+        elif not isinstance(values[0], str) or not re.fullmatch(r"[a-z]{2,3}(?:-[A-Z]{2})?", values[0]):
+            raise ValidationError("Invalid metadata language.")
+def restore_persisted_settings():
+    """Return the live settings object to what is actually saved on disk.
+
+    Re-decrypt after reload: settings.reload() pulls the on-disk ciphertext back
+    into the live Dynaconf object, so without this second pass downstream code
+    would see `enc:v1:` strings for API keys, auth credentials, provider
+    passwords, and compat tokens until the next process restart.
+    """
+    settings.reload()
+    migrate_legacy_plex_encryption(settings)
+    decrypt_settings_in_place(settings)
+
+
+_native_settings_save_lock = threading.RLock()
+
+# Every kind's master switch, so flipping one republishes that kind's saved
+# snapshots. A kind missing from here keeps refreshing after the user turned it
+# off, until the next restart.
+NATIVE_MASTER_KEYS = {'settings-general-use_' + kind
+                      for kind in ('emby', 'jellyfin', 'plex', 'silo')}
+
+
+def _save_settings_with_native(settings_items, *, strict_metadata=False, on_metadata_persisted=None):
+    """Apply the media-server master-switch handling around a settings save."""
+    with _native_settings_save_lock:
+        if not any(key in NATIVE_MASTER_KEYS for key, _value in settings_items):
+            return _save_settings(settings_items, strict_metadata=strict_metadata,
+                                  on_metadata_persisted=on_metadata_persisted)
+        from media_servers.dispatcher import get_native_configuration
+        native = get_native_configuration()
+        with native.lock:
+            try:
+                return _save_settings(settings_items, native, strict_metadata=strict_metadata,
+                                      on_metadata_persisted=on_metadata_persisted)
+            finally:
+                for kind, enabled in native.masters.items():
+                    _settings_mapping(settings, 'general')['use_' + kind] = enabled
+
+
 def save_settings(settings_items):
+    from media_servers.http import MediaServerError, parse_verify_ssl
+    from secret_store.registry import IMPORT_ONLY_SECTIONS
+
+    items = list(settings_items)
+    validate_metadata_settings(items)
+
+    for index, (key, value) in enumerate(items):
+        parts = key.lower().split('-')
+        if len(parts) > 1 and parts[1] in IMPORT_ONLY_SECTIONS:
+            raise ValidationError('Use media server instances to edit connection settings')
+        if key in NATIVE_MASTER_KEYS:
+            if isinstance(value, list) and len(value) == 1:
+                value = value[0]
+            try:
+                items[index] = key, parse_verify_ssl(value)
+            except MediaServerError:
+                raise ValidationError('Invalid native media server master switch') from None
+
+    from discover.metadata import CONFIG_LOCK, invalidate_metadata
+    with CONFIG_LOCK:
+        if not any(key.startswith("settings-discover-") or key == "settings-general-metadata_language"
+                   for key, _ in items):
+            return _save_settings_with_native(items)
+        previous = dict(settings.discover)
+        previous_language = settings.get("general.metadata_language", "")
+        effective_language = previous_language
+        effective = dict(previous)
+        for key, values in items:
+            if key == "settings-general-metadata_language":
+                effective_language = values[0]
+            if key.startswith("settings-discover-"):
+                field = key.removeprefix("settings-discover-")
+                if field != "tmdb_access_token" or values[0] != "***":
+                    effective[field] = values[0]
+        changed = effective != previous or effective_language != previous_language
+        persisted = False
+
+        def metadata_persisted():
+            nonlocal persisted
+            persisted = True
+            invalidate_metadata()
+
+        try:
+            _save_settings_with_native(items, strict_metadata=changed,
+                                       on_metadata_persisted=metadata_persisted if changed else None)
+        except Exception:
+            if persisted:
+                raise MetadataFollowupError(
+                    "Discover settings were saved, but application refresh failed. Reload settings before retrying."
+                ) from None
+            settings.set("discover", previous)
+            settings.set("general.metadata_language", previous_language)
+            raise
+
+
+def _save_settings(settings_items, native_configuration=None, *, strict_metadata=False,
+                   on_metadata_persisted=None):
+    # Validate repeated form values before applying any changes, including the
+    # single-value and empty-list representations used by the settings editor.
+    #
+    # The settings store underneath is case-insensitive, so a case variant of the name
+    # would reach the same key while skipping this normalizer and leaving a second,
+    # unvalidated copy in the config file. The name is therefore compared case
+    # insensitively and rewritten to its canonical form, because every later step here
+    # compares the last segment against array_keys and str_keys exactly.
+    #
+    # The section is compared exactly. Matching the name alone let a key naming any other
+    # section be redirected into the translator's, which is a silent cross-section write.
+    settings_items = [
+        ('settings-translator-openrouter_provider_order',
+         normalize_openrouter_provider_order([] if value == [''] else value))
+        if _is_provider_order_key(key) else (key, value)
+        for key, value in settings_items
+    ]
+    _require_provider_order_for_custom_routing(settings_items)
     configure_debug = False
     configure_captcha = False
     update_schedule = False
     sonarr_changed = False
     radarr_changed = False
+    sportarr_changed = False
     update_path_map = False
     configure_proxy = False
     exclusion_updated = False
     sonarr_exclusion_updated = False
     radarr_exclusion_updated = False
+    sportarr_exclusion_updated = False
     use_embedded_subs_changed = False
+    embedded_subtitles_parser_changed = False
     undefined_audio_track_default_changed = False
     undefined_subtitles_track_default_changed = False
     audio_tracks_parsing_changed = False
@@ -946,6 +1374,12 @@ def save_settings(settings_items):
 
         settings_keys = key.split('-')
 
+        if key in {'settings-discover-tmdb_access_token', 'settings-discover-locale'}:
+            if key.endswith('tmdb_access_token') and value[0] == '***':
+                continue
+            settings.discover[settings_keys[-1]] = value[0]
+            continue
+
         # Make sure that text based form values aren't passed as list
         if isinstance(value, list) and len(value) == 1 and settings_keys[-1] not in array_keys:
             value = value[0]
@@ -963,11 +1397,12 @@ def save_settings(settings_items):
                     pass
 
         # Make sure empty language list are stored correctly
-        if settings_keys[-1] in array_keys and value[0] in empty_values:
+        if (settings_keys[-1] in array_keys and settings_keys[-1] != 'openrouter_provider_order'
+                and value and value[0] in empty_values):
             value = []
 
         # Handle path mappings settings since they are array in array
-        if settings_keys[-1] in ['path_mappings', 'path_mappings_movie']:
+        if settings_keys[-1] in ['path_mappings', 'path_mappings_movie', 'path_mappings_sports']:
             value = [x.split(',') for x in value if isinstance(x, str)]
 
         if value == 'true':
@@ -986,6 +1421,9 @@ def save_settings(settings_items):
         if key in ['settings-general-use_embedded_subs', 'settings-general-ignore_pgs_subs',
                    'settings-general-ignore_vobsub_subs', 'settings-general-ignore_ass_subs']:
             use_embedded_subs_changed = True
+
+        if key == 'settings-general-embedded_subtitles_parser':
+            embedded_subtitles_parser_changed = value != settings.general.embedded_subtitles_parser
 
         if key == 'settings-general-adaptive_searching_max_age':
             if value != settings.general.adaptive_searching_max_age:
@@ -1023,11 +1461,16 @@ def save_settings(settings_items):
             configure_captcha = True
 
         if key in ['update_schedule', 'settings-general-use_sonarr', 'settings-general-use_radarr',
+                   'settings-general-use_sportarr',
                    'settings-general-auto_update', 'settings-general-upgrade_subs',
                    'settings-sonarr-series_sync', 'settings-radarr-movies_sync',
+                   'settings-sportarr-sports_sync',
                    'settings-sonarr-full_update', 'settings-sonarr-full_update_day', 'settings-sonarr-full_update_hour',
                    'settings-radarr-full_update', 'settings-radarr-full_update_day', 'settings-radarr-full_update_hour',
+                   'settings-sportarr-full_update', 'settings-sportarr-full_update_day',
+                   'settings-sportarr-full_update_hour',
                    'settings-general-wanted_search_frequency', 'settings-general-wanted_search_frequency_movie',
+                   'settings-general-wanted_search_frequency_sports',
                    'settings-general-upgrade_frequency', 'settings-backup-frequency', 'settings-backup-day',
                    'settings-backup-hour']:
             update_schedule = True
@@ -1040,7 +1483,16 @@ def save_settings(settings_items):
                    'settings-radarr-base_url', 'settings-radarr-ssl', 'settings-radarr-apikey']:
             radarr_changed = True
 
-        if key in ['settings-general-path_mappings', 'settings-general-path_mappings_movie']:
+        # Sports has no scalar connection block: its instances live in
+        # arr_instances and their own edits already refresh the runtime. The
+        # master toggle is the one sports setting that does not, and without
+        # this the event streams kept running after it was switched off, until
+        # a restart or an unrelated instance edit happened to refresh them.
+        if key == 'settings-general-use_sportarr':
+            sportarr_changed = True
+
+        if key in ['settings-general-path_mappings', 'settings-general-path_mappings_movie',
+                   'settings-general-path_mappings_sports']:
             update_path_map = True
 
         if key in ['settings-proxy-type', 'settings-proxy-url', 'settings-proxy-port', 'settings-proxy-username',
@@ -1049,8 +1501,14 @@ def save_settings(settings_items):
 
         if key in ['settings-sonarr-excluded_tags', 'settings-sonarr-only_monitored',
                    'settings-sonarr-excluded_series_types', 'settings-sonarr-exclude_season_zero',
-                   'settings-radarr-excluded_tags', 'settings-radarr-only_monitored']:
+                   'settings-radarr-excluded_tags', 'settings-radarr-only_monitored',
+                   'settings-sportarr-excluded_tags', 'settings-sportarr-excluded_sports',
+                   'settings-sportarr-only_monitored']:
             exclusion_updated = True
+
+        if key in ['settings-sportarr-excluded_tags', 'settings-sportarr-excluded_sports',
+                   'settings-sportarr-only_monitored']:
+            sportarr_exclusion_updated = True
 
         if key in ['settings-sonarr-excluded_tags', 'settings-sonarr-only_monitored',
                    'settings-sonarr-excluded_series_types', 'settings-sonarr-exclude_season_zero']:
@@ -1136,6 +1594,9 @@ def save_settings(settings_items):
             if settings_keys[1] in active_provider_hub_provider_ids:
                 reset_compat_pool = True
 
+        if key in ('settings-compat_endpoint-enabled', 'settings-compat_endpoint-serve_local_subs'):
+            update_schedule = True
+
         if key in ('settings-compat_endpoint-fanout_max_workers',
                    'settings-compat_endpoint-max_concurrent_fanouts'):
             # Defer the reset until AFTER all values in this batch are
@@ -1192,6 +1653,10 @@ def save_settings(settings_items):
         if settings.general.use_radarr:
             list_missing_subtitles_movies()
 
+        if settings.general.use_sportarr:
+            from subtitles.indexer.sports import list_missing_subtitles_sports
+            list_missing_subtitles_sports()
+
     if undefined_subtitles_track_default_changed:
         from .scheduler import scheduler
         from subtitles.indexer.series import series_full_scan_subtitles
@@ -1200,6 +1665,16 @@ def save_settings(settings_items):
             series_full_scan_subtitles(use_cache=True)
         if settings.general.use_radarr:
             movies_full_scan_subtitles(use_cache=True)
+
+    if settings.general.use_sportarr and (undefined_subtitles_track_default_changed or
+                                         use_embedded_subs_changed or audio_tracks_parsing_changed or
+                                         embedded_subtitles_parser_changed):
+        from subtitles.indexer.sports import sports_full_scan_subtitles
+        sports_full_scan_subtitles(refresh_audio=audio_tracks_parsing_changed,
+                                  audio_mode=bool(settings.general.parse_embedded_audio_track)
+                                  if audio_tracks_parsing_changed else None,
+                                  audio_refresh_id=secrets.token_hex(16)
+                                  if audio_tracks_parsing_changed or embedded_subtitles_parser_changed else None)
 
     if audio_tracks_parsing_changed:
         from .scheduler import scheduler
@@ -1246,17 +1721,34 @@ def save_settings(settings_items):
         settings.validators.validate()
         validate_log_regex()
     except ValidationError:
-        # Re-decrypt after reload: settings.reload() pulls the on-disk
-        # ciphertext back into the live Dynaconf object, so without this
-        # second pass downstream code would see `enc:v1:` strings for
-        # API keys, auth credentials, provider passwords, and compat
-        # tokens until the next process restart.
-        settings.reload()
-        migrate_legacy_plex_encryption(settings)
-        decrypt_settings_in_place(settings)
+        restore_persisted_settings()
         raise
     else:
-        write_config()
+        if strict_metadata:
+            try:
+                saved = write_config(strict_metadata=True)
+            except Exception:
+                restore_persisted_settings()
+                raise MetadataPersistenceError("Discover settings could not be saved. Try again.") from None
+        else:
+            saved = write_config()
+
+        if saved is not True:
+            # The request is refused, so none of it may stay applied. Every
+            # submitted value is already on the live settings object by now,
+            # and when a media-server master switch travelled with it the
+            # caller's `finally` restores only those two switches: without this
+            # the process would keep running values that reached no file, tell
+            # the user they were saved, and revert them at the next restart.
+            # Nothing about that is particular to a master switch, so the check
+            # covers every save rather than only those.
+            restore_persisted_settings()
+            raise ValidationError('Unable to save settings to disk')
+        if native_configuration is not None:
+            native_configuration.publish_masters(settings)
+
+        if on_metadata_persisted is not None:
+            on_metadata_persisted()
 
         # Set the configured state based on config.yaml file existence
         from .database import database, update, System
@@ -1293,6 +1785,16 @@ def save_settings(settings_items):
             except Exception:
                 pass
 
+        if sportarr_changed:
+            # Streams and jobs together: configure_sports_jobs is gated on the
+            # same toggle, so leaving it out would stop the streams and leave
+            # the scheduled sports jobs registered.
+            from sportarr.scheduler import refresh_sports_runtime
+            try:
+                refresh_sports_runtime()
+            except Exception:
+                pass
+
         if update_path_map:
             from utilities.path_mappings import path_mappings
             path_mappings.update()
@@ -1307,6 +1809,12 @@ def save_settings(settings_items):
                 event_stream(type='reset-episode-wanted')
             if radarr_exclusion_updated:
                 event_stream(type='reset-movie-wanted')
+            # The sports wanted list is computed live against the exclusion
+            # settings, so saving them has to invalidate the client's cached
+            # sports rows. The 'sports' event is the one the socketio reducer
+            # maps to the whole sports query root, wanted included.
+            if sportarr_exclusion_updated:
+                event_stream(type='sports')
 
 
 def get_array_from(property):
@@ -1394,6 +1902,21 @@ def sync_checker(subtitle):
 
 
 # Plex OAuth Migration Functions
+def _sync_plex_destination():
+    """Keep the Plex destination row in step with an account change here.
+
+    The automatic API-key-to-OAuth migration swaps which credential the account
+    authenticates with, in both directions. A row still holding the other one
+    would refresh with a credential the account no longer has.
+    """
+    try:
+        from media_servers.plex_account import sync_plex_account
+        sync_plex_account()
+    except Exception:
+        logging.debug('Could not carry the migrated Plex account onto its destination',
+                      exc_info=True)
+
+
 def migrate_plex_config():
     # Generate encryption key if not exists or is empty
     existing_key = settings.plex.get('encryption_key')
@@ -1749,6 +2272,9 @@ def migrate_apikey_to_oauth():
             settings.plex.apikey = ''
             settings.plex.apikey_encrypted = False
             write_config()
+            # The account authenticates with the token now, so the destination
+            # row must stop holding the API key that was just removed.
+            _sync_plex_destination()
             logging.info("Legacy API key permanently removed after successful OAuth migration")
             
         except Exception as e:
@@ -1776,6 +2302,8 @@ def migrate_apikey_to_oauth():
             settings.plex.disable_auto_migration = False  # Allow retry
             
             write_config()
+            # Back on the API key, so the destination row goes back with it.
+            _sync_plex_destination()
             
             # Test the rollback
             try:

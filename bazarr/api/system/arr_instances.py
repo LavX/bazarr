@@ -12,7 +12,7 @@ from arr_instances import service
 from ..utils import authenticate
 
 api_ns_system_arr_instances = Namespace(
-    "arr_instances", description="Manage multiple Sonarr/Radarr instances")
+    "arr_instances", description="Manage Sonarr, Radarr and Sportarr instances")
 
 # Plaintext API keys are accepted only in the JSON body, never in the URL/query,
 # and are never echoed back (responses carry api_key_set, not the key).
@@ -30,6 +30,8 @@ _create_parser.add_argument("enabled", type=bool, location="json")
 _create_parser.add_argument("is_default", type=bool, location="json")
 _create_parser.add_argument("subtitle_settings", type=dict, location="json")
 _create_parser.add_argument("media_defaults", type=dict, location="json")
+_create_parser.add_argument("sports_settings", type=dict, location="json")
+_create_parser.add_argument("path_mappings", type=lambda value: value, location="json", store_missing=False)
 
 _update_parser = reqparse.RequestParser()
 _update_parser.add_argument("name", type=str, location="json")
@@ -45,6 +47,8 @@ _update_parser.add_argument("enabled", type=bool, location="json")
 _update_parser.add_argument("is_default", type=bool, location="json")
 _update_parser.add_argument("subtitle_settings", type=dict, location="json")
 _update_parser.add_argument("media_defaults", type=dict, location="json")
+_update_parser.add_argument("sports_settings", type=dict, location="json")
+_update_parser.add_argument("path_mappings", type=lambda value: value, location="json", store_missing=False)
 
 _test_parser = reqparse.RequestParser()
 _test_parser.add_argument("kind", type=str, required=True, location="json")

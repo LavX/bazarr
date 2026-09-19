@@ -1,23 +1,35 @@
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import {
+  faChartLine,
   faClockRotateLeft,
+  faCompass,
   faDatabase,
   faDownload,
   faFileZipper,
+  faFilm,
+  faGaugeHigh,
   faLayerGroup,
+  faMagnifyingGlass,
+  faPaperPlane,
   faScaleBalanced,
   faServer,
   faShieldHalved,
   faSliders,
   faStore,
+  faTag,
   faTowerBroadcast,
+  faTrophy,
   faWandMagicSparkles,
 } from "@fortawesome/free-solid-svg-icons";
 
 export interface WhatsNewSlide {
   /** Short headline for the change. */
   title: string;
-  /** One to three lines describing it. */
+  /**
+   * Plain-language prose describing it, two to five sentences. The modal wraps
+   * and scrolls it, so the bodies from v2.6.0 on run to a short paragraph;
+   * verified rendering at 400px and 1280px wide.
+   */
   body: string;
   /** Optional imported asset URL; takes priority over `icon`. */
   image?: string;
@@ -32,7 +44,7 @@ export interface WhatsNewSlide {
  * cutting a release. Kept as an explicit token so the wizard never has to parse the
  * fork's `version + YYMMDD` runtime string.
  */
-export const latestWhatsNewVersion = "2.6.2";
+export const latestWhatsNewVersion = "2.7.0";
 
 // v2.6.0 feature slides; v2.6.1 (a patch on the same line) leads with its
 // fix and keeps the whole Clockwork tour behind it.
@@ -87,6 +99,86 @@ const clockworkSlides: WhatsNewSlide[] = [
 ];
 
 export const whatsNew: Record<string, WhatsNewSlide[]> = {
+  "2.7.0": [
+    {
+      title: "Discover is where Bazarr+ opens now",
+      body: "Instead of a table, the first thing you see is your own library: what it holds, what it is working on, and what is still missing, grouped per library with a link into each queue. Needs attention collects throttled providers, disconnected library sync and unreachable root folders, and stays quiet when there is nothing to report. Below your library sit trending titles, digital releases and recent episodes.",
+      icon: faCompass,
+      cta: { label: "Open Discover", to: "/discover" },
+    },
+    {
+      title: "Search subtitles for any title, owned or not",
+      body: "Look up any film or show by title and search your providers for it, even with an empty library and no Sonarr or Radarr connected. Each provider reports its own progress as it runs, the result opens as a formatted preview under the row, and Download saves the file straight to the device you are reading on. Browsing and refreshing never contact a subtitle provider: only a search you asked for does.",
+      icon: faMagnifyingGlass,
+      cta: { label: "Open Discover", to: "/discover" },
+    },
+    {
+      title: "Request a title in Seerr from Discover",
+      body: "If you run Overseerr, Jellyseerr or Seerr, a title page says what Seerr already knows and offers the matching action: request it, pick seasons, or nothing at all when it is already available or blocklisted. A series opens a season picker that keeps what Seerr holds, what you already own and what is left to request apart. Bazarr+ never approves anything: the request is made as the Seerr owner and approval stays in Seerr.",
+      icon: faPaperPlane,
+      cta: { label: "Open Connections", to: "/settings/connections" },
+    },
+    {
+      title: "Sports are a media type, not a side door",
+      body: "Sportarr recordings now go through the same workflows as series and movies: manual search and download, uploads, the subtitle editor, sync, translate, combine, Wanted, History, Excluded and global search. Every job, file read and provider callback stays with the Sportarr instance that owns the recording. Subtitle settings take a global default with per-instance overrides, and disabled instances drop out of scheduled work.",
+      icon: faTrophy,
+      cta: { label: "Open Sports", to: "/sports" },
+    },
+    {
+      title: "Several Emby and Silo servers, not one of each",
+      body: "Add as many Emby and Silo servers as you run, each with its own URL, encrypted key, TLS setting and path mappings, the way Sonarr and Radarr already worked. A new subtitle is refreshed on every server whose mappings cover that file, and one unreachable server no longer holds up the rest. Emby matches an item by provider id, then exact path, then title and year; Silo matches by path and falls back to a library scan. Both are new here, and both cover movies, episodes and sports recordings. The Emby and Silo sections in Connections link out to a guide covering path mappings, the refresh states and what each server can match on.",
+      icon: faServer,
+      cta: { label: "Open Connections", to: "/settings/connections" },
+    },
+    {
+      title: "Statistics that answer something",
+      body: "System, Statistics plots downloads per day with the share that arrived without a manual search, downloads and mean match quality per provider with a blacklist rate beside them, the spread of match scores, and which languages you actually end up with. A provider high on downloads and high on blacklist rate is the one to turn off, which nothing surfaced before. Scores are normalised per media type first, so an episode out of 360 and a film out of 180 no longer average into a meaningless number.",
+      icon: faChartLine,
+      cta: { label: "Open Statistics", to: "/system/statistics" },
+    },
+    {
+      title: "SmartFast routing: cheaper OpenRouter translations if you switch",
+      body: "SmartFast asks OpenRouter for an endpoint that is cheap and still fast enough, rather than the fastest one at any price. Nothing changes on your install: your current routing is kept until you pick SmartFast yourself under Settings, AI Translator, Provider Routing. It is worth the click if you are on Fastest, which is where every install that predates the routing selector sits: the September benchmark runs kept landing it on endpoints priced around twice the cheapest endpoint serving the same model. SmartFast needs AI Subtitle Translator 2.0.0 or newer and an older service refuses it, so update the translator before you switch.",
+      icon: faGaugeHigh,
+      cta: { label: "Open Translator settings", to: "/settings/translator" },
+    },
+    {
+      title: "Translations that stall, vanish or talk over each other",
+      body: "Setting reasoning to Disabled now really disables it instead of leaving the model's own default running, which is what had jobs timing out on reasoning tokens, and a cleared setting counts as disabled too. Thanks to wouterrutgers for finding and fixing the first half of that. Progress also stays on screen until the file is published rather than ending while the service is still finalising, and two translations running at once each keep their own notification.",
+      icon: faWandMagicSparkles,
+      cta: { label: "Open Translator settings", to: "/settings/translator" },
+    },
+    {
+      title: "Sessions, cookies and the event stream are closed up",
+      body: "A failed form login used to leave a cookie good enough to fetch the log file and the config backup, and that backup carries every credential in the install. That is closed. The legacy password upgrade no longer routes your plaintext password through the browser cookie, CORS stays off unless you turn it on, and the event socket refuses anyone who cannot prove who they are. Everyone is signed out once on this upgrade, and session lifetime, cookie security and the trusted proxy are read at startup, so changing them needs a restart.",
+      icon: faShieldHalved,
+      cta: { label: "Open General settings", to: "/settings/general" },
+    },
+    {
+      title: "Combined subtitles keep their characters",
+      body: "Combining subtitles preserves valid UTF-8 and BOM-marked Unicode instead of guessing an encoding, so accented and non-Latin text survives the merge. Encoding detection is now a fallback for legacy files only. A movie's translated badge also follows the file on disk, so replacing or deleting a subtitle clears a stale badge while a later sync keeps a current translation marked.",
+      icon: faLayerGroup,
+      cta: { label: "Open Subtitles settings", to: "/settings/subtitles" },
+    },
+    {
+      title: "Editor playback works on your second Sonarr or Radarr",
+      body: "Video playback in the subtitle editor failed for media on an explicitly selected instance: the playlist loaded and everything it pointed at came back 404. The selected instance is now carried through the initialization and media requests too.",
+      icon: faFilm,
+      cta: { label: "Open your series", to: "/series" },
+    },
+    {
+      title: "The tab says which build you are running",
+      body: "Page titles used to stop at the instance name. They now end with the running version, so a tab reads Series - Bazarr+ v2.7.0, and Discover sets a title at all. A custom instance name is still the base, so it follows whatever you named this install.",
+      icon: faTag,
+      cta: { label: "Open System Status", to: "/system/status" },
+    },
+    {
+      title: "Translated upgrades are their own switch, and off",
+      body: "Translated subtitles shared the upgrade toggle with manual downloads, and that toggle was on by default, so the upgrade job kept replacing a translation with a provider listing every cycle even when the score did not improve. Settings, Subtitles now has one switch for manually downloaded or uploaded subtitles and another for translated ones. Both are off on a new install. On this upgrade your manual setting is kept and translated upgrades are off, so turn them on if you want provider subtitles to replace your translations.",
+      icon: faSliders,
+      cta: { label: "Open Subtitles settings", to: "/settings/subtitles" },
+    },
+  ],
   "2.6.2": [
     {
       title: "Uploaded subtitles appear before sync finishes",

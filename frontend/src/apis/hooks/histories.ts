@@ -24,3 +24,27 @@ export function useHistoryStats(
       ),
   });
 }
+
+export function useHistoryMetrics(
+  time: History.TimeFrameOptions,
+  action: History.ActionOptions | null,
+  provider: System.Provider | null,
+  language: Language.Info | null,
+) {
+  return useQuery({
+    queryKey: [
+      QueryKeys.System,
+      QueryKeys.History,
+      "metrics",
+      { time, action, provider, language },
+    ],
+
+    queryFn: () =>
+      api.history.metrics(
+        time,
+        action ?? undefined,
+        provider?.name,
+        language?.code2,
+      ),
+  });
+}

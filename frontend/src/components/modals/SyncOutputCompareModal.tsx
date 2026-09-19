@@ -26,10 +26,14 @@ import {
 interface Props {
   opened: boolean;
   onClose: () => void;
-  mediaType: "episode" | "movie";
+  mediaType: "episode" | "movie" | "sports";
   mediaId: number;
   original: Subtitle;
   outputs: Subtitle[];
+  // Owning Sonarr/Radarr/Sportarr instance id (#156). Sports callers always
+  // carry one: a sports path mapping is per instance, so scoping the content
+  // read and the promote keeps them on the server that owns the file.
+  arrInstanceId?: number;
 }
 
 interface Variant {
@@ -80,6 +84,7 @@ export default function SyncOutputCompareModal({
   mediaId,
   original,
   outputs,
+  arrInstanceId,
 }: Props) {
   const promote = usePromoteSyncSubtitle();
   const variants = useMemo<Variant[]>(() => {
@@ -124,6 +129,7 @@ export default function SyncOutputCompareModal({
             mediaType,
             mediaId,
             variant.key,
+            arrInstanceId,
           );
           return {
             ...variant,
@@ -148,7 +154,7 @@ export default function SyncOutputCompareModal({
     return () => {
       cancelled = true;
     };
-  }, [mediaId, mediaType, opened, variants]);
+  }, [arrInstanceId, mediaId, mediaType, opened, variants]);
 
   const maxRows =
     loaded.length > 0
@@ -166,6 +172,7 @@ export default function SyncOutputCompareModal({
       mediaId,
       targetLanguage: buildSubtitleLanguageKey(original),
       sourceLanguage: selectedVariant.key,
+      arrInstanceId,
     });
 
     showNotification(

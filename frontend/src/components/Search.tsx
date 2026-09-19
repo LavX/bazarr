@@ -59,6 +59,23 @@ function useSearch(query: string) {
             };
           }
 
+          if (v.sportarrLeagueId) {
+            // The backend has returned leagues since sports gained a nav tab.
+            // Reaching the throw below was not a theoretical branch: typing
+            // anything matching a league name broke the whole search dropdown.
+            const leagueId = v.id ?? v.sportarrLeagueId;
+            return {
+              poster: v.poster,
+              link: `/sports/${leagueId}${
+                v.arr_instance_id ? `?instance=${v.arr_instance_id}` : ""
+              }`,
+              type: "sports",
+              value: `sp-${leagueId}`,
+              // A league has a sport where a show or film has a year.
+              label: v.sport ? `${v.title} (${v.sport})` : v.title,
+            };
+          }
+
           throw new Error("Unknown search result");
         })();
 
@@ -102,6 +119,7 @@ const Search: FunctionComponent = () => {
   const results = useSearch(query);
   const sonarrInstances = useArrInstanceLabels("sonarr");
   const radarrInstances = useArrInstanceLabels("radarr");
+  const sportarrInstances = useArrInstanceLabels("sportarr");
 
   const isMobile = useMediaQuery(`(max-width: ${em(750)})`);
 
@@ -127,8 +145,14 @@ const Search: FunctionComponent = () => {
       }}
       renderOption={(input) => {
         const result = results.find((r) => r.value === input.option.value);
+        // A lookup rather than a two-way ternary: "not a show means a movie"
+        // labelled a sports league with its Radarr instances, which name the
+        // wrong servers and can be a different count entirely.
         const instanceLabels =
-          result?.type === "show" ? sonarrInstances : radarrInstances;
+          {
+            show: sonarrInstances,
+            sports: sportarrInstances,
+          }[result?.type ?? ""] ?? radarrInstances;
 
         return (
           <Flex>

@@ -2,13 +2,14 @@
 
 import os
 import ipaddress
+import re
 import socket
 import time
 import requests
 import mimetypes
 
-from flask import (request, abort, render_template, Response, session, send_file, stream_with_context, Blueprint,
-                   redirect)
+from flask import (request, abort, render_template, Response, send_file, stream_with_context, Blueprint,
+                   jsonify, redirect)
 from functools import wraps
 from urllib.parse import unquote, urlparse
 
@@ -20,6 +21,7 @@ from utilities.helper import check_credentials
 from utilities.central import get_log_file_path
 from utilities.security_guards import api_key_matches
 
+from .auth import is_session_authenticated
 from .config import settings, base_url, get_ssl_verify
 from .database import database, System
 from .get_args import args
@@ -65,7 +67,7 @@ def check_login(actual_method):
                     'WWW-Authenticate': 'Basic realm="Login Required"'
                 })
         elif settings.auth.type == 'form':
-            if 'logged_in' not in session:
+            if not is_session_authenticated():
                 return abort(401)
         return actual_method(*args, **kwargs)
     return wrapper
@@ -119,7 +121,7 @@ def catch_all(path):
                 'WWW-Authenticate': 'Basic realm="Login Required"'
             })
     elif settings.auth.type == 'form':
-        if 'logged_in' not in session or not session['logged_in']:
+        if not is_session_authenticated():
             auth = False
 
     try:
@@ -185,35 +187,69 @@ def _instance_image_url(kind, url):
     return f'{client.base_url()}/api/v3/{path}?apikey={client.api_key}', client.verify_ssl
 
 
+# How long a browser may reuse a library cover without asking again. Cover art
+# changes when someone replaces it in Sonarr/Radarr, which is rare, and a day-old
+# poster costs nothing; re-fetching every cover on every page view costs a round
+# trip through Bazarr to the arr instance for each one.
+#
+# A day and no more. Radarr paths carry a ``lastWrite`` query, so replaced movie
+# art arrives under a new URL and is picked up at once, but the Sonarr parser
+# strips the query from its image URLs, so a replaced series poster has no new
+# address to arrive under and only this window ends it. A
+# ``stale-while-revalidate`` leg on top would have stretched that to eight days.
+COVER_MAX_AGE = 86400
+COVER_CACHE_CONTROL = f'private, max-age={COVER_MAX_AGE}'
+# Relayed in both directions so the once-a-day revalidation can be answered with
+# an empty 304 instead of the image again.
+COVER_VALIDATORS = ('ETag', 'Last-Modified')
+
+
+def _proxy_cover(kind, url, rewrite=None):
+    """Stream one library cover from its owning arr instance, cached.
+
+    The reader's own validators are carried upstream and the upstream answer is
+    carried back, so an unchanged cover is answered with a 304 and no body. An
+    upstream failure stays a 404 here rather than being dressed up as a 200
+    whose body is the arr instance's error page.
+    """
+    url = url.strip("/")
+    url_image, verify = _instance_image_url(kind, url)
+    if url_image is None:
+        return '', 404
+    if rewrite:
+        url_image = url_image.replace(*rewrite)
+    headers = dict(HEADERS)
+    for header in ('If-None-Match', 'If-Modified-Since'):
+        if request.headers.get(header):
+            headers[header] = request.headers[header]
+    try:
+        req = requests.get(url_image, stream=True, timeout=15, verify=verify, headers=headers)
+    except Exception:
+        return '', 404
+
+    passthrough = {name: req.headers[name] for name in COVER_VALIDATORS if name in req.headers}
+    if req.status_code == 304:
+        req.close()
+        return Response(status=304, headers={'Cache-Control': COVER_CACHE_CONTROL, **passthrough})
+    if req.status_code != 200:
+        req.close()
+        return '', 404
+    return Response(stream_with_context(req.iter_content(2048)),
+                    content_type=req.headers.get('content-type', 'application/octet-stream'),
+                    headers={'Cache-Control': COVER_CACHE_CONTROL, **passthrough})
+
+
 @ui_bp.route('/images/series/<path:url>', methods=['GET'])
 @check_login
 def series_images(url):
-    url = url.strip("/")
-    url_image, verify = _instance_image_url('sonarr', url)
-    if url_image is None:
-        return '', 404
-    url_image = url_image.replace('poster-250', 'poster-500')
-    try:
-        req = requests.get(url_image, stream=True, timeout=15, verify=verify, headers=HEADERS)
-    except Exception:
-        return '', 404
-    else:
-        return Response(stream_with_context(req.iter_content(2048)), content_type=req.headers['content-type'])
+    # Sonarr stores the 250px poster; the UI wants the 500px one.
+    return _proxy_cover('sonarr', url, rewrite=('poster-250', 'poster-500'))
 
 
 @ui_bp.route('/images/movies/<path:url>', methods=['GET'])
 @check_login
 def movies_images(url):
-    url = url.strip("/")
-    url_image, verify = _instance_image_url('radarr', url)
-    if url_image is None:
-        return '', 404
-    try:
-        req = requests.get(url_image, stream=True, timeout=15, verify=verify, headers=HEADERS)
-    except Exception:
-        return '', 404
-    else:
-        return Response(stream_with_context(req.iter_content(2048)), content_type=req.headers['content-type'])
+    return _proxy_cover('radarr', url)
 
 
 # --- Cinematic login backdrops (pre-auth) --------------------------------
@@ -225,12 +261,10 @@ def movies_images(url):
 # key stays server-side; the browser only ever receives public image.tmdb.org
 # URLs, which it loads directly.
 
-# Built-in read-only TMDB v3 API key. This is the shared public key used across
-# the Overseerr/Jellyseerr ecosystem - the same app-shipped service-key pattern
-# Bazarr already uses for TVDB v4. Override at runtime with BAZARR_TMDB_API_KEY
-# to point at a dedicated key. With no key the endpoint returns an empty list and
-# the login screen falls back to its gradient.
-_TMDB_BUILTIN_API_KEY = '431a8708161bcd1f1fbe7536137e61ed'
+# The built-in key and its resolution rule live in app.tmdb, shared with
+# Discover, so the two surfaces that call TMDB can never drift apart. With no key
+# at all the endpoint returns an empty list and the login screen falls back to
+# its gradient.
 _TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p/original'
 _TMDB_TRENDING_URL = 'https://api.themoviedb.org/3/trending/all/week'
 # How many backdrops the login screen rotates through, and how long the TMDB
@@ -242,7 +276,8 @@ _backdrop_cache = {'at': 0.0, 'urls': []}
 
 def _tmdb_api_key():
     """Resolve the TMDB key: env override first, then the built-in default."""
-    return os.environ.get('BAZARR_TMDB_API_KEY', '').strip() or _TMDB_BUILTIN_API_KEY
+    from app.tmdb import builtin_api_key
+    return builtin_api_key()
 
 
 def _fetch_tmdb_backdrops():
@@ -493,6 +528,34 @@ def _build_request_url(base_parsed, status_path, resolved_ip, hostname, pin):
     return pinned_url, headers
 
 
+# Both connection-test routes exist to read one version string out of a
+# Sonarr/Radarr style handshake, and the far end is a host the caller typed, so
+# everything it sends back is caller influenced. Bound what may be echoed to the
+# shape a version string can have instead of passing the response through.
+_VERSION_MAX_LENGTH = 64
+_VERSION_PATTERN = re.compile(r'[A-Za-z0-9][A-Za-z0-9._+-]*')
+
+
+def _handshake_version(payload):
+    """Return the version from a status handshake, or None when it is not one.
+
+    None means the far end answered 200 with something that is not a version
+    string: wrong service, a captive portal, an HTML error page that happens to
+    parse, or a field long enough to be a payload rather than a version.
+    """
+    if not isinstance(payload, dict):
+        return None
+    version = payload.get('version')
+    if not isinstance(version, str):
+        return None
+    version = version.strip()
+    if not version or len(version) > _VERSION_MAX_LENGTH:
+        return None
+    if not _VERSION_PATTERN.fullmatch(version):
+        return None
+    return version
+
+
 @ui_bp.route('/test/<service>', methods=['GET'])
 @check_login
 def proxy_service(service):
@@ -581,12 +644,17 @@ def proxy_service(service):
             last_response_code = result.status_code
             if result.status_code == 200:
                 try:
-                    version = result.json()['version']
-                    return dict(status=True, version=version,
-                                code=result.status_code)
+                    version = _handshake_version(result.json())
                 except Exception:
+                    version = None
+                if version is None:
+                    # Reached something that answers 200 but is not the
+                    # handshake. Keep the existing behaviour of recording it and
+                    # trying the remaining candidates rather than settling here.
                     last_error = 'Error Occurred. Check your settings.'
                     continue
+                return jsonify(status=True, version=version,
+                               code=result.status_code)
             elif result.status_code == 401:
                 return dict(status=False,
                             error='Access Denied. Check API key.',
@@ -641,10 +709,15 @@ def proxy(protocol, url):
     else:
         if result.status_code == 200:
             try:
-                version = result.json()['version']
-                return dict(status=True, version=version, code=result.status_code)
+                version = _handshake_version(result.json())
             except Exception:
+                version = None
+            if version is None:
                 return dict(status=False, error='Error Occurred. Check your settings.', code=result.status_code)
+            # jsonify rather than a bare dict: the body is JSON, and saying so
+            # at the return site keeps the content type out of the reader's
+            # assumptions, Flask's and a static analyser's alike.
+            return jsonify(status=True, version=version, code=result.status_code)
         elif result.status_code == 401:
             return dict(status=False, error='Access Denied. Check API key.', code=result.status_code)
         elif result.status_code == 404:

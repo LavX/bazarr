@@ -80,7 +80,7 @@ def test_serve_local_accepts_path_in_absolute_target_root(tmp_path):
     """When the file_id was minted with an allowed_roots list (e.g. for
     subs in general.subfolder=='absolute' folders), serve_local must
     accept paths inside any of those roots — not just media_dir.
-    Codex P1 follow-on."""
+    This is the follow-on to that fix."""
     from compat.local_subs import serve_local
     media_dir = tmp_path / "Movies" / "Inception (2010)"
     media_dir.mkdir(parents=True)

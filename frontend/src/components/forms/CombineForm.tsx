@@ -54,7 +54,17 @@ const CombineForm: FunctionComponent<Props> = ({
         scope,
         body: { languages: selected, format },
       });
-      if (result.status === "built") {
+      if (result.status === "built" && result.error) {
+        // Published, but a follow-up step did not complete. Reporting this as
+        // a plain success hid work the operator still has to do: the subtitle
+        // can be missing from the event index until it is reindexed.
+        showNotification(
+          notification.warn(
+            "Combined subtitle needs attention",
+            `Saved to ${result.path}, but a follow-up step failed: ${result.error}`,
+          ),
+        );
+      } else if (result.status === "built") {
         showNotification(
           notification.info(
             "Combined subtitle generated",

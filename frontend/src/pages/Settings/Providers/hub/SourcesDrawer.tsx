@@ -54,6 +54,7 @@ const SourceRow: FunctionComponent<SourceRowProps> = ({
   onRemove,
 }) => {
   const patch = useProviderHubPatchCatalogSource();
+  const refresh = useProviderHubRefreshCatalog();
 
   const stableRef = parseGitHubRef(source.url) ?? "main";
   const [devMode, setDevMode] = useState(Boolean(source.dev_ref));
@@ -137,9 +138,19 @@ const SourceRow: FunctionComponent<SourceRowProps> = ({
         </Group>
       </Group>
       {source.last_error && (
-        <Text size="xs" c="red">
-          {source.last_error}
-        </Text>
+        <Stack gap="xs">
+          <Text size="xs" c="dimmed" role="status">
+            {source.last_error}
+          </Text>
+          <Button
+            size="compact-xs"
+            variant="light"
+            onClick={() => refresh.mutate()}
+            loading={refresh.isPending}
+          >
+            Retry catalog refresh
+          </Button>
+        </Stack>
       )}
       <div className={styles.sourceCardDevSection}>
         <Switch

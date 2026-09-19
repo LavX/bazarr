@@ -8,6 +8,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from . import PROVIDER_HUB_API_VERSION
+from .migration import MIGRATED_BUILT_IN_PROVIDER_IDS, RETIRED_BUILT_IN_PROVIDER_IDS
 
 _HEX_SHA256_RE = re.compile(r"^[a-fA-F0-9]{64}$")
 _HEX_COMMIT_RE = re.compile(r"^[a-fA-F0-9]{40}$")
@@ -77,11 +78,90 @@ def _validate_sha256(value: str, field: str) -> str:
     return value.lower()
 
 
+def _bazarr_settings_sections() -> set[str]:
+    """Top-level config.yaml sections Bazarr declares for itself.
+
+    Read off the settings validators instead of a list kept here by hand, so a
+    section added later is covered the day it is declared. The stored settings
+    are deliberately not walked instead: saving a plugin's Settings card writes
+    that plugin's config into config.yaml under the plugin's own id, so from the
+    next boot the stored sections include it, and a plugin would reserve itself
+    out of the pool the moment its user configured it.
+    """
+    try:
+        from app.config import validators as settings_validators
+    except Exception as error:
+        # Refuse rather than permit. This set is one half of a security gate, and
+        # an empty one lets every id through: the install check would accept a
+        # plugin calling itself sonarr and the pool overlay would then hand it
+        # the section. The caller treats the refusal as an invalid manifest,
+        # which drops the plugin instead of arming it.
+        raise ManifestValidationError(
+            "cannot decide which settings sections are reserved: Bazarr settings are unavailable"
+        ) from error
+
+    sections = set()
+    for validator in settings_validators:
+        for name in getattr(validator, "names", None) or ():
+            section = str(name).split(".", 1)[0].strip().lower()
+            if section:
+                sections.add(section)
+    if not sections:
+        raise ManifestValidationError(
+            "cannot decide which settings sections are reserved: no settings sections were found"
+        )
+    return sections
+
+
+def _provider_owned_settings_sections() -> set[str]:
+    """Settings sections that belong to a subtitle provider, not to Bazarr.
+
+    A catalog plugin replacing a built-in reuses that built-in's id on purpose,
+    and with it that built-in's settings section, which is where the plugin's own
+    credentials then live. Those ids are governed by the built-in shadow gate,
+    not by the reserved-section rule.
+    """
+    sections = set(MIGRATED_BUILT_IN_PROVIDER_IDS) | set(RETIRED_BUILT_IN_PROVIDER_IDS)
+    try:
+        from subliminal_patch.extensions import provider_registry
+        from .registry import _REGISTERED_PROVIDER_HUB_IDS
+        # Registered hub plugins live in the same registry as the built-ins, and
+        # a plugin must never be the thing that unreserves a section for itself,
+        # so subtract them exactly as the shadow gate in registry.py does. Both
+        # imports sit in the one try on purpose: losing either drops the whole
+        # registry term, which only widens the reserved set.
+        sections |= {str(name) for name in provider_registry.names()} - _REGISTERED_PROVIDER_HUB_IDS
+    except Exception:
+        pass
+    return sections
+
+
+def reserved_settings_sections() -> set[str]:
+    """Settings sections no plugin id may ever claim.
+
+    The pool overlay copies every key a plugin declares in its config_schema out
+    of the settings section named after the plugin, and settings are decrypted in
+    memory, so a plugin calling itself ``sonarr`` would be handed the Sonarr API
+    key on every search and one calling itself ``auth`` the admin password. These
+    sections are Bazarr's own, so the rejection holds for every install source:
+    there is no built-in provider behind them for the trusted shadow gate to hand
+    over.
+
+    Raises ManifestValidationError when the set cannot be derived. Both callers
+    take that as the safe direction: validation drops the manifest, and the pool
+    overlay skips the settings overlay for every plugin rather than read a
+    section it cannot vouch for.
+    """
+    return _bazarr_settings_sections() - _provider_owned_settings_sections()
+
+
 def _validate_provider_id(value: str, built_in_provider_ids: set[str]) -> str:
     if not _PROVIDER_ID_RE.match(value):
         raise ManifestValidationError("provider_id must use lowercase provider id syntax")
     if value in built_in_provider_ids:
         raise ManifestValidationError(f"provider_id {value!r} shadows a built-in provider")
+    if value in reserved_settings_sections():
+        raise ManifestValidationError(f"provider_id {value!r} is reserved by a Bazarr settings section")
     return value
 
 

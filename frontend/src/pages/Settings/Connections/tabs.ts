@@ -5,8 +5,12 @@
 export const CONNECTION_TABS = [
   "sonarr",
   "radarr",
+  "sportarr",
   "plex",
   "jellyfin",
+  "emby",
+  "silo",
+  "seerr",
 ] as const;
 
 export type ConnectionTab = (typeof CONNECTION_TABS)[number];

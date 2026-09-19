@@ -1,6 +1,6 @@
 # coding=utf-8
 
-from flask_restx import Resource, reqparse
+from flask_restx import Resource, inputs, reqparse
 
 from . import api_ns_jellyfin
 from ..utils import authenticate
@@ -68,13 +68,16 @@ class JellyfinLibraries(Resource):
                                      location=('json', 'form'))
     post_request_parser.add_argument('verify_ssl', type=str, required=False,
                                      help='Override saved verify_ssl flag for this query (true/false)')
+    post_request_parser.add_argument('include_all', type=inputs.boolean, default=False,
+                                     location=('json', 'form'),
+                                     help='Include all library types for Sports selection')
 
     @authenticate
     @api_ns_jellyfin.doc(parser=post_request_parser)
     @api_ns_jellyfin.response(200, 'Success')
     @api_ns_jellyfin.response(401, 'Not Authenticated')
     def post(self):
-        """List available movie and series libraries from the Jellyfin server.
+        """List movie and series libraries, or all types when include_all is true.
         Accepts optional url/apikey params (in the request body) to query
         before saving config.
 
@@ -86,6 +89,7 @@ class JellyfinLibraries(Resource):
             url=args.get('url'),
             apikey=args.get('apikey'),
             verify_ssl=_parse_verify_ssl(args.get('verify_ssl')),
+            include_all=args['include_all'],
         )
         return {
             'data': result['libraries'],

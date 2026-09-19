@@ -47,7 +47,7 @@ import {
   useSeriesModification,
 } from "@/apis/hooks";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
-import { useInstanceName } from "@/apis/hooks/site";
+import { useAppTitle } from "@/apis/hooks/site";
 import { FullPageDropzone, Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import { CombineModal } from "@/components/forms/CombineForm";
@@ -208,7 +208,7 @@ const SeriesEpisodesView: FunctionComponent = () => {
   );
 
   useDocumentTitle(
-    `${series?.title ?? "Unknown Series"} - ${useInstanceName()} (Series)`,
+    `${series?.title ?? "Unknown Series"} - ${useAppTitle()} (Series)`,
   );
 
   const tableRef = useRef<TableInstance<Item.Episode> | null>(null);

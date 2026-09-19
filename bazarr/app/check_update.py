@@ -188,6 +188,47 @@ def download_release(url):
             apply_update()
 
 
+def install_downloaded_update():
+    """Install a release this instance downloaded for itself, if there is one.
+
+    This is what startup calls, and the gate is the point of it. `args.no_update`
+    is true for `--no-update` and for `updatemethod=External`, which is what the
+    container sets, and an install that is updated from the outside must not
+    unpack a release over its own tree. The container's tree is owned by root so
+    the attempt fails anyway, noisily, halfway through; a development container
+    that bind-mounts a source tree over /app/bazarr has a writable one, and there
+    the attempt would succeed and overwrite the operator's checkout.
+
+    The archive is reachable at all because /config outlives the install that
+    wrote it: a directory carried over from a source install can still hold the
+    release that install had queued.
+    """
+    if args.no_update:
+        discard_stale_update()
+    else:
+        apply_update()
+
+
+def discard_stale_update():
+    """Throw away a release archive this install is never going to unpack.
+
+    Removing it, rather than leaving it, is what keeps this a one-time event
+    instead of something the operator reads in the log on every restart.
+    """
+    bazarr_zip = os.path.join(args.config_dir, 'update', 'bazarr.zip')
+    if not os.path.isfile(bazarr_zip):
+        return
+
+    try:
+        os.remove(bazarr_zip)
+    except OSError:
+        logging.exception(f'BAZARR cannot remove the leftover release archive {bazarr_zip}. Updates are managed '  # noqa: G004
+                          'externally for this install, so it will not be installed. Delete it by hand.')
+    else:
+        logging.info(f'BAZARR discarded a leftover release archive ({bazarr_zip}). Updates are managed externally '  # noqa: G004
+                     'for this install, so it was not unpacked.')
+
+
 def apply_update():
     is_updated = False
     update_dir = os.path.join(args.config_dir, 'update')

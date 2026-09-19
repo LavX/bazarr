@@ -2,6 +2,7 @@
 
 import os
 
+from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
@@ -33,6 +34,7 @@ from utilities.backup import backup_to_zip
 from utilities.pretty_date import pretty_date
 from provider_hub.tasks import provider_hub_check_updates
 
+from . import activity
 from .config import settings
 from .database import database
 from .get_args import args
@@ -126,6 +128,7 @@ class Scheduler:
             logging.info(f"Scheduler will use this timezone: {self.timezone}")  # noqa: G004
 
         self.aps_scheduler = BackgroundScheduler({'apscheduler.timezone': self.timezone})
+        self.__tag_scheduled_runs()
 
         # task listener
         def task_listener_add(event):
@@ -152,9 +155,29 @@ class Scheduler:
 
         self.aps_scheduler.start()
 
+    def __tag_scheduled_runs(self):
+        """Tag each scheduled execution thread with its task id, for observation.
+
+        Several recurring tasks enqueue a JobsQueue child and block on it, so a
+        status reader that counts the task and the child sees two searches where
+        there is one. The child inherits this tag and the summary prefers it.
+
+        The tag is applied by wrapping the executor's worker pool, not the
+        registered callables: a job's ``func`` has to stay the exact object that
+        was registered, and APScheduler's own submission arguments are forwarded
+        untouched, so scheduling, results and exceptions are unchanged.
+        """
+        executor = ThreadPoolExecutor()
+        executor._pool = activity.tagged_scheduler_pool(executor._pool)
+        try:
+            self.aps_scheduler.add_executor(executor, 'default')
+        except Exception:
+            logging.exception("Scheduler run tagging is unavailable; task correlation is degraded")
+
     def update_configurable_tasks(self):
         self.__sonarr_update_task()
         self.__radarr_update_task()
+        self.__sportarr_update_task()
         self.__sonarr_full_update_task()
         self.__radarr_full_update_task()
         self.__update_bazarr_task()
@@ -286,6 +309,10 @@ class Scheduler:
                     id=f'update_movies_{inst.id}', name=f'Sync with Radarr ({inst.name})',
                     replace_existing=True,
                     kwargs=dict(arr_instance_id=inst.id, wait_for_completion=True))
+
+    def __sportarr_update_task(self):
+        from sportarr.scheduler import configure_sports_jobs
+        configure_sports_jobs(self.aps_scheduler, database)
 
     def __provider_hub_worker_reaper_task(self):
         # Hub workers are spawned lazily per pool and provider and nothing else

@@ -129,18 +129,23 @@ function subtitle(episode: number) {
   );
 }
 
+// react-dropzone reads DataTransfer.items on every drag event, not only on
+// drop, so a transfer without them throws inside file-selector before the
+// component ever sees the drag. One representation for every drag phase.
+function fileTransfer(files: File[]) {
+  return {
+    files,
+    items: files.map((file) => ({
+      kind: "file",
+      type: file.type,
+      getAsFile: () => file,
+    })),
+    types: ["Files"],
+  };
+}
+
 function dropFiles(target: HTMLElement, files: File[]) {
-  fireEvent.drop(target, {
-    dataTransfer: {
-      files,
-      items: files.map((file) => ({
-        kind: "file",
-        type: file.type,
-        getAsFile: () => file,
-      })),
-      types: ["Files"],
-    },
-  });
+  fireEvent.drop(target, { dataTransfer: fileTransfer(files) });
 }
 
 function fileRow(name: string) {
@@ -182,7 +187,7 @@ function dragFiles(
   type: "dragEnter" | "dragLeave",
   files: File[],
 ) {
-  fireEvent[type](target, { dataTransfer: { files, types: ["Files"] } });
+  fireEvent[type](target, { dataTransfer: fileTransfer(files) });
 }
 
 async function openFromWindow(kind: MediaKind) {

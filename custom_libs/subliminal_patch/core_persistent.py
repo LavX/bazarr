@@ -247,7 +247,8 @@ def list_all_subtitles_parallel(videos, languages, pool_instance,
                                  per_provider_timeout: int = 5,
                                  wall_timeout: int = 8,
                                  exclude_providers=None,
-                                 on_result=None):
+                                 on_result=None,
+                                 on_outcome=None):
     """Parallel fanout with a hard wall-clock timeout, sharing one
     bounded executor process-wide.
 
@@ -296,6 +297,17 @@ def list_all_subtitles_parallel(videos, languages, pool_instance,
     providers = [p for p in pool_instance.providers
                  if p not in getattr(pool_instance, "discarded_providers", set())
                  and p not in exclude]
+    def emit_outcome(result, latency_ms=0):
+        if on_outcome is not None:
+            on_outcome(result, latency_ms)
+
+    from .core import ProviderSearchResult, provider_search_failure
+
+    if on_outcome is not None:
+        for name in pool_instance.providers:
+            if name not in providers:
+                emit_outcome(ProviderSearchResult(name, status="skipped", reason="provider_excluded"))
+
     if not providers:
         return out
 
@@ -313,6 +325,8 @@ def list_all_subtitles_parallel(videos, languages, pool_instance,
             "compat fanout: dropped (concurrency cap reached, wall=%ds)",
             wall_timeout,
         )
+        for name in providers:
+            emit_outcome(ProviderSearchResult(name, status="saturated", reason="capacity"))
         return out
 
     try:
@@ -327,14 +341,17 @@ def list_all_subtitles_parallel(videos, languages, pool_instance,
                     "concurrency wait, wall=%ds)",
                     wall_timeout,
                 )
+                for name in providers:
+                    emit_outcome(ProviderSearchResult(name, status="saturated", reason="capacity"))
                 return out
 
             futures: Dict[Future, str] = {}
             start_times: Dict[Future, float] = {}
             for p in providers:
+                options = {"detailed": True} if on_outcome is not None else {}
                 fut = _safe_submit(executor,
-                                    pool_instance.list_subtitles_provider,
-                                    p, video, languages)
+                                   pool_instance.list_subtitles_provider,
+                                   p, video, languages, **options)
                 futures[fut] = p
                 start_times[fut] = time.monotonic()
 
@@ -352,10 +369,14 @@ def list_all_subtitles_parallel(videos, languages, pool_instance,
                 # Process a done future: record outcome, extend `out` on success.
                 try:
                     result = fut.result(timeout=0)
-                except Exception:
+                except Exception as error:
                     _emit(name, "exception", latency_s)
+                    emit_outcome(provider_search_failure(name, error), int(latency_s * 1000))
                     return
-                if isinstance(result, tuple) and len(result) == 2:
+                if isinstance(result, ProviderSearchResult):
+                    emit_outcome(result, int(latency_s * 1000))
+                    subs = result.subtitles
+                elif isinstance(result, tuple) and len(result) == 2:
                     _, subs = result
                 else:
                     subs = result
@@ -400,8 +421,12 @@ def list_all_subtitles_parallel(videos, languages, pool_instance,
                         # that never got CPU time is just as useless to
                         # the caller as one that timed out.
                         _emit(name, "abandoned", latency_s)
+                        emit_outcome(ProviderSearchResult(name, status="timeout", reason="wall_timeout"),
+                                     int(latency_s * 1000))
                     else:
                         _emit(name, "abandoned", latency_s)
+                        emit_outcome(ProviderSearchResult(name, status="timeout", reason="wall_timeout"),
+                                     int(latency_s * 1000))
                         still_running.append((fut, name))
                 if still_running:
                     with _abandoned_lock:

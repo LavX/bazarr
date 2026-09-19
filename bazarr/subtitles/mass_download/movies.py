@@ -14,8 +14,7 @@ from radarr.history import history_log_movie
 from arr_instances.resolution import scoped
 from app.notifier import send_notifications_movie
 from app.get_providers import get_providers
-from app.database import (get_exclusion_clause, get_audio_profile_languages, TableMovies, database, select,
-                          get_profile_id)
+from app.database import get_exclusion_clause, get_audio_profile_languages, TableMovies, database, select
 from app.jobs_queue import jobs_queue
 from app.event_handler import event_stream
 
@@ -46,6 +45,7 @@ def movies_download_subtitles(no, job_id=None, job_sub_function=False, arr_insta
                   TableMovies.tags,
                   TableMovies.monitored,
                   TableMovies.profileId,
+                  TableMovies.arr_instance_id,
                   TableMovies.subtitles)
         .where(reduce(operator.and_, conditions)),
         TableMovies.arr_instance_id, arr_instance_id)
@@ -57,14 +57,15 @@ def movies_download_subtitles(no, job_id=None, job_sub_function=False, arr_insta
         return
     elif movie.subtitles is None:
         # subtitles indexing for this movie is incomplete, we'll do it again
-        store_subtitles_movie(movie.path, path_mappings.path_replace_instance(movie.path, arr_instance_id, 'movie'), arr_instance_id=arr_instance_id)
+        store_subtitles_movie(movie.path, path_mappings.path_replace_instance(movie.path, movie.arr_instance_id, 'movie'), arr_instance_id=movie.arr_instance_id)
         movie = database.execute(stmt).first()
     elif movie.missing_subtitles is None:
         # missing subtitles calculation for this movie is incomplete, we'll do it again
         list_missing_subtitles_movies(no=no, arr_instance_id=arr_instance_id)
         movie = database.execute(stmt).first()
 
-    moviePath = path_mappings.path_replace_movie(movie.path)
+    arr_instance_id = movie.arr_instance_id
+    moviePath = path_mappings.path_replace_instance(movie.path, arr_instance_id, 'movie')
 
     if not os.path.exists(moviePath):
         logging.debug(f"BAZARR movie file not found. Path mapping issue?: {moviePath}")  # noqa: G004
@@ -135,6 +136,8 @@ def movie_download_specific_subtitles(radarr_id, language, hi, forced, job_id=No
                 TableMovies.title,
                 TableMovies.path,
                 TableMovies.sceneName,
+                TableMovies.arr_instance_id,
+                TableMovies.profileId,
                 TableMovies.audio_language)
             .where(TableMovies.radarrId == radarr_id),
             TableMovies.arr_instance_id, arr_instance_id)) \
@@ -143,7 +146,8 @@ def movie_download_specific_subtitles(radarr_id, language, hi, forced, job_id=No
     if not movieInfo:
         return 'Movie not found', 404
 
-    moviePath = path_mappings.path_replace_movie(movieInfo.path)
+    arr_instance_id = movieInfo.arr_instance_id
+    moviePath = path_mappings.path_replace_instance(movieInfo.path, arr_instance_id, 'movie')
 
     if not os.path.exists(moviePath):
         return 'Movie file not found. Path mapping issue?', 500
@@ -170,7 +174,7 @@ def movie_download_specific_subtitles(radarr_id, language, hi, forced, job_id=No
 
     try:
         result = list(generate_subtitles(moviePath, [(language, hi, forced)], audio_language,
-                                         sceneName, title, 'movie', profile_id=get_profile_id(movie_id=radarr_id),
+                                         sceneName, title, 'movie', profile_id=movieInfo.profileId,
                                          job_id=job_id, arr_instance_id=arr_instance_id))
         if isinstance(result, list) and len(result):
             result = result[0]

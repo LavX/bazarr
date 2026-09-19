@@ -71,16 +71,24 @@ function formatDuration(seconds: number): string {
   return `${min}m ${sec}s`;
 }
 
+function nonNegativeNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
+}
+
 function formatCostValue(cost: number): string {
-  if (cost === 0) return "Free";
-  if (cost < 0.01) return `$${cost.toFixed(4)}`;
-  return `$${cost.toFixed(2)}`;
+  if (cost > 0 && cost < 0.0001) return "<$0.0001";
+  return `$${cost.toFixed(4)}`;
 }
 
 const JobRow: FunctionComponent<JobRowProps> = ({ job }) => {
   const modelUsed = job.result?.model_used || job.model;
   // Prefer top-level tokensUsed (live from API), fall back to result
-  const tokensUsed = job.tokensUsed || job.result?.tokens_used;
+  const tokensUsed = nonNegativeNumber(
+    job.tokensUsed ?? job.result?.tokens_used,
+  );
+  const reportedCost = nonNegativeNumber(job.totalCost);
 
   // Build media title
   const langPair =
@@ -93,31 +101,32 @@ const JobRow: FunctionComponent<JobRowProps> = ({ job }) => {
       ? `${job.filename}${langPair}`
       : langPair || "-";
 
-  // Duration — prefer server-side elapsedSeconds
-  let durationStr = "-";
-  let durationSec = 0;
-  if (job.elapsedSeconds) {
-    durationSec = job.elapsedSeconds;
-    durationStr = formatDuration(durationSec);
-  } else if (job.startedAt && job.completedAt) {
-    durationSec =
-      (new Date(job.completedAt).getTime() -
-        new Date(job.startedAt).getTime()) /
-      1000;
-    durationStr = formatDuration(durationSec);
-  } else if (job.status === "processing" && job.startedAt) {
-    // eslint-disable-next-line react-hooks/purity
-    const elapsed = (Date.now() - new Date(job.startedAt).getTime()) / 1000;
-    durationStr = `${formatDuration(elapsed)}...`;
+  // Prefer reported duration, including an explicit zero, over timestamps.
+  let durationSec = nonNegativeNumber(job.elapsedSeconds);
+  let durationIsLive = false;
+  if (job.elapsedSeconds == null && job.startedAt) {
+    const started = new Date(job.startedAt).getTime();
+    if (job.completedAt) {
+      durationSec = nonNegativeNumber(
+        (new Date(job.completedAt).getTime() - started) / 1000,
+      );
+    } else if (job.status === "processing") {
+      // eslint-disable-next-line react-hooks/purity
+      durationSec = nonNegativeNumber((Date.now() - started) / 1000);
+      durationIsLive = true;
+    }
   }
+  const durationStr =
+    durationSec == null
+      ? "-"
+      : `${formatDuration(durationSec)}${durationIsLive ? "..." : ""}`;
+  const tokenRate =
+    tokensUsed != null && durationSec != null && durationSec > 0
+      ? nonNegativeNumber(tokensUsed / durationSec)
+      : undefined;
+  const tokenRateStr = tokenRate == null ? "-" : tokenRate.toFixed(0);
 
-  // TPS
-  const tpsStr =
-    tokensUsed && durationSec > 0
-      ? `${(tokensUsed / durationSec).toFixed(0)} t/s`
-      : "-";
-
-  // Progress — show lines if available
+  // Show translated lines when available.
   const progressLabel =
     job.completedLines && job.totalLines
       ? `${job.completedLines}/${job.totalLines} lines`
@@ -176,18 +185,18 @@ const JobRow: FunctionComponent<JobRowProps> = ({ job }) => {
       </Table.Td>
       <Table.Td>
         <Text size="xs" ff="monospace">
-          {tokensUsed ? tokensUsed.toLocaleString() : "-"}
+          {tokensUsed != null ? tokensUsed.toLocaleString() : "-"}
         </Text>
       </Table.Td>
       <Table.Td>
         <Text size="xs" ff="monospace">
-          {job.totalCost != null && job.totalCost > 0 ? (
+          {reportedCost != null ? (
             <Tooltip
-              label={`${formatCostValue(job.totalCost)} total cost`}
+              label={`${formatCostValue(reportedCost)} reported charge`}
               withArrow
             >
               <Text component="span" size="xs" ff="monospace" c="green.4">
-                {formatCostValue(job.totalCost)}
+                {formatCostValue(reportedCost)}
               </Text>
             </Tooltip>
           ) : (
@@ -204,9 +213,9 @@ const JobRow: FunctionComponent<JobRowProps> = ({ job }) => {
         <Text
           size="xs"
           ff="monospace"
-          c={tpsStr !== "-" ? "green.4" : "dimmed"}
+          c={tokenRateStr !== "-" ? "green.4" : "dimmed"}
         >
-          {tpsStr}
+          {tokenRateStr}
         </Text>
       </Table.Td>
     </Table.Tr>
@@ -395,6 +404,11 @@ export const TranslatorStatusPanel: FunctionComponent<
         <Title order={5} mb="md" id="translation-jobs-heading">
           Translation Jobs
         </Title>
+        <Text size="xs" c="dimmed" mb="sm">
+          Total tokens per elapsed job second. Includes prompt tokens and
+          reported retry usage. Charges reported by the translation service, in
+          USD.
+        </Text>
         {jobsData && jobsData.jobs.length > 0 ? (
           <Table.ScrollContainer minWidth={600}>
             <Table
@@ -409,9 +423,9 @@ export const TranslatorStatusPanel: FunctionComponent<
                   <Table.Th>Progress</Table.Th>
                   <Table.Th>Model</Table.Th>
                   <Table.Th>Tokens</Table.Th>
-                  <Table.Th>Cost</Table.Th>
+                  <Table.Th>Reported cost</Table.Th>
                   <Table.Th>Duration</Table.Th>
-                  <Table.Th>Speed</Table.Th>
+                  <Table.Th>Total tokens/s</Table.Th>
                 </Table.Tr>
               </Table.Thead>
               <Table.Tbody>

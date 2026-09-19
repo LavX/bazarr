@@ -253,6 +253,14 @@ def candidate_from_worker(provider_name: str, payload: dict[str, Any]) -> HubWor
     subtitle.hash_verifiable = bool(payload.get("hash_verifiable", False))
     subtitle.hearing_impaired_verifiable = bool(payload.get("hearing_impaired_verifiable", False))
 
+    # Preserve reported facts separately from the legacy flags, whose defaults
+    # collapse missing information to false. These stay inside the host.
+    reported_language = payload.get("language", {})
+    forced = reported_language.get("forced")
+    hi = payload.get("hearing_impaired", reported_language.get("hi"))
+    subtitle._reported_forced = forced if type(forced) is bool else None
+    subtitle._reported_hearing_impaired = hi if type(hi) is bool else None
+
     display = payload.get("display") or {}
     if isinstance(display, dict):
         for key, value in display.items():

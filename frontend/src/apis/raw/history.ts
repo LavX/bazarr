@@ -19,6 +19,21 @@ class HistoryApi extends BaseApi {
     });
     return response;
   }
+
+  async metrics(
+    timeFrame?: History.TimeFrameOptions,
+    action?: History.ActionOptions,
+    provider?: string,
+    language?: Language.CodeType,
+  ) {
+    const response = await this.get<History.Metrics>("/metrics", {
+      timeFrame,
+      action,
+      provider,
+      language,
+    });
+    return response;
+  }
 }
 
 const historyApi = new HistoryApi();

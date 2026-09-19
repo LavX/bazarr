@@ -143,7 +143,7 @@ export const Subtitle: FunctionComponent<Props> = ({
 
   const badgeEl = (
     <Group gap={4} wrap="nowrap">
-      <Badge variant={variant} style={{ whiteSpace: "nowrap" }}>
+      <Badge variant={variant} style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
         <Language.Text value={subtitle} long={false}></Language.Text>
       </Badge>
       {isSyncOutputSubtitle(subtitle) && (

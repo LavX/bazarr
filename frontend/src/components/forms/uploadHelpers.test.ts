@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   assignEpisodes,
   episodeBelongsToSeries,
+  eventBelongsToLeague,
   matchEpisode,
   shouldAutoCloseUpload,
 } from "./uploadHelpers";
@@ -116,5 +117,22 @@ describe("episodeBelongsToSeries", () => {
       sonarrEpisodeId: 11,
     } as Item.Episode;
     expect(episodeBelongsToSeries(orphan, 560)).toBe(false);
+  });
+});
+
+describe("eventBelongsToLeague", () => {
+  it("accepts an event owned by the opened league", () => {
+    expect(eventBelongsToLeague({ league_id: 51 }, 51)).toBe(true);
+  });
+
+  it("rejects an event owned by a different league", () => {
+    // The shape a wrong-league lookup produces: the picker selects from the
+    // fetched list, so a membership check would pass and the subtitle would
+    // land on another league's event.
+    expect(eventBelongsToLeague({ league_id: 52 }, 51)).toBe(false);
+  });
+
+  it("treats a null event as not belonging", () => {
+    expect(eventBelongsToLeague(null, 51)).toBe(false);
   });
 });

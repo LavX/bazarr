@@ -29,7 +29,7 @@ const SettingsSchedulerView: FunctionComponent = () => {
 
   return (
     <Layout name="Scheduler">
-      <Section header="Sonarr/Radarr Sync">
+      <Section header="Library Sync">
         <Selector
           label="Sync with Sonarr"
           options={seriesSyncOptions}
@@ -82,6 +82,35 @@ const SettingsSchedulerView: FunctionComponent = () => {
             synced. If you make changes to a specific unmonitored Radarr movie
             and you want Bazarr to know about those changes, simply toggle the
             monitored status back on in Radarr and Bazarr will sync any changes.
+          </Message>
+        </CollapseBox>
+        <Selector
+          label="Sync with Sportarr"
+          options={seriesSyncOptions}
+          settingKey="settings-sportarr-sports_sync"
+        ></Selector>
+        <Check
+          label="Sync Only Monitored Leagues"
+          settingKey={"settings-sportarr-sync_only_monitored_leagues"}
+        ></Check>
+        <CollapseBox
+          settingKey={"settings-sportarr-sync_only_monitored_leagues"}
+        >
+          <Message>
+            If enabled, only leagues with a monitored status in Sportarr will be
+            synced.
+          </Message>
+        </CollapseBox>
+        <Check
+          label="Sync Only Monitored Events"
+          settingKey={"settings-sportarr-sync_only_monitored_events"}
+        ></Check>
+        <CollapseBox
+          settingKey={"settings-sportarr-sync_only_monitored_events"}
+        >
+          <Message>
+            If enabled, only events with a monitored status in Sportarr will be
+            synced.
           </Message>
         </CollapseBox>
       </Section>
@@ -158,6 +187,43 @@ const SettingsSchedulerView: FunctionComponent = () => {
           If disabled, Bazarr will use embedded subtitles parser to index movies
           file properties on each run. This will result in higher disk I/O.
         </Message>
+
+        <Selector
+          label="Update All Sports Subtitles from Disk"
+          settingKey="settings-sportarr-full_update"
+          options={diskUpdateOptions}
+        ></Selector>
+
+        <CollapseBox
+          settingKey="settings-sportarr-full_update"
+          on={(k) => k === "Weekly"}
+        >
+          <Selector
+            label="Day of Week"
+            settingKey="settings-sportarr-full_update_day"
+            options={dayOptions}
+          ></Selector>
+        </CollapseBox>
+        <CollapseBox
+          settingKey="settings-sportarr-full_update"
+          on={(k) => k === "Daily" || k === "Weekly"}
+        >
+          <Selector
+            label="Time of Day"
+            settingKey="settings-sportarr-full_update_hour"
+            options={timeOptions}
+          ></Selector>
+        </CollapseBox>
+
+        <Check
+          label="Use cached embedded subtitles parser results"
+          settingKey="settings-sportarr-use_ffprobe_cache"
+        ></Check>
+        <Message>
+          If disabled, Bazarr will use the embedded subtitles parser to index
+          sports event file properties on each run. This will result in higher
+          disk I/O.
+        </Message>
       </Section>
       <Section header="Search and Upgrade Subtitles">
         <Selector
@@ -170,6 +236,12 @@ const SettingsSchedulerView: FunctionComponent = () => {
           label="Search for Missing Movies Subtitles"
           options={upgradeOptions}
           settingKey="settings-general-wanted_search_frequency_movie"
+        ></Selector>
+
+        <Selector
+          label="Search for Missing Sports Subtitles"
+          options={upgradeOptions}
+          settingKey="settings-general-wanted_search_frequency_sports"
         ></Selector>
 
         <Selector

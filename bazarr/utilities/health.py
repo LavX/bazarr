@@ -7,7 +7,9 @@ import json
 from sqlalchemy import func
 
 from app.config import settings
-from app.database import (TableShowsRootfolder, TableMoviesRootfolder, TableLanguagesProfiles, database, select,
+from app.database import (TableArrInstances, TableShowsRootfolder, TableMoviesRootfolder,
+                          TableSportsLeaguesRootfolder, TableSportsLeagues,
+                          TableLanguagesProfiles, database, select,
                           TableShows, TableMovies)
 from app.event_handler import event_stream
 from app.jobs_queue import jobs_queue
@@ -45,6 +47,21 @@ def check_health(job_id=None, wait_for_completion=False):
                                         arr_client=client_for_instance(database, inst.id))
         else:
             check_radarr_rootfolder()
+    if settings.general.use_sportarr:
+        from sportarr.rootfolder import sync_rootfolders
+
+        for inst in repo.list('sportarr', enabled_only=True):
+            # sync_rootfolders raises on an offline instance, a non-200 answer or
+            # a malformed root-folder payload, unlike the Sonarr and Radarr
+            # helpers above which absorb transport failures themselves. Left
+            # unguarded, one unreachable Sportarr aborted the whole health job:
+            # the remaining owners were never checked and the badge event and
+            # backup rotation below never ran, so the job had no terminal state.
+            try:
+                sync_rootfolders(inst.id)
+            except Exception:
+                logging.exception('BAZARR could not refresh the root folders of Sportarr instance %s',
+                                  inst.id)
     event_stream(type='badges')
 
     from .backup import backup_rotation
@@ -119,6 +136,20 @@ def movie_default_profile_is_missing():
     return not _every_instance_settles_its_own_default('radarr')
 
 
+def sports_default_profile_is_missing():
+    """The global sports default is enabled but nothing supplies a profile.
+
+    Sports mirrors the series and movie checks, including the instance escape:
+    an enabled Sportarr that carries its own override (or an explicit "assign no
+    profile") settles it without the global.
+    """
+    if not settings.general.sports_default_enabled:
+        return False
+    if settings.general.sports_default_profile != '':
+        return False
+    return not _every_instance_settles_its_own_default('sportarr')
+
+
 def get_health_issues():
     # this function must return a list of dictionaries consisting of to keys: object and issue
     health_issues = []
@@ -147,6 +178,34 @@ def get_health_issues():
             health_issues.append({'object': path_mappings.path_replace_movie(item.path),  # noqa: PERF401
                                   'issue': item.error})
 
+    # get Sportarr rootfolder issues
+    # sportarr/rootfolder.py already writes accessible and error per league
+    # root; nothing read them, so a broken sports path mapping produced no
+    # health issue and no status badge, and downloads just failed per event.
+    if settings.general.use_sportarr:
+        # Joined to the owner and filtered to enabled Sportarr instances. The
+        # rows of a disabled instance survive, and mapping one below calls
+        # path_replace_instance, whose sports owner lookup requires an enabled
+        # instance and raises otherwise. Unfiltered, disabling an instance that
+        # had an inaccessible root folder took down the whole health and badges
+        # request rather than just hiding its issue.
+        rootfolder = database.execute(
+            select(TableSportsLeaguesRootfolder.path,
+                   TableSportsLeaguesRootfolder.accessible,
+                   TableSportsLeaguesRootfolder.error,
+                   TableSportsLeaguesRootfolder.arr_instance_id)
+            .join(TableArrInstances,
+                  TableSportsLeaguesRootfolder.arr_instance_id == TableArrInstances.id)
+            .where(TableSportsLeaguesRootfolder.accessible == 0,
+                   TableArrInstances.kind == 'sportarr',
+                   TableArrInstances.enabled == 1)) \
+            .all()
+        health_issues.extend(
+            {'object': path_mappings.path_replace_instance(
+                item.path, item.arr_instance_id, 'sports'),
+             'issue': item.error}
+            for item in rootfolder)
+
     # get languages profiles duplicate ids issues when there's a cutoff set
     languages_profiles = database.execute(
         select(TableLanguagesProfiles.items, TableLanguagesProfiles.name, TableLanguagesProfiles.cutoff)).all()
@@ -170,13 +229,21 @@ def get_health_issues():
                                            .where(TableShows.profileId.is_not(None))).scalar()
     movies_with_profile = database.execute(select(func.count(TableMovies.radarrId))
                                            .where(TableMovies.profileId.is_not(None))).scalar()
+    sports_with_profile = database.execute(
+        select(func.count(TableSportsLeagues.id))
+        .join(TableArrInstances, TableSportsLeagues.arr_instance_id == TableArrInstances.id)
+        .where(TableSportsLeagues.profileId.is_not(None),
+               TableArrInstances.kind == 'sportarr',
+               TableArrInstances.enabled == 1)).scalar()
     default_series_profile_empty = series_default_profile_is_missing()
     default_movies_profile_empty = movie_default_profile_is_missing()
+    default_sports_profile_empty = sports_default_profile_is_missing()
     if languages_profiles_count == 0:
         health_issues.append({'object': 'Missing languages profile',
                               'issue': 'You must create at least one languages profile and assign it to your content.'})
     elif languages_profiles_count > 0 and ((settings.general.use_sonarr and series_with_profile == 0 and default_series_profile_empty) or
-                                           (settings.general.use_radarr and movies_with_profile == 0 and default_movies_profile_empty)):
+                                           (settings.general.use_radarr and movies_with_profile == 0 and default_movies_profile_empty) or
+                                           (settings.general.use_sportarr and sports_with_profile == 0 and default_sports_profile_empty)):
         health_issues.append({'object': 'No assigned languages profile',
                               'issue': 'Although you have created at least one languages profile, you must assign it '
                                        'to your content.'})

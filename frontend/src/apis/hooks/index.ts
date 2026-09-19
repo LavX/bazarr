@@ -12,3 +12,7 @@ export * from "./status";
 export * from "./subtitles";
 export * from "./system";
 export * from "./translator";
+export * from "./discover";
+export * from "./mediaServers";
+
+export * from "./sports";

@@ -16,7 +16,7 @@ from .ui import ui_bp
 from .get_args import args
 from .config import settings, base_url
 from .database import close_database
-from .app import create_app
+from .app import create_app, trusted_proxy_value
 
 app = create_app()
 from compat import register as register_compat  # noqa: E402
@@ -48,12 +48,16 @@ class Server:
 
     def configure_server(self):
         try:
-            # Trust X-Forwarded-* only from 127.0.0.1 (the supervisor proxy
-            # in docker/supervisor.py). Direct clients that inject these
-            # headers are untrusted and Waitress strips them. The compat
-            # endpoint reads X-Forwarded-Host/Proto for download-link
-            # construction; trusting arbitrary client values would let an
-            # attacker forge stream URLs and exfiltrate the Api-Key.
+            # Trust X-Forwarded-* only from general.trusted_proxies, which
+            # defaults to 127.0.0.1 (the supervisor proxy in
+            # docker/supervisor.py). Direct clients that inject these headers
+            # are untrusted and Waitress strips them. The compat endpoint
+            # reads X-Forwarded-Host/Proto for download-link construction;
+            # trusting arbitrary client values would let an attacker forge
+            # stream URLs and exfiltrate the Api-Key. A reverse proxy in
+            # another container has to be named in that setting, otherwise its
+            # HTTPS reads as http here and every client shares one login
+            # rate-limit bucket under the proxy's address.
             # Thread count: measured on a live 4-instance install, the old
             # inherited threads=100 accounted for 100 of 123 process threads
             # at idle for a single-user UI whose heavy work runs in background
@@ -65,14 +69,25 @@ class Server:
             # dozen parked tabs with ample headroom for bursts, and waitress
             # queues rather than drops beyond it. Configurable (4..100) for
             # larger installs via general.web_server_threads.
+            # trusted_proxy_headers is only legal alongside a trusted_proxy:
+            # waitress raises ValueError for the pair, and that escapes this
+            # OSError handler and the import of this module, so an operator who
+            # clears the setting would get a boot loop fixable only by editing
+            # config.yaml. With no proxy trusted, waitress strips every
+            # forwarded header anyway, which is the intent.
+            proxy_options = {}
+            trusted_proxy = trusted_proxy_value()
+            if trusted_proxy:
+                proxy_options = {'trusted_proxy': trusted_proxy,
+                                 'trusted_proxy_headers': {'x-forwarded-host',
+                                                           'x-forwarded-proto',
+                                                           'x-forwarded-for'}}
+
             self.server = create_server(app,
                                         host=self.address,
                                         port=self.port,
                                         threads=settings.general.web_server_threads,
-                                        trusted_proxy='127.0.0.1',
-                                        trusted_proxy_headers={'x-forwarded-host',
-                                                               'x-forwarded-proto',
-                                                               'x-forwarded-for'})
+                                        **proxy_options)
             self.connected = True
         except OSError as error:
             if error.errno == errno.EADDRNOTAVAIL:
@@ -124,11 +139,17 @@ class Server:
             pass
 
     def close_all(self):
-        print("Closing database...")
-        close_database()
+        # The webserver first, so a slow stream teardown cannot hold the UI
+        # open and unresponsive, then the streams, then the database. Stopping
+        # the streams first meant a restart appeared to hang: the server was
+        # still accepting requests that blocked on the stream manager's lock.
+        from sportarr.sse_client import stop_sportarr_clients
         if self.server:
             print("Closing webserver...")
             self.server.close()
+        stop_sportarr_clients()
+        print("Closing database...")
+        close_database()
 
     def shutdown(self, status=EXIT_NORMAL):
         self.close_all()
@@ -140,4 +161,3 @@ class Server:
 
 
 webserver = Server()
-

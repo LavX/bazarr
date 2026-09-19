@@ -104,7 +104,7 @@ def test_resolve_safe_url_no_redirect(monkeypatch, public_dns):
 
 
 def test_resolve_safe_url_blocks_redirect_to_metadata(monkeypatch, public_dns):
-    """The exact attack from Codex P1: public URL 30x to AWS metadata."""
+    """The exact reported attack: public URL 30x to AWS metadata."""
     monkeypatch.setattr(
         "utilities.url_guard._get_walker_session",
         lambda: _fake_session([

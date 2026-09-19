@@ -2,17 +2,22 @@
 
 import ast
 import hashlib
+import logging
 import os
 import re
 import tempfile
+from contextlib import nullcontext
 from datetime import datetime, timedelta
+from media_servers.events import publication_callback
 
 from flask import make_response, jsonify, request
 from flask_restx import Resource, Namespace
 from werkzeug.utils import secure_filename
 
 from app.config import settings
-from app.database import TableEpisodes, TableHistory, TableHistoryMovie, TableMovies, TableShows, database, select
+from app.database import (TableArrInstances, TableEpisodes, TableHistory, TableHistoryMovie,
+                          TableHistorySports, TableMovies, TableShows, TableSportsEvents,
+                          TableSportsLeagues, database, select)
 from app.event_handler import event_stream
 from app.jobs_queue import jobs_queue
 from languages.get_languages import language_from_alpha2
@@ -131,6 +136,20 @@ FORMAT_MAP = {
 FORMAT_TO_EXT = {v: k for k, v in FORMAT_MAP.items()}
 
 
+def _subtitle_filename(video_name, suffix, ext):
+    """Compose <video name>.<language suffix><ext>.
+
+    secure_filename over the whole composed name rewrote every space in the
+    video's own filename to an underscore. External subtitles are matched by
+    exact basename, so the created file no longer belonged to its video: the
+    indexer never saw it, and the on-disk fallback probe looked for a name that
+    was not there. Only the request-derived half is sanitised; video_name comes
+    off the media row, and every caller still anchors the composed path under a
+    trusted directory.
+    """
+    return f'{video_name}.{secure_filename(f"{suffix}{ext}")}'
+
+
 def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=None):
     """Resolve a subtitle file path from a media ID and language code.
 
@@ -201,6 +220,46 @@ def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=N
                 'arrInstanceId': row.arr_instance_id,
                 'mediaPath': row.path,
             }
+    elif media_type == 'sports':
+        # An event is episode-shaped: the league plays the part the show does.
+        # media_id is the LOCAL event id, not an upstream one, so there is no
+        # cross-instance collision to disambiguate, only ownership to enforce.
+        query = (
+            select(TableSportsEvents.id,
+                   TableSportsEvents.league_id,
+                   TableSportsEvents.arr_instance_id,
+                   TableSportsEvents.subtitles,
+                   TableSportsEvents.path,
+                   TableSportsEvents.sportarrEventId,
+                   TableSportsEvents.title)
+            # Joined to an ENABLED sportarr owner: callers downstream map this
+            # path per instance, and that mapping refuses a disabled owner by
+            # raising, which surfaces as a 500 rather than a 404.
+            .join(TableArrInstances,
+                  TableSportsEvents.arr_instance_id == TableArrInstances.id)
+            .where(TableSportsEvents.id == media_id,
+                   TableArrInstances.kind == 'sportarr',
+                   TableArrInstances.enabled == 1)
+        )
+        if arr_instance_id is not None:
+            query = query.where(TableSportsEvents.arr_instance_id == arr_instance_id)
+        row = database.execute(query).first()
+        if row:
+            league_row = database.execute(
+                select(TableSportsLeagues.id, TableSportsLeagues.title,
+                       TableSportsLeagues.sportarrLeagueId)
+                .where(TableSportsLeagues.id == row.league_id,
+                       TableSportsLeagues.arr_instance_id == row.arr_instance_id)).first()
+            metadata = {
+                'mediaTitle': league_row.title if league_row else None,
+                'mediaId': league_row.id if league_row else row.league_id,
+                'mediaUpstreamId': league_row.sportarrLeagueId if league_row else None,
+                'episodeId': row.id,
+                'episodeUpstreamId': row.sportarrEventId,
+                'arrInstanceId': row.arr_instance_id,
+                'episodeTitle': row.title,
+                'mediaPath': row.path,
+            }
     else:
         return 'Invalid media type', 400
 
@@ -228,10 +287,11 @@ def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=N
         # Best-effort modified time of a DB-listed subtitle, via the trusted
         # path mapping. Returns -1 when the file can't be stat'd.
         try:
-            if media_type == 'episode':
-                real_path = path_mappings.path_replace(raw_path)
-            else:
-                real_path = path_mappings.path_replace_movie(raw_path)
+            # Through the owning instance, so a second Sportarr mounting its
+            # library elsewhere does not stat a path that exists here for a
+            # different server's file.
+            real_path = path_mappings.path_replace_instance(
+                raw_path, row.arr_instance_id, media_type)
             return os.path.getmtime(real_path)
         except OSError:
             return -1.0
@@ -303,7 +363,7 @@ def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=N
             suffix += '.forced'
 
         for ext in ['.srt', '.ass', '.ssa', '.vtt', '.sub', '.smi', '.mpl', '.txt']:
-            filename = secure_filename(f'{video_name}.{suffix}{ext}')
+            filename = _subtitle_filename(video_name, suffix, ext)
             candidate = os.path.normpath(os.path.join(video_dir_real, filename))
             if not (candidate == video_dir_real or
                     candidate.startswith(video_dir_real + os.sep)):
@@ -319,7 +379,7 @@ def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=N
             if target_folder and target_folder != video_dir:
                 target_folder_real = os.path.realpath(target_folder)
                 for ext in ['.srt', '.ass', '.ssa', '.vtt', '.sub', '.smi', '.mpl', '.txt']:
-                    filename = secure_filename(f'{video_name}.{suffix}{ext}')
+                    filename = _subtitle_filename(video_name, suffix, ext)
                     candidate = os.path.normpath(os.path.join(target_folder_real, filename))
                     if not (candidate == target_folder_real or
                             candidate.startswith(target_folder_real + os.sep)):
@@ -359,6 +419,16 @@ def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=N
             return 'Media not found', 404
         trusted_media_path = path_mappings.path_replace_instance(
             fresh_row.path, fresh_row.arr_instance_id, 'episode')
+    elif media_type == 'sports':
+        query = select(TableSportsEvents.path, TableSportsEvents.arr_instance_id).where(
+            TableSportsEvents.id == media_id)
+        if arr_instance_id is not None:
+            query = query.where(TableSportsEvents.arr_instance_id == arr_instance_id)
+        fresh_row = database.execute(query).first()
+        if not fresh_row:
+            return 'Media not found', 404
+        trusted_media_path = path_mappings.path_replace_instance(
+            fresh_row.path, fresh_row.arr_instance_id, 'sports')
     else:
         query = select(TableMovies.path, TableMovies.arr_instance_id).where(
             TableMovies.radarrId == media_id)
@@ -392,9 +462,9 @@ def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=N
         return 'Subtitle file not found on disk', 404
 
     # CodeQL-recognized py/path-injection sanitizer: realpath + commonpath.
-    # Copilot's official autofix for this exact query uses precisely this
-    # pattern. startswith(base + os.sep) is NOT modeled as a sanitizer by
-    # the py/path-injection query, but os.path.commonpath([path, base]) is.
+    # The query's own documented autofix uses precisely this pattern.
+    # startswith(base + os.sep) is NOT modeled as a sanitizer by the
+    # py/path-injection query, but os.path.commonpath([path, base]) is.
     # Building the barrier at the final return site gives the caller a value
     # that CodeQL's dataflow treats as cleared, so the downstream sinks
     # (os.stat in generate_etag, tempfile.mkstemp(dir=), os.replace, os.chmod)
@@ -537,16 +607,36 @@ def _refresh_media_subtitles(media_type, media_id, metadata):
     elif media_type == 'movie' and media_path:
         store_subtitles_movie(media_path, path_mappings.path_replace_instance(media_path, arr_instance_id, 'movie'), use_cache=False, arr_instance_id=arr_instance_id)
         event_stream(type='movie', payload=metadata.get('mediaId', media_id))
+    elif media_type == 'sports':
+        # The sports indexer takes the event id and re-reads the row itself,
+        # rather than a pair of paths, so there is no media_path to require.
+        from subtitles.indexer.sports import store_subtitles_sports
+        store_subtitles_sports(metadata.get('episodeId', media_id), arr_instance_id)
+        event_stream(type='sports', action='update', payload=metadata.get('episodeId', media_id))
 
 
-def _history_path_for_local_subtitle(media_type, subtitle_path):
+def _history_path_for_local_subtitle(media_type, subtitle_path, arr_instance_id=None):
+    if media_type == 'sports':
+        return path_mappings.path_replace_reverse_instance(subtitle_path, arr_instance_id, 'sports')
     if media_type == 'episode':
         return path_mappings.path_replace_reverse(subtitle_path)
     return path_mappings.path_replace_reverse_movie(subtitle_path)
 
 
 def _latest_sync_history_for_path(media_type, media_id, subtitle_path, arr_instance_id=None):
-    history_path = _history_path_for_local_subtitle(media_type, subtitle_path)
+    history_path = _history_path_for_local_subtitle(media_type, subtitle_path, arr_instance_id)
+    if media_type == 'sports':
+        query = (
+            select(TableHistorySports.timestamp)
+            .where(TableHistorySports.event_id == media_id)
+            .where(TableHistorySports.action == 5)
+            .where(TableHistorySports.subtitles_path == history_path)
+            .order_by(TableHistorySports.timestamp.desc())
+            .limit(1)
+        )
+        if arr_instance_id is not None:
+            query = query.where(TableHistorySports.arr_instance_id == arr_instance_id)
+        return database.execute(query).first()
     if media_type == 'episode':
         query = (
             select(TableHistory.timestamp)
@@ -607,7 +697,7 @@ def get_subtitle_sync_status(media_type, media_id, language_code, arr_instance_i
     if isinstance(result[1], int):
         return result[0], result[1]
 
-    subtitle_path, _ = result
+    subtitle_path, metadata = result
     try:
         stat = os.stat(subtitle_path)
     except FileNotFoundError:
@@ -617,7 +707,10 @@ def get_subtitle_sync_status(media_type, media_id, language_code, arr_instance_i
         media_type,
         media_id,
         subtitle_path,
-        arr_instance_id=arr_instance_id,
+        # The row's own owner when the caller did not name one. Sports path
+        # mappings are per instance, so reversing the path without an owner is
+        # not merely unscoped, it cannot be done at all.
+        arr_instance_id=arr_instance_id or metadata.get('arrInstanceId'),
     )
     last_sync_timestamp = latest_sync.timestamp if latest_sync else None
     last_modified = datetime.fromtimestamp(stat.st_mtime)
@@ -689,6 +782,24 @@ def _log_promoted_sync_history(media_type, media_id, target_language, source_lan
             result=result,
             arr_instance_id=metadata.get('arrInstanceId'),
         )
+    elif media_type == 'sports':
+        from sportarr.history import sports_history_log
+        arr_instance_id = metadata.get('arrInstanceId')
+        result = ProcessSubtitlesResult(
+            message=message,
+            reversed_path=path_mappings.path_replace_reverse_instance(media_path, arr_instance_id, 'sports'),
+            downloaded_language_code2=_language_base(target_language),
+            downloaded_provider=None,
+            score=None,
+            forced=_is_forced_language(target_language),
+            subtitle_id=None,
+            reversed_subtitles_path=path_mappings.path_replace_reverse_instance(
+                target_path, arr_instance_id, 'sports'),
+            hearing_impaired=_is_hi_language(target_language),
+        )
+        # The event id, not an upstream one: sports history is keyed on the
+        # local row the way every other sports table is.
+        sports_history_log(5, metadata.get('episodeId', media_id), arr_instance_id, result)
 
 
 def _get_media_metadata(media_type, media_id, arr_instance_id=None):
@@ -743,6 +854,39 @@ def _get_media_metadata(media_type, media_id, arr_instance_id=None):
                 'mediaId': row.id,
                 'mediaUpstreamId': row.radarrId,
                 'arrInstanceId': row.arr_instance_id,
+            }
+    elif media_type == 'sports':
+        query = (
+            select(TableSportsEvents.id, TableSportsEvents.league_id, TableSportsEvents.arr_instance_id,
+                   TableSportsEvents.path, TableSportsEvents.sportarrEventId, TableSportsEvents.title)
+            # Joined to an ENABLED sportarr owner, the same gate
+            # resolve_subtitle_path enforces. Without it this answered 200 with
+            # the league title, the event title and the raw Sportarr-side path
+            # for an event whose instance is disabled, past the gate every
+            # other sports endpoint applies, and the follow-up create then 404d.
+            .join(TableArrInstances,
+                  TableSportsEvents.arr_instance_id == TableArrInstances.id)
+            .where(TableSportsEvents.id == media_id,
+                   TableArrInstances.kind == 'sportarr',
+                   TableArrInstances.enabled == 1)
+        )
+        if arr_instance_id is not None:
+            query = query.where(TableSportsEvents.arr_instance_id == arr_instance_id)
+        row = database.execute(query).first()
+        if row:
+            league_row = database.execute(
+                select(TableSportsLeagues.id, TableSportsLeagues.title, TableSportsLeagues.sportarrLeagueId)
+                .where(TableSportsLeagues.id == row.league_id,
+                       TableSportsLeagues.arr_instance_id == row.arr_instance_id)).first()
+            return {
+                'mediaTitle': league_row.title if league_row else None,
+                'mediaId': league_row.id if league_row else row.league_id,
+                'mediaUpstreamId': league_row.sportarrLeagueId if league_row else None,
+                'episodeId': row.id,
+                'episodeUpstreamId': row.sportarrEventId,
+                'arrInstanceId': row.arr_instance_id,
+                'episodeTitle': row.title,
+                'mediaPath': row.path,
             }
     return None
 
@@ -807,7 +951,37 @@ def _get_subtitle_content(media_type, media_id, language_code, arr_instance_id=N
 
 
 def _save_subtitle_content(media_type, media_id, language_code, arr_instance_id=None):
-    """Shared handler for saving edited subtitle content."""
+    """Pin Sports identity before resolving any subtitle paths for the edit."""
+    if media_type != 'sports':
+        return _save_subtitle_content_guarded(media_type, media_id, language_code, arr_instance_id)
+
+    from sportarr.errors import SportsNotFound
+    from sportarr.subtitles import sports_manual_operation
+
+    if not _is_valid_language_code(language_code):
+        return 'Invalid language code', 400
+
+    try:
+        with sports_manual_operation(media_id, arr_instance_id) as operation:
+            try:
+                return _save_subtitle_content_guarded(
+                    media_type, media_id, language_code, operation[0].arr_instance_id,
+                    sports_operation=operation)
+            except (ValueError, FileNotFoundError) as exc:
+                # The event existed when the edit began. Losing it or its
+                # signature during this request is a publication conflict.
+                return str(exc), 409
+    except SportsNotFound:
+        return 'Media not found', 404
+    except FileNotFoundError:
+        return 'Sports video file not found', 404
+    except ValueError as exc:
+        return str(exc), 409
+
+
+def _save_subtitle_content_guarded(media_type, media_id, language_code, arr_instance_id=None,
+                                   sports_operation=None):
+    """Shared editor write, with the optional owned Sports publication boundary."""
     result = resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=arr_instance_id)
     if isinstance(result[1], int):
         return result[0], result[1]
@@ -832,8 +1006,9 @@ def _save_subtitle_content(media_type, media_id, language_code, arr_instance_id=
     if len(encoded) > MAX_FILE_SIZE:
         return f'Content too large ({len(encoded)} bytes, max {MAX_FILE_SIZE})', 413
 
-    video_path = path_mappings.path_replace_instance(
-        metadata['mediaPath'], metadata.get('arrInstanceId', arr_instance_id), media_type)
+    video_path = (sports_operation[3] if sports_operation is not None else
+                  path_mappings.path_replace_instance(
+                      metadata['mediaPath'], metadata.get('arrInstanceId', arr_instance_id), media_type))
     try:
         with subtitle_write_locks(video_path, subtitle_path):
             if not os.path.isfile(subtitle_path):
@@ -842,10 +1017,15 @@ def _save_subtitle_content(media_type, media_id, language_code, arr_instance_id=
             if if_match and if_match.strip('"') != generate_etag(subtitle_path):
                 return 'Subtitle file has been modified since last read', 412
             with subtitle_mutation(video_path, subtitle_path):
-                _write_bytes_atomically(subtitle_path, encoded)
-                _apply_subtitle_chmod(subtitle_path)
+                with (sports_operation[2](output_path=subtitle_path)
+                      if sports_operation is not None else nullcontext()):
+                    _write_bytes_atomically(subtitle_path, encoded)
+                    publication_callback(media_type, video_path, 'edit', metadata.get('arrInstanceId'))(subtitle_path)
+                    _apply_subtitle_chmod(subtitle_path)
             new_etag = generate_etag(subtitle_path)
     except FileNotFoundError:
+        if sports_operation is not None:
+            return 'Sports file changed. Please try again.', 409
         return 'Subtitle file or directory not found', 404
     except PermissionError:
         return 'Permission denied when writing subtitle file', 409
@@ -854,13 +1034,56 @@ def _save_subtitle_content(media_type, media_id, language_code, arr_instance_id=
             return 'No space left on device', 507
         raise
 
-    _refresh_media_subtitles(media_type, media_id, metadata)
+    # Best effort: the bytes are on disk and published. A reindex that cannot
+    # run (the sports indexer raises a bare OSError on a probe failure or its
+    # analysis timeout) must not answer 500 for a write that succeeded, or the
+    # retry would come back 409 against the file this request just created.
+    try:
+        _refresh_media_subtitles(media_type, media_id, metadata)
+    except Exception:
+        logging.exception('BAZARR could not reindex %s %s after writing its subtitle',
+                          media_type, media_id)
     response = make_response('', 204)
     response.headers['ETag'] = f'"{new_etag}"'
     return response
 
 
 def promote_sync_subtitle(media_type, media_id, target_language, source_language, arr_instance_id=None):
+    """Pin Sports identity before resolving any path for the promotion.
+
+    The PUT and create routes already publish inside ``sports_manual_operation``;
+    this one wrote through the generic flow, so a reconciliation that replaced
+    or moved the recording between path resolution and the write landed the
+    bytes on the stale target and then reindexed and logged history against the
+    event as it now is.
+    """
+    if media_type != 'sports':
+        return _promote_sync_subtitle_guarded(media_type, media_id, target_language,
+                                              source_language, arr_instance_id)
+
+    from sportarr.errors import SportsNotFound
+    from sportarr.subtitles import sports_manual_operation
+
+    try:
+        with sports_manual_operation(media_id, arr_instance_id) as operation:
+            try:
+                return _promote_sync_subtitle_guarded(
+                    media_type, media_id, target_language, source_language,
+                    operation[0].arr_instance_id, sports_operation=operation)
+            except (ValueError, FileNotFoundError) as exc:
+                # The event existed when the promotion began. Losing it or its
+                # signature during this request is a publication conflict.
+                return str(exc), 409
+    except SportsNotFound:
+        return 'Media not found', 404
+    except FileNotFoundError:
+        return 'Sports video file not found', 404
+    except ValueError as exc:
+        return str(exc), 409
+
+
+def _promote_sync_subtitle_guarded(media_type, media_id, target_language, source_language,
+                                   arr_instance_id=None, sports_operation=None):
     """Overwrite a base subtitle with one generated by a sync engine."""
     if not source_language or not isinstance(source_language, str):
         return 'Request body must include "sourceLanguage"', 400
@@ -901,8 +1124,9 @@ def promote_sync_subtitle(media_type, media_id, target_language, source_language
     if os.path.realpath(source_path) == os.path.realpath(target_path):
         return 'Source and target subtitles are the same file', 400
 
-    video_path = path_mappings.path_replace_instance(
-        metadata['mediaPath'], metadata.get('arrInstanceId', arr_instance_id), media_type)
+    video_path = (sports_operation[3] if sports_operation is not None else
+                  path_mappings.path_replace_instance(
+                      metadata['mediaPath'], metadata.get('arrInstanceId', arr_instance_id), media_type))
     try:
         with subtitle_write_locks(video_path, source_path, target_path):
             file_size = os.path.getsize(source_path)
@@ -913,9 +1137,15 @@ def promote_sync_subtitle(media_type, media_id, target_language, source_language
             with open(source_path, 'rb') as source_file:
                 data = source_file.read()
             with subtitle_mutation(video_path, target_path):
-                _write_bytes_atomically(target_path, data)
-                _apply_subtitle_chmod(target_path)
+                with (sports_operation[2](output_path=target_path)
+                      if sports_operation is not None else nullcontext()):
+                    _write_bytes_atomically(target_path, data)
+                    publication_callback(media_type, video_path, 'sync',
+                                         metadata.get('arrInstanceId'))(target_path)
+                    _apply_subtitle_chmod(target_path)
     except FileNotFoundError:
+        if sports_operation is not None:
+            return 'Sports file changed. Please try again.', 409
         return 'Subtitle file or directory not found', 404
     except PermissionError:
         return 'Permission denied when writing subtitle file', 409
@@ -925,7 +1155,13 @@ def promote_sync_subtitle(media_type, media_id, target_language, source_language
         raise
 
     try:
+        # Best effort, for the reason the editor write states: history below
+        # records the promotion in a finally, so raising here reported failure
+        # for a promotion that had already been written and logged.
         _refresh_media_subtitles(media_type, media_id, metadata)
+    except Exception:
+        logging.exception('BAZARR could not reindex %s %s after promoting its subtitle',
+                          media_type, media_id)
     finally:
         _log_promoted_sync_history(
             media_type=media_type,
@@ -1021,6 +1257,29 @@ class MovieSubtitleSyncStatus(Resource):
 
 
 def _create_subtitle(media_type, media_id, arr_instance_id=None):
+    """Pin Sports identity before resolving the destination for a new subtitle."""
+    if media_type != 'sports':
+        return _create_subtitle_guarded(media_type, media_id, arr_instance_id)
+
+    from sportarr.errors import SportsNotFound
+    from sportarr.subtitles import sports_manual_operation
+
+    try:
+        with sports_manual_operation(media_id, arr_instance_id) as operation:
+            try:
+                return _create_subtitle_guarded(
+                    media_type, media_id, operation[0].arr_instance_id, sports_operation=operation)
+            except (ValueError, FileNotFoundError) as exc:
+                return str(exc), 409
+    except SportsNotFound:
+        return 'Media not found', 404
+    except FileNotFoundError:
+        return 'Sports video file not found', 404
+    except ValueError as exc:
+        return str(exc), 409
+
+
+def _create_subtitle_guarded(media_type, media_id, arr_instance_id=None, sports_operation=None):
     """Shared handler for creating a new subtitle file."""
     data = request.get_json()
     if not data:
@@ -1051,7 +1310,7 @@ def _create_subtitle(media_type, media_id, arr_instance_id=None):
     # Look up the media to get the video file path
     if media_type == 'episode':
         query = (
-            select(TableEpisodes.id, TableEpisodes.path)
+            select(TableEpisodes.id, TableEpisodes.path, TableEpisodes.arr_instance_id)
             .where(TableEpisodes.sonarrEpisodeId == media_id)
         )
         if arr_instance_id is not None:
@@ -1059,11 +1318,23 @@ def _create_subtitle(media_type, media_id, arr_instance_id=None):
         row = database.execute(query).first()
     elif media_type == 'movie':
         query = (
-            select(TableMovies.id, TableMovies.path)
+            select(TableMovies.id, TableMovies.path, TableMovies.arr_instance_id)
             .where(TableMovies.radarrId == media_id)
         )
         if arr_instance_id is not None:
             query = query.where(TableMovies.arr_instance_id == arr_instance_id)
+        row = database.execute(query).first()
+    elif media_type == 'sports':
+        query = (
+            select(TableSportsEvents.id, TableSportsEvents.path, TableSportsEvents.arr_instance_id)
+            .join(TableArrInstances,
+                  TableSportsEvents.arr_instance_id == TableArrInstances.id)
+            .where(TableSportsEvents.id == media_id,
+                   TableArrInstances.kind == 'sportarr',
+                   TableArrInstances.enabled == 1)
+        )
+        if arr_instance_id is not None:
+            query = query.where(TableSportsEvents.arr_instance_id == arr_instance_id)
         row = database.execute(query).first()
     else:
         return 'Invalid media type', 400
@@ -1073,21 +1344,29 @@ def _create_subtitle(media_type, media_id, arr_instance_id=None):
 
     # Apply the owning instance's per-instance path_mappings when configured
     # (#156); falls back to the global mapping when the instance has none.
-    video_path = path_mappings.path_replace_instance(row.path, arr_instance_id, media_type)
+    # Always the row's own owner, never the request's: sports mappings are per
+    # instance, so a caller that omitted arr_instance_id would otherwise get no
+    # mapping at all, and every re-index below now gets the correct owner too.
+    arr_instance_id = row.arr_instance_id
+    video_path = (sports_operation[3] if sports_operation is not None else
+                  path_mappings.path_replace_instance(row.path, arr_instance_id, media_type))
 
     # Build the subtitle filename. `language` was already validated against
     # r'^[a-zA-Z]{2,3}$' above, `ext` comes from the FORMAT_TO_EXT whitelist,
     # `hi`/`forced` are booleans, so the source string cannot contain path
-    # separators. Running the filename through `secure_filename` still has
-    # value as a CodeQL-recognised sanitiser for py/path-injection, and we
-    # use `safe_join` for the directory composition.
+    # separators. _subtitle_filename runs `secure_filename` over that
+    # request-derived suffix, which is the CodeQL-recognised sanitiser for
+    # py/path-injection; it deliberately does NOT run over `video_name`, which
+    # comes off the media row and must keep its spaces to stay matchable. The
+    # directory composition uses `safe_join`, and the normpath containment
+    # below anchors the result.
     video_name = os.path.splitext(os.path.basename(video_path))[0]
     suffix = language
     if hi:
         suffix += '.hi'
     elif forced:
         suffix += '.forced'
-    subtitle_filename = secure_filename(f'{video_name}.{suffix}{ext}')
+    subtitle_filename = _subtitle_filename(video_name, suffix, ext)
 
     # Determine target directory
     target_folder = get_target_folder(video_path)
@@ -1114,10 +1393,15 @@ def _create_subtitle(media_type, media_id, arr_instance_id=None):
             if os.path.isfile(subtitle_path):
                 return 'Subtitle file already exists', 409
             with subtitle_mutation(video_path, subtitle_path):
-                _write_bytes_atomically(subtitle_path, encoded)
-                _apply_subtitle_chmod(subtitle_path)
+                with (sports_operation[2](output_path=subtitle_path)
+                      if sports_operation is not None else nullcontext()):
+                    _write_bytes_atomically(subtitle_path, encoded)
+                    publication_callback(media_type, video_path, 'edit', arr_instance_id)(subtitle_path)
+                    _apply_subtitle_chmod(subtitle_path)
 
     except FileNotFoundError:
+        if sports_operation is not None:
+            return 'Sports file changed. Please try again.', 409
         return 'Target directory not found', 404
     except PermissionError:
         return 'Permission denied when writing subtitle file', 409
@@ -1126,13 +1410,26 @@ def _create_subtitle(media_type, media_id, arr_instance_id=None):
             return 'No space left on device', 507
         raise
 
-    # Force re-scan subtitles from disk using the media (video) path
-    if media_type == 'episode':
-        store_subtitles(row.path, video_path, use_cache=False, arr_instance_id=arr_instance_id)
-        event_stream(type='episode', payload=row.id)
-    else:
-        store_subtitles_movie(row.path, video_path, use_cache=False, arr_instance_id=arr_instance_id)
-        event_stream(type='movie', payload=row.id)
+    # Force re-scan subtitles from disk using the media (video) path. Best
+    # effort, for the reason the editor write and the promotion state: the file
+    # is created and published by here, and the sports indexer raises a bare
+    # OSError on a probe failure or its analysis timeout, which would answer
+    # 500 for a creation that succeeded and leave the retry to answer 409
+    # against the file this request just wrote.
+    try:
+        if media_type == 'episode':
+            store_subtitles(row.path, video_path, use_cache=False, arr_instance_id=arr_instance_id)
+            event_stream(type='episode', payload=row.id)
+        elif media_type == 'sports':
+            from subtitles.indexer.sports import store_subtitles_sports
+            store_subtitles_sports(row.id, arr_instance_id)
+            event_stream(type='sports', action='update', payload=row.id)
+        else:
+            store_subtitles_movie(row.path, video_path, use_cache=False, arr_instance_id=arr_instance_id)
+            event_stream(type='movie', payload=row.id)
+    except Exception:
+        logging.exception('BAZARR could not reindex %s %s after creating its subtitle',
+                          media_type, row.id)
 
     # Build language with modifiers
     language_with_modifiers = language
@@ -1156,3 +1453,44 @@ class MovieSubtitleCreate(Resource):
     @authenticate
     def post(self, radarrId):
         return _create_subtitle('movie', radarrId, arr_instance_id=_request_arr_instance_id())
+
+
+@api_ns_subtitle_content.route('sports/events/<int:eventId>/subtitles/<language>/content')
+class SportsEventSubtitleContent(Resource):
+    @authenticate
+    def get(self, eventId, language):
+        return _get_subtitle_content('sports', eventId, language,
+                                     arr_instance_id=_request_arr_instance_id())
+
+    @authenticate
+    def put(self, eventId, language):
+        return _save_subtitle_content('sports', eventId, language,
+                                      arr_instance_id=_request_arr_instance_id())
+
+
+@api_ns_subtitle_content.route('sports/events/<int:eventId>/subtitles/<language>/promote')
+class SportsEventSubtitlePromote(Resource):
+    @authenticate
+    def post(self, eventId, language):
+        return _promote_sync_subtitle_content('sports', eventId, language,
+                                              arr_instance_id=_request_arr_instance_id())
+
+
+@api_ns_subtitle_content.route('sports/events/<int:eventId>/subtitles/<language>/sync-status')
+class SportsEventSubtitleSyncStatus(Resource):
+    @authenticate
+    def get(self, eventId, language):
+        response, status_code = get_subtitle_sync_status('sports', eventId, language,
+                                                         arr_instance_id=_request_arr_instance_id())
+        if status_code != 200:
+            return response, status_code
+        return jsonify(response)
+
+
+# Not 'sports/events/<id>/subtitles': that path is the indexer's POST, and a
+# second Resource on it silently shadows the first.
+@api_ns_subtitle_content.route('sports/events/<int:eventId>/subtitles/create')
+class SportsEventSubtitleCreate(Resource):
+    @authenticate
+    def post(self, eventId):
+        return _create_subtitle('sports', eventId, arr_instance_id=_request_arr_instance_id())

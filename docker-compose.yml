@@ -64,6 +64,43 @@ services:
       # Optional: Additional media paths
       # - /path/to/anime:/anime
       # - /path/to/downloads:/downloads
+
+    # Container hardening. The image is built to run this way: the application
+    # tree is owned by root and everything written at runtime goes to /config,
+    # so the only writable places a provider plugin's worker can reach are the
+    # ones it is supposed to reach.
+    #
+    # read_only freezes the image filesystem, cap_drop takes away every Linux
+    # capability, and no-new-privileges stops a setuid binary from raising
+    # privileges even if one were somehow reachable.
+    #
+    # The tmpfs gives back a writable /tmp. Extraction and the sync engines do
+    # not need it, they work under /config/cache and beside the destination
+    # file, but subtitle bundle downloads spill into it past their in-memory
+    # ceiling, the Provider Hub and sports workers put their per-request
+    # temporary directories there, and the alass shim falls back to it when the
+    # config cache cannot hold an executable. The size cap matters: an uncapped
+    # tmpfs may grow to half of host RAM, and it is charged to the host, not to
+    # this container's memory limit.
+    #
+    # Mounting your own source over /app/bazarr for development is not
+    # compatible with read_only: drop that key in that case.
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      # The startup needs exactly three, and only while it is still root:
+      # CHOWN to hand /config to PUID:PGID, SETUID and SETGID for the drop to
+      # that user. Everything after the drop, which is all of Bazarr and every
+      # Provider Hub worker, runs with no capabilities at all, because a
+      # non-root process keeps none of them.
+      - CHOWN
+      - SETUID
+      - SETGID
     
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:6767/_supervisor/status | grep -q '\"running\"'"]

@@ -12,7 +12,7 @@ from subliminal_patch.core_persistent import list_all_subtitles_parallel
 from app.config import settings
 from app.get_providers import get_provider_language_hook, get_providers_sorted, get_providers_auth
 from . import auth, cache as C, response_mapper as M
-from .local_subs import search_local
+from .local_subs import search_local, _UNRESOLVED_SPORTS
 from utilities.url_guard import assert_safe_outbound, resolve_safe_url, UnsafeURLError  # noqa: F401
 
 logger = logging.getLogger("bazarr.compat.service")
@@ -32,7 +32,7 @@ _CLIENT_MOVIEHASH_PROVIDERS = (
 _SHOOTER_HASH_RE = re.compile(r"^[0-9a-fA-F]{32}(?:;[0-9a-fA-F]{32}){3}$")
 
 
-def _get_compat_pool():
+def _get_compat_pool(*, restore_available=False):
     """Dedicated SZAsyncProviderPool instance. MUST NOT share app.get_providers._pools."""
     global _compat_pool
     with _pool_lock:
@@ -46,6 +46,20 @@ def _get_compat_pool():
                 language_hook=get_provider_language_hook(),
                 language_equals=[],
             )
+        elif restore_available:
+            # A cold pool can omit a configured provider while it is throttled.
+            # Restore availability without update() clearing unrelated discards
+            # or retiring initialized members that another search is using.
+            missing = [name for name in get_providers_sorted() or [] if name not in _compat_pool.providers]
+            if missing:
+                configs = get_providers_auth()
+                for name in missing:
+                    try:
+                        _compat_pool.adopt_provider(name, configs.get(name, {}))
+                    except KeyError:
+                        # Registration or the pool's adoption gate can change
+                        # after the availability snapshot. Coverage reports it.
+                        continue
         return _compat_pool
 
 
@@ -233,12 +247,47 @@ def _apply_anidb_ids(video, series_anidb_id: int | None = None,
     return video
 
 
-def _build_video(imdb_id: str, season: int | None, episode: int | None,
+def _build_release_query_video(query: str | None) -> Video:
+    """Parse only explicit release text into unverified provider query hints.
+
+    These hints are neither resolved metadata nor a local video association.
+    Keep the complete parse until ambiguity has been checked, without defaults
+    from Video.fromname or Episode.fromguess.
+    """
+    hints = _guessit_filename(query) if query else {}
+    kind, title, year = hints.get("type"), hints.get("title"), hints.get("year")
+    if (kind not in ("movie", "episode") or not isinstance(title, str)
+            or not any(c.isalnum() for c in title)
+            or (year is not None and (type(year) is not int or not 1870 <= year <= 2200))):
+        raise ValueError("Could not read this release name. Include a clear movie title or one numbered episode.")
+    numbering = re.findall(
+        r"(?<![a-z0-9])(?:s([0-9]{1,4})[ ._-]*e([0-9]{1,4})|([0-9]{1,4})x([0-9]{1,4}))(?![a-z0-9])",
+        query, re.IGNORECASE,
+    )
+    if kind == "episode":
+        season, episode = hints.get("season"), hints.get("episode")
+        if (type(season) is not int or not 0 <= season <= 9999
+                or type(episode) is not int or not 1 <= episode <= 9999
+                or len(numbering) != 1 or hints.get("date") is not None):
+            raise ValueError("Use one explicitly numbered episode, for example Show.S02E03. Packs and absolute numbering need an exact episode.")
+        s, e, x_s, x_e = numbering[0]
+        if (int(s or x_s), int(e or x_e)) != (season, episode):
+            raise ValueError("This release name has conflicting episode numbers. Use one explicit season and episode.")
+        return Episode(name=query, series=title, year=year, season=season, episodes=[episode])
+    if numbering or any(hints.get(key) is not None for key in ("season", "episode", "date")):
+        raise ValueError("This release name has ambiguous episode hints. Use one explicit season and episode.")
+    return Movie(name=query, title=title, year=year)
+
+
+def _build_video(imdb_id: str | None, season: int | None, episode: int | None,
                  media_type: str, query: str | None = None,
                  moviehash: str | None = None,
                  moviebytesize: int | None = None,
                  series_anidb_id: int | None = None,
-                 series_anidb_episode_id: int | None = None) -> Video:
+                 series_anidb_episode_id: int | None = None,
+                 *, title_only: bool = False, year: int | None = None,
+                 release_query: bool = False, episode_identity: dict | None = None,
+                 copy_path: str | None = None) -> Video:
     """Construct a Video for compat fanout.
 
     Preferred path: when the imdb_id resolves to a library entry with a
@@ -253,11 +302,29 @@ def _build_video(imdb_id: str, season: int | None, episode: int | None,
     on the client's filename + OMDB/TVDB refiner lookups. Lower scoring
     signal but still better than nothing for query-only searches.
     """
+    if release_query:
+        if (title_only or imdb_id or season is not None or episode is not None or year is not None
+                or moviehash or moviebytesize is not None or series_anidb_id is not None
+                or series_anidb_episode_id is not None or episode_identity is not None
+                or copy_path is not None):
+            raise ValueError("A release query cannot adopt identified media or file properties.")
+        return _build_release_query_video(query)
     # Normalize up front: clients (Jellyfin plugin) strip 'tt' before
     # sending. OMDB / TVDB v1 / v4 all reject the bare numeric form, so
     # carrying the normalized value through the Video avoids having to
     # re-prepend in every downstream caller.
     imdb_id = _tt(imdb_id) or imdb_id
+    if title_only:
+        if media_type == "episode":
+            identity = episode_identity or {}
+            video = Episode(name=copy_path or "", series=query or "", season=season, episodes=[episode],
+                            year=year, series_imdb_id=imdb_id, title=identity.get("title"),
+                            imdb_id=identity.get("imdb_id"), tvdb_id=identity.get("tvdb_id"),
+                            series_tvdb_id=identity.get("show_tvdb_id"), tmdb_id=identity.get("id"),
+                            series_tmdb_id=identity.get("show_id"))
+            video.episode_title = identity.get("title")
+            return video
+        return Movie(name=copy_path or "", title=query or "", year=year, imdb_id=imdb_id)
     meta = _lookup_library_metadata(imdb_id, media_type, season, episode)
 
     path = meta.get("path") or ""
@@ -633,12 +700,89 @@ _SKIP_FOR_VIRTUAL_VIDEO = frozenset({"embeddedsubtitles"})
 LOCAL_PROVIDER = "local"
 
 
+# Release facts a chosen local copy may contribute, and the guessit key each
+# one is read from. Identity is deliberately absent: a copy refines how a
+# release is described, never which title, episode or numbering was confirmed.
+COPY_RELEASE_ATTRIBUTES = (
+    ("release_group", "release_group"),
+    ("source", "source"),
+    ("resolution", "screen_size"),
+    ("video_codec", "video_codec"),
+    ("audio_codec", "audio_codec"),
+    ("edition", "edition"),
+    ("streaming_service", "streaming_service"),
+    ("other", "other"),
+)
+_COPY_STORED_COLUMNS = (("source", "source"), ("resolution", None),
+                        ("video_codec", "video_codec"), ("audio_codec", "audio_codec"))
+
+
+def _copy_release_hints(text: str) -> dict:
+    """Bounded string parsing of one release-bearing name, nothing more."""
+    if not isinstance(text, str) or not text.strip() or len(text) > 500:
+        return {}
+    return _guessit_filename(text.strip())
+
+
+def refine_video_with_copy(video, copy_facts: dict):
+    """Supplement one prebuilt title target with facts from a chosen local copy.
+
+    Only release description, file name, observed size and, when it was
+    computed, the content hash are contributed. Title, series, season, episode
+    and every external identifier are left exactly as the confirmed target
+    established them, so a copy can never redirect the search to another work.
+
+    Every fact comes from the copy the reader picked: the mapped path's own
+    file name first, then its scene name, then the stored release columns. No
+    refiner registry, no media probe, no cache write and no network call.
+
+    ``Video.name`` is read-only and takes part in the video's hash, so the
+    chosen copy's path is supplied to ``_build_video`` at construction instead
+    of being assigned here.
+    """
+    from subtitles.refiners.utils import convert_to_guessit
+
+    path = copy_facts.get("path") or ""
+    hints = _copy_release_hints(os.path.basename(path))
+    scene = _copy_release_hints(copy_facts.get("release"))
+    for attribute, key in COPY_RELEASE_ATTRIBUTES:
+        for source in (hints, scene):
+            value = source.get(key)
+            if value and getattr(video, attribute, None) in (None, "", []):
+                setattr(video, attribute, value)
+    for attribute, key in _COPY_STORED_COLUMNS:
+        stored = copy_facts.get(attribute)
+        # convert_to_guessit returns its argument unchanged on a miss, and the
+        # column can hold the literal string "None" from an older writer.
+        if not stored or stored == "None" or getattr(video, attribute, None):
+            continue
+        setattr(video, attribute, convert_to_guessit(key, stored) if key else stored)
+    size = copy_facts.get("observed_size")
+    if isinstance(size, int) and size > 0:
+        video.size = size
+    if copy_facts.get("file_hash"):
+        _apply_client_moviehash(video, copy_facts["file_hash"])
+    return video
+
+
+def search_title(video, languages, pool, providers, on_outcome):
+    """Search a prebuilt title target using the shared bounded provider executor."""
+    wall = max(5, min(120, int(settings.compat_endpoint.search_timeout_seconds)))
+    return list_all_subtitles_parallel(
+        [video], set(languages), pool,
+        per_provider_timeout=max(3, int(wall * 0.6)), wall_timeout=wall,
+        exclude_providers=set(pool.providers) - set(providers),
+        on_outcome=on_outcome,
+    ).get(video, [])
+
+
 def _do_fanout(imdb_id, season, episode, languages, media_type,
                query=None, moviehash=None, moviebytesize=None,
                series_anidb_id=None, series_anidb_episode_id=None,
                moviehash_match=None,
                requested_languages=None, exclude_providers=None,
-               timeout_seconds=None, only_providers=None):
+               timeout_seconds=None, only_providers=None,
+               sports_match=_UNRESOLVED_SPORTS):
     from subliminal_patch.provider_health import get_tracker as _get_health_tracker
     from subliminal_patch.score import ComputeScore, MAX_SCORES
     health = _get_health_tracker()
@@ -671,7 +815,7 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
     if only_providers is not None:
         requested_only = {str(p).strip() for p in only_providers if str(p).strip()}
         exclude |= (set(pool.providers) - requested_only)
-        local_allowed = LOCAL_PROVIDER in requested_only
+        local_allowed = LOCAL_PROVIDER in requested_only and LOCAL_PROVIDER not in requested_exclude
     else:
         requested_only = None
         local_allowed = LOCAL_PROVIDER not in requested_exclude
@@ -796,6 +940,7 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
                 languages=requested_languages or [],
                 query=query, moviehash=moviehash,
                 moviehash_match=moviehash_match,
+                sports_match=sports_match,
             )
         except Exception as e:
             logger.warning("compat: search_local failed (continuing without locals): %s", e)
@@ -840,6 +985,10 @@ def available_providers() -> list[str]:
         return []
 
 
+class SportsSelectionChanged(RuntimeError):
+    pass
+
+
 def search(imdb_id: str, season, episode, languages: Iterable[Language],
            media_type: str, query: str | None = None,
            moviehash: str | None = None,
@@ -862,23 +1011,61 @@ def search(imdb_id: str, season, episode, languages: Iterable[Language],
                       exclude_providers=exclude_providers,
                       timeout_seconds=timeout_seconds,
                       only_providers=only_providers)
+    local_allowed = (LOCAL_PROVIDER not in (exclude_providers or [])
+                     and (only_providers is None or LOCAL_PROVIDER in only_providers))
+    check_sports = local_allowed and bool(settings.compat_endpoint.serve_local_subs)
+    from .sports import resolve_for_request
+
+    def resolve_sports():
+        if check_sports:
+            return resolve_for_request(
+                imdb_id, season, episode, media_type, query, moviehash, moviehash_match)
+        return None
+
     cache_ttl = int(settings.compat_endpoint.cache_ttl_seconds)
     fid_ttl = int(settings.compat_endpoint.file_id_ttl_seconds)
     ttl = min(cache_ttl, fid_ttl)
-    return C.compat_region.get_or_create(
-        key,
-        creator=lambda: _do_fanout(imdb_id, season, episode, languages,
-                                    media_type, query=query, moviehash=moviehash,
-                                    moviebytesize=moviebytesize,
-                                    series_anidb_id=series_anidb_id,
-                                    series_anidb_episode_id=series_anidb_episode_id,
-                                    moviehash_match=moviehash_match,
-                                    requested_languages=requested_languages,
-                                    exclude_providers=exclude_providers,
-                                    timeout_seconds=timeout_seconds,
-                                    only_providers=only_providers),
-        expiration_time=ttl,
-    )
+    fanout_started = False
+    for attempt in range(2):
+        sports_match = resolve_sports()
+        sports_key = sports_match.cache_key() if sports_match is not None else None
+        cache_key = key + ":sports:" + sports_key if sports_key is not None else key
+
+        def validate_selection():
+            current = resolve_sports()
+            current_key = current.cache_key() if current is not None else None
+            if current_key != sports_key:
+                raise SportsSelectionChanged("Sports selection changed during search")
+
+        def create():
+            nonlocal fanout_started
+            validate_selection()
+            # Bind local results to the match used for this key. Explicit None
+            # also matters: a newly appearing sports file cannot enter a native key.
+            fanout_started = True
+            result = _do_fanout(
+                imdb_id, season, episode, languages, media_type,
+                query=query, moviehash=moviehash, moviebytesize=moviebytesize,
+                series_anidb_id=series_anidb_id,
+                series_anidb_episode_id=series_anidb_episode_id,
+                moviehash_match=moviehash_match,
+                requested_languages=requested_languages,
+                exclude_providers=exclude_providers,
+                timeout_seconds=timeout_seconds, only_providers=only_providers,
+                sports_match=sports_match)
+            validate_selection()
+            return result
+
+        try:
+            result = C.compat_region.get_or_create(cache_key, creator=create, expiration_time=ttl)
+            # Cache hits need the same current-selection check as new results.
+            validate_selection()
+            return result
+        except SportsSelectionChanged:
+            if attempt == 1 or fanout_started:
+                raise
+            # Creation exceptions are not cached. Retry once before provider work
+            # starts; never spend a second fanout timeout or another admission.
 
 
 def download(file_id, base_host: str = "",
@@ -895,7 +1082,15 @@ def download(file_id, base_host: str = "",
     ok, _payload = auth.parse_file_id(file_id)
     if not ok:
         raise FileNotFoundError("file_id invalid or expired")
-    stream_tok = auth.mint_file_stream_token(int(file_id))
+    if _payload.get("media_type") == "sports":
+        from .sports import validate_payload
+        try:
+            validate_payload(_payload)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise FileNotFoundError("Sports subtitle is no longer available") from exc
+        stream_tok = auth.mint_file_stream_token(int(file_id), sports_binding=_payload["sports"]["binding"])
+    else:
+        stream_tok = auth.mint_file_stream_token(int(file_id))
     base_url = (settings.general.base_url or "").rstrip("/")
     path = f"{base_url}/api/v1/download/stream/{quote(stream_tok, safe='')}"
     link = f"{base_host.rstrip('/')}{path}" if base_host else path
@@ -982,6 +1177,13 @@ def serve_subtitle_content(stream_token: str) -> tuple[bytes, str]:
     ok, fpayload = auth.parse_file_id(fid)
     if not ok:
         raise FileNotFoundError("file_id expired or not found")
+
+    if fpayload.get("media_type") == "sports" or payload.get("sports") is not None:
+        from .sports import serve
+        binding = (fpayload.get("sports") or {}).get("binding")
+        if fpayload.get("media_type") != "sports" or not binding or payload.get("sports") != binding:
+            raise FileNotFoundError("Sports capability no longer matches its file")
+        return serve(fpayload)
 
     # Local-library payloads carry an explicit kind discriminator; serve
     # them from disk (with on-the-fly format conversion) instead of the

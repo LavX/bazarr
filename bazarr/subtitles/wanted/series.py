@@ -19,13 +19,14 @@ from app.database import (get_exclusion_clause, get_audio_profile_languages, get
                           TableEpisodes, TableHistory, database, update, select)
 from app.event_handler import event_stream
 from app.jobs_queue import jobs_queue
+from app import activity
 from app.config import settings
 from subliminal_patch.score import MAX_SCORES
 
 from ..adaptive_searching import is_search_active, updateFailedAttempts
 from ..download import generate_subtitles
 from ..language_profiles import build_translate_from_map
-from .utils import _find_existing_subtitle_path
+from .utils import _find_existing_subtitle_path, _provider_file_on_disk
 
 
 def _wanted_episode(episode, providers_list, job_id=None):
@@ -109,6 +110,26 @@ def _wanted_episode(episode, providers_list, job_id=None):
                             already_translated.subtitles_path
                         )
                         if local_subs_path and os.path.exists(local_subs_path):
+                            continue
+                        # The translated file is gone, and the upgrade that
+                        # removed it left a provider file for the language
+                        # behind. Translating again would put a row with the 50%
+                        # default back on top of the history and hand the next
+                        # upgrade the same listing to fetch, so a real subtitle
+                        # on disk ends this: it is already better than the
+                        # translation asking to be written.
+                        if _provider_file_on_disk(
+                            episode.subtitles,
+                            language,
+                            already_translated.subtitles_path,
+                            path_replace_fn=path_mappings.path_replace,
+                        ):
+                            logging.debug(
+                                "BAZARR auto-translate (wanted-scan) skipped for %s: "
+                                "language %s is already served by a subtitle from a "
+                                "provider",
+                                video_path, language,
+                            )
                             continue
                     # Fetch additional columns required by postprocess_subtitles
                     # (imdbId/tvdbId for plex/jellyfin refresh). episode_details
@@ -329,10 +350,23 @@ def wanted_search_missing_subtitles_series(job_id=None, wait_for_completion=Fals
         jobs_queue.update_job_progress(job_id=job_id, progress_value='max')
 
     throttled = False
+    observed = activity.register(activity.activity_id_for_job(job_id), operation='wanted_search',
+                                 scope_kind='server')
     for i, episode in enumerate(episodes, start=1):
         jobs_queue.update_job_progress(job_id=job_id, progress_value=i,
                                        progress_message=f'{episode.title} - S{episode.season:02d}E{episode.episode:02d}'
                                                         f' - {episode.episodeTitle}')
+        # Observation only: the bulk loop knows which item it is on, and
+        # nothing else records that. "item i of N" is not N downloads.
+        # The owner is deliberately not recorded: this scan spans every
+        # instance, and a scope field that is never cleared would leave the
+        # whole server-wide search reading as scoped to whichever instance it
+        # touched last.
+        activity.note_scope(observed, media_type='episode',
+                            title=episode.title, episode_title=episode.episodeTitle,
+                            season=episode.season, episode=episode.episode,
+                            upstream_episode_id=episode.sonarrEpisodeId)
+        activity.note_progress(observed, unit='item', value=i, total=count_episodes)
 
         providers = get_providers()
         if providers:

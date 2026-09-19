@@ -362,7 +362,7 @@ def test_proxy_service_returns_connection_error_when_no_ip_reachable(monkeypatch
 def test_format_host_header_brackets_ipv6():
     """RFC 7230 §5.4 requires IPv6 literals in the Host header to be
     bracketed. urlparse(...).hostname strips brackets, so the helper
-    has to put them back. Codex P2 round 3."""
+    has to put them back."""
     from app.ui import _format_host_header
     # IPv6 with non-default port
     assert _format_host_header("::1", 8989, "http") == "[::1]:8989"
@@ -384,7 +384,7 @@ def test_proxy_service_brackets_ipv6_in_host_header(monkeypatch):
     """Verify the IPv6 Host header makes it through proxy_service intact.
     Without the bracketing fix, Sonarr/Radarr behind certain HTTP parsers
     return 400 because Host: ::1:8989 is ambiguous (which colon is the
-    port separator?). Codex P2 round 3."""
+    port separator?)."""
     monkeypatch.setattr("app.config.settings.auth.type", None)
     monkeypatch.setattr(socket, "getaddrinfo",
                         lambda *a, **kw: [_addr("::1")])
@@ -428,7 +428,7 @@ def test_proxy_service_pins_to_resolved_ip_for_http(monkeypatch):
 
 
 def test_proxy_service_does_not_pin_for_https_with_verify(monkeypatch):
-    """Codex P2: when HTTPS is in use with verify_ssl=True, pinning the
+    """When HTTPS is in use with verify_ssl=True, pinning the
     URL to the resolved IP would set SNI to the IP and fail TLS
     hostname validation against a cert legitimately issued for the
     hostname. The hostname must be preserved in the URL so urllib3
@@ -611,3 +611,150 @@ def test_legacy_proxy_accepts_the_header_and_forwards_only_the_query(monkeypatch
         forwarded = fake_get.call_args_list[0].args[1]
         assert forwarded["apikey"] == "some-arr-key"
         assert TEST_API_KEY not in repr(fake_get.call_args_list[0])
+
+
+# === what the legacy proxy is willing to echo back ===
+
+@pytest.mark.parametrize("payload", [
+    {"version": "4.0.0.0"},
+    {"version": "5.14.0.9383"},
+    {"version": "v3.0.10-beta.1+build5"},
+    {"version": "  4.0.0.0  "},
+])
+def test_handshake_version_accepts_real_versions(payload):
+    from app.ui import _handshake_version
+    assert _handshake_version(payload) == payload["version"].strip()
+
+
+@pytest.mark.parametrize("payload", [
+    {},                                        # no version field at all
+    {"version": None},                         # present but null
+    {"version": ""},
+    {"version": "   "},
+    {"version": 4},                            # not a string
+    {"version": {"nested": "object"}},
+    {"version": ["4.0.0.0"]},
+    {"version": "<script>alert(1)</script>"},  # markup
+    {"version": '4.0.0.0"><img src=x>'},       # quote break-out
+    {"version": "4.0.0.0\n\nInjected: yes"},   # control characters
+    {"version": "x" * 65},                     # longer than a version can be
+    "not a mapping at all",
+    ["not", "a", "mapping"],
+    None,
+])
+def test_handshake_version_refuses_everything_else(payload):
+    from app.ui import _handshake_version
+    assert _handshake_version(payload) is None
+
+
+def test_service_proxy_does_not_echo_a_hostile_version(monkeypatch):
+    """The route the settings page actually calls must not pass the far end
+    through either.
+
+    Control flow matters here: a 200 that is not a handshake is not a verdict,
+    it is one candidate failing, so the remaining status paths still have to be
+    tried before the route gives up. Sonarr and Radarr carry two paths, and the
+    legacy one is tried first, so a hostile body on the first must not stop the
+    v3 probe.
+    """
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **kw: [_addr("10.0.0.5")])
+    hostile = MagicMock(status_code=200)
+    hostile.json.return_value = {"version": "<script>alert(1)</script>"}
+    with patch("app.ui.requests.get", return_value=hostile) as fake_get:
+        app = _build_app()
+        client = app.test_client()
+        _login(client)
+        r = client.get("/test/sonarr?url=http://sonarr.lan:8989&apikey=k")
+        body = r.get_json()
+        assert body["status"] is False
+        assert body["error"] == "Error Occurred. Check your settings."
+        assert body["code"] == 200
+        assert "script" not in r.get_data(as_text=True)
+        # Both status paths were still attempted; the bad body did not end the
+        # probe early.
+        assert fake_get.call_count == 2
+        urls = [c.args[0] for c in fake_get.call_args_list]
+        assert urls[0].endswith("/api/system/status")
+        assert urls[1].endswith("/api/v3/system/status")
+
+
+def test_service_proxy_recovers_when_only_the_second_path_is_the_handshake(monkeypatch):
+    """A junk 200 on the legacy path must not cost the user a working test."""
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **kw: [_addr("10.0.0.5")])
+    junk = MagicMock(status_code=200)
+    junk.json.return_value = {"service": "something else"}
+    good = MagicMock(status_code=200)
+    good.json.return_value = {"version": "4.0.10.2544"}
+    with patch("app.ui.requests.get", side_effect=[junk, good]):
+        app = _build_app()
+        client = app.test_client()
+        _login(client)
+        r = client.get("/test/sonarr?url=http://sonarr.lan:8989&apikey=k")
+        assert r.get_json() == {"status": True, "version": "4.0.10.2544", "code": 200}
+
+
+def test_service_proxy_keeps_the_whisper_404_shape(monkeypatch):
+    """whisper-asr-webservice serves no /status, so the probe 404s and the
+    settings page renders its own "no version found" hint off code 404.
+
+    The version constraint only ever runs on a 200 body, so it cannot reach this
+    path. Pin that, because the hint is the only thing a WhisperAI user sees.
+    """
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **kw: [_addr("10.0.0.5")])
+    missing = MagicMock(status_code=404)
+    missing.json.return_value = {"detail": "Not Found"}
+    with patch("app.ui.requests.get", return_value=missing):
+        app = _build_app()
+        client = app.test_client()
+        _login(client)
+        r = client.get("/test/whisperai?url=http://whisper.lan:9000")
+        body = r.get_json()
+        assert body["status"] is False
+        assert body["code"] == 404
+
+
+def test_legacy_proxy_does_not_echo_a_hostile_version(monkeypatch):
+    """A 200 from the far end is not licence to pass its bytes back.
+
+    The caller chooses the host this route talks to, so the handshake body is
+    caller influenced. Anything that is not a version string has to come back as
+    the ordinary failure shape the settings page already renders, carrying the
+    upstream status code and no content from the far end.
+    """
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **kw: [_addr("10.0.0.5")])
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = {"version": "<script>alert(1)</script>"}
+    with patch("app.ui.requests.get", return_value=resp):
+        app = _build_app()
+        client = app.test_client()
+        _login(client)
+        r = client.get("/test/http/sonarr.lan:8989/api")
+        body = r.get_json()
+        assert body["status"] is False
+        assert body["error"] == "Error Occurred. Check your settings."
+        assert body["code"] == 200
+        assert "script" not in r.get_data(as_text=True)
+
+
+def test_legacy_proxy_keeps_the_success_shape(monkeypatch):
+    """status, version and code are what the settings page reads. Keep them."""
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **kw: [_addr("10.0.0.5")])
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = {"version": "4.0.10.2544"}
+    with patch("app.ui.requests.get", return_value=resp):
+        app = _build_app()
+        client = app.test_client()
+        _login(client)
+        r = client.get("/test/http/sonarr.lan:8989/api")
+        assert r.mimetype == "application/json"
+        assert r.get_json() == {"status": True, "version": "4.0.10.2544", "code": 200}

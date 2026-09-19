@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Getting Started with Bazarr+: Docker install and setup</title>
-  <meta name="description" content="Install Bazarr+ with Docker, connect it to Sonarr and Radarr, add your first subtitle providers, and set a language profile so downloads start automatically.">
+  <meta name="description" content="Install Bazarr+ with Docker, connect Sonarr, Radarr or Sportarr if you run them or use Discover with no library at all, add your first subtitle providers, and set a language profile so downloads start automatically.">
   <link rel="canonical" href="https://lavx.github.io/bazarr/guides/getting-started.html">
 
   <!-- Open Graph -->
   <meta property="og:type" content="website">
   <meta property="og:title" content="Getting Started with Bazarr+: Docker install and setup">
-  <meta property="og:description" content="Install Bazarr+ with Docker, connect it to Sonarr and Radarr, add your first subtitle providers, and set a language profile so downloads start automatically.">
+  <meta property="og:description" content="Install Bazarr+ with Docker, connect Sonarr, Radarr or Sportarr if you run them or use Discover with no library at all, add your first subtitle providers, and set a language profile so downloads start automatically.">
   <meta property="og:url" content="https://lavx.github.io/bazarr/guides/getting-started.html">
   <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
   <meta property="og:image:width" content="1200">
@@ -22,7 +22,7 @@
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Getting Started with Bazarr+: Docker install and setup">
-  <meta name="twitter:description" content="Install Bazarr+ with Docker, connect it to Sonarr and Radarr, add your first subtitle providers, and set a language profile so downloads start automatically.">
+  <meta name="twitter:description" content="Install Bazarr+ with Docker, connect Sonarr, Radarr or Sportarr if you run them or use Discover with no library at all, add your first subtitle providers, and set a language profile so downloads start automatically.">
   <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
 
   <!-- Geist font: self-hosted -->
@@ -64,7 +64,7 @@
     "@context": "https://schema.org",
     "@type": "TechArticle",
     "headline": "Getting Started",
-    "description": "Install Bazarr+ with Docker, connect to Sonarr and Radarr, and start downloading subtitles automatically.",
+    "description": "Install Bazarr+ with Docker, connect Sonarr, Radarr or Sportarr if you run them or use Discover with no library, and start downloading subtitles automatically.",
     "url": "https://lavx.github.io/bazarr/guides/getting-started.html",
     "author": {
       "@type": "Person",
@@ -115,7 +115,7 @@
 
       <h2 id="prerequisites">Prerequisites</h2>
       <p>You need Docker and Docker Compose installed on your server. Any Linux distribution with Docker CE works. Bazarr+ also runs on macOS and Windows via Docker Desktop, though Linux is recommended for production.</p>
-      <p>Make sure your Sonarr and/or Radarr instances are accessible from the machine where you will run Bazarr+.</p>
+      <p>That is the whole requirement, because there are two ways to run Bazarr+. You can connect Sonarr, Radarr or Sportarr and have it fetch subtitles for the library you already have, or you can run it with no library at all and search any film or show by name. Both start from the same install below. If you do run a media stack, keep its host, port and API key to hand for the connection step.</p>
 
       <h2 id="one-liner-install">One-liner install</h2>
       <p>The fastest way to get running. This script creates a <code>bazarr</code> directory, writes a <code>docker-compose.yml</code>, and starts the containers.</p>
@@ -153,6 +153,17 @@
       - ./config:/config
       - /path/to/movies:/movies
       - /path/to/tv:/tv
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:6767/_supervisor/status | grep -q '\"running\"'"]
       interval: 30s
@@ -202,23 +213,63 @@
         <pre><code>docker compose up -d</code></pre>
       </div>
 
+      <h2 id="container-hardening">Container hardening</h2>
+      <p>The hardening keys above (<code>read_only</code>, <code>tmpfs</code>, <code>cap_drop</code>, <code>cap_add</code>, <code>security_opt</code>) are what the image is built for. Bazarr+ owns its application tree as root and writes everything at runtime under <code>/config</code>, so freezing the rest of the filesystem costs nothing and keeps a provider plugin's worker process from rewriting the code Bazarr+ imports on its next restart. The <code>/tmp</code> tmpfs is what gives back the one writable path outside <code>/config</code> that is still needed: subtitle bundle downloads spill into it once they outgrow their in-memory buffer, the Provider Hub and sports workers put their per-request temporary directories there, and the alass shim falls back to it when the config cache cannot hold an executable. Extraction and the sync engines do not need it, they already work under <code>/config/cache</code> and beside the destination file. Keep the <code>size=</code> cap: an uncapped tmpfs may grow to half of host RAM, and it is charged to the host rather than to the container.</p>
+
+      <p>The three capabilities added back are the ones the startup needs while it is still root: <code>CHOWN</code> to hand <code>/config</code> to your <code>PUID:PGID</code>, and <code>SETUID</code> and <code>SETGID</code> to become that user. Bazarr+ itself, and every Provider Hub worker it starts, runs afterwards with no capabilities at all.</p>
+
+      <p>If you run the container with plain <code>docker run</code> instead of Compose, the same settings are:</p>
+
+      <div class="code">
+        <div class="code-head">
+          <span class="code-lang">Shell</span>
+          <button class="copy" data-copy-from="hardening-flags" aria-label="Copy hardening flags">Copy</button>
+        </div>
+        <pre id="hardening-flags"><code>docker run -d \
+  --name bazarr \
+  --read-only \
+  --tmpfs /tmp:size=512m \
+  --cap-drop ALL \
+  --cap-add CHOWN --cap-add SETUID --cap-add SETGID \
+  --security-opt no-new-privileges:true \
+  -p 6767:6767 \
+  -e PUID=1000 -e PGID=1000 -e TZ=UTC \
+  -v ./config:/config \
+  -v /path/to/movies:/movies \
+  -v /path/to/tv:/tv \
+  ghcr.io/lavx/bazarr:latest</code></pre>
+      </div>
+
+      <div class="note">
+        <strong>Developing against your own checkout?</strong> Mounting a source tree over <code>/app/bazarr</code> needs a writable filesystem, so drop <code>read_only</code> (or <code>--read-only</code>) for that container. Keep the rest.
+      </div>
+
       <div class="note">
         <strong>OpenSubtitles.org:</strong> in v2.4 OpenSubtitles.org is a native <a href="provider-hub.html">Provider Hub</a> plugin you install from the Marketplace. It scrapes the site in-process, so there is no separate scraper container. The FlareSolverr service above is recommended: set its <code>/v1</code> URL (e.g. <code>http://flaresolverr:8191/v1</code>) in the plugin's <strong>FlareSolverr URL</strong> setting so it can solve Cloudflare challenges when needed. If you run Bazarr+ with host networking (<code>network_mode: host</code>), the <code>flaresolverr</code> hostname stops resolving: use <code>http://localhost:8191/v1</code> and make port 8191 reachable on the host, either by adding a <code>8191:8191</code> ports mapping to the FlareSolverr service above or running it with host networking too.
       </div>
 
       <h2 id="first-login">First login</h2>
-      <p>Open <code>http://localhost:6767</code> in your browser. On a fresh install, a guided <strong>setup wizard</strong> opens automatically and walks you through the steps below: connecting Sonarr and Radarr, optionally adding Plex or Jellyfin, choosing languages and a profile, and installing subtitle providers. Installing providers needs a restart to load them; the wizard handles that and resumes where you left off. You can skip the wizard at any time and configure everything from <strong>Settings</strong> instead, and it never reappears once your install is set up.</p>
+      <p>Open <code>http://localhost:6767</code> in your browser. On a fresh install, a guided <strong>setup wizard</strong> opens automatically. The first thing it asks is what you want Bazarr+ to do: connect the Sonarr, Radarr or Sportarr library you already have, or run on its own with no library. That answer decides which steps it walks you through, so it never asks you for a service you do not run. Installing providers needs a restart to load them; the wizard handles that and resumes where you left off. You can skip the wizard at any time and configure everything from <strong>Settings</strong> instead, and it never reappears once your install is set up.</p>
+
+      <p>Whichever path you take, these are the settings that matter:</p>
 
       <ol class="steps">
         <li><strong>Set a password.</strong> Bazarr+ uses PBKDF2 with 600k iterations, a significant upgrade from upstream's MD5 hashing. Pick something strong.</li>
         <li><strong>Choose your languages.</strong> Select the subtitle languages you want Bazarr+ to search for. You can set defaults per profile or override per series/movie later.</li>
-        <li><strong>Add subtitle providers.</strong> Enable built-in providers under Settings &gt; Providers. In v2.4 you also install providers from the Provider Hub Marketplace, which serves a versioned catalog of provider plugins. A catalog plugin can reuse a built-in id and replace the shipped provider, so the two collapse into a single card.</li>
+        <li><strong>Add subtitle providers.</strong> Enable built-in providers under Settings &gt; Providers. You can also install providers from the Provider Hub Marketplace, which serves a versioned catalog of provider plugins. A catalog plugin can reuse a built-in id and replace the shipped provider, so the two collapse into a single card.</li>
         <li><strong>Set provider priority.</strong> Use Settings &gt; Providers to order providers. Bazarr+ can try them in priority order and stop early once it finds a match, saving time and API calls.</li>
       </ol>
 
       <div class="note">
         <strong>Startup auto-install:</strong> When an official catalog source is enabled, Bazarr+ installs the official-catalog version of your enabled built-in providers on startup. The supervisor reports this as an <strong>Installing providers</strong> stage, so the first boot after enabling a catalog can take a little longer. If you have no providers enabled yet, the Marketplace shows a nudge to add some.
       </div>
+
+      <h2 id="no-library">Running with no library</h2>
+      <p>Bazarr+ does not need Sonarr, Radarr or Sportarr to be useful. Since v2.7.0 it opens on <strong>Discover</strong>, which works on its own: type a film or show by name, or browse what is trending, what has reached digital and what aired recently, then pick a title, search the providers, preview the subtitle and download the one you want. Nothing has to be indexed first, and there is nothing to sign up for.</p>
+
+      <p>Discover authenticates with a metadata key the application carries, so a fresh install can search the moment it is up. If you would rather supply your own, store a TMDB key under <strong>Settings &gt; Discover</strong>.</p>
+
+      <p>To run this way, take the Discover path when the wizard asks at first login and connect nothing. The languages and providers from that same wizard are all Discover needs. The <a href="provider-hub.html">Provider Hub</a> and <a href="subtitle-processing.html">Subtitle Processing</a> guides apply unchanged, and the section below is for readers who do have a library. More on what Discover is and does is on the <a href="../#standalone">home page</a>.</p>
 
       <h2 id="connecting-to-sonarr-and-radarr">Connecting to Sonarr and Radarr</h2>
       <p>Go to <strong>Settings &gt; Sonarr</strong> (or <strong>Radarr</strong>) and fill in:</p>
@@ -237,6 +288,7 @@
 
       <h2 id="next-steps">Next steps</h2>
       <ul>
+        <li><a href="../#standalone">Run Bazarr+ with no library</a>: how Discover searches any film or show on its own, and how to supply your own metadata key</li>
         <li><a href="provider-hub.html">Install Provider Hub plugins</a> from the official catalog source</li>
         <li><a href="subtitle-processing.html">Process subtitles</a> with combined bilingual output, embedded-track scoring, and multi-engine sync</li>
         <li><a href="distribution-hub.html">Serve subtitles to other apps</a> with the Distribution Hub multi-tenant API and named keys</li>

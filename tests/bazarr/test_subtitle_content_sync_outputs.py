@@ -274,8 +274,21 @@ def test_promotion_preserves_confirmation_and_refresh_attempts_on_failure(schema
 
         monkeypatch.setattr(schema_session, 'execute', fail_history_insert)
 
-    with pytest.raises(RuntimeError, match='controlled refresh failure'):
-        content.promote_sync_subtitle(media_type, media_id, 'en', 'en:sync-alass', arr_instance_id=7)
+    if failure == 'history':
+        # History is written in a finally and is the confirmation itself, so
+        # losing it is a real failure and still propagates.
+        with pytest.raises(RuntimeError, match='controlled refresh failure'):
+            content.promote_sync_subtitle(media_type, media_id, 'en', 'en:sync-alass', arr_instance_id=7)
+    else:
+        # A reindex or an event-stream fault must not undo a publication that
+        # completed: the bytes are on disk and the action-5 row is written, so
+        # raising answered 500 for a promotion that succeeded, and the retry
+        # then came back 409 against the file this request had just written.
+        body, code = content.promote_sync_subtitle(media_type, media_id, 'en', 'en:sync-alass',
+                                                   arr_instance_id=7)
+        assert code == 200
+        assert body['targetPath'] == str(original)
+        assert failure in refreshed, 'the refresh step was not even attempted'
 
     assert original.read_text() == 'selected subtitle'
     rows = schema_session.execute(select(table)).scalars().all()

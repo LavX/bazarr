@@ -28,9 +28,15 @@ import {
   Text,
 } from "@/pages/Settings/components";
 import { useBaseInput } from "@/pages/Settings/utilities/hooks";
+import { useSettings } from "@/pages/Settings/utilities/SettingsProvider";
 import { Environment, toggleState } from "@/utilities";
 import ExternalWebhookSelector from "./ExternalWebhookSelector";
-import { branchOptions, proxyOptions, securityOptions } from "./options";
+import {
+  branchOptions,
+  cookieSecureOptions,
+  proxyOptions,
+  securityOptions,
+} from "./options";
 
 // Auth password input that NEVER displays the stored value.
 //
@@ -60,7 +66,7 @@ import { branchOptions, proxyOptions, securityOptions } from "./options";
 // After typing "newpw", a fresh `stored` read returns "newpw", so a
 // fall-back to `stored` on clear would re-stage the new password
 // instead of the original hash - silently saving the typed-then-
-// cancelled password. Codex flagged this. The ref captures the value
+// cancelled password. The ref captures the value
 // once on first render (before any user interaction can stage anything)
 // and stays pinned to the loaded hash for the lifetime of the
 // component.
@@ -72,7 +78,7 @@ const AuthPasswordInput: FunctionComponent = () => {
     settingKey: "settings-auth-password",
   });
   // Capture the FIRST observed `stored` value, including the empty
-  // string. Codex P3: the prior `stored.length > 0` guard meant
+  // string. The prior `stored.length > 0` guard meant
   // originalRef.current stayed null whenever there was no auth password
   // configured, and the type-then-clear path below sent that null back
   // through FormData, where it was serialized as the string "null" and
@@ -116,6 +122,55 @@ const generateApiKey = () => {
     .join("");
 };
 
+export function MetadataLanguage() {
+  const settings = useSettings();
+  const locale =
+    settings?.general.metadata_language || settings?.discover?.locale;
+  return (
+    <Selector
+      label="Metadata language"
+      searchable
+      settingKey="settings-general-metadata_language"
+      settingOptions={{
+        onLoaded: (settings) =>
+          settings.general.metadata_language ||
+          settings.discover?.locale ||
+          "en-US",
+      }}
+      options={[
+        { value: "en-US", label: "English (United States)" },
+        { value: "en-GB", label: "English (United Kingdom)" },
+        { value: "hu-HU", label: "Hungarian" },
+        { value: "de-DE", label: "German" },
+        { value: "fr-FR", label: "French" },
+        { value: "es-ES", label: "Spanish" },
+        { value: "it-IT", label: "Italian" },
+        { value: "pt-BR", label: "Portuguese (Brazil)" },
+        { value: "ja-JP", label: "Japanese" },
+        { value: "ko-KR", label: "Korean" },
+        { value: "zh-CN", label: "Chinese (Simplified)" },
+      ].concat(
+        locale &&
+          ![
+            "en-US",
+            "en-GB",
+            "hu-HU",
+            "de-DE",
+            "fr-FR",
+            "es-ES",
+            "it-IT",
+            "pt-BR",
+            "ja-JP",
+            "ko-KR",
+            "zh-CN",
+          ].includes(locale)
+          ? [{ value: locale, label: locale }]
+          : [],
+      )}
+    />
+  );
+}
+
 const SettingsGeneralView: FunctionComponent = () => {
   const { data: status } = useSystemStatus();
   const [copied, setCopy] = useState(false);
@@ -156,6 +211,25 @@ const SettingsGeneralView: FunctionComponent = () => {
           Hostname or IP address to access Bazarr (ie: bazarr.mydomain.local or
           192.168.0.100). Required for webhook security.
         </Message>
+        <Text
+          label="Trusted Proxy"
+          placeholder="127.0.0.1"
+          settingKey="settings-general-trusted_proxy"
+        ></Text>
+        <Message>
+          The one address whose X-Forwarded-* headers Bazarr will believe. Set
+          it to your reverse proxy if it runs on another host or in another
+          container, otherwise its HTTPS looks like plain HTTP to Bazarr and
+          every visitor shares one login rate limit. Leave empty to trust
+          nothing. Requires a restart of Bazarr when changed
+        </Message>
+      </Section>
+      <Section header="Metadata">
+        <MetadataLanguage />
+        <Message>
+          Preferred language for titles and descriptions across Bazarr+.
+          Subtitle languages are managed separately.
+        </Message>
       </Section>
       <Section header="Media">
         <Check
@@ -178,6 +252,28 @@ const SettingsGeneralView: FunctionComponent = () => {
         <CollapseBox settingKey="settings-auth-type">
           <Text label="Username" settingKey="settings-auth-username"></Text>
           <AuthPasswordInput />
+          <Number
+            label="Session Lifetime (days)"
+            min={1}
+            max={365}
+            settingKey="settings-auth-session_lifetime_days"
+          ></Number>
+          <Message>
+            How long a signed-in browser may sit idle before it has to sign in
+            again. The window restarts on every request, so a browser in regular
+            use stays signed in. Requires a restart of Bazarr when changed
+          </Message>
+          <Selector
+            label="Secure Session Cookie"
+            options={cookieSecureOptions}
+            settingKey="settings-auth-cookie_secure"
+          ></Selector>
+          <Message>
+            Automatic marks the cookie secure only on HTTPS requests, which
+            keeps plain HTTP on a local network working. Choose Always when a
+            reverse proxy terminates HTTPS and is not listed under Trusted
+            Proxies. Requires a restart of Bazarr when changed
+          </Message>
         </CollapseBox>
         <Text
           label="API Key"

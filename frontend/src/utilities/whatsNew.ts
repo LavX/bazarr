@@ -6,14 +6,17 @@
  * in `components/modals/useWhatsNewAutoOpen.ts`.
  */
 
+import { readStoredValue, writeStoredValue } from "./browserStorage";
+
 export const WHATS_NEW_SEEN_KEY = "bazarr-whats-new-seen";
 
 export function getSeenWhatsNewVersion(): string | null {
-  return localStorage.getItem(WHATS_NEW_SEEN_KEY);
+  return readStoredValue(WHATS_NEW_SEEN_KEY);
 }
 
-export function markWhatsNewSeen(version: string): void {
-  localStorage.setItem(WHATS_NEW_SEEN_KEY, version);
+/** Whether the marker was actually recorded. */
+export function markWhatsNewSeen(version: string): boolean {
+  return writeStoredValue(WHATS_NEW_SEEN_KEY, version);
 }
 
 /**

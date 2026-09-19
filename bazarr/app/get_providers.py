@@ -33,6 +33,10 @@ from sonarr.blacklist import blacklist_log
 
 _TRACEBACK_RE = re.compile(r'File "(.*?providers[\\/].*?)", line (\d+)')
 _PROVIDER_HUB_REGISTRATION_DONE = False
+# Plugin ids already reported for claiming a Bazarr settings section. The overlay
+# below runs on every search and download, so without this the same install
+# writes the same line for the life of the process.
+_REPORTED_RESERVED_SECTION_PLUGINS = set()
 
 
 def _ensure_provider_hub_registered():
@@ -271,8 +275,11 @@ def get_providers():
         if reason:
             now = datetime.datetime.now()
             if now < until:
-                logging.debug("Not using %s until %s, because of: %s", provider,
-                              until.strftime("%y/%m/%d %H:%M"), reason)
+                # INFO rather than DEBUG: a provider being skipped until a later
+                # hour is a decision about what the reader gets, and it is the
+                # line a report about a provider that "does nothing" needs.
+                logging.info("Not using %s until %s, because of: %s", provider,
+                             until.strftime("%y/%m/%d %H:%M"), reason)
                 providers_list.remove(provider)
             else:
                 logging.info("Using %s again after %s, (disabled because: %s)", provider, throttle_desc, reason)
@@ -497,14 +504,31 @@ def get_providers_auth():
     except Exception:
         logging.exception("Unable to load Provider Hub provider config")
     try:
+        from provider_hub.manifest import reserved_settings_sections
         from provider_hub.state import active_installations
+        reserved_sections = reserved_settings_sections()
         for installation in active_installations():
             manifest = installation.manifest
             schema = manifest.get("config_schema") if isinstance(manifest, dict) else {}
             properties = schema.get("properties") if isinstance(schema, dict) else {}
             if not isinstance(properties, dict):
                 continue
-            section = settings.get(installation.provider_id, {}) if hasattr(settings, "get") else {}
+            if installation.provider_id in reserved_sections:
+                # The section named after this plugin is one of Bazarr's own, not
+                # the plugin's. validate_manifest refuses such an id at install and
+                # at every boot, so getting here means a manifest slipped past it,
+                # and copying the section's keys into the worker config would hand
+                # the plugin that section's credentials (sonarr.apikey, plex.token,
+                # auth.password) on every search. Its own stored config and the
+                # schema defaults still apply.
+                if installation.provider_id not in _REPORTED_RESERVED_SECTION_PLUGINS:
+                    _REPORTED_RESERVED_SECTION_PLUGINS.add(installation.provider_id)
+                    logging.error("Refusing to read the %s settings section for Provider Hub plugin %s: "
+                                  "that section belongs to Bazarr, not to the plugin",
+                                  installation.provider_id, installation.provider_id)
+                section = {}
+            else:
+                section = settings.get(installation.provider_id, {}) if hasattr(settings, "get") else {}
             config = dict(provider_configs.get(installation.provider_id, {}))
             for key, field in properties.items():
                 if not isinstance(field, dict):
@@ -520,7 +544,7 @@ def get_providers_auth():
     return provider_configs
 
 
-def _handle_mgb(name, exception, ids, language):
+def _handle_mgb(name, exception, ids, language, sports_context=None):
     if language.forced:
         language_str = f'{language.basename}:forced'
     elif language.hi:
@@ -528,17 +552,69 @@ def _handle_mgb(name, exception, ids, language):
     else:
         language_str = language.basename
 
+    if sports_context is not None:
+        # A sports search carries the event and its instance on the video, and
+        # the pool threads them through to this callback. The release ids are
+        # all None by construction, so this must come before the media
+        # branches; the event's own table records the exclusion the same shape
+        # the owned blacklist flow writes. Guarded: an attribution fault must
+        # not take the whole provider search down with it.
+        from sportarr.history import blacklist_log_sports
+        try:
+            blacklist_log_sports(
+                sports_context, name, exception.id, language_str)
+        except Exception:
+            logging.exception(
+                'BAZARR could not record the sports blacklist for %s '
+                'release %s', name, exception.id)
+        return
+
     if ids:
+        # The id dict always carries all three keys, filled with None when the
+        # video does not have them, so membership never told these branches
+        # apart. A sports search is already gone by here: its video and every
+        # subtitle listed off it carry sports_context, which the branch above
+        # returns on, so nothing below can be a recording.
+        #
+        # The remaining null-id case is an episode or movie whose database
+        # refiner did not resolve, which is routine on an instance with its own
+        # path mappings because the refiner looks the row up through the GLOBAL
+        # reverse mapping. get_blacklist() reads (provider, subs_id) with no
+        # media scoping, so the row does suppress the bad release everywhere,
+        # and dropping it left the corrupt subtitle to be re-downloaded and
+        # re-rejected forever.
+        #
+        # Know what the row costs, because it is not a visible junk entry. Both
+        # Excluded pages inner-join the local ids this row leaves NULL, so it
+        # never lists, and the exclusion it applies is global. It is still
+        # removable: blacklist_delete counts distinct owners for that one
+        # (provider, subs_id) and refuses only when a NULL-owner row shares a
+        # key with an owned one, which is not the ordinary case, so an unscoped
+        # delete by the provider and release id the warning below prints will
+        # clear it. That is the behaviour development has always had; it is
+        # recorded here so the next reader weighing "tidy the Excluded page"
+        # against "stop re-downloading a subtitle the provider rejected" knows
+        # which way the trade runs.
         if exception.media_type == "series":
-            if 'sonarrSeriesId' in ids and 'sonarrEpisodeId' in ids:
-                blacklist_log(ids['sonarrSeriesId'], ids['sonarrEpisodeId'], name, exception.id, language_str)
-        else:
-            blacklist_log_movie(ids['radarrId'], name, exception.id, language_str)
+            if not (ids.get('sonarrSeriesId') and ids.get('sonarrEpisodeId')):
+                logging.warning(
+                    'BAZARR provider %s demanded a blacklist for %s on an episode that could not '
+                    'be attributed; recording it unattributed so the release stays excluded.',
+                    name, exception.id)
+            blacklist_log(ids.get('sonarrSeriesId'), ids.get('sonarrEpisodeId'), name, exception.id,
+                          language_str)
+            return
+        if not ids.get('radarrId'):
+            logging.warning(
+                'BAZARR provider %s demanded a blacklist for %s on a movie that could not be '
+                'attributed; recording it unattributed so the release stays excluded.',
+                name, exception.id)
+        blacklist_log_movie(ids.get('radarrId'), name, exception.id, language_str)
 
 
-def provider_throttle(name, exception, ids=None, language=None):
+def provider_throttle(name, exception, ids=None, language=None, sports_context=None):
     if isinstance(exception, MustGetBlacklisted) and isinstance(ids, dict) and isinstance(language, Language):
-        return _handle_mgb(name, exception, ids, language)
+        return _handle_mgb(name, exception, ids, language, sports_context)
 
     cls = getattr(exception, "__class__")
     cls_name = getattr(cls, "__name__")
@@ -669,6 +745,30 @@ def list_throttled_providers():
         reason, until, throttle_desc = tp.get(provider, (None, None, None))
         throttled_providers.append([provider, reason, pretty_date(until)])
     return throttled_providers
+
+
+def snapshot_throttled_providers():
+    """Read-only view of the in-memory throttle table.
+
+    ``list_throttled_providers`` calls ``update_throttled_provider`` first,
+    which deletes expired entries, rewrites throttled_providers.dat and emits a
+    badge event. A status read must do none of that, so this filters expired
+    entries in memory and writes nothing.
+
+    An empty result means no throttle is recorded for an enabled provider. It is
+    not evidence that the providers are healthy, and one throttled provider says
+    nothing about the others.
+    """
+    now = datetime.datetime.now()
+    enabled = list(settings.general.enabled_providers or [])
+    providers = []
+    for provider in enabled:
+        reason, until, throttle_desc = tp.get(provider, (None, None, None))
+        if not reason or not until or until <= now:
+            continue
+        providers.append({'provider': provider, 'reason': reason,
+                          'until': until.isoformat(), 'description': throttle_desc})
+    return {'providers': providers, 'enabled_count': len(enabled)}
 
 
 def reset_throttled_providers(only_auth_or_conf_error=False):

@@ -1,165 +1,102 @@
 import { FC, useState } from "react";
-import {
-  Button,
-  Group,
-  NumberInput,
-  PasswordInput,
-  Stack,
-  Switch,
-  Tabs,
-  Text,
-  TextInput,
-  Title,
-} from "@mantine/core";
-import { useSettingsMutation } from "@/apis/hooks";
+import { Paper, Radio, Stack, Text, Title } from "@mantine/core";
+import type { MediaServerKind } from "@/apis/raw/mediaServers";
+import { kindName } from "@/pages/Settings/MediaServers/kinds";
+import InstanceServerForm from "./mediaServer/InstanceServerForm";
+import PlexServerForm from "./mediaServer/PlexServerForm";
+import StepActions from "./mediaServer/StepActions";
 import type { WizardStepProps } from "./types";
 
+interface KindChoice {
+  value: MediaServerKind;
+  description: string;
+}
+
+// The same four kinds, in the same order, as the Connections tabs.
+const CHOICES: KindChoice[] = [
+  {
+    value: "plex",
+    description:
+      "Sign in with your Plex account and pick the server to refresh.",
+  },
+  {
+    value: "jellyfin",
+    description: "Connect with the server URL and an API key.",
+  },
+  {
+    value: "emby",
+    description:
+      "Connect with the server URL and an API key, then map your media folders.",
+  },
+  {
+    value: "silo",
+    description:
+      "Connect with the server URL and an API key, then map your media folders to a library.",
+  },
+];
+
 /**
- * Optional onboarding step for an external media server. Plex (manual apikey
- * auth) and Jellyfin each get a tab with the minimal connection fields, written
- * straight to the matching settings keys. Both are fully optional: only filled
- * tabs are persisted, and Skip advances writing nothing.
+ * Optional onboarding step for an external media server. A kind picker first,
+ * then the fields that kind actually needs: a tab pair invited filling in two
+ * servers at once on a step most people skip, and it hid the two kinds whose
+ * connection is not a typed host and key at all.
+ *
+ * Every kind stays optional and Continue with nothing filled in writes
+ * nothing, because Bazarr+ finds and downloads subtitles with no media server
+ * at all. Skipping is the shell's control.
  */
 const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
-  const settings = useSettingsMutation();
-
-  // Plex (manual apikey auth) connection fields.
-  const [plexIp, setPlexIp] = useState("");
-  const [plexPort, setPlexPort] = useState<number | string>(32400);
-  const [plexSsl, setPlexSsl] = useState(false);
-  const [plexToken, setPlexToken] = useState("");
-
-  // Jellyfin connection fields.
-  const [jellyfinUrl, setJellyfinUrl] = useState("");
-  const [jellyfinApiKey, setJellyfinApiKey] = useState("");
-  const [jellyfinVerifySsl, setJellyfinVerifySsl] = useState(true);
-
-  const plexFilled = plexIp.trim().length > 0 || plexToken.trim().length > 0;
-  const jellyfinFilled =
-    jellyfinUrl.trim().length > 0 || jellyfinApiKey.trim().length > 0;
-
-  const handleContinue = () => {
-    const payload: LooseObject = {};
-
-    if (plexFilled) {
-      payload["settings-plex-ip"] = plexIp.trim();
-      payload["settings-plex-port"] = Number(plexPort);
-      payload["settings-plex-ssl"] = plexSsl;
-      payload["settings-plex-apikey"] = plexToken.trim();
-      payload["settings-plex-auth_method"] = "apikey";
-      payload["settings-general-use_plex"] = true;
-    }
-
-    if (jellyfinFilled) {
-      payload["settings-jellyfin-url"] = jellyfinUrl.trim();
-      payload["settings-jellyfin-apikey"] = jellyfinApiKey.trim();
-      payload["settings-jellyfin-verify_ssl"] = jellyfinVerifySsl;
-      payload["settings-general-use_jellyfin"] = true;
-    }
-
-    if (Object.keys(payload).length > 0) {
-      settings.mutate(payload);
-    }
-    onNext();
-  };
-
-  const anythingFilled = plexFilled || jellyfinFilled;
+  const [kind, setKind] = useState<MediaServerKind | null>(null);
 
   return (
     <Stack gap="lg">
       <Stack gap="xs">
         <Title order={2}>Media servers</Title>
         <Text c="dimmed">
-          Optionally connect Plex or Jellyfin so Bazarr can refresh metadata
-          after it downloads subtitles. You can skip this and add it later.
+          Optionally connect a media server so Bazarr refreshes it after it
+          downloads subtitles. Bazarr finds and downloads subtitles with no
+          media server at all, so you can set one up later in Settings,
+          Connections.
         </Text>
       </Stack>
 
-      <Tabs defaultValue="plex">
-        <Tabs.List>
-          <Tabs.Tab value="plex">Plex</Tabs.Tab>
-          <Tabs.Tab value="jellyfin">Jellyfin</Tabs.Tab>
-        </Tabs.List>
-
-        <Tabs.Panel value="plex" pt="md">
-          <Stack gap="md">
-            <Group gap="md" align="flex-start" wrap="nowrap">
-              <TextInput
-                label="Address"
-                description="Hostname or IPv4 address"
-                placeholder="127.0.0.1"
-                style={{ flex: 1 }}
-                value={plexIp}
-                onChange={(e) => setPlexIp(e.currentTarget.value)}
+      <Radio.Group
+        value={kind ?? ""}
+        onChange={(value) => setKind(value as MediaServerKind)}
+        aria-label="Which media server do you have?"
+      >
+        <Stack gap="sm">
+          {CHOICES.map((choice) => (
+            <Paper key={choice.value} withBorder p="md" radius="md">
+              <Radio
+                value={choice.value}
+                label={kindName(choice.value)}
+                description={choice.description}
               />
-              <NumberInput
-                label="Port"
-                w={110}
-                min={1}
-                max={65535}
-                allowDecimal={false}
-                hideControls
-                value={plexPort}
-                onChange={setPlexPort}
-              />
-            </Group>
-            <Switch
-              label="Use SSL"
-              checked={plexSsl}
-              onChange={(e) => setPlexSsl(e.currentTarget.checked)}
-            />
-            <PasswordInput
-              label="Token"
-              description="Your Plex authentication token (X-Plex-Token)"
-              placeholder="Plex token"
-              autoComplete="new-password"
-              value={plexToken}
-              onChange={(e) => setPlexToken(e.currentTarget.value)}
-            />
-          </Stack>
-        </Tabs.Panel>
+            </Paper>
+          ))}
+        </Stack>
+      </Radio.Group>
 
-        <Tabs.Panel value="jellyfin" pt="md">
-          <Stack gap="md">
-            <TextInput
-              label="Server URL"
-              description="Full URL of your Jellyfin server"
-              placeholder="http://localhost:8096"
-              value={jellyfinUrl}
-              onChange={(e) => setJellyfinUrl(e.currentTarget.value)}
-            />
-            <PasswordInput
-              label="API Key"
-              description="Generate one in Jellyfin Dashboard, API Keys"
-              placeholder="Jellyfin API key"
-              autoComplete="new-password"
-              value={jellyfinApiKey}
-              onChange={(e) => setJellyfinApiKey(e.currentTarget.value)}
-            />
-            <Switch
-              label="Verify SSL certificate"
-              checked={jellyfinVerifySsl}
-              onChange={(e) => setJellyfinVerifySsl(e.currentTarget.checked)}
-            />
-          </Stack>
-        </Tabs.Panel>
-      </Tabs>
-
-      <Group justify="space-between">
-        <Group gap="sm">
-          {onBack && (
-            <Button variant="default" onClick={onBack}>
-              Back
-            </Button>
-          )}
-          <Button variant="subtle" color="gray" onClick={onNext}>
-            Skip
-          </Button>
-        </Group>
-        <Button onClick={handleContinue} loading={settings.isPending}>
-          {anythingFilled ? "Continue" : "Continue without a server"}
-        </Button>
-      </Group>
+      {kind === "plex" ? (
+        <PlexServerForm onNext={onNext} onBack={onBack} />
+      ) : kind ? (
+        // Keyed by kind: without it React reuses the instance across a switch
+        // and the prefilled name, the typed URL and the credential would all
+        // carry over from the kind the user just left.
+        <InstanceServerForm
+          key={kind}
+          kind={kind}
+          onNext={onNext}
+          onBack={onBack}
+        />
+      ) : (
+        <StepActions
+          onNext={onNext}
+          onBack={onBack}
+          continueLabel="Continue without a server"
+        />
+      )}
     </Stack>
   );
 };

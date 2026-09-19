@@ -1,0 +1,201 @@
+import { NavLink, useLocation } from "react-router";
+import { Badge, Menu, Tooltip } from "@mantine/core";
+import { faChevronRight, faCircle } from "@fortawesome/free-solid-svg-icons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import logoSrc from "@/assets/images/logo_no_orb128.png";
+import { useNavbar } from "@/contexts/Navbar";
+import { CustomRouteObject } from "@/Router/type";
+import { pathJoin } from "@/utilities";
+import AppControls from "./AppControls";
+import JobsButton from "./JobsButton";
+import styles from "./AppShell.module.scss";
+
+const labels: Record<string, string> = {
+  series: "Series",
+  movies: "Movies",
+  sports: "Sports",
+  wanted: "Wanted",
+  blacklist: "Excluded",
+  "distribution-hub": "Distribution Hub",
+};
+// FontAwesome glyphs do not paint the same share of their viewBox. These run
+// edge to edge, so at the rail's 16px icon box they stand 2px taller than the
+// play, film and hub glyphs beside them and close on the label underneath.
+// The stylesheet trims them by a pixel so the whole rail keeps one ink band.
+const fullBleedGlyphs = new Set(["compass", "trophy", "clock", "file-excel"]);
+
+function visible(route: CustomRouteObject) {
+  return (
+    !route.hidden &&
+    Boolean(route.name && route.path && !route.path.includes(":"))
+  );
+}
+
+export default function NavigationRail({
+  groups,
+  onOpenJobs,
+}: {
+  groups: { label: string; items: CustomRouteObject[] }[];
+  onOpenJobs: () => void;
+}) {
+  const { show } = useNavbar();
+  const { pathname } = useLocation();
+  function item(route: CustomRouteObject) {
+    const path = pathJoin("/", route.path!);
+    const label = labels[route.path!] ?? route.name!;
+    const icon = route.icon ?? faCircle;
+    const badge =
+      typeof route.badge === "string"
+        ? route.badge
+        : (route.badge ?? 0) +
+          (route.children ?? []).reduce(
+            (sum, child: CustomRouteObject) =>
+              sum +
+              (!child.hidden && typeof child.badge === "number"
+                ? child.badge
+                : 0),
+            0,
+          );
+    const connectionStatus = badge === "LIVE" || badge === "DOWN";
+    const iconWithBadge = (
+      <span className={styles.railIcon}>
+        <FontAwesomeIcon
+          icon={icon}
+          className={
+            fullBleedGlyphs.has(icon.iconName) ? styles.trimmedGlyph : undefined
+          }
+        />
+        {Boolean(badge) && (
+          <span
+            className={
+              connectionStatus ? styles.connectionDot : styles.railBadge
+            }
+            data-status={badge}
+            aria-hidden="true"
+          >
+            {connectionStatus
+              ? ""
+              : typeof badge === "number" && badge > 99
+                ? "99+"
+                : badge}
+          </span>
+        )}
+      </span>
+    );
+    const description = badge
+      ? connectionStatus
+        ? `Connection ${badge.toLowerCase()}`
+        : (route.children ?? [])
+            .filter(
+              (child: CustomRouteObject) =>
+                !child.hidden &&
+                typeof child.badge === "number" &&
+                child.badge > 0,
+            )
+            .map((child: CustomRouteObject) => `${child.name}: ${child.badge}`)
+            .join(", ") || `${badge} items`
+      : undefined;
+    const children: CustomRouteObject[] = route.children?.filter(visible) ?? [];
+    const isCurrent = pathname === path || pathname.startsWith(path + "/");
+    if (children.length && !route.element) {
+      return (
+        <Menu
+          key={route.path}
+          position="right-start"
+          width={240}
+          withinPortal
+          classNames={{ dropdown: styles.navigationMenu }}
+        >
+          <Menu.Target>
+            <button
+              type="button"
+              className={styles.railLink}
+              aria-label={label}
+              aria-description={description}
+              title={description ? `${label}: ${description}` : label}
+              aria-current={isCurrent ? "page" : undefined}
+            >
+              {iconWithBadge}
+              <span>{label}</span>
+              <FontAwesomeIcon
+                icon={faChevronRight}
+                className={styles.menuChevron}
+              />
+            </button>
+          </Menu.Target>
+          <Menu.Dropdown>
+            <Menu.Label>{route.name}</Menu.Label>
+            {children.map((child) => (
+              <Menu.Item
+                key={child.path}
+                component={NavLink}
+                to={pathJoin(path, child.path!)}
+                onClick={() => show(false)}
+                rightSection={
+                  child.badge ? (
+                    <Badge
+                      size="sm"
+                      variant="light"
+                      aria-label={`${child.name}: ${child.badge}`}
+                    >
+                      {child.badge}
+                    </Badge>
+                  ) : undefined
+                }
+              >
+                {child.name}
+              </Menu.Item>
+            ))}
+          </Menu.Dropdown>
+        </Menu>
+      );
+    }
+    return (
+      <Tooltip
+        key={route.path}
+        label={route.name}
+        position="right"
+        openDelay={500}
+      >
+        <NavLink
+          to={path}
+          aria-label={label}
+          aria-description={description}
+          className={styles.railLink}
+          onClick={() => show(false)}
+        >
+          {iconWithBadge}
+          <span>{label}</span>
+        </NavLink>
+      </Tooltip>
+    );
+  }
+  return (
+    <div className={styles.railContent}>
+      <NavLink
+        to="/discover"
+        aria-label="Bazarr+ home"
+        className={styles.logo}
+        onClick={() => show(false)}
+      >
+        <img src={logoSrc} alt="" width={36} height={36} />
+      </NavLink>
+      <div className={styles.railScroll}>
+        {groups.map((group) => (
+          <div
+            key={group.label}
+            role="group"
+            aria-label={group.label}
+            className={styles.railGroup}
+          >
+            {group.items.map((route) => item(route))}
+          </div>
+        ))}
+      </div>
+      <div className={styles.railBottom}>
+        <JobsButton onClick={onOpenJobs} />
+        <AppControls />
+      </div>
+    </div>
+  );
+}

@@ -78,6 +78,30 @@ describe("ArrStep", () => {
     expect(screen.getByLabelText(/api key/i)).toBeInTheDocument();
   });
 
+  it("offers Sportarr with its own default port and use flag", async () => {
+    const user = userEvent.setup();
+    // The wizard connected only Sonarr and Radarr, so a Sportarr user had to
+    // finish it and then find Settings > Connections.
+    customRender(<ArrStep kind="sportarr" onNext={onNext} />);
+
+    expect(
+      screen.getByRole("heading", { name: /sportarr/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText(/port/i)).toHaveValue("1867");
+
+    await user.type(screen.getByLabelText(/address/i), "10.0.0.9");
+    await user.click(screen.getByRole("button", { name: /test/i }));
+    expect(testMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "sportarr", port: 1867 }),
+    );
+
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+    expect(createMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "sportarr" }),
+      expect.anything(),
+    );
+  });
+
   it("tests the connection with the entered values and shows the result", async () => {
     const user = userEvent.setup();
     customRender(<ArrStep kind="sonarr" onNext={onNext} />);
@@ -112,7 +136,7 @@ describe("ArrStep", () => {
       },
     );
 
-    customRender(<ArrStep kind="sonarr" required onNext={onNext} />);
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
 
     await user.clear(screen.getByLabelText(/name/i));
     await user.type(screen.getByLabelText(/name/i), "Main Sonarr");
@@ -143,7 +167,7 @@ describe("ArrStep", () => {
     const user = userEvent.setup();
     setInstances([{ id: 1, kind: "sonarr", name: "Existing Sonarr" }]);
 
-    customRender(<ArrStep kind="sonarr" required onNext={onNext} />);
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
 
     expect(screen.getByText(/already connected/i)).toBeInTheDocument();
     expect(screen.getByText(/existing sonarr/i)).toBeInTheDocument();
@@ -154,13 +178,14 @@ describe("ArrStep", () => {
     expect(onNext).toHaveBeenCalled();
   });
 
-  it("offers a Skip affordance when not required", async () => {
-    const user = userEvent.setup();
+  it("renders no skip control of its own", () => {
+    // Skipping is the shell's job now, from step.optional, with one label for
+    // every step. A second skip here is what made "Skip for now" and "Skip"
+    // read as two different promises when they were the same call.
     customRender(<ArrStep kind="radarr" onNext={onNext} />);
 
-    await user.click(screen.getByRole("button", { name: /skip/i }));
-
-    expect(createMutate).not.toHaveBeenCalled();
-    expect(onNext).toHaveBeenCalled();
+    expect(
+      screen.queryByRole("button", { name: /skip/i }),
+    ).not.toBeInTheDocument();
   });
 });

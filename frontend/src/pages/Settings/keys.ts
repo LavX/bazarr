@@ -9,8 +9,11 @@ export const languageEqualsKey = "settings-general-language_equals";
 
 export const pathMappingsKey = "settings-general-path_mappings";
 export const pathMappingsMovieKey = "settings-general-path_mappings_movie";
+export const pathMappingsSportsKey = "settings-general-path_mappings_sports";
 
 export const seriesEnabledKey = "settings-general-use_sonarr";
 export const moviesEnabledKey = "settings-general-use_radarr";
+export const sportsEnabledKey = "settings-general-use_sportarr";
 export const plexEnabledKey = "settings-general-use_plex";
 export const jellyfinEnabledKey = "settings-general-use_jellyfin";
+export const seerrEnabledKey = "settings-general-use_seerr";

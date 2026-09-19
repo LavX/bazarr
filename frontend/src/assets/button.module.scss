@@ -27,3 +27,28 @@
     }
   }
 }
+
+// Shared primary action treatment, usable by page content and portalled surfaces.
+.primaryScope {
+  button[data-variant="filled"]:not(:disabled):not([data-disabled]) {
+    // Mantine writes these three on the element's style attribute, so only an
+    // important declaration in a stylesheet outranks them.
+    --button-bg: var(--bz-action-bg) !important;
+    --button-hover: var(--bz-action-hover) !important;
+    --button-color: var(--bz-action-fg) !important;
+    color: var(--bz-action-fg);
+    font-weight: 600;
+  }
+
+  // A primary action that is waiting for input keeps its colour at reduced
+  // strength. Mantine's grey disabled fill reads as a control that is broken,
+  // which on the one button this page exists for is the wrong message.
+  button[data-variant="filled"]:disabled:not([data-loading]),
+  button[data-variant="filled"][data-disabled]:not([data-loading]) {
+    background: var(--bz-action-bg);
+    border: 1px solid transparent;
+    color: var(--bz-action-fg);
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}

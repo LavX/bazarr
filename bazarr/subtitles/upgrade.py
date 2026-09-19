@@ -346,13 +346,80 @@ def get_queries_condition_parameters():
     minimum_timestamp = (datetime.now() - timedelta(days=int(days_to_upgrade_subs)))
 
     # action=7 (EmbeddedSource) intentionally excluded: embedded subs are source
-    # quality and should not be upgraded
-    if settings.general.upgrade_manual:
-        query_actions = [1, 2, 3, 4, 6]
-    else:
-        query_actions = [1, 3]
+    # quality and should not be upgraded. Manual downloads/uploads (2, 4) and
+    # translations (6) are separate opt-ins; both default off on a new install.
+    query_actions = [1]
+    if getattr(settings.general, 'upgrade_manual', False):
+        query_actions.append(2)
+    query_actions.append(3)
+    if getattr(settings.general, 'upgrade_manual', False):
+        query_actions.append(4)
+    if getattr(settings.general, 'upgrade_translated', False):
+        query_actions.append(6)
 
     return [minimum_timestamp, query_actions]
+
+
+def _provider_sourced_actions(query_actions):
+    """The actions that mean a provider supplied the file.
+
+    Action 6 is machine output, so it is never one of them, and the manual
+    actions only appear here when the user opted into upgrading them.
+    """
+    return [action for action in query_actions if action != 6]
+
+
+def _retired_translated_rows(table, rows, provider_actions, minimum_timestamp):
+    """History ids of translated rows a real subtitle has already replaced.
+
+    A translated row is always an upgrade candidate: it carries
+    translator.default_score (50% of the scale) or no score at all, so the bar
+    it sets is beaten by any real listing. Nothing used to retire it either. The
+    upgrade records the language of the subtitle the provider returned, which
+    need not be the variant string of the row it replaced: a "prefer HI" profile
+    translates into nl:hi while the provider result lands as plain nl, so no
+    second row is ever written in that group and the translated row stays the
+    newest row of it for good.
+
+    The wanted scan then translates that language again as soon as the upgrade
+    removes the translated file it replaced, which hands the next cycle the same
+    50% baseline, and the identical listing is downloaded again: same provider,
+    same score, every upgrade run, which is the loop this returns the ids to
+    break.
+
+    One provider sourced row for the same video, instance and language is what
+    retires the translated row, so a translation is replaced by a real subtitle
+    once rather than once per cycle. The language comparison ignores the :hi and
+    :forced variant and runs here, in Python: no portable SQL expression for it
+    reads the same on SQLite and PostgreSQL. The timestamp bound only keeps the
+    read inside the upgrade window the candidates themselves are drawn from.
+    """
+    translated_rows = [row for row in rows if row.action == 6]
+    if not translated_rows:
+        return set()
+
+    provider_rows = database.execute(
+        select(table.video_path,
+               table.arr_instance_id,
+               table.language)
+        .where(and_(table.action.in_(provider_actions),
+                    table.video_path.in_({row.video_path for row in translated_rows}),
+                    table.timestamp > minimum_timestamp))) \
+        .all()
+
+    retired = set()
+    for row in translated_rows:
+        language = (row.language or '').split(':')[0]
+        for provider_row in provider_rows:
+            if provider_row.video_path != row.video_path:
+                continue
+            if provider_row.arr_instance_id != row.arr_instance_id:
+                continue
+            if (provider_row.language or '').split(':')[0] != language:
+                continue
+            retired.add(row.id)
+            break
+    return retired
 
 
 def _find_current_subtitle_for_language(language_string, external_subtitles):
@@ -432,8 +499,10 @@ def get_upgradable_episode_subtitles(history_id_list=None):
     upgradable_episodes_conditions += get_exclusion_clause('series')
     subtitles_to_upgrade = database.execute(
         select(TableHistory.id,
+               TableHistory.action,
                TableHistory.video_path,
                TableHistory.language,
+               TableHistory.arr_instance_id,
                TableHistory.upgradedFromId)
         .select_from(TableHistory)
         .join(TableShows, onclause=and_(TableHistory.sonarrSeriesId == TableShows.sonarrSeriesId,
@@ -451,10 +520,20 @@ def get_upgradable_episode_subtitles(history_id_list=None):
     logging.debug(f"{len(subtitles_to_upgrade)} subtitles are candidates and we've selected the latest timestamp for "  # noqa: G004
                   f"each of them.")
 
+    retired_translated_ids = _retired_translated_rows(
+        TableHistory, subtitles_to_upgrade, _provider_sourced_actions(query_actions), minimum_timestamp)
+
     upgradable_episode_subtitles = {}
     for subtitle_to_upgrade in subtitles_to_upgrade:
         # exclude subtitles that are not in history_id_list if provided
         if history_id_list and subtitle_to_upgrade.id not in history_id_list:
+            continue
+
+        # exclude a translated row a real subtitle has already replaced, so the
+        # upgrade keeps running against that subtitle instead of the translation
+        if subtitle_to_upgrade.id in retired_translated_ids:
+            logging.debug(f"TableHistory ID {subtitle_to_upgrade.id} is a translation a real subtitle has already "  # noqa: G004
+                          f"replaced for language {subtitle_to_upgrade.language} so we'll skip it.")
             continue
 
         # exclude subtitles with ID that as been "upgraded from" and shouldn't be considered
@@ -509,8 +588,10 @@ def get_upgradable_movies_subtitles(history_id_list=None):
     upgradable_movies_conditions += get_exclusion_clause('movie')
     subtitles_to_upgrade = database.execute(
         select(TableHistoryMovie.id,
+               TableHistoryMovie.action,
                TableHistoryMovie.video_path,
                TableHistoryMovie.language,
+               TableHistoryMovie.arr_instance_id,
                TableHistoryMovie.upgradedFromId)
         .select_from(TableHistoryMovie)
         .join(TableMovies, onclause=and_(TableHistoryMovie.radarrId == TableMovies.radarrId,
@@ -526,10 +607,20 @@ def get_upgradable_movies_subtitles(history_id_list=None):
     logging.debug(f"{len(subtitles_to_upgrade)} subtitles are candidates and we've selected the latest timestamp for "  # noqa: G004
                   f"each of them.")
 
+    retired_translated_ids = _retired_translated_rows(
+        TableHistoryMovie, subtitles_to_upgrade, _provider_sourced_actions(query_actions), minimum_timestamp)
+
     upgradable_movie_subtitles = {}
     for subtitle_to_upgrade in subtitles_to_upgrade:
         # exclude subtitles that are not in history_id_list if provided
         if history_id_list and subtitle_to_upgrade.id not in history_id_list:
+            continue
+
+        # exclude a translated row a real subtitle has already replaced, so the
+        # upgrade keeps running against that subtitle instead of the translation
+        if subtitle_to_upgrade.id in retired_translated_ids:
+            logging.debug(f"TableHistoryMovie ID {subtitle_to_upgrade.id} is a translation a real subtitle has "  # noqa: G004
+                          f"already replaced for language {subtitle_to_upgrade.language} so we'll skip it.")
             continue
 
         # exclude subtitles with ID that as been "upgraded from" and shouldn't be considered

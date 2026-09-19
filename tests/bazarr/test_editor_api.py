@@ -216,11 +216,11 @@ class TestResolveVideoPath:
 
     def test_invalid_media_type(self):
         result = _resolve_video_path('podcast', 1)
-        assert result == ('Invalid media type, must be "episode" or "movie"', 400)
+        assert result == ('mediaType must be one of "episode", "movie", "sports"', 400)
 
     def test_invalid_media_type_empty(self):
         result = _resolve_video_path('', 1)
-        assert result == ('Invalid media type, must be "episode" or "movie"', 400)
+        assert result == ('mediaType must be one of "episode", "movie", "sports"', 400)
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +433,7 @@ class TestValidateParams:
 
         with patch.object(editor_module, 'request', mock_request):
             result = _validate_params()
-            assert result == ('mediaType must be "episode" or "movie"', 400)
+            assert result == ('mediaType must be one of "episode", "movie", "sports"', 400)
 
     def test_invalid_media_type(self):
         mock_request = MagicMock()
@@ -441,7 +441,7 @@ class TestValidateParams:
 
         with patch.object(editor_module, 'request', mock_request):
             result = _validate_params()
-            assert result == ('mediaType must be "episode" or "movie"', 400)
+            assert result == ('mediaType must be one of "episode", "movie", "sports"', 400)
 
     def test_missing_media_id(self):
         mock_request = MagicMock()
@@ -920,7 +920,7 @@ class TestEditorSyncPost:
 
         with patch.object(editor_module, 'request', mock_request):
             result = sync_resource.post()
-        assert result == ('mediaType must be "episode" or "movie"', 400)
+        assert result == ('mediaType must be one of "episode", "movie", "sports"', 400)
 
     def test_invalid_media_type(self):
         mock_request = self._make_post_request({
@@ -930,7 +930,7 @@ class TestEditorSyncPost:
 
         with patch.object(editor_module, 'request', mock_request):
             result = sync_resource.post()
-        assert result == ('mediaType must be "episode" or "movie"', 400)
+        assert result == ('mediaType must be one of "episode", "movie", "sports"', 400)
 
     def test_missing_media_id(self):
         mock_request = self._make_post_request({
@@ -1019,6 +1019,24 @@ class TestEditorSyncPost:
             # Should get past VAD validation (fails on resolve instead)
             assert result != ('Invalid vad option', 400), f'vad={vad} was incorrectly rejected'
 
+    def test_unknown_encoding_is_refused_before_any_workspace_exists(self):
+        """A bogus codec name is a bad request, not a temporary directory nobody frees."""
+        from subtitles.tools import subsync_engines
+
+        mock_request = self._make_post_request({
+            'mediaType': 'episode', 'mediaId': '1', 'content': 'data', 'encoding': 'not-a-codec',
+        })
+        sync_resource = editor_module.EditorSync()
+        registered = set(subsync_engines._preview_workspaces)
+
+        with patch.object(editor_module, 'request', mock_request), \
+             patch.object(editor_module, '_resolve_video_path') as mock_resolve:
+            result = sync_resource.post()
+
+        assert result == ('Invalid encoding', 400)
+        mock_resolve.assert_not_called()
+        assert set(subsync_engines._preview_workspaces) == registered
+
     def test_successful_post_starts_job(self):
         mock_request = self._make_post_request({
             'mediaType': 'episode', 'mediaId': '1', 'content': 'subtitle data',
@@ -1067,7 +1085,7 @@ class TestEditorSyncPost:
 
         with patch.object(editor_module, 'request', mock_request):
             result = sync_resource.post()
-        assert result == ('mediaType must be "episode" or "movie"', 400)
+        assert result == ('mediaType must be one of "episode", "movie", "sports"', 400)
 
 
 # ---------------------------------------------------------------------------

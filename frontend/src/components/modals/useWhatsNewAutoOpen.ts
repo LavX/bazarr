@@ -57,7 +57,14 @@ export function useWhatsNewAutoOpen(enabled: boolean) {
       return;
     }
     opened.current = true;
-    markWhatsNewSeen(latestWhatsNewVersion);
+    // Auto-open is a promise that this happens once. A browser that blocks site
+    // data cannot record that it happened, so the promise cannot be kept and the
+    // reader would meet a modal over the page on every single visit, forever,
+    // with no explanation. The wizard stays reachable from System, Status,
+    // which is where the rest of the product points readers at it.
+    if (!markWhatsNewSeen(latestWhatsNewVersion)) {
+      return;
+    }
     openContextModal(WhatsNewModal, {
       version: latestWhatsNewVersion,
       slides,

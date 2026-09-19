@@ -3,24 +3,24 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Bazarr+ &middot; self-hosted subtitles for Sonarr and Radarr</title>
-<meta name="description" content="Self-hosted subtitle manager for Sonarr, Radarr, Plex and Jellyfin. Finds subtitles in the languages you want, times them to your files, and translates the rest.">
+<title>Bazarr+ &middot; self-hosted subtitles, with or without Sonarr</title>
+<meta name="description" content="Self-hosted subtitle manager for Sonarr, Radarr, Sportarr, Plex, Jellyfin, Emby and Silo, or on its own with no library at all. Finds subtitles in the languages you want, times them to your files, and translates the rest.">
 <meta name="theme-color" content="#121125">
 <link rel="canonical" href="https://lavx.github.io/bazarr/">
 
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Bazarr+">
 <meta property="og:locale" content="en">
-<meta property="og:title" content="Bazarr+ &middot; subtitles for your whole library">
-<meta property="og:description" content="Self-hosted subtitle automation for Sonarr, Radarr, Plex and Jellyfin. Finds, times and translates subtitles for every episode, then keeps doing it.">
+<meta property="og:title" content="Bazarr+ &middot; subtitles for everything you watch">
+<meta property="og:description" content="Self-hosted subtitle automation for Sonarr, Radarr, Sportarr, Plex, Jellyfin, Emby and Silo, or for no library at all. Finds, times and translates subtitles, then keeps doing it.">
 <meta property="og:url" content="https://lavx.github.io/bazarr/">
 <meta property="og:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="The Bazarr+ subtitle editor with a video preview, a waveform timeline and an AI translation panel">
+<meta property="og:image:alt" content="The Bazarr+ Discover homepage: a library banner with counts for series, movies, episodes and sports events, a queue of what is still missing subtitles, and a row of what was fetched most recently">
 <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Bazarr+ &middot; subtitles for your whole library">
-  <meta name="twitter:description" content="Self-hosted subtitle automation for Sonarr, Radarr, Plex and Jellyfin. Finds, times and translates subtitles for every episode, then keeps doing it.">
+  <meta name="twitter:title" content="Bazarr+ &middot; subtitles for everything you watch">
+  <meta name="twitter:description" content="Self-hosted subtitle automation for Sonarr, Radarr, Sportarr, Plex, Jellyfin, Emby and Silo, or for no library at all. Finds, times and translates subtitles, then keeps doing it.">
   <meta name="twitter:image" content="https://lavx.github.io/bazarr/screenshots/og-image.png">
 
 <link rel="icon" href="favicon.ico" sizes="any">
@@ -36,11 +36,11 @@
     "name": "Bazarr+",
     "applicationCategory": "MultimediaApplication",
     "operatingSystem": "Docker, Linux, Windows, macOS",
-    "softwareVersion": "2.6.2",
+    "softwareVersion": "2.7.0",
     "license": "https://www.gnu.org/licenses/gpl-3.0.html",
     "url": "https://lavx.github.io/bazarr/",
     "codeRepository": "https://github.com/LavX/bazarr",
-    "description": "Self-hosted subtitle manager for Sonarr, Radarr, Plex and Jellyfin with a provider plugin catalog, a multi-tenant subtitle API, combined bilingual subtitles and AI translation.",
+    "description": "Self-hosted subtitle manager for Sonarr, Radarr, Sportarr, Plex, Jellyfin, Emby and Silo, or for no library at all, with a provider plugin catalog, a multi-tenant subtitle API, combined bilingual subtitles and AI translation.",
     "offers": {
       "@type": "Offer",
       "price": "0",
@@ -54,12 +54,17 @@
     "image": "https://lavx.github.io/bazarr/screenshots/og-image.png",
     "downloadUrl": "https://github.com/LavX/bazarr/releases",
     "screenshot": [
+      "https://lavx.github.io/bazarr/screenshots/v2.7.0/discover-home.webp",
+      "https://lavx.github.io/bazarr/screenshots/v2.7.0/discover-title-subtitle-search.webp",
+      "https://lavx.github.io/bazarr/screenshots/v2.7.0/connections-instances.webp",
+      "https://lavx.github.io/bazarr/screenshots/v2.7.0/subtitle-editor.webp",
       "https://lavx.github.io/bazarr/screenshots/v2.4.0/provider-hub-marketplace-wide.webp",
-      "https://lavx.github.io/bazarr/screenshots/v2.4.0/distribution-hub-overview.webp",
-      "https://lavx.github.io/bazarr/screenshots/editor-translate.webp",
-      "https://lavx.github.io/bazarr/screenshots/series-batch-actions.webp"
+      "https://lavx.github.io/bazarr/screenshots/v2.4.0/distribution-hub-overview.webp"
     ],
     "featureList": [
+      "Standalone subtitle search and download, with no library connected",
+      "Sonarr, Radarr and Sportarr as library sources, several of each",
+      "Plex, Jellyfin, Emby and Silo library refresh, several of each",
       "Provider Hub plugin catalog for subtitle sources",
       "Distribution Hub: multi-tenant OpenSubtitles-compatible API",
       "AI translation through any OpenRouter model",
@@ -104,7 +109,7 @@
       "url": "https://lavx.github.io/bazarr/#q3",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "That is how Bazarr+ learns what is in your library and where the files are, so it is the normal setup and the one the guides assume. Sonarr tracks TV, Radarr tracks films, and you can connect any number of either."
+        "text": "Not any more. Since v2.7.0 Discover is the homepage, and it searches, previews and downloads subtitles for any film or show with nothing connected at all. Connect Sonarr, Radarr or Sportarr when you want that to happen on its own for a whole library, on a schedule, and you can connect any number of each."
       }
     },
     {
@@ -169,6 +174,7 @@
     <nav aria-label="Primary">
       <ul>
         <li class="nav-inpage"><a href="#what">What it does</a></li>
+        <li class="nav-deep"><a href="#connects">Connects to</a></li>
         <li class="nav-deep"><a href="#proof">Screenshots</a></li>
         <li class="nav-inpage"><a href="#compare">Compare</a></li>
         <li><a href="#start">Install</a></li>
@@ -200,8 +206,8 @@
 
     <div class="container">
       <div class="hero-copy">
-      <h1 id="hero-h">Subtitles for everything in your library.<span class="lit">Found, timed and translated, automatically.</span></h1>
-      <p class="hero-sub">Bazarr+ watches every show and film Sonarr and Radarr know about, fetches subtitles in the languages you asked for, lines them up with your files, and does it again for every new episode. Self-hosted. No account, no telemetry.</p>
+      <h1 id="hero-h">Subtitles for everything you watch.<span class="lit">Found, timed and translated, automatically.</span></h1>
+      <p class="hero-sub">Bazarr+ fetches subtitles in the languages you asked for and lines them up with your files. Connect Sonarr, Radarr or Sportarr and it does that unattended for every new episode, or run it on its own and search any film or show by name. Self-hosted. No account, no telemetry.</p>
 
       <div class="hero-actions">
         <a class="btn" href="guides/getting-started.html">Start here</a>
@@ -296,22 +302,131 @@
     </div>
   </section>
 
+  <!-- ============================ NO STACK ============================ -->
+  <section id="standalone" aria-labelledby="standalone-h" class="reveal">
+    <div class="container">
+      <h2 id="standalone-h">No media stack required.</h2>
+      <p class="lede">Bazarr+ used to be able to work only on what Sonarr and Radarr told it about. Since v2.7.0 it opens on Discover, and Discover works on its own.</p>
+
+      <div class="paths">
+        <div class="path path-new">
+          <div class="path-name">On its own</div>
+          <h3>Search any title and pull a subtitle for it</h3>
+          <p>Type a film or show by name, or browse what is trending, what has reached digital and what aired recently. Pick a title, search the providers, read the result in a preview and download it. No Sonarr, no Radarr, no Sportarr, no library, nothing indexed first.</p>
+          <p>Nothing to sign up for either: the title data arrives through a key the application carries, so a fresh install can search the moment it is up. Bring your own key instead if you would rather.</p>
+        </div>
+        <div class="path">
+          <div class="path-name">With a library</div>
+          <h3>Connect the stack and all of it happens unattended</h3>
+          <p>Point Bazarr+ at Sonarr, Radarr or Sportarr and the same work runs on a schedule across everything they track, against a language profile you write once. Discover stays where it is, and tells you which of the titles it shows you already hold.</p>
+          <p><a class="inline" href="guides/getting-started.html">Getting started</a></p>
+        </div>
+      </div>
+
+      <p class="prose">If you run Seerr, Jellyseerr or Overseerr, a title you do not have yet can be requested from its page in Discover. The request goes in as the Seerr owner, so it is approved and dispatched immediately rather than queued for somebody to look at. <a class="inline" href="guides/seerr.html">Requesting titles from Discover</a>.</p>
+    </div>
+  </section>
+
+  <!-- ============================ CONNECTS TO ============================ -->
+  <section id="connects" aria-labelledby="connects-h" class="reveal">
+    <div class="container">
+      <h2 id="connects-h">What it connects to</h2>
+      <p class="lede">Seven applications, in two groups. One group tells Bazarr+ what media exists. The other is told when a subtitle lands. They are configured differently and they fail differently, which is worth knowing before you add one.</p>
+
+      <div class="wiring">
+        <div class="wire">
+          <div class="wire-role">Library sources</div>
+          <h3>They tell Bazarr+ what exists</h3>
+          <ul class="apps">
+            <li>Sonarr</li>
+            <li>Radarr</li>
+            <li>Sportarr <span class="since">v2.7</span></li>
+          </ul>
+          <p>Sonarr tracks TV, Radarr tracks films, and Sportarr, new in this release, tracks sport. Connect as many of each as you like: every one is an instance of its own with its own subtitle settings. Sport is a first-class media type now, so a recording gets the manual search, upload, editing, sync, translation, combine, Wanted queue and History an episode gets.</p>
+        </div>
+        <div class="wire">
+          <div class="wire-role">Refresh destinations</div>
+          <h3>They show the subtitle once it lands</h3>
+          <ul class="apps">
+            <li>Plex</li>
+            <li>Jellyfin</li>
+            <li>Emby <span class="since">v2.7</span></li>
+            <li>Silo <span class="since">v2.7</span></li>
+          </ul>
+          <p>A subtitle on disk that the player never re-read is a subtitle nobody can select. When one lands, Bazarr+ asks the servers that cover that file to scan it again. All four now sit on one multi-instance layer, so two Jellyfin servers or three Emby servers is an ordinary setup, each with its own credentials, its own pending work and its own retry.</p>
+        </div>
+      </div>
+
+      <p class="prose">Two things worth knowing before you configure them. Emby and Silo find a file by its path, so they need path mappings; Jellyfin and Plex match another way and have never asked for them. And Plex is on the shared layer for refreshes only: its account panel, server discovery and webhook helpers still read the single Plex connection in settings. <a class="inline" href="guides/media-servers.html">How media server connections work</a>.</p>
+    </div>
+  </section>
+
   <!-- ============================ PROOF ============================ -->
   <span class="anchor-alias" id="screenshots-heading" aria-hidden="true"></span>
   <section id="proof" aria-labelledby="proof-h" class="reveal">
     <div class="container">
       <h2 id="proof-h">The interface</h2>
-      <p class="lede">Screenshots from the running application. Nothing here is a mockup.</p>
+      <p class="lede">Screenshots from the running application. Nothing here is a mockup. v2.7.0 rebuilt what you meet first: Discover is the homepage, the setup wizard asks what you want to do instead of insisting on Sonarr, and Statistics has a page of its own under System.</p>
 
       <div class="shots">
         <figure class="shot">
-          <button type="button" data-full="screenshots/editor-translate.webp" aria-label="Enlarge: the subtitle editor with video preview, waveform and AI translation">
+          <button type="button" data-full="screenshots/v2.7.0/discover-home.webp" aria-label="Enlarge: Discover as the Bazarr+ homepage">
             <picture>
-              <source type="image/webp" srcset="screenshots/editor-translate-640w.webp 640w, screenshots/editor-translate.webp 1920w" sizes="(max-width: 900px) 100vw, 560px">
-              <img src="screenshots/editor-translate.png" width="1920" height="1080" loading="lazy" decoding="async" alt="The Bazarr+ subtitle editor: a video preview at the top, a waveform timeline beneath it, the cue list at the left and an AI translation panel at the right">
+              <source type="image/webp" srcset="screenshots/v2.7.0/discover-home.webp 3200w" sizes="(max-width: 900px) 100vw, 560px">
+              <img src="screenshots/v2.7.0/discover-home.png" width="1280" height="800" loading="lazy" decoding="async" alt="The Discover page as the Bazarr+ homepage: a library banner over artwork with counts for series, movies, episodes, sports events and subtitles fetched, buttons for the episodes, movies and sports events that still need subtitles, a Still missing queue in three columns, and a Recently fetched row">
             </picture>
           </button>
-          <figcaption>Fix a line, nudge its timing against the waveform, or translate it, without leaving the app.</figcaption>
+          <figcaption>Discover is the page Bazarr+ opens on. With a library it leads with what is still missing and what arrived last.</figcaption>
+        </figure>
+
+        <figure class="shot">
+          <button type="button" data-full="screenshots/v2.7.0/discover-title-subtitle-search.webp" aria-label="Enlarge: searching subtitles for a title that is not in the library">
+            <picture>
+              <source type="image/webp" srcset="screenshots/v2.7.0/discover-title-subtitle-search.webp 3200w" sizes="(max-width: 900px) 100vw, 560px">
+              <img src="screenshots/v2.7.0/discover-title-subtitle-search.png" width="1280" height="1180" loading="lazy" decoding="async" alt="A Discover title page for a film marked as not in the library, listing subtitle results from several providers, each row offering a preview and a download">
+            </picture>
+          </button>
+          <figcaption>No library needed: search any title, read the result in a preview, download the one you want. <a href="#standalone">How that works</a></figcaption>
+        </figure>
+
+        <figure class="shot">
+          <button type="button" data-full="screenshots/v2.7.0/connections-instances.webp" aria-label="Enlarge: the Connections settings page">
+            <picture>
+              <source type="image/webp" srcset="screenshots/v2.7.0/connections-instances.webp 3200w" sizes="(max-width: 900px) 100vw, 560px">
+              <img src="screenshots/v2.7.0/connections-instances.png" width="1280" height="800" loading="lazy" decoding="async" alt="The Connections settings page with tabs for Sonarr, Radarr, Sportarr, Plex, Jellyfin, Emby, Silo and Seerr, showing a registered Sonarr server as an instance card with test, edit and enable controls">
+            </picture>
+          </button>
+          <figcaption>Every integration on one page, each server its own instance with its own settings. <a href="#connects">What connects to what</a></figcaption>
+        </figure>
+
+        <figure class="shot">
+          <button type="button" data-full="screenshots/v2.7.0/sports-events.webp" aria-label="Enlarge: a sports league page">
+            <picture>
+              <source type="image/webp" srcset="screenshots/v2.7.0/sports-events.webp 3200w" sizes="(max-width: 900px) 100vw, 560px">
+              <img src="screenshots/v2.7.0/sports-events.png" width="1280" height="800" loading="lazy" decoding="async" alt="A motorsport league page in Bazarr+ listing events grouped by season, each row carrying its subtitle languages and actions">
+            </picture>
+          </button>
+          <figcaption>Sport is a media type of its own now, with the same subtitle workflow episodes and films get.</figcaption>
+        </figure>
+
+        <figure class="shot">
+          <button type="button" data-full="screenshots/v2.7.0/statistics-activity.webp" aria-label="Enlarge: the Statistics page">
+            <picture>
+              <source type="image/webp" srcset="screenshots/v2.7.0/statistics-activity.webp 3200w" sizes="(max-width: 900px) 100vw, 560px">
+              <img src="screenshots/v2.7.0/statistics-activity.png" width="1280" height="800" loading="lazy" decoding="async" alt="The Statistics page under System, on its Activity tab, with a per-day download chart and summary figures above it">
+            </picture>
+          </button>
+          <figcaption>Statistics has a page of its own under System, with one filter row across every tab.</figcaption>
+        </figure>
+
+        <figure class="shot">
+          <button type="button" data-full="screenshots/v2.7.0/subtitle-editor.webp" aria-label="Enlarge: the subtitle editor playing a film against its cue list and waveform">
+            <picture>
+              <source type="image/webp" srcset="screenshots/v2.7.0/subtitle-editor.webp 1920w" sizes="(max-width: 900px) 100vw, 560px">
+              <img src="screenshots/v2.7.0/subtitle-editor.png" width="1280" height="720" loading="lazy" decoding="async" alt="The Bazarr+ subtitle editor: the cue list at the left with start, end and duration columns and gaps called out between cues, the film playing at the top right with the current line burned over it, an editable text box for that cue beneath it, and a waveform across the bottom with each cue drawn as a block over it">
+            </picture>
+          </button>
+          <figcaption>Play the film, read the line against the waveform, fix it in place. Gaps between cues are called out as you go.</figcaption>
         </figure>
 
         <figure class="shot">
@@ -364,6 +479,11 @@
       <table class="cmp">
           <thead><tr><th scope="col">Feature</th><th scope="col">Upstream Bazarr</th><th scope="col">Bazarr+</th></tr></thead>
           <tbody>
+            <tr>
+              <td class="feature">Run with no library <span class="since">v2.7</span></td>
+              <td class="up"><span class="mark no" aria-hidden="true">&ndash;</span>Not available</td>
+              <td class="plus"><span class="mark yes" aria-hidden="true">&check;</span>Discover is the homepage: search any film or show by title, preview the result and download it, with no Sonarr, Radarr or Sportarr connected and nothing indexed</td>
+            </tr>
             <tr>
               <td class="feature">Provider Hub <span class="since">v2.4</span></td>
               <td class="up"><span class="mark no" aria-hidden="true">&ndash;</span>Not available</td>
@@ -420,12 +540,17 @@
             <tr>
               <td class="feature">First-run setup wizard <span class="since">v2.5</span></td>
               <td class="up"><span class="mark no" aria-hidden="true">&ndash;</span>Not available</td>
-              <td class="plus"><span class="mark yes" aria-hidden="true">&check;</span>A guided, skippable wizard walks a fresh install through Sonarr, Radarr, optional Plex or Jellyfin, a language profile and installing providers, handling the restart and resuming afterwards</td>
+              <td class="plus"><span class="mark yes" aria-hidden="true">&check;</span>A guided wizard that asks first whether you are connecting a media stack or running without one, then walks a fresh install through the steps that answer needs, handling the restart and resuming afterwards</td>
             </tr>
             <tr>
               <td class="feature">Bulk operations</td>
               <td class="up"><span class="mark no" aria-hidden="true">&ndash;</span>One at a time</td>
               <td class="plus"><span class="mark yes" aria-hidden="true">&check;</span>12 batch actions on any selection, up to 10,000 items per run</td>
+            </tr>
+            <tr>
+              <td class="feature">Sport as a media type <span class="since">v2.7</span></td>
+              <td class="up"><span class="mark no" aria-hidden="true">&ndash;</span>Not available</td>
+              <td class="plus"><span class="mark yes" aria-hidden="true">&check;</span>Sportarr as an instance kind beside Sonarr and Radarr, with sport sharing the subtitle workflows series and films already use</td>
             </tr>
             <tr>
               <td class="feature">Mass sync</td>
@@ -462,9 +587,9 @@
               <td class="plus"><span class="mark yes" aria-hidden="true">&check;</span>Multi-tenant OpenSubtitles-compatible API with named keys, tiers, per-window metering and per-key provider scoping, plus a first-party <a href="https://github.com/LavX/jellyfin-plugin-bazarr-plus" rel="noopener">Jellyfin plugin</a> and <a href="https://github.com/LavX/vlsub-bazarr-plus" rel="noopener">VLSub Bazarr+</a></td>
             </tr>
             <tr>
-              <td class="feature">Jellyfin library refresh <span class="since">v2.2</span></td>
-              <td class="up"><span class="mark no" aria-hidden="true">&ndash;</span>Development branch only</td>
-              <td class="plus"><span class="mark yes" aria-hidden="true">&check;</span>Cherry-picked and hardened, with HTTPS and self-signed support and a Refresh now control</td>
+              <td class="feature">Media server refresh <span class="since">v2.7</span></td>
+              <td class="up"><span class="mark no" aria-hidden="true">&ndash;</span>Jellyfin only, development branch</td>
+              <td class="plus"><span class="mark yes" aria-hidden="true">&check;</span>Emby, Silo, Jellyfin and Plex on one layer, several servers of each, with HTTPS and self-signed support, per-instance retry and a Refresh libraries action</td>
             </tr>
           </tbody>
         </table>
@@ -502,6 +627,8 @@
       </div>
 
       <p class="prose">That is enough to start. Two optional companions are worth knowing about: <strong>FlareSolverr</strong>, which lets the OpenSubtitles.org plugin get past Cloudflare challenges, and the <strong>AI translator sidecar</strong>, if you want translation. Both are covered in the <a href="guides/getting-started.html">getting started guide</a>, which also walks through your first login.</p>
+
+      <p class="prose">The starter above leaves out the four hardening keys the image is built for, which freeze its filesystem and take away every Linux capability it does not need. They are four lines, and the <a href="guides/getting-started.html#container-hardening">getting started guide</a> shows the compose file with them in place, along with the equivalent <code class="inline">docker run</code> flags. Use that one for anything you intend to keep running.</p>
 
       <p class="prose">There is also a one-line installer that writes the compose file for you and asks where your media lives. It runs a script from this site, so read it first if that matters to you, and it does for a lot of people: <a href="https://github.com/LavX/bazarr/blob/gh-pages/install.sh" rel="noopener">the exact file it fetches is here</a>.</p>
 
@@ -547,7 +674,7 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
           <div class="faq-answer" id="a3" role="region" aria-labelledby="q3"><div>
-            <p>That is how Bazarr+ learns what is in your library and where the files are, so it is the normal setup and the one the guides assume. Sonarr tracks TV, Radarr tracks films, and you can connect any number of either.</p>
+            <p>Not any more. Since v2.7.0 <a href="#standalone">Discover is the homepage</a>, and it searches, previews and downloads subtitles for any film or show with nothing connected at all. Connect Sonarr, Radarr or Sportarr when you want that to happen on its own for a whole library, on a schedule, and you can connect any number of each.</p>
           </div></div>
         </div>
 
@@ -597,7 +724,11 @@
         <li class="near">
           <h3>Shipped</h3>
           <span class="horizon-when">The v2 line so far</span>
-          <p><strong>v2.6.2 &ldquo;Clockwork&rdquo;</strong> keeps subtitle history and sync outputs
+          <p><strong>v2.7.0 &ldquo;Atlas&rdquo;</strong> opens on Discover: search and pull subtitles
+            for any title, whether or not it is in your library, and run with no library at all.
+            It adds Sports as a third media type, folds Emby, Silo, Jellyfin and Plex onto one
+            multi-instance layer, requests titles in Seerr, and gives Statistics a real page.
+            Before it, <strong>v2.6.2 &ldquo;Clockwork&rdquo;</strong> keeps subtitle history and sync outputs
             with the right media, saves useful partial OpenRouter translations with an incomplete
             status, lists uploads before background sync finishes, and adds explicit OpenRouter
             routing choices. Searches continue past unusable archives from catalog providers. The v2.6 line also
@@ -612,15 +743,14 @@
           <h3>Next</h3>
           <span class="horizon-when">Coming on the v2 line</span>
           <ul>
-            <li><strong>Discover.</strong> Search and pull subtitles for any title, whether or not
-              it is in your library.</li>
             <li><strong>A rebuilt translator.</strong> Translation moves in-process, with a catalog
               of models, configuration per engine, and a choice of engine per language profile,
               instead of a separate sidecar container.</li>
             <li><strong>Search inside your subtitles.</strong> Find the episode from a line of
               dialogue you half remember, across everything you have.</li>
-            <li><strong>Run without Sonarr and Radarr.</strong> A standalone mode, packaged for the
-              desktop, for people who have a folder of films rather than a media stack.</li>
+            <li><strong>Install it like an app.</strong> Native installers for Windows, macOS and
+              Linux, each one carrying its own Python and a tray icon, so Bazarr+ runs on a
+              desktop with no Docker and no terminal.</li>
           </ul>
         </li>
 
@@ -639,7 +769,7 @@
   <!-- ============================ CLOSE ============================ -->
   <section class="close-cta reveal" aria-labelledby="close-h">
     <div class="container">
-      <h2 id="close-h">Point it at your library.</h2>
+      <h2 id="close-h">Point it at your library, or at nothing at all.</h2>
       <p class="lede">It takes one compose file. Everything else it works out on its own, and if you change your mind, your backup puts you back exactly where you were.</p>
       <div class="hero-actions">
         <a class="btn" href="guides/getting-started.html">Start here</a>

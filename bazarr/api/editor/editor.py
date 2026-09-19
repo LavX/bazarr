@@ -1,5 +1,6 @@
 # coding=utf-8
 
+import codecs
 import hashlib
 import json
 import logging
@@ -16,11 +17,13 @@ from flask import Response, request, send_file
 from flask_restx import Namespace, Resource
 
 from arr_instances.resolution import scoped
-from app.database import TableEpisodes, TableMovies, TableShows, database, select  # noqa: F401
+from app.database import (TableArrInstances, TableEpisodes, TableMovies, TableShows,  # noqa: F401
+                          TableSportsEvents, database, select)
 from app.get_args import args
 from utilities.path_mappings import path_mappings
 from api.subtitles.content import resolve_subtitle_path  # noqa: F401
-from subtitles.tools.subsync_engines import is_sync_engine_language_key
+from subtitles.tools.subsync_engines import (create_preview_workspace, discard_preview_workspace,
+                                             is_sync_engine_language_key)
 
 from ..utils import authenticate
 
@@ -87,6 +90,13 @@ def _payload_arr_instance_id(data):
     return _optional_int(value, 'arrInstanceId')
 
 
+# The media types the editor works on. One tuple rather than six hardcoded
+# pairs: the copies are what left sports rejected at five separate gates while
+# the sixth already understood it.
+MEDIA_TYPES = ('episode', 'movie', 'sports')
+MEDIA_TYPE_ERROR = 'mediaType must be one of "episode", "movie", "sports"'
+
+
 def _resolve_video_path(media_type, media_id, arr_instance_id=None):
     """Look up the video file path from the database and apply path mappings.
 
@@ -116,7 +126,30 @@ def _resolve_video_path(media_type, media_id, arr_instance_id=None):
             return 'Movie not found', 404
         return path_mappings.path_replace_movie(row.path)
 
-    return 'Invalid media type, must be "episode" or "movie"', 400
+    elif media_type == 'sports':
+        # media_id is the local event id, a primary key, so scoping is about
+        # enforcing ownership rather than resolving a collision. The row's own
+        # owner drives the mapping: sports mappings are per instance and the
+        # caller is allowed to omit arr_instance_id.
+        # Joined to an ENABLED sportarr owner: the sports mapping below refuses
+        # a disabled one and would raise a 500 out of this handler instead.
+        row = database.execute(
+            scoped(
+                select(TableSportsEvents.path, TableSportsEvents.arr_instance_id)
+                .join(TableArrInstances,
+                      TableSportsEvents.arr_instance_id == TableArrInstances.id)
+                .where(TableSportsEvents.id == media_id,
+                       TableArrInstances.kind == 'sportarr',
+                       TableArrInstances.enabled == 1),
+                TableSportsEvents.arr_instance_id,
+                arr_instance_id,
+            )
+        ).first()
+        if not row:
+            return 'Sports event not found', 404
+        return path_mappings.path_replace_instance(row.path, row.arr_instance_id, 'sports')
+
+    return MEDIA_TYPE_ERROR, 400
 
 
 def _get_ffmpeg():
@@ -229,8 +262,8 @@ def _validate_params():
     media_type = request.args.get('mediaType')
     media_id = request.args.get('mediaId')
 
-    if not media_type or media_type not in ('episode', 'movie'):
-        return 'mediaType must be "episode" or "movie"', 400
+    if not media_type or media_type not in MEDIA_TYPES:
+        return MEDIA_TYPE_ERROR, 400
     if not media_id:
         return 'mediaId is required', 400
     try:
@@ -245,8 +278,8 @@ def _resolve_or_abort():
     """Validate params and resolve video path. Returns (video_path,) or a Flask error tuple."""
     params = _validate_params()
     # _validate_params returns (str, int) on success or (error_msg, status_code) on failure.
-    # On success media_type is "episode" or "movie", on error it's a longer message.
-    if isinstance(params[0], str) and params[0] not in ('episode', 'movie'):
+    # On success media_type is one of MEDIA_TYPES, on error it's a longer message.
+    if isinstance(params[0], str) and params[0] not in MEDIA_TYPES:
         return params
 
     media_type, media_id = params
@@ -597,8 +630,8 @@ class EditorHls(Resource):
         ffmpeg writes them. hls.js handles segment fetching, buffer management,
         and seek-back within the cached portion.
         """
-        if media_type not in ('episode', 'movie'):
-            return 'mediaType must be "episode" or "movie"', 400
+        if media_type not in MEDIA_TYPES:
+            return MEDIA_TYPE_ERROR, 400
         if not HLS_FILENAME_RE.match(filename):
             return 'Invalid HLS filename', 400
         if audio_track < 0:
@@ -669,22 +702,24 @@ class EditorHls(Resource):
             if not os.path.isfile(target):
                 return 'Encoding starting, retry shortly', 503
 
-            # Native HLS clients (Safari / iOS) can't inject custom request
-            # headers on segment requests, so the apikey has to ride in the
-            # URL. The manifest's segment lines and #EXT-X-MAP URI are
-            # relative paths that resolve without the playlist URL's query
-            # string, so we rewrite them server-side to carry the apikey when
-            # the request authenticated via query. Header-auth paths (hls.js
-            # with xhrSetup) don't include apikey on the request and skip
-            # this branch, keeping the manifest clean.
+            # Relative segment and #EXT-X-MAP URLs do not inherit the
+            # playlist query string. Carry the validated instance scope so
+            # every request resolves the same media and stream cache. Native
+            # HLS clients also need query authentication because they cannot
+            # inject headers into segment requests.
+            resource_query = []
+            if arr_instance_id is not None:
+                resource_query.append(f'arr_instance_id={arr_instance_id}')
             apikey_query = request.args.get('apikey')
             if apikey_query:
+                resource_query.append(f'apikey={quote(apikey_query, safe="")}')
+            if resource_query:
                 try:
                     with open(target) as f:
                         manifest = f.read()
                 except OSError:
                     return 'Encoding starting, retry shortly', 503
-                encoded = quote(apikey_query, safe='')
+                query_string = '&'.join(resource_query)
                 rewritten = []
                 for line in manifest.splitlines(keepends=True):
                     stripped = line.rstrip('\n').rstrip('\r')
@@ -692,13 +727,13 @@ class EditorHls(Resource):
                         rewritten.append(
                             re.sub(
                                 r'URI="([^"?]+)"',
-                                f'URI="\\1?apikey={encoded}"',
+                                f'URI="\\1?{query_string}"',
                                 line,
                             )
                         )
                     elif stripped and not stripped.startswith('#'):
                         sep = '\n' if line.endswith('\n') else ''
-                        rewritten.append(f'{stripped}?apikey={encoded}{sep}')
+                        rewritten.append(f'{stripped}?{query_string}{sep}')
                     else:
                         rewritten.append(line)
                 response = Response(
@@ -938,7 +973,7 @@ class EditorSubtitles(Resource):
         """Return available subtitle files for a media item."""
         import ast
         params = _validate_params()
-        if isinstance(params[0], str) and params[0] not in ('episode', 'movie'):
+        if isinstance(params[0], str) and params[0] not in MEDIA_TYPES:
             return params
 
         media_type, media_id = params
@@ -951,6 +986,14 @@ class EditorSubtitles(Resource):
                 scoped(
                     select(TableEpisodes.subtitles).where(TableEpisodes.sonarrEpisodeId == media_id),
                     TableEpisodes.arr_instance_id,
+                    arr_instance_id,
+                )
+            ).first()
+        elif media_type == 'sports':
+            row = database.execute(
+                scoped(
+                    select(TableSportsEvents.subtitles).where(TableSportsEvents.id == media_id),
+                    TableSportsEvents.arr_instance_id,
                     arr_instance_id,
                 )
             ).first()
@@ -992,7 +1035,8 @@ _editor_sync_jobs = {}  # job_key -> {status, content, message}
 
 
 def run_editor_sync(job_key, video_path, tmp_in, tmp_out, encoding, max_offset, gss, reference,
-                    no_fix_framerate=True, vad=None, job_id=None, output_mode='keep_all', enabled_engines=None):
+                    no_fix_framerate=True, vad=None, job_id=None, output_mode='keep_all', enabled_engines=None,
+                    preview_workspace=None):
     """Background sync worker. Called by jobs_queue."""
     from app.jobs_queue import jobs_queue
 
@@ -1095,6 +1139,8 @@ def run_editor_sync(job_key, video_path, tmp_in, tmp_out, encoding, max_offset, 
                         os.unlink(p)
                     except OSError:
                         pass
+            # Engine outputs land beside the input, so the workspace goes too.
+            discard_preview_workspace(preview_workspace)
         threading.Timer(600, cleanup).start()
 
 
@@ -1125,8 +1171,8 @@ class EditorSync(Resource):
         if vad and vad not in ('subs_then_webrtc', 'subs_then_auditok', 'webrtc', 'auditok'):
             return 'Invalid vad option', 400
 
-        if not media_type or media_type not in ('episode', 'movie'):
-            return 'mediaType must be "episode" or "movie"', 400
+        if not media_type or media_type not in MEDIA_TYPES:
+            return MEDIA_TYPE_ERROR, 400
         if not media_id:
             return 'mediaId is required', 400
         if not content:
@@ -1138,6 +1184,15 @@ class EditorSync(Resource):
         # (e.g. path-traversal, shell metachars) into the tempfile suffix.
         if fmt not in ('srt', 'vtt', 'ass', 'ssa', 'sub', 'smi', 'mpl', 'txt'):
             return 'Invalid format; must be one of srt, vtt, ass, ssa, sub, smi, mpl, txt', 400
+
+        # The body names the codec its content is written in, and it is also what the
+        # worker reads the aligned result back with. An unknown name is the caller's
+        # mistake, so it is refused here rather than raising LookupError later, once
+        # the temporary files already exist.
+        try:
+            codecs.lookup(encoding)
+        except (LookupError, TypeError):
+            return 'Invalid encoding', 400
 
         try:
             media_id = int(media_id)
@@ -1155,39 +1210,56 @@ class EditorSync(Resource):
         if not os.path.isfile(video_path):
             return 'Video file not found', 404
 
-        ext = f'.{fmt}'
-        fd, tmp_in = tempfile.mkstemp(suffix=ext, prefix='bazarr_sync_')
-        os.write(fd, content.encode(encoding))
-        os.close(fd)
-        tmp_out = tmp_in.replace(ext, f'.synced{ext}')
-
         import threading
 
-        job_key = f'editor_sync_{hashlib.md5(tmp_in.encode()).hexdigest()[:8]}'
-        _editor_sync_jobs[job_key] = {'status': 'running', 'content': None, 'message': 'Starting sync...'}
+        ext = f'.{fmt}'
+        # The editor previews an alignment: nothing here is a library subtitle until
+        # the user saves the content back. Input and engine outputs share a directory
+        # of Bazarr's own, which keeps generated names off the media folder and gives
+        # the destinations an owner that does not depend on the video's stem.
+        preview_workspace = create_preview_workspace()
+        job_key = None
+        # Once the workspace exists, only the queued job's cleanup timer removes it,
+        # so everything up to a successful hand-off unwinds here instead. Content the
+        # named codec cannot represent is the realistic way in.
+        try:
+            fd, tmp_in = tempfile.mkstemp(suffix=ext, prefix='bazarr_sync_', dir=preview_workspace)
+            try:
+                os.write(fd, content.encode(encoding))
+            finally:
+                os.close(fd)
+            tmp_out = tmp_in.replace(ext, f'.synced{ext}')
 
-        # Submit to the jobs queue for visibility in Jobs Manager
-        queue_job_id = jobs_queue.feed_jobs_pending_queue(
-            job_name='Editor Sync',
-            module='api.editor.editor',
-            func='run_editor_sync',
-            kwargs={
-                'job_key': job_key,
-                'video_path': video_path,
-                'tmp_in': tmp_in,
-                'tmp_out': tmp_out,
-                'encoding': encoding,
-                'max_offset': max_offset,
-                'gss': gss,
-                'reference': reference,
-                'no_fix_framerate': no_fix_framerate,
-                'vad': vad,
-                'output_mode': output_mode,
-                'enabled_engines': enabled_engines,
-            },
-            is_progress=True,
-            progress_max=3,
-        )
+            job_key = f'editor_sync_{hashlib.md5(tmp_in.encode()).hexdigest()[:8]}'
+            _editor_sync_jobs[job_key] = {'status': 'running', 'content': None, 'message': 'Starting sync...'}
+
+            # Submit to the jobs queue for visibility in Jobs Manager.
+            queue_job_id = jobs_queue.feed_jobs_pending_queue(
+                job_name='Editor Sync',
+                module='api.editor.editor',
+                func='run_editor_sync',
+                kwargs={
+                    'job_key': job_key,
+                    'video_path': video_path,
+                    'tmp_in': tmp_in,
+                    'tmp_out': tmp_out,
+                    'encoding': encoding,
+                    'max_offset': max_offset,
+                    'gss': gss,
+                    'reference': reference,
+                    'no_fix_framerate': no_fix_framerate,
+                    'vad': vad,
+                    'output_mode': output_mode,
+                    'enabled_engines': enabled_engines,
+                    'preview_workspace': preview_workspace,
+                },
+                is_progress=True,
+                progress_max=3,
+            )
+        except BaseException:
+            _editor_sync_jobs.pop(job_key, None)
+            discard_preview_workspace(preview_workspace)
+            raise
 
         # Force-start in a separate thread so it doesn't wait behind other queued jobs
         threading.Thread(

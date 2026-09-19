@@ -8,9 +8,10 @@ from dynaconf.validator import ValidationError
 
 from api.utils import None_Keys
 from app.database import TableLanguagesProfiles, TableSettingsLanguages, TableSettingsNotifier, \
-    update_profile_id_list, database, insert, update, delete, select
+    normalize_profile_items, update_profile_id_list, database, insert, update, delete, select
 from app.event_handler import event_stream
-from app.config import settings, save_settings, get_settings
+from app.config import (settings, save_settings, get_settings, validate_metadata_settings,
+                        MetadataPersistenceError, MetadataFollowupError)
 from app.scheduler import scheduler  # noqa: F401
 from subtitles.indexer.series import list_missing_subtitles
 from subtitles.indexer.movies import list_missing_subtitles_movies
@@ -44,6 +45,10 @@ class SystemSettings(Resource):
 
     @authenticate
     def post(self):
+        try:
+            validate_metadata_settings(list(zip(request.form.keys(), request.form.listvalues())))
+        except ValidationError as error:
+            return error.message, 406
         deleted_profile_ids = []
         enabled_languages = request.form.getlist('languages-enabled')
         if len(enabled_languages) != 0:
@@ -75,6 +80,11 @@ class SystemSettings(Resource):
                     except CombineRuleError as error:
                         return f"Invalid combine rule for profile '{item.get('name')}': {error}", 400
                 combine_value = json.dumps(combine_rule) if combine_rule else None
+                # A client may omit the optional per-language keys, and the
+                # migration that adds them runs at startup only. Storing the
+                # item as sent left every indexing pass raising KeyError on it
+                # until the next restart, so fill them in here instead.
+                normalize_profile_items(item['items'])
                 if item['profileId'] in existing:
                     # Update existing profiles
                     database.execute(
@@ -126,6 +136,12 @@ class SystemSettings(Resource):
                 list_missing_subtitles()
             if settings.general.use_radarr:
                 list_missing_subtitles_movies()
+            # Gated like its two siblings above. Ungated, saving any setting on
+            # an install with Sportarr switched off still walked every sports
+            # event row, one transaction and one locking select each.
+            if settings.general.use_sportarr:
+                from subtitles.indexer.sports import list_missing_subtitles_sports
+                list_missing_subtitles_sports()
 
         # Update Notification
         notifications = request.form.getlist('notifications-providers')
@@ -139,6 +155,11 @@ class SystemSettings(Resource):
 
         try:
             save_settings(zip(request.form.keys(), request.form.listvalues()))
+        except MetadataPersistenceError:
+            return "Discover settings could not be saved. Try again.", 503
+        except MetadataFollowupError:
+            return {"code": "discover_settings_refresh_failed",
+                    "message": "Discover settings were saved, but application refresh failed. Reload settings before retrying."}, 503
         except ValidationError as e:
             event_stream("settings")
             return e.message, 406

@@ -384,6 +384,17 @@ __BAZARR_DEPENDS__
       - ./config:/config
 __MOVIES_VOLUME__
 __TV_VOLUME__
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:6767/_supervisor/status | grep -q '\''\"running\"'\''"]
       interval: 30s

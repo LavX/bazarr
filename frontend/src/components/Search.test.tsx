@@ -27,7 +27,7 @@ function instance(
     enabled: true,
     is_default: isDefault,
     ip: "localhost",
-    port: kind === "sonarr" ? 8989 : 7878,
+    port: { sonarr: 8989, radarr: 7878, sportarr: 1867 }[kind] ?? 7878,
     base_url: "/",
     ssl: false,
     verify_ssl: true,
@@ -41,6 +41,8 @@ const instances = [
   instance(2, "sonarr", "4K Series", false),
   instance(3, "radarr", "HD Movies", true),
   instance(4, "radarr", "4K Movies", false),
+  instance(5, "sportarr", "HD Sports", true),
+  instance(6, "sportarr", "4K Sports", false),
 ];
 
 const results: ItemSearchResult[] = [
@@ -78,6 +80,27 @@ const results: ItemSearchResult[] = [
   },
 ];
 
+const leagues: ItemSearchResult[] = [
+  {
+    id: 301,
+    sportarrLeagueId: 7,
+    arr_instance_id: 5,
+    title: "Formula 1",
+    sport: "Motorsport",
+    year: "",
+    poster: null,
+  },
+  {
+    id: 302,
+    sportarrLeagueId: 7,
+    arr_instance_id: 6,
+    title: "Formula 1",
+    sport: "Motorsport",
+    year: "",
+    poster: null,
+  },
+];
+
 function renderSearch(
   configuredInstances = instances,
   searchResults = results,
@@ -93,6 +116,7 @@ function renderSearch(
     { path: "/", element: <Search /> },
     { path: "/movies/:id", element: <p>Movie details</p> },
     { path: "/series/:id", element: <p>Series details</p> },
+    { path: "/sports/:id", element: <p>League details</p> },
   ]);
 
   rawRender(
@@ -160,6 +184,38 @@ describe("Search Bar", () => {
       expect(within(movie).queryByText("HD Movies") !== null).toBe(movieBadge);
     },
   );
+
+  it("does not blow up the dropdown on a sports league", async () => {
+    const user = userEvent.setup();
+    const { router } = renderSearch(instances, leagues);
+
+    // The backend has returned leagues since sports gained a nav tab, and the
+    // dropdown threw "Unknown search result" on every one of them: typing
+    // anything matching a league name broke the whole search.
+    await user.type(screen.getByPlaceholderText("Search"), "formula");
+
+    const option = await screen.findByRole("option", { name: /4K Sports/ });
+    // A league carries a sport where a show or film carries a year.
+    expect(option).toHaveTextContent("Formula 1 (Motorsport)");
+    await user.click(option);
+    expect(router.state.location.pathname).toBe("/sports/302");
+    expect(router.state.location.search).toBe("?instance=6");
+  });
+
+  it("labels a league with its own Sportarr instances, not Radarr's", async () => {
+    const user = userEvent.setup();
+    // One Radarr, two Sportarr: "not a show means a movie" would read the
+    // single-Radarr labels and show no badge at all.
+    renderSearch(
+      [instances[0], instances[2], instances[4], instances[5]],
+      leagues,
+    );
+
+    await user.type(screen.getByPlaceholderText("Search"), "formula");
+
+    const option = await screen.findByRole("option", { name: /HD Sports/ });
+    expect(within(option).getByText("HD Sports")).toBeInTheDocument();
+  });
 
   it("filters by title without matching the instance name", async () => {
     const user = userEvent.setup();

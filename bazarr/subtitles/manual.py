@@ -4,7 +4,7 @@
 import os
 import sys
 import logging
-from functools import partial
+from media_servers.events import publication_callback
 import subliminal
 
 from subzero.language import Language
@@ -18,7 +18,8 @@ from app.config import settings
 from utilities.helper import get_target_folder, force_unicode
 from utilities.path_mappings import path_mappings
 from app.database import (database, get_profiles_list, select, TableEpisodes, TableShows, get_audio_profile_languages,
-                          get_profile_id, TableMovies)
+                          TableMovies)
+from app import activity
 from app.jobs_queue import jobs_queue
 from app.notifier import send_notifications, send_notifications_movie
 from sonarr.history import history_log
@@ -36,20 +37,39 @@ from .processing import process_subtitle
 
 
 @update_pools
-def manual_search(path, profile_id, providers, sceneName, title, media_type):
+def manual_search(path, profile_id, providers, sceneName, title, media_type, *, context=None,
+                  language_set=None, original_format=False, cancel=None):
     logging.debug(f'BAZARR Manually searching subtitles for this file: {path}')  # noqa: G004
 
+    # A manual search runs synchronously on the request thread and never enters
+    # the jobs queue, so without this observation it is invisible to any status
+    # reader while it is the only thing the server is actually doing.
+    with activity.observed_operation('manual_search', scope_kind='media',
+                                     media_type='episode' if media_type == 'series' else 'movie',
+                                     title=title):
+        return _manual_search(path, profile_id, providers, sceneName, title, media_type,
+                              context=context, language_set=language_set,
+                              original_format=original_format, cancel=cancel)
+
+
+def _manual_search(path, profile_id, providers, sceneName, title, media_type, *, context=None,
+                   language_set=None, original_format=False, cancel=None):
     final_subtitles = []
 
-    pool = _get_pool(media_type, profile_id)
+    pool = _get_pool(media_type, profile_id, context=context) if context is not None else _get_pool(media_type, profile_id)
 
-    language_set, original_format = _get_language_obj(profile_id=profile_id)
+    if context is not None:
+        from sportarr.subtitles import candidate_signature
+        signature = candidate_signature(context)
+    if language_set is None:
+        language_set, original_format = _get_language_obj(profile_id=profile_id)
     also_forced = any([x.forced for x in language_set])
     forced_required = all([x.forced for x in language_set])
     normal = not also_forced and not forced_required and all([not x.hi for x in language_set])
 
     if providers:
-        video = get_video(force_unicode(path), title, sceneName, providers=providers, media_type=media_type)
+        video = get_video(force_unicode(path), title, sceneName, providers=providers, media_type=media_type,
+                          **({'context': context, 'cancel': cancel} if context is not None else {}))
     else:
         logging.info("BAZARR All providers are throttled")
         return 'All providers are throttled'
@@ -72,7 +92,7 @@ def manual_search(path, profile_id, providers, sceneName, title, media_type):
             score_handler = DEFAULT_SCORES['episode'] if media_type == "series" else DEFAULT_SCORES['movie']
 
             for s in subtitles[video]:
-                if not normal and s.language not in language_set:
+                if (context is not None or not normal) and s.language not in language_set:
                     logging.debug(f"Skipping subtitle {s.language} because it's not requested")  # noqa: G004
                     continue
 
@@ -134,7 +154,7 @@ def manual_search(path, profile_id, providers, sceneName, title, media_type):
                          language=str(s.language.basename),
                          hearing_impaired=str(s.hearing_impaired),
                          provider=s.provider_name,
-                         subtitle=subtitle_cache.store(s),
+                         subtitle=_cache_search_result(s, context, signature if context is not None else None),
                          url=s.page_link,
                          original_format=s.use_original_format,
                          matches=list(matches),
@@ -154,7 +174,7 @@ def manual_search(path, profile_id, providers, sceneName, title, media_type):
 
 @update_pools
 def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provider, sceneName, title, media_type,
-                             use_original_format, profile_id, job_id=None, arr_instance_id=None):
+                             use_original_format, profile_id, job_id=None, arr_instance_id=None, *, context=None, cancel=None):
     logging.debug(f'BAZARR Manually downloading Subtitles for this file: {path}')  # noqa: G004
 
     if settings.general.utf8_encode:
@@ -166,6 +186,16 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
     if subtitle is None:
         logging.error("BAZARR Subtitle not found in cache (expired or invalid ID)")
         return 'Subtitle not found in cache. Please search again.'
+    from sportarr.subtitles import SportsCandidate, validate_candidate
+    if context is not None:
+        from copy import deepcopy
+        candidate = subtitle
+        validate_candidate(candidate, context, cancel=cancel)
+        subtitle = deepcopy(candidate.subtitle)
+        if provider != subtitle.provider_name:
+            raise ValueError('Subtitle provider does not match cached result')
+    elif isinstance(subtitle, SportsCandidate) or media_type == 'sports':
+        raise ValueError('Sports downloads require their exact event context')
     if hi == 'True':
         subtitle.language.hi = True
     else:
@@ -179,11 +209,13 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
 
     from subtitles.tools.mods import get_subzero_mods
     subtitle.mods = get_subzero_mods(arr_instance_id)
-    video = get_video(force_unicode(path), title, sceneName, providers={provider}, media_type=media_type)
+    video = get_video(force_unicode(path), title, sceneName, providers={provider}, media_type=media_type,
+                      **({'context': context, 'cancel': cancel} if context is not None else {}))
     if video:
         try:
             if provider:
-                download_subtitles([subtitle], _get_pool(media_type, profile_id))
+                download_subtitles([subtitle], _get_pool(media_type, profile_id, context=context)
+                                   if context is not None else _get_pool(media_type, profile_id))
                 logging.debug(f'BAZARR Subtitles file downloaded for this file: {path}')  # noqa: G004
             else:
                 logging.info("BAZARR All providers are throttled")
@@ -195,20 +227,14 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
             if not subtitle.is_valid():
                 logging.error(f"BAZARR Downloaded subtitles isn't valid for this file: {path}")  # noqa: G004
                 return "Downloaded subtitles isn't valid. Check log."
+            if context is not None:
+                from sportarr.subtitles import save_sports_subtitle
+                return save_sports_subtitle(video, subtitle, candidate, audio_language, job_id=job_id, cancel=cancel)
             try:
-                chmod = int(settings.general.chmod, 8) if not sys.platform.startswith(
-                    'win') and settings.general.chmod_enabled else None
                 with subtitle_write_locks(path, os.path.join(get_target_folder(path) or os.path.dirname(path), '.destination')):
-                    written_paths = []
-                    saved_subtitles = save_subtitles(video.original_path, [subtitle],
-                                                     single=settings.general.single_language,
-                                                     tags=None,  # fixme
-                                                     directory=get_target_folder(path),
-                                                     chmod=chmod,
-                                                     formats=(subtitle.format,),
-                                                     path_decoder=force_unicode,
-                                                     write_subtitle=partial(write_subtitle_file, path, written_paths=written_paths))
-                    saved_subtitles = [saved for saved in saved_subtitles if saved.storage_path in written_paths]
+                    saved_subtitles = _save_downloaded_subtitles(
+                        video, subtitle, path,
+                        on_publish=publication_callback(media_type, path, 'download', arr_instance_id))
 
             except Exception as e:
                 logging.exception(f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')  # noqa: G004
@@ -222,7 +248,7 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
                         processed_subtitle = process_subtitle(subtitle=saved_subtitle, media_type=media_type,
                                                               audio_language=audio_language, is_upgrade=False,
                                                               is_manual=True, path=path, max_score=max_score,
-                                                              job_id=job_id)
+                                                              job_id=job_id, arr_instance_id=arr_instance_id)
                         if processed_subtitle:
                             return processed_subtitle
                         else:
@@ -252,7 +278,9 @@ def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode
             TableEpisodes.sceneName,
             TableEpisodes.season,
             TableEpisodes.episode,
+            TableEpisodes.arr_instance_id,
             TableEpisodes.title.label('episodeTitle'),
+            TableShows.profileId,
             TableShows.title)
         .select_from(TableEpisodes)
         .join(TableShows)
@@ -264,10 +292,17 @@ def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode
         return 'Episode not found', 404
 
     title = episodeInfo.title
+    observed = activity.register(activity.activity_id_for_job(job_id), operation='manual_download',
+                                 scope_kind='media', media_type='episode', title=title,
+                                 episode_title=episodeInfo.episodeTitle, season=episodeInfo.season,
+                                 episode=episodeInfo.episode, arr_instance_id=arr_instance_id,
+                                 upstream_series_id=sonarr_series_id,
+                                 upstream_episode_id=sonarr_episode_id)
     jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Manually downloading Subtitles for {title} - "
                                                            f"S{episodeInfo.season:02d}E{episodeInfo.episode:02d} - "
                                                            f"{episodeInfo.episodeTitle}")
-    episodePath = path_mappings.path_replace(episodeInfo.path)
+    arr_instance_id = episodeInfo.arr_instance_id
+    episodePath = path_mappings.path_replace_instance(episodeInfo.path, arr_instance_id, 'series')
     sceneName = episodeInfo.sceneName or "None"
 
     audio_language_list = get_audio_profile_languages(episodeInfo.audio_language)
@@ -279,7 +314,7 @@ def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode
     try:
         result = manual_download_subtitle(episodePath, audio_language, hi, forced, subtitle, selected_provider,
                                           sceneName, title, 'series', use_original_format,
-                                          profile_id=get_profile_id(episode_id=sonarr_episode_id), job_id=job_id,
+                                          profile_id=episodeInfo.profileId, job_id=job_id,
                                           arr_instance_id=arr_instance_id)
     except OSError:
         return 'Unable to save subtitles file', 500
@@ -289,6 +324,12 @@ def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode
         if isinstance(result, str):
             return result, 500
         elif result:
+            # The subtitle exists and its history row is about to be written.
+            # The job name flips to "downloaded" in the finally block whatever
+            # happened, so the name is not evidence and this is.
+            activity.note_publication(observed, outcome='success',
+                                      language=getattr(result, 'language', None),
+                                      provider=selected_provider)
             history_log(2, sonarr_series_id, sonarr_episode_id, result, arr_instance_id=arr_instance_id)
             if not settings.general.dont_notify_manual_actions:
                 send_notifications(sonarr_series_id, sonarr_episode_id, result.message,
@@ -311,6 +352,8 @@ def movie_manually_download_specific_subtitle(radarr_id, hi, forced, use_origina
                TableMovies.year,
                TableMovies.path,
                TableMovies.sceneName,
+               TableMovies.arr_instance_id,
+               TableMovies.profileId,
                TableMovies.audio_language)
         .where(TableMovies.radarrId == radarr_id),
         TableMovies.arr_instance_id, arr_instance_id)) \
@@ -320,9 +363,13 @@ def movie_manually_download_specific_subtitle(radarr_id, hi, forced, use_origina
         return 'Movie not found', 404
 
     title = movieInfo.title
+    observed = activity.register(activity.activity_id_for_job(job_id), operation='manual_download',
+                                 scope_kind='media', media_type='movie', title=title,
+                                 arr_instance_id=arr_instance_id, upstream_movie_id=radarr_id)
     jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Manually downloading Subtitles for {title} "
                                                            f"({movieInfo.year})")
-    moviePath = path_mappings.path_replace_movie(movieInfo.path)
+    arr_instance_id = movieInfo.arr_instance_id
+    moviePath = path_mappings.path_replace_instance(movieInfo.path, arr_instance_id, 'movie')
     sceneName = movieInfo.sceneName or "None"
 
     audio_language_list = get_audio_profile_languages(movieInfo.audio_language)
@@ -334,7 +381,7 @@ def movie_manually_download_specific_subtitle(radarr_id, hi, forced, use_origina
     try:
         result = manual_download_subtitle(moviePath, audio_language, hi, forced, subtitle, selected_provider,
                                           sceneName, title, 'movie', use_original_format,
-                                          profile_id=get_profile_id(movie_id=radarr_id), job_id=job_id,
+                                          profile_id=movieInfo.profileId, job_id=job_id,
                                           arr_instance_id=arr_instance_id)
     except OSError:
         return 'Unable to save subtitles file', 500
@@ -344,6 +391,9 @@ def movie_manually_download_specific_subtitle(radarr_id, hi, forced, use_origina
         if isinstance(result, str):
             return result, 500
         elif result:
+            activity.note_publication(observed, outcome='success',
+                                      language=getattr(result, 'language', None),
+                                      provider=selected_provider)
             history_log_movie(2, radarr_id, result, arr_instance_id=arr_instance_id)
             if not settings.general.dont_notify_manual_actions:
                 send_notifications_movie(radarr_id, result.message, arr_instance_id=arr_instance_id)
@@ -407,3 +457,27 @@ def clear_mismatch_after_manual_save(video, media_type, saved_subtitles, arr_ins
         if language is None:
             continue
         clear_mismatch_for_video(video, media_type, language, arr_instance_id=arr_instance_id)
+
+
+def _cache_search_result(subtitle, context=None, signature=None):
+    if context is not None:
+        from sportarr.subtitles import bind_candidate
+        subtitle = bind_candidate(context, subtitle, signature)
+    return subtitle_cache.store(subtitle)
+
+
+def _save_downloaded_subtitles(video, subtitle, path, validate=None, publication_guard=None,
+                               written_paths=None, on_publish=None):
+    """Publish provider bytes using the common format, naming and atomic writer."""
+    chmod = int(settings.general.chmod, 8) if not sys.platform.startswith('win') and settings.general.chmod_enabled else None
+    written_paths = [] if written_paths is None else written_paths
+    def write(destination, content):
+        if validate is not None:
+            validate(destination)
+        return write_subtitle_file(path, destination, content, written_paths=written_paths,
+                                   on_publish=on_publish,
+                                   **({'publication_guard': publication_guard} if publication_guard is not None else {}))
+    saved = save_subtitles(video.original_path, [subtitle], single=settings.general.single_language, tags=None,
+                           directory=get_target_folder(path), chmod=chmod, formats=(subtitle.format,),
+                           path_decoder=force_unicode, write_subtitle=write)
+    return [item for item in saved if item.storage_path in written_paths]

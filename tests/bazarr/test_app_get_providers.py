@@ -1,4 +1,5 @@
 import inspect
+import logging
 
 import pytest
 from subliminal_patch.core import Language
@@ -246,3 +247,110 @@ class TestProviderIsUsable:
             get_providers, "tp", {"opensubtitlescom": ("Throttled", until, "1h")}
         )
         assert get_providers.provider_is_usable("opensubtitlescom")
+
+    def test_a_throttled_provider_says_so_above_debug(self, monkeypatch, caplog):
+        """Skipping a provider changes what the reader gets, so the line has to be
+        readable without general.debug. It was logging.debug, and a report that
+        "provider X does nothing" is exactly what that line answers. Pinned here
+        rather than in the level table, because the root logger would accept an
+        INFO record either way: only the call site says which level it is emitted
+        at."""
+        import datetime
+
+        monkeypatch.setattr(
+            get_providers.settings.general, "enabled_providers", ["opensubtitlescom"]
+        )
+        until = datetime.datetime.now() + datetime.timedelta(hours=1)
+        monkeypatch.setattr(
+            get_providers, "tp", {"opensubtitlescom": ("WorkerError", until, "5 minutes")}
+        )
+        # The hub registration gate is once per process, and the provider-hub tests
+        # in this same pytest process need it still unconsumed so their state file is
+        # read when they set it. This test is about the level of the throttle line.
+        monkeypatch.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
+
+        with caplog.at_level(logging.INFO):
+            # None, not [], is how an empty provider list comes back.
+            assert get_providers.get_providers() is None
+
+        record = next(
+            record for record in caplog.records
+            if "Not using opensubtitlescom" in record.getMessage()
+        )
+        assert record.levelno == logging.INFO
+
+
+class TestProviderHubSettingsOverlay:
+    """The pool overlay copies a plugin's declared config keys out of the
+    settings section named after the plugin. Settings are decrypted in memory,
+    so a plugin whose id names one of Bazarr's own sections would be handed that
+    section's credentials on every search and download (validate_manifest
+    refuses such an id; this is the overlay's own half of that)."""
+
+    @staticmethod
+    def _installation(provider_id):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            provider_id=provider_id,
+            manifest={
+                "config_schema": {
+                    "type": "object",
+                    "properties": {"apikey": {"type": "string"}},
+                },
+            },
+        )
+
+    def _patch_hub(self, monkeypatch, provider_id, stored_config):
+        import provider_hub.service as hub_service
+        import provider_hub.state as hub_state
+
+        monkeypatch.setattr(
+            hub_state,
+            "active_installations",
+            lambda: [self._installation(provider_id)],
+        )
+        monkeypatch.setattr(
+            hub_service,
+            "runtime_provider_configs",
+            lambda: {provider_id: dict(stored_config)},
+        )
+
+    def test_plugin_never_receives_another_sections_secret(self, monkeypatch):
+        config = get_providers.settings
+        original = config.sonarr.apikey
+        config.set("sonarr.apikey", "sonarr-api-key")  # pragma: allowlist secret
+        self._patch_hub(monkeypatch, "sonarr", {"apikey": "plugin-own-key"})
+        try:
+            auth = get_providers.get_providers_auth()
+        finally:
+            config.set("sonarr.apikey", original)
+
+        assert auth["sonarr"]["apikey"] == "plugin-own-key"
+
+    def test_a_blocked_plugin_is_reported_once_per_process(self, monkeypatch, caplog):
+        # The overlay runs on every search and download, so reporting per call
+        # would have one bad install writing the same line forever.
+        monkeypatch.setattr(get_providers, "_REPORTED_RESERVED_SECTION_PLUGINS", set())
+        self._patch_hub(monkeypatch, "plex", {"apikey": "plugin-own-key"})
+
+        with caplog.at_level(logging.ERROR):
+            get_providers.get_providers_auth()
+            get_providers.get_providers_auth()
+
+        reports = [
+            record for record in caplog.records
+            if "Refusing to read the plex settings section" in record.getMessage()
+        ]
+        assert len(reports) == 1
+
+    def test_plugin_reads_its_own_settings_section(self, monkeypatch):
+        config = get_providers.settings
+        config.set("overlayhub", {"apikey": "typed-into-the-settings-card"})
+        self._patch_hub(monkeypatch, "overlayhub", {"apikey": "stale-stored-key"})
+        try:
+            auth = get_providers.get_providers_auth()
+        finally:
+            config.set("overlayhub", {})
+
+        assert auth["overlayhub"]["apikey"] == "typed-into-the-settings-card"

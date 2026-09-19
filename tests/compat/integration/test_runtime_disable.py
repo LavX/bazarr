@@ -1,4 +1,4 @@
-"""Codex P2: when compat_endpoint.enabled is toggled off at runtime, the
+"""When compat_endpoint.enabled is toggled off at runtime, the
 already-mounted compat blueprint must refuse traffic. The blueprint is
 registered at boot based on the startup value, so without the
 before_request guard the endpoint keeps serving with the old token until

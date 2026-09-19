@@ -52,6 +52,28 @@ def _build_pooled_session(verify: bool) -> requests.Session:
     return s
 
 
+def plex_server_for(baseurl: str, token: str, verify: bool = False) -> PlexServer:
+    """A pooled PlexServer for one explicit endpoint.
+
+    Native destinations carry their own URL and token rather than reading the
+    scalar settings, so the cache is keyed the same way but the credentials
+    come from the caller. Same cache, same FIFO bound: a destination rotation
+    evicts old entries instead of leaking them.
+    """
+    cache_key = (baseurl, token, verify)
+    with _plex_cache_lock:
+        cached = _plex_cache.get(cache_key)
+        if cached is not None:
+            _plex_cache.move_to_end(cache_key)
+            return cached
+        session = _build_pooled_session(verify=verify)
+        plex_server = PlexServer(baseurl, token, session=session)
+        _plex_cache[cache_key] = plex_server
+        while len(_plex_cache) > _PLEX_CACHE_MAX_ENTRIES:
+            _plex_cache.popitem(last=False)
+        return plex_server
+
+
 def get_plex_server() -> PlexServer:
     """Connect to the Plex server and return the server instance.
 
@@ -89,25 +111,7 @@ def get_plex_server() -> PlexServer:
         # the original code unconditionally set ``session.verify = False``.
         # If TLS verification ever becomes user-configurable for Plex, plumb
         # that flag through to the cache key as well.
-        verify = False
-        cache_key = (baseurl, token, verify)
-
-        with _plex_cache_lock:
-            cached = _plex_cache.get(cache_key)
-            if cached is not None:
-                # Move-to-end to keep the most-recently-used at the tail
-                # so eviction continues to drop the oldest entry.
-                _plex_cache.move_to_end(cache_key)
-                return cached
-
-            session = _build_pooled_session(verify=verify)
-            plex_server = PlexServer(baseurl, token, session=session)
-
-            _plex_cache[cache_key] = plex_server
-            while len(_plex_cache) > _PLEX_CACHE_MAX_ENTRIES:
-                _plex_cache.popitem(last=False)
-
-            return plex_server
+        return plex_server_for(baseurl, token, False)
 
     except Exception as e:
         logger.error(f"Failed to connect to Plex server: {e}")  # noqa: G004
@@ -252,6 +256,49 @@ def plex_update_library(is_movie_library: bool) -> None:
             
     except Exception as e:
         logger.error(f"Error in plex_update_library: {e}")  # noqa: G004
+
+
+def plex_update_sports_library() -> None:
+    """Trigger a library update for every configured Plex sports library.
+
+    A sports event carries no IMDB id, so ``plex_refresh_item`` has nothing to
+    resolve the item with; scanning each configured sports section is the
+    equivalent refresh for the sports content in it.
+    """
+    try:
+        plex = get_plex_server()
+        library_names = settings.plex.sports_library
+
+        # Ensure we have a list
+        if not isinstance(library_names, list):
+            library_names = [library_names] if library_names else []
+
+        if not library_names:
+            logger.debug("No sports libraries configured in Plex settings")
+            return
+
+        # Update all configured sports libraries
+        updated_count = 0
+        for library_name in library_names:
+            if not library_name:  # Skip empty strings
+                continue
+
+            try:
+                library = plex.library.section(library_name)
+                library.update()
+                logger.info(f"Triggered update for sports library: {library_name}")  # noqa: G004
+                updated_count += 1
+            except Exception as lib_error:
+                logger.error(f"Failed to update sports library '{library_name}': {lib_error}")  # noqa: G004
+                continue
+
+        if updated_count > 0:
+            logger.debug(f"Successfully triggered update for {updated_count} sports libraries")  # noqa: G004
+        else:
+            logger.warning("Failed to update any Plex sports libraries")
+
+    except Exception as e:
+        logger.error(f"Error in plex_update_sports_library: {e}")  # noqa: G004
 
 
 def plex_refresh_item(imdb_id: str, is_movie: bool, season: int = None, episode: int = None) -> None:

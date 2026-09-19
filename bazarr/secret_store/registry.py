@@ -1,7 +1,7 @@
 # coding=utf-8
 """Registry of every sensitive setting in config.yaml.
 
-Two tiers:
+Three credential tiers:
 
 USER_VISIBLE_SECRETS - credentials the user types in, copies, or rotates
     via the Settings page. They are encrypted at rest, but the
@@ -13,6 +13,9 @@ USER_VISIBLE_SECRETS - credentials the user types in, copies, or rotates
 USER_VISIBLE_SECRET_LISTS - same tier as above, but the value is a list
     of strings (e.g. translator.gemini_keys), each item handled
     individually.
+
+WRITE_ONLY_SECRETS - credentials encrypted at rest and omitted from settings
+    responses. Only their configured status is public.
 
 SYSTEM_SECRETS - cryptographic primitives the user MUST NOT see and the
     backend MUST NOT leak. These are scoped to backend-internal use:
@@ -30,6 +33,14 @@ Membership tests use exact-match dotted paths (e.g. "sonarr.apikey").
 The dynaconf API serializer flattens nested settings to that form
 before checking, so this stays simple.
 """
+
+# Sections whose connection settings are now instance rows. They remain
+# encrypted for the one-time database import, but their values are never
+# exposed or edited through the general settings API, because a save would
+# write a value nothing reads. Plex is not here: its section still holds the
+# account, the recently-added dates and the webhook and Autopulse
+# configuration, none of which is a refresh.
+IMPORT_ONLY_SECTIONS = frozenset({'emby', 'jellyfin', 'silo'})
 
 USER_VISIBLE_SECRETS = frozenset({
     # Bazarr's own admin login (username + password) and the API key that
@@ -54,8 +65,13 @@ USER_VISIBLE_SECRETS = frozenset({
     "plex.token",
     "plex.username",
     "plex.email",
-    # Jellyfin
+    # Media servers
     "jellyfin.apikey",
+    "emby.apikey",
+    "silo.apikey",
+    # Seerr: the key is admin access to Seerr, encrypted at rest and shown
+    # only in the Connections form.
+    "seerr.apikey",
     # Network proxy (full login pair).
     "proxy.username",
     "proxy.password",
@@ -164,3 +180,11 @@ def is_system_secret(key: str) -> bool:
     """True iff `key` is a backend-only cryptographic primitive that
     must be masked by the API serializer."""
     return key in SYSTEM_SECRETS
+
+
+# Credentials encrypted at rest and omitted from all settings responses.
+WRITE_ONLY_SECRETS = frozenset({"discover.tmdb_access_token"})
+
+
+def is_write_only_secret(path: str) -> bool:
+    return path.lower() in WRITE_ONLY_SECRETS
