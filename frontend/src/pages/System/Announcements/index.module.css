@@ -1,0 +1,81 @@
+/* One announcement, as a card. The head carries what a reader sorts by, the
+   title carries the gist, and the body is prose at a readable measure rather
+   than a table cell stretched across the window. */
+
+.card {
+  /* The accent the app already uses for links (AppShell, Discover), taken
+     through light-dark for the scheme. Releases colours its links blue-4,
+     which measures 3.4:1 on a card in dark mode; this pair measures 5.4:1
+     against the light card and 10:1 against the dark one. */
+  --announcement-link: light-dark(
+    var(--mantine-color-brand-7),
+    var(--mantine-color-brand-4)
+  );
+}
+
+.kind {
+  /* "Provider Hub" is two words in a head that is deliberately tight on a
+     phone, and a kind that wraps stops scanning as a kind. */
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+/* The disclosure is one of two quiet actions on the card, so it carries the
+   same weight as the source link beside it rather than the button theme's
+   near-white, which would make reading on look like the card's main action. */
+.toggle {
+  color: var(--bz-text-secondary);
+}
+
+.toggle:hover {
+  color: var(--bz-text-primary);
+}
+
+.age {
+  color: var(--bz-text-tertiary);
+  font-size: 0.75rem;
+  /* One value. Left free to break, "4 months ago" stacked into four lines and
+     read as four separate facts. */
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.headline {
+  margin-top: var(--mantine-spacing-sm);
+  color: var(--bz-text-primary);
+  font-weight: 600;
+  line-height: 1.35;
+  /* A headline that ends on one orphaned word reads as a mistake. */
+  text-wrap: balance;
+}
+
+.body {
+  margin-top: var(--mantine-spacing-xs);
+  color: var(--bz-text-secondary);
+  font-size: 0.9375rem;
+  line-height: 1.65;
+  /* A URL in the prose is longer than the line it sits on. It has to break
+     rather than push the card wider than its measure. */
+  overflow-wrap: anywhere;
+}
+
+.body a {
+  color: var(--announcement-link);
+  text-underline-offset: 2px;
+}
+
+/* The card's own source, kept quieter than the links in the prose: there is
+   one on every card, and a page of accents competes with the headlines. */
+.link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  color: var(--bz-text-secondary);
+  font-size: 0.875rem;
+  text-underline-offset: 3px;
+}
+
+.link:hover {
+  color: var(--bz-text-primary);
+}
