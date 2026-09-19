@@ -264,6 +264,10 @@ class TestProviderIsUsable:
         monkeypatch.setattr(
             get_providers, "tp", {"opensubtitlescom": ("WorkerError", until, "5 minutes")}
         )
+        # The hub registration gate is once per process, and the provider-hub tests
+        # in this same pytest process need it still unconsumed so their state file is
+        # read when they set it. This test is about the level of the throttle line.
+        monkeypatch.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
 
         with caplog.at_level(logging.INFO):
             # None, not [], is how an empty provider list comes back.
