@@ -343,7 +343,7 @@ Upstream Bazarr queries all subtitle providers simultaneously and picks the high
 Bazarr+ solves it with a **Provider Priority toggle** in Settings > Providers. When enabled, providers are queried sequentially in the order you've arranged them. If a provider returns subtitles meeting the minimum score, Bazarr+ stops searching and uses those results. Your preferred providers (curated community sites, specialized language sources) always get first shot. When disabled, the original behavior is preserved: all providers queried simultaneously, best score wins.
 
 ### AI Subtitle Translation via OpenRouter
-Upstream has Google Translate, Gemini, and Lingarr. Bazarr+ adds **OpenRouter** as a fourth translator engine, giving access to 300+ LLMs (Claude, Gemini, GPT, LLaMA, Grok, and more) plus any custom model ID from openrouter.ai. It runs as a separate microservice with an async job queue supporting 1-5 concurrent jobs and 1-8 parallel batches. Features include:
+Upstream has Google Translate, Gemini, and Lingarr. Bazarr+ adds **OpenRouter** as a fourth translator engine, giving access to 300+ LLMs (Claude, Gemini, GPT, LLaMA, Grok, and more) plus any custom model ID from openrouter.ai. It runs as a separate microservice with an async job queue supporting 1-5 concurrent jobs and 1-8 parallel batches. That is what ships today; next on the v2 line it moves in-process, as a library with a model catalog and a per-profile engine choice instead of a sidecar container ([Roadmap](#roadmap)). Features include:
 - **Translate from the subtitle action menu**: click (...) on a missing subtitle row, pick an existing source subtitle to translate from
 - **Batch translation** for entire series/movie libraries from the Wanted pages
 - **Dedicated settings page** with 4 zones: engine picker, connection config, model tuning (temperature, reasoning mode, provider routing, parallel batches), and a live status panel showing queue stats, job progress, token usage, cost, and speed
@@ -405,13 +405,6 @@ The film plays against the cue list, the current line is editable beside it, and
 ### Subtitle Viewer
 Read-only subtitle preview accessible from the subtitle action menu. Supports SRT, VTT, and ASS/SSA formats with automatic format detection. Shows a cue table with timestamps and text, file size, and format badge. Useful for quickly checking subtitle content and timing. When you do want the files, every subtitle menu has a Download action, and the series and movie pages can produce a zip of everything on disk, filtered by season and language.
 
-### Advanced UI
-- **Table filters** on Wanted and Library pages: include/exclude audio language (multi-select), missing subtitle language filter, title search, with active filter chips and a collapsible filter panel
-- **Floating save button** with Ctrl+S/Cmd+S keyboard shortcut, visible only when settings have unsaved changes
-- **Three-button unsaved changes modal**: Save & Leave, Discard, or Keep Editing (upstream only has Leave/Stay)
-- **Navy + amber dark theme**: custom color palette from `#121125` (navy black) to `#fff8e1` (cream), with amber brand accents (`#e68a00` to `#b36b00`)
-- **Audio language display** as blue badges in all table views
-
 ### Mass Subtitle Sync
 Upstream lets you sync subtitles one at a time, or per-series via Mass Edit. But there's no way to sync your entire library at once. This has been [requested for years](https://bazarr.featureupvote.com/suggestions/172013/mass-sync-all-subtitles) (249 votes), but upstream rejected it as "won't happen," saying "Bazarr isn't a batch tool."
 
@@ -441,6 +434,13 @@ Select multiple movies or series from the library pages and apply operations in 
 
 **Profile management:**
 - **Bulk profile assignment**: select multiple movies or series and assign a language profile to all of them at once
+
+### Smaller UI Differences from Upstream
+- **Table filters** on Wanted and Library pages: include/exclude audio language (multi-select), missing subtitle language filter, title search, with active filter chips and a collapsible filter panel
+- **Floating save button** with Ctrl+S/Cmd+S keyboard shortcut, visible only when settings have unsaved changes
+- **Three-button unsaved changes modal**: Save & Leave, Discard, or Keep Editing (upstream only has Leave/Stay)
+- **Navy + amber dark theme**: custom color palette from `#121125` (navy black) to `#fff8e1` (cream), with amber brand accents (`#e68a00` to `#b36b00`)
+- **Audio language display** as blue badges in all table views
 
 ### No Tracking / No Telemetry
 Upstream Bazarr ships two analytics systems that phone home to Google: a GA4 property (`G-3820T18GE3`) in `bazarr/utilities/analytics.py` that reports your Bazarr version, Python version, Sonarr/Radarr versions, OS, subtitle provider usage, every download action, and languages searched, plus a legacy Universal Analytics tracker (`UA-86466078-1`) in the SubZero library dependency. Bazarr+ has removed both entirely. No usage data leaves your server.
@@ -584,6 +584,8 @@ The OpenSubtitles.org plugin no longer uses environment variables. Configure its
 <details>
 <summary><strong>Architecture</strong></summary>
 
+**Container topology.** The three containers and how they reach each other. What Bazarr+ reaches outbound is a separate list below the picture, because none of it is a container you host.
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │                                Docker Network                                     │
@@ -612,6 +614,14 @@ The OpenSubtitles.org plugin no longer uses environment variables. Configure its
 ```
 
 > **Note:** The OpenSubtitles.org Provider Hub plugin scrapes opensubtitles.org in-process via `ai-cloudscraper` with inline Anubis proof-of-work solving. [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) (port 8191) is strongly recommended as a fallback to solve Cloudflare browser challenges; set its `/v1` URL in the plugin's FlareSolverr URL setting. See the Docker Compose example above for the full setup.
+
+**Data sources and destinations.** What Bazarr+ reaches outbound, none of it a container you host:
+
+- **TMDB**: the film and show metadata behind Discover. It runs on a key the application carries, so there is nothing to configure, and supplying your own is an optional override
+- **Subtitle providers**: the catalog plugins you install from the Provider Hub, and the sites the OpenSubtitles.org plugin reads in-process
+- **Plex, Jellyfin, Emby and Silo**: one multi-instance layer, each server with its own credentials, asked to rescan a file when a subtitle lands
+- **Seerr, Jellyseerr and Overseerr**: optional, for requesting a title you do not own from its page in Discover
+- **OpenRouter**: reached through the AI Subtitle Translator container, and only when you turn translation on
 
 </details>
 
