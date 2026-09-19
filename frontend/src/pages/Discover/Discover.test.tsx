@@ -1,4 +1,5 @@
 /* eslint-disable camelcase -- API fixtures retain transport field names. */
+/// <reference types="node" />
 import {
   createMemoryRouter,
   Link,
@@ -8,6 +9,7 @@ import {
 import { Button, useMantineColorScheme } from "@mantine/core";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
+import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import queryClient from "@/apis/queries";
 import { useDiscover } from "@/contexts/Discover";
@@ -23,6 +25,44 @@ import {
   selectInput,
 } from "./selectTestHelpers";
 import Discover from "./testHarness";
+
+const discoverStyles = readFileSync(
+  "src/pages/Discover/Discover.module.scss",
+  "utf8",
+);
+
+/**
+ * The coarse-pointer block that carries the page's touch floor.
+ *
+ * jsdom applies no media query and computes no layout, so the stylesheet is
+ * what can be asserted. The floor has to sit inside a coarse-pointer block:
+ * that is what keeps the fine-pointer sizes the page was tuned for, which is
+ * the whole reason the desktop rules are left where they are.
+ */
+function coarseTouchBlock(source: string): string {
+  const marker = "@media (pointer: coarse)";
+  for (
+    let at = source.indexOf(marker);
+    at >= 0;
+    at = source.indexOf(marker, at + 1)
+  ) {
+    const open = source.indexOf("{", at);
+    if (open < 0) return "";
+    let depth = 0;
+    for (let i = open; i < source.length; i += 1) {
+      if (source[i] === "{") depth += 1;
+      else if (source[i] === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          const block = source.slice(at, i + 1);
+          if (block.includes(".wantedLanguages button")) return block;
+          break;
+        }
+      }
+    }
+  }
+  return "";
+}
 
 function ThemeToggle() {
   const { toggleColorScheme } = useMantineColorScheme();
@@ -1509,5 +1549,41 @@ describe("Discover return from local work", () => {
     } finally {
       harness.restore();
     }
+  });
+});
+
+describe("Discover touch targets on a coarse pointer", () => {
+  it("floors every control that measured under 44px, inside a coarse-pointer block", () => {
+    const block = coarseTouchBlock(discoverStyles);
+    expect(block).not.toBe("");
+    // Not a global size increase: the ticket that owns this page rejected
+    // raising these on a fine pointer, so the floor is scoped to the finger.
+    expect(block).toMatch(/@media \(pointer: coarse\)/);
+    // Retaken at 320px with a coarse pointer: the queue's search pills came to
+    // 31.4px, a wanted row's title link to 37px, the summary buttons to 40px
+    // and the heading links to 18.6 or 20.1px.
+    for (const selector of [
+      ".discover .wantedLanguages button",
+      ".discover .wantedTitle",
+      ".discover .heroCta",
+      ".discover .heroActions a",
+      ".discover .wantedGroupHead a",
+      ".discover .libraryHistory a",
+      ".discover .attention li > a",
+    ]) {
+      const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      expect(block).toMatch(new RegExp(`${escaped}[^}]*min-height: 44px`));
+    }
+  });
+
+  it("leaves the deliberate fine-pointer sizes where they were set", () => {
+    // The pills are sized to WCAG 2.2's 24px minimum on purpose, not to this
+    // page's 44px floor, and the floor must not reach past the media query.
+    const outside = discoverStyles.replace(
+      coarseTouchBlock(discoverStyles),
+      "",
+    );
+    expect(outside).toMatch(/\.wantedLanguages \{[\s\S]*?min-height: 28px/);
+    expect(outside).toMatch(/\.heroCta \{[\s\S]*?min-height: 40px/);
   });
 });

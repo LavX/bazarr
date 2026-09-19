@@ -5063,3 +5063,41 @@
     }
   }
 }
+
+/* The 44px floor, on a coarse pointer only.
+ *
+ * Phone width is where these controls are the primary way to act and a finger
+ * is what hits them. Retaken at 320px with a coarse pointer, the queue's search
+ * pills came to 31px, a wanted row's title link to 37px, the summary buttons to
+ * 40px and the "see all" links beside each heading to under 24px, which is below
+ * WCAG 2.2's minimum target size as well as this project's own floor. The
+ * desktop sizes stay where they are: the block is scoped to a coarse pointer, so
+ * a mouse keeps the tighter rhythm. The box grows around these links rather than
+ * the words in them, so the type stays at the size it was set.
+ */
+@media (pointer: coarse) {
+  .discover .wantedLanguages button,
+  .discover .wantedTitle,
+  .discover .heroCta,
+  .discover .heroActions a,
+  .discover .wantedGroupHead a,
+  .discover .libraryHistory a,
+  .discover .attention li > a {
+    min-height: 44px;
+  }
+  /* Links are inline text, so the taller box needs centring or the words hang
+     at its top edge and the row they sit in reads as misaligned. */
+  .discover .heroActions a,
+  .discover .wantedGroupHead a,
+  .discover .libraryHistory a,
+  .discover .attention li > a {
+    display: inline-flex;
+    align-items: center;
+  }
+  /* A wanted row reserves two lines so movie and episode rows line up across
+     the page. The reserve sits in a taller box now, and centring it keeps the
+     row's own padding even at top and bottom. */
+  .discover .wantedTitle {
+    justify-content: center;
+  }
+}
