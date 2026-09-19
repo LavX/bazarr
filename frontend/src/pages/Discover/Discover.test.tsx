@@ -85,6 +85,12 @@ function renderDiscover() {
         path: "/subtitle-hub",
         element: <Link to="/discover">Return to Discover</Link>,
       },
+      {
+        // A route outside Discover, reachable from the shared navigation, for
+        // the cases where the reader leaves the whole route.
+        path: "/history/series",
+        element: <div>Local history page</div>,
+      },
     ],
     { initialEntries: ["/discover"] },
   );
@@ -983,7 +989,11 @@ it("keeps identified title retrieval focused on language and search", async () =
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeVisible();
 });
 
-it("restores completed subtitle results through browser Back and Forward without another search", async () => {
+// The boundary this pair pins: the title's own way back edits the URL inside
+// the Discover route, so it is history navigation with the page still mounted.
+// Leaving the route altogether is the cases below it, where the page is filed
+// on the way out.
+it("restores completed subtitle results through Back and Forward inside Discover without another search", async () => {
   let searches = 0;
   server.use(
     http.post("/api/discover/search", () => {
@@ -1026,6 +1036,69 @@ it("restores completed subtitle results through browser Back and Forward without
     await router.navigate(-1);
   });
   expect(screen.queryByText("The.Matrix.1999.1080p")).not.toBeInTheDocument();
+});
+
+/**
+ * A provider answer the case holds open, for the two races where the reader is
+ * on another route while the search is out. `arrive` lets the answer land.
+ */
+function pendingSearch(onRequest: () => void) {
+  let arrive: (() => void) | undefined;
+  const held = new Promise<void>((resolve) => {
+    arrive = resolve;
+  });
+  return {
+    handler: http.post("/api/discover/search", async () => {
+      onRequest();
+      await held;
+      return HttpResponse.json(snapshot());
+    }),
+    arrive: () => arrive?.(),
+  };
+}
+
+it("keeps results that arrive while the reader is on another route", async () => {
+  let searches = 0;
+  const search = pendingSearch(() => {
+    searches++;
+  });
+  server.use(search.handler);
+  const { user, router } = renderDiscover();
+  await selectTarget(user);
+  await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+  // Leaving the route files the title's page while its search is still out.
+  await user.click(screen.getByRole("link", { name: "History" }));
+  await screen.findByText("Local history page");
+  await act(async () => {
+    search.arrive();
+  });
+  await act(async () => {
+    await router.navigate(-1);
+  });
+  await screen.findByText("The.Matrix.1999.1080p");
+  expect(searches).toBe(1);
+});
+
+it("keeps a search running while the reader is on another route", async () => {
+  let searches = 0;
+  const search = pendingSearch(() => {
+    searches++;
+  });
+  server.use(search.handler);
+  const { user, router } = renderDiscover();
+  await selectTarget(user);
+  await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+  await user.click(screen.getByRole("link", { name: "History" }));
+  await screen.findByText("Local history page");
+  // Coming back before the provider answers must not retire the search.
+  await act(async () => {
+    await router.navigate(-1);
+  });
+  await act(async () => {
+    search.arrive();
+  });
+  await screen.findByText("The.Matrix.1999.1080p");
+  expect(searches).toBe(1);
 });
 
 describe("Discover return from local work", () => {
