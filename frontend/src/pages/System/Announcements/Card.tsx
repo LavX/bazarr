@@ -18,6 +18,7 @@ import { useSystemAnnouncementsAddDismiss } from "@/apis/hooks";
 import { MutateAction } from "@/components/async";
 import {
   ANNOUNCEMENT_LABELS,
+  bodyLabel,
   classifyAnnouncement,
   linkHost,
   splitAnnouncementText,
@@ -44,11 +45,16 @@ const AnnouncementCard: FunctionComponent<Props> = ({ announcement }) => {
   const segments = useMemo(() => splitLinks(body), [body]);
   const { overflowing, ref } = useOverflowingBody(body);
   const host = linkHost(link);
+  // A link the clamp has hidden must not be tabbable: focus would land on
+  // something the reader cannot see. Expanding is the way in.
+  const hiddenInClamp = overflowing && !expanded;
+  const cardLabel = headline ? undefined : bodyLabel(body) || undefined;
 
   return (
     <Card
       component="article"
       aria-labelledby={headline ? titleId : undefined}
+      aria-label={cardLabel}
       className={classes.card}
       p="lg"
     >
@@ -89,6 +95,7 @@ const AnnouncementCard: FunctionComponent<Props> = ({ announcement }) => {
                 target="_blank"
                 rel="noopener noreferrer"
                 underline="always"
+                tabIndex={hiddenInClamp ? -1 : undefined}
               >
                 {segment.text}
               </Anchor>

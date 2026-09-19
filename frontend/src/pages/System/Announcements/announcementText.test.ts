@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  bodyLabel,
   classifyAnnouncement,
   linkHost,
   splitAnnouncementText,
@@ -93,6 +94,30 @@ describe("linkHost", () => {
   });
 });
 
+describe("bodyLabel", () => {
+  it("returns a short body whole, on one line", () => {
+    expect(bodyLabel("Heads up about\na new provider")).toBe(
+      "Heads up about a new provider",
+    );
+  });
+
+  it("cuts a long body at a word rather than mid word", () => {
+    const label = bodyLabel(`${"word ".repeat(30)}end`);
+
+    expect(label.length).toBeLessThanOrEqual(80);
+    expect(label.endsWith("word")).toBe(true);
+    expect(label).not.toContain("  ");
+  });
+
+  it("keeps a first word longer than the limit rather than emptying itself", () => {
+    expect(bodyLabel("x".repeat(200))).toBe("x".repeat(80));
+  });
+
+  it("returns nothing for an empty body", () => {
+    expect(bodyLabel("   ")).toBe("");
+  });
+});
+
 describe("splitLinks", () => {
   it("lifts a URL out of the sentence around it", () => {
     expect(
@@ -117,6 +142,28 @@ describe("splitLinks", () => {
         text: "https://lavx.github.io/bazarr",
       },
       { text: "." },
+    ]);
+  });
+
+  it("keeps a bracket the address opened and drops the one that wrapped it", () => {
+    expect(splitLinks("(https://en.wikipedia.org/wiki/Foo_(bar))")).toEqual([
+      { text: "(" },
+      {
+        link: "https://en.wikipedia.org/wiki/Foo_(bar)",
+        text: "https://en.wikipedia.org/wiki/Foo_(bar)",
+      },
+      { text: ")" },
+    ]);
+  });
+
+  it("drops a quote the prose wrapped the address in", () => {
+    expect(splitLinks('said "https://example.com/a" once')).toEqual([
+      { text: 'said "' },
+      {
+        link: "https://example.com/a",
+        text: "https://example.com/a",
+      },
+      { text: '" once' },
     ]);
   });
 

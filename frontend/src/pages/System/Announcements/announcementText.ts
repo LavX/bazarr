@@ -97,25 +97,42 @@ export interface TextSegment {
 }
 
 /**
+ * A link that ends in punctuation the address does not own. A closing bracket
+ * that wraps a URL in prose is punctuation, but one the address itself opened
+ * belongs to it, so the two are counted rather than assumed.
+ */
+function trimUrl(raw: string): string {
+  let url = raw.replace(/[.,;:!?'"]+$/, "");
+  const closers = () => (url.match(/\)/g) ?? []).length;
+  const openers = () => (url.match(/\(/g) ?? []).length;
+  while (url.endsWith(")") && closers() > openers()) {
+    url = url.slice(0, -1);
+  }
+  return url;
+}
+
+/**
  * Splits a body into prose and the URLs inside it, so a URL the feed dropped
- * mid-sentence is still reachable. Scheme-bearing URLs only: a bare
- * "github.com/LavX/..." left as prose is a small loss, while guessing where a
- * hostname begins would turn ordinary sentences into links. A trailing
- * sentence mark stays in the prose, and a closing bracket around a URL is
- * punctuation rather than part of the address.
+ * mid-sentence is still reachable. The match runs to the next whitespace and
+ * the address is then trimmed of punctuation the prose owns, which keeps a
+ * bracketed URL intact instead of cutting it at the first bracket it contains.
+ * A scheme is required: a bare "github.com/LavX/..." left as prose is a small
+ * loss, while guessing where a hostname begins turns ordinary sentences into
+ * links.
  */
 export function splitLinks(text: string): TextSegment[] {
-  const pattern = /https?:\/\/[^\s<>()]*[^\s<>().,;:!?]/g;
+  const pattern = /https?:\/\/[^\s<>]+/g;
   const segments: TextSegment[] = [];
   let cursor = 0;
   let match = pattern.exec(text);
 
   while (match) {
+    const url = trimUrl(match[0]);
     if (match.index > cursor) {
       segments.push({ text: text.slice(cursor, match.index) });
     }
-    segments.push({ link: match[0], text: match[0] });
-    cursor = match.index + match[0].length;
+    segments.push({ link: url, text: url });
+    cursor = match.index + url.length;
     match = pattern.exec(text);
   }
 
@@ -124,4 +141,20 @@ export function splitLinks(text: string): TextSegment[] {
   }
 
   return segments;
+}
+
+/**
+ * A name for a card that has no headline, where the lead was too long to read
+ * as one. An article with no name leaves a screen reader with an unnamed
+ * landmark and a list of dismiss buttons that all read the same, so the
+ * opening of the body stands in for the title it does not have.
+ */
+export function bodyLabel(body: string, limit = 80): string {
+  const flat = body.replace(/\s+/g, " ").trim();
+  if (flat.length <= limit) {
+    return flat;
+  }
+  const cut = flat.slice(0, limit);
+  const lastSpace = cut.lastIndexOf(" ");
+  return lastSpace > 0 ? cut.slice(0, lastSpace) : cut;
 }
