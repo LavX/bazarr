@@ -10,7 +10,11 @@ declare type ToolboxComp = FunctionComponent<PropsWithChildren> & {
 
 const Toolbox: ToolboxComp = ({ children }) => {
   return (
-    <Group p={12} justify="space-between" className={styles.group}>
+    /* 12px all round put roughly 40px of chrome around a single 36px input,
+       which on a table whose left half is empty until something is selected
+       read as a band of nothing. The horizontal inset is what separates the
+       controls from the table edges; the vertical is not carrying anything. */
+    <Group py={6} px={12} justify="space-between" className={styles.group}>
       {children}
     </Group>
   );
