@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   useArrInstances,
   useCreateArrInstance,
+  useDeleteArrInstance,
   useSettingsMutation,
   useTestArrInstanceConnection,
 } from "@/apis/hooks";
@@ -17,6 +18,7 @@ vi.mock("@/apis/hooks", async (importOriginal) => {
     ...actual,
     useArrInstances: vi.fn(),
     useCreateArrInstance: vi.fn(),
+    useDeleteArrInstance: vi.fn(),
     useTestArrInstanceConnection: vi.fn(),
     useSettingsMutation: vi.fn(),
   };
@@ -24,6 +26,7 @@ vi.mock("@/apis/hooks", async (importOriginal) => {
 
 const mockedUseArrInstances = vi.mocked(useArrInstances);
 const mockedUseCreateArrInstance = vi.mocked(useCreateArrInstance);
+const mockedUseDeleteArrInstance = vi.mocked(useDeleteArrInstance);
 const mockedUseTestArrInstanceConnection = vi.mocked(
   useTestArrInstanceConnection,
 );
@@ -31,6 +34,7 @@ const mockedUseSettingsMutation = vi.mocked(useSettingsMutation);
 
 const onNext = vi.fn();
 const createMutate = vi.fn();
+const deleteMutate = vi.fn();
 const testMutate = vi.fn();
 const settingsMutate = vi.fn();
 
@@ -52,6 +56,21 @@ function setTestState(state: Record<string, unknown>) {
   } as unknown as ReturnType<typeof useTestArrInstanceConnection>);
 }
 
+// Both writes succeed by default, so a test that cares about a failure sets
+// only the one it is about.
+function succeedingMutation(mutate: typeof createMutate) {
+  mutate.mockImplementation(
+    (_body: unknown, opts?: { onSuccess?: () => void }) => {
+      opts?.onSuccess?.();
+    },
+  );
+}
+
+async function fillValidConnection(user: ReturnType<typeof userEvent.setup>) {
+  await user.type(screen.getByLabelText(/address/i), "10.0.0.5");
+  await user.type(screen.getByLabelText(/api key/i), "abc123");
+}
+
 describe("ArrStep", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -61,9 +80,16 @@ describe("ArrStep", () => {
       mutate: createMutate,
       isPending: false,
     } as unknown as ReturnType<typeof useCreateArrInstance>);
+    mockedUseDeleteArrInstance.mockReturnValue({
+      mutate: deleteMutate,
+      isPending: false,
+    } as unknown as ReturnType<typeof useDeleteArrInstance>);
     mockedUseSettingsMutation.mockReturnValue({
       mutate: settingsMutate,
+      isPending: false,
     } as unknown as ReturnType<typeof useSettingsMutation>);
+    succeedingMutation(createMutate);
+    succeedingMutation(settingsMutate);
   });
 
   it("renders bespoke connection fields for the kind", () => {
@@ -78,6 +104,65 @@ describe("ArrStep", () => {
     expect(screen.getByLabelText(/api key/i)).toBeInTheDocument();
   });
 
+  // The defect this step shipped with: Continue on a form nobody filled in
+  // posted it anyway, and the backend fills the blanks (empty key,
+  // 127.0.0.1), so a new install came out of the wizard with up to three
+  // enabled, default, unreachable instances scheduled for sync.
+  it("writes nothing when the step was never filled in", async () => {
+    const user = userEvent.setup();
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await user.click(
+      screen.getByRole("button", { name: /continue without sonarr/i }),
+    );
+
+    expect(createMutate).not.toHaveBeenCalled();
+    expect(settingsMutate).not.toHaveBeenCalled();
+    expect(onNext).toHaveBeenCalled();
+  });
+
+  it("refuses to create until an address and an API key are given", async () => {
+    const user = userEvent.setup();
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await user.type(screen.getByLabelText(/address/i), "10.0.0.5");
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    expect(createMutate).not.toHaveBeenCalled();
+    expect(onNext).not.toHaveBeenCalled();
+    expect(screen.getByText(/enter the sonarr api key/i)).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText(/api key/i), "abc123");
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+  });
+
+  it("rejects a cleared port instead of posting zero", async () => {
+    const user = userEvent.setup();
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await fillValidConnection(user);
+    await user.clear(screen.getByLabelText(/port/i));
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    expect(createMutate).not.toHaveBeenCalled();
+    expect(screen.getByText(/between 1 and 65535/i)).toBeInTheDocument();
+  });
+
+  it("keeps Test shut until there is a connection to test", async () => {
+    const user = userEvent.setup();
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    expect(screen.getByRole("button", { name: /test/i })).toBeDisabled();
+
+    await user.type(screen.getByLabelText(/address/i), "10.0.0.5");
+    expect(screen.getByRole("button", { name: /test/i })).toBeDisabled();
+
+    await user.type(screen.getByLabelText(/api key/i), "abc123");
+    expect(screen.getByRole("button", { name: /test/i })).toBeEnabled();
+  });
+
   it("offers Sportarr with its own default port and use flag", async () => {
     const user = userEvent.setup();
     // The wizard connected only Sonarr and Radarr, so a Sportarr user had to
@@ -89,15 +174,19 @@ describe("ArrStep", () => {
     ).toBeInTheDocument();
     expect(screen.getByLabelText(/port/i)).toHaveValue("1867");
 
-    await user.type(screen.getByLabelText(/address/i), "10.0.0.9");
+    await fillValidConnection(user);
     await user.click(screen.getByRole("button", { name: /test/i }));
     expect(testMutate).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "sportarr", port: 1867 }),
     );
 
-    await user.click(screen.getByRole("button", { name: /continue/i }));
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
     expect(createMutate).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "sportarr" }),
+      expect.anything(),
+    );
+    expect(settingsMutate).toHaveBeenCalledWith(
+      { "settings-general-use_sportarr": true },
       expect.anything(),
     );
   });
@@ -106,8 +195,7 @@ describe("ArrStep", () => {
     const user = userEvent.setup();
     customRender(<ArrStep kind="sonarr" onNext={onNext} />);
 
-    await user.type(screen.getByLabelText(/address/i), "10.0.0.5");
-    await user.type(screen.getByLabelText(/api key/i), "abc123");
+    await fillValidConnection(user);
     await user.click(screen.getByRole("button", { name: /test/i }));
 
     expect(testMutate).toHaveBeenCalledWith(
@@ -116,6 +204,17 @@ describe("ArrStep", () => {
         ip: "10.0.0.5",
         api_key: "abc123",
         port: 8989,
+      }),
+    );
+
+    // The verdict belongs to the connection it was measured against: the hook
+    // is handed the current values so it can drop a green result the moment
+    // the address, the port or the key changes.
+    expect(mockedUseTestArrInstanceConnection).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        ip: "10.0.0.5",
+        port: 8989,
+        apiKey: "abc123",
       }),
     );
 
@@ -130,19 +229,12 @@ describe("ArrStep", () => {
 
   it("creates the instance, enables use_sonarr, and advances on Continue", async () => {
     const user = userEvent.setup();
-    createMutate.mockImplementation(
-      (_body: unknown, opts?: { onSuccess?: () => void }) => {
-        opts?.onSuccess?.();
-      },
-    );
-
     customRender(<ArrStep kind="sonarr" onNext={onNext} />);
 
     await user.clear(screen.getByLabelText(/name/i));
     await user.type(screen.getByLabelText(/name/i), "Main Sonarr");
-    await user.type(screen.getByLabelText(/address/i), "10.0.0.5");
-    await user.type(screen.getByLabelText(/api key/i), "abc123");
-    await user.click(screen.getByRole("button", { name: /continue/i }));
+    await fillValidConnection(user);
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
 
     await waitFor(() => {
       expect(createMutate).toHaveBeenCalledWith(
@@ -157,25 +249,134 @@ describe("ArrStep", () => {
       );
     });
 
-    expect(settingsMutate).toHaveBeenCalledWith({
-      "settings-general-use_sonarr": true,
-    });
+    expect(settingsMutate).toHaveBeenCalledWith(
+      { "settings-general-use_sonarr": true },
+      expect.anything(),
+    );
     expect(onNext).toHaveBeenCalled();
+  });
+
+  // The wizard never asked which instance should be the default, so it must
+  // not answer for the reader. The backend promotes the first enabled instance
+  // of a kind on its own.
+  it("does not claim the new row as the default", async () => {
+    const user = userEvent.setup();
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await fillValidConnection(user);
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    expect(createMutate.mock.calls[0][0]).not.toHaveProperty("is_default");
+  });
+
+  it("only flips use_sonarr once the create has succeeded", async () => {
+    const user = userEvent.setup();
+    // A create that never answers: nothing else may happen behind it.
+    createMutate.mockImplementation(() => undefined);
+
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await fillValidConnection(user);
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    expect(settingsMutate).not.toHaveBeenCalled();
+    expect(onNext).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a rejected create instead of advancing", async () => {
+    const user = userEvent.setup();
+    createMutate.mockImplementation(
+      (_body: unknown, opts?: { onError?: (error: unknown) => void }) => {
+        opts?.onError?.(new Error("nope"));
+      },
+    );
+
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await fillValidConnection(user);
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    expect(
+      await screen.findByText(/could not save the sonarr connection/i),
+    ).toBeInTheDocument();
+    expect(onNext).not.toHaveBeenCalled();
+  });
+
+  it("says so when the instance saved but the switch did not", async () => {
+    const user = userEvent.setup();
+    settingsMutate.mockImplementation(
+      (_body: unknown, opts?: { onError?: (error: unknown) => void }) => {
+        opts?.onError?.(new Error("nope"));
+      },
+    );
+
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await fillValidConnection(user);
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    expect(
+      await screen.findByText(/could not turn it on/i),
+    ).toBeInTheDocument();
+    expect(onNext).not.toHaveBeenCalled();
   });
 
   it("shows a connected state for a pre-existing instance and does not create", async () => {
     const user = userEvent.setup();
-    setInstances([{ id: 1, kind: "sonarr", name: "Existing Sonarr" }]);
+    setInstances([
+      {
+        id: 1,
+        kind: "sonarr",
+        name: "Existing Sonarr",
+        ip: "10.0.0.5",
+        port: 8989,
+        base_url: "/",
+        ssl: false,
+      },
+    ]);
 
     customRender(<ArrStep kind="sonarr" onNext={onNext} />);
 
     expect(screen.getByText(/already connected/i)).toBeInTheDocument();
     expect(screen.getByText(/existing sonarr/i)).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /continue/i }));
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
 
     expect(createMutate).not.toHaveBeenCalled();
     expect(onNext).toHaveBeenCalled();
+  });
+
+  // Without this, a typo made on the previous pass was unfixable from the
+  // wizard: Back showed a read-only panel with no edit and no delete.
+  it("can remove a wrong instance from the connected panel", async () => {
+    const user = userEvent.setup();
+    setInstances([
+      {
+        id: 7,
+        kind: "sonarr",
+        name: "Typo Sonarr",
+        ip: "10.0.0.9",
+        port: 8989,
+        base_url: "/",
+        ssl: false,
+      },
+    ]);
+
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await user.click(
+      screen.getByRole("button", { name: /remove and enter it again/i }),
+    );
+    // Destructive, so it asks once before it acts.
+    expect(deleteMutate).not.toHaveBeenCalled();
+
+    await user.click(
+      screen.getByRole("button", { name: /remove typo sonarr/i }),
+    );
+
+    expect(deleteMutate).toHaveBeenCalledWith(7, expect.anything());
   });
 
   it("renders no skip control of its own", () => {

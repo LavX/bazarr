@@ -104,9 +104,9 @@ function describeEntry(
   return entry.source ?? entry.source_name ?? undefined;
 }
 
-// Why one provider did not install, in the backend's own words where it gave
-// any. A failure the user cannot name is a failure they cannot act on.
-function describeInstallError(reason: unknown): string {
+// What went wrong, in the backend's own words where it gave any. A failure the
+// user cannot name is a failure they cannot act on.
+function describeError(reason: unknown, fallback: string): string {
   if (reason instanceof AxiosError) {
     const data = reason.response?.data as { message?: string } | undefined;
     if (data?.message) {
@@ -116,7 +116,21 @@ function describeInstallError(reason: unknown): string {
   if (reason instanceof Error && reason.message) {
     return reason.message;
   }
-  return "The install failed and Bazarr+ gave no reason.";
+  return fallback;
+}
+
+function describeInstallError(reason: unknown): string {
+  return describeError(
+    reason,
+    "The install failed and Bazarr+ gave no reason.",
+  );
+}
+
+function describeCatalogError(reason: unknown): string {
+  return describeError(
+    reason,
+    "Bazarr+ could not read the provider catalog and gave no reason.",
+  );
 }
 
 /**
@@ -147,7 +161,14 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   onNext,
   onBack,
 }) => {
-  const { data: catalog, isPending: catalogPending } = useProviderHubCatalog();
+  const {
+    data: catalog,
+    isPending: catalogPending,
+    isError: catalogFailed,
+    error: catalogError,
+    isFetching: catalogFetching,
+    refetch: refetchCatalog,
+  } = useProviderHubCatalog();
   const install = useProviderHubInstall();
   const { restart } = useSystem();
   const settingsMutation = useSettingsMutation();
@@ -586,6 +607,30 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
         <Stack align="center" py="xl">
           <Loader />
         </Stack>
+      ) : catalogFailed ? (
+        // A catalog that could not be fetched is not an empty catalog. Both
+        // arrive here as `data: undefined`, and reading them as the same thing
+        // told people with a proxy problem, an offline box or a broken catalog
+        // source that Bazarr+ has no providers, and offered them no retry.
+        <Alert color="red" title="Could not load the provider catalog">
+          <Stack gap="sm" align="flex-start">
+            <Text size="sm">{describeCatalogError(catalogError)}</Text>
+            <Group gap="sm">
+              <Button
+                variant="default"
+                loading={catalogFetching}
+                onClick={() => void refetchCatalog()}
+              >
+                Retry
+              </Button>
+              {!hasInstalled && (
+                <Button variant="subtle" onClick={onNext}>
+                  Continue without providers
+                </Button>
+              )}
+            </Group>
+          </Stack>
+        </Alert>
       ) : choices.length === 0 ? (
         <Alert color="gray" title="No providers available">
           <Stack gap="sm" align="flex-start">
@@ -595,7 +640,8 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
             </Text>
             {/* Only with nothing installed either: an install that already has
                 providers is offered them above, and this step is answerable.
-                A catalog that loaded normally never reaches this branch. */}
+                A catalog that failed to load has its own branch above, so this
+                one is only ever a catalog that answered with nothing. */}
             {!hasInstalled && (
               <Button variant="default" onClick={onNext}>
                 Continue without providers
@@ -624,6 +670,7 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
             </Stack>
           )}
           <TextInput
+            aria-label="Search providers"
             placeholder="Search providers"
             leftSection={<FontAwesomeIcon icon={faMagnifyingGlass} />}
             value={query}

@@ -1,5 +1,6 @@
 import { FC, useEffect, useMemo, useState } from "react";
 import {
+  Alert,
   Anchor,
   Button,
   Checkbox,
@@ -12,6 +13,7 @@ import {
   TextInput,
   Title,
 } from "@mantine/core";
+import { AxiosError } from "axios";
 import {
   useProviderHubProviders,
   useSettingsMutation,
@@ -32,13 +34,66 @@ interface ConfigField {
   required: boolean;
 }
 
+// The half of a login that is not the secret: the account name a provider
+// signs in with. Schemas mark these optional often enough (the provider can be
+// queried anonymously, with credentials as an upgrade) that filtering on
+// `required` alone rendered the password box on its own and asked for half a
+// login.
+const IDENTITY_KEY = /user|email|login|account/i;
+
 // First-run shows only the fields a provider actually needs to start working:
-// required fields plus secret credentials (username/password/api key). Advanced
-// toggles (forced-only, FPS, FlareSolverr, delays, AI-translation flags, ...)
-// stay hidden here and remain available later in Settings > Providers, so the
-// step does not become an overwhelming wall of inputs.
+// required fields, secret credentials, and the account name that goes with a
+// secret. Advanced toggles (forced-only, FPS, FlareSolverr, delays,
+// AI-translation flags, ...) stay hidden here and remain available later in
+// Settings > Providers, so the step does not become an overwhelming wall of
+// inputs.
 function essentialFields(fields: ConfigField[]): ConfigField[] {
-  return fields.filter((field) => field.required || field.type === "password");
+  const hasSecret = fields.some((field) => field.type === "password");
+  return fields.filter(
+    (field) =>
+      field.required ||
+      field.type === "password" ||
+      (hasSecret && field.type === "text" && IDENTITY_KEY.test(field.key)),
+  );
+}
+
+// Why the save did not happen, in the backend's own words where it gave any.
+// The raw client swallows 502/503 and network errors, which is exactly what a
+// backend still coming back from the install restart produces, so this line is
+// the only thing that will say anything at all.
+function describeSaveError(reason: unknown): string {
+  if (reason instanceof AxiosError) {
+    const data = reason.response?.data as { message?: string } | undefined;
+    if (data?.message) {
+      return data.message;
+    }
+  }
+  if (reason instanceof Error && reason.message) {
+    return reason.message;
+  }
+  return "Bazarr+ did not save the providers. It may still be restarting; wait a moment and try again.";
+}
+
+function isBlank(value: unknown): boolean {
+  if (value === undefined || value === null) {
+    return true;
+  }
+  return typeof value === "string" && value.trim().length === 0;
+}
+
+// What Bazarr+ already holds for this provider field. A provider configured
+// before the wizard ran (or on an earlier pass through it) must not be
+// reported as missing a credential it has.
+function storedValue(
+  settings: LooseObject | undefined,
+  providerId: string,
+  fieldKey: string,
+): unknown {
+  const section = settings?.[providerId];
+  if (!section || typeof section !== "object" || Array.isArray(section)) {
+    return undefined;
+  }
+  return (section as LooseObject)[fieldKey];
 }
 
 // Mirrors schemaToInputs() in Settings/Providers/index.tsx: turn a manifest's
@@ -127,7 +182,13 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
   onBack,
   onInstallMore,
 }) => {
-  const { data: providers } = useProviderHubProviders();
+  const {
+    data: providers,
+    isError: providersFailed,
+    error: providersError,
+    isFetching: providersFetching,
+    refetch: refetchProviders,
+  } = useProviderHubProviders();
   const { data: systemSettings } = useSystemSettings();
   const settings = useSettingsMutation();
 
@@ -147,6 +208,11 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
   }, [answered, systemSettings]);
   // Keyed by `${providerId}::${fieldKey}` so different providers never collide.
   const [values, setValues] = useState<Record<string, string | boolean>>({});
+  // Credentials are only marked once Continue has been pressed: every required
+  // field would otherwise turn red the instant a provider is ticked, before
+  // the reader has had a chance to type anything.
+  const [checked, setChecked] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const toggleEnabled = (providerId: string) => {
     setAnswered(true);
@@ -168,9 +234,65 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
     }));
   };
 
+  // Every enabled provider's required credentials that are still blank, both
+  // typed and already stored. The stage used to compute the required set only
+  // to decide what to render: a provider could be ticked, left empty and saved
+  // enabled, and the reader met silent search failures instead of a message.
+  const missing = useMemo(() => {
+    const found: {
+      providerId: string;
+      label: string;
+      fields: ConfigField[];
+    }[] = [];
+    for (const provider of installed) {
+      const providerId = provider.provider_id;
+      if (!enabled.includes(providerId)) {
+        continue;
+      }
+      const blanks = essentialFields(fieldsFromManifest(provider.manifest))
+        .filter((field) => field.required && field.type !== "checkbox")
+        .filter((field) => {
+          const typed = values[`${providerId}::${field.key}`];
+          if (typed !== undefined) {
+            return isBlank(typed);
+          }
+          return isBlank(
+            storedValue(
+              systemSettings as LooseObject | undefined,
+              providerId,
+              field.key,
+            ),
+          );
+        });
+      if (blanks.length > 0) {
+        found.push({
+          providerId,
+          label: providerLabel(provider),
+          fields: blanks,
+        });
+      }
+    }
+    return found;
+  }, [enabled, installed, systemSettings, values]);
+
+  const missingKeys = useMemo(
+    () =>
+      new Set(
+        missing.flatMap((entry) =>
+          entry.fields.map((field) => `${entry.providerId}::${field.key}`),
+        ),
+      ),
+    [missing],
+  );
+
   const canContinue = enabled.length > 0;
 
   const handleContinue = () => {
+    setChecked(true);
+    if (missing.length > 0) {
+      return;
+    }
+    setSaveError(null);
     const payload: LooseObject = {
       "settings-general-enabled_providers": enabled,
     };
@@ -194,6 +316,7 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
       onSuccess: () => {
         onNext();
       },
+      onError: (reason) => setSaveError(describeSaveError(reason)),
     });
   };
 
@@ -206,6 +329,26 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
           need. You must enable at least one provider to continue.
         </Text>
       </Stack>
+
+      {/* A list that failed to load is not a list of nothing. Without this the
+          step showed a heading, a rule that at least one provider must be
+          enabled, an empty region and a dead Continue, on a step that cannot
+          be skipped. */}
+      {providersFailed && (
+        <Alert color="red" title="Could not load the installed providers">
+          <Stack gap="sm" align="flex-start">
+            <Text size="sm">{describeSaveError(providersError)}</Text>
+            <Button
+              variant="default"
+              size="xs"
+              loading={providersFetching}
+              onClick={() => void refetchProviders()}
+            >
+              Retry
+            </Button>
+          </Stack>
+        </Alert>
+      )}
 
       <ScrollArea.Autosize mah={380} type="auto" offsetScrollbars>
         <Stack gap="md" pr="sm">
@@ -248,12 +391,17 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
                         />
                       );
                     }
+                    const fieldError =
+                      checked && missingKeys.has(`${providerId}::${field.key}`)
+                        ? `${providerLabel(provider)} needs this to search`
+                        : undefined;
                     if (field.type === "password") {
                       return (
                         <PasswordInput
                           key={field.key}
                           label={field.label}
                           description={field.description}
+                          error={fieldError}
                           value={
                             typeof fieldValue === "string" ? fieldValue : ""
                           }
@@ -272,6 +420,7 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
                         key={field.key}
                         label={field.label}
                         description={field.description}
+                        error={fieldError}
                         value={typeof fieldValue === "string" ? fieldValue : ""}
                         onChange={(event) =>
                           setValue(
@@ -288,6 +437,25 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
           })}
         </Stack>
       </ScrollArea.Autosize>
+
+      {checked && missing.length > 0 && (
+        <Alert color="red" title="Missing credentials">
+          {missing
+            .map(
+              (entry) =>
+                `${entry.label} needs ${entry.fields
+                  .map((field) => field.label)
+                  .join(", ")}`,
+            )
+            .join(". ")}
+          . Fill them in, or turn those providers off.
+        </Alert>
+      )}
+      {saveError && (
+        <Alert color="red" title="Could not save the providers">
+          {saveError}
+        </Alert>
+      )}
 
       <Text size="xs" c="dimmed">
         Advanced provider options are available later in Settings, Providers.

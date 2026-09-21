@@ -23,17 +23,25 @@ import type { WizardStepProps } from "./types";
  */
 const SeerrStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   const settings = useSettingsMutation();
-  const test = useSeerrTestConnectionMutation();
 
   const [url, setUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [verifySsl, setVerifySsl] = useState(true);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const trimmedUrl = url.trim();
   const trimmedKey = apiKey.trim();
   const filled = trimmedUrl.length > 0 && trimmedKey.length > 0;
   // verify_ssl only means anything over TLS, mirroring the Connections page.
   const isHttps = trimmedUrl.toLowerCase().startsWith("https://");
+
+  // Editing the URL or the key drops the last verdict, so a green result can
+  // never describe a connection that is no longer on screen.
+  const test = useSeerrTestConnectionMutation({
+    url: trimmedUrl,
+    apikey: trimmedKey,
+    verifySsl,
+  });
 
   const handleTest = () => {
     test.mutate({ url: trimmedUrl, apikey: trimmedKey, verifySsl });
@@ -44,6 +52,7 @@ const SeerrStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
       onNext();
       return;
     }
+    setSaveError(null);
     settings.mutate(
       {
         "settings-seerr-url": trimmedUrl,
@@ -55,11 +64,19 @@ const SeerrStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
         onSuccess: () => {
           onNext();
         },
+        onError: () =>
+          setSaveError(
+            "Bazarr+ could not save the Seerr connection. Try again, or add it later in Settings, Connections.",
+          ),
       },
     );
   };
 
   const result = test.data;
+  // A verdict this connection earned. It is dropped whenever the URL or the
+  // key changes, so anything other than a green result here means the reader
+  // is about to save a connection nobody has proved works.
+  const verified = result?.success === true;
 
   return (
     <Stack gap="lg">
@@ -138,12 +155,19 @@ const SeerrStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
         ) && (
           <Alert color="yellow" title="Limited Seerr permissions">
             This Seerr user cannot request both movies and series. Requests from
-            Bazarr+ will be refused.
+            Bazarr+ will be refused. In Seerr, under Settings, Users, give this
+            user the Request Movies and Request Series permissions, then test
+            again.
           </Alert>
         )}
       {test.isError && (
         <Alert color="red" title="Test failed">
           Could not reach the Bazarr API to run the connection test.
+        </Alert>
+      )}
+      {saveError && (
+        <Alert color="red" title="Could not save Seerr">
+          {saveError}
         </Alert>
       )}
 
@@ -155,8 +179,15 @@ const SeerrStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
             </Button>
           )}
         </Group>
+        {/* The step is optional, so an untested connection is still allowed
+            through. It is not allowed through silently: the label says what is
+            being saved. */}
         <Button onClick={handleContinue} loading={settings.isPending}>
-          {filled ? "Continue" : "Continue without Seerr"}
+          {!filled
+            ? "Continue without Seerr"
+            : verified
+              ? "Continue"
+              : "Save and continue anyway"}
         </Button>
       </Group>
     </Stack>
