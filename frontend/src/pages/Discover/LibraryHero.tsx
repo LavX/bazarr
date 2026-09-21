@@ -257,7 +257,11 @@ export default function LibraryHero() {
                 aria-hidden="true"
                 spin={status.tone === "busy"}
               />
-              {status.line}
+              {/* The label is its own element because the pill is a flex row,
+                  and a bare text node in one becomes an anonymous flex item:
+                  text-overflow cannot reach it, so the sentence clipped
+                  mid-word with no ellipsis at 400px instead of eliding. */}
+              <span className={styles.heroStatusText}>{status.line}</span>
             </p>
           </div>
           <div className={styles.heroStats}>
