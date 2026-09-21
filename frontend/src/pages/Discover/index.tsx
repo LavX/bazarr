@@ -583,6 +583,13 @@ export default function Discover() {
   const skippedBuiltIns = providers
     .filter((provider) => provider.reason === "not_catalog_provider")
     .map((provider) => provider.provider);
+  // Rows the running search has already published. They stand in for a result
+  // list only while there is no finished one: a refresh keeps the previous
+  // snapshot on the page with its own checked time, which is a better answer
+  // than a list that is still filling up, and showing both would offer the
+  // same subtitle twice under two identities.
+  const showLive = searching && snapshot === null;
+  const liveRows = showLive ? (state.live?.results ?? []) : [];
   const empty =
     state.status === "complete" &&
     snapshot?.status === "complete" &&
@@ -1169,6 +1176,24 @@ export default function Discover() {
 
           {!browsingPage && (
             <div ref={retrievalResults}>
+              {showLive && (
+                <Stack
+                  gap="lg"
+                  id="bh-live-results"
+                  className={styles.resultsPanel}
+                >
+                  <Text size="sm" c="dimmed" className={styles.resultsNote}>
+                    {/* An empty list mid-search is not an answer, and it must
+                        not read like the one a finished search gives. */}
+                    {liveRows.length === 0
+                      ? "No results yet. Providers are still searching."
+                      : `${liveRows.length} subtitle ${liveRows.length === 1 ? "result" : "results"} so far. More may still arrive.`}
+                  </Text>
+                  {state.live && liveRows.length > 0 && (
+                    <SubtitleResults snapshot={state.live} />
+                  )}
+                </Stack>
+              )}
               {snapshot && (
                 <Stack
                   gap="lg"

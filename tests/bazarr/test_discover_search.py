@@ -1077,3 +1077,84 @@ def test_modes_without_source_linkage_do_not_acquire_metadata_deadlines(authenti
     providers.add("discover_no_source")
     response = post(authenticated_client, payload)
     assert response.status_code == 200 and len(providers.videos) == 1
+
+
+def _progress_post(client, payload, identity):
+    return client.post("/api/discover/search", json=payload,
+                       headers={"X-API-KEY": "discover-test-key", "X-Discover-Progress": identity})
+
+
+def test_rows_are_offered_while_other_providers_are_still_pending(authenticated_client, providers, monkeypatch):
+    """A finished provider's rows travel with the observation, not after the search."""
+    import copy as copy_module
+    from discover import progress
+    from discover.handles import resolve_result
+    from provider_hub.protocol import candidate_from_worker
+
+    published = []
+    original = progress.publish
+
+    def record(identity, observation):
+        published.append(copy_module.deepcopy(observation))
+        original(identity, observation)
+
+    monkeypatch.setattr(progress, "publish", record)
+    for name in ("discover_one", "discover_two"):
+        providers.add(name, [candidate_from_worker(name, {
+            "id": f"{name}-1", "language": {"alpha3": "eng"},
+            "release_info": f"The.Matrix.1999.{name}", "matches": ["imdb_id"],
+            "provider_payload": {}})])
+    identity = "11111111-2222-3333-4444-555555555555"
+    response = _progress_post(authenticated_client, {
+        "media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}, identity)
+    assert response.status_code == 200
+    final = {row["id"]: row for row in response.json["results"]}
+    assert len(final) == 2
+
+    early = [observation for observation in published
+             if observation.get("results")
+             and any(item["status"] == "pending" for item in observation["providers"])]
+    assert early, "no observation carried a result while a provider was still pending"
+    offered = [row["id"] for row in early[0]["results"]]
+    assert offered
+    # Actionable at once: the handle a reader is offered mid-search resolves,
+    # and it is still the same handle in the finished snapshot.
+    for result_id in offered:
+        assert resolve_result(result_id, early[0]["search_id"]) is not None
+        assert result_id in final
+    assert early[0]["context"]["imdb_id"] == "tt0133093"
+    # The finished observation hands the result list back to the snapshot.
+    assert published[-1]["phase"] == "finished"
+    assert not published[-1].get("results")
+
+
+def test_publishing_rows_early_does_not_mint_a_second_handle(authenticated_client, providers):
+    from compat.file_id_store import get_store
+    from provider_hub.protocol import candidate_from_worker
+
+    providers.add("discover_one", [candidate_from_worker("discover_one", {
+        "id": "1", "language": {"alpha3": "eng"}, "release_info": "The Matrix",
+        "matches": ["imdb_id"], "provider_payload": {}})])
+    before = len(get_store())
+    response = _progress_post(authenticated_client, {
+        "media_type": "movie", "imdb_id": "tt0133093", "language": "eng"},
+        "22222222-3333-4444-5555-666666666666")
+    assert response.status_code == 200
+    assert len(response.json["results"]) == 1
+    assert len(get_store()) - before == 1
+
+
+def test_search_without_an_observer_is_unchanged(authenticated_client, providers):
+    """No progress identity means no early rows and no early handles."""
+    from compat.file_id_store import get_store
+    from provider_hub.protocol import candidate_from_worker
+
+    providers.add("discover_one", [candidate_from_worker("discover_one", {
+        "id": "1", "language": {"alpha3": "eng"}, "release_info": "The Matrix",
+        "matches": ["imdb_id"], "provider_payload": {}})])
+    before = len(get_store())
+    response = post(authenticated_client, {
+        "media_type": "movie", "imdb_id": "tt0133093", "language": "eng"})
+    assert response.status_code == 200
+    assert len(response.json["results"]) == 1
+    assert len(get_store()) - before == 1

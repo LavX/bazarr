@@ -411,11 +411,40 @@ def search(request: SearchRequest, on_progress=None) -> dict:
             # hash and release description. Confirmed identity is untouched.
             service.refine_video_with_copy(video, request.copy)
 
+        # Rows the fanout has already produced, published while the search is
+        # still running so a reader can act on them without waiting for the
+        # slowest provider. `built` keeps each row beside the subtitle it was
+        # minted for, which both keeps that subtitle referenced (so its id
+        # stays unique) and lets the final list reuse the very same row: one
+        # handle per subtitle, and an id a reader saw mid-search still names
+        # the same result in the finished snapshot.
+        parsed = {}
+        built = {}
+        live_rows = []
+        # Building a row costs match evidence and a compatibility score. That
+        # cost is paid once either way, but paying it here spends the fanout's
+        # own wall clock, which the remaining providers are still living on.
+        # Past this budget the rest of the rows are built after the fanout, as
+        # before, and appear when the search completes.
+        live_budget = 1.5
+
         def report_progress():
             if on_progress is not None:
-                on_progress({"phase": "searching", "providers": [
+                on_progress({"phase": "searching", "search_id": search_id, "context": dict(context),
+                             "results": list(live_rows), "providers": [
                     outcomes.get(name, {"provider": name, "status": "pending", "result_count": 0})
                     for name in sorted(set(providers) | set(outcomes))]})
+
+        def build_live_rows(subtitles):
+            nonlocal live_budget
+            if on_progress is None or live_budget <= 0:
+                return
+            started = time.monotonic()
+            for sub in subtitles:
+                row = _result(sub, video, context, search_id, checked, ttl, parsed)
+                built[id(sub)] = (sub, row)
+                live_rows.append(row)
+            live_budget -= time.monotonic() - started
 
         report_progress()
 
@@ -439,6 +468,7 @@ def search(request: SearchRequest, on_progress=None) -> dict:
                 with _STATE_LOCK:
                     state["cooldowns"][outcome.provider] = (until, dict(item))
             outcomes[outcome.provider] = item
+            build_live_rows(outcome.subtitles)
             report_progress()
 
         # This is admission to one provider operation. Cache-creator and
@@ -452,8 +482,14 @@ def search(request: SearchRequest, on_progress=None) -> dict:
                 title=context.get("title") or context.get("query") or context.get("imdb_id"),
                 season=context.get("season"), episode=context.get("episode")):
             subtitles = service.search_title(video, [language], pool, providers, on_outcome)
-        parsed = {}
-        rows = [_result(sub, video, context, search_id, checked, ttl, parsed) for sub in subtitles]
+        rows = []
+        for sub in subtitles:
+            # A row already published mid-search is reused rather than minted
+            # again, so the finished snapshot repeats the ids a reader has
+            # already been offered instead of retiring them.
+            existing = built.get(id(sub))
+            rows.append(existing[1] if existing is not None and existing[0] is sub
+                        else _result(sub, video, context, search_id, checked, ttl, parsed))
         # Failed refreshes retain usable rows only for providers that failed.
         # Successful empty searches replace their earlier results.
         if previous_exists:

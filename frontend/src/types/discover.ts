@@ -125,6 +125,15 @@ export interface DiscoverSearchProgress {
   providers: (Pick<DiscoverProviderOutcome, "provider" | "result_count"> & {
     status: DiscoverProviderStatus | "pending";
   })[];
+  /**
+   * The rows the search has already minted, in the order providers returned
+   * them, with the context they were searched under. Both are absent until a
+   * search is actually running, and the finished observation drops them: the
+   * completed snapshot owns the result list from that point on.
+   */
+  search_id?: string;
+  context?: DiscoverContext;
+  results?: DiscoverSubtitleResult[];
 }
 
 export interface DiscoverSubtitleResult {
