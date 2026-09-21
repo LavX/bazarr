@@ -4,6 +4,7 @@ import {
   PropsWithChildren,
   ReactNode,
   useCallback,
+  useMemo,
   useState,
 } from "react";
 import {
@@ -33,8 +34,8 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useSystemHealth, useSystemStatus } from "@/apis/hooks";
+import { useArrKindAvailability } from "@/apis/hooks/arrInstances";
 import { useAppTitle } from "@/apis/hooks/site";
-import { useSportsAvailability } from "@/apis/hooks/sports";
 import api from "@/apis/raw";
 import { QueryOverlay } from "@/components/async";
 import {
@@ -99,6 +100,41 @@ function Label(props: IconProps): JSX.Element {
   );
 }
 
+// What each media server product is called in the UI. The kinds come from the
+// destination layer, which spells them lowercase.
+const mediaServerLabels: Record<System.MediaServerStatus["kind"], string> = {
+  emby: "Emby",
+  jellyfin: "Jellyfin",
+  plex: "Plex",
+  silo: "Silo",
+};
+
+function mediaServerTitle(
+  server: System.MediaServerStatus,
+  sameKind: number,
+): string {
+  const label = mediaServerLabels[server.kind] ?? server.kind;
+  // One Emby reads best as plain "Emby Version", matching the Sonarr and
+  // Radarr rows above it. Name the instance only once there is more than one
+  // of that product to tell apart.
+  return sameKind > 1
+    ? `${label} Version (${server.name})`
+    : `${label} Version`;
+}
+
+function mediaServerValue(server: System.MediaServerStatus): string {
+  if (server.state === "checking") {
+    // No probe has answered yet. The page polls until one does.
+    return "Checking…";
+  }
+  if (server.state === "unreachable") {
+    return "Unreachable";
+  }
+  // Silo's health endpoint reports an id and a name and no version at all, so
+  // saying so is the honest answer rather than an empty cell.
+  return server.version || "Connected, no version reported";
+}
+
 interface InfoContainerProps {
   title: string;
 }
@@ -124,10 +160,39 @@ const InfoContainer: FunctionComponent<
 
 const SystemStatusView: FunctionComponent = () => {
   const health = useSystemHealth();
-  const { data: status } = useSystemStatus();
-  const { enabled: sportsEnabled } = useSportsAvailability();
+  const statusQuery = useSystemStatus();
+  const { data: status } = statusQuery;
+  const { enabled: sonarrEnabled } = useArrKindAvailability("sonarr");
+  const { enabled: radarrEnabled } = useArrKindAvailability("radarr");
+  const { enabled: sportsEnabled } = useArrKindAvailability("sportarr");
   const openWhatsNew = useOpenWhatsNew();
   const showWhatsNew = hasWhatsNew();
+
+  const mediaServers = useMemo(
+    () => status?.media_servers ?? [],
+    [status?.media_servers],
+  );
+  const perKind = useMemo(() => {
+    const counts = new Map<string, number>();
+    mediaServers.forEach((server) =>
+      counts.set(server.kind, (counts.get(server.kind) ?? 0) + 1),
+    );
+    return counts;
+  }, [mediaServers]);
+
+  // A version nobody has probed yet resolves in the background, so the page
+  // asks again until every destination has said something. Once none is
+  // "checking" this stops on its own.
+  const awaitingVersions = mediaServers.some(
+    (server) => server.state === "checking",
+  );
+  const { refetch: refetchStatus } = statusQuery;
+  const pollVersions = useCallback(() => {
+    if (awaitingVersions) {
+      void refetchStatus();
+    }
+  }, [awaitingVersions, refetchStatus]);
+  useInterval(pollVersions, 4000);
 
   const [uptime, setUptime] = useState<string>();
 
@@ -200,15 +265,33 @@ const SystemStatusView: FunctionComponent = () => {
           {status?.package_version !== "" && (
             <Row title="Package Version">{status?.package_version}</Row>
           )}
-          <Row title="Sonarr Version">{status?.sonarr_version}</Row>
-          <Row title="Radarr Version">{status?.radarr_version}</Row>
-          {/* The endpoint has reported this since sports landed and the page
-              never showed it, so there was no way to see which Sportarr
-              Bazarr was actually talking to. Rendered only with Sportarr on,
-              so a two-media install does not gain an empty row. */}
-          {sportsEnabled && (
-            <Row title="Sportarr Version">{status?.sportarr_version}</Row>
-          )}
+          {/* Every integration row is conditional, on the rule Sportarr has
+              used since sports landed: the product's master toggle is on and
+              there is an enabled instance to query. An unconfigured Sonarr
+              used to render an empty row here, which reads as broken rather
+              than as absent. The version itself has to be present too, so a
+              row never appears before the endpoint has answered. */}
+          {sonarrEnabled && status?.sonarr_version ? (
+            <Row title="Sonarr Version">{status.sonarr_version}</Row>
+          ) : null}
+          {radarrEnabled && status?.radarr_version ? (
+            <Row title="Radarr Version">{status.radarr_version}</Row>
+          ) : null}
+          {sportsEnabled && status?.sportarr_version ? (
+            <Row title="Sportarr Version">{status.sportarr_version}</Row>
+          ) : null}
+          {/* Media servers were never on this page at all, though a connected
+              server's version is the first thing anyone checks when refreshes
+              misbehave. One row per instance, because these are
+              multi-instance: two Embys are two rows. */}
+          {mediaServers.map((server) => (
+            <Row
+              key={server.id}
+              title={mediaServerTitle(server, perKind.get(server.kind) ?? 1)}
+            >
+              {mediaServerValue(server)}
+            </Row>
+          ))}
           <Row title="Operating System">{status?.operating_system}</Row>
           <Row title="Python Version">{status?.python_version}</Row>
           <Row title="Database Engine">{status?.database_engine}</Row>

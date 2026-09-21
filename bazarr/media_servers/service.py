@@ -86,7 +86,15 @@ def probe_instance(session, instance_id, body, *, libraries=False):
     except MediaServerError as error:
         return ({'data': [], 'error_code': error.code} if libraries else
                 {'success': False, 'error_code': error.code}), 400
-    return _probe(row.kind, url, key, verify_ssl, libraries), 200
+    result = _probe(row.kind, url, key, verify_ssl, libraries)
+    # A test that used exactly what is saved has just learned this
+    # destination's version, so the status page gets it without a probe of its
+    # own. A test of unsaved edits describes some other connection and is not
+    # recorded against the saved instance.
+    if not libraries and not set(body or {}) & {'url', 'api_key', 'clear_api_key', 'verify_ssl'}:
+        from .versions import record
+        record(row.id, row.revision, result)
+    return result, 200
 
 
 def probe_connection(body, *, libraries=False):

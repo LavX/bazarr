@@ -11,6 +11,9 @@ import type {
   ArrInstanceUpdate,
   ArrKind,
 } from "@/apis/raw/arrInstances";
+// Imported from the defining module, not the barrel: index re-exports this
+// file, so going through "." would close an import cycle.
+import { useSystemSettings } from "./system";
 
 const arrKey = [QueryKeys.ArrInstances];
 
@@ -33,6 +36,28 @@ export function useArrInstances() {
     queryKey: arrKey,
     queryFn: () => api.arrInstances.list(),
   });
+}
+
+/**
+ * Whether one arr kind is actually in use. Both conditions matter: the master
+ * toggle is the operator's intent, and an enabled instance is what there is to
+ * actually query. Sports has gated its status row on this since it landed;
+ * Sonarr and Radarr now use the same answer, so an install without them shows
+ * no row for them instead of an empty one.
+ */
+export function useArrKindAvailability(kind: ArrKind) {
+  const query = useArrInstances();
+  const { data: settings, isLoading: settingsLoading } = useSystemSettings();
+  const master = settings?.general?.[`use_${kind}`] ?? false;
+  const instances =
+    query.data?.filter(
+      (instance) => instance.kind === kind && instance.enabled,
+    ) ?? [];
+  return {
+    instances,
+    enabled: master && instances.length > 0,
+    isLoading: query.isLoading || settingsLoading,
+  };
 }
 
 /**

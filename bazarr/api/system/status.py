@@ -19,6 +19,24 @@ from ..utils import authenticate
 api_ns_system_status = Namespace('System Status', description='List environment information and versions')
 
 
+def media_server_statuses():
+    """Every media server destination actually in use, with its version.
+
+    Reported as a list rather than as a fixed field per product because these
+    are multi-instance: two Embys are two entries. Answered from the cached
+    versions, so a slow or unreachable server delays nothing here, and a
+    failure to read them at all leaves the rest of the page intact.
+    """
+    try:
+        from app.config import settings
+        from app.database import database
+        from media_servers.versions import statuses
+        return statuses(database, settings)
+    except Exception:
+        logging.debug('BAZARR cannot collect media server versions')
+        return []
+
+
 @api_ns_system_status.route('system/status')
 class SystemStatus(Resource):
     @authenticate
@@ -44,6 +62,7 @@ class SystemStatus(Resource):
         system_status.update({'sonarr_version': get_sonarr_info.version()})
         system_status.update({'radarr_version': get_radarr_info.version()})
         system_status.update({'sportarr_version': get_sportarr_info.version()})
+        system_status.update({'media_servers': media_server_statuses()})
         system_status.update({'operating_system': platform.platform()})
         
         # Check if JIT is enabled (Python 3.13+)

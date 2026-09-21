@@ -111,3 +111,26 @@ def test_pg_import_failure_rolls_back_both_structures_then_retries(pg_session, p
         assert restarted.get(TableMediaServerImports, kind) is None
     monkeypatch.setattr(backfill, '_record_import', record)
     assert backfill.backfill_instances(pg_session, config)[kind]['created'] is True
+
+
+def test_pg_status_page_reads_only_destinations_in_use(pg_session):
+    """The status page's destination read is engine-agnostic, so prove it here.
+
+    It adds no column and no migration: it goes through the same repository
+    snapshot every worker already uses, which is exactly why it has to hold up
+    on PostgreSQL rather than only on SQLite.
+    """
+    from media_servers import versions
+    from media_servers.repository import MediaServerInstanceRepository
+    from test_media_server_versions import settings
+    versions.reset()
+    repo = MediaServerInstanceRepository(pg_session)
+    live = repo.create(**payload('emby', 'On'))
+    repo.create(**payload('emby', 'Off', enabled=False))
+    versions.record(live.id, live.revision, {'success': True, 'version': '4.8.11.0'})
+    try:
+        entries = versions.statuses(pg_session, settings(), refresh=False)
+    finally:
+        versions.reset()
+    assert entries == [{'id': live.id, 'kind': 'emby', 'name': 'On',
+                        'state': 'connected', 'version': '4.8.11.0'}]

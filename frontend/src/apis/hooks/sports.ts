@@ -8,26 +8,12 @@ import sports, {
   SportsLeague,
   SportsRecord,
 } from "@/apis/raw/sports";
-import { useArrInstances } from "./arrInstances";
-// Imported from the defining module, not the barrel: index re-exports this
-// file, so going through "." would close an import cycle.
-import { useSystemSettings } from "./system";
+import { useArrKindAvailability } from "./arrInstances";
 
+// Kept as its own name because most of this module calls it, but the rule it
+// encodes is not specific to sports: see useArrKindAvailability.
 export function useSportsAvailability() {
-  const query = useArrInstances();
-  const { data: settings, isLoading: settingsLoading } = useSystemSettings();
-  const useSportarr = settings?.general?.use_sportarr ?? false;
-  const instances =
-    query.data?.filter(
-      (instance) => instance.kind === "sportarr" && instance.enabled,
-    ) ?? [];
-  return {
-    instances,
-    // Both conditions matter: the master toggle is the operator's intent, and
-    // an enabled instance is what there is to actually query.
-    enabled: useSportarr && instances.length > 0,
-    isLoading: query.isLoading || settingsLoading,
-  };
+  return useArrKindAvailability("sportarr");
 }
 // A league in the shape the shared ItemView table expects, so Sports renders
 // through the same component as Series and Movies instead of a bespoke grid.
