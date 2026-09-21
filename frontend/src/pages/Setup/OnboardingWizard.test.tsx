@@ -59,7 +59,9 @@ describe("OnboardingWizardView", () => {
     await user.click(screen.getByRole("button", { name: /get started/i }));
 
     await waitFor(() => {
-      expect(localStorage.getItem("bazarr.onboarding.step")).toBe("1");
+      // The cursor is a step key, not an index into a list that is generated
+      // and renumbers under the reader.
+      expect(localStorage.getItem("bazarr.onboarding.step")).toBe("intent");
     });
     // Welcome hands straight over to the one question the rest follows from.
     expect(
@@ -82,7 +84,9 @@ describe("OnboardingWizardView", () => {
     expect(
       await screen.findByRole("heading", { name: /^sonarr$/i }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/step 3 of 12/i)).toBeInTheDocument();
+    // A phase and a position inside it, never a step total: the total is not
+    // knowable before the path is answered and moves once servers are ticked.
+    expect(screen.getByText(/connect \u00b7 1 of 5/i)).toBeInTheDocument();
   });
 
   it("the discover path asks for no arr instance at all", async () => {
@@ -91,12 +95,14 @@ describe("OnboardingWizardView", () => {
 
     await answerIntent(user, /find subtitles for anything/i);
 
-    // Seerr, not Sonarr: it is what makes the request button on a title work,
-    // and this is the reader most likely to use it.
+    // Media servers, not Sonarr: connecting one has nothing to do with running
+    // an arr, and this step used to be hidden from everyone who ran neither.
     expect(
-      await screen.findByRole("heading", { name: /^seerr$/i }),
+      await screen.findByRole("heading", { name: /^media servers$/i }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/step 3 of 8/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/connect \u00b7 media servers 1 of 1/i),
+    ).toBeInTheDocument();
     expect(
       screen.queryByRole("heading", { name: /^sonarr$/i }),
     ).not.toBeInTheDocument();
@@ -123,9 +129,8 @@ describe("OnboardingWizardView", () => {
     await user.click(screen.getByRole("button", { name: /^continue$/i }));
 
     expect(
-      await screen.findByRole("heading", { name: /^seerr$/i }),
+      await screen.findByRole("heading", { name: /^media servers$/i }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/step 3 of 8/i)).toBeInTheDocument();
   });
 
   it("the shell renders the skip control for an optional step", async () => {
@@ -162,7 +167,7 @@ describe("OnboardingWizardView", () => {
     // between pressing Finish and the app taking over.
     const user = userEvent.setup();
     localStorage.setItem("bazarr.onboarding.intent", "discover");
-    localStorage.setItem("bazarr.onboarding.step", "7");
+    localStorage.setItem("bazarr.onboarding.step", "finish");
     let onSuccess: (() => void) | undefined;
     mutate.mockImplementation(
       (_input: unknown, opts?: { onSuccess?: () => void }) => {
@@ -182,7 +187,7 @@ describe("OnboardingWizardView", () => {
     expect(
       screen.getByRole("heading", { name: /you are all set/i }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/step 8 of 8/i)).toBeInTheDocument();
+    expect(screen.getByText(/finish \u00b7 2 of 2/i)).toBeInTheDocument();
   });
 
   it("Skip setup saves setup_complete and navigates home", async () => {

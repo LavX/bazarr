@@ -1,7 +1,8 @@
 import { FC } from "react";
-import { Button, Group, Paper, Radio, Stack, Text, Title } from "@mantine/core";
+import { Button, Group, Radio, Stack, Text, Title } from "@mantine/core";
 import { useOnboardingIntent } from "@/pages/Setup/useOnboardingIntent";
 import type { WizardIntent, WizardStepProps } from "./types";
+import styles from "./IntentStep.module.scss";
 
 interface PathChoice {
   value: WizardIntent;
@@ -32,7 +33,7 @@ const CHOICES: PathChoice[] = [
  * rail shows and nothing else: no backend setting is written, and either answer
  * can be changed here or in Settings afterwards.
  */
-const IntentStep: FC<WizardStepProps> = ({ onNext }) => {
+const IntentStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   const { intent, setIntent } = useOnboardingIntent();
 
   return (
@@ -53,18 +54,37 @@ const IntentStep: FC<WizardStepProps> = ({ onNext }) => {
       >
         <Stack gap="sm">
           {CHOICES.map((choice) => (
-            <Paper key={choice.value} withBorder p="md" radius="md">
-              <Radio
-                value={choice.value}
-                label={choice.title}
-                description={choice.description}
-              />
-            </Paper>
+            <Radio.Card
+              key={choice.value}
+              className={styles.card}
+              radius="md"
+              value={choice.value}
+              aria-label={choice.title}
+            >
+              <div className={styles.cardBody}>
+                <Radio.Indicator />
+                <div className={styles.cardText}>
+                  <Text fw={500}>{choice.title}</Text>
+                  <Text size="sm" c="dimmed">
+                    {choice.description}
+                  </Text>
+                </div>
+              </div>
+            </Radio.Card>
           ))}
         </Stack>
       </Radio.Group>
 
-      <Group justify="flex-end">
+      <Group justify="space-between">
+        <Group gap="sm">
+          {/* The shell passes onBack at every index above zero. This was the
+              one step that dropped it, so Welcome was a one-way door. */}
+          {onBack && (
+            <Button variant="default" onClick={onBack}>
+              Back
+            </Button>
+          )}
+        </Group>
         <Button onClick={onNext} disabled={intent === null}>
           Continue
         </Button>

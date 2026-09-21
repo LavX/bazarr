@@ -1,15 +1,17 @@
+import { ReactElement } from "react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useSettingsMutation } from "@/apis/hooks";
-import { customRender, screen, waitFor, within } from "@/tests";
+import type { MediaServerKind } from "@/apis/raw/mediaServers";
+import { OnboardingSelectionProvider } from "@/pages/Setup/useOnboardingSelection";
+import { customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import MediaServerStep from "./MediaServerStep";
 
 // Keep the real barrel (AllProviders' ThemeLoader reads useSystemSettings from
 // it) and override only the settings mutation we assert on. The instance rows
-// themselves go through the real hooks and MSW, so a refused save is a refused
-// save and not a mock's opinion.
+// themselves go through the real hooks and MSW.
 vi.mock("@/apis/hooks", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/apis/hooks")>();
   return {
@@ -18,40 +20,17 @@ vi.mock("@/apis/hooks", async (importOriginal) => {
   };
 });
 
-// The Plex account panel is the Connections panel, and it polls Plex. Stub the
-// hooks rather than the network so an unauthenticated render is what the
-// account flow would actually show first.
-vi.mock("@/apis/hooks/plex", () => ({
-  usePlexAuthValidationQuery: vi.fn(() => ({
-    data: { valid: false, auth_method: "apikey" },
-    isLoading: false,
-    error: null,
-    refetch: vi.fn(),
-  })),
-  usePlexPinMutation: vi.fn(() => ({ mutateAsync: vi.fn() })),
-  usePlexPinCheckQuery: vi.fn(() => ({ data: undefined })),
-  usePlexLogoutMutation: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
-  usePlexServersQuery: vi.fn(() => ({
-    data: [],
-    error: null,
-    refetch: vi.fn(),
-  })),
-  usePlexSelectedServerQuery: vi.fn(() => ({ data: undefined })),
-  usePlexServerSelectionMutation: vi.fn(() => ({ mutateAsync: vi.fn() })),
-}));
-
 const mockedSettingsMutation = vi.mocked(useSettingsMutation);
 
 const onNext = vi.fn();
 const mutate = vi.fn();
 
-// The shape the API answers a create with, so the real hook parses it.
-const createdInstance = (kind: string, url: string) => ({
-  id: "2af88684-d7d2-4534-82bb-a6d839cc5c10",
+const row = (kind: MediaServerKind, name: string, id: string) => ({
+  id,
   kind,
-  name: "Emby",
+  name,
   enabled: true,
-  url,
+  url: "http://10.0.0.9:8096",
   verify_ssl: true,
   api_key_set: true,
   path_mappings: [],
@@ -60,9 +39,28 @@ const createdInstance = (kind: string, url: string) => ({
   options: {},
 });
 
+function setInstances(rows: Partial<Record<MediaServerKind, unknown[]>>) {
+  server.use(
+    http.get("/api/system/media-server-instances", ({ request }) => {
+      const kind = new URL(request.url).searchParams.get(
+        "kind",
+      ) as MediaServerKind;
+      return HttpResponse.json({ data: rows[kind] ?? [] });
+    }),
+  );
+}
+
+function withSelection(ui: ReactElement) {
+  return customRender(
+    <OnboardingSelectionProvider>{ui}</OnboardingSelectionProvider>,
+  );
+}
+
 describe("MediaServerStep", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
+    setInstances({});
     mockedSettingsMutation.mockReturnValue({
       mutate,
     } as unknown as ReturnType<typeof useSettingsMutation>);
@@ -70,7 +68,7 @@ describe("MediaServerStep", () => {
 
   it("renders no skip control of its own", () => {
     // The wizard shell owns the one skip control; see steps/index.test.tsx.
-    customRender(<MediaServerStep onNext={onNext} />);
+    withSelection(<MediaServerStep onNext={onNext} />);
 
     expect(
       screen.queryByRole("button", { name: /skip/i }),
@@ -78,18 +76,18 @@ describe("MediaServerStep", () => {
   });
 
   it("offers every kind the Connections page does", () => {
-    customRender(<MediaServerStep onNext={onNext} />);
+    withSelection(<MediaServerStep onNext={onNext} />);
 
     for (const label of ["Plex", "Jellyfin", "Emby", "Silo"]) {
       expect(
-        screen.getByRole("radio", { name: new RegExp(label) }),
+        screen.getByRole("checkbox", { name: new RegExp(`^${label}$`) }),
       ).toBeInTheDocument();
     }
   });
 
-  it("Continue with nothing filled in writes no settings", async () => {
+  it("Continue with nothing ticked writes no settings", async () => {
     const user = userEvent.setup();
-    customRender(<MediaServerStep onNext={onNext} />);
+    withSelection(<MediaServerStep onNext={onNext} />);
 
     await user.click(
       screen.getByRole("button", { name: /continue without a server/i }),
@@ -99,171 +97,111 @@ describe("MediaServerStep", () => {
     expect(onNext).toHaveBeenCalled();
   });
 
-  it("configures one kind at a time", async () => {
-    // Tabs put two servers' fields on screen at once, on a step most people
-    // skip. Picking a kind is what puts its fields there, and only its fields.
+  it("the whole card is the hit area, not a label inside it", async () => {
+    // The Radio it replaced put a 20px label inside a 73px card, so most of
+    // the card did nothing when clicked.
     const user = userEvent.setup();
-    customRender(<MediaServerStep onNext={onNext} />);
+    withSelection(<MediaServerStep onNext={onNext} />);
 
-    expect(screen.queryByLabelText(/server url/i)).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("radio", { name: /^Jellyfin/ }));
-    expect(screen.getByLabelText(/server url/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/api key/i)).toBeInTheDocument();
-    // Jellyfin resolves the item itself, so it never had path mappings.
-    expect(screen.queryByText(/^Path mappings$/)).not.toBeInTheDocument();
-    await user.type(
-      screen.getByLabelText(/server url/i),
-      "http://10.0.0.9:8096",
+    await user.click(
+      screen.getByText("Connect with the server URL and an API key."),
     );
 
-    await user.click(screen.getByRole("radio", { name: /^Emby/ }));
-    expect(screen.getByText(/^Path mappings$/)).toBeInTheDocument();
-    expect(screen.queryByLabelText(/movie libraries/i)).not.toBeInTheDocument();
-    // Nothing carries over from the kind just left, the prefilled name least
-    // of all: a reused instance would label the Emby row "Jellyfin".
-    expect(screen.getByLabelText(/^name$/i)).toHaveValue("Emby");
-    expect(screen.getByLabelText(/server url/i)).toHaveValue("");
+    expect(screen.getByRole("checkbox", { name: /^Jellyfin$/ })).toBeChecked();
   });
 
-  it("Plex connects through the account flow and writes nothing itself", async () => {
-    // The manual host, port and pasted X-Plex-Token this step used to ask for
-    // is a path the rest of the app has moved off: the OAuth callback stores
-    // the token, sets use_plex, and media_servers.plex_account owns the row.
+  it("takes several kinds at once", async () => {
     const user = userEvent.setup();
-    customRender(<MediaServerStep onNext={onNext} />);
+    withSelection(<MediaServerStep onNext={onNext} />);
 
-    await user.click(screen.getByRole("radio", { name: /^Plex/ }));
+    await user.click(screen.getByRole("checkbox", { name: /^Jellyfin$/ }));
+    await user.click(screen.getByRole("checkbox", { name: /^Emby$/ }));
+
+    expect(screen.getByRole("checkbox", { name: /^Jellyfin$/ })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /^Emby$/ })).toBeChecked();
+    expect(
+      screen.getByRole("button", { name: /set up 2 servers/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("takes two servers of one kind and names them apart", async () => {
+    // media_server_instances has no uniqueness on name or kind, and Settings
+    // already lists several per kind. Two rows both called "Emby" would be
+    // indistinguishable everywhere the reader meets them later.
+    const user = userEvent.setup();
+    withSelection(<MediaServerStep onNext={onNext} />);
+
+    await user.click(screen.getByRole("checkbox", { name: /^Emby$/ }));
+    await user.click(screen.getByRole("button", { name: /add another emby/i }));
 
     expect(
-      screen.getByRole("button", { name: /connect to plex/i }),
+      screen.getByRole("button", { name: "Remove Emby" }),
     ).toBeInTheDocument();
-    expect(screen.queryByLabelText(/token/i)).not.toBeInTheDocument();
-    expect(screen.queryByLabelText(/port/i)).not.toBeInTheDocument();
-    expect(mutate).not.toHaveBeenCalled();
-
-    await user.click(screen.getByRole("button", { name: /^continue$/i }));
-    expect(onNext).toHaveBeenCalled();
-    expect(mutate).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: "Remove Emby 2" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /set up 2 servers/i }),
+    ).toBeInTheDocument();
   });
 
-  it("Emby asks for the path mappings its refreshes are scoped by", async () => {
+  it("unticking a kind drops the servers it added", async () => {
     const user = userEvent.setup();
-    customRender(<MediaServerStep onNext={onNext} />);
+    withSelection(<MediaServerStep onNext={onNext} />);
 
-    await user.click(screen.getByRole("radio", { name: /^Emby/ }));
-    await user.click(screen.getByRole("button", { name: /add mapping/i }));
+    await user.click(screen.getByRole("checkbox", { name: /^Silo$/ }));
+    expect(
+      screen.getByRole("button", { name: "Remove Silo" }),
+    ).toBeInTheDocument();
 
-    expect(screen.getByLabelText(/local path 1/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/server path 1/i)).toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: /^Silo$/ }));
+
+    expect(screen.queryByRole("button", { name: "Remove Silo" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /continue without a server/i }),
+    ).toBeInTheDocument();
   });
 
-  it("creates the instance and flips the master switch", async () => {
-    const created: unknown[] = [];
+  it("a saved server reads as connected and cannot be unticked", async () => {
+    // A tick means "not connected yet". Once a row is written, unticking it
+    // would not undo the write, so the only honest undo is a delete.
+    setInstances({ emby: [row("emby", "Living room", "row-1")] });
+    withSelection(<MediaServerStep onNext={onNext} />);
+
+    const checkbox = await screen.findByRole("checkbox", { name: /^Emby$/ });
+    await waitFor(() => expect(checkbox).toBeChecked());
+    expect(checkbox).toBeDisabled();
+    expect(await screen.findByText("Living room")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /^disconnect$/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("Disconnect asks first, then deletes the row and clears the switch", async () => {
+    const deleted: string[] = [];
+    setInstances({ emby: [row("emby", "Living room", "row-1")] });
     server.use(
-      http.post("/api/system/media-server-instances", async ({ request }) => {
-        const body = await request.json();
-        created.push(body);
-        return HttpResponse.json(
-          createdInstance("emby", "http://10.0.0.9:8096"),
-        );
+      http.delete("/api/system/media-server-instances/row-1", () => {
+        deleted.push("row-1");
+        return new HttpResponse(null, { status: 204 });
       }),
     );
     const user = userEvent.setup();
-    customRender(<MediaServerStep onNext={onNext} />);
+    withSelection(<MediaServerStep onNext={onNext} />);
 
-    await user.click(screen.getByRole("radio", { name: /^Emby/ }));
-    await user.type(
-      screen.getByLabelText(/server url/i),
-      "http://10.0.0.9:8096",
+    await user.click(
+      await screen.findByRole("button", { name: /^disconnect$/i }),
     );
-    await user.type(screen.getByLabelText(/api key/i), "emby-key");
-    await user.click(screen.getByRole("button", { name: /add mapping/i }));
-    await user.type(screen.getByLabelText(/local path 1/i), "/tv");
-    await user.type(screen.getByLabelText(/server path 1/i), "/media/tv");
-    await user.click(screen.getByRole("button", { name: /connect emby/i }));
+    expect(screen.getByText(/disconnect living room\?/i)).toBeInTheDocument();
+    expect(deleted).toHaveLength(0);
 
-    await waitFor(() => expect(created).toHaveLength(1));
-    expect(created[0]).toEqual({
-      kind: "emby",
-      name: "Emby",
-      enabled: true,
-      url: "http://10.0.0.9:8096",
-      verify_ssl: true,
-      api_key: "emby-key",
-      path_mappings: [{ local_path: "/tv", remote_path: "/media/tv" }],
-      options: {},
+    await user.click(
+      screen.getAllByRole("button", { name: /^disconnect$/i })[0],
+    );
+
+    await waitFor(() => expect(deleted).toEqual(["row-1"]));
+    expect(mutate).toHaveBeenCalledWith({
+      "settings-general-use_emby": false,
     });
-    expect(mutate).toHaveBeenCalledWith(
-      { "settings-general-use_emby": true },
-      expect.anything(),
-    );
-  });
-
-  it("refuses to save an enabled Emby instance with no mapping", async () => {
-    // The Connections form has always refused this. A wizard that allowed it
-    // would hand Settings a row its own editor calls invalid.
-    const user = userEvent.setup();
-    customRender(<MediaServerStep onNext={onNext} />);
-
-    await user.click(screen.getByRole("radio", { name: /^Emby/ }));
-    await user.type(
-      screen.getByLabelText(/server url/i),
-      "http://10.0.0.9:8096",
-    );
-    await user.type(screen.getByLabelText(/api key/i), "emby-key");
-    await user.click(screen.getByRole("button", { name: /connect emby/i }));
-
-    expect(
-      await screen.findByText(/needs at least one path mapping/i),
-    ).toBeInTheDocument();
-    expect(onNext).not.toHaveBeenCalled();
-  });
-
-  it("names a refused connection instead of advancing as if it saved", async () => {
-    server.use(
-      http.post("/api/system/media-server-instances", () =>
-        HttpResponse.json({ error_code: "invalid_url" }, { status: 400 }),
-      ),
-    );
-    const user = userEvent.setup();
-    customRender(<MediaServerStep onNext={onNext} />);
-
-    await user.click(screen.getByRole("radio", { name: /^Emby/ }));
-    await user.type(
-      screen.getByLabelText(/server url/i),
-      "http://10.0.0.9:8096",
-    );
-    await user.type(screen.getByLabelText(/api key/i), "emby-key");
-    await user.click(screen.getByRole("button", { name: /add mapping/i }));
-    await user.type(screen.getByLabelText(/local path 1/i), "/tv");
-    await user.type(screen.getByLabelText(/server path 1/i), "/media/tv");
-    await user.click(screen.getByRole("button", { name: /connect emby/i }));
-
-    expect(
-      await screen.findByText(/could not save this instance/i),
-    ).toBeInTheDocument();
-    expect(onNext).not.toHaveBeenCalled();
-    // Setup is never a dead end: the shell's skip moves on, and the alert says
-    // where the connection can be finished.
-    expect(
-      within(screen.getByRole("alert")).getByText(/settings, connections/i),
-    ).toBeInTheDocument();
-  });
-
-  it("Silo scopes every mapping to a library", async () => {
-    const user = userEvent.setup();
-    customRender(<MediaServerStep onNext={onNext} />);
-
-    await user.click(screen.getByRole("radio", { name: /^Silo/ }));
-
-    expect(
-      screen.getByRole("button", { name: /load libraries/i }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        /select the silo library that contains that server folder/i,
-      ),
-    ).toBeInTheDocument();
   });
 });

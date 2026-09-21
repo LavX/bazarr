@@ -32,25 +32,64 @@ export function useMediaServerInstances(kind: MediaServerKind) {
   });
 }
 
+/**
+ * What one save writes.
+ *
+ * The payload is passed at mutate() time so one hook can write several rows:
+ * `mutateAsync(() => payload)` per row, which is what the onboarding wizard
+ * needs to create the media servers a reader ticked in one run. A caller that
+ * has its payload at hook-call time still passes it as `input` and calls
+ * `mutate(undefined)`, which is what the Connections editors do.
+ *
+ * It is handed over as a thunk rather than as the object itself because
+ * whatever is passed to mutate() becomes the mutation's stored `variables`, and
+ * this payload carries a write-only API key. A function is not serialised into
+ * a state dump, so the credential stays where apis/raw/mediaServers.ts already
+ * keeps it: out of every cache and every error.
+ *
+ * Test and libraries deliberately keep their payload at hook-call time: they
+ * reset their result when a connection value changes, which is the behaviour
+ * that stops a stale "Connected" sitting under an edited URL.
+ */
+export type SaveMediaServerInput = MediaServerUpdate & {
+  kind?: MediaServerKind;
+};
+
+export type SaveMediaServerPayload = () => SaveMediaServerInput;
+
 export function useSaveMediaServerInstance(
-  kind: MediaServerKind,
-  input: MediaServerUpdate,
+  kind?: MediaServerKind,
+  input?: MediaServerUpdate,
   id?: string,
 ) {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: () =>
-      id
-        ? api.mediaServers.update(id, input)
-        : api.mediaServers.create({
-            ...input,
-            kind,
-            name: input.name ?? "",
-            url: input.url ?? "",
-          }),
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: instancesKey(kind) });
-      if (id) void client.invalidateQueries({ queryKey: itemKey(kind, id) });
+    mutationFn: (variables: SaveMediaServerPayload | void) => {
+      const source: SaveMediaServerInput = variables
+        ? variables()
+        : (input ?? {});
+      const { kind: payloadKind, ...payload } = source;
+      const target = payloadKind ?? kind;
+      if (id) {
+        return api.mediaServers.update(id, payload);
+      }
+      if (!target) {
+        return Promise.reject(
+          new Error("A new media server instance needs a kind"),
+        );
+      }
+      return api.mediaServers.create({
+        ...payload,
+        kind: target,
+        name: payload.name ?? "",
+        url: payload.url ?? "",
+      });
+    },
+    onSuccess: (_data, variables) => {
+      const target = (variables ? variables().kind : undefined) ?? kind;
+      if (!target) return;
+      void client.invalidateQueries({ queryKey: instancesKey(target) });
+      if (id) void client.invalidateQueries({ queryKey: itemKey(target, id) });
     },
   });
 }

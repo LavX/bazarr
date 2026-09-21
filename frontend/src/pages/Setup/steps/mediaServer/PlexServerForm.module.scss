@@ -1,0 +1,27 @@
+// The Plex account panel is the Connections panel, and the Connections page
+// gives it a page to sit on: two bordered cards with their own headings. Inside
+// the wizard card that reads as two cards inside a card, so the chrome is taken
+// off here rather than forked into a second copy of the panel. Mantine's static
+// class names are what make that possible without touching Settings.
+.panel {
+  // Mantine writes the panel's padding as an inline style, which no selector
+  // can outrank. The panel belongs to the Connections page and is shared, so
+  // the override lives here rather than being forked into a second copy.
+  :global(.mantine-Paper-root) {
+    padding: 0 !important;
+    margin-bottom: 0;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+  }
+
+  // Under the step's own heading these are field-group labels, not card
+  // titles. Kept as headings so the outline still reads h3 then h4.
+  :global(.mantine-Title-root) {
+    font-size: var(--mantine-font-size-sm);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--bz-text-tertiary);
+  }
+}

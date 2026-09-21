@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { ONBOARDING_STEPS, stepsForIntent } from "./index";
+import type { MediaServerDraftSummary } from "@/pages/Setup/useOnboardingSelection";
+import { buildSteps, mediaServerStepKey, ONBOARDING_STEPS } from "./index";
+
+const NO_SERVERS: MediaServerDraftSummary[] = [];
+
+function keysFor(
+  intent: "library" | "discover" | null,
+  mediaServers: MediaServerDraftSummary[] = NO_SERVERS,
+) {
+  return buildSteps({ intent, mediaServers }).map((s) => s.key);
+}
 
 // Every step body under steps/, source and all, keyed by module path. The raw
 // text is what we assert on: a skip control is a thing a step renders, and the
@@ -61,7 +71,7 @@ describe("onboarding step registry", () => {
   });
 
   it("the library path keeps the arr steps and drops nothing they need", () => {
-    const keys = stepsForIntent("library").map((s) => s.key);
+    const keys = keysFor("library");
 
     expect(keys).toEqual([
       "welcome",
@@ -79,12 +89,15 @@ describe("onboarding step registry", () => {
     ]);
   });
 
-  it("the discover path drops the arr and media-server steps", () => {
-    const keys = stepsForIntent("discover").map((s) => s.key);
+  it("the discover path drops the arr steps but keeps media servers", () => {
+    // A Jellyfin user with no Sonarr never saw the media server step at all,
+    // though connecting one has nothing to do with running an arr.
+    const keys = keysFor("discover");
 
     expect(keys).toEqual([
       "welcome",
       "intent",
+      "media-servers",
       "seerr",
       "languages",
       "providers",
@@ -102,8 +115,62 @@ describe("onboarding step registry", () => {
   });
 
   it("shows the whole registry before an intent is chosen", () => {
-    expect(stepsForIntent(null).map((s) => s.key)).toEqual(
-      ONBOARDING_STEPS.map((s) => s.key),
+    expect(keysFor(null)).toEqual(ONBOARDING_STEPS.map((s) => s.key));
+  });
+
+  it("generates one configure step per selected media server", () => {
+    const keys = keysFor("library", [
+      { draftId: "a", kind: "emby" },
+      { draftId: "b", kind: "emby" },
+      { draftId: "c", kind: "jellyfin" },
+    ]);
+
+    expect(keys.slice(5, 9)).toEqual([
+      "media-servers",
+      mediaServerStepKey("a"),
+      mediaServerStepKey("b"),
+      mediaServerStepKey("c"),
+    ]);
+  });
+
+  it("generates nothing for a server that is already saved", () => {
+    const keys = keysFor("library", [
+      { draftId: "a", kind: "emby", instanceId: "row-1" },
+      { draftId: "b", kind: "silo" },
+    ]);
+
+    expect(keys).not.toContain(mediaServerStepKey("a"));
+    expect(keys).toContain(mediaServerStepKey("b"));
+  });
+
+  it("an empty selection yields the picker on its own", () => {
+    expect(keysFor("library", [])).toEqual(keysFor("library"));
+  });
+
+  it("is pure: the same state gives the same list", () => {
+    const input = {
+      intent: "library" as const,
+      mediaServers: [{ draftId: "a", kind: "silo" as const }],
+    };
+
+    expect(buildSteps(input).map((s) => s.key)).toEqual(
+      buildSteps(input).map((s) => s.key),
     );
+  });
+
+  it("every generated step is optional, like the picker that made it", () => {
+    const generated = buildSteps({
+      intent: "library",
+      mediaServers: [{ draftId: "a", kind: "emby" }],
+    }).find((s) => s.key === mediaServerStepKey("a"));
+
+    expect(generated?.optional).toBe(true);
+    expect(generated?.requiredReason).toBeUndefined();
+  });
+
+  it("every step declares the phase the rail counts", () => {
+    for (const step of ONBOARDING_STEPS) {
+      expect(["start", "connect", "subtitles", "finish"]).toContain(step.phase);
+    }
   });
 });
