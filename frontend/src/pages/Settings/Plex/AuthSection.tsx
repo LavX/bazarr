@@ -58,7 +58,32 @@ const AuthSection = () => {
   );
 
   const handleAuth = async () => {
-    const { data: pin } = await createPin();
+    // Every branch below used to fall through to `pin.authUrl`, so a Plex API
+    // that was unreachable, rate-limited or simply answered without a pin threw
+    // an unhandled rejection and the button did nothing at all.
+    let pin: Plex.Pin | null = null;
+    try {
+      pin = (await createPin()).data ?? null;
+    } catch (error) {
+      notifications.show({
+        title: "Could not reach Plex",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Plex did not answer the sign-in request. Try again in a moment.",
+        color: "red",
+      });
+      return;
+    }
+
+    if (!pin?.authUrl) {
+      notifications.show({
+        title: "Could not start Plex sign-in",
+        message: "Plex answered without a sign-in link. Try again in a moment.",
+        color: "red",
+      });
+      return;
+    }
 
     setPin(pin);
 
@@ -71,6 +96,18 @@ const AuthSection = () => {
       "PlexAuth",
       `width=${width},height=${height},left=${left},top=${top},${features}`,
     );
+
+    // A blocked popup returns null, which otherwise leaves the panel polling a
+    // pin against a window the user never saw.
+    if (!authWindowRef.current) {
+      setPin(null);
+      notifications.show({
+        title: "Plex sign-in window was blocked",
+        message:
+          "Allow pop-ups for this site, then start the Plex sign-in again.",
+        color: "red",
+      });
+    }
   };
 
   const handleLogout = () => {

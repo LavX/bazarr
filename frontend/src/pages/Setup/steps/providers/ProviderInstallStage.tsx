@@ -6,6 +6,7 @@ import {
   Group,
   List,
   Loader,
+  Progress,
   ScrollArea,
   Stack,
   Text,
@@ -178,6 +179,20 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   const [query, setQuery] = useState("");
   const [restarting, setRestarting] = useState(false);
   const [installing, setInstalling] = useState(false);
+  // Which control started the run. Both install buttons used to read
+  // `installing`, so pressing either spun both and neither said what it was
+  // doing.
+  const [installSource, setInstallSource] = useState<
+    "recommended" | "selected" | null
+  >(null);
+  // `done` counts settled installs, successful or not, because the bar is about
+  // how much work is left rather than how much of it worked. The verdicts land
+  // in `outcomes` when the run finishes.
+  const [progress, setProgress] = useState<{
+    done: number;
+    total: number;
+    latest: string | null;
+  } | null>(null);
   const [outcomes, setOutcomes] = useState<InstallOutcome[] | null>(null);
   // Why the recommended set installed but could not be enabled, in the
   // settings API's own words. Staged providers still restart into place, so
@@ -347,11 +362,27 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
       }
       setInstalling(true);
       setEnableError(null);
+      // Installing the recommended set is 36 providers on a real catalog, and
+      // a single spinner over a run that long is indistinguishable from a
+      // frozen page. Each install reports as it settles, so the bar moves and
+      // the count is the truth rather than an animation.
+      setProgress({ done: 0, total: targets.length, latest: null });
       const results = await Promise.allSettled(
         targets.map((choice) =>
-          install.mutateAsync({ manifest: choice.manifest }),
+          install.mutateAsync({ manifest: choice.manifest }).finally(() =>
+            setProgress((current) =>
+              current === null
+                ? current
+                : {
+                    ...current,
+                    done: current.done + 1,
+                    latest: choice.name,
+                  },
+            ),
+          ),
         ),
       );
+      setProgress(null);
       const fresh: InstallOutcome[] = targets.map((choice, index) => {
         const result = results[index];
         return result.status === "fulfilled"
@@ -388,6 +419,7 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
 
       setOutcomes(merged);
       setInstalling(false);
+      setInstallSource(null);
 
       // Nothing staged means nothing new to load, so a restart would only cost
       // the user a minute and tell them nothing. Leave the failures on screen.
@@ -441,6 +473,7 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
     setSelected(ids);
     outcomesRef.current = [];
     setOutcomes(null);
+    setInstallSource("recommended");
     return runInstall(recommended);
   }, [recommended, runInstall]);
 
@@ -724,6 +757,33 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
           Install &amp; restart
         </Button>
       </Group>
+
+      {progress !== null && (
+        // Live region rather than decoration: on a 36-provider run this is the
+        // only thing that distinguishes working from hung, so it has to reach
+        // a screen reader too.
+        <Stack gap={6} role="status" aria-live="polite">
+          <Group justify="space-between" gap="sm" wrap="nowrap">
+            <Text size="sm">
+              {`Installing provider ${Math.min(progress.done + 1, progress.total)} of ${progress.total}`}
+              {progress.latest === null ? "" : `, finished ${progress.latest}`}
+            </Text>
+            <Text size="sm" c="dimmed">
+              {`${progress.done} of ${progress.total} done`}
+            </Text>
+          </Group>
+          <Progress
+            value={
+              progress.total === 0 ? 0 : (progress.done / progress.total) * 100
+            }
+            aria-label="Provider installation progress"
+          />
+          <Text size="xs" c="dimmed">
+            Bazarr+ restarts once when this finishes, and the wizard picks up
+            where it left off.
+          </Text>
+        </Stack>
+      )}
     </Stack>
   );
 };
