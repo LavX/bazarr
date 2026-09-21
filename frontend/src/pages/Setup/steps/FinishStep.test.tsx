@@ -1,4 +1,5 @@
 import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   useArrInstances,
@@ -7,7 +8,34 @@ import {
   useSystemSettings,
 } from "@/apis/hooks";
 import { customRender, screen, waitFor } from "@/tests";
+import server from "@/tests/mocks/node";
 import FinishStep from "./FinishStep";
+
+// The recap reads the media server rows, not the master switches. Staging them
+// per kind is what proves a connected Emby is named instead of being reported
+// as "Plex skipped, Jellyfin skipped".
+function setMediaServers(rows: Record<string, string[]>) {
+  server.use(
+    http.get("/api/system/media-server-instances", ({ request }) => {
+      const kind = new URL(request.url).searchParams.get("kind") ?? "";
+      return HttpResponse.json({
+        data: (rows[kind] ?? []).map((name, index) => ({
+          id: `${kind}-${index}`,
+          kind,
+          name,
+          enabled: true,
+          url: "http://10.0.0.9:8096",
+          verify_ssl: true,
+          api_key_set: true,
+          path_mappings: [],
+          refresh_movies: true,
+          refresh_episodes: true,
+          options: {},
+        })),
+      });
+    }),
+  );
+}
 
 // Navigation is asserted; mock react-router's useNavigate like the shell test.
 const navigate = vi.fn();
@@ -79,7 +107,8 @@ describe("FinishStep", () => {
     } as unknown as ReturnType<typeof useSettingsMutation>);
   });
 
-  it("summarizes the configured state", () => {
+  it("summarizes the configured state", async () => {
+    setMediaServers({ plex: ["Plex"] });
     customRender(<FinishStep onNext={vi.fn()} />);
 
     // Sonarr / Radarr counts.
@@ -89,8 +118,42 @@ describe("FinishStep", () => {
     expect(screen.getByText(/language profile/i)).toBeInTheDocument();
     // An enabled provider shows up.
     expect(screen.getByText(/provider/i)).toBeInTheDocument();
-    // Plex on, Jellyfin off.
-    expect(screen.getByText(/plex/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/plex connected \(1 server\)/i),
+    ).toBeInTheDocument();
+  });
+
+  it("names every kind of media server, not just Plex and Jellyfin", async () => {
+    // use_plex and use_jellyfin were the only switches the recap read, so a
+    // reader who connected Emby was told "Plex skipped, Jellyfin skipped" and
+    // never saw the server they had actually set up.
+    setMediaServers({ emby: ["Emby", "Emby 2"], silo: ["Silo"] });
+    customRender(<FinishStep onNext={vi.fn()} />);
+
+    expect(
+      await screen.findByText(/emby connected \(2 servers\)/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/silo connected \(1 server\)/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/plex media server skipped/i)).toBeNull();
+  });
+
+  it("says so when the finish write fails instead of going quiet", async () => {
+    const user = userEvent.setup();
+    mutate.mockImplementation(
+      (_input: unknown, opts?: { onError?: () => void }) => {
+        opts?.onError?.();
+      },
+    );
+
+    customRender(<FinishStep onNext={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: /finish/i }));
+
+    expect(
+      await screen.findByText(/could not finish setup/i),
+    ).toBeInTheDocument();
+    expect(navigate).not.toHaveBeenCalled();
   });
 
   it("marks setup complete and navigates home on Finish", async () => {

@@ -11,6 +11,30 @@ import type { FC } from "react";
  */
 export type WizardIntent = "library" | "discover";
 
+/**
+ * The four stretches of the wizard, in order.
+ *
+ * The rail counts phases, not steps. A step total cannot be shown honestly:
+ * before the intent is answered nobody knows which path runs, and the media
+ * server segment grows and shrinks as servers are ticked, so a denominator
+ * would change under the reader mid-setup. The phases never do.
+ */
+export type WizardPhase = "start" | "connect" | "subtitles" | "finish";
+
+export const WIZARD_PHASES: WizardPhase[] = [
+  "start",
+  "connect",
+  "subtitles",
+  "finish",
+];
+
+export const PHASE_LABELS: Record<WizardPhase, string> = {
+  start: "Getting started",
+  connect: "Connect",
+  subtitles: "Subtitles",
+  finish: "Finish",
+};
+
 export interface WizardStepProps {
   onNext: () => void; // advance + persist
   onBack?: () => void; // go back one step
@@ -19,7 +43,12 @@ export interface WizardStepProps {
 export interface WizardStepDef {
   key: string; // stable id e.g. "welcome"
   label: string; // Stepper label
+  phase: WizardPhase;
   Component: FC<WizardStepProps>;
+  // Steps that belong to one stretch of the same subject, counted together in
+  // the header so a generated segment reads "Media servers 2 of 3" instead of
+  // moving a total nobody can predict.
+  segment?: string;
   // The single source of skippability. The wizard shell renders the skip
   // control from this, with one label for every step; steps never render
   // their own (steps/index.test.tsx fails if one does).

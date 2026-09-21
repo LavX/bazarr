@@ -1,6 +1,6 @@
 /* eslint-disable camelcase */
 
-import { FC, useState } from "react";
+import { FC, useCallback, useMemo, useState } from "react";
 import {
   Alert,
   Button,
@@ -13,17 +13,11 @@ import {
   TextInput,
   Title,
 } from "@mantine/core";
-import { useSettingsMutation } from "@/apis/hooks";
 import {
   useMediaServerLibraries,
   useMediaServerTest,
-  useSaveMediaServerInstance,
 } from "@/apis/hooks/mediaServers";
-import type {
-  MediaServerKind,
-  MediaServerOptions,
-  PathMapping,
-} from "@/apis/raw/mediaServers";
+import type { MediaServerOptions, PathMapping } from "@/apis/raw/mediaServers";
 import { KINDS_WITH_PATH_MAPPINGS } from "@/apis/raw/mediaServers";
 import {
   CREDENTIAL_LABELS,
@@ -33,100 +27,120 @@ import {
 import LibraryPickers from "@/pages/Settings/MediaServers/LibraryPickers";
 import PathMappings from "@/pages/Settings/MediaServers/PathMappings";
 import type { WizardStepProps } from "@/pages/Setup/steps/types";
+import type { MediaServerDraft } from "@/pages/Setup/useOnboardingSelection";
+import { useOnboardingSelection } from "@/pages/Setup/useOnboardingSelection";
 import StepActions from "./StepActions";
-import { validateServerUrl } from "./validation";
+import {
+  DraftFieldErrors,
+  isDraftTouched,
+  useMediaServerSubmit,
+} from "./submit";
 
 interface Props extends WizardStepProps {
   // Plex is not here: its connection comes from the account flow, not a form.
-  kind: Exclude<MediaServerKind, "plex">;
+  draft: MediaServerDraft;
 }
 
 /**
- * Onboarding form for the kinds whose connection is typed in: Emby, Jellyfin
- * and Silo. It saves through useSaveMediaServerInstance, the writer the
- * Connections instance form uses, and reuses the same PathMappings and
- * LibraryPickers editors, so a row made here is one Settings can re-save.
+ * Onboarding form for one media server whose connection is typed in: Emby,
+ * Jellyfin or Silo. It writes through the same create the Connections instance
+ * form uses and reuses the same PathMappings and LibraryPickers editors, so a
+ * row made here is one Settings can re-save.
  *
  * The kind decides the fields. Emby and Silo resolve a publication by path, so
  * they need mappings or the dispatcher never addresses them; Jellyfin resolves
  * the item itself and needs the libraries it should scan instead. Plex does
- * neither and is not offered here.
+ * neither and has its own panel.
+ *
+ * One form per server, always: the test and libraries hooks close over the
+ * connection values at hook-call time and reset their result when one of them
+ * changes, which is what keeps a stale "Connected" from sitting under an edited
+ * URL. That behaviour only survives if each server has a component of its own.
  *
  * Continue with nothing filled in writes nothing and advances, the same
  * contract as every other optional connection step.
  */
-const InstanceServerForm: FC<Props> = ({ kind, onNext, onBack }) => {
+const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
+  const kind = draft.kind;
   const name = kindName(kind);
   const credential = CREDENTIAL_LABELS[kind];
   const mapped = KINDS_WITH_PATH_MAPPINGS.includes(kind);
-  const settings = useSettingsMutation();
+  const { updateDraft, markSaved } = useOnboardingSelection();
+  // Emby and Silo cannot be saved without a mapping, so the first row is on
+  // screen from the start. It used to sit behind an Add mapping button with no
+  // required marker, which the reader only found after the save was refused.
+  const mappings =
+    mapped && draft.pathMappings.length === 0
+      ? [{ local_path: "", remote_path: "" }]
+      : draft.pathMappings;
+  const { submit, isPending } = useMediaServerSubmit();
 
-  const [displayName, setDisplayName] = useState(name);
-  const [url, setUrl] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [verifySsl, setVerifySsl] = useState(true);
-  const [mappings, setMappings] = useState<PathMapping[]>([]);
-  const [options, setOptions] = useState<MediaServerOptions>({});
-  const [problem, setProblem] = useState<string | null>(null);
+  const [errors, setErrors] = useState<DraftFieldErrors>({});
+  const [failure, setFailure] = useState<string | null>(null);
+  const [switchesFailed, setSwitchesFailed] = useState(false);
 
-  const connection = {
-    url: url.trim(),
-    api_key: apiKey.trim(),
-    verify_ssl: verifySsl,
-  };
-  const configured = connection.url.length > 0 && connection.api_key.length > 0;
-  const touched =
-    url.trim().length > 0 || apiKey.trim().length > 0 || mappings.length > 0;
-  const test = useMediaServerTest(kind, connection);
-  const libraries = useMediaServerLibraries(kind, connection);
-  const save = useSaveMediaServerInstance(kind, {
-    ...connection,
-    name: displayName.trim(),
-    enabled: true,
-    path_mappings: mappings,
-    options,
-  });
+  // Typing is the reader answering the message, so the message goes as they
+  // answer it. It used to sit there until Test was pressed.
+  const clear = useCallback((field: keyof DraftFieldErrors) => {
+    setFailure(null);
+    setErrors((current) =>
+      current[field] === undefined
+        ? current
+        : { ...current, [field]: undefined },
+    );
+  }, []);
 
-  const incompleteMapping = mappings.some(
-    (mapping) => !mapping.local_path.trim() || !mapping.remote_path.trim(),
+  const set = useCallback(
+    (patch: Partial<MediaServerDraft>, field?: keyof DraftFieldErrors) => {
+      if (field) clear(field);
+      updateDraft(draft.draftId, patch);
+    },
+    [clear, draft.draftId, updateDraft],
   );
 
-  const validate = (): string | null => {
-    if (!displayName.trim()) return "Name is required";
-    const urlProblem = validateServerUrl(connection.url);
-    if (urlProblem) return urlProblem;
-    if (!connection.api_key) return `${credential} is required`;
-    if (mapped && mappings.length === 0)
-      return "An enabled instance needs at least one path mapping";
-    if (incompleteMapping)
-      return "Fill in both paths on every mapping, or remove it";
-    return null;
-  };
+  const connection = useMemo(
+    () => ({
+      url: draft.url.trim(),
+      api_key: draft.apiKey.trim(),
+      verify_ssl: draft.verifySsl,
+    }),
+    [draft.url, draft.apiKey, draft.verifySsl],
+  );
+  const configured = connection.url.length > 0 && connection.api_key.length > 0;
+  const touched = isDraftTouched(draft);
+
+  const test = useMediaServerTest(kind, connection);
+  const libraries = useMediaServerLibraries(kind, connection);
 
   const handleContinue = () => {
     if (!touched) {
       onNext();
       return;
     }
-    const found = validate();
-    setProblem(found);
-    if (found) return;
-    save.mutate(undefined, {
-      onSuccess: () => {
-        // The row is what refreshes; the master switch is what lets the
-        // dispatcher publish it, exactly as the Connections page stages both.
-        settings.mutate(
-          { [`settings-general-use_${kind}`]: true },
-          { onSuccess: () => onNext() },
-        );
-      },
+    setFailure(null);
+    setSwitchesFailed(false);
+    void submit([draft]).then((result) => {
+      const found = result.errors[draft.draftId];
+      if (found) {
+        setErrors(found);
+        return;
+      }
+      setErrors({});
+      const outcome = result.outcomes[0];
+      if (!outcome?.ok) {
+        setFailure(outcome?.error ?? "The save failed.");
+        return;
+      }
+      setSwitchesFailed(result.switchesFailed);
+      markSaved(draft.draftId, outcome.instanceId ?? "");
+      onNext();
     });
   };
 
   return (
-    <Stack gap="lg">
+    <Stack gap="md">
       <Stack gap="xs">
-        <Title order={3}>{name}</Title>
+        <Title order={3}>{draft.name.trim() || name}</Title>
         <Text c="dimmed">
           Connect {name} so Bazarr can refresh it after it downloads subtitles.
         </Text>
@@ -135,97 +149,116 @@ const InstanceServerForm: FC<Props> = ({ kind, onNext, onBack }) => {
       <TextInput
         label="Name"
         description="Shown in Settings, Connections"
-        value={displayName}
-        onChange={(event) => setDisplayName(event.currentTarget.value)}
+        value={draft.name}
+        error={errors.name}
+        onChange={(event) => set({ name: event.currentTarget.value }, "name")}
       />
       <TextInput
         label="Server URL"
         placeholder={URL_PLACEHOLDERS[kind]}
-        description={`Full URL of your ${name} server, including any path prefix. Keep credentials in the ${credential} field.`}
-        value={url}
-        onChange={(event) => setUrl(event.currentTarget.value)}
+        description={
+          kind === "silo"
+            ? `Full URL of your ${name} server, including any path prefix. Keep credentials in the ${credential} field. Refreshes need an IP address or a name resolved by DNS or the hosts file: mDNS and other local-discovery names pass the Test but fail refreshes.`
+            : `Full URL of your ${name} server, including any path prefix. Keep credentials in the ${credential} field.`
+        }
+        value={draft.url}
+        error={errors.url}
+        onChange={(event) => set({ url: event.currentTarget.value }, "url")}
       />
-      {kind === "silo" && (
-        <Text size="sm" c="dimmed">
-          Refreshes need an IP address or a name resolved by DNS or the hosts
-          file. mDNS and other local-discovery names pass the Test but fail
-          refreshes.
-        </Text>
-      )}
       <PasswordInput
         label={credential}
         autoComplete="new-password"
-        value={apiKey}
-        onChange={(event) => setApiKey(event.currentTarget.value)}
+        value={draft.apiKey}
+        error={errors.apiKey}
+        onChange={(event) =>
+          set({ apiKey: event.currentTarget.value }, "apiKey")
+        }
       />
       <Switch
         label="Verify SSL certificate"
-        checked={verifySsl}
-        onChange={(event) => setVerifySsl(event.currentTarget.checked)}
+        description="Applies to HTTPS connections."
+        checked={draft.verifySsl}
+        onChange={(event) => set({ verifySsl: event.currentTarget.checked })}
       />
-      <Text size="xs" c="dimmed">
-        Certificate verification applies to HTTPS connections.
-      </Text>
 
-      <Group>
+      <Group gap="sm" align="center">
         <Button
           type="button"
           variant="light"
           disabled={!configured}
           loading={test.isPending}
           onClick={() => {
-            setProblem(null);
+            setFailure(null);
             test.mutate();
           }}
         >
           Test
         </Button>
+        {test.isSuccess && test.data.success ? (
+          <Text size="sm" c="green">
+            {test.data.server_name
+              ? `Connected to ${test.data.server_name}`
+              : "Connection succeeded"}
+            {kind !== "silo" && test.data.version
+              ? ` (v${test.data.version})`
+              : ""}
+            . Test checks access, not refresh permission.
+          </Text>
+        ) : test.isError || (test.isSuccess && !test.data.success) ? (
+          <Text size="sm" c="red">
+            Connection test failed. Check the Server URL, {credential},
+            certificate and server access.
+          </Text>
+        ) : (
+          <Text size="sm" c="dimmed">
+            {configured
+              ? "Test checks access, not refresh permission."
+              : `Enter a Server URL and ${credential} to test this connection.`}
+          </Text>
+        )}
       </Group>
-      <Text size="sm" c="dimmed">
-        Test checks access, not refresh permission.
-      </Text>
-      {!configured && (
-        <Text size="sm" c="dimmed">
-          Enter a Server URL and {credential} to test this connection.
-        </Text>
-      )}
-      {test.isSuccess && test.data.success && (
-        <Alert color="green">
-          {test.data.server_name
-            ? `Connected to ${test.data.server_name}`
-            : "Connection succeeded"}
-          {kind !== "silo" && test.data.version
-            ? ` (v${test.data.version})`
-            : ""}
-          .
-        </Alert>
-      )}
-      {(test.isError || (test.isSuccess && !test.data.success)) && (
-        <Alert color="red">
-          Connection test failed. Check the Server URL, {credential},
-          certificate and server access.
-        </Alert>
-      )}
 
       {kind === "jellyfin" && (
         <>
           <Divider label="Libraries this instance refreshes" />
-          <LibraryPickers
-            kind="jellyfin"
-            value={options}
-            onChange={setOptions}
-            libraries={libraries}
-            configured={configured}
-          />
+          {/* The pickers are three empty, disabled selects until the libraries
+              are fetched, and they are what makes this screen taller than the
+              window. Until then the section is the one control that does
+              anything: the load. */}
+          {libraries.isIdle ? (
+            <Group gap="sm" align="center">
+              <Button
+                type="button"
+                variant="light"
+                disabled={!configured}
+                onClick={() => libraries.mutate()}
+              >
+                Load libraries
+              </Button>
+              <Text size="sm" c="dimmed">
+                {configured
+                  ? "Optional. Leave it and this instance refreshes whatever the item resolves to."
+                  : `Enter a Server URL and ${credential} first.`}
+              </Text>
+            </Group>
+          ) : (
+            <LibraryPickers
+              kind="jellyfin"
+              value={draft.options}
+              onChange={(options: MediaServerOptions) => set({ options })}
+              libraries={libraries}
+              configured={configured}
+            />
+          )}
         </>
       )}
 
       {mapped && (
         <>
-          <Divider label="Path mappings" />
+          <Divider label="Path mappings (required)" />
           {kind === "silo" && (
             <>
-              <Group>
+              <Group gap="sm" align="center">
                 <Button
                   type="button"
                   variant="light"
@@ -235,54 +268,54 @@ const InstanceServerForm: FC<Props> = ({ kind, onNext, onBack }) => {
                 >
                   Load libraries
                 </Button>
+                {libraries.isError ? (
+                  <Text size="sm" c="red">
+                    Could not load Silo libraries. Check the Server URL,{" "}
+                    {credential} and library access.
+                  </Text>
+                ) : libraries.isSuccess && libraries.data.length === 0 ? (
+                  <Text size="sm" c="dimmed">
+                    No supported libraries found. Enable a movie or series
+                    library in Silo and check the API key's access.
+                  </Text>
+                ) : (
+                  <Text size="sm" c="dimmed">
+                    Every Silo mapping is scoped to a library, so the mappings
+                    open once the libraries are loaded.
+                  </Text>
+                )}
               </Group>
-              {libraries.isPending && (
-                <Text size="sm">Loading Silo libraries...</Text>
-              )}
-              {libraries.isError && (
-                <Alert color="red">
-                  Could not load Silo libraries. Check the Server URL,{" "}
-                  {credential} and library access.
-                </Alert>
-              )}
-              {libraries.isSuccess && libraries.data.length === 0 && (
-                <Alert color="gray">
-                  No supported libraries found. Enable a movie or series library
-                  in Silo and check the API key's access.
-                </Alert>
-              )}
-              {libraries.isIdle && (
-                <Text size="sm" c="dimmed">
-                  Load libraries to add mappings or choose an available Silo
-                  library.
-                </Text>
-              )}
             </>
           )}
-          <PathMappings
-            kind={kind}
-            value={mappings}
-            onChange={setMappings}
-            libraries={libraries.data}
-          />
+          {/* Silo cannot add a mapping before its libraries are known: the
+              editor's own Add control is disabled until then. */}
+          {(kind !== "silo" || libraries.isSuccess) && (
+            <PathMappings
+              kind={kind}
+              value={mappings}
+              onChange={(pathMappings: PathMapping[]) =>
+                set({ pathMappings }, "pathMappings")
+              }
+              libraries={libraries.data}
+            />
+          )}
+          {errors.pathMappings && (
+            <Text size="sm" c="red">
+              {errors.pathMappings}
+            </Text>
+          )}
         </>
       )}
 
-      {problem && (
-        <Alert color="red" title={`Could not connect ${name}`}>
-          {problem}
+      {failure && (
+        <Alert
+          color="red"
+          title={`Could not save ${draft.name.trim() || name}`}
+        >
+          {failure} Try again, or connect it later from Settings, Connections.
         </Alert>
       )}
-      {save.isError && (
-        <Alert color="red">
-          Could not save this instance. Check{" "}
-          {mapped
-            ? `the name, the full URL, the ${credential.toLowerCase()} and the path mappings`
-            : `the name, the full URL and the ${credential.toLowerCase()}`}
-          , then try again, or connect it later from Settings, Connections.
-        </Alert>
-      )}
-      {settings.isError && (
+      {switchesFailed && (
         <Alert color="red">
           The instance was saved, but its {name} master switch could not be
           turned on, so nothing refreshes yet. Enable it in Settings,
@@ -294,8 +327,14 @@ const InstanceServerForm: FC<Props> = ({ kind, onNext, onBack }) => {
         onNext={onNext}
         onBack={onBack}
         onContinue={handleContinue}
-        continueLabel={touched ? `Connect ${name}` : `Continue without ${name}`}
-        continuePending={save.isPending || settings.isPending}
+        continueLabel={
+          !touched
+            ? `Continue without ${name}`
+            : failure
+              ? `Try ${name} again`
+              : `Connect ${name}`
+        }
+        continuePending={isPending}
       />
     </Stack>
   );

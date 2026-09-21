@@ -1,6 +1,7 @@
-import { FC } from "react";
+import { FC, useState } from "react";
 import { useNavigate } from "react-router";
 import {
+  Alert,
   Button,
   Group,
   List,
@@ -17,11 +18,15 @@ import {
   useSettingsMutation,
   useSystemSettings,
 } from "@/apis/hooks";
+import { useMediaServerInstances } from "@/apis/hooks/mediaServers";
+import type { MediaServerKind } from "@/apis/raw/mediaServers";
+import { kindName } from "@/pages/Settings/MediaServers/kinds";
 import {
   clearPersistedIntent,
   useOnboardingIntent,
 } from "@/pages/Setup/useOnboardingIntent";
-import { useWizardStep } from "@/pages/Setup/useWizardStep";
+import { clearPersistedSelection } from "@/pages/Setup/useOnboardingSelection";
+import { clearPersistedStep } from "@/pages/Setup/useWizardStep";
 import type { WizardStepProps } from "./types";
 
 interface SummaryLine {
@@ -62,13 +67,31 @@ function SummaryItem({ label, done }: SummaryLine) {
  */
 const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
   const navigate = useNavigate();
-  const { reset } = useWizardStep();
   const { intent } = useOnboardingIntent();
   const mutation = useSettingsMutation();
+  const [failed, setFailed] = useState(false);
 
   const { data: instances } = useArrInstances();
   const { data: profiles } = useLanguageProfiles();
   const { data: settings } = useSystemSettings();
+
+  // The recap reads the rows, not the master switches. It used to read
+  // use_plex and use_jellyfin only, so connecting Emby produced "Plex skipped,
+  // Jellyfin skipped" and no mention of the server that was actually set up.
+  const plex = useMediaServerInstances("plex");
+  const jellyfin = useMediaServerInstances("jellyfin");
+  const emby = useMediaServerInstances("emby");
+  const silo = useMediaServerInstances("silo");
+  const mediaServers: { kind: MediaServerKind; count: number }[] = [
+    { kind: "plex", count: plex.data?.length ?? 0 },
+    { kind: "jellyfin", count: jellyfin.data?.length ?? 0 },
+    { kind: "emby", count: emby.data?.length ?? 0 },
+    { kind: "silo", count: silo.data?.length ?? 0 },
+  ];
+  const mediaServerCount = mediaServers.reduce(
+    (total, entry) => total + entry.count,
+    0,
+  );
 
   const general = settings?.general;
   const discoverPath = intent === "discover";
@@ -85,8 +108,6 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
   const instanceCount = sonarrCount + radarrCount + sportarrCount;
   const profileCount = (profiles ?? []).length;
   const providers = general?.enabled_providers ?? [];
-  const usePlex = general?.use_plex ?? false;
-  const useJellyfin = general?.use_jellyfin ?? false;
   const useSeerr = general?.use_seerr ?? false;
   const translatorReady =
     (settings?.translator?.openrouter_api_key ?? "").length > 0;
@@ -116,18 +137,16 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
         : "Sportarr not connected",
       done: sportarrCount > 0,
     },
-    {
-      label: usePlex
-        ? "Plex media server connected"
-        : "Plex media server skipped",
-      done: usePlex,
-    },
-    {
-      label: useJellyfin
-        ? "Jellyfin media server connected"
-        : "Jellyfin media server skipped",
-      done: useJellyfin,
-    },
+    ...(mediaServerCount === 0
+      ? [{ label: "No media server connected", done: false }]
+      : mediaServers
+          .filter((entry) => entry.count > 0)
+          .map((entry) => ({
+            label: `${kindName(entry.kind)} connected (${entry.count} ${
+              entry.count === 1 ? "server" : "servers"
+            })`,
+            done: true,
+          }))),
   ];
 
   const sharedLines: SummaryLine[] = [
@@ -171,9 +190,10 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
       where: "Settings, Connections",
     });
   }
-  if (!discoverPath && !usePlex && !useJellyfin) {
+  if (!discoverPath && mediaServerCount === 0) {
     skipped.push({
-      label: "No Plex or Jellyfin media server is connected",
+      label:
+        "No media server is connected, so nothing is refreshed after a download",
       where: "Settings, Connections",
     });
   }
@@ -191,16 +211,22 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
   }
 
   const handleFinish = () => {
+    setFailed(false);
     mutation.mutate(
       { "settings-general-setup_complete": true },
       {
         onSuccess: () => {
-          reset();
+          clearPersistedStep();
           clearPersistedIntent();
+          clearPersistedSelection();
           // The Redirector picks routing back up once setup is marked
           // complete. A Discover user goes straight to the page they came for.
           navigate(discoverPath ? "/discover" : "/");
         },
+        // Without this the button stopped spinning and nothing else happened:
+        // setup stayed incomplete, so the next load came straight back here
+        // with no explanation.
+        onError: () => setFailed(true),
       },
     );
   };
@@ -237,6 +263,14 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
             ))}
           </List>
         </Stack>
+      )}
+
+      {failed && (
+        <Alert color="red" title="Could not finish setup">
+          Bazarr+ could not save that setup is complete, so this screen comes
+          back on the next load. Check that Bazarr+ is still running, then try
+          again.
+        </Alert>
       )}
 
       <Group justify="space-between">

@@ -1,0 +1,27 @@
+// The picker's cards. Mantine's Checkbox.Card is already the whole hit area,
+// which is the point of using it: the Radio it replaced put a 20px label inside
+// a 73px card, so most of the card did nothing when clicked.
+.card {
+  padding: 14px 16px;
+  width: 100%;
+  text-align: left;
+}
+
+.cardBody {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.cardText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.selection {
+  border: 1px solid var(--bz-border-card);
+  border-radius: var(--bz-radius-lg, 12px);
+  padding: 12px 16px;
+}
