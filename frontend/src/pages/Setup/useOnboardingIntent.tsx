@@ -8,32 +8,29 @@ import {
   useState,
 } from "react";
 import type { WizardIntent } from "./steps/types";
+import {
+  readOnboardingValue,
+  removeOnboardingValue,
+  writeOnboardingValue,
+} from "./onboardingStorage";
 
-const STORAGE_KEY = "bazarr.onboarding.intent";
+const STORAGE_NAME = "intent";
 
 function isIntent(value: string | null): value is WizardIntent {
   return value === "library" || value === "discover";
 }
 
-function readPersistedIntent(): WizardIntent | null {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return isIntent(raw) ? raw : null;
-  } catch {
-    // localStorage can throw in locked-down browsers; fall back to unanswered.
-    return null;
-  }
+/** The answer as it was last persisted, for a reader who is not mounted. */
+export function readPersistedIntent(): WizardIntent | null {
+  const raw = readOnboardingValue(STORAGE_NAME);
+  return isIntent(raw) ? raw : null;
 }
 
 function persistIntent(intent: WizardIntent | null) {
-  try {
-    if (intent === null) {
-      localStorage.removeItem(STORAGE_KEY);
-    } else {
-      localStorage.setItem(STORAGE_KEY, intent);
-    }
-  } catch {
-    // Ignore persistence failures; the in-memory answer still works.
+  if (intent === null) {
+    removeOnboardingValue(STORAGE_NAME);
+  } else {
+    writeOnboardingValue(STORAGE_NAME, intent);
   }
 }
 

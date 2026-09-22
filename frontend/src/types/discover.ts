@@ -105,6 +105,16 @@ export type DiscoverProviderStatus =
   | "cooldown"
   | "unreachable"
   | "timeout"
+  /**
+   * The provider was working when the shared search deadline expired. Not a
+   * timeout: nothing of the provider's own was exceeded, we stopped waiting.
+   */
+  | "abandoned"
+  /**
+   * Submitted, but never picked up by a worker before the deadline, so no
+   * request was made. The provider is not evidence for or against anything.
+   */
+  | "not_started"
   | "error"
   | "skipped"
   | "saturated";
@@ -125,6 +135,15 @@ export interface DiscoverSearchProgress {
   providers: (Pick<DiscoverProviderOutcome, "provider" | "result_count"> & {
     status: DiscoverProviderStatus | "pending";
   })[];
+  /**
+   * The rows the search has already minted, in the order providers returned
+   * them, with the context they were searched under. Both are absent until a
+   * search is actually running, and the finished observation drops them: the
+   * completed snapshot owns the result list from that point on.
+   */
+  search_id?: string;
+  context?: DiscoverContext;
+  results?: DiscoverSubtitleResult[];
 }
 
 export interface DiscoverSubtitleResult {
@@ -154,7 +173,12 @@ export interface DiscoverSubtitleResult {
 export interface DiscoverSearchSnapshot {
   search_id: string;
   context: DiscoverContext;
-  status: "complete" | "partial" | "failed";
+  /**
+   * "skipped" means no provider was asked: every outcome was a deliberate
+   * skip, unmet setup, or a call that never started. It is separate from
+   * "failed", which means providers were asked and none answered.
+   */
+  status: "complete" | "partial" | "failed" | "skipped";
   checked_at: string;
   attempted_at: string;
   cache_status: "fresh" | "cached" | "stale";

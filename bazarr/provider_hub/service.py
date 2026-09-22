@@ -802,6 +802,36 @@ def _effective_installation_config(installation: dict[str, Any]) -> dict[str, An
     return effective
 
 
+def _forget_credential_throttle(provider_id: str) -> None:
+    """Hand a re-configured provider its next attempt back.
+
+    An AuthenticationError parks a provider in throttled_providers.dat for
+    twelve hours, and the only thing that fixes it is the user correcting what
+    they typed. The settings page already clears those entries on save, but a
+    Provider Hub plugin is configured through this module instead, so the
+    corrected provider stayed skipped by every search, and reported as cooling
+    down on Discover, until the backoff ran out on its own.
+
+    The compat pool holds provider instances built with the old credentials, so
+    it is dropped here too, exactly as the settings path does. Both steps are
+    best-effort: saving a plugin's configuration must not fail because the
+    throttle table or the pool is unavailable.
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+    try:
+        from app.get_providers import reset_throttled_provider
+        reset_throttled_provider(provider_id)
+    except Exception:
+        logger.exception("Failed to clear the throttle for %s after a configuration change", provider_id)
+    try:
+        from compat.service import reset_compat_pool
+        reset_compat_pool()
+    except Exception:
+        logger.exception("Failed to reset the compat pool after configuring %s", provider_id)
+
+
 def update_provider(provider_id: str, enabled: bool | None = None, config: dict[str, Any] | None = None) -> dict[str, Any] | None:
     if config is not None:
         if not isinstance(config, dict):
@@ -832,6 +862,8 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
     provider = mutate_state(update_installation)
     if provider is None:
         return None
+    if config is not None:
+        _forget_credential_throttle(provider_id)
     return _redact_installation(provider)
 
 

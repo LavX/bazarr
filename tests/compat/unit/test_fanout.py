@@ -341,7 +341,10 @@ def test_detailed_wall_timeout_does_not_accept_late_provider_rows(monkeypatch):
             [Movie("", "The Matrix")], {Language("eng")}, pool, wall_timeout=0.05,
             on_outcome=lambda outcome, elapsed: outcomes.append(outcome),
         )
-        assert [(outcome.provider, outcome.status) for outcome in outcomes] == [("discover_slow", "timeout")]
+        # The provider was mid-search when the wall fired. It did not exceed a
+        # deadline of its own, so it is reported as abandoned rather than as a
+        # timeout the provider would be blamed for.
+        assert [(outcome.provider, outcome.status) for outcome in outcomes] == [("discover_slow", "abandoned")]
         release.set()
         assert finished.wait(2)
         assert dict(result) == {}

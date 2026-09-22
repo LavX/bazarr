@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
@@ -52,12 +53,29 @@ export function useSeerrRequestMutation() {
   });
 }
 
-export function useSeerrTestConnectionMutation() {
-  return useMutation({
+/**
+ * The connection a test verdict belongs to. Same contract as the arr test
+ * hook: editing any of these drops the previous verdict, so a green result
+ * never survives the address or the key it was measured against.
+ */
+export interface SeerrTestConnection {
+  url?: string;
+  apikey?: string;
+  verifySsl?: boolean;
+}
+
+export function useSeerrTestConnectionMutation(
+  connection: SeerrTestConnection = {},
+) {
+  const mutation = useMutation({
     mutationFn: (params: {
       url: string;
       apikey: string;
       verifySsl?: boolean;
     }) => api.seerr.testConnection(params.url, params.apikey, params.verifySsl),
   });
+  const { reset } = mutation;
+  const { url, apikey, verifySsl } = connection;
+  useEffect(() => reset(), [url, apikey, verifySsl, reset]);
+  return mutation;
 }

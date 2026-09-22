@@ -1,14 +1,7 @@
 import { FC, useState } from "react";
-import {
-  Anchor,
-  Button,
-  Group,
-  PasswordInput,
-  Stack,
-  Text,
-  Title,
-} from "@mantine/core";
+import { Anchor, Button, Group, PasswordInput, Text } from "@mantine/core";
 import { useSettingsMutation } from "@/apis/hooks";
+import StepLayout from "@/pages/Setup/StepLayout";
 import type { WizardStepProps } from "./types";
 
 /**
@@ -46,17 +39,39 @@ const TranslatorStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   };
 
   return (
-    <Stack gap="lg">
-      <Stack gap="xs">
-        <Title order={2}>Subtitle translation</Title>
-        <Text c="dimmed">
-          Bazarr+ can translate a subtitle into a language nobody published,
-          with an AI model of your choice. Paste an OpenRouter key to switch it
-          on now. Everything else works without it, and the full set of
-          translation options lives in Settings.
+    <StepLayout
+      title="Subtitle translation"
+      layout="stacked"
+      description="Bazarr+ can translate a subtitle into a language nobody published, with an AI model of your choice. Paste an OpenRouter key to switch it on now. Everything else works without it, and the full set of translation options lives in Settings."
+      aside={
+        <Text size="sm" c="dimmed">
+          <Anchor
+            href="https://openrouter.ai/keys"
+            target="_blank"
+            rel="noopener noreferrer"
+            size="sm"
+          >
+            Get an OpenRouter key
+          </Anchor>
         </Text>
-      </Stack>
-
+      }
+      actions={
+        <Group justify="space-between">
+          <Group gap="sm">
+            {onBack && (
+              <Button variant="default" onClick={onBack}>
+                Back
+              </Button>
+            )}
+          </Group>
+          <Button onClick={handleContinue} loading={settings.isPending}>
+            {trimmedKey.length > 0
+              ? "Continue"
+              : "Continue without translation"}
+          </Button>
+        </Group>
+      }
+    >
       <PasswordInput
         label="OpenRouter API key"
         description="Leave this empty to set translation up later"
@@ -65,31 +80,7 @@ const TranslatorStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
         value={apiKey}
         onChange={(e) => setApiKey(e.currentTarget.value)}
       />
-
-      <Text size="sm" c="dimmed">
-        <Anchor
-          href="https://openrouter.ai/keys"
-          target="_blank"
-          rel="noopener noreferrer"
-          size="sm"
-        >
-          Get an OpenRouter key
-        </Anchor>
-      </Text>
-
-      <Group justify="space-between">
-        <Group gap="sm">
-          {onBack && (
-            <Button variant="default" onClick={onBack}>
-              Back
-            </Button>
-          )}
-        </Group>
-        <Button onClick={handleContinue} loading={settings.isPending}>
-          {trimmedKey.length > 0 ? "Continue" : "Continue without translation"}
-        </Button>
-      </Group>
-    </Stack>
+    </StepLayout>
   );
 };
 

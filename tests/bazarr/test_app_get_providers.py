@@ -354,3 +354,194 @@ class TestProviderHubSettingsOverlay:
             config.set("overlayhub", {})
 
         assert auth["overlayhub"]["apikey"] == "typed-into-the-settings-card"
+
+
+def test_concurrent_recorders_do_not_race_on_the_staging_file(monkeypatch, tmp_path):
+    """Every writer stages through the same throttled_providers.dat.tmp. The
+    compat fanout now records throttles from inside its provider futures, so
+    two providers failing at once reach this function together: without
+    serialization the second os.replace finds the file the first already moved
+    and the FileNotFoundError surfaces out of a provider's error handler, which
+    the fanout reports in place of the failure it was recording."""
+    import datetime
+    import os
+    import threading
+    import time
+
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(get_providers.args, "config_dir", str(tmp_path))
+    real_replace = os.replace
+
+    def slow_replace(src, dst):
+        # Widen the window the lock has to close. Without it the interleaving
+        # is real but rare enough to pass by luck on a quiet machine.
+        time.sleep(0.01)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(get_providers.os, "replace", slow_replace)
+    until = datetime.datetime.now() + datetime.timedelta(minutes=10)
+    failures = []
+
+    def record(index):
+        try:
+            get_providers.set_throttled_providers(
+                {f"provider_{index}": ("APIThrottled", until, "10 minutes")})
+        except Exception as error:
+            # Catching everything is the point: none must escape.
+            failures.append(error)
+
+    threads = [threading.Thread(target=record, args=(index,)) for index in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert failures == []
+    assert (tmp_path / "config" / "throttled_providers.dat").exists()
+
+
+def test_recording_a_throttle_never_walks_a_table_another_thread_is_resizing(monkeypatch, tmp_path):
+    """The staging file is only half of it. provider_throttle hands the shared
+    table straight to the writer, so a second recorder adding its own provider
+    mid-serialization raises "dictionary changed size during iteration", and
+    that escapes the first provider's error handler for the fanout to report in
+    place of its real failure. Both the mutation and the write belong under one
+    lock."""
+    import threading
+    from subliminal_patch.exceptions import APIThrottled
+
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(get_providers.args, "config_dir", str(tmp_path))
+    monkeypatch.setattr(get_providers, "tp", {})
+    monkeypatch.setattr(get_providers, "throttle_count", {})
+    monkeypatch.setattr(get_providers, "event_stream", lambda *args, **kwargs: None)
+    names = [f"racing_provider_{index}" for index in range(12)]
+    monkeypatch.setattr(get_providers.settings.general, "enabled_providers", names)
+    monkeypatch.setattr(get_providers.provider_registry, "names", lambda: list(names))
+    failures = []
+
+    def record(name):
+        try:
+            get_providers.provider_throttle(name, APIThrottled("slow down"), wait=False)
+        except Exception as error:
+            # Catching everything is the point: none must escape.
+            failures.append(error)
+
+    threads = [threading.Thread(target=record, args=(name,)) for name in names]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert failures == []
+    assert set(get_providers.tp) == set(names)
+
+
+def test_a_fresh_backoff_recorded_mid_sweep_is_not_released_by_the_stale_read(monkeypatch, tmp_path):
+    """get_providers() reads the table, finds an entry expired, then removes
+    it. A provider future recording a fresh backoff between those two steps had
+    its deadline deleted on the strength of the one it replaced, and the
+    provider went straight back into the next search."""
+    import datetime
+    import threading
+
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(get_providers.args, "config_dir", str(tmp_path))
+    name = "sweep_racer"
+    expired = datetime.datetime.now() - datetime.timedelta(minutes=1)
+    fresh = datetime.datetime.now() + datetime.timedelta(minutes=30)
+    monkeypatch.setattr(get_providers, "tp", {name: ("APIThrottled", expired, "10 minutes")})
+    monkeypatch.setattr(get_providers.settings.general, "enabled_providers", [name])
+    monkeypatch.setattr(get_providers.provider_registry, "names", lambda: [name])
+    monkeypatch.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
+
+    recorded = threading.Event()
+    real_lock = get_providers._THROTTLE_LOCK
+
+    class RecordingLock:
+        """Stand in for the real lock and, the first time the sweep reaches
+        for it, let a recorder write a fresh deadline first."""
+
+        def __enter__(self):
+            if not recorded.is_set():
+                recorded.set()
+                get_providers.tp[name] = ("TooManyRequests", fresh, "30 minutes")
+            return real_lock.__enter__()
+
+        def __exit__(self, *args):
+            return real_lock.__exit__(*args)
+
+    monkeypatch.setattr(get_providers, "_THROTTLE_LOCK", RecordingLock())
+
+    assert get_providers.get_providers() is None, "the fresh backoff was not honoured"
+    assert get_providers.tp[name][0] == "TooManyRequests"
+
+
+def test_a_provider_asking_for_longer_than_its_class_gets_it(monkeypatch, tmp_path):
+    """The map says what an exception class is worth in general. A provider
+    that sent a Retry-After has said when it will answer again, and that is a
+    floor the class's duration must not undercut: the header used to choose
+    only how long to pause between retries, so a site asking for an hour was
+    re-queried after the class's ten minutes."""
+    import datetime
+    from subliminal_patch.exceptions import APIThrottled
+
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(get_providers.args, "config_dir", str(tmp_path))
+    monkeypatch.setattr(get_providers, "tp", {})
+    monkeypatch.setattr(get_providers, "throttle_count", {})
+    monkeypatch.setattr(get_providers, "event_stream", lambda *args, **kwargs: None)
+    monkeypatch.setattr(get_providers.settings.general, "enabled_providers", ["patient_provider"])
+    monkeypatch.setattr(get_providers.provider_registry, "names", lambda: ["patient_provider"])
+
+    get_providers.provider_throttle("patient_provider", APIThrottled(retry_after=3600), wait=False)
+
+    _reason, until, description = get_providers.tp["patient_provider"]
+    remaining = (until - datetime.datetime.now()).total_seconds()
+    assert 3400 < remaining < 3700, "the class duration undercut what the provider asked for"
+    assert description == "60 minutes"
+
+
+def test_a_short_retry_after_does_not_undercut_the_class_duration(monkeypatch, tmp_path):
+    """The longer of the two, not the header unconditionally."""
+    import datetime
+    from subliminal_patch.exceptions import APIThrottled
+
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(get_providers.args, "config_dir", str(tmp_path))
+    monkeypatch.setattr(get_providers, "tp", {})
+    monkeypatch.setattr(get_providers, "throttle_count", {})
+    monkeypatch.setattr(get_providers, "event_stream", lambda *args, **kwargs: None)
+    monkeypatch.setattr(get_providers.settings.general, "enabled_providers", ["hasty_provider"])
+    monkeypatch.setattr(get_providers.provider_registry, "names", lambda: ["hasty_provider"])
+
+    get_providers.provider_throttle("hasty_provider", APIThrottled(retry_after=5), wait=False)
+
+    _reason, until, description = get_providers.tp["hasty_provider"]
+    remaining = (until - datetime.datetime.now()).total_seconds()
+    assert 500 < remaining < 620 and description == "10 minutes"
+
+
+def test_the_later_of_two_concurrent_deadlines_is_the_one_kept(monkeypatch, tmp_path):
+    """Two searches can have the same provider in flight and compute their
+    deadlines before either records one, so the second writer is not
+    necessarily the one with the most to say. An hour the provider asked for
+    must not be replaced by a generic ten minutes from the other request."""
+    import datetime
+    from subliminal_patch.exceptions import APIThrottled
+
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(get_providers.args, "config_dir", str(tmp_path))
+    monkeypatch.setattr(get_providers, "tp", {})
+    monkeypatch.setattr(get_providers, "throttle_count", {})
+    monkeypatch.setattr(get_providers, "event_stream", lambda *args, **kwargs: None)
+    monkeypatch.setattr(get_providers.settings.general, "enabled_providers", ["two_at_once"])
+    monkeypatch.setattr(get_providers.provider_registry, "names", lambda: ["two_at_once"])
+
+    get_providers.provider_throttle("two_at_once", APIThrottled(retry_after=3600), wait=False)
+    get_providers.provider_throttle("two_at_once", APIThrottled("slow down"), wait=False)
+
+    _reason, until, description = get_providers.tp["two_at_once"]
+    remaining = (until - datetime.datetime.now()).total_seconds()
+    assert 3400 < remaining < 3700, "a shorter concurrent record replaced the longer one"
+    assert description == "60 minutes"

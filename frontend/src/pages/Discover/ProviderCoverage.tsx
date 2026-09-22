@@ -15,6 +15,9 @@ const outcomeLabels: Record<DiscoverProviderOutcome["status"], string> = {
   cooldown: "Provider is cooling down",
   unreachable: "Provider could not be reached",
   timeout: "Provider search timed out",
+  abandoned: "Still searching when the search deadline passed",
+  ["not_started"]:
+    "Not searched: the search ran out of time before this provider started",
   error: "Provider search failed",
   skipped: "Provider could not search this target",
   saturated: "Search capacity is busy. Try again shortly",
@@ -33,6 +36,9 @@ const skipLabels: Record<string, string> = {
     "Built-in provider, skipped. Discover searches trusted catalog providers only.",
   ["provider_unavailable"]:
     "Not installed or not loaded, skipped. Check it in the Subtitle Hub.",
+  ["rate_limited"]: "Too many requests were sent to this provider recently",
+  ["download_limit_reached"]: "This provider's download limit has been reached",
+  ["search_limit_reached"]: "This provider's search limit has been reached",
 };
 
 const languageNames = new Intl.DisplayNames(["en"], { type: "language" });
@@ -70,13 +76,22 @@ export default function ProviderCoverage({
   );
   const skipped = providers.filter((p) => p.status === "skipped");
   const unverified = providers.filter((p) => p.status === "unverified");
+  // The provider answered nothing, but nothing is known to be wrong with it
+  // either: this search simply ran out of its own time. Grouping that under
+  // "unavailable" reports our scheduling as the provider's fault.
+  const outOfTime = providers.filter(
+    (p) => p.status === "not_started" || p.status === "abandoned",
+  );
   const unavailable = providers.filter(
-    (p) => !["success", "empty", "skipped", "unverified"].includes(p.status),
+    (p) =>
+      !["success", "empty", "skipped", "unverified"].includes(p.status) &&
+      !outOfTime.includes(p),
   );
   const groups = [
     { label: "Providers searched", rows: searched, expanded: false },
     { label: "Unverified searches", rows: unverified, expanded: false },
     { label: "Providers unavailable", rows: unavailable, expanded: true },
+    { label: "Not finished in time", rows: outOfTime, expanded: true },
     { label: "Not applicable to this search", rows: skipped, expanded: false },
   ];
   return (
@@ -87,6 +102,7 @@ export default function ProviderCoverage({
           · {searched.length} searched
           {unverified.length ? ` · ${unverified.length} unverified` : ""}
           {skipped.length ? ` · ${skipped.length} skipped` : ""}
+          {outOfTime.length ? ` · ${outOfTime.length} out of time` : ""}
           {unavailable.length ? ` · ${unavailable.length} unavailable` : ""}
         </span>
       </summary>

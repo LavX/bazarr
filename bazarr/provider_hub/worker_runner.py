@@ -56,6 +56,24 @@ def _content_payload(result):
     return result
 
 
+
+def _retry_after(error):
+    """The provider's own Retry-After, if it gave one, as a plain number.
+
+    Only a finite, positive value crosses: a plugin is untrusted code, and this
+    number decides how long the host stops asking for. Bounded at a day, the
+    same ceiling the host applies to the value it reads back.
+    """
+    value = getattr(error, "retry_after", None)
+    try:
+        value = float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+    if value is None or value != value or value in (float("inf"), float("-inf")) or value <= 0:
+        return None
+    return min(86400.0, value)
+
+
 def _handle(provider, op, payload):
     if op == "health":
         return {"initialized": True}
@@ -124,6 +142,12 @@ def main():
                     "code": "provider",
                     "class_name": error.__class__.__name__,
                     "message": str(error),
+                    # A rate limit the provider timed for us. The host rebuilds
+                    # the exception from the class name and message alone, so
+                    # without carrying this the provider's own "come back in an
+                    # hour" is lost at the boundary and its backoff falls back
+                    # to whatever the exception class is worth in general.
+                    "retry_after": _retry_after(error),
                     "retryable": False,
                 },
             }

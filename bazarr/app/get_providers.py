@@ -9,6 +9,7 @@ import subliminal_patch
 import time
 import socket
 import requests
+import threading
 import traceback
 import re
 
@@ -156,6 +157,26 @@ PROVIDERS_FORCED_OFF = ["addic7ed", "tvsubtitles", "legendasdivx", "napiprojekt"
                         "supersubtitles", "titlovi", "assrt"]
 
 throttle_count = {}
+# The compat fanout records throttles from inside its provider futures, so two
+# providers failing at once now reach this table concurrently, and both races
+# that opens end the same way: an exception out of the provider's own error
+# handler, which the fanout then reports in place of the failure it was
+# recording. One is the staging file, which every writer moves through the same
+# throttled_providers.dat.tmp path. The other is `tp` itself, which one thread
+# can resize while another is serializing it. So the lock covers every mutation
+# of the table and its persistence, not only the write. It is reentrant because
+# those pairs call set_throttled_providers(), which takes it again.
+_THROTTLE_LOCK = threading.RLock()
+
+# Remote exception names the worker transport carries when a provider raised a
+# timeout. The envelope keeps the class name but not the class, so a search
+# outcome and this table disagree about the same failure unless both read it.
+# These are exactly the names core.provider_search_failure calls a timeout.
+_REMOTE_TIMEOUTS = {
+    "Timeout": requests.exceptions.Timeout,
+    "ConnectTimeout": requests.exceptions.ConnectTimeout,
+    "ReadTimeout": requests.exceptions.ReadTimeout,
+}
 
 
 def provider_is_usable(name):
@@ -282,9 +303,21 @@ def get_providers():
                              until.strftime("%y/%m/%d %H:%M"), reason)
                 providers_list.remove(provider)
             else:
-                logging.info("Using %s again after %s, (disabled because: %s)", provider, throttle_desc, reason)
-                del tp[provider]
-                set_throttled_providers(tp)
+                # Decide again with the lock held. The read above is a snapshot,
+                # and a provider future recording a fresh backoff between the
+                # two would otherwise have this release it on the strength of
+                # the deadline it has already replaced.
+                with _THROTTLE_LOCK:
+                    reason, until, throttle_desc = tp.get(provider, (None, None, None))
+                    if reason and until and datetime.datetime.now() < until:
+                        logging.info("Not using %s until %s, because of: %s", provider,
+                                     until.strftime("%y/%m/%d %H:%M"), reason)
+                        providers_list.remove(provider)
+                    elif reason:
+                        logging.info("Using %s again after %s, (disabled because: %s)", provider,
+                                     throttle_desc, reason)
+                        tp.pop(provider, None)
+                        set_throttled_providers(tp)
         # if forced only is enabled: # fixme: Prepared for forced only implementation to remove providers with don't support forced only subtitles
         #     for provider in providers_list:
         #         if provider in PROVIDERS_FORCED_OFF:
@@ -612,12 +645,40 @@ def _handle_mgb(name, exception, ids, language, sports_context=None):
         blacklist_log_movie(ids.get('radarrId'), name, exception.id, language_str)
 
 
-def provider_throttle(name, exception, ids=None, language=None, sports_context=None):
+def provider_throttle(name, exception, ids=None, language=None, sports_context=None, wait=True):
+    """Record a provider failure in the throttle table.
+
+    ``wait`` is the caller's promise about its own deadline. The count gate
+    below pauses through the first few rate-limit events and only records the
+    backoff on the fifth, which is right for a search that is about to retry
+    the same provider in the same call: the pause is the retry's whole point,
+    and a provider that recovers on the second attempt has earned no backoff.
+    A bounded fanout does neither. The pause would be spent inside the wall the
+    other providers are still living on, and there is no retry for it to buy,
+    so the first rate limit is the only evidence there will be. Such a caller
+    passes ``wait=False`` and the backoff is recorded at once, without a pause.
+    """
     if isinstance(exception, MustGetBlacklisted) and isinstance(ids, dict) and isinstance(language, Language):
         return _handle_mgb(name, exception, ids, language, sports_context)
 
     cls = getattr(exception, "__class__")
     cls_name = getattr(cls, "__name__")
+    # A plugin worker's failure reaches us as a WorkerError: the transport
+    # cannot carry the original exception class, only a code and, for a failure
+    # the provider itself raised, the remote class name. Classifying by class
+    # alone records "WorkerError" with the generic ten-minute default, so the
+    # cooldown Discover reads back out of this table afterwards says "provider
+    # cooldown" about what was plainly a timeout, and outranks the timeout
+    # floor with a duration that has nothing to do with the cause.
+    # core.provider_search_failure already reads both the hard-deadline code
+    # and these remote names; the backoff has to agree with it or the two
+    # disagree on screen.
+    code = getattr(exception, "code", None)
+    if code == "timeout":
+        cls = requests.exceptions.Timeout
+    elif code == "provider":
+        cls = _REMOTE_TIMEOUTS.get(getattr(exception, "remote_class_name", None), cls)
+    cls_name = cls.__name__
     if cls not in VALID_THROTTLE_EXCEPTIONS:
         for valid_cls in VALID_THROTTLE_EXCEPTIONS:
             if issubclass(cls, valid_cls):
@@ -631,9 +692,25 @@ def provider_throttle(name, exception, ids=None, language=None, sports_context=N
     else:
         throttle_delta, throttle_description = datetime.timedelta(minutes=10), "10 minutes"
 
+    # A provider that sent a Retry-After has said when it will answer again.
+    # The map holds what this exception class is worth in general, which is a
+    # floor, not a ceiling on what the provider asked for: a site asking for an
+    # hour was otherwise re-queried after the class's ten minutes, since the
+    # header only ever chose how long to pause between retries. Clamped the way
+    # core.provider_search_failure clamps the same value.
+    retry_after = getattr(exception, "retry_after", None)
+    try:
+        retry_after = max(1.0, min(86400.0, float(retry_after))) if retry_after else None
+    except (TypeError, ValueError):
+        retry_after = None
+    if retry_after and datetime.timedelta(seconds=retry_after) > throttle_delta:
+        throttle_delta = datetime.timedelta(seconds=retry_after)
+        throttle_description = (f"{round(retry_after)} seconds" if retry_after < 120
+                                else f"{round(retry_after / 60)} minutes")
+
     throttle_until = datetime.datetime.now() + throttle_delta
 
-    if cls_name not in VALID_COUNT_EXCEPTIONS or throttled_count(name, exception):
+    if cls_name not in VALID_COUNT_EXCEPTIONS or throttled_count(name, exception, wait=wait):
         if cls_name == 'ValueError' and isinstance(exception.args, tuple) and len(exception.args) and exception.args[
             0].startswith('unsupported pickle protocol'):
             for fn in subliminal_cache_region.backend.all_filenames:
@@ -642,8 +719,19 @@ def provider_throttle(name, exception, ids=None, language=None, sports_context=N
                 except (IOError, OSError):
                     logging.debug("Couldn't remove cache file: %s", os.path.basename(fn))
         else:
-            tp[name] = (cls_name, throttle_until, throttle_description)
-            set_throttled_providers(tp)
+            with _THROTTLE_LOCK:
+                # Two searches can have the same provider in flight and compute
+                # their deadlines before either gets here, so the second writer
+                # is not necessarily the one with the most to say. Keep the
+                # later deadline: an hour the provider asked for must not be
+                # replaced by a generic ten minutes from the other request,
+                # which would put Bazarr back on its door while it is still
+                # refusing. The same rule the reader applies, on the way in.
+                current = tp.get(name)
+                if current and current[1] and current[1] > throttle_until:
+                    cls_name, throttle_until, throttle_description = current
+                tp[name] = (cls_name, throttle_until, throttle_description)
+                set_throttled_providers(tp)
 
             trac_info = _get_traceback_info(exception)
 
@@ -674,7 +762,7 @@ def _get_traceback_info(exc: Exception):
     return message + extra
 
 
-def throttled_count(name, exception=None):
+def throttled_count(name, exception=None, wait=True):
     global throttle_count
     if name in list(throttle_count.keys()):
         if 'count' in list(throttle_count[name].keys()):
@@ -698,6 +786,15 @@ def throttled_count(name, exception=None):
     if exception and hasattr(exception, 'retry_after') and exception.retry_after:
         wait_seconds = max(1, min(exception.retry_after, 30))  # floor at 1s, cap at 30s
 
+    if not wait:
+        # No pause means no retry, so there is no second attempt for this
+        # provider to redeem itself on. Record the backoff its exception class
+        # earns now, or the caller re-asks a rate-limited provider on its very
+        # next request and the per-provider cool-offs never apply to it.
+        logging.info("Provider %s throttle count %s of 5, recorded without waiting", name,
+                     throttle_count[name]['count'])
+        return True
+
     logging.info("Provider %s throttle count %s of 5, waiting %ds and trying again", name,
                  throttle_count[name]['count'], wait_seconds)
     time.sleep(wait_seconds)
@@ -708,30 +805,35 @@ def update_throttled_provider():
     existing_providers = provider_registry.names()
     providers_list = [x for x in settings.general.enabled_providers if x in existing_providers]
 
-    for provider in list(tp):
-        if provider not in providers_list:
-            del tp[provider]
-            set_throttled_providers(tp)
-
-        reason, until, throttle_desc = tp.get(provider, (None, None, None))
-
-        if reason:
-            now = datetime.datetime.now()
-            if now < until:
-                pass
-            else:
-                logging.info("Using %s again after %s, (disabled because: %s)", provider, throttle_desc, reason)
-                del tp[provider]
+    # Held across the whole sweep: it both deletes from the table and hands the
+    # table to the writer, so a recorder arriving mid-sweep would otherwise
+    # resize a dict this loop is already walking.
+    with _THROTTLE_LOCK:
+        for provider in list(tp):
+            if provider not in providers_list:
+                tp.pop(provider, None)
                 set_throttled_providers(tp)
 
             reason, until, throttle_desc = tp.get(provider, (None, None, None))
 
             if reason:
                 now = datetime.datetime.now()
-                if now >= until:
+                if now < until:
+                    pass
+                else:
                     logging.info("Using %s again after %s, (disabled because: %s)", provider, throttle_desc, reason)
-                    del tp[provider]
+                    tp.pop(provider, None)
                     set_throttled_providers(tp)
+
+                reason, until, throttle_desc = tp.get(provider, (None, None, None))
+
+                if reason:
+                    now = datetime.datetime.now()
+                    if now >= until:
+                        logging.info("Using %s again after %s, (disabled because: %s)", provider, throttle_desc,
+                                     reason)
+                        tp.pop(provider, None)
+                        set_throttled_providers(tp)
 
     event_stream(type='badges')
 
@@ -771,13 +873,38 @@ def snapshot_throttled_providers():
     return {'providers': providers, 'enabled_count': len(enabled)}
 
 
+# The throttle reasons a user can actually fix by correcting what they typed.
+# Everything else in the table is the provider's own state, so a settings or
+# Provider Hub edit has no business clearing it.
+CREDENTIAL_THROTTLE_REASONS = ('AuthenticationError', 'ConfigurationError', 'PaymentRequired')
+
+
+def reset_throttled_provider(name):
+    """Forget one provider's credential throttle.
+
+    A rejected password parks that provider for hours, and correcting it is
+    what earns it its next attempt. Only that provider is touched, so the
+    cool-offs the others are serving out stay where they are. Returns True when
+    an entry was dropped, so a caller can log the difference.
+    """
+    with _THROTTLE_LOCK:
+        reason = tp.get(name, (None, None, None))[0]
+        if reason not in CREDENTIAL_THROTTLE_REASONS:
+            return False
+        tp.pop(name, None)
+        set_throttled_providers(tp)
+    event_stream(type='badges')
+    logging.info('BAZARR throttle for %s has been reset (was: %s).', name, reason)
+    return True
+
+
 def reset_throttled_providers(only_auth_or_conf_error=False):
-    for provider in list(tp):
-        if only_auth_or_conf_error and tp[provider][0] not in ['AuthenticationError', 'ConfigurationError',
-                                                               'PaymentRequired']:
-            continue
-        del tp[provider]
-    set_throttled_providers(tp)
+    with _THROTTLE_LOCK:
+        for provider in list(tp):
+            if only_auth_or_conf_error and tp[provider][0] not in CREDENTIAL_THROTTLE_REASONS:
+                continue
+            tp.pop(provider, None)
+        set_throttled_providers(tp)
     update_throttled_provider()
     if only_auth_or_conf_error:
         logging.info('BAZARR throttled providers have been reset (only AuthenticationError, ConfigurationError and '
@@ -817,19 +944,26 @@ def set_throttled_providers(data):
     if not isinstance(data, dict):
         raise TypeError(f"set_throttled_providers expects a dict, got {type(data).__name__}")
     dat_path = _throttled_providers_path()
-    serializable = {}
-    for name, val in data.items():
-        cls_name, throttle_until, description = val
-        serializable[name] = (
-            cls_name,
-            throttle_until.isoformat() if throttle_until else None,
-            description
-        )
-    json_data = json.dumps(serializable)
-    tmp_path = dat_path + '.tmp'
-    with open(tmp_path, 'w') as handle:
-        handle.write(json_data)
-    os.replace(tmp_path, dat_path)
+    # Every writer stages through the one .tmp path, so two callers racing here
+    # have the second replace a file the first has already moved, and the
+    # FileNotFoundError surfaces out of whichever provider's error handler was
+    # recording its failure. Reading `data` under the same lock also keeps this
+    # iteration off a dict another recorder is writing to. The compat fanout
+    # records from inside its provider futures, so both races are now reachable
+    # from a single search.
+    with _THROTTLE_LOCK:
+        serializable = {}
+        for name, val in data.items():
+            cls_name, throttle_until, description = val
+            serializable[name] = (
+                cls_name,
+                throttle_until.isoformat() if throttle_until else None,
+                description
+            )
+        tmp_path = dat_path + '.tmp'
+        with open(tmp_path, 'w') as handle:
+            handle.write(json.dumps(serializable))
+        os.replace(tmp_path, dat_path)
 
 
 tp = get_throttled_providers()

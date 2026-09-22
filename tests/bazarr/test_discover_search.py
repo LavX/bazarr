@@ -50,9 +50,15 @@ def providers(monkeypatch):
     installations = []
     original = {}
 
-    def add(name, result=None, error=None, languages=None, video_types=None, trusted=True):
+    def add(name, result=None, error=None, languages=None, video_types=None, trusted=True, delay=None):
         def listing(self, video, requested):
             videos.append((name, video, requested))
+            if delay:
+                # A provider that keeps the fanout running after a faster one
+                # has already answered. Some behaviour only exists while the
+                # search is still in flight and cannot be observed otherwise.
+                import time as _time
+                _time.sleep(delay)
             if error:
                 raise error
             return result or []
@@ -189,6 +195,63 @@ def test_persisted_auth_cooldown_retains_known_cause(authenticated_client, provi
     assert response["coverage"]["providers"][0]["status"] == "authentication_required"
     assert response["coverage"]["providers"][0]["retry_at"] is not None
     assert providers.videos == []
+
+
+def test_corrected_hub_credentials_release_the_auth_throttle(authenticated_client, providers, monkeypatch,
+                                                             tmp_path):
+    """Fixing the password is what a twelve-hour auth backoff is waiting for.
+
+    The settings page clears those entries when a provider's settings are
+    saved. A Provider Hub plugin is configured through its own endpoint, which
+    did not, so the corrected provider stayed out of every search and Discover
+    kept reporting it as needing authentication until the backoff expired by
+    itself. A provider cooling down for its own reasons is untouched by the
+    correction and keeps its wait.
+    """
+    import datetime as dt
+    from app import get_providers
+    from compat import service as compat_service
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    providers.add("discover_auth")
+    providers.add("discover_busy")
+    state = load_state()
+    state["installations"] = {"discover_auth": {
+        "provider_id": "discover_auth", "name": "Discover Auth", "active_version": "1.0.0",
+        "state": "active", "pending_restart": False,
+        "manifest": {"secret_fields": ["password"]}, "config": {"password": "typo"},  # pragma: allowlist secret
+    }}
+    save_state(state)
+    # The production gate, rather than a fixed list: a provider leaves and
+    # rejoins the searchable set exactly as the throttle table says it should.
+    monkeypatch.setattr(get_providers, "get_providers_sorted",
+                        lambda: [name for name in providers.names if get_providers.provider_is_usable(name)])
+    monkeypatch.setattr(compat_service, "_compat_pool", object(), raising=False)
+    until = dt.datetime.now() + dt.timedelta(hours=12)
+    get_providers.tp["discover_auth"] = ("AuthenticationError", until, "12 hours")
+    get_providers.tp["discover_busy"] = ("TooManyRequests", until, "12 hours")
+
+    before = post(authenticated_client, {"media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
+    assert {item["provider"]: item["status"] for item in before["coverage"]["providers"]} == {
+        "discover_auth": "authentication_required", "discover_busy": "cooldown"}
+
+    response = authenticated_client.patch(
+        "/api/provider-hub/providers/discover_auth",
+        json={"config": {"password": "corrected"}},  # pragma: allowlist secret
+        headers={"X-API-KEY": "discover-test-key"})
+
+    assert response.status_code == 200
+    assert "discover_auth" not in get_providers.tp
+    assert "discover_auth" not in get_providers.get_throttled_providers()
+    assert get_providers.tp["discover_busy"] == ("TooManyRequests", until, "12 hours")
+    # Dropped as well: it held providers built with the rejected credentials.
+    assert compat_service._compat_pool is None
+
+    after = post(authenticated_client, {"media_type": "movie", "imdb_id": "tt0111161", "language": "eng"}).json
+    assert {item["provider"]: item["status"] for item in after["coverage"]["providers"]} == {
+        "discover_auth": "empty", "discover_busy": "cooldown"}
+    assert [name for name, _, _ in providers.videos] == ["discover_auth"]
 
 
 @pytest.mark.parametrize("language,alpha3,country", [("pob", "por", "BR"), ("zht", "zho", "TW"), ("hun", "hun", None)])
@@ -1077,3 +1140,441 @@ def test_modes_without_source_linkage_do_not_acquire_metadata_deadlines(authenti
     providers.add("discover_no_source")
     response = post(authenticated_client, payload)
     assert response.status_code == 200 and len(providers.videos) == 1
+
+
+def _progress_post(client, payload, identity):
+    return client.post("/api/discover/search", json=payload,
+                       headers={"X-API-KEY": "discover-test-key", "X-Discover-Progress": identity})
+
+
+def test_rows_are_offered_while_other_providers_are_still_pending(authenticated_client, providers, monkeypatch):
+    """A finished provider's rows travel with the observation, not after the search."""
+    import copy as copy_module
+    from discover import progress
+    from discover.handles import resolve_result
+    from provider_hub.protocol import candidate_from_worker
+
+    published = []
+    original = progress.publish
+
+    def record(identity, observation):
+        published.append(copy_module.deepcopy(observation))
+        original(identity, observation)
+
+    monkeypatch.setattr(progress, "publish", record)
+    for name in ("discover_one", "discover_two"):
+        providers.add(name, [candidate_from_worker(name, {
+            "id": f"{name}-1", "language": {"alpha3": "eng"},
+            "release_info": f"The.Matrix.1999.{name}", "matches": ["imdb_id"],
+            "provider_payload": {}})])
+    identity = "11111111-2222-3333-4444-555555555555"
+    response = _progress_post(authenticated_client, {
+        "media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}, identity)
+    assert response.status_code == 200
+    final = {row["id"]: row for row in response.json["results"]}
+    assert len(final) == 2
+
+    early = [observation for observation in published
+             if observation.get("results")
+             and any(item["status"] == "pending" for item in observation["providers"])]
+    assert early, "no observation carried a result while a provider was still pending"
+    offered = [row["id"] for row in early[0]["results"]]
+    assert offered
+    # Actionable at once: the handle a reader is offered mid-search resolves,
+    # and it is still the same handle in the finished snapshot.
+    for result_id in offered:
+        assert resolve_result(result_id, early[0]["search_id"]) is not None
+        assert result_id in final
+    assert early[0]["context"]["imdb_id"] == "tt0133093"
+    # The finished observation hands the result list back to the snapshot.
+    assert published[-1]["phase"] == "finished"
+    assert not published[-1].get("results")
+
+
+def test_publishing_rows_early_does_not_mint_a_second_handle(authenticated_client, providers):
+    from compat.file_id_store import get_store
+    from provider_hub.protocol import candidate_from_worker
+
+    providers.add("discover_one", [candidate_from_worker("discover_one", {
+        "id": "1", "language": {"alpha3": "eng"}, "release_info": "The Matrix",
+        "matches": ["imdb_id"], "provider_payload": {}})])
+    before = len(get_store())
+    response = _progress_post(authenticated_client, {
+        "media_type": "movie", "imdb_id": "tt0133093", "language": "eng"},
+        "22222222-3333-4444-5555-666666666666")
+    assert response.status_code == 200
+    assert len(response.json["results"]) == 1
+    assert len(get_store()) - before == 1
+
+
+def test_search_without_an_observer_is_unchanged(authenticated_client, providers):
+    """No progress identity means no early rows and no early handles."""
+    from compat.file_id_store import get_store
+    from provider_hub.protocol import candidate_from_worker
+
+    providers.add("discover_one", [candidate_from_worker("discover_one", {
+        "id": "1", "language": {"alpha3": "eng"}, "release_info": "The Matrix",
+        "matches": ["imdb_id"], "provider_payload": {}})])
+    before = len(get_store())
+    response = post(authenticated_client, {
+        "media_type": "movie", "imdb_id": "tt0133093", "language": "eng"})
+    assert response.status_code == 200
+    assert len(response.json["results"]) == 1
+    assert len(get_store()) - before == 1
+
+
+def test_a_search_that_only_skipped_providers_is_not_reported_as_failed(authenticated_client, providers):
+    """A skip is a correct answer about this target, not a failure. Reporting
+    the whole search as failed put "No provider completed this search" in front
+    of a reader whose providers had all behaved exactly as intended."""
+    from subliminal.video import Episode
+
+    providers.add("discover_episodes_only", video_types=(Episode,))
+    providers.add("discover_other_episodes_only", video_types=(Episode,))
+    response = post(authenticated_client, {"media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
+    assert response["status"] == "skipped"
+    assert {item["status"] for item in response["coverage"]["providers"]} == {"skipped"}
+    assert response["coverage"]["complete"] is False
+
+
+def test_one_real_failure_beside_a_correct_skip_is_still_a_failed_search(authenticated_client, providers):
+    """The distinct state is only for a search where nothing was asked. One
+    provider asked and failing is a failed search however many others were
+    correctly skipped, and the frontend must not have to work that out itself."""
+    from subliminal.video import Episode
+    from subliminal.exceptions import AuthenticationError
+
+    providers.add("discover_episodes_only", video_types=(Episode,))
+    providers.add("discover_refuses", error=AuthenticationError("fixture failure"))
+    response = post(authenticated_client, {"media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
+    assert response["status"] == "failed"
+    assert {item["provider"]: item["status"] for item in response["coverage"]["providers"]} == {
+        "discover_episodes_only": "skipped", "discover_refuses": "authentication_required"}
+
+
+def test_one_success_beside_a_skip_still_completes(authenticated_client, providers):
+    from provider_hub.protocol import candidate_from_worker
+    from subliminal.video import Episode
+
+    providers.add("discover_episodes_only", video_types=(Episode,))
+    providers.add("discover_found", [candidate_from_worker("discover_found", {
+        "id": "one", "language": {"alpha3": "eng"}, "provider_payload": {},
+    })])
+    response = post(authenticated_client, {"media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
+    assert response["status"] == "complete" and len(response["results"]) == 1
+
+
+def _seconds_from_now(stamp):
+    import datetime as dt
+
+    moment = dt.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    return (moment - dt.datetime.now(dt.timezone.utc)).total_seconds()
+
+
+def _retry_seconds(outcome):
+    return _seconds_from_now(outcome["retry_at"])
+
+
+@pytest.mark.parametrize("error,status,floor,ceiling", [
+    # A site answering 500 to every request used to be re-asked in 60 seconds,
+    # on the same schedule as a provider that had merely been slow.
+    (RuntimeError("upstream returned 500"), "error", 240, 320),
+    (None, "authentication_required", 840, 920),
+])
+def test_the_wait_before_asking_again_comes_from_the_cause(authenticated_client, providers,
+                                                           error, status, floor, ceiling):
+    from subliminal.exceptions import AuthenticationError
+
+    providers.add("discover_backoff", error=error or AuthenticationError("fixture failure"))
+    response = post(authenticated_client, {"media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
+    outcome = response["coverage"]["providers"][0]
+    assert outcome["status"] == status
+    assert floor < _retry_seconds(outcome) < ceiling
+
+
+def test_a_provider_retry_after_outranks_the_per_cause_wait(authenticated_client, providers):
+    from subliminal_patch.exceptions import APIThrottled
+
+    providers.add("discover_retry_after", error=APIThrottled(retry_after=42))
+    response = post(authenticated_client, {"media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
+    outcome = response["coverage"]["providers"][0]
+    assert outcome["status"] == "cooldown"
+    assert 20 < _retry_seconds(outcome) < 60
+
+
+def test_a_rate_limit_is_named_rather_than_folded_into_cooling_down(authenticated_client, providers, monkeypatch):
+    """The throttle table records the exception class, so a rate limit and a
+    download quota arrive here distinguishable. The status map had no entry for
+    either, so both reached the reader as a generic cooldown."""
+    import datetime as dt
+    from app import get_providers
+
+    providers.add("discover_limited")
+    monkeypatch.setattr(get_providers, "get_providers_sorted", lambda: [])
+    get_providers.tp["discover_limited"] = (
+        "DownloadLimitExceeded", dt.datetime.now() + dt.timedelta(hours=3), "3 hours")
+    response = post(authenticated_client, {"media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
+    outcome = response["coverage"]["providers"][0]
+    assert (outcome["status"], outcome["reason"]) == ("cooldown", "download_limit_reached")
+    assert providers.videos == []
+
+
+def test_the_longer_of_the_two_running_deadlines_decides_the_retry(authenticated_client, providers):
+    """A Retry-After the provider sent and a throttle-table entry can both be
+    running. Publishing the shorter one offers a retry that searches nothing:
+    get_providers_sorted() still excludes the provider until the table's
+    deadline, so the retry only replaces the deadline on screen."""
+    import datetime as dt
+    from app import get_providers
+    from subliminal_patch.exceptions import APIThrottled
+
+    providers.add("discover_two_clocks", error=APIThrottled(retry_after=42))
+    get_providers.tp["discover_two_clocks"] = (
+        "TooManyRequests", dt.datetime.now() + dt.timedelta(hours=1), "1 hour")
+    response = post(authenticated_client, {
+        "media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
+    outcome = response["coverage"]["providers"][0]
+    assert outcome["status"] == "cooldown"
+    assert 3400 < _retry_seconds(outcome) < 3700
+
+
+def test_a_retry_after_still_wins_when_no_table_entry_outlasts_it(authenticated_client, providers):
+    """The longer of the two, not the table unconditionally."""
+    import datetime as dt
+    from app import get_providers
+    from subliminal_patch.exceptions import APIThrottled
+
+    providers.add("discover_one_clock", error=APIThrottled(retry_after=600))
+    get_providers.tp["discover_one_clock"] = (
+        "APIThrottled", dt.datetime.now() + dt.timedelta(seconds=30), "30 seconds")
+    response = post(authenticated_client, {
+        "media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
+    assert 560 < _retry_seconds(response["coverage"]["providers"][0]) < 620
+
+
+def test_a_provider_that_never_searched_for_want_of_setup_is_not_complete_coverage(
+        authenticated_client, providers):
+    """A skip is the provider declining this target and has no answer to give.
+    A provider missing its configuration has answers it was never able to look
+    for, so a search beside one is partial, however well the others did. It
+    also must not buy the long complete-search cache lifetime."""
+    from provider_hub.protocol import candidate_from_worker
+    from subliminal.exceptions import ConfigurationError
+
+    providers.add("discover_found", [candidate_from_worker("discover_found", {
+        "id": "one", "language": {"alpha3": "eng"}, "provider_payload": {}})])
+    providers.add("discover_unconfigured", error=ConfigurationError("no credentials"))
+    response = post(authenticated_client, {
+        "media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
+    assert {item["provider"]: item["status"] for item in response["coverage"]["providers"]} == {
+        "discover_found": "success", "discover_unconfigured": "setup_required"}
+    assert response["status"] == "partial"
+    assert response["coverage"]["complete"] is False
+    assert len(response["results"]) == 1
+
+
+def _fake_clock(monkeypatch, module, start=0.0):
+    """Replace a module's time source with one that only moves when told.
+
+    Budget accounting is what is under test, so the clock has to be driven by
+    the work being charged rather than by how busy the machine is.
+    """
+    import time as real_time
+    import types
+
+    clock = types.SimpleNamespace(now=start)
+    monkeypatch.setattr(module, "time",
+                        types.SimpleNamespace(time=real_time.time, monotonic=lambda: clock.now))
+    return clock
+
+
+def _charge_row_building(monkeypatch, module, clock, seconds):
+    real_result = module._result
+
+    def costly(*args, **kwargs):
+        row = real_result(*args, **kwargs)
+        clock.now += seconds
+        return row
+
+    monkeypatch.setattr(module, "_result", costly)
+
+
+def test_the_live_row_budget_is_spent_per_row_not_per_response(authenticated_client, providers,
+                                                               monkeypatch):
+    """One provider answering with a large batch used to overrun the budget by
+    as much as it liked: the check only ran on the way into the batch. Every
+    millisecond of that scoring is charged to the shared wall the remaining
+    providers are still being judged against, so the overrun is paid for by
+    reporting working providers as abandoned."""
+    import copy as copy_module
+    from discover import progress, search as search_module
+    from provider_hub.protocol import candidate_from_worker
+
+    # Building one row costs 0.6 of a second on a clock that moves only when a
+    # row is built, so the 1.5 second budget stops the loop after three of them
+    # and nothing else in the search is charged. Real sleeping would make the
+    # same point in five seconds instead of none.
+    clock = _fake_clock(monkeypatch, search_module)
+    _charge_row_building(monkeypatch, search_module, clock, 0.6)
+    published = []
+    original = progress.publish
+
+    def record(identity, observation):
+        published.append(copy_module.deepcopy(observation))
+        return original(identity, observation)
+
+    monkeypatch.setattr(progress, "publish", record)
+
+    batch = [candidate_from_worker("discover_batch", {
+        "id": f"batch-{index}", "language": {"alpha3": "eng"},
+        "release_info": f"The.Matrix.1999.copy{index}", "matches": ["imdb_id"],
+        "provider_payload": {}}) for index in range(8)]
+    providers.add("discover_batch", batch)
+    response = _progress_post(authenticated_client, {
+        "media_type": "movie", "imdb_id": "tt0133093", "language": "eng"},
+        "33333333-4444-5555-6666-777777777777")
+    assert response.status_code == 200
+    offered = [observation["results"] for observation in published if observation.get("results")]
+    assert offered, "no observation carried a result"
+    assert len(offered[-1]) == 3, "the budget did not stop the batch part way through"
+    # The rest is built after the fanout, which is where all of it was built
+    # before, so the reader still ends up with every row.
+    assert len(response.json["results"]) == 8
+    assert len({row["id"] for row in response.json["results"]}) == 8
+
+
+def test_a_row_offered_early_still_resolves_when_the_search_finishes(authenticated_client,
+                                                                     providers, monkeypatch):
+    """The early handle's lifetime starts when it is offered, the snapshot's
+    when the fanout returns. With a result TTL shorter than the search, the
+    rows filed into a perfectly live cache entry named handles the store had
+    already dropped, so the first download attempt failed."""
+    from app.config import settings
+    from discover.handles import resolve_result
+    from provider_hub.protocol import candidate_from_worker
+
+    for key in ("cache_ttl_seconds", "file_id_ttl_seconds"):
+        monkeypatch.setattr(settings.compat_endpoint, key, 2)
+    providers.add("discover_fast", [candidate_from_worker("discover_fast", {
+        "id": "fast-1", "language": {"alpha3": "eng"}, "release_info": "The Matrix",
+        "matches": ["imdb_id"], "provider_payload": {}})])
+    providers.add("discover_slow", delay=2.6)
+    response = _progress_post(authenticated_client, {
+        "media_type": "movie", "imdb_id": "tt0133093", "language": "eng"},
+        "44444444-5555-6666-7777-888888888888")
+    assert response.status_code == 200
+    rows = response.json["results"]
+    assert len(rows) == 1
+    assert resolve_result(rows[0]["id"], response.json["search_id"]) is not None
+    # And with its whole lifetime ahead of it, not the remainder of one that
+    # started before the slow provider had even answered.
+    assert _seconds_from_now(rows[0]["expires_at"]) > 1.0
+
+
+def test_a_row_offered_early_stays_actionable_while_the_search_runs(authenticated_client,
+                                                                    providers, monkeypatch):
+    """A row is offered the moment it is published, so its handle has to outlive
+    the search that published it. Minted for the result TTL alone it does not:
+    with a TTL shorter than the wall the remaining providers are still living
+    on, a row the reader can see and click is already gone from the store
+    before the search ends, and the Download button reports it expired while
+    the search that produced it is still running. The completion renewal
+    cannot close that window either, because it refuses an entry that has
+    already expired and mints a replacement id instead, retiring the one the
+    reader was offered."""
+    import copy as copy_module
+    from app.config import settings
+    from discover import progress
+    from discover.handles import resolve_result
+    from provider_hub.protocol import candidate_from_worker
+
+    published = []
+    original = progress.publish
+
+    def record(identity, observation):
+        published.append(copy_module.deepcopy(observation))
+        original(identity, observation)
+
+    monkeypatch.setattr(progress, "publish", record)
+    for key in ("cache_ttl_seconds", "file_id_ttl_seconds"):
+        monkeypatch.setattr(settings.compat_endpoint, key, 2)
+    providers.add("discover_fast", [candidate_from_worker("discover_fast", {
+        "id": "fast-1", "language": {"alpha3": "eng"}, "release_info": "The Matrix",
+        "matches": ["imdb_id"], "provider_payload": {}})])
+    providers.add("discover_slow", delay=2.6)
+    response = _progress_post(authenticated_client, {
+        "media_type": "movie", "imdb_id": "tt0133093", "language": "eng"},
+        "66666666-7777-8888-9999-aaaaaaaaaaaa")
+    assert response.status_code == 200
+
+    early = [observation for observation in published if observation.get("results")]
+    assert early, "no observation carried a result"
+    offered = early[0]["results"][0]
+    assert _seconds_from_now(offered["expires_at"]) > 0, "the offered row expired mid-search"
+    assert resolve_result(offered["id"], early[0]["search_id"]) is not None
+    # And the finished snapshot still names it, rather than retiring an id a
+    # reader was already looking at.
+    assert offered["id"] in {row["id"] for row in response.json["results"]}
+
+
+def test_publishing_the_growing_row_list_is_charged_to_the_same_budget(authenticated_client,
+                                                                       providers, monkeypatch):
+    """Every outcome republishes the whole accumulated list and the observer
+    copies it, so with enough rows the copying costs more than the building the
+    budget was written to bound, and it comes out of the same wall. Charging it
+    is what stops the list growing once that is where the budget is going."""
+    import copy as copy_module
+    from discover import progress, search as search_module
+    from provider_hub.protocol import candidate_from_worker
+
+    clock = _fake_clock(monkeypatch, search_module)
+    published = []
+    original = progress.publish
+
+    def costly_publish(identity, observation):
+        published.append(copy_module.deepcopy(observation))
+        # 0.8 a call: the first two exhaust the 1.5 second budget between them.
+        clock.now += 0.8
+        return original(identity, observation)
+
+    monkeypatch.setattr(progress, "publish", costly_publish)
+
+    for name in ("discover_first", "discover_second"):
+        providers.add(name, [candidate_from_worker(name, {
+            "id": f"{name}-{index}", "language": {"alpha3": "eng"},
+            "release_info": f"The.Matrix.1999.{name}.{index}", "matches": ["imdb_id"],
+            "provider_payload": {}}) for index in range(4)])
+    response = _progress_post(authenticated_client, {
+        "media_type": "movie", "imdb_id": "tt0133093", "language": "eng"},
+        "55555555-6666-7777-8888-999999999999")
+    assert response.status_code == 200
+
+    offered = [observation["results"] for observation in published if observation.get("results")]
+    assert offered, "no observation carried a result"
+    assert len(offered[-1]) == 4, "publishing was not charged, so the list kept growing"
+    assert len(response.json["results"]) == 8
+
+
+def test_a_cooldown_defers_to_a_longer_deadline_recorded_after_it(authenticated_client, providers):
+    """A Discover cooldown is fixed when the outcome is recorded, but the
+    throttle table can move afterwards: a provider abandoned at the wall takes
+    the short abandonment wait, then its call finishes and writes a real rate
+    limit. Offering the earlier of the two produces a retry that searches
+    nothing, because the provider stays out of get_providers_sorted() until the
+    table's deadline."""
+    import datetime as dt
+    from app import get_providers
+    from subliminal.exceptions import AuthenticationError
+
+    providers.add("discover_late_writer", error=AuthenticationError("fixture failure"))
+    first = post(authenticated_client, {
+        "media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
+    assert first["coverage"]["providers"][0]["status"] == "authentication_required"
+
+    # The abandoned call lands after the snapshot was already filed.
+    get_providers.tp["discover_late_writer"] = (
+        "DownloadLimitExceeded", dt.datetime.now() + dt.timedelta(hours=3), "3 hours")
+    second = post(authenticated_client, {
+        "media_type": "movie", "imdb_id": "tt0133093", "language": "eng", "refresh": True}).json
+    outcome = second["coverage"]["providers"][0]
+    assert _retry_seconds(outcome) > 3600, "the stale cooldown shadowed the longer deadline"

@@ -23,12 +23,70 @@ from compat import cache, service
 from subliminal_patch.extensions import provider_registry
 from subliminal_patch.score import ComputeScore, MAX_SCORES
 
-from .handles import mint_result, resolve_result
+from .handles import mint_result, renew_result, resolve_result
 
 _IMDB = re.compile(r"tt[0-9]{7,10}\Z")
 _LANGUAGE = re.compile(r"[a-z]{2,3}(?:-[A-Za-z]{2,4})?\Z")
 _STATE_LOCK = Lock()
 _COMPLETE = {"success", "empty"}
+# Statuses that mean no request left this instance, so nothing upstream failed.
+# A search whose every outcome is one of these did not fail; it never ran, and
+# saying "No provider completed this search" about it answers a question the
+# reader did not ask. "setup_required" belongs here because both ways to reach
+# it, missing configuration found before the search and ConfigurationError
+# raised instead of a listing, are the operator's to fix, not an upstream fault.
+_NOT_ATTEMPTED = {"skipped", "setup_required", "not_started"}
+# ...but a provider that never started still leaves a hole where its answer
+# would have been, so it cannot count toward a search claiming complete
+# coverage the way a deliberate skip does. "setup_required" is the same kind of
+# hole: a skip is the provider correctly declining this target and has no
+# answer to give, while a provider missing its credentials has answers it was
+# never able to look for, and will have them the moment the operator fixes the
+# configuration. Claiming complete coverage there both overstates the search
+# and buys the finished snapshot the long cache lifetime.
+_NO_COVERAGE = {"not_started", "setup_required"}
+# Outcomes that must not put a provider on a Discover cooldown. A skip is a
+# decision about this target, and a call that never started is not evidence
+# about the provider, so neither earns a wait before asking again.
+_NO_COOLDOWN = {"skipped", "not_started"}
+
+# What the throttle table's recorded exception class means for the reader. The
+# table stores the original class name, so a rate limit and a download quota
+# arrive here distinguishable and are worth telling apart: one clears in
+# minutes, the other usually at the provider's own daily reset.
+_THROTTLE_CAUSE = {
+    "AuthenticationError": ("authentication_required", "authentication_required"),
+    "ConfigurationError": ("setup_required", "setup_required"),
+    "ServiceUnavailable": ("unreachable", "unreachable"),
+    "IPAddressBlocked": ("unreachable", "automated_requests_blocked"),
+    "ConnectTimeout": ("timeout", "timeout"),
+    "ReadTimeout": ("timeout", "timeout"),
+    "Timeout": ("timeout", "timeout"),
+    "TooManyRequests": ("cooldown", "rate_limited"),
+    "DownloadLimitExceeded": ("cooldown", "download_limit_reached"),
+    "SearchLimitReached": ("cooldown", "search_limit_reached"),
+}
+
+# How long Discover waits before offering this provider again, by cause, when
+# nothing more specific is available. A flat delay for every cause was the
+# whole defect: a site answering 500 to the entire internet was re-asked on the
+# same schedule as a provider that merely answered slowly. These are only the
+# floor; a Retry-After the provider sent, and the throttle table's own
+# per-provider, per-exception durations, both outrank them.
+_RETRY_AFTER_CAUSE = {
+    "authentication_required": 900,
+    "setup_required": 900,
+    "cooldown": 600,
+    "unreachable": 300,
+    "error": 300,
+    "timeout": 120,
+    "unverified": 120,
+    # Our wall, not the provider's failing. Wait long enough that an
+    # immediate retry does not re-run the same losing race, no longer.
+    "abandoned": 45,
+    "saturated": 20,
+}
+_RETRY_AFTER_DEFAULT = 60
 
 
 @dataclass(frozen=True)
@@ -214,6 +272,35 @@ def _reconcile_episode(payload, context):
     return valid_until
 
 
+def _retry_delay(outcome):
+    """Seconds to wait before Discover offers this provider again.
+
+    Two clocks can be running at once. What the provider itself said, through
+    a Retry-After it sent, and the throttle table, which the pool has just
+    written for this exact exception if the failure was one the backoff knows,
+    and which carries the per-provider durations an operator can reason about
+    (a rate limit on one site, a daily download quota on another). Whichever
+    runs longer is the one that decides when the provider is next asked, so
+    that is the one the reader is told about: offering a retry at the earlier
+    of the two produces a button that searches nothing, because
+    get_providers_sorted() still excludes the provider until the table's
+    deadline and the retry only replaces the deadline on screen.
+
+    A per-cause floor applies only when neither clock is running.
+
+    Reading the table rather than duplicating its numbers also keeps the row
+    Discover shows and the reason the provider is missing from the next search
+    in agreement, instead of two independent clocks disagreeing on screen.
+    """
+    delay = max(1.0, float(outcome.retry_after)) if outcome.retry_after else 0.0
+    throttle = get_providers.tp.get(outcome.provider)
+    if throttle and throttle[1]:
+        delay = max(delay, (throttle[1] - dt.datetime.now()).total_seconds())
+    if delay > 0:
+        return delay
+    return _RETRY_AFTER_CAUSE.get(outcome.status, _RETRY_AFTER_DEFAULT)
+
+
 def _pool_state(pool):
     with _STATE_LOCK:
         if not hasattr(pool, "_discover_state"):
@@ -259,17 +346,24 @@ def _coverage(pool, state, *, has_file=False):
             status, reason = "skipped", "requires_file"
         elif name in cooldowns and cooldowns[name][0] > now:
             until, prior = cooldowns[name]
+            # The same longer-of-the-two rule _retry_delay applies, applied
+            # again on the way out. A cooldown is fixed when the outcome is
+            # recorded, but the throttle table can move afterwards: a provider
+            # abandoned at the wall goes on the short abandonment wait, then
+            # its call finishes and writes a real rate limit. Offering the
+            # earlier of the two produces a retry that searches nothing,
+            # because the provider stays out of get_providers_sorted() until
+            # the table's deadline.
+            throttle = get_providers.tp.get(name)
+            if throttle and throttle[1]:
+                until = max(until, throttle[1].timestamp())
             outcomes[name] = {**prior, "result_count": 0, "retry_at": _iso(until)}
             continue
         elif name not in available or name in discarded:
             status, reason = "cooldown", "provider_cooldown"
             throttle = get_providers.tp.get(name)
             if throttle and throttle[1]:
-                status = {"AuthenticationError": "authentication_required",
-                          "ConfigurationError": "setup_required",
-                          "ServiceUnavailable": "unreachable",
-                          "ConnectTimeout": "timeout", "ReadTimeout": "timeout"}.get(throttle[0], "cooldown")
-                reason = status
+                status, reason = _THROTTLE_CAUSE.get(throttle[0], ("cooldown", "provider_cooldown"))
                 retry_at = throttle[1].astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
         elif name not in pool.providers:
             status, reason = "setup_required", "provider_unavailable"
@@ -411,11 +505,70 @@ def search(request: SearchRequest, on_progress=None) -> dict:
             # hash and release description. Confirmed identity is untouched.
             service.refine_video_with_copy(video, request.copy)
 
+        # Rows the fanout has already produced, published while the search is
+        # still running so a reader can act on them without waiting for the
+        # slowest provider. `built` keeps each row beside the subtitle it was
+        # minted for, which both keeps that subtitle referenced (so its id
+        # stays unique) and lets the final list reuse the very same row: one
+        # handle per subtitle, and an id a reader saw mid-search still names
+        # the same result in the finished snapshot.
+        parsed = {}
+        built = {}
+        live_rows = []
+        # Building a row costs match evidence and a compatibility score. That
+        # cost is paid once either way, but paying it here spends the fanout's
+        # own wall clock, which the remaining providers are still living on.
+        # Past this budget the rest of the rows are built after the fanout, as
+        # before, and appear when the search completes.
+        live_budget = 1.5
+        # A handle offered mid-search has to outlive the search that offered
+        # it. Its lifetime starts when the row is published, while the wall the
+        # remaining providers are still searching on can be longer than the
+        # result TTL itself, so minting for the TTL alone publishes rows the
+        # store has already dropped before the last provider answers: the
+        # reader sees them, clicks Download and is told they expired. Renewal
+        # at completion cannot close that window, since it refuses an entry
+        # that is already gone and mints a replacement for the id the reader
+        # was offered. Covering the wall as well leaves exactly the TTL once
+        # the completed snapshot renews it, because renewal never shortens.
+        live_ttl = ttl + service.search_wall_seconds()
+
         def report_progress():
-            if on_progress is not None:
-                on_progress({"phase": "searching", "providers": [
-                    outcomes.get(name, {"provider": name, "status": "pending", "result_count": 0})
-                    for name in sorted(set(providers) | set(outcomes))]})
+            # Charged to the same budget as building. Every outcome publishes
+            # the whole accumulated list and the observer copies it, so past a
+            # certain number of rows the copying costs more than the building
+            # it was meant to bound, and both come out of the wall the other
+            # providers are still searching on. Charging it here is what stops
+            # the list growing once that is what the budget is going to.
+            nonlocal live_budget
+            if on_progress is None:
+                return
+            started = time.monotonic()
+            on_progress({"phase": "searching", "search_id": search_id, "context": dict(context),
+                         "results": list(live_rows), "providers": [
+                outcomes.get(name, {"provider": name, "status": "pending", "result_count": 0})
+                for name in sorted(set(providers) | set(outcomes))]})
+            live_budget -= time.monotonic() - started
+
+        def build_live_rows(subtitles):
+            # Charged per row, not per response. Checking only on the way in
+            # lets a single provider answering with a large batch spend the
+            # budget many times over, and every millisecond of it comes out of
+            # the shared wall the still-running providers are being judged
+            # against: they get reported as abandoned for work this loop did.
+            # Whatever is left when the budget runs out is built after the
+            # fanout, which is where all of it was built before.
+            nonlocal live_budget
+            if on_progress is None:
+                return
+            for sub in subtitles:
+                if live_budget <= 0:
+                    return
+                started = time.monotonic()
+                row = _result(sub, video, context, search_id, checked, live_ttl, parsed)
+                built[id(sub)] = (sub, row)
+                live_rows.append(row)
+                live_budget -= time.monotonic() - started
 
         report_progress()
 
@@ -431,14 +584,13 @@ def search(request: SearchRequest, on_progress=None) -> dict:
                 item["supported_media"] = list(manifest.supported_media)
             if outcome.reason == "unsupported_language" and manifest is not None:
                 item["supported_languages"] = list(manifest.languages)
-            if outcome.status not in _COMPLETE and outcome.status != "skipped":
-                delay = outcome.retry_after or (300 if outcome.status in {"authentication_required", "setup_required"}
-                                                else 60)
-                until = time.time() + delay
+            if outcome.status not in _COMPLETE | _NO_COOLDOWN:
+                until = time.time() + _retry_delay(outcome)
                 item["retry_at"] = _iso(until)
                 with _STATE_LOCK:
                     state["cooldowns"][outcome.provider] = (until, dict(item))
             outcomes[outcome.provider] = item
+            build_live_rows(outcome.subtitles)
             report_progress()
 
         # This is admission to one provider operation. Cache-creator and
@@ -452,8 +604,22 @@ def search(request: SearchRequest, on_progress=None) -> dict:
                 title=context.get("title") or context.get("query") or context.get("imdb_id"),
                 season=context.get("season"), episode=context.get("episode")):
             subtitles = service.search_title(video, [language], pool, providers, on_outcome)
-        parsed = {}
-        rows = [_result(sub, video, context, search_id, checked, ttl, parsed) for sub in subtitles]
+        rows = []
+        for sub in subtitles:
+            # A row already published mid-search is reused rather than minted
+            # again, so the finished snapshot repeats the ids a reader has
+            # already been offered instead of retiring them. Its handle has
+            # been expiring since the moment it was offered, though, while this
+            # snapshot's own cache lifetime starts here, so the reused handle
+            # gets the rest of its life back. Without that the cache entry
+            # outlives the handles it names by the length of the search, and a
+            # slow search with a short TTL files rows whose handles are gone
+            # before anyone is served them.
+            existing = built.get(id(sub))
+            renewed = (renew_result(existing[1]["id"], ttl)
+                       if existing is not None and existing[0] is sub else None)
+            rows.append({**existing[1], "expires_at": _iso(renewed)} if renewed is not None
+                        else _result(sub, video, context, search_id, checked, ttl, parsed))
         # Failed refreshes retain usable rows only for providers that failed.
         # Successful empty searches replace their earlier results.
         if previous_exists:
@@ -462,9 +628,21 @@ def search(request: SearchRequest, on_progress=None) -> dict:
                         and outcomes[row["provider"]]["status"] not in _COMPLETE | {"skipped"}
                         and resolve_result(row["id"]) is not None)
         completed = sum(item["status"] in _COMPLETE for item in outcomes.values())
-        incomplete = sum(item["status"] not in _COMPLETE | {"skipped"}
-                         for item in outcomes.values())
-        status = "complete" if completed and not incomplete else "partial" if completed or rows else "failed"
+        # Only a provider that was actually asked and did not answer counts as
+        # a failure. Skips, unmet setup and calls that never started are all
+        # reasons the search did not happen, which is a different answer to
+        # give the reader than "every provider failed".
+        failures = sum(item["status"] not in _COMPLETE | _NOT_ATTEMPTED
+                       for item in outcomes.values())
+        uncovered = sum(item["status"] in _NO_COVERAGE for item in outcomes.values())
+        if completed and not failures and not uncovered:
+            status = "complete"
+        elif completed or rows:
+            status = "partial"
+        elif failures or not outcomes:
+            status = "failed"
+        else:
+            status = "skipped"
         stale = any(row["stale"] for row in rows)
         return {
             "search_id": search_id, "context": dict(context), "status": status,

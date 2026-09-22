@@ -1,10 +1,12 @@
 import type {
   DigitalReleaseContext,
+  DiscoverContext,
   DiscoverDownloadFeedback,
   DiscoverPreviewFeedback,
   DiscoverSearchProgress,
   DiscoverSearchSnapshot,
   DiscoverSelection,
+  DiscoverSubtitleResult,
   MetadataEpisode,
   MetadataSource,
   MetadataTitle,
@@ -62,13 +64,37 @@ export interface DiscoverBrowsing {
   scrollY: number;
 }
 
+/**
+ * The rows a running search has already published, under the context it is
+ * searching. It exists only while that search runs: the moment the server
+ * answers, the completed snapshot owns the list, and every other outcome
+ * (failure, a changed selection, leaving the title, signing out) drops it.
+ *
+ * It is deliberately not a snapshot. A snapshot is a finished answer with
+ * coverage, a checked time and a cache status; this is an unfinished list, and
+ * typing it as the same thing would invite a reader to treat it as settled.
+ */
+export interface DiscoverLiveResults {
+  context: DiscoverContext;
+  results: DiscoverSubtitleResult[];
+}
+
 export interface DiscoverState {
   sessionId: number;
   browsing: DiscoverBrowsing;
   draft: DiscoverDraft;
   generation: number;
-  status: "unsearched" | "searching" | "complete" | "partial" | "failed";
+  status:
+    | "unsearched"
+    | "searching"
+    | "complete"
+    | "partial"
+    | "failed"
+    // No provider was asked: every outcome was a skip, unmet setup, or a call
+    // that never started. Mirrors the snapshot state of the same name.
+    | "skipped";
   snapshot: DiscoverSearchSnapshot | null;
+  live: DiscoverLiveResults | null;
   searchProgress?: DiscoverSearchProgress;
   error: string | null;
   storageAvailable: boolean;
@@ -141,6 +167,7 @@ export function initialDiscoverState(): DiscoverState {
     generation: 0,
     status: "unsearched",
     snapshot: null,
+    live: null,
     error: null,
     storageAvailable,
     languageSeeded: false,
@@ -367,6 +394,51 @@ type DiscoverAction =
   | { type: "cancel"; generation: number }
   | { type: "clear"; generation: number };
 
+/**
+ * The rows the reader is actually being offered: the finished snapshot's when
+ * there is one, and otherwise the running search's. A row is offered the
+ * moment it is rendered, so this is what decides whether a download or a
+ * preview names a result that is really on the page.
+ */
+export function offeredResults(
+  state: Pick<DiscoverState, "snapshot" | "live">,
+): DiscoverSubtitleResult[] {
+  return state.snapshot?.results ?? state.live?.results ?? [];
+}
+
+/**
+ * Fold one observation into the rows already shown.
+ *
+ * Append-only, and deliberately so. The finished snapshot lists results in the
+ * order the providers returned them, which is the order they are appended in
+ * here, so there is no final re-ranking for this to fight with and no reason
+ * to move a row a reader is already reading. Rows are matched by id, so a
+ * repeated observation adds nothing, and a row that survives into the finished
+ * snapshot keeps the identity its Download button was already using.
+ */
+function liveResults(
+  previous: DiscoverLiveResults | null,
+  progress: DiscoverSearchProgress,
+): DiscoverLiveResults | null {
+  const { context, results } = progress;
+  if (!context || !Array.isArray(results)) return previous;
+  const rows = results.filter(
+    (row) =>
+      typeof row?.id === "string" &&
+      typeof row.search_id === "string" &&
+      typeof row.expires_at === "string",
+  );
+  // Rows of an earlier attempt at the same selection are not rows of this one.
+  const kept =
+    previous?.results.filter((row) => row.search_id === progress.search_id) ??
+    [];
+  const seen = new Set(kept.map((row) => row.id));
+  return {
+    context,
+    results: [...kept, ...rows.filter((row) => !seen.has(row.id))],
+  };
+}
+
 export function discoverReducer(
   state: DiscoverState,
   action: DiscoverAction,
@@ -380,6 +452,9 @@ export function discoverReducer(
         saved.status === "searching"
           ? (saved.snapshot?.status ?? "unsearched")
           : saved.status,
+      // A filed page holds no owner for a search that was still running, so
+      // the rows that search had published so far have nobody to finish them.
+      live: null,
       searchProgress: undefined,
       download: saved.download?.status === "pending" ? null : saved.download,
       preview: saved.preview?.status === "pending" ? null : saved.preview,
@@ -421,6 +496,7 @@ export function discoverReducer(
       ...(changed
         ? ({
             snapshot: null,
+            live: null,
             status: "unsearched",
             error: null,
             download: null,
@@ -446,16 +522,25 @@ export function discoverReducer(
     };
   }
   if (action.type === "progress") {
-    return action.generation === state.generation &&
-      state.status === "searching"
-      ? { ...state, searchProgress: action.progress }
-      : state;
+    // The same two guards the whole search path uses. An observation of a
+    // search the reader has moved on from is discarded here, rows and all,
+    // exactly as its final response would be.
+    if (action.generation !== state.generation || state.status !== "searching")
+      return state;
+    return {
+      ...state,
+      searchProgress: action.progress,
+      live: liveResults(state.live, action.progress),
+    };
   }
   if (action.type === "start") {
     return {
       ...state,
       generation: action.generation,
       status: "searching",
+      // Nothing has been published for this search yet, and the rows of the
+      // one before it are not an answer to it.
+      live: null,
       searchProgress: undefined,
       error: null,
       // Searching with the language is using it: it stops being a seed, and
@@ -474,6 +559,7 @@ export function discoverReducer(
       ...state,
       generation: action.generation,
       status: state.status === "searching" ? "unsearched" : state.status,
+      live: null,
       download: state.download?.status === "pending" ? null : state.download,
       preview: state.preview?.status === "pending" ? null : state.preview,
     };
@@ -483,7 +569,7 @@ export function discoverReducer(
       action.key !== discoverContextKey(state.draft) ||
       (feedback.status !== "pending" &&
         state.preview?.requestId !== feedback.requestId) ||
-      !state.snapshot?.results.some(
+      !offeredResults(state).some(
         (row) =>
           row.id === feedback.row.id &&
           row.search_id === feedback.row.search_id,
@@ -516,7 +602,7 @@ export function discoverReducer(
     )
       return state;
     if (
-      !state.snapshot?.results.some(
+      !offeredResults(state).some(
         (row) =>
           row.id === feedback.row.id &&
           row.search_id === feedback.row.search_id,
@@ -554,6 +640,7 @@ export function discoverReducer(
     return {
       ...state,
       snapshot,
+      live: null,
       status: "failed",
       download: snapshot?.results.some(
         (row) => row.id === state.download?.row.id,
@@ -579,6 +666,7 @@ export function discoverReducer(
   return {
     ...state,
     snapshot,
+    live: null,
     status: snapshot.status,
     error: null,
     download: snapshot.results.some((row) => row.id === state.download?.row.id)

@@ -54,12 +54,29 @@ const onInstalledNeedsRestart = vi.fn();
 const onUseInstalled = vi.fn();
 const onNext = vi.fn();
 
+const refetchCatalog = vi.fn();
+
 function setCatalog(entries: unknown[]) {
   mockedCatalog.mockReturnValue({
     data: { sources: [], entries },
     // Settled: the stage reads this to tell an empty catalog from one that has
     // not answered yet.
     isPending: false,
+    isError: false,
+    error: null,
+    isFetching: false,
+    refetch: refetchCatalog,
+  } as unknown as ReturnType<typeof useProviderHubCatalog>);
+}
+
+function setCatalogError(error: unknown) {
+  mockedCatalog.mockReturnValue({
+    data: undefined,
+    isPending: false,
+    isError: true,
+    error,
+    isFetching: false,
+    refetch: refetchCatalog,
   } as unknown as ReturnType<typeof useProviderHubCatalog>);
 }
 
@@ -230,6 +247,49 @@ describe("ProviderInstallStage", () => {
       screen.getByRole("button", { name: /continue without providers/i }),
     );
     expect(onNext).toHaveBeenCalledTimes(1);
+  });
+
+  // A catalog that could not be fetched and a catalog with nothing in it both
+  // arrive as `data: undefined`. Reading them as the same thing told a reader
+  // whose request failed that Bazarr+ has no providers, which is a different
+  // problem with a different fix, and offered no way to try again.
+  it("tells a catalog that failed from a catalog that is empty", async () => {
+    const user = userEvent.setup();
+    setCatalogError(new Error("provider catalog unreachable"));
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    expect(
+      screen.getByText(/could not load the provider catalog/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/provider catalog unreachable/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/no installable providers were found/i),
+    ).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: /retry/i }));
+    expect(refetchCatalog).toHaveBeenCalled();
+  });
+
+  it("names the search box for a screen reader", () => {
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    expect(screen.getByLabelText("Search providers")).toBeInTheDocument();
   });
 
   // An answer that has not arrived is not an empty one. Reading the list while

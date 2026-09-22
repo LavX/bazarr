@@ -32,6 +32,7 @@ import {
   discoverReducer,
   DiscoverState,
   initialDiscoverState,
+  offeredResults,
   recentEpisodeMismatch,
   searchSelection,
 } from "./discoverState";
@@ -354,12 +355,17 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
   const downloadSubtitle = useCallback(
     async (row: DiscoverSubtitleResult) => {
       const owner = currentState.current;
-      const snapshot = owner.snapshot;
+      // A row published by the running search is as real as one in a finished
+      // snapshot: its handle is already minted, so the server can serve it
+      // now. Waiting for the last provider would be refusing to act on a row
+      // the reader can already see.
+      const offered = owner.snapshot ?? owner.live;
       if (
-        !snapshot?.results.some(
+        !offeredResults(owner).some(
           (candidate) =>
             candidate.id === row.id && candidate.search_id === row.search_id,
         ) ||
+        !offered ||
         owner.retiredResultIds.includes(row.id) ||
         owner.download?.status === "pending"
       )
@@ -369,7 +375,7 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
       const feedback: DiscoverDownloadFeedback = {
         requestId,
         contextKey: key,
-        context: { ...snapshot.context },
+        context: { ...offered.context },
         row: { ...row },
         status: "pending",
       };
@@ -377,7 +383,7 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
       const stillCurrent = () =>
         requestId === downloadSequence.current &&
         key === discoverContextKey(draft.current) &&
-        currentState.current.snapshot?.results.some(
+        offeredResults(currentState.current).some(
           (candidate) =>
             candidate.id === row.id && candidate.search_id === row.search_id,
         ) &&
@@ -443,12 +449,13 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
   const previewSubtitle = useCallback(
     async (row: DiscoverSubtitleResult) => {
       const owner = currentState.current;
-      const snapshot = owner.snapshot;
+      const offered = owner.snapshot ?? owner.live;
       if (
-        !snapshot?.results.some(
+        !offeredResults(owner).some(
           (candidate) =>
             candidate.id === row.id && candidate.search_id === row.search_id,
         ) ||
+        !offered ||
         owner.retiredResultIds.includes(row.id)
       )
         return;
@@ -457,7 +464,7 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
       const feedback: DiscoverPreviewFeedback = {
         requestId,
         contextKey: key,
-        context: { ...snapshot.context },
+        context: { ...offered.context },
         row: { ...row },
         status: "pending",
       };
@@ -465,7 +472,7 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
       const stillCurrent = () =>
         requestId === previewSequence.current &&
         key === discoverContextKey(draft.current) &&
-        currentState.current.snapshot?.results.some(
+        offeredResults(currentState.current).some(
           (candidate) =>
             candidate.id === row.id && candidate.search_id === row.search_id,
         ) &&

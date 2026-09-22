@@ -1,13 +1,13 @@
-import { FC } from "react";
+import { FC, useState } from "react";
 import { useNavigate } from "react-router";
 import {
+  Alert,
   Button,
   Group,
   List,
   Stack,
   Text,
   ThemeIcon,
-  Title,
 } from "@mantine/core";
 import { faCheck, faMinus } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
@@ -17,11 +17,19 @@ import {
   useSettingsMutation,
   useSystemSettings,
 } from "@/apis/hooks";
+import { useMediaServerInstances } from "@/apis/hooks/mediaServers";
+import type {
+  MediaServerInstance,
+  MediaServerKind,
+} from "@/apis/raw/mediaServers";
+import { kindName } from "@/pages/Settings/MediaServers/kinds";
+import StepLayout from "@/pages/Setup/StepLayout";
 import {
   clearPersistedIntent,
   useOnboardingIntent,
 } from "@/pages/Setup/useOnboardingIntent";
-import { useWizardStep } from "@/pages/Setup/useWizardStep";
+import { clearPersistedSelection } from "@/pages/Setup/useOnboardingSelection";
+import { clearPersistedStep } from "@/pages/Setup/useWizardStep";
 import type { WizardStepProps } from "./types";
 
 interface SummaryLine {
@@ -62,15 +70,59 @@ function SummaryItem({ label, done }: SummaryLine) {
  */
 const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
   const navigate = useNavigate();
-  const { reset } = useWizardStep();
   const { intent } = useOnboardingIntent();
   const mutation = useSettingsMutation();
+  const [failed, setFailed] = useState(false);
 
   const { data: instances } = useArrInstances();
   const { data: profiles } = useLanguageProfiles();
   const { data: settings } = useSystemSettings();
 
+  // The recap reads the rows, not the master switches. It used to read
+  // use_plex and use_jellyfin only, so connecting Emby produced "Plex skipped,
+  // Jellyfin skipped" and no mention of the server that was actually set up.
+  const plex = useMediaServerInstances("plex");
+  const jellyfin = useMediaServerInstances("jellyfin");
+  const emby = useMediaServerInstances("emby");
+  const silo = useMediaServerInstances("silo");
+
   const general = settings?.general;
+
+  // A switched-off row is not a destination: the dispatcher skips it, and the
+  // backend keeps exactly one after a Plex sign-out, credential cleared.
+  // Counting it told the reader Plex was connected and dropped the line saying
+  // where to finish the job.
+  //
+  // The kind's master switch counts for the same reason. The dispatcher reads
+  // use_<kind> before it reads any row, so a server saved on a step whose
+  // switch write failed, which is exactly what "Continue anyway" walks past,
+  // refreshes nothing however enabled its own row is. Reporting it connected
+  // was the one place left that could still tell the reader setup was done
+  // when it was not.
+  const activeCount = (
+    kind: MediaServerKind,
+    rows: MediaServerInstance[] | undefined,
+  ) => {
+    const flag = general?.[`use_${kind}`] as boolean | undefined;
+    // An unanswered settings query is not a switched-off kind. It resolves
+    // before this screen is actionable, and assuming off would flash the
+    // "nothing is connected" warning at a reader who connected four servers.
+    if (general !== undefined && flag !== true) {
+      return 0;
+    }
+    return (rows ?? []).filter((row) => row.enabled).length;
+  };
+
+  const mediaServers: { kind: MediaServerKind; count: number }[] = [
+    { kind: "plex", count: activeCount("plex", plex.data) },
+    { kind: "jellyfin", count: activeCount("jellyfin", jellyfin.data) },
+    { kind: "emby", count: activeCount("emby", emby.data) },
+    { kind: "silo", count: activeCount("silo", silo.data) },
+  ];
+  const mediaServerCount = mediaServers.reduce(
+    (total, entry) => total + entry.count,
+    0,
+  );
   const discoverPath = intent === "discover";
 
   const sonarrCount = (instances ?? []).filter(
@@ -85,8 +137,6 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
   const instanceCount = sonarrCount + radarrCount + sportarrCount;
   const profileCount = (profiles ?? []).length;
   const providers = general?.enabled_providers ?? [];
-  const usePlex = general?.use_plex ?? false;
-  const useJellyfin = general?.use_jellyfin ?? false;
   const useSeerr = general?.use_seerr ?? false;
   const translatorReady =
     (settings?.translator?.openrouter_api_key ?? "").length > 0;
@@ -116,19 +166,24 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
         : "Sportarr not connected",
       done: sportarrCount > 0,
     },
-    {
-      label: usePlex
-        ? "Plex media server connected"
-        : "Plex media server skipped",
-      done: usePlex,
-    },
-    {
-      label: useJellyfin
-        ? "Jellyfin media server connected"
-        : "Jellyfin media server skipped",
-      done: useJellyfin,
-    },
   ];
+
+  // Media servers are their own group rather than part of the arr recap: the
+  // picker is on both paths, so a Discover reader who connected Jellyfin has to
+  // be told about it too. It used to sit in libraryLines, which a Discover run
+  // never renders, so that reader finished with no mention of the server they
+  // had just set up.
+  const mediaServerLines: SummaryLine[] =
+    mediaServerCount === 0
+      ? [{ label: "No media server connected", done: false }]
+      : mediaServers
+          .filter((entry) => entry.count > 0)
+          .map((entry) => ({
+            label: `${kindName(entry.kind)} connected (${entry.count} ${
+              entry.count === 1 ? "server" : "servers"
+            })`,
+            done: true,
+          }));
 
   const sharedLines: SummaryLine[] = [
     {
@@ -157,7 +212,9 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
     },
   ];
 
-  const lines = discoverPath ? sharedLines : [...libraryLines, ...sharedLines];
+  const lines = discoverPath
+    ? [...mediaServerLines, ...sharedLines]
+    : [...libraryLines, ...mediaServerLines, ...sharedLines];
 
   // What was left undone, and the page that finishes it. Named rather than
   // linked: setup is not marked complete until Finish is pressed, so a link
@@ -171,9 +228,12 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
       where: "Settings, Connections",
     });
   }
-  if (!discoverPath && !usePlex && !useJellyfin) {
+  // Not gated on the path, for the same reason the recap is not: both paths
+  // are offered the picker now.
+  if (mediaServerCount === 0) {
     skipped.push({
-      label: "No Plex or Jellyfin media server is connected",
+      label:
+        "No media server is connected, so nothing is refreshed after a download",
       where: "Settings, Connections",
     });
   }
@@ -191,67 +251,82 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
   }
 
   const handleFinish = () => {
+    setFailed(false);
     mutation.mutate(
       { "settings-general-setup_complete": true },
       {
         onSuccess: () => {
-          reset();
+          clearPersistedStep();
           clearPersistedIntent();
+          clearPersistedSelection();
           // The Redirector picks routing back up once setup is marked
           // complete. A Discover user goes straight to the page they came for.
           navigate(discoverPath ? "/discover" : "/");
         },
+        // Without this the button stopped spinning and nothing else happened:
+        // setup stayed incomplete, so the next load came straight back here
+        // with no explanation.
+        onError: () => setFailed(true),
       },
     );
   };
 
   return (
-    <Stack gap="lg">
-      <Stack gap="xs">
-        <Title order={2}>You are all set</Title>
-        <Text c="dimmed">
-          {discoverPath
-            ? "Search for any film or series, preview what is available and download it straight to this device. No library required."
-            : instanceCount > 0
-              ? "Your first library scan starts now, and Bazarr+ will begin looking for the subtitles it is missing."
-              : "Nothing is connected yet, so Bazarr+ has no library to scan. Discover still works, and you can connect an instance whenever you like."}
-        </Text>
-      </Stack>
-
+    <StepLayout
+      title="You are all set"
+      description={
+        discoverPath
+          ? "Search for any film or series, preview what is available and download it straight to this device. No library required."
+          : instanceCount > 0
+            ? "Your first library scan starts now, and Bazarr+ will begin looking for the subtitles it is missing."
+            : "Nothing is connected yet, so Bazarr+ has no library to scan. Discover still works, and you can connect an instance whenever you like."
+      }
+      aside={
+        <Stack gap="md">
+          {skipped.length > 0 && (
+            <Stack gap="xs">
+              <Text fw={600}>What you left for later</Text>
+              <List spacing="xs" size="sm">
+                {skipped.map((item) => (
+                  <List.Item key={item.label}>
+                    <Text size="sm" c="dimmed">
+                      {item.label}. You will find it under {item.where}.
+                    </Text>
+                  </List.Item>
+                ))}
+              </List>
+            </Stack>
+          )}
+          {failed && (
+            <Alert color="red" title="Could not finish setup">
+              Bazarr+ could not save that setup is complete, so this screen
+              comes back on the next load. Check that Bazarr+ is still running,
+              then try again.
+            </Alert>
+          )}
+        </Stack>
+      }
+      actions={
+        <Group justify="space-between">
+          <Group gap="sm">
+            {onBack && (
+              <Button variant="default" onClick={onBack}>
+                Back
+              </Button>
+            )}
+          </Group>
+          <Button onClick={handleFinish} loading={mutation.isPending} size="md">
+            {discoverPath ? "Finish and open Discover" : "Finish"}
+          </Button>
+        </Group>
+      }
+    >
       <List spacing="sm" center>
         {lines.map((line) => (
           <SummaryItem key={line.label} label={line.label} done={line.done} />
         ))}
       </List>
-
-      {skipped.length > 0 && (
-        <Stack gap="xs">
-          <Text fw={600}>What you left for later</Text>
-          <List spacing="xs" size="sm">
-            {skipped.map((item) => (
-              <List.Item key={item.label}>
-                <Text size="sm" c="dimmed">
-                  {item.label}. You will find it under {item.where}.
-                </Text>
-              </List.Item>
-            ))}
-          </List>
-        </Stack>
-      )}
-
-      <Group justify="space-between">
-        <Group gap="sm">
-          {onBack && (
-            <Button variant="default" onClick={onBack}>
-              Back
-            </Button>
-          )}
-        </Group>
-        <Button onClick={handleFinish} loading={mutation.isPending} size="md">
-          {discoverPath ? "Finish and open Discover" : "Finish"}
-        </Button>
-      </Group>
-    </Stack>
+    </StepLayout>
   );
 };
 

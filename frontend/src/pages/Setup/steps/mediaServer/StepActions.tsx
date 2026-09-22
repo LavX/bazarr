@@ -1,5 +1,5 @@
-import { FC } from "react";
-import { Button, Group } from "@mantine/core";
+import { FC, ReactNode } from "react";
+import { Button, Group, Stack, Text } from "@mantine/core";
 
 interface Props {
   onNext: () => void;
@@ -8,6 +8,14 @@ interface Props {
   onContinue?: () => void;
   continueLabel?: string;
   continuePending?: boolean;
+  /**
+   * A second action for this step, beside the primary one. Test lives here
+   * rather than up among the fields: it is the last thing a reader does before
+   * pressing Continue, and it was landing half a screen away from it.
+   */
+  secondary?: ReactNode;
+  /** One line above the row, for why the secondary action cannot run yet. */
+  note?: ReactNode;
 }
 
 /**
@@ -21,19 +29,31 @@ const StepActions: FC<Props> = ({
   onContinue,
   continueLabel = "Continue",
   continuePending,
+  secondary,
+  note,
 }) => (
-  <Group justify="space-between">
-    <Group gap="sm">
-      {onBack && (
-        <Button variant="default" onClick={onBack}>
-          Back
+  <Stack gap={6}>
+    {note && (
+      <Text size="sm" c="dimmed" ta="right">
+        {note}
+      </Text>
+    )}
+    <Group justify="space-between">
+      <Group gap="sm">
+        {onBack && (
+          <Button variant="default" onClick={onBack}>
+            Back
+          </Button>
+        )}
+      </Group>
+      <Group gap="sm">
+        {secondary}
+        <Button onClick={onContinue ?? onNext} loading={continuePending}>
+          {continueLabel}
         </Button>
-      )}
+      </Group>
     </Group>
-    <Button onClick={onContinue ?? onNext} loading={continuePending}>
-      {continueLabel}
-    </Button>
-  </Group>
+  </Stack>
 );
 
 export default StepActions;

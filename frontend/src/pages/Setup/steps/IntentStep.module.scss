@@ -1,0 +1,22 @@
+// Radio.Card is the whole hit area. The Paper + Radio pair it replaced put a
+// two-line label inside a card several times its height, so most of the card
+// did nothing when clicked, on the one screen the rest of the wizard follows
+// from.
+.card {
+  padding: 16px;
+  width: 100%;
+  text-align: left;
+}
+
+.cardBody {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.cardText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}

@@ -1,0 +1,74 @@
+// One kind, one card: the tick and, once it is ticked, what the reader has
+// lined up for that kind. The state used to live in a "Servers to set up"
+// sidebar that repeated the four names already on the cards, stretched a short
+// step into a tall column and left the other half of the card empty.
+.kinds {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  // Each card is as tall as its own contents. Stretching them to match the
+  // tallest in the row left dead space under the short ones.
+  align-items: start;
+  gap: 12px;
+}
+
+@media (min-width: 900px) {
+  .kinds {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.kindCard {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--bz-border-card);
+  border-radius: var(--bz-radius-lg, 12px);
+  background: var(--bz-surface-raised);
+  overflow: hidden;
+}
+
+.kindCardChecked {
+  border-color: var(--mantine-primary-color-filled);
+}
+
+.kindCardLocked {
+  opacity: 0.85;
+}
+
+// Mantine's Checkbox.Card is a button, so nothing interactive can live inside
+// it. The border moves to the wrapper and the footer sits beside it, which
+// keeps the whole tick area clickable and the footer's own controls usable.
+.card {
+  padding: 14px 16px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+}
+
+.cardBody {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.cardText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 16px 12px;
+  border-top: 1px solid var(--bz-border-card);
+}
+
+.footerRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}

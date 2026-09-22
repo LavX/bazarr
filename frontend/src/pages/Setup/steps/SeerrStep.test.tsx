@@ -102,6 +102,84 @@ describe("SeerrStep", () => {
     });
   });
 
+  // The verdict belongs to the connection it was measured against: the hook
+  // is handed the current values so it can drop a green result the moment the
+  // URL or the key changes.
+  it("hands the test hook the connection currently on screen", async () => {
+    const user = userEvent.setup();
+    customRender(<SeerrStep onNext={onNext} />);
+
+    await user.type(screen.getByLabelText(/seerr url/i), "http://seerr:5055");
+    await user.type(screen.getByLabelText(/api key/i), "seerr-key");
+
+    expect(mockedTestMutation).toHaveBeenLastCalledWith({
+      url: "http://seerr:5055",
+      apikey: "seerr-key",
+      verifySsl: true,
+    });
+  });
+
+  // The step is optional, so a connection nobody proved is still allowed
+  // through. The label is what stops it going through silently.
+  it("says what it is saving when the connection was never proved", async () => {
+    const user = userEvent.setup();
+    customRender(<SeerrStep onNext={onNext} />);
+
+    expect(
+      screen.getByRole("button", { name: /continue without seerr/i }),
+    ).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText(/seerr url/i), "http://seerr:5055");
+    await user.type(screen.getByLabelText(/api key/i), "seerr-key");
+
+    expect(
+      screen.getByRole("button", { name: /save and continue anyway/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("reads plain Continue once the connection tested green", () => {
+    setTestState({
+      data: {
+        success: true,
+        application_title: "Jellyseerr",
+        acting_user: {
+          id: 1,
+          display_name: "owner",
+          can_request_movie: true,
+          can_request_tv: true,
+          can_request_4k_movie: false,
+          can_request_4k_tv: false,
+        },
+      },
+    });
+
+    customRender(<SeerrStep onNext={onNext} />);
+
+    expect(
+      screen.queryByRole("button", { name: /save and continue anyway/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("surfaces a failed save", async () => {
+    const user = userEvent.setup();
+    mutate.mockImplementation(
+      (_input: unknown, opts?: { onError?: (reason: unknown) => void }) => {
+        opts?.onError?.(new Error("nope"));
+      },
+    );
+
+    customRender(<SeerrStep onNext={onNext} />);
+
+    await user.type(screen.getByLabelText(/seerr url/i), "http://seerr:5055");
+    await user.type(screen.getByLabelText(/api key/i), "seerr-key");
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    expect(
+      await screen.findByText(/could not save the seerr connection/i),
+    ).toBeInTheDocument();
+    expect(onNext).not.toHaveBeenCalled();
+  });
+
   it("warns when the Seerr user cannot request both kinds", () => {
     setTestState({
       data: {
@@ -123,6 +201,11 @@ describe("SeerrStep", () => {
     expect(screen.getByText(/connected to jellyseerr/i)).toBeInTheDocument();
     expect(
       screen.getByText(/cannot request both movies and series/i),
+    ).toBeInTheDocument();
+    // Naming the problem without naming the fix left the reader with a
+    // warning and nothing to do about it.
+    expect(
+      screen.getByText(/request movies and request series permissions/i),
     ).toBeInTheDocument();
   });
 
