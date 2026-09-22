@@ -435,8 +435,14 @@ class ProviderWorkerClient:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 self._kill_worker()
+                # Carry the cause. Without a code this arrives at
+                # provider_search_failure as a bare RuntimeError and is
+                # classified "error", so a plugin that hung until the hard kill
+                # was reported as "Provider search failed" rather than as the
+                # timeout it was.
                 raise WorkerError(
-                    f"worker exceeded {timeout:.1f}s deadline"
+                    f"worker exceeded {timeout:.1f}s deadline",
+                    code="timeout",
                 )
             try:
                 chunk = stdout_queue.get(timeout=remaining)

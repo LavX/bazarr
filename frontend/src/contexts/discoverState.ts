@@ -84,7 +84,15 @@ export interface DiscoverState {
   browsing: DiscoverBrowsing;
   draft: DiscoverDraft;
   generation: number;
-  status: "unsearched" | "searching" | "complete" | "partial" | "failed";
+  status:
+    | "unsearched"
+    | "searching"
+    | "complete"
+    | "partial"
+    | "failed"
+    // No provider was asked: every outcome was a skip, unmet setup, or a call
+    // that never started. Mirrors the snapshot state of the same name.
+    | "skipped";
   snapshot: DiscoverSearchSnapshot | null;
   live: DiscoverLiveResults | null;
   searchProgress?: DiscoverSearchProgress;

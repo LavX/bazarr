@@ -1158,3 +1158,95 @@ def test_search_without_an_observer_is_unchanged(authenticated_client, providers
     assert response.status_code == 200
     assert len(response.json["results"]) == 1
     assert len(get_store()) - before == 1
+
+
+def test_a_search_that_only_skipped_providers_is_not_reported_as_failed(authenticated_client, providers):
+    """A skip is a correct answer about this target, not a failure. Reporting
+    the whole search as failed put "No provider completed this search" in front
+    of a reader whose providers had all behaved exactly as intended."""
+    from subliminal.video import Episode
+
+    providers.add("discover_episodes_only", video_types=(Episode,))
+    providers.add("discover_other_episodes_only", video_types=(Episode,))
+    response = post(authenticated_client, {"media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
+    assert response["status"] == "skipped"
+    assert {item["status"] for item in response["coverage"]["providers"]} == {"skipped"}
+    assert response["coverage"]["complete"] is False
+
+
+def test_one_real_failure_beside_a_correct_skip_is_still_a_failed_search(authenticated_client, providers):
+    """The distinct state is only for a search where nothing was asked. One
+    provider asked and failing is a failed search however many others were
+    correctly skipped, and the frontend must not have to work that out itself."""
+    from subliminal.video import Episode
+    from subliminal.exceptions import AuthenticationError
+
+    providers.add("discover_episodes_only", video_types=(Episode,))
+    providers.add("discover_refuses", error=AuthenticationError("fixture failure"))
+    response = post(authenticated_client, {"media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
+    assert response["status"] == "failed"
+    assert {item["provider"]: item["status"] for item in response["coverage"]["providers"]} == {
+        "discover_episodes_only": "skipped", "discover_refuses": "authentication_required"}
+
+
+def test_one_success_beside_a_skip_still_completes(authenticated_client, providers):
+    from provider_hub.protocol import candidate_from_worker
+    from subliminal.video import Episode
+
+    providers.add("discover_episodes_only", video_types=(Episode,))
+    providers.add("discover_found", [candidate_from_worker("discover_found", {
+        "id": "one", "language": {"alpha3": "eng"}, "provider_payload": {},
+    })])
+    response = post(authenticated_client, {"media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
+    assert response["status"] == "complete" and len(response["results"]) == 1
+
+
+def _retry_seconds(outcome):
+    import datetime as dt
+
+    retry_at = dt.datetime.fromisoformat(outcome["retry_at"].replace("Z", "+00:00"))
+    return (retry_at - dt.datetime.now(dt.timezone.utc)).total_seconds()
+
+
+@pytest.mark.parametrize("error,status,floor,ceiling", [
+    # A site answering 500 to every request used to be re-asked in 60 seconds,
+    # on the same schedule as a provider that had merely been slow.
+    (RuntimeError("upstream returned 500"), "error", 240, 320),
+    (None, "authentication_required", 840, 920),
+])
+def test_the_wait_before_asking_again_comes_from_the_cause(authenticated_client, providers,
+                                                           error, status, floor, ceiling):
+    from subliminal.exceptions import AuthenticationError
+
+    providers.add("discover_backoff", error=error or AuthenticationError("fixture failure"))
+    response = post(authenticated_client, {"media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
+    outcome = response["coverage"]["providers"][0]
+    assert outcome["status"] == status
+    assert floor < _retry_seconds(outcome) < ceiling
+
+
+def test_a_provider_retry_after_outranks_the_per_cause_wait(authenticated_client, providers):
+    from subliminal_patch.exceptions import APIThrottled
+
+    providers.add("discover_retry_after", error=APIThrottled(retry_after=42))
+    response = post(authenticated_client, {"media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
+    outcome = response["coverage"]["providers"][0]
+    assert outcome["status"] == "cooldown"
+    assert 20 < _retry_seconds(outcome) < 60
+
+
+def test_a_rate_limit_is_named_rather_than_folded_into_cooling_down(authenticated_client, providers, monkeypatch):
+    """The throttle table records the exception class, so a rate limit and a
+    download quota arrive here distinguishable. The status map had no entry for
+    either, so both reached the reader as a generic cooldown."""
+    import datetime as dt
+    from app import get_providers
+
+    providers.add("discover_limited")
+    monkeypatch.setattr(get_providers, "get_providers_sorted", lambda: [])
+    get_providers.tp["discover_limited"] = (
+        "DownloadLimitExceeded", dt.datetime.now() + dt.timedelta(hours=3), "3 hours")
+    response = post(authenticated_client, {"media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
+    outcome = response["coverage"]["providers"][0]
+    assert (outcome["status"], outcome["reason"]) == ("cooldown", "download_limit_reached")
+    assert providers.videos == []

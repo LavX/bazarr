@@ -10,7 +10,8 @@ from subliminal.video import Episode, Movie, Video
 from subliminal_patch.core_persistent import list_all_subtitles_parallel
 
 from app.config import settings
-from app.get_providers import get_provider_language_hook, get_providers_sorted, get_providers_auth
+from app.get_providers import (get_provider_language_hook, get_providers_sorted, get_providers_auth,
+                               provider_is_usable, provider_throttle)
 from . import auth, cache as C, response_mapper as M
 from .local_subs import search_local, _UNRESOLVED_SPORTS
 from utilities.url_guard import assert_safe_outbound, resolve_safe_url, UnsafeURLError  # noqa: F401
@@ -43,6 +44,17 @@ def _get_compat_pool(*, restore_available=False):
                 provider_configs=get_providers_auth(),
                 blacklist=None,
                 ban_list=None,
+                # The library pool has carried these two since the backoff was
+                # written; this pool never did, so every per-exception cool-off
+                # in provider_throttle_map() was dead code on the compat and
+                # Discover paths and throttled_providers.dat was never written
+                # by them. A provider returning 500 to every request was asked
+                # again on the next search, forever. throttle_callback records
+                # the failure with the duration its exception class earns, and
+                # adoption_gate keeps a provider that is serving out a backoff
+                # from being re-adopted into the pool behind that record's back.
+                throttle_callback=provider_throttle,
+                adoption_gate=provider_is_usable,
                 language_hook=get_provider_language_hook(),
                 language_equals=[],
             )
@@ -767,11 +779,21 @@ def refine_video_with_copy(video, copy_facts: dict):
 
 def search_title(video, languages, pool, providers, on_outcome):
     """Search a prebuilt title target using the shared bounded provider executor."""
+    # Imported here for the same reason discover.search._coverage does it: the
+    # API blueprint imports every namespace eagerly, and a module-level import
+    # of the health tracker drags provider internals into modules whose tests
+    # replace subliminal_patch with a bounded stub.
+    from subliminal_patch.provider_health import get_tracker
+    health = get_tracker()
     wall = max(5, min(120, int(settings.compat_endpoint.search_timeout_seconds)))
     return list_all_subtitles_parallel(
         [video], set(languages), pool,
         per_provider_timeout=max(3, int(wall * 0.6)), wall_timeout=wall,
         exclude_providers=set(pool.providers) - set(providers),
+        # Without this the tracker only ever read: discover.search consults
+        # currently_discarded() while nothing fed record(), so the escalating
+        # discard could never engage no matter how badly a provider behaved.
+        on_result=health.record,
         on_outcome=on_outcome,
     ).get(video, [])
 

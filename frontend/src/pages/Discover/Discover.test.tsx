@@ -748,6 +748,102 @@ describe("Discover retrieval", () => {
   });
 });
 
+it("does not call a search failed when no provider was ever asked", async () => {
+  // The page used to work this out itself, from every provider being skipped,
+  // and got it wrong as soon as one real failure stood beside a correct skip.
+  const full = snapshot();
+  server.use(
+    http.post("/api/discover/search", () =>
+      HttpResponse.json({
+        ...full,
+        status: "skipped",
+        results: [],
+        coverage: {
+          complete: false,
+          configured_count: 2,
+          completed_count: 0,
+          providers: [
+            {
+              provider: "episodes-only",
+              status: "skipped",
+              reason: "unsupported_media",
+              result_count: 0,
+              elapsed_ms: 1,
+              retry_at: null,
+            },
+            {
+              provider: "needs-setup",
+              status: "setup_required",
+              reason: "missing_configuration",
+              result_count: 0,
+              elapsed_ms: 0,
+              retry_at: null,
+            },
+          ],
+        },
+      }),
+    ),
+  );
+  const { user } = renderDiscover();
+  await selectTarget(user);
+  await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+  expect(
+    await screen.findByText(/No provider searched this title/),
+  ).toBeInTheDocument();
+  expect(screen.queryByText(/No provider completed/)).not.toBeInTheDocument();
+});
+
+it("never describes a provider that was never asked as having timed out", async () => {
+  const full = snapshot();
+  server.use(
+    http.post("/api/discover/search", () =>
+      HttpResponse.json({
+        ...full,
+        status: "partial",
+        coverage: {
+          ...full.coverage,
+          complete: false,
+          configured_count: 3,
+          providers: [
+            ...full.coverage.providers,
+            {
+              provider: "queued",
+              status: "not_started",
+              reason: "fanout_capacity",
+              result_count: 0,
+              elapsed_ms: 20000,
+              retry_at: null,
+            },
+            {
+              provider: "still-working",
+              status: "abandoned",
+              reason: "wall_timeout",
+              result_count: 0,
+              elapsed_ms: 20000,
+              retry_at: null,
+            },
+          ],
+        },
+      }),
+    ),
+  );
+  const { user } = renderDiscover();
+  await selectTarget(user);
+  await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+  await screen.findByText("The.Matrix.1999.1080p");
+  await user.click(screen.getByText(/Search details/, { selector: "summary" }));
+  expect(
+    screen.getByText(/the search ran out of time before this provider started/),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText("Still searching when the search deadline passed"),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByText("Provider search timed out"),
+  ).not.toBeInTheDocument();
+  expect(screen.getByText("Not finished in time (2)")).toBeInTheDocument();
+});
+
 it("distinguishes successful empty, partial, failed and provider setup states", async () => {
   const full = snapshot();
   const responses = [

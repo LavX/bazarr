@@ -29,6 +29,59 @@ _IMDB = re.compile(r"tt[0-9]{7,10}\Z")
 _LANGUAGE = re.compile(r"[a-z]{2,3}(?:-[A-Za-z]{2,4})?\Z")
 _STATE_LOCK = Lock()
 _COMPLETE = {"success", "empty"}
+# Statuses that mean no request left this instance, so nothing upstream failed.
+# A search whose every outcome is one of these did not fail; it never ran, and
+# saying "No provider completed this search" about it answers a question the
+# reader did not ask. "setup_required" belongs here because both ways to reach
+# it, missing configuration found before the search and ConfigurationError
+# raised instead of a listing, are the operator's to fix, not an upstream fault.
+_NOT_ATTEMPTED = {"skipped", "setup_required", "not_started"}
+# ...but a provider that never started still leaves a hole where its answer
+# would have been, so it cannot count toward a search claiming complete
+# coverage the way a deliberate skip does.
+_NO_COVERAGE = {"not_started"}
+# Outcomes that must not put a provider on a Discover cooldown. A skip is a
+# decision about this target, and a call that never started is not evidence
+# about the provider, so neither earns a wait before asking again.
+_NO_COOLDOWN = {"skipped", "not_started"}
+
+# What the throttle table's recorded exception class means for the reader. The
+# table stores the original class name, so a rate limit and a download quota
+# arrive here distinguishable and are worth telling apart: one clears in
+# minutes, the other usually at the provider's own daily reset.
+_THROTTLE_CAUSE = {
+    "AuthenticationError": ("authentication_required", "authentication_required"),
+    "ConfigurationError": ("setup_required", "setup_required"),
+    "ServiceUnavailable": ("unreachable", "unreachable"),
+    "IPAddressBlocked": ("unreachable", "automated_requests_blocked"),
+    "ConnectTimeout": ("timeout", "timeout"),
+    "ReadTimeout": ("timeout", "timeout"),
+    "Timeout": ("timeout", "timeout"),
+    "TooManyRequests": ("cooldown", "rate_limited"),
+    "DownloadLimitExceeded": ("cooldown", "download_limit_reached"),
+    "SearchLimitReached": ("cooldown", "search_limit_reached"),
+}
+
+# How long Discover waits before offering this provider again, by cause, when
+# nothing more specific is available. A flat delay for every cause was the
+# whole defect: a site answering 500 to the entire internet was re-asked on the
+# same schedule as a provider that merely answered slowly. These are only the
+# floor; a Retry-After the provider sent, and the throttle table's own
+# per-provider, per-exception durations, both outrank them.
+_RETRY_AFTER_CAUSE = {
+    "authentication_required": 900,
+    "setup_required": 900,
+    "cooldown": 600,
+    "unreachable": 300,
+    "error": 300,
+    "timeout": 120,
+    "unverified": 120,
+    # Our wall, not the provider's failing. Wait long enough that an
+    # immediate retry does not re-run the same losing race, no longer.
+    "abandoned": 45,
+    "saturated": 20,
+}
+_RETRY_AFTER_DEFAULT = 60
 
 
 @dataclass(frozen=True)
@@ -214,6 +267,30 @@ def _reconcile_episode(payload, context):
     return valid_until
 
 
+def _retry_delay(outcome):
+    """Seconds to wait before Discover offers this provider again.
+
+    Three sources, most specific first. What the provider itself said, through
+    a Retry-After it sent. Then the throttle table, which the pool has just
+    written for this exact exception if the failure was one the backoff knows,
+    and which carries the per-provider durations an operator can reason about
+    (a rate limit on one site, a daily download quota on another). Only then a
+    per-cause floor.
+
+    Reading the table rather than duplicating its numbers also keeps the row
+    Discover shows and the reason the provider is missing from the next search
+    in agreement, instead of two independent clocks disagreeing on screen.
+    """
+    if outcome.retry_after:
+        return max(1.0, float(outcome.retry_after))
+    throttle = get_providers.tp.get(outcome.provider)
+    if throttle and throttle[1]:
+        remaining = (throttle[1] - dt.datetime.now()).total_seconds()
+        if remaining > 0:
+            return remaining
+    return _RETRY_AFTER_CAUSE.get(outcome.status, _RETRY_AFTER_DEFAULT)
+
+
 def _pool_state(pool):
     with _STATE_LOCK:
         if not hasattr(pool, "_discover_state"):
@@ -265,11 +342,7 @@ def _coverage(pool, state, *, has_file=False):
             status, reason = "cooldown", "provider_cooldown"
             throttle = get_providers.tp.get(name)
             if throttle and throttle[1]:
-                status = {"AuthenticationError": "authentication_required",
-                          "ConfigurationError": "setup_required",
-                          "ServiceUnavailable": "unreachable",
-                          "ConnectTimeout": "timeout", "ReadTimeout": "timeout"}.get(throttle[0], "cooldown")
-                reason = status
+                status, reason = _THROTTLE_CAUSE.get(throttle[0], ("cooldown", "provider_cooldown"))
                 retry_at = throttle[1].astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
         elif name not in pool.providers:
             status, reason = "setup_required", "provider_unavailable"
@@ -460,10 +533,8 @@ def search(request: SearchRequest, on_progress=None) -> dict:
                 item["supported_media"] = list(manifest.supported_media)
             if outcome.reason == "unsupported_language" and manifest is not None:
                 item["supported_languages"] = list(manifest.languages)
-            if outcome.status not in _COMPLETE and outcome.status != "skipped":
-                delay = outcome.retry_after or (300 if outcome.status in {"authentication_required", "setup_required"}
-                                                else 60)
-                until = time.time() + delay
+            if outcome.status not in _COMPLETE | _NO_COOLDOWN:
+                until = time.time() + _retry_delay(outcome)
                 item["retry_at"] = _iso(until)
                 with _STATE_LOCK:
                     state["cooldowns"][outcome.provider] = (until, dict(item))
@@ -498,9 +569,21 @@ def search(request: SearchRequest, on_progress=None) -> dict:
                         and outcomes[row["provider"]]["status"] not in _COMPLETE | {"skipped"}
                         and resolve_result(row["id"]) is not None)
         completed = sum(item["status"] in _COMPLETE for item in outcomes.values())
-        incomplete = sum(item["status"] not in _COMPLETE | {"skipped"}
-                         for item in outcomes.values())
-        status = "complete" if completed and not incomplete else "partial" if completed or rows else "failed"
+        # Only a provider that was actually asked and did not answer counts as
+        # a failure. Skips, unmet setup and calls that never started are all
+        # reasons the search did not happen, which is a different answer to
+        # give the reader than "every provider failed".
+        failures = sum(item["status"] not in _COMPLETE | _NOT_ATTEMPTED
+                       for item in outcomes.values())
+        uncovered = sum(item["status"] in _NO_COVERAGE for item in outcomes.values())
+        if completed and not failures and not uncovered:
+            status = "complete"
+        elif completed or rows:
+            status = "partial"
+        elif failures or not outcomes:
+            status = "failed"
+        else:
+            status = "skipped"
         stale = any(row["stale"] for row in rows)
         return {
             "search_id": search_id, "context": dict(context), "status": status,
