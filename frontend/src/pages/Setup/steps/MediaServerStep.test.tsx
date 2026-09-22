@@ -410,13 +410,14 @@ describe("MediaServerStep", () => {
     withSelection(<MediaServerStep onNext={onNext} />);
 
     await user.click(screen.getByRole("checkbox", { name: /^Silo$/ }));
-    expect(
-      screen.getByRole("button", { name: "Remove Silo" }),
-    ).toBeInTheDocument();
+    expect(screen.getByText("1 to set up")).toBeInTheDocument();
+    // One pending server needs no Remove of its own: unticking the card is
+    // how it is undone, and a second control for the same thing is noise.
+    expect(screen.queryByRole("button", { name: "Remove Silo" })).toBeNull();
 
     await user.click(screen.getByRole("checkbox", { name: /^Silo$/ }));
 
-    expect(screen.queryByRole("button", { name: "Remove Silo" })).toBeNull();
+    expect(screen.queryByText("1 to set up")).toBeNull();
     expect(
       screen.getByRole("button", { name: /continue without a server/i }),
     ).toBeInTheDocument();

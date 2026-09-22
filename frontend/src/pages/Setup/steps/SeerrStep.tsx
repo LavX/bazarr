@@ -6,6 +6,7 @@ import {
   PasswordInput,
   Stack,
   Switch,
+  Text,
   TextInput,
 } from "@mantine/core";
 import { useSettingsMutation } from "@/apis/hooks";
@@ -132,25 +133,43 @@ const SeerrStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
       description="Connect Seerr, Jellyseerr or Overseerr and the request button on a title works straight away. Requests are made with this API key, as the Seerr owner, and approved immediately."
       aside={verdict}
       actions={
-        <Group justify="space-between">
-          <Group gap="sm">
-            {onBack && (
-              <Button variant="default" onClick={onBack}>
-                Back
+        <Stack gap={6}>
+          {!filled && (
+            <Text size="sm" c="dimmed" ta="right">
+              Enter a Seerr URL and an API key to test this connection.
+            </Text>
+          )}
+          <Group justify="space-between">
+            <Group gap="sm">
+              {onBack && (
+                <Button variant="default" onClick={onBack}>
+                  Back
+                </Button>
+              )}
+            </Group>
+            <Group gap="sm">
+              <Button
+                type="button"
+                variant="default"
+                loading={test.isPending}
+                disabled={!filled}
+                onClick={handleTest}
+              >
+                Test
               </Button>
-            )}
+              {/* The step is optional, so an untested connection is still
+                  allowed through. It is not allowed through silently: the
+                  label says what is being saved. */}
+              <Button onClick={handleContinue} loading={settings.isPending}>
+                {!filled
+                  ? "Continue without Seerr"
+                  : verified
+                    ? "Continue"
+                    : "Save and continue anyway"}
+              </Button>
+            </Group>
           </Group>
-          {/* The step is optional, so an untested connection is still allowed
-              through. It is not allowed through silently: the label says what
-              is being saved. */}
-          <Button onClick={handleContinue} loading={settings.isPending}>
-            {!filled
-              ? "Continue without Seerr"
-              : verified
-                ? "Continue"
-                : "Save and continue anyway"}
-          </Button>
-        </Group>
+        </Stack>
       }
     >
       <TextInput
@@ -177,18 +196,6 @@ const SeerrStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
           onChange={(e) => setVerifySsl(e.currentTarget.checked)}
         />
       )}
-
-      <Group>
-        <Button
-          type="button"
-          variant="light"
-          loading={test.isPending}
-          disabled={!filled}
-          onClick={handleTest}
-        >
-          Test
-        </Button>
-      </Group>
     </StepLayout>
   );
 };

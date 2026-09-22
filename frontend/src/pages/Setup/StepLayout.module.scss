@@ -1,12 +1,23 @@
-// Layout for one wizard step. Single column by default, two columns from the
-// width where a reading measure stops being the right instrument.
+// Layout for one wizard step. See StepLayout.tsx for which variant a step
+// takes and why.
 
 .layout,
-.single {
+.stacked,
+.wide {
   display: flex;
   flex-direction: column;
   gap: 20px;
   min-width: 0;
+}
+
+// A step whose explanation is a sentence or two. The shell is wide because the
+// configure screens need it; a step with nothing to put beside its controls
+// reads down the middle at a comfortable measure instead of stretching to fill
+// a width it has no use for.
+.stacked {
+  width: 100%;
+  max-width: 760px;
+  margin-inline: auto;
 }
 
 .intro {
@@ -40,17 +51,17 @@
     align-items: start;
   }
 
-  .intro {
+  .layout .intro {
     grid-column: 1;
     grid-row: 1;
   }
 
-  .controls {
+  .layout .controls {
     grid-column: 2;
     grid-row: 1;
   }
 
-  .actions {
+  .layout .actions {
     grid-column: 1 / -1;
     grid-row: 2;
   }

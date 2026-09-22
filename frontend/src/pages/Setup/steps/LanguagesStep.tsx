@@ -88,6 +88,7 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   return (
     <StepLayout
       title="Subtitle languages"
+      layout="stacked"
       description="Pick the languages you want subtitles in. Bazarr only searches for languages that belong to a profile, so we will turn your selection into a default profile that gets applied to every show and movie."
       actions={
         <Group justify="space-between">

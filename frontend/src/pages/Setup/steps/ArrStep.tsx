@@ -363,21 +363,43 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack }) => {
       description={`Connect ${meta.label} so Bazarr can find your ${meta.media}.`}
       aside={verdict}
       actions={
-        <Group justify="space-between">
-          <Group gap="sm">
-            {onBack && (
-              <Button variant="default" onClick={onBack}>
-                Back
+        <Stack gap={6}>
+          {!testable && (
+            <Text size="sm" c="dimmed" ta="right">
+              Enter an Address and an API Key to test this connection.
+            </Text>
+          )}
+          <Group justify="space-between">
+            <Group gap="sm">
+              {onBack && (
+                <Button variant="default" onClick={onBack}>
+                  Back
+                </Button>
+              )}
+            </Group>
+            <Group gap="sm">
+              {/* Beside Continue, because testing is the last thing a reader
+                  does before pressing it. An ungated Test probed 127.0.0.1 on
+                  the default port with an empty key and reported a verdict
+                  about a server the reader never named. */}
+              <Button
+                type="button"
+                variant="default"
+                loading={test.isPending}
+                disabled={!testable}
+                onClick={handleTest}
+              >
+                Test
               </Button>
-            )}
+              <Button
+                onClick={handleContinue}
+                loading={create.isPending || settings.isPending}
+              >
+                {touched ? "Continue" : `Continue without ${meta.label}`}
+              </Button>
+            </Group>
           </Group>
-          <Button
-            onClick={handleContinue}
-            loading={create.isPending || settings.isPending}
-          >
-            {touched ? "Continue" : `Continue without ${meta.label}`}
-          </Button>
-        </Group>
+        </Stack>
       }
     >
       <TextInput
@@ -440,20 +462,6 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack }) => {
           clearError("apiKey");
         }}
       />
-
-      <Group>
-        {/* An ungated Test probed 127.0.0.1 on the default port with an empty
-            key and reported a verdict about a server the reader never named. */}
-        <Button
-          type="button"
-          variant="light"
-          loading={test.isPending}
-          disabled={!testable}
-          onClick={handleTest}
-        >
-          Test
-        </Button>
-      </Group>
     </StepLayout>
   );
 };

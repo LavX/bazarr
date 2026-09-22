@@ -15,6 +15,7 @@ const WelcomeStep: FC<WizardStepProps> = ({ onNext }) => {
   return (
     <StepLayout
       title="Welcome to Bazarr+"
+      layout="stacked"
       description="A few quick steps and you are running. The next screen asks what you want Bazarr+ to do, and we only ask for what that needs. You can change any of this later in Settings."
       actions={
         <Button onClick={onNext} size="md">

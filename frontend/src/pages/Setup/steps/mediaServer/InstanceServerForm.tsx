@@ -5,7 +5,6 @@ import {
   Alert,
   Button,
   Divider,
-  Group,
   PasswordInput,
   Stack,
   Switch,
@@ -175,47 +174,28 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
     });
   };
 
-  // Everything the reader reads rather than types into: the connection verdict
-  // and anything that went wrong. It sits with the explanation, which is what
-  // keeps the fields beside it instead of under it.
+  // Everything the reader reads rather than types into: what the connection
+  // test came back with, and anything that went wrong. Nothing to press: Test
+  // itself sits beside Continue, because it is the last thing a reader does
+  // before pressing it and was landing half a screen away.
   const status = (
     <Stack gap="sm">
-      <Group gap="sm" align="center">
-        <Button
-          type="button"
-          variant="light"
-          disabled={!configured}
-          loading={test.isPending}
-          onClick={() => {
-            setFailure(null);
-            test.mutate();
-          }}
-        >
-          Test
-        </Button>
-        {test.isSuccess && test.data.success ? (
-          <Text size="sm" c="green">
-            {test.data.server_name
-              ? `Connected to ${test.data.server_name}`
-              : "Connection succeeded"}
-            {kind !== "silo" && test.data.version
-              ? ` (v${test.data.version})`
-              : ""}
-            . Test checks access, not refresh permission.
-          </Text>
-        ) : test.isError || (test.isSuccess && !test.data.success) ? (
-          <Text size="sm" c="red">
-            Connection test failed. Check the Server URL, {credential},
-            certificate and server access.
-          </Text>
-        ) : (
-          <Text size="sm" c="dimmed">
-            {configured
-              ? "Test checks access, not refresh permission."
-              : `Enter a Server URL and ${credential} to test this connection.`}
-          </Text>
-        )}
-      </Group>
+      {test.isSuccess && test.data.success ? (
+        <Text size="sm" c="green">
+          {test.data.server_name
+            ? `Connected to ${test.data.server_name}`
+            : "Connection succeeded"}
+          {kind !== "silo" && test.data.version
+            ? ` (v${test.data.version})`
+            : ""}
+          . Test checks access, not refresh permission.
+        </Text>
+      ) : test.isError || (test.isSuccess && !test.data.success) ? (
+        <Text size="sm" c="red">
+          Connection test failed. Check the Server URL, {credential},
+          certificate and server access.
+        </Text>
+      ) : null}
 
       {failure && (
         <Alert
@@ -297,6 +277,25 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
           onNext={onNext}
           onBack={onBack}
           onContinue={handleContinue}
+          note={
+            configured
+              ? undefined
+              : `Enter a Server URL and ${credential} to test this connection.`
+          }
+          secondary={
+            <Button
+              type="button"
+              variant="default"
+              disabled={!configured}
+              loading={test.isPending}
+              onClick={() => {
+                setFailure(null);
+                test.mutate();
+              }}
+            >
+              Test
+            </Button>
+          }
           continueLabel={
             savedButNotSwitchedOn
               ? "Continue anyway"

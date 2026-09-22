@@ -1,5 +1,5 @@
 import { FC, useMemo } from "react";
-import { Button, Checkbox, Divider, Group, Stack, Text } from "@mantine/core";
+import { Button, Checkbox, Group, Text } from "@mantine/core";
 import { useSystemSettings } from "@/apis/hooks";
 import { useMediaServerInstances } from "@/apis/hooks/mediaServers";
 import type {
@@ -120,77 +120,30 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
     }
   };
 
-  const chosen = ORDER.filter(
-    (kind) => connected[kind].length > 0 || pendingOf(kind).length > 0,
-  );
   const pendingTotal = drafts.filter(
     (draft) => draft.instanceId === undefined,
   ).length;
 
-  const selection = chosen.length > 0 && (
-    <Stack gap="sm" className={styles.selection}>
-      <Text fw={600} size="sm">
-        Servers to set up
-      </Text>
-      {chosen.map((kind, position) => (
-        <Stack key={kind} gap="xs">
-          {position > 0 && <Divider />}
-          {connected[kind].map((instance) => (
-            <ConnectedServerRow
-              key={instance.id}
-              instance={instance}
-              kind={kind}
-              last={connected[kind].length === 1}
-              accountOwned={kind === "plex" && instance.id === plexAccountRowId}
-              ownershipPending={kind === "plex" && settingsPending}
-              onDisconnected={forgetInstance}
-            />
-          ))}
-          {pendingOf(kind).map((draft) => (
-            <Group key={draft.draftId} justify="space-between" gap="sm">
-              <Text>
-                {draft.name}{" "}
-                <Text span size="sm" c="dimmed">
-                  not connected yet
-                </Text>
-              </Text>
-              <Button
-                variant="subtle"
-                color="gray"
-                size="compact-sm"
-                aria-label={`Remove ${draft.name}`}
-                onClick={() => removeDraft(draft.draftId)}
-              >
-                Remove
-              </Button>
-            </Group>
-          ))}
-          {kind === "plex" ? (
-            <Text size="sm" c="dimmed">
-              One Plex account per install. To refresh a second Plex server, add
-              it in Settings, Connections after setup.
-            </Text>
-          ) : (
-            <Group>
-              <Button
-                variant="subtle"
-                size="compact-sm"
-                onClick={() => addDraft(kind, takenNames)}
-              >
-                Add another {kindName(kind)}
-              </Button>
-            </Group>
-          )}
-        </Stack>
-      ))}
-    </Stack>
-  );
+  // What the reader has lined up for one kind, in the card's own words. Two
+  // numbers, because they mean different things: a connected server is already
+  // a row in the database and is undone by disconnecting it, a pending one is
+  // a tick that has written nothing yet.
+  const summarise = (live: number, waiting: number) => {
+    const parts: string[] = [];
+    if (live > 0) {
+      parts.push(`${live} connected`);
+    }
+    if (waiting > 0) {
+      parts.push(`${waiting} to set up`);
+    }
+    return parts.join(", ");
+  };
 
   return (
     <StepLayout
       title="Media servers"
       description="Optionally connect a media server so Bazarr refreshes it after it downloads subtitles. Bazarr finds and downloads subtitles with no media server at all, so you can set one up later in Settings, Connections."
-      aside={selection || undefined}
+      layout="wide"
       actions={
         <StepActions
           onNext={onNext}
@@ -205,12 +158,14 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
     >
       <div className={styles.kinds}>
         {ORDER.map((kind) => {
+          const rows = connected[kind];
           // A switched-off row is not a destination: the dispatcher skips it,
           // so counting it as connected would tick this card, lock it, and
           // leave the reader no way to set that kind up at all. The one the
           // backend keeps after a Plex sign-out is exactly that row, and it
-          // has had its credential cleared as well.
-          const rows = connected[kind].filter((row) => row.enabled);
+          // has had its credential cleared as well. It is still listed below,
+          // saying what it is, because it is still a row to disconnect.
+          const live = rows.filter((row) => row.enabled);
           const pending = pendingOf(kind);
           // Plex is the kind whose card is not answered by "a Plex row
           // exists". A row somebody added by hand in Connections is not the
@@ -222,32 +177,105 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
           // card does not tick and untick itself while that query lands.
           const answered =
             kind === "plex" && !settingsPending
-              ? rows.some((row) => row.id === plexAccountRowId)
-              : rows.length > 0;
+              ? live.some((row) => row.id === plexAccountRowId)
+              : live.length > 0;
           const checked = answered || pending.length > 0;
           const locked = answered && pending.length === 0;
+          const summary = summarise(live.length, pending.length);
           return (
-            <Checkbox.Card
+            <div
               key={kind}
-              className={styles.card}
-              radius="md"
-              checked={checked}
-              // A connected server is undone by disconnecting it, not by
-              // unticking it: the row is already written.
-              disabled={locked}
-              aria-label={kindName(kind)}
-              onClick={() => (locked ? undefined : toggle(kind, !checked))}
+              className={[
+                styles.kindCard,
+                checked ? styles.kindCardChecked : "",
+                locked ? styles.kindCardLocked : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
             >
-              <div className={styles.cardBody}>
-                <Checkbox.Indicator />
-                <div className={styles.cardText}>
-                  <Text fw={500}>{kindName(kind)}</Text>
-                  <Text size="sm" c="dimmed">
-                    {DESCRIPTIONS[kind]}
-                  </Text>
+              <Checkbox.Card
+                className={styles.card}
+                // The wrapper carries the border, so the footer below can hold
+                // controls of its own without nesting them inside a button.
+                withBorder={false}
+                radius="md"
+                checked={checked}
+                // A connected server is undone by disconnecting it, not by
+                // unticking it: the row is already written.
+                disabled={locked}
+                aria-label={kindName(kind)}
+                onClick={() => (locked ? undefined : toggle(kind, !checked))}
+              >
+                <div className={styles.cardBody}>
+                  <Checkbox.Indicator />
+                  <div className={styles.cardText}>
+                    <Text fw={500}>{kindName(kind)}</Text>
+                    <Text size="sm" c="dimmed">
+                      {DESCRIPTIONS[kind]}
+                    </Text>
+                  </div>
                 </div>
-              </div>
-            </Checkbox.Card>
+              </Checkbox.Card>
+
+              {(rows.length > 0 || pending.length > 0) && (
+                <div className={styles.footer}>
+                  {rows.map((instance) => (
+                    <ConnectedServerRow
+                      key={instance.id}
+                      instance={instance}
+                      kind={kind}
+                      last={rows.length === 1}
+                      accountOwned={
+                        kind === "plex" && instance.id === plexAccountRowId
+                      }
+                      ownershipPending={kind === "plex" && settingsPending}
+                      onDisconnected={forgetInstance}
+                    />
+                  ))}
+                  {/* One pending server is undone by unticking the card, so it
+                      needs no control of its own. Several cannot be: unticking
+                      would drop them all, and the reader who added a second
+                      Emby has to be able to drop just that one. */}
+                  {pending.length > 1 &&
+                    pending.map((draft) => (
+                      <Group
+                        key={draft.draftId}
+                        justify="space-between"
+                        gap="sm"
+                      >
+                        <Text size="sm">{draft.name}</Text>
+                        <Button
+                          variant="subtle"
+                          color="gray"
+                          size="compact-sm"
+                          aria-label={`Remove ${draft.name}`}
+                          onClick={() => removeDraft(draft.draftId)}
+                        >
+                          Remove
+                        </Button>
+                      </Group>
+                    ))}
+                  <div className={styles.footerRow}>
+                    <Text size="sm" c="dimmed">
+                      {summary}
+                    </Text>
+                    {kind === "plex" ? (
+                      <Text size="sm" c="dimmed">
+                        One Plex account per install.
+                      </Text>
+                    ) : (
+                      <Button
+                        variant="subtle"
+                        size="compact-sm"
+                        onClick={() => addDraft(kind, takenNames)}
+                      >
+                        Add another {kindName(kind)}
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
           );
         })}
       </div>

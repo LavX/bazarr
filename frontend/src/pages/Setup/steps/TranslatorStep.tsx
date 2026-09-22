@@ -41,6 +41,7 @@ const TranslatorStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   return (
     <StepLayout
       title="Subtitle translation"
+      layout="stacked"
       description="Bazarr+ can translate a subtitle into a language nobody published, with an AI model of your choice. Paste an OpenRouter key to switch it on now. Everything else works without it, and the full set of translation options lives in Settings."
       aside={
         <Text size="sm" c="dimmed">

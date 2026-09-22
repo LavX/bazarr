@@ -40,6 +40,7 @@ const IntentStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   return (
     <StepLayout
       title="What do you want Bazarr+ to do for you?"
+      layout="stacked"
       description="This only decides which steps we walk you through. Whatever you pick, everything else stays available in Settings, and you can connect the rest at any time."
       actions={
         <Group justify="space-between">
