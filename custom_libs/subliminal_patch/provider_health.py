@@ -39,6 +39,11 @@ COOLDOWN_MAX_SECONDS = 600
 _BAD_OUTCOMES = frozenset({"timeout", "exception", "abandoned"})
 # Outcomes that reset the failure counter.
 _GOOD_OUTCOMES = frozenset({"ok", "slow"})
+# "not_started" is in neither set on purpose. The fanout emits it for a call
+# that was still queued when the wall fired, so the provider was never asked
+# and the call says nothing about its health, good or bad. Counting it as a
+# failure would discard whichever providers happen to sort last whenever the
+# provider count exceeds the worker count.
 
 
 class _ProviderState:
@@ -65,9 +70,11 @@ class ProviderHealthTracker:
                               from health POV (got data, just late).
             timeout        -> fut.result(timeout=) raised.
             exception      -> provider raised anything else.
-            abandoned      -> wall_timeout fired before the provider
-                              returned. Treated as failure because the
-                              caller didn't get data.
+            abandoned      -> wall_timeout fired while the provider was
+                              still working. Treated as failure because
+                              the caller didn't get data.
+            not_started    -> wall_timeout fired before a worker picked
+                              the call up. Ignored: no request was made.
 
         Any other outcome string is ignored (forward-compat).
         """

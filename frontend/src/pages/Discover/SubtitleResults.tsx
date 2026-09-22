@@ -38,10 +38,20 @@ function attributes(
     .join(", ");
 }
 
+/**
+ * The rows and the context they were searched under. Only those two, because
+ * a list that is still growing has neither coverage nor a settled checked
+ * time, and this renders both that list and a finished one.
+ */
+export type SubtitleResultList = Pick<
+  DiscoverSearchSnapshot,
+  "context" | "results"
+>;
+
 export default function SubtitleResults({
   snapshot,
 }: {
-  snapshot: DiscoverSearchSnapshot;
+  snapshot: SubtitleResultList;
 }) {
   const {
     state,

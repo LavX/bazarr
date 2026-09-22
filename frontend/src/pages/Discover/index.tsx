@@ -572,17 +572,28 @@ export default function Discover() {
           ? "no-catalog"
           : "ready";
   // After a search: nothing searched at all is a different fact from
-  // providers that searched and failed, and it gets its own sentence.
-  const nothingSearched =
-    snapshot?.status === "failed" &&
-    providers.length > 0 &&
-    providers.every(
-      (provider) =>
-        provider.status === "skipped" || provider.status === "setup_required",
-    );
+  // providers that searched and failed, and it gets its own sentence. The
+  // backend answers it directly now. Deriving it here, from every provider
+  // being skipped, was defeated by a single real failure standing beside a
+  // correct skip, and the reader was then told no provider completed a search
+  // that one provider had never been asked to run.
+  const nothingSearched = snapshot?.status === "skipped";
+  const searchUnsuccessful =
+    snapshot?.status === "failed" || snapshot?.status === "skipped";
+  // Providers that were never asked, in a search where others were and failed.
+  const notAsked = providers.filter((provider) =>
+    ["skipped", "setup_required", "not_started"].includes(provider.status),
+  ).length;
   const skippedBuiltIns = providers
     .filter((provider) => provider.reason === "not_catalog_provider")
     .map((provider) => provider.provider);
+  // Rows the running search has already published. They stand in for a result
+  // list only while there is no finished one: a refresh keeps the previous
+  // snapshot on the page with its own checked time, which is a better answer
+  // than a list that is still filling up, and showing both would offer the
+  // same subtitle twice under two identities.
+  const showLive = searching && snapshot === null;
+  const liveRows = showLive ? (state.live?.results ?? []) : [];
   const empty =
     state.status === "complete" &&
     snapshot?.status === "complete" &&
@@ -1125,7 +1136,7 @@ export default function Discover() {
               )}
               {!searching &&
                 !state.error &&
-                snapshot?.status === "failed" &&
+                searchUnsuccessful &&
                 !noProviders &&
                 (nothingSearched ? (
                   <Alert color="yellow">
@@ -1147,8 +1158,15 @@ export default function Discover() {
                   </Alert>
                 ) : (
                   <Alert color="yellow">
-                    No provider completed this search. Review provider details
-                    below before retrying.
+                    No provider completed this search.{" "}
+                    {notAsked > 0 && (
+                      <>
+                        {notAsked === 1
+                          ? "One further provider was not asked at all."
+                          : `${notAsked} further providers were not asked at all.`}{" "}
+                      </>
+                    )}
+                    Review provider details below before retrying.
                   </Alert>
                 ))}
               {!searching && empty && (
@@ -1169,6 +1187,24 @@ export default function Discover() {
 
           {!browsingPage && (
             <div ref={retrievalResults}>
+              {showLive && (
+                <Stack
+                  gap="lg"
+                  id="bh-live-results"
+                  className={styles.resultsPanel}
+                >
+                  <Text size="sm" c="dimmed" className={styles.resultsNote}>
+                    {/* An empty list mid-search is not an answer, and it must
+                        not read like the one a finished search gives. */}
+                    {liveRows.length === 0
+                      ? "No results yet. Providers are still searching."
+                      : `${liveRows.length} subtitle ${liveRows.length === 1 ? "result" : "results"} so far. More may still arrive.`}
+                  </Text>
+                  {state.live && liveRows.length > 0 && (
+                    <SubtitleResults snapshot={state.live} />
+                  )}
+                </Stack>
+              )}
               {snapshot && (
                 <Stack
                   gap="lg"

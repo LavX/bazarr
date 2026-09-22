@@ -10,7 +10,9 @@ from subliminal.video import Episode, Movie, Video
 from subliminal_patch.core_persistent import list_all_subtitles_parallel
 
 from app.config import settings
-from app.get_providers import get_provider_language_hook, get_providers_sorted, get_providers_auth
+from app.get_providers import (CREDENTIAL_THROTTLE_REASONS, get_provider_language_hook,
+                               get_providers_sorted, get_providers_auth,
+                               provider_is_usable, provider_throttle)
 from . import auth, cache as C, response_mapper as M
 from .local_subs import search_local, _UNRESOLVED_SPORTS
 from utilities.url_guard import assert_safe_outbound, resolve_safe_url, UnsafeURLError  # noqa: F401
@@ -19,6 +21,11 @@ logger = logging.getLogger("bazarr.compat.service")
 
 _pool_lock = Lock()
 _compat_pool = None  # lazy singleton, dedicated (B2)
+# Bumped every time the pool is dropped. A drop does not cancel the searches
+# already running on the old pool, and those calls carry the credentials the
+# user has just replaced, so their verdict on those credentials has to be told
+# apart from the new pool's.
+_pool_generation = 0
 # Providers that consume the client-supplied OpenSubtitles-style moviehash.
 # NapiProjekt is intentionally excluded: it keys on a different hash (md5 of the
 # first 10 MB, a 32-char digest), and feeding it the 16-char OS hash makes its
@@ -32,6 +39,60 @@ _CLIENT_MOVIEHASH_PROVIDERS = (
 _SHOOTER_HASH_RE = re.compile(r"^[0-9a-fA-F]{32}(?:;[0-9a-fA-F]{32}){3}$")
 
 
+def _record_throttle(name, exception, ids=None, language=None, sports_context=None):
+    """Record a provider failure without spending the fanout's wall clock.
+
+    provider_throttle sleeps between the first few rate-limit events, which is
+    correct where it came from: the library search retries the same provider in
+    the same call, and the pause is what makes the retry worth attempting. This
+    pool never retries. Its callback runs inside the provider future, before
+    the detailed outcome is returned, so the sleep would be charged to the wall
+    the remaining providers are still searching against. With the smallest
+    valid five-second wall, the default five-second pause is enough on its own
+    to have the provider reported as abandoned instead of cooling down, its
+    retry metadata discarded and a health failure counted against it, all for a
+    failure we had already classified correctly.
+    """
+    return provider_throttle(name, exception, ids=ids, language=language,
+                             sports_context=sports_context, wait=False)
+
+
+def _throttle_recorder(generation):
+    """The pool's throttle callback, tied to the pool that was given it.
+
+    Dropping the pool is how a credential change takes effect, but it does not
+    cancel the searches already in flight on the old one. Those calls are still
+    presenting the password the user has just corrected, so the
+    AuthenticationError one of them is about to raise is evidence about the old
+    credentials and none at all about the new ones. Recorded anyway, it writes
+    the twelve-hour entry back over the one the save just cleared, and the
+    provider the user has only now fixed is skipped again with nothing on
+    screen to say why. Only the credential classes are dropped: a rate limit or
+    an outage a superseded call ran into is about the provider itself and
+    stands whatever the local configuration does.
+
+    A save replaces the whole pool's configuration, so this covers every
+    provider on the old pool rather than one. An unchanged provider whose
+    credentials really are wrong therefore records its backoff on the next
+    search instead of this one, which is the right way round to be wrong: it
+    asks a bad provider once more, where the alternative keeps skipping one the
+    user has just fixed.
+    """
+    def record(name, exception, ids=None, language=None, sports_context=None):
+        if generation != _pool_generation and (
+                exception.__class__.__name__ in CREDENTIAL_THROTTLE_REASONS):
+            logger.info("compat: not recording a %s backoff for %s, the configuration it "
+                        "judged has already been replaced",
+                        exception.__class__.__name__, name)
+            # What a no-wait record returns: there is no retry on this path
+            # either way, so the caller's handling is unchanged.
+            return True
+        return _record_throttle(name, exception, ids=ids, language=language,
+                                sports_context=sports_context)
+
+    return record
+
+
 def _get_compat_pool(*, restore_available=False):
     """Dedicated SZAsyncProviderPool instance. MUST NOT share app.get_providers._pools."""
     global _compat_pool
@@ -43,6 +104,17 @@ def _get_compat_pool(*, restore_available=False):
                 provider_configs=get_providers_auth(),
                 blacklist=None,
                 ban_list=None,
+                # The library pool has carried these two since the backoff was
+                # written; this pool never did, so every per-exception cool-off
+                # in provider_throttle_map() was dead code on the compat and
+                # Discover paths and throttled_providers.dat was never written
+                # by them. A provider returning 500 to every request was asked
+                # again on the next search, forever. throttle_callback records
+                # the failure with the duration its exception class earns, and
+                # adoption_gate keeps a provider that is serving out a backoff
+                # from being re-adopted into the pool behind that record's back.
+                throttle_callback=_throttle_recorder(_pool_generation),
+                adoption_gate=provider_is_usable,
                 language_hook=get_provider_language_hook(),
                 language_equals=[],
             )
@@ -65,9 +137,10 @@ def _get_compat_pool(*, restore_available=False):
 
 def reset_compat_pool() -> None:
     """Called on settings-change or provider toggle so stale creds don't persist."""
-    global _compat_pool
+    global _compat_pool, _pool_generation
     with _pool_lock:
         _compat_pool = None
+        _pool_generation += 1
 
 
 def _tt(imdb_id) -> str:
@@ -765,13 +838,32 @@ def refine_video_with_copy(video, copy_facts: dict):
     return video
 
 
+def search_wall_seconds() -> int:
+    """How long one fanout may run, clamped the way the fanout clamps it.
+
+    A caller that hands something out while the search is still running needs
+    this number too, and two copies of the clamp would drift.
+    """
+    return max(5, min(120, int(settings.compat_endpoint.search_timeout_seconds)))
+
+
 def search_title(video, languages, pool, providers, on_outcome):
     """Search a prebuilt title target using the shared bounded provider executor."""
-    wall = max(5, min(120, int(settings.compat_endpoint.search_timeout_seconds)))
+    # Imported here for the same reason discover.search._coverage does it: the
+    # API blueprint imports every namespace eagerly, and a module-level import
+    # of the health tracker drags provider internals into modules whose tests
+    # replace subliminal_patch with a bounded stub.
+    from subliminal_patch.provider_health import get_tracker
+    health = get_tracker()
+    wall = search_wall_seconds()
     return list_all_subtitles_parallel(
         [video], set(languages), pool,
         per_provider_timeout=max(3, int(wall * 0.6)), wall_timeout=wall,
         exclude_providers=set(pool.providers) - set(providers),
+        # Without this the tracker only ever read: discover.search consults
+        # currently_discarded() while nothing fed record(), so the escalating
+        # discard could never engage no matter how badly a provider behaved.
+        on_result=health.record,
         on_outcome=on_outcome,
     ).get(video, [])
 
@@ -786,7 +878,17 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
     from subliminal_patch.provider_health import get_tracker as _get_health_tracker
     from subliminal_patch.score import ComputeScore, MAX_SCORES
     health = _get_health_tracker()
-    pool = _get_compat_pool()
+    # restore_available, for the same reason Discover asks for it. Any pool
+    # reset, a settings save, a provider toggle or a Hub configuration change,
+    # is served by the next fanout building a pool from the providers that are
+    # searchable right then, so a provider serving out a backoff at that moment
+    # is left out of a membership list nothing else ever adds to. On this path
+    # that is permanent: the exclusion below is re-checked per fanout, while
+    # nothing re-checked the way back in, so one provider's backoff plus one
+    # unrelated save dropped it from every compat search for the life of the
+    # process. Adoption still goes through provider_is_usable, so the backoff
+    # itself is served out in full.
+    pool = _get_compat_pool(restore_available=True)
     video = _build_video(imdb_id, season, episode, media_type,
                          query=query, moviehash=moviehash,
                          moviebytesize=moviebytesize,
@@ -798,7 +900,18 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
     # Per-request / per-key provider exclusion (Distribution Hub req #1) is
     # unioned with the health-discard set and the virtual-video skip list.
     requested_exclude = {str(p).strip() for p in (exclude_providers or []) if str(p).strip()}
-    exclude = (health_discarded | requested_exclude
+    # The adoption gate only guards the way IN. It is consulted when a name is
+    # missing from pool.providers and has to be adopted, which is exactly the
+    # case a throttled provider is not in: this pool is a process-lifetime
+    # singleton, so a provider that was healthy when it was built stays in
+    # pool.providers for as long as the process lives, and the fanout submits
+    # every member. Writing the throttle table therefore took that provider out
+    # of the library search and out of Discover's coverage while this path went
+    # on asking it on every request, with the rest of Bazarr reporting it as
+    # throttled. Re-check the membership we already hold, per fanout, against
+    # the same gate.
+    throttled = {name for name in pool.providers if not provider_is_usable(name)}
+    exclude = (health_discarded | requested_exclude | throttled
                | (set() if video_has_file else set(_SKIP_FOR_VIRTUAL_VIDEO)))
     # Per-request / per-key allow-list (only_providers). None means no allow-list
     # (every enabled provider is in play); a list (even empty) scopes the search
@@ -819,10 +932,11 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
     else:
         requested_only = None
         local_allowed = LOCAL_PROVIDER not in requested_exclude
-    logger.info("compat fanout: video=%r lang=%s providers=%d health_skipped=%s "
+    logger.info("compat fanout: video=%r lang=%s providers=%d health_skipped=%s throttled=%s "
                 "req_excluded=%s req_only=%s local_allowed=%s",
                 video, [str(l) for l in languages], len(pool.providers),  # noqa: E741
-                sorted(health_discarded) or "[]", sorted(requested_exclude) or "[]",
+                sorted(health_discarded) or "[]", sorted(throttled) or "[]",
+                sorted(requested_exclude) or "[]",
                 "none" if requested_only is None else (sorted(requested_only) or "[]"),
                 local_allowed)
 
