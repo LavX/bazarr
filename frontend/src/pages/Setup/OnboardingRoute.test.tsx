@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useSettingsMutation } from "@/apis/hooks";
 import { AllProviders } from "@/providers";
-import { rawRender, screen, waitFor } from "@/tests";
+import { act, rawRender, screen, waitFor } from "@/tests";
 import OnboardingWizardView from "./OnboardingWizard";
 
 // The real router here, deliberately: what is being tested is that the wizard
@@ -141,6 +141,41 @@ describe("the wizard's own URL", () => {
     ).toBeInTheDocument();
 
     // One press, one move: out of the wizard the way it was entered.
+    await router.navigate(-1);
+
+    await waitFor(() => expect(router.state.location.pathname).toBe("/"));
+  });
+
+  it("Back still walks the history after a browser Forward", async () => {
+    const user = userEvent.setup();
+    const router = openWizardAt("/setup", ["/", "/setup"]);
+
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/setup/welcome"),
+    );
+    await user.click(screen.getByRole("button", { name: /get started/i }));
+    await screen.findByRole("heading", { name: /what do you want bazarr/i });
+
+    await act(async () => {
+      await router.navigate(-1);
+    });
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/setup/welcome"),
+    );
+    await act(async () => {
+      await router.navigate(1);
+    });
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/setup/intent"),
+    );
+
+    await user.click(await screen.findByRole("button", { name: /^back$/i }));
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/setup/welcome"),
+    );
+
+    // Still one press, one move: the entry the Forward restored was not
+    // written over.
     await router.navigate(-1);
 
     await waitFor(() => expect(router.state.location.pathname).toBe("/"));

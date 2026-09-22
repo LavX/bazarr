@@ -137,6 +137,39 @@ describe("the providers step is not a dead end", () => {
     settle?.();
   });
 
+  it("does not offer to leave setup while the install runs", async () => {
+    // Leaving ends the wizard, which unmounts the step: the run carries on
+    // into nothing and restarts Bazarr+ at a reader who is already elsewhere.
+    let settle: (() => void) | undefined;
+    mutateAsync.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          settle = resolve;
+        }),
+    );
+    const user = userEvent.setup();
+    openProvidersStep();
+
+    expect(
+      await screen.findByRole("button", { name: /set up later/i }),
+    ).not.toBeDisabled();
+
+    await user.click(
+      await screen.findByRole("checkbox", { name: /opensubtitles/i }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: /install .{0,3} restart/i }),
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /set up later/i }),
+      ).toBeDisabled(),
+    );
+
+    settle?.();
+  });
+
   it("browser Back does not leave the install running into nothing", async () => {
     // The skip is hidden while a run is going, but the address bar is another
     // way out of the same screen: going back unmounted the stage while the

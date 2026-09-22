@@ -151,7 +151,13 @@ const OnboardingWizardBody: FunctionComponent = () => {
     if (knownParam && stepKey !== undefined) {
       pendingUrl.current = stepKey;
       if (trail.current[trail.current.length - 1] === stepKey) {
+        // Backwards: the entry underneath is the one being moved to.
         trail.current.pop();
+      } else {
+        // Forwards, or a pasted link. Either way the entry being left is now
+        // the one underneath, and forgetting that made the wizard's own Back
+        // write a third entry over two that already said the same step.
+        trail.current.push(current.key);
       }
       goTo(stepKey);
       return;
@@ -239,6 +245,11 @@ const OnboardingWizardBody: FunctionComponent = () => {
             <Button
               variant="subtle"
               color="gray"
+              // Leaving ends the wizard, which takes the step with it, so it
+              // waits for a step that is in the middle of work it has to
+              // finish. An install left this way kept going into nothing and
+              // restarted Bazarr+ at a reader who was already somewhere else.
+              disabled={stepBusy}
               onClick={() => {
                 setLeaveError(null);
                 setLeaving(true);
