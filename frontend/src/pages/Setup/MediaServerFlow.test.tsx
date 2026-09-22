@@ -28,6 +28,8 @@ let settingsWrites: unknown[] = [];
 let refuse: MediaServerKind | null = null;
 // The rows land but the write that turns their master switch on does not.
 let refuseSwitch = false;
+// Holds the master-switch write open, so a step can be left mid-save.
+let heldSwitch: Promise<void> | null = null;
 
 function serialize(row: Row) {
   return {
@@ -80,6 +82,9 @@ function stageBackend() {
     // The settings writer posts FormData, not JSON.
     http.post("/api/system/settings", async ({ request }) => {
       const written = Object.fromEntries((await request.formData()).entries());
+      if (heldSwitch) {
+        await heldSwitch;
+      }
       if (
         refuseSwitch &&
         Object.keys(written).some((key) =>
@@ -115,6 +120,7 @@ describe("media server selection", () => {
     settingsWrites = [];
     refuse = null;
     refuseSwitch = false;
+    heldSwitch = null;
     stageBackend();
     startOnPicker();
   });
@@ -270,6 +276,44 @@ describe("media server selection", () => {
     await user.type(screen.getByLabelText(/api key/i), "jelly-key");
     await user.click(screen.getByRole("button", { name: /connect jellyfin/i }));
   }
+
+  it("finishes the save after the step it was started on is gone", async () => {
+    // Back and Skip unmount the configure step mid-save, and TanStack drops a
+    // mutate call's own onSuccess and onError once that happens. The settings
+    // write then never settled, so the draft was never marked saved: its step
+    // stayed in the wizard with the values still in it, and continuing from it
+    // wrote a second row for a server that was already there.
+    let release: (() => void) | undefined;
+    heldSwitch = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+
+    await connectJellyfin(user);
+    await waitFor(() => expect(creates).toHaveLength(1));
+
+    // Out of the step while its master switch is still in the air.
+    await user.click(screen.getByRole("button", { name: /^back$/i }));
+    await screen.findByRole("heading", { name: /^media servers$/i });
+
+    release?.();
+    await waitFor(() => expect(settingsWrites).toHaveLength(1));
+
+    // The draft is saved, so nothing is pending and no second configure step
+    // is generated for it.
+    expect(
+      await screen.findByRole("button", { name: /continue without a server/i }),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: /continue without a server/i }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: /^seerr$/i }),
+    ).toBeInTheDocument();
+    expect(creates).toHaveLength(1);
+  });
 
   it("keeps a failed master switch on screen instead of walking past it", async () => {
     // Marking the draft saved is what removes this step from the wizard, so

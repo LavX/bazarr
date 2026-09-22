@@ -182,17 +182,24 @@ export function useMediaServerSubmit() {
         );
         let switchesFailed = false;
         if (kinds.size > 0) {
-          switchesFailed = await new Promise<boolean>((resolve) => {
-            settings.mutate(
+          // mutateAsync, not mutate with callbacks. TanStack drops a mutate
+          // call's own onSuccess and onError once the component that made the
+          // call has unmounted, which pressing Back or Skip during the save
+          // does. The promise then never settled: the caller's then never ran,
+          // the draft was never marked saved, its step stayed in the wizard,
+          // and submitting it again wrote a second row for a server that was
+          // already there. mutateAsync settles either way.
+          switchesFailed = await settings
+            .mutateAsync(
               Object.fromEntries(
                 [...kinds].map((kind) => [
                   `settings-general-use_${kind}`,
                   true,
                 ]),
               ),
-              { onSuccess: () => resolve(false), onError: () => resolve(true) },
-            );
-          });
+            )
+            .then(() => false)
+            .catch(() => true);
         }
         return { errors: {}, outcomes, switchesFailed };
       } finally {

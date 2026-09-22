@@ -74,24 +74,24 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   );
 
   // Which Plex row the account owns, by the same rule the backend applies
-  // (media_servers/plex_account.py::_account_row): the recorded id, or the only
-  // row there is. Disconnecting that one has to sign the account out; deleting
-  // it on its own leaves the token and the chosen server behind for the next
+  // (media_servers/plex_account.py::_account_row): the recorded id and nothing
+  // else. A sign-in never adopts a row it did not create, so an id that matches
+  // no row means the account owns none, not that it owns whichever row is
+  // first. Disconnecting the owned row has to sign the account out; deleting it
+  // on its own leaves the token and the chosen server behind for the next
   // reconcile to rebuild it from.
   const plexAccountRowId = useMemo(() => {
     const rows = plex.data ?? [];
-    // A settings query still in flight and an account with no recorded row
-    // look identical in this data, and the fallback to the first row is only
-    // honest for the second. Guessing while it is pending can sign the whole
-    // account out over a row the reader added by hand, or delete the account's
-    // own row without signing out, which the next reconcile rebuilds from the
-    // token that was left behind. So ownership stays unknown until it is known,
-    // and the row says so by not offering to disconnect yet.
+    // Until the settings answer, the recorded id is unknown rather than empty,
+    // and treating unknown as "owns nothing" would delete the account's own row
+    // without signing out, which the next reconcile rebuilds from the token
+    // left behind. So ownership stays unknown until it is known, and the row
+    // says so by not offering to disconnect yet.
     if (rows.length === 0 || settingsPending) {
       return null;
     }
     const recorded = settings?.plex?.instance_id ?? "";
-    return (rows.find((row) => row.id === recorded) ?? rows[0]).id;
+    return rows.find((row) => row.id === recorded)?.id ?? null;
   }, [plex.data, settings?.plex?.instance_id, settingsPending]);
 
   const takenNames = useMemo(

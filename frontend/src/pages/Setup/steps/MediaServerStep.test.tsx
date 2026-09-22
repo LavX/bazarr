@@ -252,9 +252,9 @@ describe("MediaServerStep", () => {
   it("waits for the settings before offering to disconnect a Plex row", async () => {
     // Which Plex row the account owns comes from the settings. While that query
     // is still in flight the missing value reads as "nothing recorded", which
-    // is the rule that falls back to the first row, so the wrong row could be
-    // signed out or the account's own row deleted with the token left behind
-    // for the next reconcile to rebuild it from.
+    // is indistinguishable from an account that owns no row, so the account's
+    // own row could be deleted with the token left behind for the next
+    // reconcile to rebuild it from.
     let release: (() => void) | undefined;
     const held = new Promise<void>((resolve) => {
       release = resolve;
@@ -287,6 +287,39 @@ describe("MediaServerStep", () => {
         screen.getAllByRole("button", { name: /^disconnect$/i })[0],
       ).toBeEnabled(),
     );
+  });
+
+  it("owns no Plex row when the recorded id matches none", async () => {
+    // The backend adopts no row it did not create
+    // (media_servers/plex_account.py::_account_row), so a recorded id that
+    // matches nothing means the account owns nothing. Treating the only row
+    // there is as the account's signed the reader out over a server they had
+    // added by hand.
+    const calls: string[] = [];
+    setInstances({ plex: [row("plex", "Loft", "plex-2")] });
+    setPlexOwner("plex-deleted");
+    server.use(
+      http.post("/api/plex/oauth/logout", () => {
+        calls.push("logout");
+        return HttpResponse.json({ success: true });
+      }),
+      http.delete("/api/system/media-server-instances/plex-2", () => {
+        calls.push("delete");
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    const user = userEvent.setup();
+    withSelection(<MediaServerStep onNext={onNext} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: /^disconnect$/i }),
+    );
+    expect(screen.queryByText(/signed out of your plex account/i)).toBeNull();
+    await user.click(
+      screen.getAllByRole("button", { name: /^disconnect$/i })[0],
+    );
+
+    await waitFor(() => expect(calls).toEqual(["delete"]));
   });
 
   it("does not call a switched-off row connected", async () => {

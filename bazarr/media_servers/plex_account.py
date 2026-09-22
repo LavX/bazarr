@@ -76,12 +76,18 @@ def _seed(settings):
 def _account_row(repo, settings):
     """The row this account owns, or nothing when it has never had one.
 
-    Recorded by id rather than inferred, so adding a second Plex instance by
-    hand cannot silently hand the account someone else's row.
+    Recorded by id rather than inferred, and never guessed. A sign-in adopts no
+    row the account did not create: when the recorded id matches nothing,
+    because disconnecting the destination deleted it, or because the account has
+    never had one, the caller creates a fresh row instead of taking whichever
+    Plex instance happens to be first. Falling back to that one handed the
+    account a sibling somebody added by hand, and the next sign-in wrote its own
+    URL and token over that server's.
     """
-    rows = repo.list('plex')
     saved = getattr(settings.plex, 'instance_id', '') or ''
-    return next((row for row in rows if row.id == saved), rows[0] if rows else None)
+    if not saved:
+        return None
+    return next((row for row in repo.list('plex') if row.id == saved), None)
 
 
 def sync_plex_instance(session, settings, *, signed_in=False, signed_out=False, persist=None):
@@ -169,8 +175,8 @@ def apply_plex_account(session, settings, *, signed_in=False, signed_out=False, 
             fields['enabled'] = True
         if fields:
             repo.update(row.id, **fields)
-    # Recorded even when nothing else changed, so an account with no credential
-    # yet still binds its owner and the fallback cannot take a hand-added row.
+    # Recorded even when nothing else changed, so the row the account just made
+    # is the row it finds next time rather than one it has to guess at.
     recorded = getattr(settings.plex, 'instance_id', '') != row.id
     settings.plex.instance_id = row.id
     session.commit()
