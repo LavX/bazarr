@@ -32,6 +32,7 @@ import {
   OnboardingSelectionProvider,
   useOnboardingSelection,
 } from "./useOnboardingSelection";
+import { StepBusyProvider, useStepBusy } from "./useStepBusy";
 import { StepDraftProvider, useClearStepDrafts } from "./useStepDrafts";
 import { useWizardStep } from "./useWizardStep";
 import styles from "./OnboardingWizard.module.scss";
@@ -53,6 +54,7 @@ const OnboardingWizardBody: FunctionComponent = () => {
   const { intent, resetIntent } = useOnboardingIntent();
   const { drafts, clearSelection } = useOnboardingSelection();
   const clearStepDrafts = useClearStepDrafts();
+  const stepBusy = useStepBusy();
   const navigate = useNavigate();
   const { stepKey } = useParams<{ stepKey?: string }>();
   const mutation = useSettingsMutation();
@@ -99,10 +101,10 @@ const OnboardingWizardBody: FunctionComponent = () => {
   // has to deal with a URL that moved on its own: a browser Back or Forward,
   // or a pasted link.
   const moveTo = useCallback(
-    (key: string) => {
+    (key: string, replace = false) => {
       pendingUrl.current = key;
       goTo(key);
-      navigate(`/setup/${key}`);
+      navigate(`/setup/${key}`, { replace });
     },
     [goTo, navigate],
   );
@@ -110,8 +112,11 @@ const OnboardingWizardBody: FunctionComponent = () => {
     () => moveTo(steps[Math.min(index + 1, steps.length - 1)].key),
     [moveTo, steps, index],
   );
+  // Back replaces the entry it is leaving instead of stacking an earlier step
+  // on top of a later one. Pushing it made the next browser Back go forwards
+  // through the wizard, which is the opposite of what Back means.
   const back = useCallback(
-    () => moveTo(steps[Math.max(index - 1, 0)].key),
+    () => moveTo(steps[Math.max(index - 1, 0)].key, true),
     [moveTo, steps, index],
   );
 
@@ -209,7 +214,18 @@ const OnboardingWizardBody: FunctionComponent = () => {
 
         <Modal
           opened={leaving}
-          onClose={() => setLeaving(false)}
+          // Dismissing does not cancel the write, so while one is in the air
+          // there is nothing to dismiss to: pressing Keep going and then
+          // landing on the home page anyway is the answer the reader did not
+          // give.
+          onClose={() => {
+            if (!mutation.isPending) {
+              setLeaving(false);
+            }
+          }}
+          closeOnClickOutside={!mutation.isPending}
+          closeOnEscape={!mutation.isPending}
+          withCloseButton={!mutation.isPending}
           title="Leave setup?"
           centered
         >
@@ -224,7 +240,11 @@ const OnboardingWizardBody: FunctionComponent = () => {
               </Alert>
             )}
             <Group justify="flex-end">
-              <Button variant="default" onClick={() => setLeaving(false)}>
+              <Button
+                variant="default"
+                onClick={() => setLeaving(false)}
+                disabled={mutation.isPending}
+              >
                 Keep going
               </Button>
               <Button
@@ -296,13 +316,14 @@ const OnboardingWizardBody: FunctionComponent = () => {
           />
         </Paper>
 
-        {current.optional ? (
+        {current.optional && !stepBusy ? (
           <div className={styles.stepSkip}>
             <Button variant="subtle" color="gray" onClick={next}>
               {current.skipLabel ?? "Do this later"}
             </Button>
           </div>
         ) : (
+          !current.optional &&
           current.requiredReason && (
             <Text className={styles.stepNote}>{current.requiredReason}</Text>
           )
@@ -316,7 +337,9 @@ const OnboardingWizardView: FunctionComponent = () => (
   <OnboardingIntentProvider>
     <OnboardingSelectionProvider>
       <StepDraftProvider>
-        <OnboardingWizardBody />
+        <StepBusyProvider>
+          <OnboardingWizardBody />
+        </StepBusyProvider>
       </StepDraftProvider>
     </OnboardingSelectionProvider>
   </OnboardingIntentProvider>

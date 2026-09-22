@@ -34,6 +34,7 @@ import type {
   ProviderHubManifest,
 } from "@/apis/raw/providerHub";
 import { parseManifest } from "@/pages/Settings/Providers/hub/utils";
+import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import { isRecommendedProvider } from "./recommended";
 import { redirectToSetup } from "./redirect";
 import styles from "./ProviderGrid.module.scss";
@@ -219,6 +220,13 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
   // expiring, the button). Firing it twice would send a second bounce request
   // into a backend that is already going down.
   const restartStartedRef = useRef(false);
+
+  // Once an install is under way, this step has to finish: the requests keep
+  // running whether or not anything is rendering them, the run ends in a
+  // restart that activates what it staged, and the poll that waits out that
+  // restart is what brings the reader back. So the shell's skip goes away
+  // until the run is over, rather than offering an exit that breaks it.
+  useReportStepBusy(installing || countdown !== null || restarting);
 
   const choices: CatalogChoice[] = (catalog?.entries ?? [])
     .map((entry) => {

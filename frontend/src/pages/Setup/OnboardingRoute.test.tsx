@@ -94,6 +94,31 @@ describe("the wizard's own URL", () => {
     ).toBeInTheDocument();
   });
 
+  it("the wizard's own Back does not turn browser Back into forward", async () => {
+    // Pushing the earlier step on top of the later one made the next browser
+    // Back walk forward through the wizard.
+    const user = userEvent.setup();
+    const router = openWizardAt("/setup");
+
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/setup/welcome"),
+    );
+    await user.click(screen.getByRole("button", { name: /get started/i }));
+    await screen.findByRole("heading", { name: /what do you want bazarr/i });
+
+    await user.click(screen.getByRole("button", { name: /^back$/i }));
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/setup/welcome"),
+    );
+
+    await router.navigate(-1);
+
+    // Out of the wizard the way it was entered, not forward into it again.
+    await waitFor(() =>
+      expect(router.state.location.pathname).not.toBe("/setup/intent"),
+    );
+  });
+
   it("falls back to the persisted cursor when the URL names no step", async () => {
     localStorage.setItem("bazarr.onboarding.step", "languages");
 

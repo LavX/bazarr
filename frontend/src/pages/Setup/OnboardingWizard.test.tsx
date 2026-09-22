@@ -263,6 +263,33 @@ describe("OnboardingWizardView", () => {
     ).toBeInTheDocument();
   });
 
+  it("cannot be dismissed while the leave write is still in the air", async () => {
+    // Dismissing does not cancel the write, so a Keep going that still landed
+    // on the home page a second later is an answer the reader did not give.
+    const user = userEvent.setup();
+    mutate.mockImplementation(() => {
+      // Never settles: the modal stays in its pending state.
+    });
+    mockedSettingsMutation.mockReturnValue({
+      mutate,
+      isPending: true,
+    } as unknown as ReturnType<typeof useSettingsMutation>);
+
+    customRender(<OnboardingWizardView />);
+
+    await user.click(screen.getByRole("button", { name: /set up later/i }));
+    const keepGoing = await screen.findByRole("button", {
+      name: /keep going/i,
+    });
+
+    expect(keepGoing).toBeDisabled();
+    await user.keyboard("{Escape}");
+
+    expect(
+      screen.getByRole("button", { name: /^leave setup$/i }),
+    ).toBeInTheDocument();
+  });
+
   it("the providers step can be skipped instead of trapping the reader", async () => {
     // The one step that restarts the application was also the one step with no
     // exit but the permanent skip in the header.
