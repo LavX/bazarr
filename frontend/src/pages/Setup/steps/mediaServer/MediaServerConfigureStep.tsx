@@ -6,9 +6,7 @@ import InstanceServerForm from "./InstanceServerForm";
 import PlexServerForm from "./PlexServerForm";
 import StepActions from "./StepActions";
 
-interface Props extends WizardStepProps {
-  draftId: string;
-}
+type Props = WizardStepProps;
 
 /**
  * One media server, one screen.

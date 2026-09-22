@@ -18,6 +18,8 @@ interface Props {
   accountOwned?: boolean;
   /** Whether ownership is still being resolved, so disconnecting must wait. */
   ownershipPending?: boolean;
+  /** Whether this kind's master switch is on. Off means nothing refreshes. */
+  kindEnabled?: boolean;
   onDisconnected: (instanceId: string) => void;
 }
 
@@ -44,6 +46,7 @@ const ConnectedServerRow: FC<Props> = ({
   last,
   accountOwned = false,
   ownershipPending = false,
+  kindEnabled = true,
   onDisconnected,
 }) => {
   const [confirming, setConfirming] = useState(false);
@@ -97,9 +100,13 @@ const ConnectedServerRow: FC<Props> = ({
           {/* A row the reader switched off refreshes nothing, and the one the
               backend keeps after a Plex sign-out is exactly that. Calling it
               connected told them setup was done when the dispatcher would
-              never use it. */}
-          <Badge color={instance.enabled ? "green" : "gray"} size="sm">
-            {instance.enabled ? "Connected" : "Turned off"}
+              never use it. The kind's master switch counts the same way: the
+              dispatcher reads it before it reads any row. */}
+          <Badge
+            color={instance.enabled && kindEnabled ? "green" : "gray"}
+            size="sm"
+          >
+            {instance.enabled && kindEnabled ? "Connected" : "Turned off"}
           </Badge>
         </Group>
         {!confirming && (

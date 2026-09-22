@@ -140,13 +140,21 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
       onNext();
       return;
     }
+    // A create is still in the air from an earlier press on this draft. The
+    // form was remounted since, so it has no pending state of its own, and
+    // pressing on would write the same server a second time.
+    if (draft.submitting) {
+      return;
+    }
     setFailure(null);
+    updateDraft(draft.draftId, { submitting: true });
     void submit([draft], (outcome) =>
       // The row exists from here on, whatever the master switch write does
       // next, so a remount mid-save finds a draft that knows not to write it
       // again.
       updateDraft(draft.draftId, { savedInstanceId: outcome.instanceId ?? "" }),
     ).then((result) => {
+      updateDraft(draft.draftId, { submitting: false });
       const found = result.errors[draft.draftId];
       if (found) {
         setErrors(found);
@@ -305,7 +313,7 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
                   ? `Try ${name} again`
                   : `Connect ${name}`
           }
-          continuePending={isPending}
+          continuePending={isPending || draft.submitting === true}
         />
       }
     >

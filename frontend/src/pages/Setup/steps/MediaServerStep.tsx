@@ -1,6 +1,6 @@
 import { FC, useMemo } from "react";
 import { Button, Checkbox, Group, Text } from "@mantine/core";
-import { useSystemSettings } from "@/apis/hooks";
+import { useSettingsMutation, useSystemSettings } from "@/apis/hooks";
 import { useMediaServerInstances } from "@/apis/hooks/mediaServers";
 import type {
   MediaServerInstance,
@@ -50,6 +50,7 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
     useOnboardingSelection();
 
   const { data: settings, isPending: settingsPending } = useSystemSettings();
+  const settingsMutation = useSettingsMutation();
   // One query per kind, a fixed four, so no hook is called in a loop.
   const plex = useMediaServerInstances("plex");
   const jellyfin = useMediaServerInstances("jellyfin");
@@ -124,14 +125,25 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
     (draft) => draft.instanceId === undefined,
   ).length;
 
-  // What the reader has lined up for one kind, in the card's own words. Two
-  // numbers, because they mean different things: a connected server is already
-  // a row in the database and is undone by disconnecting it, a pending one is
-  // a tick that has written nothing yet.
-  const summarise = (live: number, waiting: number) => {
+  // Whether the kind's master switch is on. The dispatcher reads it before it
+  // reads any row, so an enabled instance under a switched-off kind refreshes
+  // nothing; calling that connected is the same lie the Finish recap used to
+  // tell. Unknown until the settings answer, and unknown is not off.
+  const switchedOn = (kind: MediaServerKind) =>
+    settings?.general === undefined ||
+    (settings.general as LooseObject)[`use_${kind}`] === true;
+
+  // What the reader has lined up for one kind, in the card's own words. Three
+  // numbers, because they mean different things: a connected server is a row
+  // that refreshes, a stalled one is a row the switch is keeping quiet, and a
+  // pending one is a tick that has written nothing yet.
+  const summarise = (live: number, stalled: number, waiting: number) => {
     const parts: string[] = [];
     if (live > 0) {
       parts.push(`${live} connected`);
+    }
+    if (stalled > 0) {
+      parts.push(`${stalled} not refreshing`);
     }
     if (waiting > 0) {
       parts.push(`${waiting} to set up`);
@@ -165,7 +177,10 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
           // backend keeps after a Plex sign-out is exactly that row, and it
           // has had its credential cleared as well. It is still listed below,
           // saying what it is, because it is still a row to disconnect.
-          const live = rows.filter((row) => row.enabled);
+          const enabledRows = rows.filter((row) => row.enabled);
+          const kindOn = switchedOn(kind);
+          const live = kindOn ? enabledRows : [];
+          const stalled = kindOn ? [] : enabledRows;
           const pending = pendingOf(kind);
           // Plex is the kind whose card is not answered by "a Plex row
           // exists". A row somebody added by hand in Connections is not the
@@ -177,11 +192,15 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
           // card does not tick and untick itself while that query lands.
           const answered =
             kind === "plex" && !settingsPending
-              ? live.some((row) => row.id === plexAccountRowId)
-              : live.length > 0;
+              ? enabledRows.some((row) => row.id === plexAccountRowId)
+              : enabledRows.length > 0;
           const checked = answered || pending.length > 0;
           const locked = answered && pending.length === 0;
-          const summary = summarise(live.length, pending.length);
+          const summary = summarise(
+            live.length,
+            stalled.length,
+            pending.length,
+          );
           return (
             <div
               key={kind}
@@ -229,6 +248,7 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
                         kind === "plex" && instance.id === plexAccountRowId
                       }
                       ownershipPending={kind === "plex" && settingsPending}
+                      kindEnabled={kindOn}
                       onDisconnected={forgetInstance}
                     />
                   ))}
@@ -259,6 +279,25 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
                     <Text size="sm" c="dimmed">
                       {summary}
                     </Text>
+                    {/* A row that exists under a switched-off kind is undone
+                        by turning the kind back on, not by adding another
+                        server or deleting this one. Without this the picker
+                        offered neither, and the reader's only honest move was
+                        to finish setup and find Settings, Connections. */}
+                    {stalled.length > 0 && (
+                      <Button
+                        variant="light"
+                        size="compact-sm"
+                        loading={settingsMutation.isPending}
+                        onClick={() =>
+                          settingsMutation.mutate({
+                            [`settings-general-use_${kind}`]: true,
+                          })
+                        }
+                      >
+                        Turn on {kindName(kind)} refreshes
+                      </Button>
+                    )}
                     {kind === "plex" ? (
                       <Text size="sm" c="dimmed">
                         One Plex account per install.

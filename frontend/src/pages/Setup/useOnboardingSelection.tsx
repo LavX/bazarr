@@ -59,6 +59,12 @@ export interface MediaServerDraft {
   // yet. The step stays on screen with a message rather than advancing, and
   // the draft stays a draft until the reader has read it.
   switchFailed?: boolean;
+  // A create for this draft is in the air. Held here rather than in the form,
+  // because pressing Back and coming straight back remounts the form with no
+  // memory of it, and the draft has nothing to show for the request until it
+  // answers: the second press wrote the same server again. Deliberately not
+  // persisted, so a reload, which loses the request anyway, clears it.
+  submitting?: boolean;
 }
 
 /** What the step builder needs. Nothing that changes while a field is typed. */
@@ -130,7 +136,7 @@ export function createDraft(
 // The credential never goes to localStorage. Everything else does, so going
 // Back to the picker and forward again, or reloading through the providers
 // restart, does not empty a form the reader already filled in.
-type StoredDraft = Omit<MediaServerDraft, "apiKey">;
+type StoredDraft = Omit<MediaServerDraft, "apiKey" | "submitting">;
 
 function isKind(value: unknown): value is MediaServerKind {
   return typeof value === "string" && value in KIND_NAMES;
@@ -184,7 +190,7 @@ function persistDrafts(drafts: MediaServerDraft[]) {
   }
   const stored: StoredDraft[] = drafts.map(
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    ({ apiKey, ...rest }) => rest,
+    ({ apiKey, submitting, ...rest }) => rest,
   );
   writeOnboardingValue(STORAGE_NAME, JSON.stringify(stored));
 }

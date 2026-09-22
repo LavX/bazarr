@@ -160,7 +160,17 @@ const OnboardingWizardBody: FunctionComponent = () => {
         </div>
 
         <Paper className={styles.card}>
-          <StepComponent onNext={next} onBack={index > 0 ? back : undefined} />
+          {/* Keyed by the step, so moving to another step starts its component
+              clean while a rebuild of the list around the current one does
+              not: the media server steps all share one component type now, and
+              without a key React would carry one server's form state into the
+              next server's screen. */}
+          <StepComponent
+            key={current.key}
+            onNext={next}
+            onBack={index > 0 ? back : undefined}
+            draftId={current.draftId}
+          />
         </Paper>
 
         {current.optional ? (

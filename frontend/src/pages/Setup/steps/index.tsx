@@ -175,9 +175,8 @@ export function buildSteps({
       phase: "connect",
       segment: MEDIA_SERVER_SEGMENT,
       optional: true,
-      Component: (p) => (
-        <MediaServerConfigureStep draftId={draft.draftId} {...p} />
-      ),
+      draftId: draft.draftId,
+      Component: MediaServerConfigureStep,
     }));
 
   if (generated.length === 0) {

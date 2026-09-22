@@ -50,18 +50,34 @@ function setInstances(rows: Partial<Record<MediaServerKind, unknown[]>>) {
   );
 }
 
-/** Which Plex row the account owns, as the backend records it. */
-function setPlexOwner(instanceId: string) {
+// The four master switches always exist in the real settings, and the picker
+// reads them: the dispatcher checks use_<kind> before it looks at any row, so
+// an enabled instance under a switched-off kind refreshes nothing.
+const SWITCHES_ON = {
+  /* eslint-disable camelcase */
+  use_plex: true,
+  use_jellyfin: true,
+  use_emby: true,
+  use_silo: true,
+  /* eslint-enable camelcase */
+};
+
+function setSettings(general: object = {}, instanceId = "") {
   server.use(
     http.get("/api/system/settings", () =>
       HttpResponse.json({
-        general: {},
+        general: { ...SWITCHES_ON, ...general },
         translator: {},
         // eslint-disable-next-line camelcase
         plex: { instance_id: instanceId },
       }),
     ),
   );
+}
+
+/** Which Plex row the account owns, as the backend records it. */
+function setPlexOwner(instanceId: string) {
+  setSettings({}, instanceId);
 }
 
 function withSelection(ui: ReactElement) {
@@ -75,6 +91,7 @@ describe("MediaServerStep", () => {
     vi.clearAllMocks();
     localStorage.clear();
     setInstances({});
+    setSettings();
     mockedSettingsMutation.mockReturnValue({
       mutate,
     } as unknown as ReturnType<typeof useSettingsMutation>);
@@ -346,6 +363,33 @@ describe("MediaServerStep", () => {
     const checkbox = screen.getByRole("checkbox", { name: /^Plex$/ });
     await waitFor(() => expect(checkbox).toBeDisabled());
     expect(checkbox).toBeChecked();
+  });
+
+  it("says so when a kind's master switch is off, and offers to turn it on", async () => {
+    // The dispatcher reads use_<kind> before it looks at any row, so an
+    // enabled instance under a switched-off kind refreshes nothing. The picker
+    // called it connected and locked the card, which left the reader nothing
+    // to do about it but finish setup and find Settings, Connections. It is
+    // the same lie the Finish recap used to tell.
+    setInstances({ emby: [row("emby", "Living room", "row-1")] });
+    // eslint-disable-next-line camelcase
+    setSettings({ use_emby: false });
+    const user = userEvent.setup();
+    withSelection(<MediaServerStep onNext={onNext} />);
+
+    expect(await screen.findByText("Living room")).toBeInTheDocument();
+    expect(await screen.findByText("1 not refreshing")).toBeInTheDocument();
+    expect(screen.queryByText("Connected")).toBeNull();
+
+    await user.click(
+      screen.getByRole("button", { name: /turn on emby refreshes/i }),
+    );
+
+    await waitFor(() =>
+      expect(mutate).toHaveBeenCalledWith({
+        "settings-general-use_emby": true,
+      }),
+    );
   });
 
   it("does not call a switched-off row connected", async () => {

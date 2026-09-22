@@ -38,10 +38,20 @@ export const PHASE_LABELS: Record<WizardPhase, string> = {
 export interface WizardStepProps {
   onNext: () => void; // advance + persist
   onBack?: () => void; // go back one step
+  // Which media server draft this step configures. Only the generated media
+  // server steps carry one; every other step ignores it.
+  draftId?: string;
 }
 
 export interface WizardStepDef {
   key: string; // stable id e.g. "welcome"
+  // The media server draft a generated step configures, handed to its
+  // component by the shell. It is data rather than a closure on purpose: a
+  // component built per draft is a new function type every time the step list
+  // is rebuilt, and React remounts on a changed type, so one draft finishing
+  // its save threw away the test result, the loaded libraries and the pending
+  // state of the form the reader was filling in beside it.
+  draftId?: string;
   label: string; // Stepper label
   phase: WizardPhase;
   Component: FC<WizardStepProps>;
