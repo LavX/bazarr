@@ -63,8 +63,40 @@ function mediaServer(
     name: "Attic",
     state: "connected",
     version: "4.8.11.0",
+    // A settled answer with the cache's full ten minutes left on it, which is
+    // what the endpoint reports for a server it has just heard from.
+    refresh_in: 600,
     ...overrides,
   };
+}
+
+// Replies in order, repeating the last one, so a test can describe what the
+// endpoint says before and after a background probe lands. Returns the call
+// counter so a test can assert the page stopped asking.
+function statusReplies(...replies: System.MediaServerStatus[][]) {
+  const calls = { count: 0 };
+  server.use(
+    http.get("/api/system/status", () => {
+      const servers = replies[Math.min(calls.count, replies.length - 1)];
+      calls.count += 1;
+      return HttpResponse.json({
+        data: {
+          sonarr_version: "",
+          radarr_version: "",
+          sportarr_version: "",
+          media_servers: servers,
+        },
+      });
+    }),
+    http.get("/api/system/health", () => HttpResponse.json({ data: [] })),
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({
+        general: { use_sonarr: false, use_radarr: false, use_sportarr: false },
+      }),
+    ),
+    http.get("/api/system/arr-instances", () => HttpResponse.json([])),
+  );
+  return calls;
 }
 
 describe("System Status", () => {
@@ -202,6 +234,55 @@ describe("System Status", () => {
     expect(
       await screen.findByText("Connected, no version reported"),
     ).toBeInTheDocument();
+  });
+
+  it("shows a version a background refresh found, without a reload", async () => {
+    // The endpoint answers from its cache and refreshes behind the request,
+    // so the first reply is the old version and says a probe is running. The
+    // page has to come back for the result on its own.
+    statusReplies(
+      [mediaServer({ refresh_in: 0 })],
+      [mediaServer({ version: "4.9.0.0" })],
+    );
+    customRender(<SystemStatusView />);
+
+    expect(
+      await screen.findByText("4.8.11.0", undefined, { timeout: 8000 }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText("4.9.0.0", undefined, { timeout: 8000 }),
+    ).toBeInTheDocument();
+  });
+
+  it("stops saying Unreachable once the server comes back", async () => {
+    statusReplies(
+      [mediaServer({ state: "unreachable", version: "", refresh_in: 0 })],
+      [mediaServer({ version: "4.9.0.0" })],
+    );
+    customRender(<SystemStatusView />);
+
+    expect(
+      await screen.findByText("Unreachable", undefined, { timeout: 8000 }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText("4.9.0.0", undefined, { timeout: 8000 }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Unreachable")).toBeNull();
+  });
+
+  it("leaves a settled page alone instead of polling it", async () => {
+    // Every destination is holding a fresh answer, so nothing the endpoint
+    // could say is different. Asking anyway would be a request every few
+    // seconds for as long as the page is open.
+    const calls = statusReplies([mediaServer()]);
+    customRender(<SystemStatusView />);
+
+    expect(
+      await screen.findByText("4.8.11.0", undefined, { timeout: 8000 }),
+    ).toBeInTheDocument();
+    const settled = calls.count;
+    await new Promise((resolve) => setTimeout(resolve, 6000));
+    expect(calls.count).toBe(settled);
   });
 
   it("shows nothing for a destination the endpoint leaves out", async () => {

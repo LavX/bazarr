@@ -45,7 +45,8 @@ def test_unprobed_destination_says_checking_rather_than_claiming_a_version(schem
     from media_servers import versions
     row = repo.create(**payload('emby'))
     entry, = versions.statuses(schema_session, settings(), refresh=False)
-    assert entry == {'id': row.id, 'kind': 'emby', 'name': 'A', 'state': 'checking', 'version': ''}
+    assert entry == {'id': row.id, 'kind': 'emby', 'name': 'A', 'state': 'checking', 'version': '',
+                     'refresh_in': 0}
 
 
 def test_recorded_probe_is_reported_and_a_failure_carries_no_version(schema_session, repo):
@@ -147,6 +148,95 @@ def test_a_test_of_unsaved_edits_is_not_recorded_against_the_saved_instance(sche
     assert (entry['state'], entry['version']) == ('checking', '')
 
 
+def test_an_entry_says_how_long_its_answer_can_stand(schema_session, repo):
+    """The page stops polling when nothing can change, so it has to be told when."""
+    from media_servers import versions
+    row = repo.create(**payload('emby'))
+    versions.record(row.id, row.revision, {'success': True, 'version': '4.8.11.0'})
+    entry, = versions.statuses(schema_session, settings(), refresh=False)
+    assert 0 < entry['refresh_in'] <= versions.CACHE_SECONDS
+
+    versions.record(row.id, row.revision, {'success': False})
+    entry, = versions.statuses(schema_session, settings(), refresh=False)
+    # A failure is retried far sooner than a success is re-read, and the page
+    # has to hear that or a server that comes back up reads as down until
+    # somebody reloads it by hand.
+    assert 0 < entry['refresh_in'] <= versions.FAILURE_SECONDS
+
+
+def test_a_destination_being_probed_asks_the_page_straight_back(schema_session, repo, monkeypatch):
+    from media_servers import versions
+    row = repo.create(**payload('emby'))
+    versions.record(row.id, row.revision, {'success': True, 'version': '4.8.11.0'})
+    monkeypatch.setattr(versions, 'CACHE_SECONDS', 0)
+    # Handed to the pool and not back yet, which is what the endpoint sees for
+    # the whole of a slow probe.
+    monkeypatch.setattr(versions._executor, 'submit', lambda *_args: None)
+    entry, = versions.statuses(schema_session, settings())
+    # The old version is still the honest answer, and it is about to change,
+    # so the page is told to come back rather than to settle on it. Without
+    # this the refreshed value never reaches an open page at all.
+    assert (entry['state'], entry['version'], entry['refresh_in']) == ('connected', '4.8.11.0', 0)
+
+
+def _pooled_plex(monkeypatch, live):
+    """A pooled client with plexapi's own behaviour: version read once, at build."""
+    import xml.etree.ElementTree as ElementTree
+    from types import SimpleNamespace
+    from plex import operations
+    handed_out = []
+    client = SimpleNamespace(
+        key='/',
+        friendlyName='Living Room',
+        version=live['version'],
+        library=SimpleNamespace(sections=lambda: []),
+        query=lambda key: ElementTree.Element(
+            'MediaContainer', {'friendlyName': 'Living Room', 'version': live['version']}))
+    monkeypatch.setattr(operations, 'plex_server_for',
+                        lambda *args: (handed_out.append(args), client)[1])
+    return client, handed_out
+
+
+def test_a_plex_upgraded_in_place_is_seen_rather_than_served_from_the_client(monkeypatch):
+    from media_servers import service
+    live = {'version': '1.40.0.1'}
+    client, handed_out = _pooled_plex(monkeypatch, live)
+
+    probe = ('plex', 'http://plex.example', 'token', True, False)
+    assert service._probe(*probe)['version'] == '1.40.0.1'
+
+    # Upgraded with the URL and the token untouched, so the pool hands back
+    # the very same client and its own attribute never moves again.
+    live['version'] = '1.41.0.7'
+    assert client.version == '1.40.0.1'
+    result = service._probe(*probe)
+    assert (result['success'], result['version'], result['server_name']) == (
+        True, '1.41.0.7', 'Living Room')
+    # Read through the pool both times. Dropping the client instead would pay
+    # a fresh handshake and a fresh init on every ten-minute refresh.
+    assert handed_out == [('http://plex.example', 'token', True)] * 4
+
+
+def test_listing_plex_libraries_does_not_pay_for_the_identity_read(monkeypatch):
+    from media_servers import service
+    _client, handed_out = _pooled_plex(monkeypatch, {'version': '1.41.0.7'})
+    assert service._probe('plex', 'http://plex.example', 'token', True, True) == {
+        'data': [], 'error_code': None}
+    assert len(handed_out) == 1
+
+
+def test_an_unreachable_plex_still_reports_a_connection_error(monkeypatch):
+    from media_servers import service
+    from plex import operations
+
+    def refuse(*_args):
+        raise OSError('connection refused')
+
+    monkeypatch.setattr(operations, 'plex_server_for', refuse)
+    assert service._probe('plex', 'http://plex.example', 'token', True, False) == {
+        'success': False, 'error_code': 'connection_error'}
+
+
 @pytest.fixture
 def status_api(schema_session, monkeypatch):
     from api import api_bp
@@ -173,8 +263,10 @@ def test_status_endpoint_reports_media_servers_beside_the_existing_fields(status
                   'database_migration', 'bazarr_directory', 'bazarr_config_directory',
                   'start_time', 'timezone'):
         assert field in data
-    assert data['media_servers'] == [{'id': row.id, 'kind': 'emby', 'name': 'Attic',
-                                      'state': 'connected', 'version': '4.8.11.0'}]
+    entry, = data['media_servers']
+    assert 0 < entry.pop('refresh_in') <= 600
+    assert entry == {'id': row.id, 'kind': 'emby', 'name': 'Attic',
+                     'state': 'connected', 'version': '4.8.11.0'}
 
 
 def test_status_endpoint_survives_a_broken_destination_layer(status_api, monkeypatch):

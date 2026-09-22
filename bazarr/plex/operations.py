@@ -74,6 +74,28 @@ def plex_server_for(baseurl: str, token: str, verify: bool = False) -> PlexServe
         return plex_server
 
 
+def plex_server_identity(baseurl: str, token: str, verify: bool = False) -> tuple:
+    """Read a Plex server's own name and version now, not when it was pooled.
+
+    ``PlexServer`` fills friendlyName and version once, from the root document
+    its initialiser fetches, and nothing it does afterwards re-reads them.
+    Listing library sections certainly does not. So a pooled client keeps
+    answering with whatever the server said when that client was built, and a
+    Plex upgraded in place, same URL, same token, would report its old version
+    until the entry is evicted or Bazarr restarts.
+
+    Asking the server again is one small request, and it goes over the session
+    the cached client already holds, so the connection pooling that the cache
+    exists for is untouched. Dropping the client instead would pay a fresh
+    TCP and TLS handshake plus a full PlexServer init, which is the cost the
+    cache was added to avoid.
+    """
+    server = plex_server_for(baseurl, token, verify)
+    root = server.query(server.key)
+    attrib = getattr(root, 'attrib', None) or {}
+    return attrib.get('friendlyName') or '', attrib.get('version') or ''
+
+
 def get_plex_server() -> PlexServer:
     """Connect to the Plex server and return the server instance.
 

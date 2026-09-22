@@ -135,6 +135,31 @@ function mediaServerValue(server: System.MediaServerStatus): string {
   return server.version || "Connected, no version reported";
 }
 
+// How soon to ask again while a probe is in flight. A probe is one bounded
+// request against one server, so the answer lands within a few seconds.
+const probePollMs = 4000;
+
+// The timer still has to tick when nothing is pending, because the hook takes
+// a number. The callback declines to fetch, so this costs one no-op.
+const idlePollMs = 60000;
+
+function mediaServerPollDelay(server: System.MediaServerStatus): number {
+  if (server.state === "checking" || server.refresh_in === 0) {
+    // A probe is running: the state on screen is the old answer, or no
+    // answer, and the real one is seconds away.
+    return 0;
+  }
+  if (server.refresh_in === undefined) {
+    // A payload that predates the field says nothing about when this could
+    // change, and guessing "now" would poll a settled page forever.
+    return Number.POSITIVE_INFINITY;
+  }
+  // A failed probe is retried on its own short schedule and a recovered
+  // server reports its version again, so this covers a server coming back up
+  // as much as it covers a version changing.
+  return server.refresh_in * 1000;
+}
+
 interface InfoContainerProps {
   title: string;
 }
@@ -180,19 +205,21 @@ const SystemStatusView: FunctionComponent = () => {
     return counts;
   }, [mediaServers]);
 
-  // A version nobody has probed yet resolves in the background, so the page
-  // asks again until every destination has said something. Once none is
-  // "checking" this stops on its own.
-  const awaitingVersions = mediaServers.some(
-    (server) => server.state === "checking",
-  );
+  // Versions resolve in the background, so the page asks again when there
+  // could be something new: while a probe is running, and once a cached
+  // answer has expired. Between those it waits, because every request in
+  // that window returns exactly what the page already shows.
+  const pollDelay = useMemo(() => {
+    const soonest = Math.min(...mediaServers.map(mediaServerPollDelay));
+    return Number.isFinite(soonest) ? Math.max(soonest, probePollMs) : null;
+  }, [mediaServers]);
   const { refetch: refetchStatus } = statusQuery;
   const pollVersions = useCallback(() => {
-    if (awaitingVersions) {
+    if (pollDelay !== null) {
       void refetchStatus();
     }
-  }, [awaitingVersions, refetchStatus]);
-  useInterval(pollVersions, 4000);
+  }, [pollDelay, refetchStatus]);
+  useInterval(pollVersions, pollDelay ?? idlePollMs);
 
   const [uptime, setUptime] = useState<string>();
 

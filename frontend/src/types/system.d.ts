@@ -44,6 +44,16 @@ declare namespace System {
     state: "connected" | "unreachable" | "checking";
     /** Empty when the server does not report one. Silo never does. */
     version: string;
+    /**
+     * Seconds this answer can stay as it is. Zero means a probe is running
+     * now, so asking again shortly may return something else. Anything else
+     * is time left on a cached value that cannot change before it expires,
+     * which is how long the page may wait before asking again.
+     *
+     * Absent on responses from before the field existed, which reads as "no
+     * idea", not as "ask again immediately".
+     */
+    refresh_in?: number;
   }
 
   interface Status {

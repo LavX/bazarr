@@ -12,9 +12,16 @@ small background pool while the request returns whatever it already holds, so
 the status endpoint never waits on a media server, never blocks on a slow one,
 and never fails because one is down. A server that has never answered reports
 'checking' once; the page polls until it resolves.
+
+Each entry also carries how many seconds its answer can stay as it is, so the
+page knows when to come back. Zero means a probe is running right now and the
+next reply may differ. Anything else is time left on a cached value that
+nothing can change before it expires, which lets the page wait that long
+instead of asking again into an unchanged reply.
 """
 
 import logging
+import math
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -121,8 +128,16 @@ def statuses(session, settings, *, refresh=True):
         if refresh and (cached is None or time.monotonic() - cached[2] >= ttl):
             _schedule(snapshot, key)
         state, version = (cached[0], cached[1]) if cached else ('checking', '')
+        with _lock:
+            probing = key in _inflight
+        # Zero while a probe is in flight, because the state above is the old
+        # answer and the new one lands in seconds. Otherwise the time left on
+        # this entry: until it expires, every request returns exactly what
+        # this one did, so there is nothing for the page to come back for.
+        refresh_in = 0 if probing or cached is None else int(
+            math.ceil(max(0.0, cached[2] + ttl - time.monotonic())))
         entries.append({'id': snapshot.id, 'kind': snapshot.kind, 'name': snapshot.name,
-                        'state': state, 'version': version})
+                        'state': state, 'version': version, 'refresh_in': refresh_in})
     with _lock:
         for stale in [key for key in _recorded if key not in live and key not in _inflight]:
             del _recorded[stale]
