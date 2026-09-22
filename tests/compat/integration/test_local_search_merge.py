@@ -103,7 +103,12 @@ def _run(only_providers=None, exclude_providers=None):
     """Run a compat search with mocked pool/fanout/local, returning
     (result, search_local_mock, fanout_mock)."""
     from compat import service
+    # The fanout re-checks its own pool membership against the enabled-and-not
+    # -throttled gate, which in production is what pool.providers was built
+    # from. This mock pool was not, so say that its member passes; otherwise
+    # every assertion about the allow-list reads an exclusion it did not make.
     with patch("compat.service._get_compat_pool") as gp, \
+         patch("compat.service.provider_is_usable", lambda name: True), \
          patch("compat.service.list_all_subtitles_parallel") as lf, \
          patch("compat.service.search_local") as sl:
         lf.return_value = {MagicMock(): [_provider_sub()]}

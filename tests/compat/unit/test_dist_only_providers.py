@@ -36,6 +36,13 @@ def capture_exclude(monkeypatch):
                             lambda: health)
         from app.config import settings
         settings["compat_endpoint"]["serve_local_subs"] = False
+        # The fanout now re-checks its own pool membership against the same
+        # enabled-and-not-throttled gate the pool adopts through, so these
+        # fixture names have to pass it or every one of them is excluded
+        # before the allow-list under test gets a say. In production
+        # pool.providers is derived from exactly that gate's inputs.
+        monkeypatch.setattr(service, "provider_is_usable",
+                            lambda name: name in set(pool_providers))
 
         def _fake_parallel(videos, languages, pool_instance, **kw):
             captured["exclude"] = set(kw.get("exclude_providers") or ())

@@ -23,7 +23,7 @@ from compat import cache, service
 from subliminal_patch.extensions import provider_registry
 from subliminal_patch.score import ComputeScore, MAX_SCORES
 
-from .handles import mint_result, resolve_result
+from .handles import mint_result, renew_result, resolve_result
 
 _IMDB = re.compile(r"tt[0-9]{7,10}\Z")
 _LANGUAGE = re.compile(r"[a-z]{2,3}(?:-[A-Za-z]{2,4})?\Z")
@@ -38,8 +38,13 @@ _COMPLETE = {"success", "empty"}
 _NOT_ATTEMPTED = {"skipped", "setup_required", "not_started"}
 # ...but a provider that never started still leaves a hole where its answer
 # would have been, so it cannot count toward a search claiming complete
-# coverage the way a deliberate skip does.
-_NO_COVERAGE = {"not_started"}
+# coverage the way a deliberate skip does. "setup_required" is the same kind of
+# hole: a skip is the provider correctly declining this target and has no
+# answer to give, while a provider missing its credentials has answers it was
+# never able to look for, and will have them the moment the operator fixes the
+# configuration. Claiming complete coverage there both overstates the search
+# and buys the finished snapshot the long cache lifetime.
+_NO_COVERAGE = {"not_started", "setup_required"}
 # Outcomes that must not put a provider on a Discover cooldown. A skip is a
 # decision about this target, and a call that never started is not evidence
 # about the provider, so neither earns a wait before asking again.
@@ -270,24 +275,29 @@ def _reconcile_episode(payload, context):
 def _retry_delay(outcome):
     """Seconds to wait before Discover offers this provider again.
 
-    Three sources, most specific first. What the provider itself said, through
-    a Retry-After it sent. Then the throttle table, which the pool has just
+    Two clocks can be running at once. What the provider itself said, through
+    a Retry-After it sent, and the throttle table, which the pool has just
     written for this exact exception if the failure was one the backoff knows,
     and which carries the per-provider durations an operator can reason about
-    (a rate limit on one site, a daily download quota on another). Only then a
-    per-cause floor.
+    (a rate limit on one site, a daily download quota on another). Whichever
+    runs longer is the one that decides when the provider is next asked, so
+    that is the one the reader is told about: offering a retry at the earlier
+    of the two produces a button that searches nothing, because
+    get_providers_sorted() still excludes the provider until the table's
+    deadline and the retry only replaces the deadline on screen.
+
+    A per-cause floor applies only when neither clock is running.
 
     Reading the table rather than duplicating its numbers also keeps the row
     Discover shows and the reason the provider is missing from the next search
     in agreement, instead of two independent clocks disagreeing on screen.
     """
-    if outcome.retry_after:
-        return max(1.0, float(outcome.retry_after))
+    delay = max(1.0, float(outcome.retry_after)) if outcome.retry_after else 0.0
     throttle = get_providers.tp.get(outcome.provider)
     if throttle and throttle[1]:
-        remaining = (throttle[1] - dt.datetime.now()).total_seconds()
-        if remaining > 0:
-            return remaining
+        delay = max(delay, (throttle[1] - dt.datetime.now()).total_seconds())
+    if delay > 0:
+        return delay
     return _RETRY_AFTER_CAUSE.get(outcome.status, _RETRY_AFTER_DEFAULT)
 
 
@@ -509,15 +519,24 @@ def search(request: SearchRequest, on_progress=None) -> dict:
                     for name in sorted(set(providers) | set(outcomes))]})
 
         def build_live_rows(subtitles):
+            # Charged per row, not per response. Checking only on the way in
+            # lets a single provider answering with a large batch spend the
+            # budget many times over, and every millisecond of it comes out of
+            # the shared wall the still-running providers are being judged
+            # against: they get reported as abandoned for work this loop did.
+            # Whatever is left when the budget runs out is built after the
+            # fanout, which is where all of it was built before.
             nonlocal live_budget
-            if on_progress is None or live_budget <= 0:
+            if on_progress is None:
                 return
-            started = time.monotonic()
             for sub in subtitles:
+                if live_budget <= 0:
+                    return
+                started = time.monotonic()
                 row = _result(sub, video, context, search_id, checked, ttl, parsed)
                 built[id(sub)] = (sub, row)
                 live_rows.append(row)
-            live_budget -= time.monotonic() - started
+                live_budget -= time.monotonic() - started
 
         report_progress()
 
@@ -557,9 +576,17 @@ def search(request: SearchRequest, on_progress=None) -> dict:
         for sub in subtitles:
             # A row already published mid-search is reused rather than minted
             # again, so the finished snapshot repeats the ids a reader has
-            # already been offered instead of retiring them.
+            # already been offered instead of retiring them. Its handle has
+            # been expiring since the moment it was offered, though, while this
+            # snapshot's own cache lifetime starts here, so the reused handle
+            # gets the rest of its life back. Without that the cache entry
+            # outlives the handles it names by the length of the search, and a
+            # slow search with a short TTL files rows whose handles are gone
+            # before anyone is served them.
             existing = built.get(id(sub))
-            rows.append(existing[1] if existing is not None and existing[0] is sub
+            renewed = (renew_result(existing[1]["id"], ttl)
+                       if existing is not None and existing[0] is sub else None)
+            rows.append({**existing[1], "expires_at": _iso(renewed)} if renewed is not None
                         else _result(sub, video, context, search_id, checked, ttl, parsed))
         # Failed refreshes retain usable rows only for providers that failed.
         # Successful empty searches replace their earlier results.

@@ -19,6 +19,23 @@ def mint_result(subtitle, context: dict, search_id: str, ttl: int) -> tuple[str,
     return f"d1.{file_id}.{nonce}", expires_at
 
 
+def renew_result(result_id: str, ttl: int) -> float | None:
+    """Give a live handle a full lifetime again, without changing the handle.
+
+    A row published while the search was still running started its TTL then,
+    while the snapshot that finally carries it starts its cache lifetime when
+    the fanout returns. With a short result TTL and a long search wall, the
+    first rows offered can be dead before the finished snapshot is even filed,
+    and every reader served that snapshot from cache gets ids the store has
+    already dropped. Minting replacements would fix the lifetime at the cost of
+    retiring ids readers were already offered mid-search, so the lifetime moves
+    instead of the id. Returns the new expiry, or None if the handle is gone.
+    """
+    if resolve_result(result_id) is None:
+        return None
+    return get_store().renew(result_id.split(".")[1], ttl)
+
+
 def resolve_result(result_id: str, search_id: str | None = None) -> dict | None:
     if not isinstance(result_id, str) or not re.fullmatch(r"d1\.[1-9][0-9]{0,19}\.[A-Za-z0-9_-]{32}", result_id):
         return None

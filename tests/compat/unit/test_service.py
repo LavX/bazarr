@@ -170,3 +170,125 @@ def test_search_title_feeds_the_health_tracker_it_reads_from(monkeypatch, tmp_pa
         assert name in get_tracker().currently_discarded()
     finally:
         reset_tracker()
+
+
+def test_a_throttled_pool_member_is_not_searched_again_while_the_backoff_runs(monkeypatch, tmp_path):
+    """The adoption gate only guards the way in, and a throttled provider is
+    already inside: this pool lives for the process, so nothing ever takes it
+    back out. Recording the backoff therefore removed the provider from the
+    library search and from Discover's coverage while this path went on asking
+    it on every single request."""
+    import datetime as dt
+    import types
+    from collections import defaultdict
+    from app import get_providers
+    from app.config import settings
+    from provider_hub.registry import HubProxyProvider
+    from subliminal_patch.extensions import provider_registry
+    from subzero.language import Language
+
+    asked = []
+    name = "compat_still_asked"
+    cls = type("StillAskedFixtureProvider", (HubProxyProvider,),
+               {"provider_name": name, "languages": {Language("eng")},
+                "list_subtitles": lambda self, video, languages: asked.append(video) or []})
+    monkeypatch.setitem(provider_registry.providers, name, cls)
+    pool = _isolated_compat_pool(monkeypatch, tmp_path, [name])
+    monkeypatch.setattr(settings.compat_endpoint, "serve_local_subs", False)
+    monkeypatch.setattr(service, "_build_video",
+                        lambda *args, **kwargs: types.SimpleNamespace(name="/no/such/file.mkv"))
+    monkeypatch.setattr(service, "list_all_subtitles_parallel",
+                        lambda videos, languages, pool_instance, **kw: (
+                            searched.update(exclude=set(kw.get("exclude_providers") or ())),
+                            defaultdict(list))[1])
+    searched = {}
+
+    service._do_fanout("tt0133093", None, None, [], "movie", timeout_seconds=8)
+    assert name not in searched["exclude"], "the provider was excluded before it was throttled"
+
+    get_providers.tp[name] = ("RuntimeError", dt.datetime.now() + dt.timedelta(minutes=10), "10 minutes")
+    service._do_fanout("tt0133093", None, None, [], "movie", timeout_seconds=8)
+    assert name in searched["exclude"]
+    assert pool.providers == [name], "the fanout must skip the member, not mutate the shared pool"
+
+
+def test_the_throttled_provider_really_stops_receiving_requests(monkeypatch, tmp_path):
+    """The same thing said end to end, through the real fanout: the provider's
+    own list_subtitles is what must stop being called."""
+    import datetime as dt
+    from app import get_providers
+    from app.config import settings
+    from provider_hub.registry import HubProxyProvider
+    from subliminal.video import Movie
+    from subliminal_patch.extensions import provider_registry
+    from subzero.language import Language
+
+    asked = []
+    name = "compat_real_fanout"
+    cls = type("RealFanoutFixtureProvider", (HubProxyProvider,),
+               {"provider_name": name, "languages": {Language("eng")},
+                "list_subtitles": lambda self, video, languages: asked.append(video) or []})
+    monkeypatch.setitem(provider_registry.providers, name, cls)
+    _isolated_compat_pool(monkeypatch, tmp_path, [name])
+    monkeypatch.setattr(settings.compat_endpoint, "serve_local_subs", False)
+    monkeypatch.setattr(service, "_build_video",
+                        lambda *args, **kwargs: Movie("/no/such/file.mkv", "The Matrix",
+                                                      imdb_id="tt0133093"))
+
+    service._do_fanout("tt0133093", None, None, [Language("eng")], "movie", timeout_seconds=8)
+    assert len(asked) == 1
+
+    get_providers.tp[name] = ("RuntimeError", dt.datetime.now() + dt.timedelta(minutes=10), "10 minutes")
+    service._do_fanout("tt0133093", None, None, [Language("eng")], "movie", timeout_seconds=8)
+    assert len(asked) == 1, "a provider serving out its backoff was asked again"
+
+
+def test_recording_a_rate_limit_does_not_sleep_inside_the_fanout(monkeypatch, tmp_path):
+    """provider_throttle pauses between the first few rate-limit events, which
+    is right where it came from: the library search retries the same provider
+    in the same call. This pool never retries, and the callback runs inside the
+    provider future, so the pause would be charged to the wall the remaining
+    providers are still searching against. At the smallest valid five-second
+    wall the default five-second pause alone is enough to have this provider
+    reported as abandoned instead of cooling down."""
+    import time
+    from app import get_providers
+    from subliminal_patch.exceptions import APIThrottled
+
+    name = _fixture_provider(monkeypatch, "compat_rate_limited", APIThrottled("slow down"))
+    pool = _isolated_compat_pool(monkeypatch, tmp_path, [name])
+    monkeypatch.setattr(get_providers, "throttle_count", {})
+    outcomes = []
+    started = time.monotonic()
+    _search(pool, name, lambda outcome, elapsed: outcomes.append(outcome))
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2.0, "the throttle bookkeeping slept inside the fanout deadline"
+    assert [outcome.status for outcome in outcomes] == ["cooldown"]
+    # Counted all the same: the pause is what is dropped, not the bookkeeping.
+    assert get_providers.throttle_count[name]["count"] == 1
+
+
+def test_a_worker_that_blew_its_deadline_is_recorded_as_a_timeout(monkeypatch, tmp_path):
+    """The transport cannot carry the provider's exception class, only a code.
+    provider_search_failure honours that code, the throttle table did not, so
+    the outcome said "timeout" while the table said "WorkerError" with the
+    generic default duration. The table is what Discover reads back for the
+    cooldown it shows and what outranks the timeout floor, so the two have to
+    agree."""
+    from app import get_providers
+    from provider_hub.worker import WorkerError
+
+    name = _fixture_provider(monkeypatch, "compat_worker_timeout",
+                             WorkerError("worker exceeded 30.0s deadline", code="timeout"))
+    pool = _isolated_compat_pool(monkeypatch, tmp_path, [name])
+    outcomes = []
+    _search(pool, name, lambda outcome, elapsed: outcomes.append(outcome))
+
+    assert [outcome.status for outcome in outcomes] == ["timeout"]
+    recorded, until, description = get_providers.tp[name]
+    assert recorded == "Timeout", "the throttle table still disagrees with the reported outcome"
+    assert description == "1 hour"
+    # And that is a cause Discover can name rather than a bare cooldown.
+    from discover.search import _THROTTLE_CAUSE
+    assert _THROTTLE_CAUSE[recorded] == ("timeout", "timeout")

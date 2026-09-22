@@ -60,3 +60,32 @@ def test_singleton_survives_reset():
     assert len(get_store()) >= 1
     reset_store()
     assert len(get_store()) == 0
+
+
+def test_renew_extends_a_live_entry_without_changing_its_id():
+    s = FileIdStore()
+    fid = s.put({"p": "x", "i": "1", "expires_at": 0.0}, ttl_seconds=1)
+    expires = s.renew(fid, 60)
+    assert expires is not None and expires > time.time() + 50
+    ok, payload = s.get(fid)
+    assert ok and payload["i"] == "1"
+    # The payload carries its own copy of the deadline, which downloads check
+    # before the store's, so a renewal that moved one and not the other would
+    # leave the entry resolvable and still refused.
+    assert payload["expires_at"] == expires
+
+
+def test_renew_never_shortens_a_longer_lifetime():
+    s = FileIdStore()
+    fid = s.put({"p": "x", "i": "1"}, ttl_seconds=600)
+    expires = s.renew(fid, 5)
+    assert expires > time.time() + 500
+
+
+def test_renew_refuses_an_entry_that_is_gone():
+    s = FileIdStore()
+    fid = s.put({"p": "x", "i": "1"}, ttl_seconds=1)
+    time.sleep(1.1)
+    assert s.renew(fid, 60) is None
+    assert s.renew(99999, 60) is None
+    assert s.renew("not-a-number", 60) is None

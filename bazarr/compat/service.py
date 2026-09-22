@@ -33,6 +33,24 @@ _CLIENT_MOVIEHASH_PROVIDERS = (
 _SHOOTER_HASH_RE = re.compile(r"^[0-9a-fA-F]{32}(?:;[0-9a-fA-F]{32}){3}$")
 
 
+def _record_throttle(name, exception, ids=None, language=None, sports_context=None):
+    """Record a provider failure without spending the fanout's wall clock.
+
+    provider_throttle sleeps between the first few rate-limit events, which is
+    correct where it came from: the library search retries the same provider in
+    the same call, and the pause is what makes the retry worth attempting. This
+    pool never retries. Its callback runs inside the provider future, before
+    the detailed outcome is returned, so the sleep would be charged to the wall
+    the remaining providers are still searching against. With the smallest
+    valid five-second wall, the default five-second pause is enough on its own
+    to have the provider reported as abandoned instead of cooling down, its
+    retry metadata discarded and a health failure counted against it, all for a
+    failure we had already classified correctly.
+    """
+    return provider_throttle(name, exception, ids=ids, language=language,
+                             sports_context=sports_context, wait=False)
+
+
 def _get_compat_pool(*, restore_available=False):
     """Dedicated SZAsyncProviderPool instance. MUST NOT share app.get_providers._pools."""
     global _compat_pool
@@ -53,7 +71,7 @@ def _get_compat_pool(*, restore_available=False):
                 # the failure with the duration its exception class earns, and
                 # adoption_gate keeps a provider that is serving out a backoff
                 # from being re-adopted into the pool behind that record's back.
-                throttle_callback=provider_throttle,
+                throttle_callback=_record_throttle,
                 adoption_gate=provider_is_usable,
                 language_hook=get_provider_language_hook(),
                 language_equals=[],
@@ -820,7 +838,18 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
     # Per-request / per-key provider exclusion (Distribution Hub req #1) is
     # unioned with the health-discard set and the virtual-video skip list.
     requested_exclude = {str(p).strip() for p in (exclude_providers or []) if str(p).strip()}
-    exclude = (health_discarded | requested_exclude
+    # The adoption gate only guards the way IN. It is consulted when a name is
+    # missing from pool.providers and has to be adopted, which is exactly the
+    # case a throttled provider is not in: this pool is a process-lifetime
+    # singleton, so a provider that was healthy when it was built stays in
+    # pool.providers for as long as the process lives, and the fanout submits
+    # every member. Writing the throttle table therefore took that provider out
+    # of the library search and out of Discover's coverage while this path went
+    # on asking it on every request, with the rest of Bazarr reporting it as
+    # throttled. Re-check the membership we already hold, per fanout, against
+    # the same gate.
+    throttled = {name for name in pool.providers if not provider_is_usable(name)}
+    exclude = (health_discarded | requested_exclude | throttled
                | (set() if video_has_file else set(_SKIP_FOR_VIRTUAL_VIDEO)))
     # Per-request / per-key allow-list (only_providers). None means no allow-list
     # (every enabled provider is in play); a list (even empty) scopes the search
@@ -841,10 +870,11 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
     else:
         requested_only = None
         local_allowed = LOCAL_PROVIDER not in requested_exclude
-    logger.info("compat fanout: video=%r lang=%s providers=%d health_skipped=%s "
+    logger.info("compat fanout: video=%r lang=%s providers=%d health_skipped=%s throttled=%s "
                 "req_excluded=%s req_only=%s local_allowed=%s",
                 video, [str(l) for l in languages], len(pool.providers),  # noqa: E741
-                sorted(health_discarded) or "[]", sorted(requested_exclude) or "[]",
+                sorted(health_discarded) or "[]", sorted(throttled) or "[]",
+                sorted(requested_exclude) or "[]",
                 "none" if requested_only is None else (sorted(requested_only) or "[]"),
                 local_allowed)
 

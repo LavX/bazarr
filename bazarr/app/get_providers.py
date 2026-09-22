@@ -612,12 +612,34 @@ def _handle_mgb(name, exception, ids, language, sports_context=None):
         blacklist_log_movie(ids.get('radarrId'), name, exception.id, language_str)
 
 
-def provider_throttle(name, exception, ids=None, language=None, sports_context=None):
+def provider_throttle(name, exception, ids=None, language=None, sports_context=None, wait=True):
+    """Record a provider failure in the throttle table.
+
+    ``wait`` is the caller's promise about its own deadline. The count gate
+    below sleeps between the first few rate-limit events, which is right for a
+    search that is about to retry the same provider in the same call, and wrong
+    for a bounded fanout: there the sleep is spent inside the wall the other
+    providers are still living on, and the provider whose failure is being
+    recorded is reported as abandoned rather than cooling down. A caller that
+    cannot afford the sleep passes ``wait=False`` and gets the counting and the
+    table write without it.
+    """
     if isinstance(exception, MustGetBlacklisted) and isinstance(ids, dict) and isinstance(language, Language):
         return _handle_mgb(name, exception, ids, language, sports_context)
 
     cls = getattr(exception, "__class__")
     cls_name = getattr(cls, "__name__")
+    # A plugin worker that blew its hard deadline reaches us as a WorkerError:
+    # the transport cannot carry the original exception class, only a code.
+    # Classifying by class alone records "WorkerError" with the generic
+    # ten-minute default, so the cooldown Discover reads back out of this table
+    # afterwards says "provider cooldown" about what was plainly a timeout, and
+    # outranks the timeout floor with a duration that has nothing to do with
+    # the cause. core.provider_search_failure already honours this code; the
+    # backoff has to agree with it or the two disagree on screen.
+    if getattr(exception, "code", None) == "timeout":
+        cls = requests.exceptions.Timeout
+        cls_name = cls.__name__
     if cls not in VALID_THROTTLE_EXCEPTIONS:
         for valid_cls in VALID_THROTTLE_EXCEPTIONS:
             if issubclass(cls, valid_cls):
@@ -633,7 +655,7 @@ def provider_throttle(name, exception, ids=None, language=None, sports_context=N
 
     throttle_until = datetime.datetime.now() + throttle_delta
 
-    if cls_name not in VALID_COUNT_EXCEPTIONS or throttled_count(name, exception):
+    if cls_name not in VALID_COUNT_EXCEPTIONS or throttled_count(name, exception, wait=wait):
         if cls_name == 'ValueError' and isinstance(exception.args, tuple) and len(exception.args) and exception.args[
             0].startswith('unsupported pickle protocol'):
             for fn in subliminal_cache_region.backend.all_filenames:
@@ -674,7 +696,7 @@ def _get_traceback_info(exc: Exception):
     return message + extra
 
 
-def throttled_count(name, exception=None):
+def throttled_count(name, exception=None, wait=True):
     global throttle_count
     if name in list(throttle_count.keys()):
         if 'count' in list(throttle_count[name].keys()):
@@ -697,6 +719,11 @@ def throttled_count(name, exception=None):
     wait_seconds = 5
     if exception and hasattr(exception, 'retry_after') and exception.retry_after:
         wait_seconds = max(1, min(exception.retry_after, 30))  # floor at 1s, cap at 30s
+
+    if not wait:
+        logging.info("Provider %s throttle count %s of 5, counted without waiting", name,
+                     throttle_count[name]['count'])
+        return False
 
     logging.info("Provider %s throttle count %s of 5, waiting %ds and trying again", name,
                  throttle_count[name]['count'], wait_seconds)
