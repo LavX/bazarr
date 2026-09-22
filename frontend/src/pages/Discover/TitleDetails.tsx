@@ -77,8 +77,21 @@ export function TitleEpisodePicker({
 }: {
   showOptions?: boolean;
 }) {
-  const { movie } = useSelectedTitle();
-  if (movie?.media_type === "show" && movie.source === "tmdb") {
+  const { id, kind, source, movie } = useSelectedTitle();
+  // Only ever the selected show. Metadata queries keep the previous answer as
+  // placeholder data while the next one is in flight, so a title change leaves
+  // the departed show in hand for a render. The picker acts on the show it is
+  // given: it files the episode identity into the draft, and it puts a
+  // single-season show's only season in the URL. Handing it a show the reader
+  // has left is what made that redirect fire over the incoming title and
+  // return the page to the one it came from.
+  if (
+    movie?.media_type === "show" &&
+    movie.source === "tmdb" &&
+    movie.id === id &&
+    kind === "show" &&
+    source === "tmdb"
+  ) {
     return (
       <EpisodePicker
         key={movie.source_id}
