@@ -1,11 +1,11 @@
 import { FunctionComponent, useEffect } from "react";
 import { useNavigate } from "react-router";
-import { LoadingOverlay } from "@mantine/core";
+import { Alert, Button, Center, LoadingOverlay, Stack } from "@mantine/core";
 import { useSystemSettings } from "@/apis/hooks";
 import { useOnboardingState } from "@/pages/Setup/useOnboardingState";
 
 const Redirector: FunctionComponent = () => {
-  const { data } = useSystemSettings();
+  const { data, isError, error, isFetching, refetch } = useSystemSettings();
   const { needsOnboarding, isLoading } = useOnboardingState();
 
   const navigate = useNavigate();
@@ -27,6 +27,31 @@ const Redirector: FunctionComponent = () => {
     // Everything else, configured or not, opens on Discover.
     navigate("/discover", { replace: true });
   }, [data, navigate, needsOnboarding, isLoading]);
+
+  // A settings read that failed is not a settings read still in flight. Without
+  // this branch the landing page of a Bazarr+ that cannot answer is a spinner
+  // that never stops, with no message and nothing to press, which is the first
+  // thing a broken install shows its owner.
+  if (isError && data === undefined) {
+    return (
+      <Center mih="60vh" p="md">
+        <Alert color="red" title="Bazarr+ did not answer" maw={520}>
+          <Stack gap="sm" align="flex-start">
+            {error instanceof Error && error.message.length > 0
+              ? error.message
+              : "The settings request failed, so we cannot tell which page to open."}
+            <Button
+              variant="default"
+              loading={isFetching}
+              onClick={() => void refetch()}
+            >
+              Try again
+            </Button>
+          </Stack>
+        </Alert>
+      </Center>
+    );
+  }
 
   return <LoadingOverlay visible></LoadingOverlay>;
 };

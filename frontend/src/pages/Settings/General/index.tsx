@@ -37,6 +37,7 @@ import {
   proxyOptions,
   securityOptions,
 } from "./options";
+import RunSetupAgain from "./RunSetupAgain";
 
 // Auth password input that NEVER displays the stored value.
 //
@@ -222,6 +223,14 @@ const SettingsGeneralView: FunctionComponent = () => {
           container, otherwise its HTTPS looks like plain HTTP to Bazarr and
           every visitor shares one login rate limit. Leave empty to trust
           nothing. Requires a restart of Bazarr when changed
+        </Message>
+      </Section>
+      <Section header="First-time setup">
+        <RunSetupAgain />
+        <Message>
+          Walks you through connecting Sonarr, Radarr, a media server, subtitle
+          languages and providers again. Nothing you have already configured is
+          removed, and you can leave it at any point.
         </Message>
       </Section>
       <Section header="Metadata">

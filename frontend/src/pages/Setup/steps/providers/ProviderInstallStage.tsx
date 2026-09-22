@@ -630,6 +630,14 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
           stages new code, so Bazarr+ needs to restart once to load them. The
           wizard will pick up where it left off after the restart.
         </Text>
+        {/* The consequence, said here rather than enforced by a disabled
+            button. This step restarts the application and talks to a catalog
+            over the network, so it is the last one that should be a dead end
+            when either goes wrong. */}
+        <Text c="dimmed" size="sm">
+          Until you enable a provider, Bazarr+ has nothing to search. You can do
+          this from the Subtitle Hub whenever you like.
+        </Text>
       </Stack>
 
       {catalogPending ? (

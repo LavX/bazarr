@@ -39,6 +39,14 @@ function instances(data: ArrInstance[] | undefined, isLoading = false) {
   return { data, isLoading } as unknown as ReturnType<typeof useArrInstances>;
 }
 
+function failedInstances() {
+  return {
+    data: undefined,
+    isLoading: false,
+    isError: true,
+  } as unknown as ReturnType<typeof useArrInstances>;
+}
+
 describe("useOnboardingState", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -52,6 +60,18 @@ describe("useOnboardingState", () => {
 
     expect(result.current.needsOnboarding).toBe(true);
     expect(result.current.isLoading).toBe(false);
+  });
+
+  it("treats a failed instances read as unknown, not as none", () => {
+    // Read as none, an install with a full library and a momentarily
+    // unreachable database answers the first-run question with yes and routes
+    // its owner into the setup wizard over a configured install.
+    mockedSettings.mockReturnValue(freshSettings());
+    mockedInstances.mockReturnValue(failedInstances());
+
+    const { result } = renderHook(() => useOnboardingState());
+
+    expect(result.current.needsOnboarding).toBe(false);
   });
 
   it("returns needsOnboarding=false when a sonarr instance exists", () => {

@@ -32,10 +32,21 @@ const LANGUAGES: Language.Server[] = [
   { code2: "es", code3: "spa", name: "Spanish", enabled: false },
 ];
 
-function setLanguages(data: unknown) {
+function setLanguages(data: unknown, isLoading = false) {
   mockedUseLanguages.mockReturnValue({
     data,
+    isLoading,
   } as unknown as ReturnType<typeof useLanguages>);
+}
+
+// The step guesses a first language from the browser, so every test says what
+// the browser is. "zz-ZZ" matches nothing in the list, which is the old
+// behaviour of starting with an empty selection.
+function setBrowserLanguage(tag: string) {
+  Object.defineProperty(window.navigator, "language", {
+    value: tag,
+    configurable: true,
+  });
 }
 
 function setProfiles(data: unknown) {
@@ -47,11 +58,37 @@ function setProfiles(data: unknown) {
 describe("LanguagesStep", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    setBrowserLanguage("zz-ZZ");
     setLanguages(LANGUAGES);
     setProfiles([]);
     mockedUseSettingsMutation.mockReturnValue({
       mutate,
     } as unknown as ReturnType<typeof useSettingsMutation>);
+  });
+
+  it("starts on the browser's language when the list has it", async () => {
+    // The step used to open with an empty selector and a disabled Continue,
+    // which is a gate satisfied by nothing the reader can see. A working
+    // default satisfies it instead, and they can still change it.
+    setBrowserLanguage("es-ES");
+    customRender(<LanguagesStep onNext={onNext} />);
+
+    // The pill in the field, so the guess is visible and removable rather
+    // than a hidden default.
+    expect((await screen.findAllByText("Spanish")).length).toBeGreaterThan(0);
+    expect(
+      screen.getByRole("button", { name: /continue/i }),
+    ).not.toBeDisabled();
+  });
+
+  it("says the list is loading instead of showing an empty selector", () => {
+    // An interactive, empty selector beside a disabled Continue reads as
+    // broken, and nothing on the step said the list was still on its way.
+    setLanguages(undefined, true);
+    customRender(<LanguagesStep onNext={onNext} />);
+
+    const field = screen.getByPlaceholderText("Loading languages");
+    expect(field).toBeDisabled();
   });
 
   it("disables Continue until a language is selected", async () => {

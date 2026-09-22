@@ -1,4 +1,4 @@
-import { render } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useSystemSettings } from "@/apis/hooks";
 import { useOnboardingState } from "@/pages/Setup/useOnboardingState";
@@ -22,6 +22,21 @@ vi.mock("@/pages/Setup/useOnboardingState", () => ({
 
 vi.mock("@mantine/core", () => ({
   LoadingOverlay: () => null,
+  Alert: ({ title, children }: { title: string; children: unknown }) => (
+    <div role="alert">
+      {title}
+      {children as never}
+    </div>
+  ),
+  Button: ({ children }: { children: unknown }) => (
+    <button>{children as never}</button>
+  ),
+  Center: ({ children }: { children: unknown }) => (
+    <div>{children as never}</div>
+  ),
+  Stack: ({ children }: { children: unknown }) => (
+    <div>{children as never}</div>
+  ),
 }));
 
 const mockedSettings = vi.mocked(useSystemSettings);
@@ -31,13 +46,19 @@ function withState({
   settings,
   needsOnboarding,
   isLoading,
+  isError = false,
 }: {
   settings: unknown;
   needsOnboarding: boolean;
   isLoading: boolean;
+  isError?: boolean;
 }) {
   mockedSettings.mockReturnValue({
     data: settings,
+    isError,
+    error: isError ? new Error("Network Error") : null,
+    isFetching: false,
+    refetch: vi.fn(),
   } as unknown as ReturnType<typeof useSystemSettings>);
   mockedOnboarding.mockReturnValue({ needsOnboarding, isLoading });
 }
@@ -86,6 +107,26 @@ describe("Redirector", () => {
       isLoading: true,
     });
     render(<Redirector />);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("says so instead of spinning for ever when settings will not answer", () => {
+    // The landing page of a Bazarr+ that cannot answer used to be a spinner
+    // with no message and nothing to press, which is the first thing a broken
+    // install shows its owner.
+    withState({
+      settings: undefined,
+      needsOnboarding: true,
+      isLoading: false,
+      isError: true,
+    });
+
+    render(<Redirector />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/did not answer/i);
+    expect(
+      screen.getByRole("button", { name: /try again/i }),
+    ).toBeInTheDocument();
     expect(navigate).not.toHaveBeenCalled();
   });
 

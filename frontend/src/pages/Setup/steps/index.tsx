@@ -107,11 +107,18 @@ export const ONBOARDING_STEPS: WizardStepDef[] = [
     Component: LanguagesStep,
   },
   {
+    // Optional, though it is the step that matters most. It is also the one
+    // step that restarts the application, and it was the only exit-less screen
+    // in the wizard: a catalog that will not load, an install that keeps
+    // failing or simply nobody to decide yet left the reader with a disabled
+    // Continue and the permanent skip in the header as the only way out. The
+    // consequence is named in the step body instead, where it can also say
+    // where to do this later.
     key: "providers",
     label: "Providers",
     phase: "subtitles",
-    requiredReason:
-      "Without at least one provider there is nothing for Bazarr+ to fetch subtitles from.",
+    optional: true,
+    skipLabel: "I will pick providers later",
     Component: ProvidersStep,
   },
   {

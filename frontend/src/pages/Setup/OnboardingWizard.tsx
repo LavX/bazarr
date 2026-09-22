@@ -1,6 +1,22 @@
-import { FunctionComponent, useMemo } from "react";
-import { useNavigate } from "react-router";
-import { Box, Button, Group, Paper, Text } from "@mantine/core";
+import {
+  FunctionComponent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { useNavigate, useParams } from "react-router";
+import {
+  Alert,
+  Box,
+  Button,
+  Group,
+  Modal,
+  Paper,
+  Stack,
+  Text,
+} from "@mantine/core";
 import { faCheck } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useSettingsMutation } from "@/apis/hooks";
@@ -16,6 +32,7 @@ import {
   OnboardingSelectionProvider,
   useOnboardingSelection,
 } from "./useOnboardingSelection";
+import { StepDraftProvider, useClearStepDrafts } from "./useStepDrafts";
 import { useWizardStep } from "./useWizardStep";
 import styles from "./OnboardingWizard.module.scss";
 
@@ -35,8 +52,12 @@ import styles from "./OnboardingWizard.module.scss";
 const OnboardingWizardBody: FunctionComponent = () => {
   const { intent, resetIntent } = useOnboardingIntent();
   const { drafts, clearSelection } = useOnboardingSelection();
+  const clearStepDrafts = useClearStepDrafts();
   const navigate = useNavigate();
+  const { stepKey } = useParams<{ stepKey?: string }>();
   const mutation = useSettingsMutation();
+  const [leaving, setLeaving] = useState(false);
+  const [leaveError, setLeaveError] = useState<string | null>(null);
 
   const signature = drafts
     .map((draft) => `${draft.draftId}:${draft.kind}:${draft.instanceId ?? ""}`)
@@ -59,8 +80,61 @@ const OnboardingWizardBody: FunctionComponent = () => {
     [intent, mediaServers],
   );
 
-  const { index, step: current, next, back, reset } = useWizardStep(steps);
+  const { index, step: current, goTo, reset } = useWizardStep(steps);
   const StepComponent = current.Component;
+
+  // The step key is in the URL, so the wizard has history of its own: browser
+  // Back walks one step back instead of leaving the application, a reload
+  // lands on the step it left, and a step can be linked to in a support
+  // thread. The persisted cursor stays as the fallback for a bare /setup.
+  const knownParam =
+    stepKey !== undefined && steps.some((s) => s.key === stepKey);
+  // The key of a move already asked for and not yet arrived. Without it the
+  // two directions are indistinguishable: a stale URL beside a moved cursor
+  // and a moved URL beside a stale cursor look exactly alike from here, and
+  // whichever one this effect guessed at, it guessed wrong half the time.
+  const pendingUrl = useRef<string | null>(null);
+
+  // Moving the cursor and the URL is one action, so the effect below only ever
+  // has to deal with a URL that moved on its own: a browser Back or Forward,
+  // or a pasted link.
+  const moveTo = useCallback(
+    (key: string) => {
+      pendingUrl.current = key;
+      goTo(key);
+      navigate(`/setup/${key}`);
+    },
+    [goTo, navigate],
+  );
+  const next = useCallback(
+    () => moveTo(steps[Math.min(index + 1, steps.length - 1)].key),
+    [moveTo, steps, index],
+  );
+  const back = useCallback(
+    () => moveTo(steps[Math.max(index - 1, 0)].key),
+    [moveTo, steps, index],
+  );
+
+  useEffect(() => {
+    if (stepKey === current.key) {
+      pendingUrl.current = null;
+      return;
+    }
+    if (pendingUrl.current === current.key) {
+      // Our own navigation, still on its way. It is also what keeps the wizard
+      // working where there is no router to answer it at all.
+      return;
+    }
+    if (knownParam && stepKey !== undefined) {
+      pendingUrl.current = stepKey;
+      goTo(stepKey);
+      return;
+    }
+    // The URL names no step, or names one this run does not walk. Neither is
+    // an entry worth being able to go back to, so it is replaced.
+    pendingUrl.current = current.key;
+    navigate(`/setup/${current.key}`, { replace: true });
+  }, [stepKey, knownParam, current.key, goTo, navigate]);
 
   // Progress is reported per phase, never as a step total. Before the intent
   // is answered nobody knows which path runs, and the media server segment
@@ -78,7 +152,11 @@ const OnboardingWizardBody: FunctionComponent = () => {
       ? `${current.segment} ${inSegment.findIndex((s) => s.key === current.key) + 1} of ${inSegment.length}`
       : `${inPhase.findIndex((s) => s.key === current.key) + 1} of ${inPhase.length}`;
 
-  const handleSkip = () => {
+  // Marking setup complete ends onboarding, so it asks first. The write can
+  // also fail, and a failed write used to produce nothing at all: no spinner,
+  // no message, no navigation, just a button that had apparently done nothing.
+  const handleLeave = () => {
+    setLeaveError(null);
     mutation.mutate(
       { "settings-general-setup_complete": true },
       {
@@ -86,14 +164,20 @@ const OnboardingWizardBody: FunctionComponent = () => {
           reset();
           resetIntent();
           clearSelection();
+          clearStepDrafts();
           // The storage key is cleared here rather than left to the provider's
           // effect: the navigation below unmounts the provider in the same
           // commit, so the effect need not run, and the skipped drafts would
           // still be there to restore on the next visit to setup.
           clearPersistedSelection();
+          setLeaving(false);
           // The Redirector picks routing back up once setup is marked complete.
           navigate("/");
         },
+        onError: () =>
+          setLeaveError(
+            "Bazarr+ could not save that. You are still in setup, so nothing is lost. Check that Bazarr+ is reachable and try again.",
+          ),
       },
     );
   };
@@ -110,11 +194,49 @@ const OnboardingWizardBody: FunctionComponent = () => {
             </Text>
           </div>
           <Group gap="sm">
-            <Button variant="subtle" color="gray" onClick={handleSkip}>
-              Skip setup
+            <Button
+              variant="subtle"
+              color="gray"
+              onClick={() => {
+                setLeaveError(null);
+                setLeaving(true);
+              }}
+            >
+              Set up later
             </Button>
           </Group>
         </header>
+
+        <Modal
+          opened={leaving}
+          onClose={() => setLeaving(false)}
+          title="Leave setup?"
+          centered
+        >
+          <Stack gap="md">
+            <Text size="sm">
+              You can run first-time setup again any time from Settings,
+              General. Anything you have already saved stays saved.
+            </Text>
+            {leaveError && (
+              <Alert color="red" title="Could not leave setup">
+                {leaveError}
+              </Alert>
+            )}
+            <Group justify="flex-end">
+              <Button variant="default" onClick={() => setLeaving(false)}>
+                Keep going
+              </Button>
+              <Button
+                color="red"
+                onClick={handleLeave}
+                loading={mutation.isPending}
+              >
+                Leave setup
+              </Button>
+            </Group>
+          </Stack>
+        </Modal>
 
         <div className={styles.rail} aria-hidden>
           {WIZARD_PHASES.map((phase, position) => {
@@ -170,13 +292,14 @@ const OnboardingWizardBody: FunctionComponent = () => {
             onNext={next}
             onBack={index > 0 ? back : undefined}
             draftId={current.draftId}
+            stepKey={current.key}
           />
         </Paper>
 
         {current.optional ? (
           <div className={styles.stepSkip}>
             <Button variant="subtle" color="gray" onClick={next}>
-              Skip this step
+              {current.skipLabel ?? "Do this later"}
             </Button>
           </div>
         ) : (
@@ -192,7 +315,9 @@ const OnboardingWizardBody: FunctionComponent = () => {
 const OnboardingWizardView: FunctionComponent = () => (
   <OnboardingIntentProvider>
     <OnboardingSelectionProvider>
-      <OnboardingWizardBody />
+      <StepDraftProvider>
+        <OnboardingWizardBody />
+      </StepDraftProvider>
     </OnboardingSelectionProvider>
   </OnboardingIntentProvider>
 );

@@ -13,6 +13,7 @@ import { useSettingsMutation } from "@/apis/hooks";
 import { useSeerrTestConnectionMutation } from "@/apis/hooks/seerr";
 import { seerrEnabledKey } from "@/pages/Settings/keys";
 import StepLayout from "@/pages/Setup/StepLayout";
+import { useStepDraft } from "@/pages/Setup/useStepDrafts";
 import type { WizardStepProps } from "./types";
 
 /**
@@ -21,12 +22,19 @@ import type { WizardStepProps } from "./types";
  * Connections page owns and flips use_seerr on. Continue with nothing filled in
  * writes nothing and advances, exactly like the media-server step.
  */
-const SeerrStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
+const SeerrStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
   const settings = useSettingsMutation();
 
-  const [url, setUrl] = useState("");
+  // Held by the wizard so Back and forward do not empty the form. The key is
+  // left out for the same reason it is on the arr steps: it is a credential.
+  const [draft, patchDraft] = useStepDraft(stepKey, {
+    url: "",
+    verifySsl: true,
+  });
+  const { url, verifySsl } = draft;
+  const setUrl = (value: string) => patchDraft({ url: value });
+  const setVerifySsl = (value: boolean) => patchDraft({ verifySsl: value });
   const [apiKey, setApiKey] = useState("");
-  const [verifySsl, setVerifySsl] = useState(true);
   const [saveError, setSaveError] = useState<string | null>(null);
 
   const trimmedUrl = url.trim();

@@ -325,7 +325,11 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
         <Title order={2}>Enable and configure providers</Title>
         <Text c="dimmed">
           Turn on the providers you want to use and enter any credentials they
-          need. You must enable at least one provider to continue.
+          need.
+        </Text>
+        <Text c="dimmed" size="sm">
+          Until you enable a provider, Bazarr+ has nothing to search. You can do
+          this from the Subtitle Hub whenever you like.
         </Text>
       </Stack>
 
