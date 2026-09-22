@@ -243,6 +243,55 @@ def test_the_throttled_provider_really_stops_receiving_requests(monkeypatch, tmp
     assert len(asked) == 1, "a provider serving out its backoff was asked again"
 
 
+def test_a_search_in_flight_cannot_re_throttle_credentials_that_were_just_corrected(monkeypatch, tmp_path):
+    """Dropping the pool does not cancel the searches running on it.
+
+    Correcting a provider's credentials clears its twelve-hour backoff and
+    drops the pool, but a call already in flight is still presenting the old
+    password. Its AuthenticationError judged the credentials the user has just
+    replaced, so recording it writes the backoff straight back over the one the
+    save cleared and the corrected provider is skipped again. A failure the
+    provider owns, a rate limit or an outage, is unaffected by what was saved
+    locally and is still recorded.
+    """
+    from app import get_providers
+    from app.config import settings
+    from provider_hub.registry import HubProxyProvider
+    from subliminal.exceptions import AuthenticationError
+    from subliminal.video import Movie
+    from subliminal_patch.exceptions import TooManyRequests
+    from subliminal_patch.extensions import provider_registry
+    from subzero.language import Language
+
+    name = "compat_superseded"
+    saves = []
+
+    def list_subtitles(self, video, languages):
+        if saves:
+            # The credential save lands while this call is in flight.
+            service.reset_compat_pool()
+            raise AuthenticationError("the password the user has just replaced")
+        raise TooManyRequests("slow down")
+
+    cls = type("SupersededFixtureProvider", (HubProxyProvider,),
+               {"provider_name": name, "languages": {Language("eng")},
+                "list_subtitles": list_subtitles})
+    monkeypatch.setitem(provider_registry.providers, name, cls)
+    _isolated_compat_pool(monkeypatch, tmp_path, [name])
+    monkeypatch.setattr(settings.compat_endpoint, "serve_local_subs", False)
+    monkeypatch.setattr(service, "_build_video",
+                        lambda *args, **kwargs: Movie("/no/such/file.mkv", "The Matrix",
+                                                      imdb_id="tt0133093"))
+
+    saves.append("saved")
+    service._do_fanout("tt0133093", None, None, [Language("eng")], "movie", timeout_seconds=8)
+    assert name not in get_providers.tp, "the superseded call re-throttled the corrected credentials"
+
+    saves.clear()
+    service._do_fanout("tt0133093", None, None, [Language("eng")], "movie", timeout_seconds=8)
+    assert get_providers.tp[name][0] == "TooManyRequests"
+
+
 def test_a_pool_rebuilt_during_a_backoff_asks_the_provider_again_once_it_lifts(monkeypatch, tmp_path):
     """The way back into the pool, which only Discover used to ask for.
 

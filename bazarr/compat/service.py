@@ -10,7 +10,8 @@ from subliminal.video import Episode, Movie, Video
 from subliminal_patch.core_persistent import list_all_subtitles_parallel
 
 from app.config import settings
-from app.get_providers import (get_provider_language_hook, get_providers_sorted, get_providers_auth,
+from app.get_providers import (CREDENTIAL_THROTTLE_REASONS, get_provider_language_hook,
+                               get_providers_sorted, get_providers_auth,
                                provider_is_usable, provider_throttle)
 from . import auth, cache as C, response_mapper as M
 from .local_subs import search_local, _UNRESOLVED_SPORTS
@@ -20,6 +21,11 @@ logger = logging.getLogger("bazarr.compat.service")
 
 _pool_lock = Lock()
 _compat_pool = None  # lazy singleton, dedicated (B2)
+# Bumped every time the pool is dropped. A drop does not cancel the searches
+# already running on the old pool, and those calls carry the credentials the
+# user has just replaced, so their verdict on those credentials has to be told
+# apart from the new pool's.
+_pool_generation = 0
 # Providers that consume the client-supplied OpenSubtitles-style moviehash.
 # NapiProjekt is intentionally excluded: it keys on a different hash (md5 of the
 # first 10 MB, a 32-char digest), and feeding it the 16-char OS hash makes its
@@ -51,6 +57,42 @@ def _record_throttle(name, exception, ids=None, language=None, sports_context=No
                              sports_context=sports_context, wait=False)
 
 
+def _throttle_recorder(generation):
+    """The pool's throttle callback, tied to the pool that was given it.
+
+    Dropping the pool is how a credential change takes effect, but it does not
+    cancel the searches already in flight on the old one. Those calls are still
+    presenting the password the user has just corrected, so the
+    AuthenticationError one of them is about to raise is evidence about the old
+    credentials and none at all about the new ones. Recorded anyway, it writes
+    the twelve-hour entry back over the one the save just cleared, and the
+    provider the user has only now fixed is skipped again with nothing on
+    screen to say why. Only the credential classes are dropped: a rate limit or
+    an outage a superseded call ran into is about the provider itself and
+    stands whatever the local configuration does.
+
+    A save replaces the whole pool's configuration, so this covers every
+    provider on the old pool rather than one. An unchanged provider whose
+    credentials really are wrong therefore records its backoff on the next
+    search instead of this one, which is the right way round to be wrong: it
+    asks a bad provider once more, where the alternative keeps skipping one the
+    user has just fixed.
+    """
+    def record(name, exception, ids=None, language=None, sports_context=None):
+        if generation != _pool_generation and (
+                exception.__class__.__name__ in CREDENTIAL_THROTTLE_REASONS):
+            logger.info("compat: not recording a %s backoff for %s, the configuration it "
+                        "judged has already been replaced",
+                        exception.__class__.__name__, name)
+            # What a no-wait record returns: there is no retry on this path
+            # either way, so the caller's handling is unchanged.
+            return True
+        return _record_throttle(name, exception, ids=ids, language=language,
+                                sports_context=sports_context)
+
+    return record
+
+
 def _get_compat_pool(*, restore_available=False):
     """Dedicated SZAsyncProviderPool instance. MUST NOT share app.get_providers._pools."""
     global _compat_pool
@@ -71,7 +113,7 @@ def _get_compat_pool(*, restore_available=False):
                 # the failure with the duration its exception class earns, and
                 # adoption_gate keeps a provider that is serving out a backoff
                 # from being re-adopted into the pool behind that record's back.
-                throttle_callback=_record_throttle,
+                throttle_callback=_throttle_recorder(_pool_generation),
                 adoption_gate=provider_is_usable,
                 language_hook=get_provider_language_hook(),
                 language_equals=[],
@@ -95,9 +137,10 @@ def _get_compat_pool(*, restore_available=False):
 
 def reset_compat_pool() -> None:
     """Called on settings-change or provider toggle so stale creds don't persist."""
-    global _compat_pool
+    global _compat_pool, _pool_generation
     with _pool_lock:
         _compat_pool = None
+        _pool_generation += 1
 
 
 def _tt(imdb_id) -> str:
