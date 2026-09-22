@@ -354,3 +354,47 @@ class TestProviderHubSettingsOverlay:
             config.set("overlayhub", {})
 
         assert auth["overlayhub"]["apikey"] == "typed-into-the-settings-card"
+
+
+def test_concurrent_recorders_do_not_race_on_the_staging_file(monkeypatch, tmp_path):
+    """Every writer stages through the same throttled_providers.dat.tmp. The
+    compat fanout now records throttles from inside its provider futures, so
+    two providers failing at once reach this function together: without
+    serialization the second os.replace finds the file the first already moved
+    and the FileNotFoundError surfaces out of a provider's error handler, which
+    the fanout reports in place of the failure it was recording."""
+    import datetime
+    import os
+    import threading
+    import time
+
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(get_providers.args, "config_dir", str(tmp_path))
+    real_replace = os.replace
+
+    def slow_replace(src, dst):
+        # Widen the window the lock has to close. Without it the interleaving
+        # is real but rare enough to pass by luck on a quiet machine.
+        time.sleep(0.01)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(get_providers.os, "replace", slow_replace)
+    until = datetime.datetime.now() + datetime.timedelta(minutes=10)
+    failures = []
+
+    def record(index):
+        try:
+            get_providers.set_throttled_providers(
+                {f"provider_{index}": ("APIThrottled", until, "10 minutes")})
+        except Exception as error:
+            # Catching everything is the point: none must escape.
+            failures.append(error)
+
+    threads = [threading.Thread(target=record, args=(index,)) for index in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert failures == []
+    assert (tmp_path / "config" / "throttled_providers.dat").exists()

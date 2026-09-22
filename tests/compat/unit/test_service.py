@@ -265,8 +265,13 @@ def test_recording_a_rate_limit_does_not_sleep_inside_the_fanout(monkeypatch, tm
 
     assert elapsed < 2.0, "the throttle bookkeeping slept inside the fanout deadline"
     assert [outcome.status for outcome in outcomes] == ["cooldown"]
-    # Counted all the same: the pause is what is dropped, not the bookkeeping.
+    # Recorded all the same, and on the first event: the pause is what is
+    # dropped, not the backoff. Waiting for a fifth event would have this path
+    # re-ask a rate-limited provider on its next four requests, with the
+    # per-provider cool-offs never applying to it at all.
     assert get_providers.throttle_count[name]["count"] == 1
+    recorded, until, description = get_providers.tp[name]
+    assert recorded == "APIThrottled" and description == "10 minutes"
 
 
 def test_a_worker_that_blew_its_deadline_is_recorded_as_a_timeout(monkeypatch, tmp_path):
@@ -292,3 +297,39 @@ def test_a_worker_that_blew_its_deadline_is_recorded_as_a_timeout(monkeypatch, t
     # And that is a cause Discover can name rather than a bare cooldown.
     from discover.search import _THROTTLE_CAUSE
     assert _THROTTLE_CAUSE[recorded] == ("timeout", "timeout")
+
+
+def test_a_provider_raised_timeout_from_a_worker_is_recorded_as_a_timeout(monkeypatch, tmp_path):
+    """The hard-deadline kill is not the only timeout the transport flattens.
+    A provider that raises one itself comes back as code="provider" plus the
+    remote class name, which the search outcome already reads. Classifying only
+    the deadline case leaves the table saying WorkerError with the generic
+    default about a failure the UI is calling a timeout, and _retry_delay then
+    prefers that mismatched deadline."""
+    from app import get_providers
+    from provider_hub.worker import WorkerError
+
+    name = _fixture_provider(monkeypatch, "compat_remote_timeout",
+                             WorkerError("provider failed", code="provider",
+                                         remote_class_name="ReadTimeout"))
+    pool = _isolated_compat_pool(monkeypatch, tmp_path, [name])
+    outcomes = []
+    _search(pool, name, lambda outcome, elapsed: outcomes.append(outcome))
+
+    assert [outcome.status for outcome in outcomes] == ["timeout"]
+    recorded, until, description = get_providers.tp[name]
+    assert recorded == "ReadTimeout" and description == "1 hour"
+
+
+def test_a_provider_error_the_transport_cannot_name_keeps_its_own_class(monkeypatch, tmp_path):
+    """Only the timeout names are translated. Anything else stays what it was,
+    so the envelope cannot quietly relabel unrelated provider failures."""
+    from app import get_providers
+    from provider_hub.worker import WorkerError
+
+    name = _fixture_provider(monkeypatch, "compat_remote_other",
+                             WorkerError("provider failed", code="provider",
+                                         remote_class_name="SomeProviderError"))
+    pool = _isolated_compat_pool(monkeypatch, tmp_path, [name])
+    _search(pool, name)
+    assert get_providers.tp[name][0] == "WorkerError"

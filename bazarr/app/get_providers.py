@@ -9,6 +9,7 @@ import subliminal_patch
 import time
 import socket
 import requests
+import threading
 import traceback
 import re
 
@@ -156,6 +157,23 @@ PROVIDERS_FORCED_OFF = ["addic7ed", "tvsubtitles", "legendasdivx", "napiprojekt"
                         "supersubtitles", "titlovi", "assrt"]
 
 throttle_count = {}
+# The compat fanout records throttles from inside its provider futures, so two
+# providers failing at once now reach set_throttled_providers() concurrently.
+# That function stages every write through one fixed .tmp path, so without this
+# the second thread's os.replace() finds the file the first already moved and
+# raises FileNotFoundError out of the provider's own error handler, which the
+# fanout then reports instead of the failure it was recording.
+_THROTTLE_FILE_LOCK = threading.Lock()
+
+# Remote exception names the worker transport carries when a provider raised a
+# timeout. The envelope keeps the class name but not the class, so a search
+# outcome and this table disagree about the same failure unless both read it.
+# These are exactly the names core.provider_search_failure calls a timeout.
+_REMOTE_TIMEOUTS = {
+    "Timeout": requests.exceptions.Timeout,
+    "ConnectTimeout": requests.exceptions.ConnectTimeout,
+    "ReadTimeout": requests.exceptions.ReadTimeout,
+}
 
 
 def provider_is_usable(name):
@@ -616,30 +634,36 @@ def provider_throttle(name, exception, ids=None, language=None, sports_context=N
     """Record a provider failure in the throttle table.
 
     ``wait`` is the caller's promise about its own deadline. The count gate
-    below sleeps between the first few rate-limit events, which is right for a
-    search that is about to retry the same provider in the same call, and wrong
-    for a bounded fanout: there the sleep is spent inside the wall the other
-    providers are still living on, and the provider whose failure is being
-    recorded is reported as abandoned rather than cooling down. A caller that
-    cannot afford the sleep passes ``wait=False`` and gets the counting and the
-    table write without it.
+    below pauses through the first few rate-limit events and only records the
+    backoff on the fifth, which is right for a search that is about to retry
+    the same provider in the same call: the pause is the retry's whole point,
+    and a provider that recovers on the second attempt has earned no backoff.
+    A bounded fanout does neither. The pause would be spent inside the wall the
+    other providers are still living on, and there is no retry for it to buy,
+    so the first rate limit is the only evidence there will be. Such a caller
+    passes ``wait=False`` and the backoff is recorded at once, without a pause.
     """
     if isinstance(exception, MustGetBlacklisted) and isinstance(ids, dict) and isinstance(language, Language):
         return _handle_mgb(name, exception, ids, language, sports_context)
 
     cls = getattr(exception, "__class__")
     cls_name = getattr(cls, "__name__")
-    # A plugin worker that blew its hard deadline reaches us as a WorkerError:
-    # the transport cannot carry the original exception class, only a code.
-    # Classifying by class alone records "WorkerError" with the generic
-    # ten-minute default, so the cooldown Discover reads back out of this table
-    # afterwards says "provider cooldown" about what was plainly a timeout, and
-    # outranks the timeout floor with a duration that has nothing to do with
-    # the cause. core.provider_search_failure already honours this code; the
-    # backoff has to agree with it or the two disagree on screen.
-    if getattr(exception, "code", None) == "timeout":
+    # A plugin worker's failure reaches us as a WorkerError: the transport
+    # cannot carry the original exception class, only a code and, for a failure
+    # the provider itself raised, the remote class name. Classifying by class
+    # alone records "WorkerError" with the generic ten-minute default, so the
+    # cooldown Discover reads back out of this table afterwards says "provider
+    # cooldown" about what was plainly a timeout, and outranks the timeout
+    # floor with a duration that has nothing to do with the cause.
+    # core.provider_search_failure already reads both the hard-deadline code
+    # and these remote names; the backoff has to agree with it or the two
+    # disagree on screen.
+    code = getattr(exception, "code", None)
+    if code == "timeout":
         cls = requests.exceptions.Timeout
-        cls_name = cls.__name__
+    elif code == "provider":
+        cls = _REMOTE_TIMEOUTS.get(getattr(exception, "remote_class_name", None), cls)
+    cls_name = cls.__name__
     if cls not in VALID_THROTTLE_EXCEPTIONS:
         for valid_cls in VALID_THROTTLE_EXCEPTIONS:
             if issubclass(cls, valid_cls):
@@ -721,9 +745,13 @@ def throttled_count(name, exception=None, wait=True):
         wait_seconds = max(1, min(exception.retry_after, 30))  # floor at 1s, cap at 30s
 
     if not wait:
-        logging.info("Provider %s throttle count %s of 5, counted without waiting", name,
+        # No pause means no retry, so there is no second attempt for this
+        # provider to redeem itself on. Record the backoff its exception class
+        # earns now, or the caller re-asks a rate-limited provider on its very
+        # next request and the per-provider cool-offs never apply to it.
+        logging.info("Provider %s throttle count %s of 5, recorded without waiting", name,
                      throttle_count[name]['count'])
-        return False
+        return True
 
     logging.info("Provider %s throttle count %s of 5, waiting %ds and trying again", name,
                  throttle_count[name]['count'], wait_seconds)
@@ -844,19 +872,26 @@ def set_throttled_providers(data):
     if not isinstance(data, dict):
         raise TypeError(f"set_throttled_providers expects a dict, got {type(data).__name__}")
     dat_path = _throttled_providers_path()
-    serializable = {}
-    for name, val in data.items():
-        cls_name, throttle_until, description = val
-        serializable[name] = (
-            cls_name,
-            throttle_until.isoformat() if throttle_until else None,
-            description
-        )
-    json_data = json.dumps(serializable)
-    tmp_path = dat_path + '.tmp'
-    with open(tmp_path, 'w') as handle:
-        handle.write(json_data)
-    os.replace(tmp_path, dat_path)
+    # Every writer stages through the one .tmp path, so two callers racing here
+    # have the second replace a file the first has already moved, and the
+    # FileNotFoundError surfaces out of whichever provider's error handler was
+    # recording its failure. Reading `data` under the same lock also keeps this
+    # iteration off a dict another recorder is writing to. The compat fanout
+    # records from inside its provider futures, so both races are now reachable
+    # from a single search.
+    with _THROTTLE_FILE_LOCK:
+        serializable = {}
+        for name, val in data.items():
+            cls_name, throttle_until, description = val
+            serializable[name] = (
+                cls_name,
+                throttle_until.isoformat() if throttle_until else None,
+                description
+            )
+        tmp_path = dat_path + '.tmp'
+        with open(tmp_path, 'w') as handle:
+            handle.write(json.dumps(serializable))
+        os.replace(tmp_path, dat_path)
 
 
 tp = get_throttled_providers()
