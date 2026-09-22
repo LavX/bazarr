@@ -435,3 +435,88 @@ def test_recording_a_throttle_never_walks_a_table_another_thread_is_resizing(mon
 
     assert failures == []
     assert set(get_providers.tp) == set(names)
+
+
+def test_a_fresh_backoff_recorded_mid_sweep_is_not_released_by_the_stale_read(monkeypatch, tmp_path):
+    """get_providers() reads the table, finds an entry expired, then removes
+    it. A provider future recording a fresh backoff between those two steps had
+    its deadline deleted on the strength of the one it replaced, and the
+    provider went straight back into the next search."""
+    import datetime
+    import threading
+
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(get_providers.args, "config_dir", str(tmp_path))
+    name = "sweep_racer"
+    expired = datetime.datetime.now() - datetime.timedelta(minutes=1)
+    fresh = datetime.datetime.now() + datetime.timedelta(minutes=30)
+    monkeypatch.setattr(get_providers, "tp", {name: ("APIThrottled", expired, "10 minutes")})
+    monkeypatch.setattr(get_providers.settings.general, "enabled_providers", [name])
+    monkeypatch.setattr(get_providers.provider_registry, "names", lambda: [name])
+    monkeypatch.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
+
+    recorded = threading.Event()
+    real_lock = get_providers._THROTTLE_LOCK
+
+    class RecordingLock:
+        """Stand in for the real lock and, the first time the sweep reaches
+        for it, let a recorder write a fresh deadline first."""
+
+        def __enter__(self):
+            if not recorded.is_set():
+                recorded.set()
+                get_providers.tp[name] = ("TooManyRequests", fresh, "30 minutes")
+            return real_lock.__enter__()
+
+        def __exit__(self, *args):
+            return real_lock.__exit__(*args)
+
+    monkeypatch.setattr(get_providers, "_THROTTLE_LOCK", RecordingLock())
+
+    assert get_providers.get_providers() is None, "the fresh backoff was not honoured"
+    assert get_providers.tp[name][0] == "TooManyRequests"
+
+
+def test_a_provider_asking_for_longer_than_its_class_gets_it(monkeypatch, tmp_path):
+    """The map says what an exception class is worth in general. A provider
+    that sent a Retry-After has said when it will answer again, and that is a
+    floor the class's duration must not undercut: the header used to choose
+    only how long to pause between retries, so a site asking for an hour was
+    re-queried after the class's ten minutes."""
+    import datetime
+    from subliminal_patch.exceptions import APIThrottled
+
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(get_providers.args, "config_dir", str(tmp_path))
+    monkeypatch.setattr(get_providers, "tp", {})
+    monkeypatch.setattr(get_providers, "throttle_count", {})
+    monkeypatch.setattr(get_providers, "event_stream", lambda *args, **kwargs: None)
+    monkeypatch.setattr(get_providers.settings.general, "enabled_providers", ["patient_provider"])
+    monkeypatch.setattr(get_providers.provider_registry, "names", lambda: ["patient_provider"])
+
+    get_providers.provider_throttle("patient_provider", APIThrottled(retry_after=3600), wait=False)
+
+    _reason, until, description = get_providers.tp["patient_provider"]
+    remaining = (until - datetime.datetime.now()).total_seconds()
+    assert 3400 < remaining < 3700, "the class duration undercut what the provider asked for"
+    assert description == "60 minutes"
+
+
+def test_a_short_retry_after_does_not_undercut_the_class_duration(monkeypatch, tmp_path):
+    """The longer of the two, not the header unconditionally."""
+    import datetime
+    from subliminal_patch.exceptions import APIThrottled
+
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(get_providers.args, "config_dir", str(tmp_path))
+    monkeypatch.setattr(get_providers, "tp", {})
+    monkeypatch.setattr(get_providers, "throttle_count", {})
+    monkeypatch.setattr(get_providers, "event_stream", lambda *args, **kwargs: None)
+    monkeypatch.setattr(get_providers.settings.general, "enabled_providers", ["hasty_provider"])
+    monkeypatch.setattr(get_providers.provider_registry, "names", lambda: ["hasty_provider"])
+
+    get_providers.provider_throttle("hasty_provider", APIThrottled(retry_after=5), wait=False)
+
+    _reason, until, description = get_providers.tp["hasty_provider"]
+    remaining = (until - datetime.datetime.now()).total_seconds()
+    assert 500 < remaining < 620 and description == "10 minutes"

@@ -1316,6 +1316,32 @@ def test_a_provider_that_never_searched_for_want_of_setup_is_not_complete_covera
     assert len(response["results"]) == 1
 
 
+def _fake_clock(monkeypatch, module, start=0.0):
+    """Replace a module's time source with one that only moves when told.
+
+    Budget accounting is what is under test, so the clock has to be driven by
+    the work being charged rather than by how busy the machine is.
+    """
+    import time as real_time
+    import types
+
+    clock = types.SimpleNamespace(now=start)
+    monkeypatch.setattr(module, "time",
+                        types.SimpleNamespace(time=real_time.time, monotonic=lambda: clock.now))
+    return clock
+
+
+def _charge_row_building(monkeypatch, module, clock, seconds):
+    real_result = module._result
+
+    def costly(*args, **kwargs):
+        row = real_result(*args, **kwargs)
+        clock.now += seconds
+        return row
+
+    monkeypatch.setattr(module, "_result", costly)
+
+
 def test_the_live_row_budget_is_spent_per_row_not_per_response(authenticated_client, providers,
                                                                monkeypatch):
     """One provider answering with a large batch used to overrun the budget by
@@ -1324,18 +1350,15 @@ def test_the_live_row_budget_is_spent_per_row_not_per_response(authenticated_cli
     providers are still being judged against, so the overrun is paid for by
     reporting working providers as abandoned."""
     import copy as copy_module
-    import time as real_time
-    import types
     from discover import progress, search as search_module
     from provider_hub.protocol import candidate_from_worker
 
-    # 0.6 of a second per call, so one row (two calls, start and end) costs
-    # 0.6 and the 1.5 second budget stops the loop after three of them. Real
-    # sleeping would make the same point in five seconds instead of none.
-    ticks = iter(0.6 * step for step in range(1, 500))
-    monkeypatch.setattr(search_module, "time",
-                        types.SimpleNamespace(time=real_time.time,
-                                              monotonic=lambda: next(ticks)))
+    # Building one row costs 0.6 of a second on a clock that moves only when a
+    # row is built, so the 1.5 second budget stops the loop after three of them
+    # and nothing else in the search is charged. Real sleeping would make the
+    # same point in five seconds instead of none.
+    clock = _fake_clock(monkeypatch, search_module)
+    _charge_row_building(monkeypatch, search_module, clock, 0.6)
     published = []
     original = progress.publish
 
@@ -1389,3 +1412,41 @@ def test_a_row_offered_early_still_resolves_when_the_search_finishes(authenticat
     # And with its whole lifetime ahead of it, not the remainder of one that
     # started before the slow provider had even answered.
     assert _seconds_from_now(rows[0]["expires_at"]) > 1.0
+
+
+def test_publishing_the_growing_row_list_is_charged_to_the_same_budget(authenticated_client,
+                                                                       providers, monkeypatch):
+    """Every outcome republishes the whole accumulated list and the observer
+    copies it, so with enough rows the copying costs more than the building the
+    budget was written to bound, and it comes out of the same wall. Charging it
+    is what stops the list growing once that is where the budget is going."""
+    import copy as copy_module
+    from discover import progress, search as search_module
+    from provider_hub.protocol import candidate_from_worker
+
+    clock = _fake_clock(monkeypatch, search_module)
+    published = []
+    original = progress.publish
+
+    def costly_publish(identity, observation):
+        published.append(copy_module.deepcopy(observation))
+        # 0.8 a call: the first two exhaust the 1.5 second budget between them.
+        clock.now += 0.8
+        return original(identity, observation)
+
+    monkeypatch.setattr(progress, "publish", costly_publish)
+
+    for name in ("discover_first", "discover_second"):
+        providers.add(name, [candidate_from_worker(name, {
+            "id": f"{name}-{index}", "language": {"alpha3": "eng"},
+            "release_info": f"The.Matrix.1999.{name}.{index}", "matches": ["imdb_id"],
+            "provider_payload": {}}) for index in range(4)])
+    response = _progress_post(authenticated_client, {
+        "media_type": "movie", "imdb_id": "tt0133093", "language": "eng"},
+        "55555555-6666-7777-8888-999999999999")
+    assert response.status_code == 200
+
+    offered = [observation["results"] for observation in published if observation.get("results")]
+    assert offered, "no observation carried a result"
+    assert len(offered[-1]) == 4, "publishing was not charged, so the list kept growing"
+    assert len(response.json["results"]) == 8

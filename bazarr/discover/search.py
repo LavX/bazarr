@@ -512,11 +512,21 @@ def search(request: SearchRequest, on_progress=None) -> dict:
         live_budget = 1.5
 
         def report_progress():
-            if on_progress is not None:
-                on_progress({"phase": "searching", "search_id": search_id, "context": dict(context),
-                             "results": list(live_rows), "providers": [
-                    outcomes.get(name, {"provider": name, "status": "pending", "result_count": 0})
-                    for name in sorted(set(providers) | set(outcomes))]})
+            # Charged to the same budget as building. Every outcome publishes
+            # the whole accumulated list and the observer copies it, so past a
+            # certain number of rows the copying costs more than the building
+            # it was meant to bound, and both come out of the wall the other
+            # providers are still searching on. Charging it here is what stops
+            # the list growing once that is what the budget is going to.
+            nonlocal live_budget
+            if on_progress is None:
+                return
+            started = time.monotonic()
+            on_progress({"phase": "searching", "search_id": search_id, "context": dict(context),
+                         "results": list(live_rows), "providers": [
+                outcomes.get(name, {"provider": name, "status": "pending", "result_count": 0})
+                for name in sorted(set(providers) | set(outcomes))]})
+            live_budget -= time.monotonic() - started
 
         def build_live_rows(subtitles):
             # Charged per row, not per response. Checking only on the way in

@@ -303,10 +303,21 @@ def get_providers():
                              until.strftime("%y/%m/%d %H:%M"), reason)
                 providers_list.remove(provider)
             else:
-                logging.info("Using %s again after %s, (disabled because: %s)", provider, throttle_desc, reason)
+                # Decide again with the lock held. The read above is a snapshot,
+                # and a provider future recording a fresh backoff between the
+                # two would otherwise have this release it on the strength of
+                # the deadline it has already replaced.
                 with _THROTTLE_LOCK:
-                    tp.pop(provider, None)
-                    set_throttled_providers(tp)
+                    reason, until, throttle_desc = tp.get(provider, (None, None, None))
+                    if reason and until and datetime.datetime.now() < until:
+                        logging.info("Not using %s until %s, because of: %s", provider,
+                                     until.strftime("%y/%m/%d %H:%M"), reason)
+                        providers_list.remove(provider)
+                    elif reason:
+                        logging.info("Using %s again after %s, (disabled because: %s)", provider,
+                                     throttle_desc, reason)
+                        tp.pop(provider, None)
+                        set_throttled_providers(tp)
         # if forced only is enabled: # fixme: Prepared for forced only implementation to remove providers with don't support forced only subtitles
         #     for provider in providers_list:
         #         if provider in PROVIDERS_FORCED_OFF:
@@ -680,6 +691,22 @@ def provider_throttle(name, exception, ids=None, language=None, sports_context=N
         throttle_delta, throttle_description = throttle_data
     else:
         throttle_delta, throttle_description = datetime.timedelta(minutes=10), "10 minutes"
+
+    # A provider that sent a Retry-After has said when it will answer again.
+    # The map holds what this exception class is worth in general, which is a
+    # floor, not a ceiling on what the provider asked for: a site asking for an
+    # hour was otherwise re-queried after the class's ten minutes, since the
+    # header only ever chose how long to pause between retries. Clamped the way
+    # core.provider_search_failure clamps the same value.
+    retry_after = getattr(exception, "retry_after", None)
+    try:
+        retry_after = max(1.0, min(86400.0, float(retry_after))) if retry_after else None
+    except (TypeError, ValueError):
+        retry_after = None
+    if retry_after and datetime.timedelta(seconds=retry_after) > throttle_delta:
+        throttle_delta = datetime.timedelta(seconds=retry_after)
+        throttle_description = (f"{round(retry_after)} seconds" if retry_after < 120
+                                else f"{round(retry_after / 60)} minutes")
 
     throttle_until = datetime.datetime.now() + throttle_delta
 
