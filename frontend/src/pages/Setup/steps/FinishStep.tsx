@@ -19,7 +19,10 @@ import {
   useSystemSettings,
 } from "@/apis/hooks";
 import { useMediaServerInstances } from "@/apis/hooks/mediaServers";
-import type { MediaServerKind } from "@/apis/raw/mediaServers";
+import type {
+  MediaServerInstance,
+  MediaServerKind,
+} from "@/apis/raw/mediaServers";
 import { kindName } from "@/pages/Settings/MediaServers/kinds";
 import {
   clearPersistedIntent,
@@ -82,18 +85,26 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
   const jellyfin = useMediaServerInstances("jellyfin");
   const emby = useMediaServerInstances("emby");
   const silo = useMediaServerInstances("silo");
+
+  const general = settings?.general;
+
+  // A switched-off row is not a destination: the dispatcher skips it, and the
+  // backend keeps exactly one after a Plex sign-out, credential cleared.
+  // Counting it told the reader Plex was connected and dropped the line saying
+  // where to finish the job.
+  const activeCount = (rows: MediaServerInstance[] | undefined) =>
+    (rows ?? []).filter((row) => row.enabled).length;
+
   const mediaServers: { kind: MediaServerKind; count: number }[] = [
-    { kind: "plex", count: plex.data?.length ?? 0 },
-    { kind: "jellyfin", count: jellyfin.data?.length ?? 0 },
-    { kind: "emby", count: emby.data?.length ?? 0 },
-    { kind: "silo", count: silo.data?.length ?? 0 },
+    { kind: "plex", count: activeCount(plex.data) },
+    { kind: "jellyfin", count: activeCount(jellyfin.data) },
+    { kind: "emby", count: activeCount(emby.data) },
+    { kind: "silo", count: activeCount(silo.data) },
   ];
   const mediaServerCount = mediaServers.reduce(
     (total, entry) => total + entry.count,
     0,
   );
-
-  const general = settings?.general;
   const discoverPath = intent === "discover";
 
   const sonarrCount = (instances ?? []).filter(

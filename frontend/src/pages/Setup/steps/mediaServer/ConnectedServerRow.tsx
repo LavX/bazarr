@@ -16,6 +16,8 @@ interface Props {
   last: boolean;
   /** Whether this is the Plex destination the signed-in account owns. */
   accountOwned?: boolean;
+  /** Whether ownership is still being resolved, so disconnecting must wait. */
+  ownershipPending?: boolean;
   onDisconnected: (instanceId: string) => void;
 }
 
@@ -41,6 +43,7 @@ const ConnectedServerRow: FC<Props> = ({
   kind,
   last,
   accountOwned = false,
+  ownershipPending = false,
   onDisconnected,
 }) => {
   const [confirming, setConfirming] = useState(false);
@@ -58,6 +61,12 @@ const ConnectedServerRow: FC<Props> = ({
         // reader never touched.
         if (last && !accountOwned) {
           settings.mutate({ [`settings-general-use_${kind}`]: false });
+        } else if (!last && accountOwned) {
+          // Signing out clears use_plex for the whole kind, and the dispatcher
+          // reads it before any row. The Plex servers the reader added by hand
+          // and kept would stop refreshing along with the account's own, so the
+          // switch is put back once its row is gone.
+          settings.mutate({ [`settings-general-use_${kind}`]: true });
         }
         onDisconnected(instance.id);
       },
@@ -85,8 +94,12 @@ const ConnectedServerRow: FC<Props> = ({
       <Group justify="space-between" wrap="nowrap" gap="sm">
         <Group gap="xs" wrap="nowrap">
           <Text fw={500}>{instance.name || kindName(kind)}</Text>
-          <Badge color="green" size="sm">
-            Connected
+          {/* A row the reader switched off refreshes nothing, and the one the
+              backend keeps after a Plex sign-out is exactly that. Calling it
+              connected told them setup was done when the dispatcher would
+              never use it. */}
+          <Badge color={instance.enabled ? "green" : "gray"} size="sm">
+            {instance.enabled ? "Connected" : "Turned off"}
           </Badge>
         </Group>
         {!confirming && (
@@ -94,6 +107,9 @@ const ConnectedServerRow: FC<Props> = ({
             variant="subtle"
             color="red"
             size="compact-sm"
+            // Which Plex row the account owns decides whether this signs out
+            // or only deletes, so it waits rather than guessing.
+            disabled={ownershipPending}
             onClick={() => setConfirming(true)}
           >
             Disconnect

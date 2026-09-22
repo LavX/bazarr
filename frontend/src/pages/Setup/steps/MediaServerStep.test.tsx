@@ -249,6 +249,103 @@ describe("MediaServerStep", () => {
     await waitFor(() => expect(calls).toEqual(["delete"]));
   });
 
+  it("waits for the settings before offering to disconnect a Plex row", async () => {
+    // Which Plex row the account owns comes from the settings. While that query
+    // is still in flight the missing value reads as "nothing recorded", which
+    // is the rule that falls back to the first row, so the wrong row could be
+    // signed out or the account's own row deleted with the token left behind
+    // for the next reconcile to rebuild it from.
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    setInstances({
+      plex: [row("plex", "Plex", "plex-1"), row("plex", "Loft", "plex-2")],
+    });
+    server.use(
+      http.get("/api/system/settings", async () => {
+        await held;
+        return HttpResponse.json({
+          general: {},
+          translator: {},
+          // eslint-disable-next-line camelcase
+          plex: { instance_id: "plex-2" },
+        });
+      }),
+    );
+    withSelection(<MediaServerStep onNext={onNext} />);
+
+    const waiting = await screen.findAllByRole("button", {
+      name: /^disconnect$/i,
+    });
+    expect(waiting[0]).toBeDisabled();
+
+    release?.();
+
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("button", { name: /^disconnect$/i })[0],
+      ).toBeEnabled(),
+    );
+  });
+
+  it("does not call a switched-off row connected", async () => {
+    // The dispatcher skips a disabled instance, and the backend keeps exactly
+    // one after a Plex sign-out, credential cleared. Reading it as connected
+    // ticked and locked the card, so the reader was told a refresh destination
+    // was set up and given no way to set one up at all.
+    setInstances({
+      jellyfin: [{ ...row("jellyfin", "Attic", "jf-1"), enabled: false }],
+    });
+    withSelection(<MediaServerStep onNext={onNext} />);
+
+    expect(await screen.findByText("Attic")).toBeInTheDocument();
+    expect(screen.getByText(/turned off/i)).toBeInTheDocument();
+    expect(screen.queryByText("Connected")).toBeNull();
+
+    const checkbox = screen.getByRole("checkbox", { name: /^Jellyfin$/ });
+    expect(checkbox).not.toBeChecked();
+    expect(checkbox).toBeEnabled();
+  });
+
+  it("keeps Plex refreshing for the servers the reader kept", async () => {
+    // Signing out clears use_plex for the whole kind, and the dispatcher reads
+    // that switch before any row. Deleting only the account's destination
+    // therefore left the hand-added Plex servers standing but silent.
+    const calls: string[] = [];
+    setInstances({
+      plex: [row("plex", "Plex", "plex-1"), row("plex", "Loft", "plex-2")],
+    });
+    setPlexOwner("plex-1");
+    server.use(
+      http.post("/api/plex/oauth/logout", () => {
+        calls.push("logout");
+        return HttpResponse.json({ success: true });
+      }),
+      http.delete("/api/system/media-server-instances/plex-1", () => {
+        calls.push("delete");
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    const user = userEvent.setup();
+    withSelection(<MediaServerStep onNext={onNext} />);
+
+    await screen.findByText("Loft");
+    await user.click(
+      screen.getAllByRole("button", { name: /^disconnect$/i })[0],
+    );
+    await user.click(
+      screen.getAllByRole("button", { name: /^disconnect$/i })[0],
+    );
+
+    await waitFor(() => expect(calls).toEqual(["logout", "delete"]));
+    await waitFor(() =>
+      expect(mutate).toHaveBeenCalledWith({
+        "settings-general-use_plex": true,
+      }),
+    );
+  });
+
   it("unticking a kind drops the servers it added", async () => {
     const user = userEvent.setup();
     withSelection(<MediaServerStep onNext={onNext} />);

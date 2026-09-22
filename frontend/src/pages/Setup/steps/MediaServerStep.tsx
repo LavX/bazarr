@@ -56,7 +56,7 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   const { drafts, addDraft, removeKind, removeDraft } =
     useOnboardingSelection();
 
-  const { data: settings } = useSystemSettings();
+  const { data: settings, isPending: settingsPending } = useSystemSettings();
   // One query per kind, a fixed four, so no hook is called in a loop.
   const plex = useMediaServerInstances("plex");
   const jellyfin = useMediaServerInstances("jellyfin");
@@ -80,12 +80,19 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   // reconcile to rebuild it from.
   const plexAccountRowId = useMemo(() => {
     const rows = plex.data ?? [];
-    if (rows.length === 0) {
+    // A settings query still in flight and an account with no recorded row
+    // look identical in this data, and the fallback to the first row is only
+    // honest for the second. Guessing while it is pending can sign the whole
+    // account out over a row the reader added by hand, or delete the account's
+    // own row without signing out, which the next reconcile rebuilds from the
+    // token that was left behind. So ownership stays unknown until it is known,
+    // and the row says so by not offering to disconnect yet.
+    if (rows.length === 0 || settingsPending) {
       return null;
     }
     const recorded = settings?.plex?.instance_id ?? "";
     return (rows.find((row) => row.id === recorded) ?? rows[0]).id;
-  }, [plex.data, settings?.plex?.instance_id]);
+  }, [plex.data, settings?.plex?.instance_id, settingsPending]);
 
   const takenNames = useMemo(
     () => ORDER.flatMap((kind) => connected[kind]).map((row) => row.name),
@@ -133,9 +140,15 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
 
       <Stack gap="sm">
         {ORDER.map((kind) => {
-          const rows = connected[kind];
+          // A switched-off row is not a destination: the dispatcher skips it,
+          // so counting it as connected would tick this card, lock it, and
+          // leave the reader no way to set that kind up at all. The one the
+          // backend keeps after a Plex sign-out is exactly that row, and it
+          // has had its credential cleared as well.
+          const rows = connected[kind].filter((row) => row.enabled);
           const pending = pendingOf(kind);
           const checked = rows.length > 0 || pending.length > 0;
+          const locked = rows.length > 0 && pending.length === 0;
           return (
             <Checkbox.Card
               key={kind}
@@ -144,13 +157,9 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
               checked={checked}
               // A connected server is undone by disconnecting it, not by
               // unticking it: the row is already written.
-              disabled={rows.length > 0 && pending.length === 0}
+              disabled={locked}
               aria-label={kindName(kind)}
-              onClick={() =>
-                rows.length > 0 && pending.length === 0
-                  ? undefined
-                  : toggle(kind, !checked)
-              }
+              onClick={() => (locked ? undefined : toggle(kind, !checked))}
             >
               <div className={styles.cardBody}>
                 <Checkbox.Indicator />
@@ -183,6 +192,7 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
                   accountOwned={
                     kind === "plex" && instance.id === plexAccountRowId
                   }
+                  ownershipPending={kind === "plex" && settingsPending}
                   onDisconnected={forgetInstance}
                 />
               ))}

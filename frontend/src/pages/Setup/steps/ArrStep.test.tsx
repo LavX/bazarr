@@ -56,12 +56,23 @@ function setTestState(state: Record<string, unknown>) {
   } as unknown as ReturnType<typeof useTestArrInstanceConnection>);
 }
 
+// The row the API hands back, as the create mutation reports it.
+const created = (id: number) => ({
+  id,
+  kind: "sonarr",
+  name: "Main Sonarr",
+  ip: "10.0.0.5",
+  port: 8989,
+  base_url: "",
+  ssl: false,
+});
+
 // Both writes succeed by default, so a test that cares about a failure sets
 // only the one it is about.
 function succeedingMutation(mutate: typeof createMutate) {
   mutate.mockImplementation(
-    (_body: unknown, opts?: { onSuccess?: () => void }) => {
-      opts?.onSuccess?.();
+    (_body: unknown, opts?: { onSuccess?: (data: unknown) => void }) => {
+      opts?.onSuccess?.(created(1));
     },
   );
 }
@@ -331,19 +342,9 @@ describe("ArrStep", () => {
     // kind still switched off.
     const user = userEvent.setup();
     createMutate.mockImplementation(
-      (_body: unknown, opts?: { onSuccess?: () => void }) => {
-        setInstances([
-          {
-            id: 1,
-            kind: "sonarr",
-            name: "Main Sonarr",
-            ip: "10.0.0.5",
-            port: 8989,
-            base_url: "",
-            ssl: false,
-          },
-        ]);
-        opts?.onSuccess?.();
+      (_body: unknown, opts?: { onSuccess?: (data: unknown) => void }) => {
+        setInstances([created(1)]);
+        opts?.onSuccess?.(created(1));
       },
     );
     settingsMutate.mockImplementation(
@@ -359,6 +360,35 @@ describe("ArrStep", () => {
 
     expect(await screen.findByText(/already connected/i)).toBeInTheDocument();
     expect(screen.getByText(/could not turn it on/i)).toBeInTheDocument();
+    expect(onNext).not.toHaveBeenCalled();
+  });
+
+  it("never creates a second row when the switch failed and the list lags", async () => {
+    // The create invalidates the instances query, so this step normally flips
+    // into its connected state on its own. A refetch that is slow, or one that
+    // fails outright, leaves it looking at an empty list with the instance
+    // already written, and the second press posted the same Sonarr again:
+    // two identical rows, each scheduled for sync, for one failed switch.
+    const user = userEvent.setup();
+    settingsMutate.mockImplementation(
+      (_body: unknown, opts?: { onError?: (error: unknown) => void }) => {
+        opts?.onError?.(new Error("nope"));
+      },
+    );
+
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await fillValidConnection(user);
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+    expect(
+      await screen.findByText(/could not turn it on/i),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    expect(createMutate).toHaveBeenCalledTimes(1);
+    // The press retries the part that failed instead.
+    expect(settingsMutate).toHaveBeenCalledTimes(2);
     expect(onNext).not.toHaveBeenCalled();
   });
 

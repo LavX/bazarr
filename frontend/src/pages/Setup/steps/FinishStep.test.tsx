@@ -14,7 +14,7 @@ import FinishStep from "./FinishStep";
 // The recap reads the media server rows, not the master switches. Staging them
 // per kind is what proves a connected Emby is named instead of being reported
 // as "Plex skipped, Jellyfin skipped".
-function setMediaServers(rows: Record<string, string[]>) {
+function setMediaServers(rows: Record<string, string[]>, off: string[] = []) {
   server.use(
     http.get("/api/system/media-server-instances", ({ request }) => {
       const kind = new URL(request.url).searchParams.get("kind") ?? "";
@@ -23,7 +23,7 @@ function setMediaServers(rows: Record<string, string[]>) {
           id: `${kind}-${index}`,
           kind,
           name,
-          enabled: true,
+          enabled: !off.includes(kind),
           url: "http://10.0.0.9:8096",
           verify_ssl: true,
           api_key_set: true,
@@ -137,6 +137,23 @@ describe("FinishStep", () => {
       screen.getByText(/silo connected \(1 server\)/i),
     ).toBeInTheDocument();
     expect(screen.queryByText(/plex media server skipped/i)).toBeNull();
+  });
+
+  it("does not count a switched-off row as a connected server", async () => {
+    // Signing out of Plex leaves the destination row behind, switched off and
+    // stripped of its credential, because signing back in should keep the
+    // libraries the reader chose. The dispatcher skips it, but the recap read
+    // the row and reported Plex connected, so the reader finished setup
+    // believing that server was a refresh destination.
+    setMediaServers({ plex: ["Plex"], emby: ["Emby"] }, ["plex"]);
+    customRender(<FinishStep onNext={vi.fn()} />);
+
+    // The switched-on server lands first, which is what says the rows have
+    // arrived and the recap is looking at them.
+    expect(
+      await screen.findByText(/emby connected \(1 server\)/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/plex connected/i)).toBeNull();
   });
 
   it("says so when the finish write fails instead of going quiet", async () => {

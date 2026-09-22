@@ -84,6 +84,12 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack }) => {
   const [apiKey, setApiKey] = useState("");
   const [errors, setErrors] = useState<FieldErrors>({});
   const [saveError, setSaveError] = useState<string | null>(null);
+  // The row this step wrote, remembered here rather than waited for. The create
+  // invalidates the instances query, so `existing` normally catches up on its
+  // own, but a refetch that is slow or that fails leaves it null with the row
+  // already in the database. Continue would then post a second identical
+  // instance instead of retrying the part that failed.
+  const [createdId, setCreatedId] = useState<number | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
 
@@ -152,9 +158,33 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack }) => {
     return found;
   };
 
+  // The row is what Bazarr+ syncs; the master switch is what lets it. Firing
+  // both on the same tick left instances that never synced when the switch
+  // failed, with nothing on screen to say so.
+  const activate = () => {
+    settings.mutate(
+      { [`settings-general-use_${kind}`]: true },
+      {
+        onSuccess: () => onNext(),
+        onError: () =>
+          setSaveError(
+            `${meta.label} was saved, but Bazarr+ could not turn it on. Open Settings, Connections after setup and enable ${meta.label} there.`,
+          ),
+      },
+    );
+  };
+
   const handleContinue = () => {
     if (existing) {
       onNext();
+      return;
+    }
+    // The instance is already written, whatever the list says. Pressing
+    // Continue again retries the switch that failed; it never creates a
+    // second row.
+    if (createdId !== null) {
+      setSaveError(null);
+      activate();
       return;
     }
     if (!touched) {
@@ -178,20 +208,9 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack }) => {
       // default, including the ones nobody confirmed.
     };
     create.mutate(body, {
-      onSuccess: () => {
-        // The row is what Bazarr+ syncs; the master switch is what lets it.
-        // Firing both on the same tick left instances that never synced when
-        // the switch failed, with nothing on screen to say so.
-        settings.mutate(
-          { [`settings-general-use_${kind}`]: true },
-          {
-            onSuccess: () => onNext(),
-            onError: () =>
-              setSaveError(
-                `${meta.label} was saved, but Bazarr+ could not turn it on. Open Settings, Connections after setup and enable ${meta.label} there.`,
-              ),
-          },
-        );
+      onSuccess: (created) => {
+        setCreatedId(created.id);
+        activate();
       },
       onError: (error) =>
         setSaveError(
@@ -211,8 +230,10 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack }) => {
     remove.mutate(existing.id, {
       onSuccess: () => {
         setConfirmRemove(false);
-        // The row this message was about is gone, so the message goes with it.
+        // The row this message was about is gone, so the message goes with it,
+        // and so does the memory of having written it.
         setSaveError(null);
+        setCreatedId(null);
       },
       onError: (error) =>
         setRemoveError(
