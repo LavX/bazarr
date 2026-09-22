@@ -1,5 +1,5 @@
 import { act, renderHook } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WizardStepDef } from "./steps/types";
 import { useWizardStep } from "./useWizardStep";
 
@@ -50,6 +50,10 @@ const LIBRARY = defs(
 describe("useWizardStep", () => {
   beforeEach(() => {
     localStorage.clear();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it("starts on the first step and persists nothing yet", () => {
@@ -113,6 +117,43 @@ describe("useWizardStep", () => {
 
     expect(result.current.step.key).toBe("providers");
     expect(localStorage.getItem(STORAGE_KEY)).toBe("providers");
+  });
+
+  it("resumes an upgrade served under a base URL", () => {
+    // The keys are namespaced by base URL now, and this reader's cursor was
+    // written before they were. Behind a reverse proxy under a subpath, which
+    // is the common deployment, a legacy value read only under the namespaced
+    // key looks like no value at all, and the reader starts again from Welcome.
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
+    localStorage.setItem("bazarr.onboarding.step", "4");
+    vi.stubGlobal("Bazarr", { baseUrl: "/bazarr" });
+
+    const { result } = renderHook(() => useWizardStep(DISCOVER));
+
+    expect(result.current.step.key).toBe("providers");
+    expect(localStorage.getItem("bazarr.onboarding.step::/bazarr")).toBe(
+      "providers",
+    );
+    expect(localStorage.getItem("bazarr.onboarding.intent::/bazarr")).toBe(
+      "discover",
+    );
+    // Both taken rather than left for a second instance to adopt as well.
+    expect(localStorage.getItem("bazarr.onboarding.step")).toBeNull();
+    expect(localStorage.getItem("bazarr.onboarding.intent")).toBeNull();
+  });
+
+  it("discards a legacy cursor for a step this run does not walk", () => {
+    localStorage.setItem("bazarr.onboarding.intent", "library");
+    localStorage.setItem("bazarr.onboarding.step", "2");
+    vi.stubGlobal("Bazarr", { baseUrl: "/bazarr" });
+
+    const { result } = renderHook(() =>
+      useWizardStep(defs("welcome", "intent", "finish")),
+    );
+
+    expect(result.current.step.key).toBe("welcome");
+    expect(localStorage.getItem("bazarr.onboarding.step::/bazarr")).toBeNull();
+    expect(localStorage.getItem("bazarr.onboarding.step")).toBeNull();
   });
 
   it("discards an index naming a step this run does not walk", () => {
