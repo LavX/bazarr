@@ -106,7 +106,15 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   };
 
   const forgetInstance = (instanceId: string) => {
-    const draft = drafts.find((entry) => entry.instanceId === instanceId);
+    // A draft that has written its row but is still on screen, because its
+    // master switch failed, holds that row under savedInstanceId rather than
+    // instanceId. Matching only the latter left such a draft standing after
+    // the reader disconnected its row from here, and continuing from its step
+    // then marked a deleted id as saved without writing anything at all.
+    const draft = drafts.find(
+      (entry) =>
+        entry.instanceId === instanceId || entry.savedInstanceId === instanceId,
+    );
     if (draft) {
       removeDraft(draft.draftId);
     }

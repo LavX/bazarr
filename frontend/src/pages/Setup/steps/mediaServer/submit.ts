@@ -138,7 +138,15 @@ export function useMediaServerSubmit() {
   const [isPending, setPending] = useState(false);
 
   const submit = useCallback(
-    async (drafts: MediaServerDraft[]): Promise<SubmitResult> => {
+    async (
+      drafts: MediaServerDraft[],
+      // Called for every server that landed, before the master switches are
+      // written. The caller records the row on its draft there rather than
+      // waiting for the whole run, because the switch write is a second round
+      // trip and the reader can be back on this step pressing Connect again
+      // long before it answers.
+      onCreated?: (outcome: SaveOutcome) => void,
+    ): Promise<SubmitResult> => {
       const errors: DraftErrors = {};
       for (const draft of drafts) {
         const found = validateDraft(draft);
@@ -174,6 +182,12 @@ export function useMediaServerSubmit() {
             error: describeSaveError(result.reason),
           };
         });
+
+        for (const outcome of outcomes) {
+          if (outcome.ok) {
+            onCreated?.(outcome);
+          }
+        }
 
         const kinds = new Set(
           outcomes

@@ -93,7 +93,7 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
   // Held on the draft, not in component state: pressing Back and walking
   // forward again remounts this form, and a warning that disappeared on the
   // way would be as good as never shown.
-  const savedButNotSwitchedOn = draft.savedInstanceId !== undefined;
+  const savedButNotSwitchedOn = draft.switchFailed === true;
 
   // Typing is the reader answering the message, so the message goes as they
   // answer it. It used to sit there until Test was pressed.
@@ -142,7 +142,12 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
       return;
     }
     setFailure(null);
-    void submit([draft]).then((result) => {
+    void submit([draft], (outcome) =>
+      // The row exists from here on, whatever the master switch write does
+      // next, so a remount mid-save finds a draft that knows not to write it
+      // again.
+      updateDraft(draft.draftId, { savedInstanceId: outcome.instanceId ?? "" }),
+    ).then((result) => {
       const found = result.errors[draft.draftId];
       if (found) {
         setErrors(found);
@@ -160,9 +165,7 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
         // renders it: the reader would reach Finish with the server reported
         // as connected and nothing refreshing. The step stays until they have
         // read it and pressed Continue again.
-        updateDraft(draft.draftId, {
-          savedInstanceId: outcome.instanceId ?? "",
-        });
+        updateDraft(draft.draftId, { switchFailed: true });
         return;
       }
       markSaved(draft.draftId, outcome.instanceId ?? "");

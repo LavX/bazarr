@@ -49,12 +49,16 @@ export interface MediaServerDraft {
   options: MediaServerOptions;
   instanceId?: string;
   // The row this draft has already written while its step is still on screen.
-  // A save whose master switch failed leaves the reader a message to read, so
-  // the step stays and the draft stays a draft; this is what stops the next
-  // press of Continue creating the same server a second time. It outlives a
-  // remount because pressing Back and walking forward again is exactly how a
-  // reader gets a second press.
+  // Recorded the moment the create lands, before the master switch is written,
+  // because pressing Back and walking forward again during a save remounts the
+  // form with no memory of the request still in flight: without this, the next
+  // press of Continue wrote the same server a second time. It is what says the
+  // row exists, whatever else has or has not happened to it.
   savedInstanceId?: string;
+  // The row landed but its kind's master switch did not, so nothing refreshes
+  // yet. The step stays on screen with a message rather than advancing, and
+  // the draft stays a draft until the reader has read it.
+  switchFailed?: boolean;
 }
 
 /** What the step builder needs. Nothing that changes while a field is typed. */
@@ -164,6 +168,7 @@ function readPersistedDrafts(): MediaServerDraft[] {
           ...(typeof row.savedInstanceId === "string"
             ? { savedInstanceId: row.savedInstanceId }
             : {}),
+          ...(row.switchFailed === true ? { switchFailed: true } : {}),
         },
       ];
     });

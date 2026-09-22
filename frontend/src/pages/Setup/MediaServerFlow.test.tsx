@@ -30,6 +30,8 @@ let refuse: MediaServerKind | null = null;
 let refuseSwitch = false;
 // Holds the master-switch write open, so a step can be left mid-save.
 let heldSwitch: Promise<void> | null = null;
+// The same for the create itself.
+let heldCreate: Promise<void> | null = null;
 
 function serialize(row: Row) {
   return {
@@ -59,6 +61,9 @@ function stageBackend() {
         name: string;
       };
       creates.push(body);
+      if (heldCreate) {
+        await heldCreate;
+      }
       if (refuse === body.kind) {
         return HttpResponse.json(
           { message: "Refused by the server." },
@@ -121,6 +126,7 @@ describe("media server selection", () => {
     refuse = null;
     refuseSwitch = false;
     heldSwitch = null;
+    heldCreate = null;
     stageBackend();
     startOnPicker();
   });
@@ -358,6 +364,72 @@ describe("media server selection", () => {
       screen.getByRole("heading", { name: /^emby$/i }),
     ).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: /^seerr$/i })).toBeNull();
+  });
+
+  it("does not write the server twice when the reader comes back mid-save", async () => {
+    // Back and forward again remounts the form with no memory of the request
+    // still in flight, so Connect was pressable a second time and wrote the
+    // same server twice. The row is recorded on the draft as soon as the
+    // create lands, before the master switch, so the second press accepts what
+    // is already there.
+    let release: (() => void) | undefined;
+    heldSwitch = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+
+    await connectJellyfin(user);
+    await waitFor(() => expect(creates).toHaveLength(1));
+
+    await user.click(screen.getByRole("button", { name: /^back$/i }));
+    await screen.findByRole("heading", { name: /^media servers$/i });
+    await user.click(screen.getByRole("button", { name: /set up 1 server/i }));
+    await screen.findByRole("heading", { name: /^jellyfin$/i });
+
+    // The switch write is still held, so nothing has told this form the run
+    // finished. Pressing the primary button must not create a second row.
+    await user.click(screen.getByRole("button", { name: /continue|connect/i }));
+    expect(creates).toHaveLength(1);
+
+    release?.();
+    await waitFor(() => expect(settingsWrites).toHaveLength(1));
+    expect(creates).toHaveLength(1);
+  });
+
+  it("drops the draft when the row it already wrote is disconnected", async () => {
+    // A save whose master switch failed leaves the row written and the step on
+    // screen, so the draft holds that row under savedInstanceId. Disconnecting
+    // it from the picker used to leave the draft standing: its step came back,
+    // and continuing from it marked a deleted id as saved without writing
+    // anything, so the reader finished with no server at all.
+    refuseSwitch = true;
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+
+    await connectJellyfin(user);
+    await screen.findByText(/master switch could not be turned on/i);
+
+    await user.click(screen.getByRole("button", { name: /^back$/i }));
+    await screen.findByRole("heading", { name: /^media servers$/i });
+
+    await user.click(
+      await screen.findByRole("button", { name: /^disconnect$/i }),
+    );
+    await user.click(
+      screen.getAllByRole("button", { name: /^disconnect$/i })[0],
+    );
+
+    // Nothing is pending any more, so no configure step is generated for it.
+    expect(
+      await screen.findByRole("button", { name: /continue without a server/i }),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: /continue without a server/i }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: /^seerr$/i }),
+    ).toBeInTheDocument();
   });
 
   it("keeps a failed master switch on screen instead of walking past it", async () => {

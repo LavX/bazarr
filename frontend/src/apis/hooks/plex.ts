@@ -139,6 +139,15 @@ export const usePlexServerSelectionMutation = () => {
       void queryClient.invalidateQueries({
         queryKey: mediaServerInstancesKey("plex"),
       });
+      // And so is plex.instance_id, which is the only thing that says which
+      // row the account owns. The settings query never goes stale on its own,
+      // so without this the wizard's picker reads the row the account has just
+      // made as one somebody added by hand: disconnecting it would delete it
+      // without signing out, and the credential left behind rebuilds it on the
+      // next reconcile.
+      void queryClient.invalidateQueries({
+        queryKey: [QueryKeys.System, QueryKeys.Settings],
+      });
     },
   });
 };

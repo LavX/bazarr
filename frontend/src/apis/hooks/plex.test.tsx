@@ -7,6 +7,7 @@ import { act, renderHook, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import { useMediaServerInstances } from "./mediaServers";
 import { usePlexServerSelectionMutation } from "./plex";
+import { useSystemSettings } from "./system";
 
 function queryWrapper() {
   const client = new QueryClient({
@@ -75,6 +76,58 @@ it("refreshes the Plex instance list when a server is selected", async () => {
 
     await waitFor(() =>
       expect(result.current.instances.data?.[0]?.id).toBe("plex-1"),
+    );
+  } finally {
+    unmount();
+    client.clear();
+  }
+});
+
+it("refreshes the settings that say which Plex row the account owns", async () => {
+  // plex.instance_id is the only thing that says the account owns a row, and
+  // the settings query never goes stale on its own. Left cached, the wizard's
+  // picker read the row the account had just made as one somebody added by
+  // hand: disconnecting it would have deleted it without signing out, and the
+  // credential left behind rebuilds it on the next reconcile.
+  let instanceId = "";
+  server.use(
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({
+        general: {},
+        translator: {},
+        plex: { instance_id: instanceId },
+      }),
+    ),
+    http.post("/api/plex/select-server", () => {
+      instanceId = "plex-1";
+      return HttpResponse.json({ data: { name: "Plex" } });
+    }),
+  );
+  const { wrapper, client } = queryWrapper();
+  const { result, unmount } = renderHook(
+    () => ({
+      settings: useSystemSettings(),
+      select: usePlexServerSelectionMutation(),
+    }),
+    { wrapper },
+  );
+
+  try {
+    await waitFor(() =>
+      expect(result.current.settings.data?.plex?.instance_id).toBe(""),
+    );
+
+    await act(async () => {
+      await result.current.select.mutateAsync({
+        machineIdentifier: "abc",
+        name: "Plex",
+        uri: "http://10.0.0.9:32400",
+        local: true,
+      });
+    });
+
+    await waitFor(() =>
+      expect(result.current.settings.data?.plex?.instance_id).toBe("plex-1"),
     );
   } finally {
     unmount();
