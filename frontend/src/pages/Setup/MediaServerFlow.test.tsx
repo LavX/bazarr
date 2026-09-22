@@ -315,6 +315,51 @@ describe("media server selection", () => {
     expect(creates).toHaveLength(1);
   });
 
+  it("does not walk the reader on when a save finishes behind their back", async () => {
+    // Skip during a save unmounts the step, and the save now settles anyway,
+    // which is the point. It must not also advance: useWizardStep.next reads
+    // the cursor from a ref, so an onNext fired by the step they already left
+    // moves them on from whatever screen they are now looking at. Here that is
+    // the Emby form they were sent to by the skip, and the extra step would
+    // carry them past it to Seerr without them touching anything.
+    let release: (() => void) | undefined;
+    heldSwitch = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+
+    await screen.findByRole("heading", { name: /^media servers$/i });
+    await user.click(screen.getByRole("checkbox", { name: /^Jellyfin$/ }));
+    await user.click(screen.getByRole("checkbox", { name: /^Emby$/ }));
+    await user.click(screen.getByRole("button", { name: /set up 2 servers/i }));
+    await screen.findByRole("heading", { name: /^jellyfin$/i });
+
+    await user.type(
+      screen.getByLabelText(/server url/i),
+      "http://10.0.0.9:8096",
+    );
+    await user.type(screen.getByLabelText(/api key/i), "jelly-key");
+    await user.click(screen.getByRole("button", { name: /connect jellyfin/i }));
+    await waitFor(() => expect(creates).toHaveLength(1));
+
+    // The shell's own skip, while the master switch write is still in the air.
+    await user.click(screen.getByRole("button", { name: /skip this step/i }));
+    await screen.findByRole("heading", { name: /^emby$/i });
+
+    release?.();
+    await waitFor(() => expect(settingsWrites).toHaveLength(1));
+    // Waiting on the segment counter rather than a timer: it drops to 2 of 2
+    // only once the saved draft has been committed and the step list rebuilt,
+    // which is the moment any stray advance would have happened.
+    expect(await screen.findByText(/media servers 2 of 2/i)).toBeVisible();
+
+    expect(
+      screen.getByRole("heading", { name: /^emby$/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^seerr$/i })).toBeNull();
+  });
+
   it("keeps a failed master switch on screen instead of walking past it", async () => {
     // Marking the draft saved is what removes this step from the wizard, so
     // setting the warning and advancing in the same breath unmounted it before

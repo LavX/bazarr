@@ -322,6 +322,32 @@ describe("MediaServerStep", () => {
     await waitFor(() => expect(calls).toEqual(["delete"]));
   });
 
+  it("leaves the Plex card open when the account owns no row", async () => {
+    // The card is the only way to reach the Plex account sign-in: there is no
+    // "Add another Plex" beside it. Locking it because some Plex row exists
+    // left a reader who had added one by hand in Connections unable to sign in
+    // at all without deleting a server they never asked about.
+    setInstances({ plex: [row("plex", "Loft", "plex-2")] });
+    setPlexOwner("plex-deleted");
+    withSelection(<MediaServerStep onNext={onNext} />);
+
+    await screen.findByText("Loft");
+    const checkbox = screen.getByRole("checkbox", { name: /^Plex$/ });
+    await waitFor(() => expect(checkbox).toBeEnabled());
+    expect(checkbox).not.toBeChecked();
+  });
+
+  it("locks the Plex card once the account owns a row", async () => {
+    setInstances({ plex: [row("plex", "Plex", "plex-1")] });
+    setPlexOwner("plex-1");
+    withSelection(<MediaServerStep onNext={onNext} />);
+
+    await screen.findByText("Plex");
+    const checkbox = screen.getByRole("checkbox", { name: /^Plex$/ });
+    await waitFor(() => expect(checkbox).toBeDisabled());
+    expect(checkbox).toBeChecked();
+  });
+
   it("does not call a switched-off row connected", async () => {
     // The dispatcher skips a disabled instance, and the backend keeps exactly
     // one after a Plex sign-out, credential cleared. Reading it as connected

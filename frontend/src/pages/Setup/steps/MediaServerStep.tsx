@@ -204,8 +204,20 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
           // has had its credential cleared as well.
           const rows = connected[kind].filter((row) => row.enabled);
           const pending = pendingOf(kind);
-          const checked = rows.length > 0 || pending.length > 0;
-          const locked = rows.length > 0 && pending.length === 0;
+          // Plex is the kind whose card is not answered by "a Plex row
+          // exists". A row somebody added by hand in Connections is not the
+          // account, and this card is the only way to reach the account
+          // sign-in: there is no "Add another Plex" beside it, so locking it
+          // over a hand-added sibling left signing in impossible without
+          // deleting a server the reader never asked about. Until the settings
+          // say which row the account owns, any row stands in for it, so the
+          // card does not tick and untick itself while that query lands.
+          const answered =
+            kind === "plex" && !settingsPending
+              ? rows.some((row) => row.id === plexAccountRowId)
+              : rows.length > 0;
+          const checked = answered || pending.length > 0;
+          const locked = answered && pending.length === 0;
           return (
             <Checkbox.Card
               key={kind}

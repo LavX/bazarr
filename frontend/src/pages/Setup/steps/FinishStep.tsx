@@ -92,14 +92,32 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
   // backend keeps exactly one after a Plex sign-out, credential cleared.
   // Counting it told the reader Plex was connected and dropped the line saying
   // where to finish the job.
-  const activeCount = (rows: MediaServerInstance[] | undefined) =>
-    (rows ?? []).filter((row) => row.enabled).length;
+  //
+  // The kind's master switch counts for the same reason. The dispatcher reads
+  // use_<kind> before it reads any row, so a server saved on a step whose
+  // switch write failed, which is exactly what "Continue anyway" walks past,
+  // refreshes nothing however enabled its own row is. Reporting it connected
+  // was the one place left that could still tell the reader setup was done
+  // when it was not.
+  const activeCount = (
+    kind: MediaServerKind,
+    rows: MediaServerInstance[] | undefined,
+  ) => {
+    const flag = general?.[`use_${kind}`] as boolean | undefined;
+    // An unanswered settings query is not a switched-off kind. It resolves
+    // before this screen is actionable, and assuming off would flash the
+    // "nothing is connected" warning at a reader who connected four servers.
+    if (general !== undefined && flag !== true) {
+      return 0;
+    }
+    return (rows ?? []).filter((row) => row.enabled).length;
+  };
 
   const mediaServers: { kind: MediaServerKind; count: number }[] = [
-    { kind: "plex", count: activeCount(plex.data) },
-    { kind: "jellyfin", count: activeCount(jellyfin.data) },
-    { kind: "emby", count: activeCount(emby.data) },
-    { kind: "silo", count: activeCount(silo.data) },
+    { kind: "plex", count: activeCount("plex", plex.data) },
+    { kind: "jellyfin", count: activeCount("jellyfin", jellyfin.data) },
+    { kind: "emby", count: activeCount("emby", emby.data) },
+    { kind: "silo", count: activeCount("silo", silo.data) },
   ];
   const mediaServerCount = mediaServers.reduce(
     (total, entry) => total + entry.count,

@@ -1,4 +1,4 @@
-import { FC, MouseEvent, useRef, useState } from "react";
+import { FC, MouseEvent, useEffect, useRef, useState } from "react";
 import { Alert, Button, Group, Stack, Text } from "@mantine/core";
 import { useMediaServerInstances } from "@/apis/hooks/mediaServers";
 import PlexSettings from "@/pages/Settings/Plex/PlexSettings";
@@ -35,6 +35,16 @@ const PlexServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
   const [continuing, setContinuing] = useState(false);
   const pending = useRef<HTMLButtonElement | null>(null);
   const allow = useRef(false);
+  // Same rule as the typed-in form: the refetch below can land after the
+  // reader has pressed Back or Skip, and advancing then would move them off a
+  // screen they never finished with.
+  const onScreen = useRef(true);
+  useEffect(() => {
+    onScreen.current = true;
+    return () => {
+      onScreen.current = false;
+    };
+  }, []);
 
   const intercept = (event: MouseEvent<HTMLDivElement>) => {
     if (allow.current) {
@@ -77,6 +87,9 @@ const PlexServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
         }
       })
       .finally(() => {
+        if (!onScreen.current) {
+          return;
+        }
         setContinuing(false);
         onNext();
       });

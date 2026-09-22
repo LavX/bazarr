@@ -79,12 +79,29 @@ function setProfiles(data: unknown) {
   } as unknown as ReturnType<typeof useLanguageProfiles>);
 }
 
+// The four media server master switches always exist in the real settings, and
+// the recap reads them: the dispatcher checks use_<kind> before it looks at any
+// row, so a saved server whose switch never landed refreshes nothing. They
+// default on here and a test says otherwise when that is the case under test.
 function setGeneral(
   general: Partial<Settings.General>,
   translator: Partial<Settings.Translator> = {},
 ) {
   mockedUseSystemSettings.mockReturnValue({
-    data: { general, translator },
+    data: {
+      general: {
+        // eslint-disable-next-line camelcase
+        use_plex: true,
+        // eslint-disable-next-line camelcase
+        use_jellyfin: true,
+        // eslint-disable-next-line camelcase
+        use_emby: true,
+        // eslint-disable-next-line camelcase
+        use_silo: true,
+        ...general,
+      },
+      translator,
+    },
   } as unknown as ReturnType<typeof useSystemSettings>);
 }
 
@@ -154,6 +171,27 @@ describe("FinishStep", () => {
       await screen.findByText(/emby connected \(1 server\)/i),
     ).toBeInTheDocument();
     expect(screen.queryByText(/plex connected/i)).toBeNull();
+  });
+
+  it("does not call a server connected whose kind is switched off", async () => {
+    // "Continue anyway" on a configure step whose master switch write failed
+    // leaves an enabled row under a use_<kind> that is still false. The
+    // dispatcher reads that switch before any row, so nothing refreshes at
+    // all; the recap counted the row, reported the server connected and
+    // dropped the line saying where to finish the job.
+    setMediaServers({ emby: ["Emby"], silo: ["Silo"] });
+    setGeneral({
+      // eslint-disable-next-line camelcase
+      use_emby: false,
+      // eslint-disable-next-line camelcase
+      enabled_providers: ["opensubtitles"],
+    });
+    customRender(<FinishStep onNext={vi.fn()} />);
+
+    expect(
+      await screen.findByText(/silo connected \(1 server\)/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/emby connected/i)).toBeNull();
   });
 
   it("says so when the finish write fails instead of going quiet", async () => {

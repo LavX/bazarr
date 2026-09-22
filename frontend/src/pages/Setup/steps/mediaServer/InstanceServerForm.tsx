@@ -1,6 +1,6 @@
 /* eslint-disable camelcase */
 
-import { FC, useCallback, useMemo, useState } from "react";
+import { FC, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
@@ -78,6 +78,18 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
 
   const [errors, setErrors] = useState<DraftFieldErrors>({});
   const [failure, setFailure] = useState<string | null>(null);
+  // Whether this step is still the one on screen. A save now settles even when
+  // the reader has left mid-write, which is the point, but the wizard cursor
+  // has moved on by then: advancing from here would step past whatever screen
+  // they are actually looking at, without them touching anything. Marking the
+  // draft saved still has to happen, so the two are separated.
+  const onScreen = useRef(true);
+  useEffect(() => {
+    onScreen.current = true;
+    return () => {
+      onScreen.current = false;
+    };
+  }, []);
   // Held on the draft, not in component state: pressing Back and walking
   // forward again remounts this form, and a warning that disappeared on the
   // way would be as good as never shown.
@@ -154,7 +166,9 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
         return;
       }
       markSaved(draft.draftId, outcome.instanceId ?? "");
-      onNext();
+      if (onScreen.current) {
+        onNext();
+      }
     });
   };
 
