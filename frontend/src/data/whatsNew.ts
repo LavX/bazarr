@@ -114,6 +114,12 @@ export const whatsNew: Record<string, WhatsNewSlide[]> = {
       cta: { label: "Open Discover", to: "/discover" },
     },
     {
+      title: "Discover shows subtitles while the search is still running",
+      body: "A search across 36 providers used to show nothing until the last one answered, although the progress bar was already counting results. Rows now appear as each provider finishes, in the order they arrive, and you can download one while the rest are still working: on a real install the first rows landed at 6 seconds on a search that finished at 21. Providers are reported honestly too, so one that never got to run is no longer recorded as a timeout, and a failing site now backs off the way it does for a library search instead of being hit again every minute.",
+      icon: faMagnifyingGlass,
+      cta: { label: "Open Discover", to: "/discover" },
+    },
+    {
       title: "No library? The app stops offering what it cannot open",
       body: "On an install with no Sonarr, Radarr or Sportarr, the sidebar listed Series, Movies and Sports anyway and every one of them was a dead end. Those entries now appear with the integration that owns them, per kind, so an install running only Radarr gets Movies and not Series. Discover's line about connecting a library became a notice you can close for good, and the heading that marked where your own library ends is gone on a page that has no library half to divide from.",
       icon: faCompass,
@@ -124,6 +130,12 @@ export const whatsNew: Record<string, WhatsNewSlide[]> = {
       body: "A fresh install used to show 62 provider checkboxes with nothing to say which of them work without signing up for something. The Providers step now leads with one action that installs and enables every provider needing no account, no configuration and no helper service, and it names the count before you click: 36 on the catalog as it stands. The set is read off the catalog manifests rather than kept in a list, so it stays right as the catalog changes, and anything it leaves out is still one tick away in the same list.",
       icon: faStore,
       cta: { label: "Open Subtitle Hub", to: "/subtitle-hub" },
+    },
+    {
+      title: "The setup wizard takes every media server you run",
+      body: "The wizard offered one media server kind behind a radio button, and switching kinds threw away what you had typed, so an install running Jellyfin and Plex, or two Embys, could not say so during setup. You now tick as many kinds as you run, add a second server of a kind, and get one screen per server. Pressing Continue on an untouched Sonarr step used to create an enabled instance with no address and no key and switch Sonarr on, which the Finish screen then reported as connected; an untouched step writes nothing at all now. Every step also fits a 1920 by 1080 screen with nothing hidden behind a scrollbar.",
+      icon: faServer,
+      cta: { label: "Open Connections", to: "/settings/connections" },
     },
     {
       title: "Request a title in Seerr from Discover",
@@ -160,6 +172,12 @@ export const whatsNew: Record<string, WhatsNewSlide[]> = {
       body: "Debug mode used to be the only control over the log and it turned on everything at once, including two loggers that write a line per event: a replay of one debug day produced 957,284 rows and 158MB. Those two and the scheduler now stop at WARNING in debug, so a real fault still shows and the flood does not. A normal install gains the provider lifecycle lines that explain why a search found nothing, roughly two per provider and one per candidate, with debug left off.",
       icon: faFileLines,
       cta: { label: "Open System Logs", to: "/system/logs" },
+    },
+    {
+      title: "System Status shows what you actually run",
+      body: "The Status page listed Sonarr and Radarr whether or not they were configured, so a fresh install read two rows with nothing beside them, and it never mentioned a media server at all. A row now appears only for an integration that is configured and has answered, and every Emby, Jellyfin, Silo and Plex destination gets one of its own with the version read from the server. An unreachable server says so instead of rendering blank, a Silo says it is connected without inventing a version it does not publish, and the page keeps checking while one is still being probed.",
+      icon: faGaugeHigh,
+      cta: { label: "Open System Status", to: "/system/status" },
     },
     {
       title: "SmartFast routing: cheaper OpenRouter translations if you switch",
