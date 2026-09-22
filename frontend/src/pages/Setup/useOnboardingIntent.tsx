@@ -20,7 +20,8 @@ function isIntent(value: string | null): value is WizardIntent {
   return value === "library" || value === "discover";
 }
 
-function readPersistedIntent(): WizardIntent | null {
+/** The answer as it was last persisted, for a reader who is not mounted. */
+export function readPersistedIntent(): WizardIntent | null {
   const raw = readOnboardingValue(STORAGE_NAME);
   return isIntent(raw) ? raw : null;
 }

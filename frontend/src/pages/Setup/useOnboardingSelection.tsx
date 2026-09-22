@@ -48,6 +48,13 @@ export interface MediaServerDraft {
   pathMappings: PathMapping[];
   options: MediaServerOptions;
   instanceId?: string;
+  // The row this draft has already written while its step is still on screen.
+  // A save whose master switch failed leaves the reader a message to read, so
+  // the step stays and the draft stays a draft; this is what stops the next
+  // press of Continue creating the same server a second time. It outlives a
+  // remount because pressing Back and walking forward again is exactly how a
+  // reader gets a second press.
+  savedInstanceId?: string;
 }
 
 /** What the step builder needs. Nothing that changes while a field is typed. */
@@ -153,6 +160,9 @@ function readPersistedDrafts(): MediaServerDraft[] {
             row.options && typeof row.options === "object" ? row.options : {},
           ...(typeof row.instanceId === "string"
             ? { instanceId: row.instanceId }
+            : {}),
+          ...(typeof row.savedInstanceId === "string"
+            ? { savedInstanceId: row.savedInstanceId }
             : {}),
         },
       ];

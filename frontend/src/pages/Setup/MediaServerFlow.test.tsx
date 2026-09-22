@@ -26,6 +26,8 @@ let rows: Row[] = [];
 let creates: unknown[] = [];
 let settingsWrites: unknown[] = [];
 let refuse: MediaServerKind | null = null;
+// The rows land but the write that turns their master switch on does not.
+let refuseSwitch = false;
 
 function serialize(row: Row) {
   return {
@@ -77,8 +79,16 @@ function stageBackend() {
     }),
     // The settings writer posts FormData, not JSON.
     http.post("/api/system/settings", async ({ request }) => {
-      const form = await request.formData();
-      settingsWrites.push(Object.fromEntries(form.entries()));
+      const written = Object.fromEntries((await request.formData()).entries());
+      if (
+        refuseSwitch &&
+        Object.keys(written).some((key) =>
+          key.startsWith("settings-general-use_"),
+        )
+      ) {
+        return new HttpResponse(null, { status: 500 });
+      }
+      settingsWrites.push(written);
       return new HttpResponse(null, { status: 204 });
     }),
     http.get("/api/system/settings", () =>
@@ -96,11 +106,15 @@ function startOnPicker() {
 describe("media server selection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // clearAllMocks keeps implementations, and one test below gives navigate
+    // one of its own.
+    navigate.mockReset();
     localStorage.clear();
     rows = [];
     creates = [];
     settingsWrites = [];
     refuse = null;
+    refuseSwitch = false;
     stageBackend();
     startOnPicker();
   });
@@ -242,6 +256,96 @@ describe("media server selection", () => {
     expect(
       screen.getByRole("button", { name: /try emby again/i }),
     ).toBeInTheDocument();
+  });
+
+  async function connectJellyfin(user: ReturnType<typeof userEvent.setup>) {
+    await screen.findByRole("heading", { name: /^media servers$/i });
+    await user.click(screen.getByRole("checkbox", { name: /^Jellyfin$/ }));
+    await user.click(screen.getByRole("button", { name: /set up 1 server/i }));
+    await screen.findByRole("heading", { name: /^jellyfin$/i });
+    await user.type(
+      screen.getByLabelText(/server url/i),
+      "http://10.0.0.9:8096",
+    );
+    await user.type(screen.getByLabelText(/api key/i), "jelly-key");
+    await user.click(screen.getByRole("button", { name: /connect jellyfin/i }));
+  }
+
+  it("keeps a failed master switch on screen instead of walking past it", async () => {
+    // Marking the draft saved is what removes this step from the wizard, so
+    // setting the warning and advancing in the same breath unmounted it before
+    // it could render: the reader reached Finish with the server reported as
+    // connected and nothing refreshing.
+    refuseSwitch = true;
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+
+    await connectJellyfin(user);
+
+    expect(
+      await screen.findByText(/master switch could not be turned on/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: /^jellyfin$/i }),
+    ).toBeInTheDocument();
+    expect(creates).toHaveLength(1);
+
+    await user.click(screen.getByRole("button", { name: /continue anyway/i }));
+
+    expect(
+      await screen.findByRole("heading", { name: /^seerr$/i }),
+    ).toBeInTheDocument();
+    // The row was already written; accepting the warning must not write it
+    // again.
+    expect(creates).toHaveLength(1);
+  });
+
+  it("still says so after a trip back to the picker", async () => {
+    refuseSwitch = true;
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+
+    await connectJellyfin(user);
+    await screen.findByText(/master switch could not be turned on/i);
+
+    await user.click(screen.getByRole("button", { name: /^back$/i }));
+    await screen.findByRole("heading", { name: /^media servers$/i });
+    await user.click(screen.getByRole("button", { name: /set up 1 server/i }));
+
+    // Remounted, and the warning is still the state of that server.
+    expect(
+      await screen.findByText(/master switch could not be turned on/i),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /continue anyway/i }));
+
+    await screen.findByRole("heading", { name: /^seerr$/i });
+    expect(creates).toHaveLength(1);
+  });
+
+  it("Skip setup forgets the servers that were ticked", async () => {
+    // clearSelection only queues a state update, and the persistence effect
+    // runs after the commit; the navigation unmounts the provider in that same
+    // commit, so the drafts could still be in localStorage to be restored on
+    // the next visit to setup.
+    let storedOnLeaving: string | null = "not read";
+    navigate.mockImplementation(() => {
+      storedOnLeaving = localStorage.getItem("bazarr.onboarding.media-servers");
+    });
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+
+    await screen.findByRole("heading", { name: /^media servers$/i });
+    await user.click(screen.getByRole("checkbox", { name: /^Jellyfin$/ }));
+    await waitFor(() =>
+      expect(
+        localStorage.getItem("bazarr.onboarding.media-servers"),
+      ).not.toBeNull(),
+    );
+
+    await user.click(screen.getByRole("button", { name: /skip setup/i }));
+
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("/"));
+    expect(storedOnLeaving).toBeNull();
   });
 
   it("puts a validation message on the field that is wrong", async () => {

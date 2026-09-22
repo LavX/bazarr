@@ -5,8 +5,50 @@ import {
   removeOnboardingValue,
   writeOnboardingValue,
 } from "./onboardingStorage";
+import { readPersistedIntent } from "./useOnboardingIntent";
 
 const STORAGE_NAME = "step";
+
+/**
+ * The step list as it stood while the cursor was still a number, in order.
+ *
+ * A frozen copy on purpose. The registry has moved since: the media server
+ * picker is on both paths now, where it used to be library-only. Resolving a
+ * stored index against the live list would hand back whatever slid into that
+ * slot, which on the Discover path is every later step shifted by one, so a
+ * reader who upgraded on Providers would come back to Languages.
+ */
+const LEGACY_STEP_KEYS = [
+  "welcome",
+  "intent",
+  "sonarr",
+  "radarr",
+  "sportarr",
+  "media-servers",
+  "seerr",
+  "languages",
+  "providers",
+  "translator",
+  "general",
+  "finish",
+];
+
+/** What the old list filtered out when the answer was "discover". */
+const LEGACY_LIBRARY_ONLY = new Set([
+  "sonarr",
+  "radarr",
+  "sportarr",
+  "media-servers",
+]);
+
+/** The key an old numeric cursor pointed at, for the path it was walking. */
+function legacyKeyAt(index: number): string | undefined {
+  const legacy =
+    readPersistedIntent() === "discover"
+      ? LEGACY_STEP_KEYS.filter((key) => !LEGACY_LIBRARY_ONLY.has(key))
+      : LEGACY_STEP_KEYS;
+  return legacy[index];
+}
 
 /** Forgets the stored cursor without disturbing a mounted wizard. */
 export function clearPersistedStep() {
@@ -17,9 +59,10 @@ export function clearPersistedStep() {
  * The cursor as it was persisted, migrated if it is still an index.
  *
  * The cursor used to be a number, and a reader who upgrades mid-wizard has one
- * in localStorage. The list built at mount is the same list that number was an
- * index into, so it resolves to the step they were actually on. An index past
- * the end is discarded rather than guessed at.
+ * in localStorage. It is an index into the list as that version built it, so it
+ * is read through the frozen legacy order above and turned into a key. An index
+ * past the end of that list, or one naming a step this run does not walk, is
+ * discarded rather than guessed at.
  */
 function readPersistedKey(steps: WizardStepDef[]): string | null {
   const raw = readOnboardingValue(STORAGE_NAME);
@@ -27,8 +70,8 @@ function readPersistedKey(steps: WizardStepDef[]): string | null {
     return null;
   }
   if (/^\d+$/.test(raw)) {
-    const migrated = steps[Number.parseInt(raw, 10)]?.key;
-    if (migrated === undefined) {
+    const migrated = legacyKeyAt(Number.parseInt(raw, 10));
+    if (migrated === undefined || !steps.some((s) => s.key === migrated)) {
       removeOnboardingValue(STORAGE_NAME);
       return null;
     }

@@ -137,7 +137,15 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
         : "Sportarr not connected",
       done: sportarrCount > 0,
     },
-    ...(mediaServerCount === 0
+  ];
+
+  // Media servers are their own group rather than part of the arr recap: the
+  // picker is on both paths, so a Discover reader who connected Jellyfin has to
+  // be told about it too. It used to sit in libraryLines, which a Discover run
+  // never renders, so that reader finished with no mention of the server they
+  // had just set up.
+  const mediaServerLines: SummaryLine[] =
+    mediaServerCount === 0
       ? [{ label: "No media server connected", done: false }]
       : mediaServers
           .filter((entry) => entry.count > 0)
@@ -146,8 +154,7 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
               entry.count === 1 ? "server" : "servers"
             })`,
             done: true,
-          }))),
-  ];
+          }));
 
   const sharedLines: SummaryLine[] = [
     {
@@ -176,7 +183,9 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
     },
   ];
 
-  const lines = discoverPath ? sharedLines : [...libraryLines, ...sharedLines];
+  const lines = discoverPath
+    ? [...mediaServerLines, ...sharedLines]
+    : [...libraryLines, ...mediaServerLines, ...sharedLines];
 
   // What was left undone, and the page that finishes it. Named rather than
   // linked: setup is not marked complete until Finish is pressed, so a link
@@ -190,7 +199,9 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
       where: "Settings, Connections",
     });
   }
-  if (!discoverPath && mediaServerCount === 0) {
+  // Not gated on the path, for the same reason the recap is not: both paths
+  // are offered the picker now.
+  if (mediaServerCount === 0) {
     skipped.push({
       label:
         "No media server is connected, so nothing is refreshed after a download",

@@ -18,6 +18,35 @@ function defs(...keys: string[]): WizardStepDef[] {
 
 const BASE = defs("welcome", "intent", "media-servers", "seerr", "finish");
 
+// The two real lists, in order. The media server picker is on both paths now;
+// when the cursor was still a number it was library-only, which is what makes
+// the Discover migration below a different list rather than the same one.
+const DISCOVER = defs(
+  "welcome",
+  "intent",
+  "media-servers",
+  "seerr",
+  "languages",
+  "providers",
+  "translator",
+  "general",
+  "finish",
+);
+const LIBRARY = defs(
+  "welcome",
+  "intent",
+  "sonarr",
+  "radarr",
+  "sportarr",
+  "media-servers",
+  "seerr",
+  "languages",
+  "providers",
+  "translator",
+  "general",
+  "finish",
+);
+
 describe("useWizardStep", () => {
   beforeEach(() => {
     localStorage.clear();
@@ -62,13 +91,40 @@ describe("useWizardStep", () => {
     expect(result.current.step.key).toBe("seerr");
   });
 
-  it("migrates a stored index from the version that counted steps", () => {
-    localStorage.setItem(STORAGE_KEY, "3");
+  it("migrates a stored index against the list that version built", () => {
+    // A Discover reader who upgrades mid-wizard. The old list on this path had
+    // no media server step, so 4 was Providers; reading 4 out of the current
+    // list would land them on Languages, a step they already answered, and
+    // shift every later cursor with it.
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
+    localStorage.setItem(STORAGE_KEY, "4");
 
-    const { result } = renderHook(() => useWizardStep(BASE));
+    const { result } = renderHook(() => useWizardStep(DISCOVER));
 
-    expect(result.current.step.key).toBe("seerr");
-    expect(localStorage.getItem(STORAGE_KEY)).toBe("seerr");
+    expect(result.current.step.key).toBe("providers");
+    expect(localStorage.getItem(STORAGE_KEY)).toBe("providers");
+  });
+
+  it("migrates a library index, where the order did not move", () => {
+    localStorage.setItem("bazarr.onboarding.intent", "library");
+    localStorage.setItem(STORAGE_KEY, "8");
+
+    const { result } = renderHook(() => useWizardStep(LIBRARY));
+
+    expect(result.current.step.key).toBe("providers");
+    expect(localStorage.getItem(STORAGE_KEY)).toBe("providers");
+  });
+
+  it("discards an index naming a step this run does not walk", () => {
+    localStorage.setItem("bazarr.onboarding.intent", "library");
+    localStorage.setItem(STORAGE_KEY, "2");
+
+    const { result } = renderHook(() =>
+      useWizardStep(defs("welcome", "intent", "finish")),
+    );
+
+    expect(result.current.step.key).toBe("welcome");
+    expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
   });
 
   it("discards a stored index that is past the end of the list", () => {

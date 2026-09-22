@@ -29,8 +29,9 @@ interface Props extends WizardStepProps {
  */
 const PlexServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
   const { markSaved } = useOnboardingSelection();
-  const { data: instances } = useMediaServerInstances("plex");
+  const { data: instances, refetch } = useMediaServerInstances("plex");
   const [confirming, setConfirming] = useState(false);
+  const [continuing, setContinuing] = useState(false);
   const pending = useRef<HTMLButtonElement | null>(null);
   const allow = useRef(false);
 
@@ -57,14 +58,27 @@ const PlexServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
   };
 
   const handleContinue = () => {
-    // The account flow owns the row. If it made one, the draft is no longer a
-    // draft, so its step stops being generated and the picker shows it as
-    // connected instead.
-    const row = instances?.[0];
-    if (row) {
-      markSaved(draft.draftId, row.id);
-    }
-    onNext();
+    // Asked again rather than read from the cache. This query is mounted before
+    // the row exists, and the server selection that creates it invalidates the
+    // Plex account queries only, so `instances` can still be the empty array it
+    // started as. The draft would then never be marked saved, its step would
+    // stay in the wizard, and Back or a resumed setup would walk the reader
+    // through a connection they had already made.
+    setContinuing(true);
+    void refetch()
+      .then(({ data }) => {
+        // The account flow owns the row. If it made one, the draft is no longer
+        // a draft, so its step stops being generated and the picker shows it as
+        // connected instead.
+        const row = (data ?? instances)?.[0];
+        if (row) {
+          markSaved(draft.draftId, row.id);
+        }
+      })
+      .finally(() => {
+        setContinuing(false);
+        onNext();
+      });
   };
 
   return (
@@ -106,7 +120,12 @@ const PlexServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
         Settings, Connections.
       </Text>
 
-      <StepActions onNext={handleContinue} onBack={onBack} />
+      <StepActions
+        onNext={onNext}
+        onBack={onBack}
+        onContinue={handleContinue}
+        continuePending={continuing}
+      />
     </Stack>
   );
 };

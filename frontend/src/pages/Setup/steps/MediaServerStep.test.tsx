@@ -50,6 +50,20 @@ function setInstances(rows: Partial<Record<MediaServerKind, unknown[]>>) {
   );
 }
 
+/** Which Plex row the account owns, as the backend records it. */
+function setPlexOwner(instanceId: string) {
+  server.use(
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({
+        general: {},
+        translator: {},
+        // eslint-disable-next-line camelcase
+        plex: { instance_id: instanceId },
+      }),
+    ),
+  );
+}
+
 function withSelection(ui: ReactElement) {
   return customRender(
     <OnboardingSelectionProvider>{ui}</OnboardingSelectionProvider>,
@@ -143,6 +157,96 @@ describe("MediaServerStep", () => {
     expect(
       screen.getByRole("button", { name: /set up 2 servers/i }),
     ).toBeInTheDocument();
+  });
+
+  it("offers no second Plex entry, because the account is one", async () => {
+    // Every Plex screen drives the same account flow and the same destination
+    // row, so a second entry was two screens for one server: the second server
+    // selection would overwrite the first rather than connect anything.
+    const user = userEvent.setup();
+    withSelection(<MediaServerStep onNext={onNext} />);
+
+    await user.click(screen.getByRole("checkbox", { name: /^Plex$/ }));
+
+    expect(
+      screen.queryByRole("button", { name: /add another plex/i }),
+    ).toBeNull();
+    expect(
+      screen.getByText(/one plex account per install/i),
+    ).toBeInTheDocument();
+
+    // Every other kind still takes as many as the reader wants.
+    await user.click(screen.getByRole("checkbox", { name: /^Emby$/ }));
+    expect(
+      screen.getByRole("button", { name: /add another emby/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("signs the Plex account out before deleting the row it owns", async () => {
+    // Deleting the row on its own leaves the token, the chosen server and the
+    // recorded owner id in the Plex settings, and the next account reconcile
+    // or startup builds the supposedly disconnected server straight back.
+    const calls: string[] = [];
+    setInstances({ plex: [row("plex", "Plex", "plex-1")] });
+    setPlexOwner("plex-1");
+    server.use(
+      http.post("/api/plex/oauth/logout", () => {
+        calls.push("logout");
+        return HttpResponse.json({ success: true });
+      }),
+      http.delete("/api/system/media-server-instances/plex-1", () => {
+        calls.push("delete");
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    const user = userEvent.setup();
+    withSelection(<MediaServerStep onNext={onNext} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: /^disconnect$/i }),
+    );
+    expect(
+      screen.getByText(/signed out of your plex account/i),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getAllByRole("button", { name: /^disconnect$/i })[0],
+    );
+
+    await waitFor(() => expect(calls).toEqual(["logout", "delete"]));
+    // Signing out clears use_plex itself, so the step writes no switch of its
+    // own on top of it.
+    expect(mutate).not.toHaveBeenCalled();
+  });
+
+  it("deletes a hand-added Plex row without touching the account", async () => {
+    const calls: string[] = [];
+    setInstances({
+      plex: [row("plex", "Plex", "plex-1"), row("plex", "Loft", "plex-2")],
+    });
+    setPlexOwner("plex-1");
+    server.use(
+      http.post("/api/plex/oauth/logout", () => {
+        calls.push("logout");
+        return HttpResponse.json({ success: true });
+      }),
+      http.delete("/api/system/media-server-instances/plex-2", () => {
+        calls.push("delete");
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    const user = userEvent.setup();
+    withSelection(<MediaServerStep onNext={onNext} />);
+
+    await screen.findByText("Loft");
+    await user.click(
+      screen.getAllByRole("button", { name: /^disconnect$/i })[1],
+    );
+    expect(screen.queryByText(/signed out of your plex account/i)).toBeNull();
+    await user.click(
+      screen.getAllByRole("button", { name: /^disconnect$/i })[1],
+    );
+
+    await waitFor(() => expect(calls).toEqual(["delete"]));
   });
 
   it("unticking a kind drops the servers it added", async () => {

@@ -6,6 +6,7 @@ import {
 } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
+import { mediaServerInstancesKey } from "./mediaServers";
 
 export const usePlexAuthValidationQuery = () => {
   return useQuery({
@@ -131,6 +132,12 @@ export const usePlexServerSelectionMutation = () => {
       });
       void queryClient.invalidateQueries({
         queryKey: [QueryKeys.Plex, "libraries"],
+      });
+      // Selecting a server is what creates or moves the Plex destination row
+      // (media_servers/plex_account.py), so any list of Plex media server
+      // instances on screen is now out of date.
+      void queryClient.invalidateQueries({
+        queryKey: mediaServerInstancesKey("plex"),
       });
     },
   });

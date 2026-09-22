@@ -209,7 +209,11 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack }) => {
     }
     setRemoveError(null);
     remove.mutate(existing.id, {
-      onSuccess: () => setConfirmRemove(false),
+      onSuccess: () => {
+        setConfirmRemove(false);
+        // The row this message was about is gone, so the message goes with it.
+        setSaveError(null);
+      },
       onError: (error) =>
         setRemoveError(
           getArrInstanceErrorMessage(
@@ -272,6 +276,16 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack }) => {
             )}
           </Stack>
         </Alert>
+        {/* The create landing is what makes this branch render: the instances
+            query is invalidated by it, so a switch write that failed a moment
+            later reports itself here or nowhere. Without this the reader was
+            shown a green "Already connected" and walked on with the kind still
+            switched off. */}
+        {saveError && (
+          <Alert color="red" title={`Could not connect ${meta.label}`}>
+            {saveError}
+          </Alert>
+        )}
         {removeError && (
           <Alert color="red" title="Could not remove the instance">
             {removeError}

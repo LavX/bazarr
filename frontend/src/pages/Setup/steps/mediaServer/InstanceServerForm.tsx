@@ -77,7 +77,10 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
 
   const [errors, setErrors] = useState<DraftFieldErrors>({});
   const [failure, setFailure] = useState<string | null>(null);
-  const [switchesFailed, setSwitchesFailed] = useState(false);
+  // Held on the draft, not in component state: pressing Back and walking
+  // forward again remounts this form, and a warning that disappeared on the
+  // way would be as good as never shown.
+  const savedButNotSwitchedOn = draft.savedInstanceId !== undefined;
 
   // Typing is the reader answering the message, so the message goes as they
   // answer it. It used to sit there until Test was pressed.
@@ -117,8 +120,15 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
       onNext();
       return;
     }
+    // The server was written on an earlier press and only its master switch
+    // failed, so this press is the reader accepting that and moving on. It must
+    // not write the same server a second time.
+    if (draft.savedInstanceId !== undefined) {
+      markSaved(draft.draftId, draft.savedInstanceId);
+      onNext();
+      return;
+    }
     setFailure(null);
-    setSwitchesFailed(false);
     void submit([draft]).then((result) => {
       const found = result.errors[draft.draftId];
       if (found) {
@@ -131,7 +141,17 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
         setFailure(outcome?.error ?? "The save failed.");
         return;
       }
-      setSwitchesFailed(result.switchesFailed);
+      if (result.switchesFailed) {
+        // Marking the draft saved is what removes this step from the wizard,
+        // so doing it here would unmount the warning in the same commit that
+        // renders it: the reader would reach Finish with the server reported
+        // as connected and nothing refreshing. The step stays until they have
+        // read it and pressed Continue again.
+        updateDraft(draft.draftId, {
+          savedInstanceId: outcome.instanceId ?? "",
+        });
+        return;
+      }
       markSaved(draft.draftId, outcome.instanceId ?? "");
       onNext();
     });
@@ -315,11 +335,11 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
           {failure} Try again, or connect it later from Settings, Connections.
         </Alert>
       )}
-      {switchesFailed && (
-        <Alert color="red">
+      {savedButNotSwitchedOn && (
+        <Alert color="red" title={`${name} is saved but switched off`}>
           The instance was saved, but its {name} master switch could not be
           turned on, so nothing refreshes yet. Enable it in Settings,
-          Connections.
+          Connections, then continue.
         </Alert>
       )}
 
@@ -328,11 +348,13 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
         onBack={onBack}
         onContinue={handleContinue}
         continueLabel={
-          !touched
-            ? `Continue without ${name}`
-            : failure
-              ? `Try ${name} again`
-              : `Connect ${name}`
+          savedButNotSwitchedOn
+            ? "Continue anyway"
+            : !touched
+              ? `Continue without ${name}`
+              : failure
+                ? `Try ${name} again`
+                : `Connect ${name}`
         }
         continuePending={isPending}
       />

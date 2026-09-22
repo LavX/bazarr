@@ -8,6 +8,7 @@ import {
   Text,
   Title,
 } from "@mantine/core";
+import { useSystemSettings } from "@/apis/hooks";
 import { useMediaServerInstances } from "@/apis/hooks/mediaServers";
 import type {
   MediaServerInstance,
@@ -39,6 +40,14 @@ const ORDER: MediaServerKind[] = ["plex", "jellyfin", "emby", "silo"];
  * and Settings already lists as many per kind as exist. The single-choice
  * picker was the only thing saying otherwise.
  *
+ * Plex is the exception, and it is one entry. Its connection is not a form but
+ * the account panel, and the account is a singleton: one token, one chosen
+ * server, one destination row the backend keeps in step with it. A second Plex
+ * entry here would be a second screen driving that same row, so a second server
+ * selection would overwrite the first rather than connect anything. A reader who
+ * really runs two Plex servers adds the second in Settings, Connections, where
+ * there is a form to give it its own address.
+ *
  * Every kind stays optional and Continue with nothing ticked writes nothing,
  * because Bazarr+ finds and downloads subtitles with no media server at all.
  * Skipping is the shell's control.
@@ -47,6 +56,7 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   const { drafts, addDraft, removeKind, removeDraft } =
     useOnboardingSelection();
 
+  const { data: settings } = useSystemSettings();
   // One query per kind, a fixed four, so no hook is called in a loop.
   const plex = useMediaServerInstances("plex");
   const jellyfin = useMediaServerInstances("jellyfin");
@@ -62,6 +72,20 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
     }),
     [plex.data, jellyfin.data, emby.data, silo.data],
   );
+
+  // Which Plex row the account owns, by the same rule the backend applies
+  // (media_servers/plex_account.py::_account_row): the recorded id, or the only
+  // row there is. Disconnecting that one has to sign the account out; deleting
+  // it on its own leaves the token and the chosen server behind for the next
+  // reconcile to rebuild it from.
+  const plexAccountRowId = useMemo(() => {
+    const rows = plex.data ?? [];
+    if (rows.length === 0) {
+      return null;
+    }
+    const recorded = settings?.plex?.instance_id ?? "";
+    return (rows.find((row) => row.id === recorded) ?? rows[0]).id;
+  }, [plex.data, settings?.plex?.instance_id]);
 
   const takenNames = useMemo(
     () => ORDER.flatMap((kind) => connected[kind]).map((row) => row.name),
@@ -156,6 +180,9 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
                   instance={instance}
                   kind={kind}
                   last={connected[kind].length === 1}
+                  accountOwned={
+                    kind === "plex" && instance.id === plexAccountRowId
+                  }
                   onDisconnected={forgetInstance}
                 />
               ))}
@@ -178,15 +205,22 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
                   </Button>
                 </Group>
               ))}
-              <Group>
-                <Button
-                  variant="subtle"
-                  size="compact-sm"
-                  onClick={() => addDraft(kind, takenNames)}
-                >
-                  Add another {kindName(kind)}
-                </Button>
-              </Group>
+              {kind === "plex" ? (
+                <Text size="sm" c="dimmed">
+                  One Plex account per install. To refresh a second Plex server,
+                  add it in Settings, Connections after setup.
+                </Text>
+              ) : (
+                <Group>
+                  <Button
+                    variant="subtle"
+                    size="compact-sm"
+                    onClick={() => addDraft(kind, takenNames)}
+                  >
+                    Add another {kindName(kind)}
+                  </Button>
+                </Group>
+              )}
             </Stack>
           ))}
         </Stack>

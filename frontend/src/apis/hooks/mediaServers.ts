@@ -9,7 +9,12 @@ import type {
   MediaServerUpdate,
 } from "@/apis/raw/mediaServers";
 
-const instancesKey = (kind: MediaServerKind) => [
+/**
+ * The instance list for one kind. Exported because the Plex account flow writes
+ * a media server row without going through these hooks, so it has to invalidate
+ * this list itself.
+ */
+export const mediaServerInstancesKey = (kind: MediaServerKind) => [
   "media-servers",
   kind,
   "instances",
@@ -26,7 +31,7 @@ const statusKey = (kind: MediaServerKind, id: string) => [
 
 export function useMediaServerInstances(kind: MediaServerKind) {
   return useQuery({
-    queryKey: instancesKey(kind),
+    queryKey: mediaServerInstancesKey(kind),
     queryFn: () => api.mediaServers.list(kind),
     placeholderData: undefined,
   });
@@ -88,7 +93,9 @@ export function useSaveMediaServerInstance(
     onSuccess: (_data, variables) => {
       const target = (variables ? variables().kind : undefined) ?? kind;
       if (!target) return;
-      void client.invalidateQueries({ queryKey: instancesKey(target) });
+      void client.invalidateQueries({
+        queryKey: mediaServerInstancesKey(target),
+      });
       if (id) void client.invalidateQueries({ queryKey: itemKey(target, id) });
     },
   });
@@ -104,7 +111,9 @@ export function useDeleteMediaServerInstance(
     onSuccess: async () => {
       await client.cancelQueries({ queryKey: itemKey(kind, id) });
       client.removeQueries({ queryKey: itemKey(kind, id) });
-      void client.invalidateQueries({ queryKey: instancesKey(kind) });
+      void client.invalidateQueries({
+        queryKey: mediaServerInstancesKey(kind),
+      });
     },
   });
 }

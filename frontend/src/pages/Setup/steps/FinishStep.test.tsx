@@ -267,8 +267,11 @@ describe("FinishStep", () => {
     );
   });
 
-  it("counts a configured translator as done", () => {
+  it("counts a configured translator as done", async () => {
     localStorage.setItem("bazarr.onboarding.intent", "discover");
+    // A media server as well, because the picker is on this path too: with
+    // none connected the recap has something left for later to report.
+    setMediaServers({ jellyfin: ["Jellyfin"] });
     setGeneral(
       { enabled_providers: ["opensubtitles"], use_seerr: true },
       { openrouter_api_key: "sk-or-xyz" },
@@ -278,7 +281,44 @@ describe("FinishStep", () => {
 
     expect(screen.getByText(/ai translation configured/i)).toBeInTheDocument();
     expect(
+      await screen.findByText(/jellyfin connected \(1 server\)/i),
+    ).toBeInTheDocument();
+    expect(
       screen.queryByText(/what you left for later/i),
     ).not.toBeInTheDocument();
+  });
+
+  it("names the media server a Discover reader connected", async () => {
+    // The picker moved onto the Discover path, but its summary stayed in the
+    // library-only half of the recap, so this reader finished setup with no
+    // mention of the server they had just connected.
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
+    setArrInstances([]);
+    setMediaServers({ emby: ["Living room"] });
+
+    customRender(<FinishStep onNext={vi.fn()} />);
+
+    expect(
+      await screen.findByText(/emby connected \(1 server\)/i),
+    ).toBeInTheDocument();
+    // Still no line about a step this reader was never shown.
+    expect(screen.queryByText(/sonarr/i)).not.toBeInTheDocument();
+  });
+
+  it("tells a Discover reader who connected nothing that nothing refreshes", async () => {
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
+    setArrInstances([]);
+    setMediaServers({});
+
+    customRender(<FinishStep onNext={vi.fn()} />);
+
+    expect(
+      await screen.findByText(/no media server connected/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /no media server is connected, so nothing is refreshed/i,
+      ),
+    ).toBeInTheDocument();
   });
 });

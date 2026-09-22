@@ -323,6 +323,45 @@ describe("ArrStep", () => {
     expect(onNext).not.toHaveBeenCalled();
   });
 
+  it("keeps the activation failure visible once the new row comes back", async () => {
+    // The create invalidates the instances query, so the row this step just
+    // wrote reappears while the step is still on screen and flips it into the
+    // green "Already connected" state. That state rendered no error at all, so
+    // the reader was told the instance was connected and walked on with the
+    // kind still switched off.
+    const user = userEvent.setup();
+    createMutate.mockImplementation(
+      (_body: unknown, opts?: { onSuccess?: () => void }) => {
+        setInstances([
+          {
+            id: 1,
+            kind: "sonarr",
+            name: "Main Sonarr",
+            ip: "10.0.0.5",
+            port: 8989,
+            base_url: "",
+            ssl: false,
+          },
+        ]);
+        opts?.onSuccess?.();
+      },
+    );
+    settingsMutate.mockImplementation(
+      (_body: unknown, opts?: { onError?: (error: unknown) => void }) => {
+        opts?.onError?.(new Error("nope"));
+      },
+    );
+
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await fillValidConnection(user);
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    expect(await screen.findByText(/already connected/i)).toBeInTheDocument();
+    expect(screen.getByText(/could not turn it on/i)).toBeInTheDocument();
+    expect(onNext).not.toHaveBeenCalled();
+  });
+
   it("shows a connected state for a pre-existing instance and does not create", async () => {
     const user = userEvent.setup();
     setInstances([

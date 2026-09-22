@@ -12,6 +12,7 @@ import {
 } from "./useOnboardingIntent";
 import type { MediaServerDraftSummary } from "./useOnboardingSelection";
 import {
+  clearPersistedSelection,
   OnboardingSelectionProvider,
   useOnboardingSelection,
 } from "./useOnboardingSelection";
@@ -85,6 +86,11 @@ const OnboardingWizardBody: FunctionComponent = () => {
           reset();
           resetIntent();
           clearSelection();
+          // The storage key is cleared here rather than left to the provider's
+          // effect: the navigation below unmounts the provider in the same
+          // commit, so the effect need not run, and the skipped drafts would
+          // still be there to restore on the next visit to setup.
+          clearPersistedSelection();
           // The Redirector picks routing back up once setup is marked complete.
           navigate("/");
         },

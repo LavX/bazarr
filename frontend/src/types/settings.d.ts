@@ -16,6 +16,7 @@ interface Settings {
   sportarr: Settings.Sportarr;
   backup: Settings.Backup;
   translator: Settings.Translator;
+  plex?: Settings.Plex;
   // Anitcaptcha
   anticaptcha: Settings.Anticaptcha;
   deathbycaptcha: Settings.DeathByCaptche;
@@ -244,6 +245,13 @@ declare namespace Settings {
   interface Plex {
     ip: string;
     port: number;
+    /**
+     * The media server row the Plex account owns, written by the backend on
+     * every account transition (media_servers/plex_account.py). Never a
+     * credential: it is how a caller tells the account's destination apart
+     * from a Plex instance somebody added by hand.
+     */
+    instance_id?: string;
     apikey?: string;
     ssl?: boolean;
     set_movie_added?: boolean;
