@@ -795,6 +795,15 @@ def refine_video_with_copy(video, copy_facts: dict):
     return video
 
 
+def search_wall_seconds() -> int:
+    """How long one fanout may run, clamped the way the fanout clamps it.
+
+    A caller that hands something out while the search is still running needs
+    this number too, and two copies of the clamp would drift.
+    """
+    return max(5, min(120, int(settings.compat_endpoint.search_timeout_seconds)))
+
+
 def search_title(video, languages, pool, providers, on_outcome):
     """Search a prebuilt title target using the shared bounded provider executor."""
     # Imported here for the same reason discover.search._coverage does it: the
@@ -803,7 +812,7 @@ def search_title(video, languages, pool, providers, on_outcome):
     # replace subliminal_patch with a bounded stub.
     from subliminal_patch.provider_health import get_tracker
     health = get_tracker()
-    wall = max(5, min(120, int(settings.compat_endpoint.search_timeout_seconds)))
+    wall = search_wall_seconds()
     return list_all_subtitles_parallel(
         [video], set(languages), pool,
         per_provider_timeout=max(3, int(wall * 0.6)), wall_timeout=wall,

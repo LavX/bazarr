@@ -521,6 +521,17 @@ def search(request: SearchRequest, on_progress=None) -> dict:
         # Past this budget the rest of the rows are built after the fanout, as
         # before, and appear when the search completes.
         live_budget = 1.5
+        # A handle offered mid-search has to outlive the search that offered
+        # it. Its lifetime starts when the row is published, while the wall the
+        # remaining providers are still searching on can be longer than the
+        # result TTL itself, so minting for the TTL alone publishes rows the
+        # store has already dropped before the last provider answers: the
+        # reader sees them, clicks Download and is told they expired. Renewal
+        # at completion cannot close that window, since it refuses an entry
+        # that is already gone and mints a replacement for the id the reader
+        # was offered. Covering the wall as well leaves exactly the TTL once
+        # the completed snapshot renews it, because renewal never shortens.
+        live_ttl = ttl + service.search_wall_seconds()
 
         def report_progress():
             # Charged to the same budget as building. Every outcome publishes
@@ -554,7 +565,7 @@ def search(request: SearchRequest, on_progress=None) -> dict:
                 if live_budget <= 0:
                     return
                 started = time.monotonic()
-                row = _result(sub, video, context, search_id, checked, ttl, parsed)
+                row = _result(sub, video, context, search_id, checked, live_ttl, parsed)
                 built[id(sub)] = (sub, row)
                 live_rows.append(row)
                 live_budget -= time.monotonic() - started

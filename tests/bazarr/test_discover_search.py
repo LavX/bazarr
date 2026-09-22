@@ -1414,6 +1414,52 @@ def test_a_row_offered_early_still_resolves_when_the_search_finishes(authenticat
     assert _seconds_from_now(rows[0]["expires_at"]) > 1.0
 
 
+def test_a_row_offered_early_stays_actionable_while_the_search_runs(authenticated_client,
+                                                                    providers, monkeypatch):
+    """A row is offered the moment it is published, so its handle has to outlive
+    the search that published it. Minted for the result TTL alone it does not:
+    with a TTL shorter than the wall the remaining providers are still living
+    on, a row the reader can see and click is already gone from the store
+    before the search ends, and the Download button reports it expired while
+    the search that produced it is still running. The completion renewal
+    cannot close that window either, because it refuses an entry that has
+    already expired and mints a replacement id instead, retiring the one the
+    reader was offered."""
+    import copy as copy_module
+    from app.config import settings
+    from discover import progress
+    from discover.handles import resolve_result
+    from provider_hub.protocol import candidate_from_worker
+
+    published = []
+    original = progress.publish
+
+    def record(identity, observation):
+        published.append(copy_module.deepcopy(observation))
+        original(identity, observation)
+
+    monkeypatch.setattr(progress, "publish", record)
+    for key in ("cache_ttl_seconds", "file_id_ttl_seconds"):
+        monkeypatch.setattr(settings.compat_endpoint, key, 2)
+    providers.add("discover_fast", [candidate_from_worker("discover_fast", {
+        "id": "fast-1", "language": {"alpha3": "eng"}, "release_info": "The Matrix",
+        "matches": ["imdb_id"], "provider_payload": {}})])
+    providers.add("discover_slow", delay=2.6)
+    response = _progress_post(authenticated_client, {
+        "media_type": "movie", "imdb_id": "tt0133093", "language": "eng"},
+        "66666666-7777-8888-9999-aaaaaaaaaaaa")
+    assert response.status_code == 200
+
+    early = [observation for observation in published if observation.get("results")]
+    assert early, "no observation carried a result"
+    offered = early[0]["results"][0]
+    assert _seconds_from_now(offered["expires_at"]) > 0, "the offered row expired mid-search"
+    assert resolve_result(offered["id"], early[0]["search_id"]) is not None
+    # And the finished snapshot still names it, rather than retiring an id a
+    # reader was already looking at.
+    assert offered["id"] in {row["id"] for row in response.json["results"]}
+
+
 def test_publishing_the_growing_row_list_is_charged_to_the_same_budget(authenticated_client,
                                                                        providers, monkeypatch):
     """Every outcome republishes the whole accumulated list and the observer
