@@ -98,6 +98,18 @@ def _raise_worker_error(payload):
     }.get(remote_name)
     if exception_type is None:
         raise error
+    # Rebuild the provider's own Retry-After too, where the exception takes
+    # one. The class and message alone lose it at the boundary, and it is what
+    # decides how long the backoff keeps the provider out.
+    retry_after = payload.get("retry_after")
+    retry_after = (retry_after if isinstance(retry_after, (int, float))
+                   and not isinstance(retry_after, bool)
+                   and 0 < retry_after < float("inf") else None)
+    if retry_after is not None:
+        try:
+            raise exception_type(message, retry_after=min(86400.0, float(retry_after))) from error
+        except TypeError:
+            pass
     raise exception_type(message) from error
 
 
