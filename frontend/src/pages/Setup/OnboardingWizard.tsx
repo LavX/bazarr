@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { useNavigate, useParams } from "react-router";
+import { useBlocker, useNavigate, useParams } from "react-router";
 import {
   Alert,
   Box,
@@ -96,29 +96,47 @@ const OnboardingWizardBody: FunctionComponent = () => {
   // and a moved URL beside a stale cursor look exactly alike from here, and
   // whichever one this effect guessed at, it guessed wrong half the time.
   const pendingUrl = useRef<string | null>(null);
+  // The steps behind the current entry that this wizard pushed, oldest first.
+  // It is what lets Back walk the history that is already there instead of
+  // writing more of it: pushing the earlier step on top made the next browser
+  // Back go forwards, and replacing the current entry left the same step in
+  // the two entries on top, so browser Back appeared to do nothing once.
+  const trail = useRef<string[]>([]);
 
   // Moving the cursor and the URL is one action, so the effect below only ever
   // has to deal with a URL that moved on its own: a browser Back or Forward,
   // or a pasted link.
   const moveTo = useCallback(
-    (key: string, replace = false) => {
+    (key: string, from: string) => {
       pendingUrl.current = key;
       goTo(key);
-      navigate(`/setup/${key}`, { replace });
+      trail.current.push(from);
+      navigate(`/setup/${key}`);
     },
     [goTo, navigate],
   );
   const next = useCallback(
-    () => moveTo(steps[Math.min(index + 1, steps.length - 1)].key),
-    [moveTo, steps, index],
+    () => moveTo(steps[Math.min(index + 1, steps.length - 1)].key, current.key),
+    [moveTo, steps, index, current.key],
   );
-  // Back replaces the entry it is leaving instead of stacking an earlier step
-  // on top of a later one. Pushing it made the next browser Back go forwards
-  // through the wizard, which is the opposite of what Back means.
-  const back = useCallback(
-    () => moveTo(steps[Math.max(index - 1, 0)].key, true),
-    [moveTo, steps, index],
-  );
+  const back = useCallback(() => {
+    const target = steps[Math.max(index - 1, 0)].key;
+    pendingUrl.current = target;
+    // The cursor moves here rather than waiting on the history move, because
+    // the step list is this component's, not the browser's.
+    goTo(target);
+    if (trail.current[trail.current.length - 1] === target) {
+      // The entry underneath is the step being gone back to, so go back to it
+      // rather than writing a third entry over the two that already say it.
+      trail.current.pop();
+      navigate(-1);
+      return;
+    }
+    // The list changed under the history (a media server was unticked, say),
+    // so the entry underneath is not this step. Replace rather than push: an
+    // earlier step stacked on a later one turns browser Back into forward.
+    navigate(`/setup/${target}`, { replace: true });
+  }, [goTo, navigate, steps, index]);
 
   useEffect(() => {
     if (stepKey === current.key) {
@@ -132,6 +150,9 @@ const OnboardingWizardBody: FunctionComponent = () => {
     }
     if (knownParam && stepKey !== undefined) {
       pendingUrl.current = stepKey;
+      if (trail.current[trail.current.length - 1] === stepKey) {
+        trail.current.pop();
+      }
       goTo(stepKey);
       return;
     }
@@ -140,6 +161,22 @@ const OnboardingWizardBody: FunctionComponent = () => {
     pendingUrl.current = current.key;
     navigate(`/setup/${current.key}`, { replace: true });
   }, [stepKey, knownParam, current.key, goTo, navigate]);
+
+  // A step in the middle of work it has to finish is not left through the
+  // address bar either. The skip is hidden for the same reason, and a browser
+  // Back that unmounted the providers step left its installs finishing into
+  // nothing, its restart arriving at nobody, and the poll that brings the
+  // reader back armed after its own cleanup had run. The attempt is dropped
+  // rather than queued: once the run is over, Back works again.
+  const blocker = useBlocker(
+    ({ currentLocation, nextLocation }) =>
+      stepBusy && currentLocation.pathname !== nextLocation.pathname,
+  );
+  useEffect(() => {
+    if (blocker.state === "blocked" && !stepBusy) {
+      blocker.reset?.();
+    }
+  }, [blocker, stepBusy]);
 
   // Progress is reported per phase, never as a step total. Before the intent
   // is answered nobody knows which path runs, and the media server segment

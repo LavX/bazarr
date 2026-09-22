@@ -49,9 +49,14 @@ function setBrowserLanguage(tag: string) {
   });
 }
 
-function setProfiles(data: unknown) {
+function setProfiles(
+  data: unknown,
+  state: { isLoading?: boolean; isError?: boolean } = {},
+) {
   mockedUseLanguageProfiles.mockReturnValue({
     data,
+    isLoading: state.isLoading ?? false,
+    isError: state.isError ?? false,
   } as unknown as ReturnType<typeof useLanguageProfiles>);
 }
 
@@ -89,6 +94,35 @@ describe("LanguagesStep", () => {
 
     const field = screen.getByPlaceholderText("Loading languages");
     expect(field).toBeDisabled();
+  });
+
+  it("never writes a profile before it knows whether one exists", () => {
+    // The preselected language makes Continue pressable straight away, and the
+    // profiles query answers separately. Writing the Default profile in that
+    // window replaces the profiles a configured install already has, which is
+    // exactly the install that reaches this step again from Settings.
+    setBrowserLanguage("en-GB");
+    setProfiles(undefined, { isLoading: true });
+
+    customRender(<LanguagesStep onNext={onNext} />);
+
+    expect(screen.getByRole("button", { name: /continue/i })).toBeDisabled();
+  });
+
+  it("advances without writing when the profiles cannot be read", async () => {
+    setBrowserLanguage("en-GB");
+    setProfiles(undefined, { isError: true });
+    const user = userEvent.setup();
+    customRender(<LanguagesStep onNext={onNext} />);
+
+    expect(
+      screen.getByText(/could not read the language profiles/i),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    expect(mutate).not.toHaveBeenCalled();
+    expect(onNext).toHaveBeenCalled();
   });
 
   it("disables Continue until a language is selected", async () => {

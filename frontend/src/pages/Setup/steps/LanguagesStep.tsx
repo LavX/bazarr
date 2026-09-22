@@ -31,7 +31,11 @@ function browserCode2(): string | null {
  */
 const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
   const { data: languages, isLoading } = useLanguages();
-  const { data: profiles } = useLanguageProfiles();
+  const {
+    data: profiles,
+    isLoading: profilesLoading,
+    isError: profilesFailed,
+  } = useLanguageProfiles();
   const settings = useSettingsMutation();
 
   // Preselected from the browser, so the gate is met by a working default
@@ -63,9 +67,15 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
   );
 
   const alreadyConfigured = (profiles ?? []).length > 0;
+  // Whether this install already has profiles is not knowable until that query
+  // answers, and "no answer" is not "none": writing the Default profile on a
+  // rerun of setup would replace the profiles the reader spent time building.
+  // The preselected language makes Continue pressable straight away, so the
+  // window between the two queries is now a window someone will press in.
+  const profilesUnknown = profilesLoading || profilesFailed;
 
   const handleContinue = () => {
-    if (alreadyConfigured) {
+    if (alreadyConfigured || profilesUnknown) {
       onNext();
       return;
     }
@@ -111,7 +121,10 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
     );
   };
 
-  const canContinue = alreadyConfigured || selected.length > 0;
+  const canContinue =
+    alreadyConfigured ||
+    profilesFailed ||
+    (!profilesUnknown && selected.length > 0);
 
   return (
     <StepLayout
@@ -137,6 +150,16 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
         </Group>
       }
     >
+      {profilesFailed && (
+        // Not a dead end and not a silent overwrite: the step advances and
+        // writes nothing, which is the only honest answer when we cannot see
+        // what is already there.
+        <Alert color="yellow" title="Could not check your language profiles">
+          Bazarr+ could not read the language profiles this install already has,
+          so setup will not change them. You can set your languages in Settings,
+          Languages.
+        </Alert>
+      )}
       {alreadyConfigured ? (
         <Alert color="green" title="Languages already configured">
           A language profile already exists, so we will keep it as-is.

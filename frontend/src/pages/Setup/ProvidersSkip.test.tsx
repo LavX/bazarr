@@ -1,3 +1,5 @@
+import { StrictMode } from "react";
+import { createMemoryRouter, RouterProvider } from "react-router";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -7,16 +9,9 @@ import {
   useSettingsMutation,
   useSystem,
 } from "@/apis/hooks";
-import { customRender, screen, waitFor } from "@/tests";
+import { AllProviders } from "@/providers";
+import { rawRender, screen, waitFor } from "@/tests";
 import OnboardingWizardView from "./OnboardingWizard";
-
-vi.mock("react-router", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("react-router")>();
-  return {
-    ...actual,
-    useNavigate: () => vi.fn(),
-  };
-});
 
 vi.mock("@/apis/hooks", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/apis/hooks")>();
@@ -43,6 +38,25 @@ const catalogEntry = {
   trusted: true,
   manifest: { id: "opensubtitles", name: "OpenSubtitles" },
 };
+
+function openProvidersStep(entries: string[] = ["/setup/providers"]) {
+  const router = createMemoryRouter(
+    [
+      { path: "/setup", element: <OnboardingWizardView /> },
+      { path: "/setup/:stepKey", element: <OnboardingWizardView /> },
+      { path: "/", element: <div>home</div> },
+    ],
+    { initialEntries: entries, initialIndex: entries.length - 1 },
+  );
+  rawRender(
+    <StrictMode>
+      <AllProviders>
+        <RouterProvider router={router} />
+      </AllProviders>
+    </StrictMode>,
+  );
+  return router;
+}
 
 describe("the providers step is not a dead end", () => {
   beforeEach(() => {
@@ -80,7 +94,7 @@ describe("the providers step is not a dead end", () => {
   });
 
   it("offers a way past it when nothing is ticked", async () => {
-    customRender(<OnboardingWizardView />);
+    openProvidersStep();
 
     expect(
       await screen.findByRole("button", {
@@ -105,7 +119,7 @@ describe("the providers step is not a dead end", () => {
         }),
     );
     const user = userEvent.setup();
-    customRender(<OnboardingWizardView />);
+    openProvidersStep();
 
     await user.click(
       await screen.findByRole("checkbox", { name: /opensubtitles/i }),
@@ -119,6 +133,45 @@ describe("the providers step is not a dead end", () => {
         screen.queryByRole("button", { name: /i will pick providers later/i }),
       ).not.toBeInTheDocument(),
     );
+
+    settle?.();
+  });
+
+  it("browser Back does not leave the install running into nothing", async () => {
+    // The skip is hidden while a run is going, but the address bar is another
+    // way out of the same screen: going back unmounted the stage while the
+    // installs were still finishing, so the restart arrived at nobody and the
+    // poll that brings the reader back was armed after its cleanup had run.
+    let settle: (() => void) | undefined;
+    mutateAsync.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          settle = resolve;
+        }),
+    );
+    const user = userEvent.setup();
+    const router = openProvidersStep(["/", "/setup/providers"]);
+
+    await user.click(
+      await screen.findByRole("checkbox", { name: /opensubtitles/i }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: /install .{0,3} restart/i }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: /i will pick providers later/i }),
+      ).not.toBeInTheDocument(),
+    );
+
+    await router.navigate(-1);
+
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/setup/providers"),
+    );
+    expect(
+      screen.getByRole("heading", { name: /add subtitle providers/i }),
+    ).toBeInTheDocument();
 
     settle?.();
   });

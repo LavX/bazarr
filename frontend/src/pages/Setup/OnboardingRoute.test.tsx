@@ -19,14 +19,14 @@ vi.mock("@/apis/hooks", async (importOriginal) => {
 
 const mockedSettingsMutation = vi.mocked(useSettingsMutation);
 
-function openWizardAt(path: string) {
+function openWizardAt(path: string, entries: string[] = [path]) {
   const router = createMemoryRouter(
     [
       { path: "/setup", element: <OnboardingWizardView /> },
       { path: "/setup/:stepKey", element: <OnboardingWizardView /> },
       { path: "/", element: <div>home</div> },
     ],
-    { initialEntries: [path] },
+    { initialEntries: entries, initialIndex: entries.length - 1 },
   );
   rawRender(
     <StrictMode>
@@ -117,6 +117,33 @@ describe("the wizard's own URL", () => {
     await waitFor(() =>
       expect(router.state.location.pathname).not.toBe("/setup/intent"),
     );
+  });
+
+  it("Back walks the history that is there instead of writing more", async () => {
+    // Replacing the current entry left the same step in the two entries on
+    // top, so the first browser Back after a wizard Back appeared to do
+    // nothing and a second press was needed to get anywhere.
+    const user = userEvent.setup();
+    const router = openWizardAt("/setup", ["/", "/setup"]);
+
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/setup/welcome"),
+    );
+    await user.click(screen.getByRole("button", { name: /get started/i }));
+    await screen.findByRole("heading", { name: /what do you want bazarr/i });
+
+    await user.click(screen.getByRole("button", { name: /^back$/i }));
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/setup/welcome"),
+    );
+    expect(
+      await screen.findByRole("heading", { name: /welcome to bazarr/i }),
+    ).toBeInTheDocument();
+
+    // One press, one move: out of the wizard the way it was entered.
+    await router.navigate(-1);
+
+    await waitFor(() => expect(router.state.location.pathname).toBe("/"));
   });
 
   it("falls back to the persisted cursor when the URL names no step", async () => {
