@@ -720,6 +720,16 @@ def provider_throttle(name, exception, ids=None, language=None, sports_context=N
                     logging.debug("Couldn't remove cache file: %s", os.path.basename(fn))
         else:
             with _THROTTLE_LOCK:
+                # Two searches can have the same provider in flight and compute
+                # their deadlines before either gets here, so the second writer
+                # is not necessarily the one with the most to say. Keep the
+                # later deadline: an hour the provider asked for must not be
+                # replaced by a generic ten minutes from the other request,
+                # which would put Bazarr back on its door while it is still
+                # refusing. The same rule the reader applies, on the way in.
+                current = tp.get(name)
+                if current and current[1] and current[1] > throttle_until:
+                    cls_name, throttle_until, throttle_description = current
                 tp[name] = (cls_name, throttle_until, throttle_description)
                 set_throttled_providers(tp)
 

@@ -346,6 +346,17 @@ def _coverage(pool, state, *, has_file=False):
             status, reason = "skipped", "requires_file"
         elif name in cooldowns and cooldowns[name][0] > now:
             until, prior = cooldowns[name]
+            # The same longer-of-the-two rule _retry_delay applies, applied
+            # again on the way out. A cooldown is fixed when the outcome is
+            # recorded, but the throttle table can move afterwards: a provider
+            # abandoned at the wall goes on the short abandonment wait, then
+            # its call finishes and writes a real rate limit. Offering the
+            # earlier of the two produces a retry that searches nothing,
+            # because the provider stays out of get_providers_sorted() until
+            # the table's deadline.
+            throttle = get_providers.tp.get(name)
+            if throttle and throttle[1]:
+                until = max(until, throttle[1].timestamp())
             outcomes[name] = {**prior, "result_count": 0, "retry_at": _iso(until)}
             continue
         elif name not in available or name in discarded:

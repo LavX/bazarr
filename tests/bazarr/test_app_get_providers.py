@@ -520,3 +520,28 @@ def test_a_short_retry_after_does_not_undercut_the_class_duration(monkeypatch, t
     _reason, until, description = get_providers.tp["hasty_provider"]
     remaining = (until - datetime.datetime.now()).total_seconds()
     assert 500 < remaining < 620 and description == "10 minutes"
+
+
+def test_the_later_of_two_concurrent_deadlines_is_the_one_kept(monkeypatch, tmp_path):
+    """Two searches can have the same provider in flight and compute their
+    deadlines before either records one, so the second writer is not
+    necessarily the one with the most to say. An hour the provider asked for
+    must not be replaced by a generic ten minutes from the other request."""
+    import datetime
+    from subliminal_patch.exceptions import APIThrottled
+
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(get_providers.args, "config_dir", str(tmp_path))
+    monkeypatch.setattr(get_providers, "tp", {})
+    monkeypatch.setattr(get_providers, "throttle_count", {})
+    monkeypatch.setattr(get_providers, "event_stream", lambda *args, **kwargs: None)
+    monkeypatch.setattr(get_providers.settings.general, "enabled_providers", ["two_at_once"])
+    monkeypatch.setattr(get_providers.provider_registry, "names", lambda: ["two_at_once"])
+
+    get_providers.provider_throttle("two_at_once", APIThrottled(retry_after=3600), wait=False)
+    get_providers.provider_throttle("two_at_once", APIThrottled("slow down"), wait=False)
+
+    _reason, until, description = get_providers.tp["two_at_once"]
+    remaining = (until - datetime.datetime.now()).total_seconds()
+    assert 3400 < remaining < 3700, "a shorter concurrent record replaced the longer one"
+    assert description == "60 minutes"

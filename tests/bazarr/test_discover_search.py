@@ -1450,3 +1450,28 @@ def test_publishing_the_growing_row_list_is_charged_to_the_same_budget(authentic
     assert offered, "no observation carried a result"
     assert len(offered[-1]) == 4, "publishing was not charged, so the list kept growing"
     assert len(response.json["results"]) == 8
+
+
+def test_a_cooldown_defers_to_a_longer_deadline_recorded_after_it(authenticated_client, providers):
+    """A Discover cooldown is fixed when the outcome is recorded, but the
+    throttle table can move afterwards: a provider abandoned at the wall takes
+    the short abandonment wait, then its call finishes and writes a real rate
+    limit. Offering the earlier of the two produces a retry that searches
+    nothing, because the provider stays out of get_providers_sorted() until the
+    table's deadline."""
+    import datetime as dt
+    from app import get_providers
+    from subliminal.exceptions import AuthenticationError
+
+    providers.add("discover_late_writer", error=AuthenticationError("fixture failure"))
+    first = post(authenticated_client, {
+        "media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
+    assert first["coverage"]["providers"][0]["status"] == "authentication_required"
+
+    # The abandoned call lands after the snapshot was already filed.
+    get_providers.tp["discover_late_writer"] = (
+        "DownloadLimitExceeded", dt.datetime.now() + dt.timedelta(hours=3), "3 hours")
+    second = post(authenticated_client, {
+        "media_type": "movie", "imdb_id": "tt0133093", "language": "eng", "refresh": True}).json
+    outcome = second["coverage"]["providers"][0]
+    assert _retry_seconds(outcome) > 3600, "the stale cooldown shadowed the longer deadline"
