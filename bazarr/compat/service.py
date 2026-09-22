@@ -835,7 +835,17 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
     from subliminal_patch.provider_health import get_tracker as _get_health_tracker
     from subliminal_patch.score import ComputeScore, MAX_SCORES
     health = _get_health_tracker()
-    pool = _get_compat_pool()
+    # restore_available, for the same reason Discover asks for it. Any pool
+    # reset, a settings save, a provider toggle or a Hub configuration change,
+    # is served by the next fanout building a pool from the providers that are
+    # searchable right then, so a provider serving out a backoff at that moment
+    # is left out of a membership list nothing else ever adds to. On this path
+    # that is permanent: the exclusion below is re-checked per fanout, while
+    # nothing re-checked the way back in, so one provider's backoff plus one
+    # unrelated save dropped it from every compat search for the life of the
+    # process. Adoption still goes through provider_is_usable, so the backoff
+    # itself is served out in full.
+    pool = _get_compat_pool(restore_available=True)
     video = _build_video(imdb_id, season, episode, media_type,
                          query=query, moviehash=moviehash,
                          moviebytesize=moviebytesize,

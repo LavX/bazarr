@@ -243,6 +243,51 @@ def test_the_throttled_provider_really_stops_receiving_requests(monkeypatch, tmp
     assert len(asked) == 1, "a provider serving out its backoff was asked again"
 
 
+def test_a_pool_rebuilt_during_a_backoff_asks_the_provider_again_once_it_lifts(monkeypatch, tmp_path):
+    """The way back into the pool, which only Discover used to ask for.
+
+    A pool reset is served by the next fanout building a fresh pool from the
+    providers that are searchable at that moment, so a provider part way
+    through a backoff is not in it. The fanout re-checks membership on the way
+    out on every call and nothing re-checked it on the way in, so the provider
+    stayed out of every compat search long after its backoff expired: one
+    unrelated settings or Hub credential save was enough to lose it for the
+    life of the process.
+    """
+    import datetime as dt
+    from app import get_providers
+    from app.config import settings
+    from provider_hub.registry import HubProxyProvider
+    from subliminal.video import Movie
+    from subliminal_patch.extensions import provider_registry
+    from subzero.language import Language
+
+    asked = []
+    name = "compat_cold_rebuild"
+    cls = type("ColdRebuildFixtureProvider", (HubProxyProvider,),
+               {"provider_name": name, "languages": {Language("eng")},
+                "list_subtitles": lambda self, video, languages: asked.append(video) or []})
+    monkeypatch.setitem(provider_registry.providers, name, cls)
+    _isolated_compat_pool(monkeypatch, tmp_path, [name])
+    # Production derives the constructor's provider list from the throttle
+    # table, which is the whole reason a rebuilt pool can come up short.
+    monkeypatch.setattr(service, "get_providers_sorted",
+                        lambda: [item for item in [name] if get_providers.provider_is_usable(item)])
+    monkeypatch.setattr(settings.compat_endpoint, "serve_local_subs", False)
+    monkeypatch.setattr(service, "_build_video",
+                        lambda *args, **kwargs: Movie("/no/such/file.mkv", "The Matrix",
+                                                      imdb_id="tt0133093"))
+
+    get_providers.tp[name] = ("RuntimeError", dt.datetime.now() + dt.timedelta(minutes=10), "10 minutes")
+    service.reset_compat_pool()
+    service._do_fanout("tt0133093", None, None, [Language("eng")], "movie", timeout_seconds=8)
+    assert asked == [], "a provider serving out its backoff was asked anyway"
+
+    get_providers.tp.pop(name)
+    service._do_fanout("tt0133093", None, None, [Language("eng")], "movie", timeout_seconds=8)
+    assert len(asked) == 1, "the rebuilt pool never took the provider back"
+
+
 def test_recording_a_rate_limit_does_not_sleep_inside_the_fanout(monkeypatch, tmp_path):
     """provider_throttle pauses between the first few rate-limit events, which
     is right where it came from: the library search retries the same provider

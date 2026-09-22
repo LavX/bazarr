@@ -25,7 +25,9 @@ def capture_exclude(monkeypatch):
         pool = MagicMock()
         pool.providers = list(pool_providers)
         pool.discarded_providers = set()
-        monkeypatch.setattr(service, "_get_compat_pool", lambda: pool)
+        # Keyword-tolerant: the fanout asks for restore_available so a pool
+        # rebuilt during a backoff takes the provider back afterwards.
+        monkeypatch.setattr(service, "_get_compat_pool", lambda **kwargs: pool)
         # Virtual video with a non-existent file path: video_has_file is False
         # but os.path.exists() gets a real string (no MagicMock TypeError).
         monkeypatch.setattr(service, "_build_video",

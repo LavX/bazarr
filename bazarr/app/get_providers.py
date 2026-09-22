@@ -873,11 +873,35 @@ def snapshot_throttled_providers():
     return {'providers': providers, 'enabled_count': len(enabled)}
 
 
+# The throttle reasons a user can actually fix by correcting what they typed.
+# Everything else in the table is the provider's own state, so a settings or
+# Provider Hub edit has no business clearing it.
+CREDENTIAL_THROTTLE_REASONS = ('AuthenticationError', 'ConfigurationError', 'PaymentRequired')
+
+
+def reset_throttled_provider(name):
+    """Forget one provider's credential throttle.
+
+    A rejected password parks that provider for hours, and correcting it is
+    what earns it its next attempt. Only that provider is touched, so the
+    cool-offs the others are serving out stay where they are. Returns True when
+    an entry was dropped, so a caller can log the difference.
+    """
+    with _THROTTLE_LOCK:
+        reason = tp.get(name, (None, None, None))[0]
+        if reason not in CREDENTIAL_THROTTLE_REASONS:
+            return False
+        tp.pop(name, None)
+        set_throttled_providers(tp)
+    event_stream(type='badges')
+    logging.info('BAZARR throttle for %s has been reset (was: %s).', name, reason)
+    return True
+
+
 def reset_throttled_providers(only_auth_or_conf_error=False):
     with _THROTTLE_LOCK:
         for provider in list(tp):
-            if only_auth_or_conf_error and tp[provider][0] not in ['AuthenticationError', 'ConfigurationError',
-                                                                   'PaymentRequired']:
+            if only_auth_or_conf_error and tp[provider][0] not in CREDENTIAL_THROTTLE_REASONS:
                 continue
             tp.pop(provider, None)
         set_throttled_providers(tp)

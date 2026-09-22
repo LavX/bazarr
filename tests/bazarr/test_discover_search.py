@@ -197,6 +197,63 @@ def test_persisted_auth_cooldown_retains_known_cause(authenticated_client, provi
     assert providers.videos == []
 
 
+def test_corrected_hub_credentials_release_the_auth_throttle(authenticated_client, providers, monkeypatch,
+                                                             tmp_path):
+    """Fixing the password is what a twelve-hour auth backoff is waiting for.
+
+    The settings page clears those entries when a provider's settings are
+    saved. A Provider Hub plugin is configured through its own endpoint, which
+    did not, so the corrected provider stayed out of every search and Discover
+    kept reporting it as needing authentication until the backoff expired by
+    itself. A provider cooling down for its own reasons is untouched by the
+    correction and keeps its wait.
+    """
+    import datetime as dt
+    from app import get_providers
+    from compat import service as compat_service
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    providers.add("discover_auth")
+    providers.add("discover_busy")
+    state = load_state()
+    state["installations"] = {"discover_auth": {
+        "provider_id": "discover_auth", "name": "Discover Auth", "active_version": "1.0.0",
+        "state": "active", "pending_restart": False,
+        "manifest": {"secret_fields": ["password"]}, "config": {"password": "typo"},  # pragma: allowlist secret
+    }}
+    save_state(state)
+    # The production gate, rather than a fixed list: a provider leaves and
+    # rejoins the searchable set exactly as the throttle table says it should.
+    monkeypatch.setattr(get_providers, "get_providers_sorted",
+                        lambda: [name for name in providers.names if get_providers.provider_is_usable(name)])
+    monkeypatch.setattr(compat_service, "_compat_pool", object(), raising=False)
+    until = dt.datetime.now() + dt.timedelta(hours=12)
+    get_providers.tp["discover_auth"] = ("AuthenticationError", until, "12 hours")
+    get_providers.tp["discover_busy"] = ("TooManyRequests", until, "12 hours")
+
+    before = post(authenticated_client, {"media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
+    assert {item["provider"]: item["status"] for item in before["coverage"]["providers"]} == {
+        "discover_auth": "authentication_required", "discover_busy": "cooldown"}
+
+    response = authenticated_client.patch(
+        "/api/provider-hub/providers/discover_auth",
+        json={"config": {"password": "corrected"}},  # pragma: allowlist secret
+        headers={"X-API-KEY": "discover-test-key"})
+
+    assert response.status_code == 200
+    assert "discover_auth" not in get_providers.tp
+    assert "discover_auth" not in get_providers.get_throttled_providers()
+    assert get_providers.tp["discover_busy"] == ("TooManyRequests", until, "12 hours")
+    # Dropped as well: it held providers built with the rejected credentials.
+    assert compat_service._compat_pool is None
+
+    after = post(authenticated_client, {"media_type": "movie", "imdb_id": "tt0111161", "language": "eng"}).json
+    assert {item["provider"]: item["status"] for item in after["coverage"]["providers"]} == {
+        "discover_auth": "empty", "discover_busy": "cooldown"}
+    assert [name for name, _, _ in providers.videos] == ["discover_auth"]
+
+
 @pytest.mark.parametrize("language,alpha3,country", [("pob", "por", "BR"), ("zht", "zho", "TW"), ("hun", "hun", None)])
 def test_explicit_language_variants_reach_real_pool(authenticated_client, providers, language, alpha3, country):
     from subzero.language import Language
