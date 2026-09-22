@@ -1,5 +1,6 @@
 import { FC } from "react";
-import { Button, Group, Radio, Stack, Text, Title } from "@mantine/core";
+import { Button, Group, Radio, Stack, Text } from "@mantine/core";
+import StepLayout from "@/pages/Setup/StepLayout";
 import { useOnboardingIntent } from "@/pages/Setup/useOnboardingIntent";
 import type { WizardIntent, WizardStepProps } from "./types";
 import styles from "./IntentStep.module.scss";
@@ -37,16 +38,26 @@ const IntentStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   const { intent, setIntent } = useOnboardingIntent();
 
   return (
-    <Stack gap="lg">
-      <Stack gap="xs">
-        <Title order={2}>What do you want Bazarr+ to do for you?</Title>
-        <Text c="dimmed">
-          This only decides which steps we walk you through. Whatever you pick,
-          everything else stays available in Settings, and you can connect the
-          rest at any time.
-        </Text>
-      </Stack>
-
+    <StepLayout
+      title="What do you want Bazarr+ to do for you?"
+      description="This only decides which steps we walk you through. Whatever you pick, everything else stays available in Settings, and you can connect the rest at any time."
+      actions={
+        <Group justify="space-between">
+          <Group gap="sm">
+            {/* The shell passes onBack at every index above zero. This was the
+                one step that dropped it, so Welcome was a one-way door. */}
+            {onBack && (
+              <Button variant="default" onClick={onBack}>
+                Back
+              </Button>
+            )}
+          </Group>
+          <Button onClick={onNext} disabled={intent === null}>
+            Continue
+          </Button>
+        </Group>
+      }
+    >
       <Radio.Group
         value={intent ?? ""}
         onChange={(value) => setIntent(value as WizardIntent)}
@@ -74,22 +85,7 @@ const IntentStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
           ))}
         </Stack>
       </Radio.Group>
-
-      <Group justify="space-between">
-        <Group gap="sm">
-          {/* The shell passes onBack at every index above zero. This was the
-              one step that dropped it, so Welcome was a one-way door. */}
-          {onBack && (
-            <Button variant="default" onClick={onBack}>
-              Back
-            </Button>
-          )}
-        </Group>
-        <Button onClick={onNext} disabled={intent === null}>
-          Continue
-        </Button>
-      </Group>
-    </Stack>
+    </StepLayout>
   );
 };
 

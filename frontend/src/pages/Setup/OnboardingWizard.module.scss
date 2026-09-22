@@ -24,9 +24,13 @@
   color: var(--bz-text-primary);
 }
 
+// 720px was a reading measure, and a first run is not prose. At 1920 it used
+// 37.5% of the width, left about 600px dead on each side, and still ran the
+// tallest media server screens nearly 900px off the bottom of the window.
+// 1120px is what lets a step be two columns (StepLayout.module.scss) and fit.
 .shell {
   width: 100%;
-  max-width: 720px;
+  max-width: 1120px;
   margin: auto;
   display: flex;
   flex-direction: column;
@@ -170,6 +174,16 @@
 // Four labelled nodes still do not fit a phone, so the labels go first and the
 // dots shrink. The header names the phase in words either way, so nothing is
 // lost by dropping them.
+// Every vertical pixel outside the card is budget the step does not get. A
+// 24px outer gutter is a phone's margin, not a desktop's: on a wide display
+// the card has 28px of padding of its own, so the gutter goes where there is
+// space for it instead.
+@media (min-width: 1200px) {
+  .root {
+    padding: 16px 32px;
+  }
+}
+
 @media (max-width: 720px) {
   .railLabel {
     display: none;

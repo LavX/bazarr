@@ -8,7 +8,6 @@ import {
   Stack,
   Text,
   ThemeIcon,
-  Title,
 } from "@mantine/core";
 import { faCheck, faMinus } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
@@ -24,6 +23,7 @@ import type {
   MediaServerKind,
 } from "@/apis/raw/mediaServers";
 import { kindName } from "@/pages/Settings/MediaServers/kinds";
+import StepLayout from "@/pages/Setup/StepLayout";
 import {
   clearPersistedIntent,
   useOnboardingIntent,
@@ -254,60 +254,61 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
   };
 
   return (
-    <Stack gap="lg">
-      <Stack gap="xs">
-        <Title order={2}>You are all set</Title>
-        <Text c="dimmed">
-          {discoverPath
-            ? "Search for any film or series, preview what is available and download it straight to this device. No library required."
-            : instanceCount > 0
-              ? "Your first library scan starts now, and Bazarr+ will begin looking for the subtitles it is missing."
-              : "Nothing is connected yet, so Bazarr+ has no library to scan. Discover still works, and you can connect an instance whenever you like."}
-        </Text>
-      </Stack>
-
+    <StepLayout
+      title="You are all set"
+      description={
+        discoverPath
+          ? "Search for any film or series, preview what is available and download it straight to this device. No library required."
+          : instanceCount > 0
+            ? "Your first library scan starts now, and Bazarr+ will begin looking for the subtitles it is missing."
+            : "Nothing is connected yet, so Bazarr+ has no library to scan. Discover still works, and you can connect an instance whenever you like."
+      }
+      aside={
+        <Stack gap="md">
+          {skipped.length > 0 && (
+            <Stack gap="xs">
+              <Text fw={600}>What you left for later</Text>
+              <List spacing="xs" size="sm">
+                {skipped.map((item) => (
+                  <List.Item key={item.label}>
+                    <Text size="sm" c="dimmed">
+                      {item.label}. You will find it under {item.where}.
+                    </Text>
+                  </List.Item>
+                ))}
+              </List>
+            </Stack>
+          )}
+          {failed && (
+            <Alert color="red" title="Could not finish setup">
+              Bazarr+ could not save that setup is complete, so this screen
+              comes back on the next load. Check that Bazarr+ is still running,
+              then try again.
+            </Alert>
+          )}
+        </Stack>
+      }
+      actions={
+        <Group justify="space-between">
+          <Group gap="sm">
+            {onBack && (
+              <Button variant="default" onClick={onBack}>
+                Back
+              </Button>
+            )}
+          </Group>
+          <Button onClick={handleFinish} loading={mutation.isPending} size="md">
+            {discoverPath ? "Finish and open Discover" : "Finish"}
+          </Button>
+        </Group>
+      }
+    >
       <List spacing="sm" center>
         {lines.map((line) => (
           <SummaryItem key={line.label} label={line.label} done={line.done} />
         ))}
       </List>
-
-      {skipped.length > 0 && (
-        <Stack gap="xs">
-          <Text fw={600}>What you left for later</Text>
-          <List spacing="xs" size="sm">
-            {skipped.map((item) => (
-              <List.Item key={item.label}>
-                <Text size="sm" c="dimmed">
-                  {item.label}. You will find it under {item.where}.
-                </Text>
-              </List.Item>
-            ))}
-          </List>
-        </Stack>
-      )}
-
-      {failed && (
-        <Alert color="red" title="Could not finish setup">
-          Bazarr+ could not save that setup is complete, so this screen comes
-          back on the next load. Check that Bazarr+ is still running, then try
-          again.
-        </Alert>
-      )}
-
-      <Group justify="space-between">
-        <Group gap="sm">
-          {onBack && (
-            <Button variant="default" onClick={onBack}>
-              Back
-            </Button>
-          )}
-        </Group>
-        <Button onClick={handleFinish} loading={mutation.isPending} size="md">
-          {discoverPath ? "Finish and open Discover" : "Finish"}
-        </Button>
-      </Group>
-    </Stack>
+    </StepLayout>
   );
 };
 

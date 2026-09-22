@@ -1,0 +1,56 @@
+// The provider lists. Both stages used to be a single column capped by an
+// inner ScrollArea: at 320px wide the install list hid 502px inside a 320px
+// box, inside a page that also scrolled, on a step that cannot be skipped. An
+// inner scroller is the same violation in a smaller box, so the cap is gone
+// and the horizontal space the single column discarded carries the list
+// instead.
+// Columns rather than a grid, because the entries are not the same height: one
+// provider needs a username and a password, the one beside it needs nothing at
+// all. A grid row is as tall as its tallest cell, so a single provider with
+// credentials left a hole under each of its neighbours. Columns pack.
+.grid {
+  column-count: 1;
+  column-gap: 24px;
+}
+
+@media (min-width: 760px) {
+  .grid {
+    column-count: 2;
+  }
+}
+
+@media (min-width: 1200px) {
+  .grid {
+    column-count: 3;
+  }
+}
+
+// One provider: its tick, and the fields it needs once it is ticked. Kept
+// whole, so a column break never separates a provider from its credentials.
+.cell {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  break-inside: avoid;
+  padding-bottom: 12px;
+}
+
+// The outcome list after an install run. Same reason, same shape.
+.outcomes {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px 24px;
+}
+
+@media (min-width: 760px) {
+  .outcomes {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1200px) {
+  .outcomes {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}

@@ -1,5 +1,5 @@
 import { FC } from "react";
-import { Stack, Text, Title } from "@mantine/core";
+import StepLayout from "@/pages/Setup/StepLayout";
 import type { WizardStepProps } from "@/pages/Setup/steps/types";
 import { useOnboardingSelection } from "@/pages/Setup/useOnboardingSelection";
 import InstanceServerForm from "./InstanceServerForm";
@@ -27,13 +27,12 @@ const MediaServerConfigureStep: FC<Props> = ({ draftId, onNext, onBack }) => {
     // The cursor moves off a step whose draft is gone, so this is a frame at
     // most. Say something rather than render an empty card.
     return (
-      <Stack gap="lg">
-        <Stack gap="xs">
-          <Title order={3}>Media server</Title>
-          <Text c="dimmed">This server is no longer selected.</Text>
-        </Stack>
-        <StepActions onNext={onNext} onBack={onBack} />
-      </Stack>
+      <StepLayout
+        title="Media server"
+        titleOrder={3}
+        description="This server is no longer selected."
+        actions={<StepActions onNext={onNext} onBack={onBack} />}
+      />
     );
   }
 

@@ -41,46 +41,26 @@ describe("GeneralStep", () => {
     } as unknown as ReturnType<typeof useSettingsMutation>);
   });
 
-  it("renders the three controls pre-filled from settings", () => {
+  it("renders the controls pre-filled from settings", () => {
     customRender(<GeneralStep onNext={onNext} />);
 
     // Subtitle folder selector reflects the stored value.
     expect(
       screen.getByRole("combobox", { name: /subtitle folder/i }),
     ).toHaveValue("AlongSide Media File");
-    // Page size selector reflects the stored value.
-    expect(screen.getByRole("combobox", { name: /page size/i })).toHaveValue(
-      "50",
-    );
     // Upgrade switch is on.
     expect(
       screen.getByRole("switch", { name: /upgrade previously downloaded/i }),
     ).toBeChecked();
   });
 
-  it("writes a changed page size on Continue", async () => {
-    const user = userEvent.setup();
-    let onSuccess: (() => void) | undefined;
-    mutate.mockImplementation(
-      (_input: unknown, opts?: { onSuccess?: () => void }) => {
-        onSuccess = opts?.onSuccess;
-      },
-    );
-
+  it("does not ask for a page size", () => {
+    // A table preference, on a screen the reader meets before they have a
+    // table. It is one row of a step that has to fit the window, and nobody
+    // can answer it on day one; Settings, UI owns it.
     customRender(<GeneralStep onNext={onNext} />);
 
-    await user.click(screen.getByRole("combobox", { name: /page size/i }));
-    await user.click(await screen.findByText("100"));
-
-    await user.click(screen.getByRole("button", { name: /continue/i }));
-
-    expect(mutate).toHaveBeenCalledTimes(1);
-    const [payload] = mutate.mock.calls[0];
-    expect(payload["settings-general-page_size"]).toBe(100);
-
-    expect(onNext).not.toHaveBeenCalled();
-    onSuccess?.();
-    await waitFor(() => expect(onNext).toHaveBeenCalled());
+    expect(screen.queryByRole("combobox", { name: /page size/i })).toBeNull();
   });
 
   it("reveals and writes a custom subfolder when a non-default folder is picked", async () => {

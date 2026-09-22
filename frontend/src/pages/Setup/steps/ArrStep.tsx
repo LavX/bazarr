@@ -9,7 +9,6 @@ import {
   Switch,
   Text,
   TextInput,
-  Title,
 } from "@mantine/core";
 import {
   getArrInstanceErrorMessage,
@@ -23,6 +22,7 @@ import type {
   ArrInstanceCreate,
   ArrInstanceTest,
 } from "@/apis/raw/arrInstances";
+import StepLayout from "@/pages/Setup/StepLayout";
 import type { WizardStepProps } from "./types";
 
 export interface ArrStepProps extends WizardStepProps {
@@ -252,13 +252,22 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack }) => {
       existing.port
     }${existing.base_url && existing.base_url !== "/" ? existing.base_url : ""}`;
     return (
-      <Stack gap="lg">
-        <Stack gap="xs">
-          <Title order={2}>{meta.label}</Title>
-          <Text c="dimmed">
-            Connect {meta.label} for your {meta.media}.
-          </Text>
-        </Stack>
+      <StepLayout
+        title={meta.label}
+        description={`Connect ${meta.label} for your ${meta.media}.`}
+        actions={
+          <Group justify="space-between">
+            <Group gap="sm">
+              {onBack && (
+                <Button variant="default" onClick={onBack}>
+                  Back
+                </Button>
+              )}
+            </Group>
+            <Button onClick={handleContinue}>Continue</Button>
+          </Group>
+        }
+      >
         <Alert color="green" title="Already connected">
           <Stack gap="sm" align="flex-start">
             <Text size="sm">
@@ -312,6 +321,48 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack }) => {
             {removeError}
           </Alert>
         )}
+      </StepLayout>
+    );
+  }
+
+  const verdict = (
+    <Stack gap="sm">
+      {testResult &&
+        (testResult.ok ? (
+          <Alert
+            color="green"
+            title={`Connected to ${testResult.app_name ?? meta.label}`}
+          >
+            {testResult.version
+              ? `Version ${testResult.version}`
+              : "The instance responded successfully."}
+          </Alert>
+        ) : (
+          <Alert color="red" title="Connection failed">
+            {testResult.message ??
+              testResult.error ??
+              "The instance did not respond."}
+          </Alert>
+        ))}
+      {test.isError && (
+        <Alert color="red" title="Test failed">
+          Could not reach the Bazarr API to run the connection test.
+        </Alert>
+      )}
+      {saveError && (
+        <Alert color="red" title={`Could not connect ${meta.label}`}>
+          {saveError}
+        </Alert>
+      )}
+    </Stack>
+  );
+
+  return (
+    <StepLayout
+      title={meta.label}
+      description={`Connect ${meta.label} so Bazarr can find your ${meta.media}.`}
+      aside={verdict}
+      actions={
         <Group justify="space-between">
           <Group gap="sm">
             {onBack && (
@@ -320,21 +371,15 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack }) => {
               </Button>
             )}
           </Group>
-          <Button onClick={handleContinue}>Continue</Button>
+          <Button
+            onClick={handleContinue}
+            loading={create.isPending || settings.isPending}
+          >
+            {touched ? "Continue" : `Continue without ${meta.label}`}
+          </Button>
         </Group>
-      </Stack>
-    );
-  }
-
-  return (
-    <Stack gap="lg">
-      <Stack gap="xs">
-        <Title order={2}>{meta.label}</Title>
-        <Text c="dimmed">
-          Connect {meta.label} so Bazarr can find your {meta.media}.
-        </Text>
-      </Stack>
-
+      }
+    >
       <TextInput
         label="Name"
         value={name}
@@ -409,51 +454,7 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack }) => {
           Test
         </Button>
       </Group>
-
-      {testResult &&
-        (testResult.ok ? (
-          <Alert
-            color="green"
-            title={`Connected to ${testResult.app_name ?? meta.label}`}
-          >
-            {testResult.version
-              ? `Version ${testResult.version}`
-              : "The instance responded successfully."}
-          </Alert>
-        ) : (
-          <Alert color="red" title="Connection failed">
-            {testResult.message ??
-              testResult.error ??
-              "The instance did not respond."}
-          </Alert>
-        ))}
-      {test.isError && (
-        <Alert color="red" title="Test failed">
-          Could not reach the Bazarr API to run the connection test.
-        </Alert>
-      )}
-      {saveError && (
-        <Alert color="red" title={`Could not connect ${meta.label}`}>
-          {saveError}
-        </Alert>
-      )}
-
-      <Group justify="space-between">
-        <Group gap="sm">
-          {onBack && (
-            <Button variant="default" onClick={onBack}>
-              Back
-            </Button>
-          )}
-        </Group>
-        <Button
-          onClick={handleContinue}
-          loading={create.isPending || settings.isPending}
-        >
-          {touched ? "Continue" : `Continue without ${meta.label}`}
-        </Button>
-      </Group>
-    </Stack>
+    </StepLayout>
   );
 };
 

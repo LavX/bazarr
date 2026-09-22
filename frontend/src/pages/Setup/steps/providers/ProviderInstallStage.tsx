@@ -7,7 +7,6 @@ import {
   List,
   Loader,
   Progress,
-  ScrollArea,
   Stack,
   Text,
   TextInput,
@@ -37,6 +36,7 @@ import type {
 import { parseManifest } from "@/pages/Settings/Providers/hub/utils";
 import { isRecommendedProvider } from "./recommended";
 import { redirectToSetup } from "./redirect";
+import styles from "./ProviderGrid.module.scss";
 
 // How often we re-check the backend after the restart. The backend drops
 // connections while it bounces, so failed polls are expected and ignored.
@@ -566,7 +566,7 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
 
         {enableFailure}
 
-        <List spacing="sm" center>
+        <List spacing="sm" center className={styles.outcomes}>
           {outcomes.map((outcome) => (
             <List.Item
               key={outcome.providerId}
@@ -709,25 +709,24 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
             value={query}
             onChange={(e) => setQuery(e.currentTarget.value)}
           />
-          <ScrollArea.Autosize mah={320} type="auto" offsetScrollbars>
-            <Stack gap="sm" pr="sm">
-              {visible.length === 0 ? (
-                <Text c="dimmed" size="sm" py="md" ta="center">
-                  No providers match &ldquo;{query}&rdquo;.
-                </Text>
-              ) : (
-                visible.map((choice) => (
+          {visible.length === 0 ? (
+            <Text c="dimmed" size="sm" py="md" ta="center">
+              No providers match &ldquo;{query}&rdquo;.
+            </Text>
+          ) : (
+            <div className={styles.grid}>
+              {visible.map((choice) => (
+                <div key={choice.providerId} className={styles.cell}>
                   <Checkbox
-                    key={choice.providerId}
                     label={choice.name}
                     description={choice.description}
                     checked={selected.includes(choice.providerId)}
                     onChange={() => toggle(choice.providerId)}
                   />
-                ))
-              )}
-            </Stack>
-          </ScrollArea.Autosize>
+                </div>
+              ))}
+            </div>
+          )}
           {selected.length > 0 && (
             <Text size="sm" c="dimmed">
               {selected.length} selected

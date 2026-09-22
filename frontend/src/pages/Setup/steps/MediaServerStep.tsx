@@ -1,13 +1,5 @@
 import { FC, useMemo } from "react";
-import {
-  Button,
-  Checkbox,
-  Divider,
-  Group,
-  Stack,
-  Text,
-  Title,
-} from "@mantine/core";
+import { Button, Checkbox, Divider, Group, Stack, Text } from "@mantine/core";
 import { useSystemSettings } from "@/apis/hooks";
 import { useMediaServerInstances } from "@/apis/hooks/mediaServers";
 import type {
@@ -15,6 +7,7 @@ import type {
   MediaServerKind,
 } from "@/apis/raw/mediaServers";
 import { kindName } from "@/pages/Settings/MediaServers/kinds";
+import StepLayout from "@/pages/Setup/StepLayout";
 import { useOnboardingSelection } from "@/pages/Setup/useOnboardingSelection";
 import ConnectedServerRow from "./mediaServer/ConnectedServerRow";
 import StepActions from "./mediaServer/StepActions";
@@ -126,19 +119,83 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
     (draft) => draft.instanceId === undefined,
   ).length;
 
-  return (
-    <Stack gap="md">
-      <Stack gap="xs">
-        <Title order={2}>Media servers</Title>
-        <Text c="dimmed">
-          Optionally connect a media server so Bazarr refreshes it after it
-          downloads subtitles. Bazarr finds and downloads subtitles with no
-          media server at all, so you can set one up later in Settings,
-          Connections.
-        </Text>
-      </Stack>
+  const selection = chosen.length > 0 && (
+    <Stack gap="sm" className={styles.selection}>
+      <Text fw={600} size="sm">
+        Servers to set up
+      </Text>
+      {chosen.map((kind, position) => (
+        <Stack key={kind} gap="xs">
+          {position > 0 && <Divider />}
+          {connected[kind].map((instance) => (
+            <ConnectedServerRow
+              key={instance.id}
+              instance={instance}
+              kind={kind}
+              last={connected[kind].length === 1}
+              accountOwned={kind === "plex" && instance.id === plexAccountRowId}
+              ownershipPending={kind === "plex" && settingsPending}
+              onDisconnected={forgetInstance}
+            />
+          ))}
+          {pendingOf(kind).map((draft) => (
+            <Group key={draft.draftId} justify="space-between" gap="sm">
+              <Text>
+                {draft.name}{" "}
+                <Text span size="sm" c="dimmed">
+                  not connected yet
+                </Text>
+              </Text>
+              <Button
+                variant="subtle"
+                color="gray"
+                size="compact-sm"
+                aria-label={`Remove ${draft.name}`}
+                onClick={() => removeDraft(draft.draftId)}
+              >
+                Remove
+              </Button>
+            </Group>
+          ))}
+          {kind === "plex" ? (
+            <Text size="sm" c="dimmed">
+              One Plex account per install. To refresh a second Plex server, add
+              it in Settings, Connections after setup.
+            </Text>
+          ) : (
+            <Group>
+              <Button
+                variant="subtle"
+                size="compact-sm"
+                onClick={() => addDraft(kind, takenNames)}
+              >
+                Add another {kindName(kind)}
+              </Button>
+            </Group>
+          )}
+        </Stack>
+      ))}
+    </Stack>
+  );
 
-      <Stack gap="sm">
+  return (
+    <StepLayout
+      title="Media servers"
+      description="Optionally connect a media server so Bazarr refreshes it after it downloads subtitles. Bazarr finds and downloads subtitles with no media server at all, so you can set one up later in Settings, Connections."
+      aside={selection || undefined}
+      actions={
+        <StepActions
+          onNext={onNext}
+          onBack={onBack}
+          continueLabel={
+            pendingTotal > 0
+              ? `Set up ${pendingTotal} ${pendingTotal === 1 ? "server" : "servers"}`
+              : "Continue without a server"
+          }
+        />
+      }
+    >
+      <div className={styles.kinds}>
         {ORDER.map((kind) => {
           // A switched-off row is not a destination: the dispatcher skips it,
           // so counting it as connected would tick this card, lock it, and
@@ -173,79 +230,8 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
             </Checkbox.Card>
           );
         })}
-      </Stack>
-
-      {chosen.length > 0 && (
-        <Stack gap="sm" className={styles.selection}>
-          <Text fw={600} size="sm">
-            Servers to set up
-          </Text>
-          {chosen.map((kind, position) => (
-            <Stack key={kind} gap="xs">
-              {position > 0 && <Divider />}
-              {connected[kind].map((instance) => (
-                <ConnectedServerRow
-                  key={instance.id}
-                  instance={instance}
-                  kind={kind}
-                  last={connected[kind].length === 1}
-                  accountOwned={
-                    kind === "plex" && instance.id === plexAccountRowId
-                  }
-                  ownershipPending={kind === "plex" && settingsPending}
-                  onDisconnected={forgetInstance}
-                />
-              ))}
-              {pendingOf(kind).map((draft) => (
-                <Group key={draft.draftId} justify="space-between" gap="sm">
-                  <Text>
-                    {draft.name}{" "}
-                    <Text span size="sm" c="dimmed">
-                      not connected yet
-                    </Text>
-                  </Text>
-                  <Button
-                    variant="subtle"
-                    color="gray"
-                    size="compact-sm"
-                    aria-label={`Remove ${draft.name}`}
-                    onClick={() => removeDraft(draft.draftId)}
-                  >
-                    Remove
-                  </Button>
-                </Group>
-              ))}
-              {kind === "plex" ? (
-                <Text size="sm" c="dimmed">
-                  One Plex account per install. To refresh a second Plex server,
-                  add it in Settings, Connections after setup.
-                </Text>
-              ) : (
-                <Group>
-                  <Button
-                    variant="subtle"
-                    size="compact-sm"
-                    onClick={() => addDraft(kind, takenNames)}
-                  >
-                    Add another {kindName(kind)}
-                  </Button>
-                </Group>
-              )}
-            </Stack>
-          ))}
-        </Stack>
-      )}
-
-      <StepActions
-        onNext={onNext}
-        onBack={onBack}
-        continueLabel={
-          pendingTotal > 0
-            ? `Set up ${pendingTotal} ${pendingTotal === 1 ? "server" : "servers"}`
-            : "Continue without a server"
-        }
-      />
-    </Stack>
+      </div>
+    </StepLayout>
   );
 };
 

@@ -1,5 +1,6 @@
 import { FC } from "react";
-import { Button, List, Stack, Text, Title } from "@mantine/core";
+import { Button, List, Stack, Text } from "@mantine/core";
+import StepLayout from "@/pages/Setup/StepLayout";
 import type { WizardStepProps } from "./types";
 
 /**
@@ -12,16 +13,15 @@ import type { WizardStepProps } from "./types";
  */
 const WelcomeStep: FC<WizardStepProps> = ({ onNext }) => {
   return (
-    <Stack gap="lg">
-      <Stack gap="xs">
-        <Title order={2}>Welcome to Bazarr+</Title>
-        <Text c="dimmed">
-          A few quick steps and you are running. The next screen asks what you
-          want Bazarr+ to do, and we only ask for what that needs. You can
-          change any of this later in Settings.
-        </Text>
-      </Stack>
-
+    <StepLayout
+      title="Welcome to Bazarr+"
+      description="A few quick steps and you are running. The next screen asks what you want Bazarr+ to do, and we only ask for what that needs. You can change any of this later in Settings."
+      actions={
+        <Button onClick={onNext} size="md">
+          Get started
+        </Button>
+      }
+    >
       <Stack gap="xs">
         <Text fw={600}>Whatever you pick, we will cover:</Text>
         <List spacing="xs">
@@ -31,11 +31,7 @@ const WelcomeStep: FC<WizardStepProps> = ({ onNext }) => {
           <List.Item>A few general application preferences</List.Item>
         </List>
       </Stack>
-
-      <Button onClick={onNext} size="md" mt="sm">
-        Get started
-      </Button>
-    </Stack>
+    </StepLayout>
   );
 };
 

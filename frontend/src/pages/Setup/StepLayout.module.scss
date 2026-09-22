@@ -1,0 +1,57 @@
+// Layout for one wizard step. Single column by default, two columns from the
+// width where a reading measure stops being the right instrument.
+
+.layout,
+.single {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+
+.intro {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.controls {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.actions {
+  min-width: 0;
+}
+
+// The shell is 1120px wide, so from 1200 there is room for the explanation and
+// the controls beside each other. The gain is vertical: the tallest media
+// server screens lose the whole height of their heading, their paragraph and
+// their status lines, which is what put them past the bottom of the window.
+@media (min-width: 1200px) {
+  .layout {
+    display: grid;
+    grid-template-columns: minmax(260px, 330px) minmax(0, 1fr);
+    column-gap: 40px;
+    row-gap: 24px;
+    align-items: start;
+  }
+
+  .intro {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .controls {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .actions {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+}

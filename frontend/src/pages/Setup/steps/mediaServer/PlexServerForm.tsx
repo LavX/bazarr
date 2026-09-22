@@ -1,7 +1,8 @@
 import { FC, MouseEvent, useRef, useState } from "react";
-import { Alert, Button, Group, Stack, Text, Title } from "@mantine/core";
+import { Alert, Button, Group, Stack, Text } from "@mantine/core";
 import { useMediaServerInstances } from "@/apis/hooks/mediaServers";
 import PlexSettings from "@/pages/Settings/Plex/PlexSettings";
+import StepLayout from "@/pages/Setup/StepLayout";
 import type { WizardStepProps } from "@/pages/Setup/steps/types";
 import type { MediaServerDraft } from "@/pages/Setup/useOnboardingSelection";
 import { useOnboardingSelection } from "@/pages/Setup/useOnboardingSelection";
@@ -82,51 +83,52 @@ const PlexServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
   };
 
   return (
-    <Stack gap="lg">
-      <Stack gap="xs">
-        <Title order={3}>Plex</Title>
-        <Text c="dimmed">
-          Sign in with your Plex account and pick the server to refresh. Nothing
-          is written until you sign in, and you can disconnect here or in
-          Settings later.
-        </Text>
-      </Stack>
-
+    <StepLayout
+      title="Plex"
+      titleOrder={3}
+      description="Sign in with your Plex account and pick the server to refresh. Nothing is written until you sign in, and you can disconnect here or in Settings later."
+      aside={
+        <Stack gap="sm">
+          {confirming && (
+            <Alert color="red" title="Disconnect from Plex?">
+              <Stack gap="sm">
+                <Text size="sm">
+                  This removes every Plex setting, including the account you
+                  just signed in with.
+                </Text>
+                <Group gap="sm">
+                  <Button
+                    variant="default"
+                    onClick={() => setConfirming(false)}
+                  >
+                    Keep Plex connected
+                  </Button>
+                  <Button color="red" onClick={confirm}>
+                    Disconnect
+                  </Button>
+                </Group>
+              </Stack>
+            </Alert>
+          )}
+          <Text size="sm" c="dimmed">
+            Which libraries this Plex server refreshes is set on its instance in
+            Settings, Connections.
+          </Text>
+        </Stack>
+      }
+      actions={
+        <StepActions
+          onNext={onNext}
+          onBack={onBack}
+          onContinue={handleContinue}
+          continuePending={continuing}
+        />
+      }
+    >
       <div className={styles.panel} onClickCapture={intercept}>
         <PlexSettings />
       </div>
-
-      {confirming && (
-        <Alert color="red" title="Disconnect from Plex?">
-          <Stack gap="sm">
-            <Text size="sm">
-              This removes every Plex setting, including the account you just
-              signed in with.
-            </Text>
-            <Group gap="sm">
-              <Button variant="default" onClick={() => setConfirming(false)}>
-                Keep Plex connected
-              </Button>
-              <Button color="red" onClick={confirm}>
-                Disconnect
-              </Button>
-            </Group>
-          </Stack>
-        </Alert>
-      )}
-
-      <Text size="sm" c="dimmed">
-        Which libraries this Plex server refreshes is set on its instance in
-        Settings, Connections.
-      </Text>
-
-      <StepActions
-        onNext={onNext}
-        onBack={onBack}
-        onContinue={handleContinue}
-        continuePending={continuing}
-      />
-    </Stack>
+    </StepLayout>
   );
 };
 

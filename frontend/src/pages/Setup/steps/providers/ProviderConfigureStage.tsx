@@ -4,10 +4,8 @@ import {
   Anchor,
   Button,
   Checkbox,
-  Divider,
   Group,
   PasswordInput,
-  ScrollArea,
   Stack,
   Text,
   TextInput,
@@ -23,6 +21,7 @@ import type {
   ProviderHubInstallation,
   ProviderHubManifest,
 } from "@/apis/raw/providerHub";
+import styles from "./ProviderGrid.module.scss";
 
 type FieldType = "text" | "password" | "checkbox";
 
@@ -350,73 +349,50 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
         </Alert>
       )}
 
-      <ScrollArea.Autosize mah={380} type="auto" offsetScrollbars>
-        <Stack gap="md" pr="sm">
-          {installed.map((provider, index) => {
-            const providerId = provider.provider_id;
-            const isEnabled = enabled.includes(providerId);
-            const fields = essentialFields(
-              fieldsFromManifest(provider.manifest),
-            );
-            return (
-              <Stack key={providerId} gap="sm">
-                {index > 0 && <Divider />}
-                <Checkbox
-                  label={providerLabel(provider)}
-                  checked={isEnabled}
-                  onChange={() => toggleEnabled(providerId)}
-                />
-                {isEnabled && fields.length === 0 && (
-                  <Text size="sm" c="dimmed" pl="xl">
-                    No credentials needed.
-                  </Text>
-                )}
-                {isEnabled &&
-                  fields.map((field) => {
-                    const fieldValue = values[`${providerId}::${field.key}`];
-                    if (field.type === "checkbox") {
-                      return (
-                        <Checkbox
-                          key={field.key}
-                          label={field.label}
-                          description={field.description}
-                          checked={fieldValue === true}
-                          onChange={(event) =>
-                            setValue(
-                              providerId,
-                              field.key,
-                              event.currentTarget.checked,
-                            )
-                          }
-                        />
-                      );
-                    }
-                    const fieldError =
-                      checked && missingKeys.has(`${providerId}::${field.key}`)
-                        ? `${providerLabel(provider)} needs this to search`
-                        : undefined;
-                    if (field.type === "password") {
-                      return (
-                        <PasswordInput
-                          key={field.key}
-                          label={field.label}
-                          description={field.description}
-                          error={fieldError}
-                          value={
-                            typeof fieldValue === "string" ? fieldValue : ""
-                          }
-                          onChange={(event) =>
-                            setValue(
-                              providerId,
-                              field.key,
-                              event.currentTarget.value,
-                            )
-                          }
-                        />
-                      );
-                    }
+      <div className={styles.grid}>
+        {installed.map((provider) => {
+          const providerId = provider.provider_id;
+          const isEnabled = enabled.includes(providerId);
+          const fields = essentialFields(fieldsFromManifest(provider.manifest));
+          return (
+            <div key={providerId} className={styles.cell}>
+              <Checkbox
+                label={providerLabel(provider)}
+                checked={isEnabled}
+                onChange={() => toggleEnabled(providerId)}
+              />
+              {isEnabled && fields.length === 0 && (
+                <Text size="sm" c="dimmed" pl="xl">
+                  No credentials needed.
+                </Text>
+              )}
+              {isEnabled &&
+                fields.map((field) => {
+                  const fieldValue = values[`${providerId}::${field.key}`];
+                  if (field.type === "checkbox") {
                     return (
-                      <TextInput
+                      <Checkbox
+                        key={field.key}
+                        label={field.label}
+                        description={field.description}
+                        checked={fieldValue === true}
+                        onChange={(event) =>
+                          setValue(
+                            providerId,
+                            field.key,
+                            event.currentTarget.checked,
+                          )
+                        }
+                      />
+                    );
+                  }
+                  const fieldError =
+                    checked && missingKeys.has(`${providerId}::${field.key}`)
+                      ? `${providerLabel(provider)} needs this to search`
+                      : undefined;
+                  if (field.type === "password") {
+                    return (
+                      <PasswordInput
                         key={field.key}
                         label={field.label}
                         description={field.description}
@@ -431,12 +407,28 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
                         }
                       />
                     );
-                  })}
-              </Stack>
-            );
-          })}
-        </Stack>
-      </ScrollArea.Autosize>
+                  }
+                  return (
+                    <TextInput
+                      key={field.key}
+                      label={field.label}
+                      description={field.description}
+                      error={fieldError}
+                      value={typeof fieldValue === "string" ? fieldValue : ""}
+                      onChange={(event) =>
+                        setValue(
+                          providerId,
+                          field.key,
+                          event.currentTarget.value,
+                        )
+                      }
+                    />
+                  );
+                })}
+            </div>
+          );
+        })}
+      </div>
 
       {checked && missing.length > 0 && (
         <Alert color="red" title="Missing credentials">
@@ -461,10 +453,10 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
         Advanced provider options are available later in Settings, Providers.
       </Text>
 
-      <Anchor component="button" type="button" onClick={onInstallMore}>
-        Install more providers
-      </Anchor>
-
+      {/* Beside Back rather than on a line of its own: it is where the reader
+          goes next if this list is not enough, which is what the rest of this
+          row is for, and two spare lines above the buttons are two lines the
+          list does not get. */}
       <Group justify="space-between">
         <Group gap="sm">
           {onBack && (
@@ -472,6 +464,9 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
               Back
             </Button>
           )}
+          <Anchor component="button" type="button" onClick={onInstallMore}>
+            Install more providers
+          </Anchor>
         </Group>
         <Button
           onClick={handleContinue}

@@ -6,13 +6,12 @@ import {
   PasswordInput,
   Stack,
   Switch,
-  Text,
   TextInput,
-  Title,
 } from "@mantine/core";
 import { useSettingsMutation } from "@/apis/hooks";
 import { useSeerrTestConnectionMutation } from "@/apis/hooks/seerr";
 import { seerrEnabledKey } from "@/pages/Settings/keys";
+import StepLayout from "@/pages/Setup/StepLayout";
 import type { WizardStepProps } from "./types";
 
 /**
@@ -78,54 +77,8 @@ const SeerrStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   // is about to save a connection nobody has proved works.
   const verified = result?.success === true;
 
-  return (
-    <Stack gap="lg">
-      <Stack gap="xs">
-        <Title order={2}>Seerr</Title>
-        <Text c="dimmed">
-          Connect Seerr, Jellyseerr or Overseerr and the request button on a
-          title works straight away. Requests are made with this API key, as the
-          Seerr owner, and approved immediately.
-        </Text>
-      </Stack>
-
-      <TextInput
-        label="Seerr URL"
-        description="Full URL of your Seerr, Jellyseerr or Overseerr server"
-        placeholder="http://seerr:5055"
-        value={url}
-        onChange={(e) => setUrl(e.currentTarget.value)}
-      />
-
-      <PasswordInput
-        label="API key"
-        description="Found in Seerr under Settings, General"
-        placeholder="API key"
-        autoComplete="new-password"
-        value={apiKey}
-        onChange={(e) => setApiKey(e.currentTarget.value)}
-      />
-
-      {isHttps && (
-        <Switch
-          label="Verify SSL certificate"
-          checked={verifySsl}
-          onChange={(e) => setVerifySsl(e.currentTarget.checked)}
-        />
-      )}
-
-      <Group>
-        <Button
-          type="button"
-          variant="light"
-          loading={test.isPending}
-          disabled={!filled}
-          onClick={handleTest}
-        >
-          Test
-        </Button>
-      </Group>
-
+  const verdict = (
+    <Stack gap="sm">
       {result &&
         (result.success ? (
           <Alert
@@ -170,27 +123,73 @@ const SeerrStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
           {saveError}
         </Alert>
       )}
+    </Stack>
+  );
 
-      <Group justify="space-between">
-        <Group gap="sm">
-          {onBack && (
-            <Button variant="default" onClick={onBack}>
-              Back
-            </Button>
-          )}
+  return (
+    <StepLayout
+      title="Seerr"
+      description="Connect Seerr, Jellyseerr or Overseerr and the request button on a title works straight away. Requests are made with this API key, as the Seerr owner, and approved immediately."
+      aside={verdict}
+      actions={
+        <Group justify="space-between">
+          <Group gap="sm">
+            {onBack && (
+              <Button variant="default" onClick={onBack}>
+                Back
+              </Button>
+            )}
+          </Group>
+          {/* The step is optional, so an untested connection is still allowed
+              through. It is not allowed through silently: the label says what
+              is being saved. */}
+          <Button onClick={handleContinue} loading={settings.isPending}>
+            {!filled
+              ? "Continue without Seerr"
+              : verified
+                ? "Continue"
+                : "Save and continue anyway"}
+          </Button>
         </Group>
-        {/* The step is optional, so an untested connection is still allowed
-            through. It is not allowed through silently: the label says what is
-            being saved. */}
-        <Button onClick={handleContinue} loading={settings.isPending}>
-          {!filled
-            ? "Continue without Seerr"
-            : verified
-              ? "Continue"
-              : "Save and continue anyway"}
+      }
+    >
+      <TextInput
+        label="Seerr URL"
+        description="Full URL of your Seerr, Jellyseerr or Overseerr server"
+        placeholder="http://seerr:5055"
+        value={url}
+        onChange={(e) => setUrl(e.currentTarget.value)}
+      />
+
+      <PasswordInput
+        label="API key"
+        description="Found in Seerr under Settings, General"
+        placeholder="API key"
+        autoComplete="new-password"
+        value={apiKey}
+        onChange={(e) => setApiKey(e.currentTarget.value)}
+      />
+
+      {isHttps && (
+        <Switch
+          label="Verify SSL certificate"
+          checked={verifySsl}
+          onChange={(e) => setVerifySsl(e.currentTarget.checked)}
+        />
+      )}
+
+      <Group>
+        <Button
+          type="button"
+          variant="light"
+          loading={test.isPending}
+          disabled={!filled}
+          onClick={handleTest}
+        >
+          Test
         </Button>
       </Group>
-    </Stack>
+    </StepLayout>
   );
 };
 
