@@ -27,10 +27,13 @@ export function onboardingKey(name: string): string {
  *
  * Adopted, never merged: a legacy value is read only when this install has
  * nothing of its own under its own key, so it can never overwrite state an
- * instance has already written. It is removed as it is taken, because the
- * legacy key is the one thing two instances behind one proxy still share: left
- * there, whichever instance loaded next would adopt the same value and inherit
- * the other's place in the wizard.
+ * instance has already written. It is copied, never removed. An install served
+ * from the root has no base URL, so the un-namespaced key is not a leftover for
+ * it, it is the key it still reads and writes. Deleting it would take a root
+ * install's cursor and answers away the first time a subpath install on the
+ * same origin loaded. A stale copy left behind costs nothing: every install has
+ * its own key from its first write onwards, and the legacy value is only ever
+ * read by one that has nothing of its own yet.
  */
 function adoptLegacyValue(name: string, key: string): string | null {
   const legacyKey = `${PREFIX}${name}`;
@@ -43,7 +46,6 @@ function adoptLegacyValue(name: string, key: string): string | null {
     return null;
   }
   localStorage.setItem(key, value);
-  localStorage.removeItem(legacyKey);
   return value;
 }
 

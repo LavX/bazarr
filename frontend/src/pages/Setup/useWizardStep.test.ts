@@ -137,9 +137,10 @@ describe("useWizardStep", () => {
     expect(localStorage.getItem("bazarr.onboarding.intent::/bazarr")).toBe(
       "discover",
     );
-    // Both taken rather than left for a second instance to adopt as well.
-    expect(localStorage.getItem("bazarr.onboarding.step")).toBeNull();
-    expect(localStorage.getItem("bazarr.onboarding.intent")).toBeNull();
+    // Both copied rather than taken. An install served from the root shares
+    // this origin and still reads these very keys.
+    expect(localStorage.getItem("bazarr.onboarding.step")).toBe("4");
+    expect(localStorage.getItem("bazarr.onboarding.intent")).toBe("discover");
   });
 
   it("discards a legacy cursor for a step this run does not walk", () => {
@@ -153,7 +154,10 @@ describe("useWizardStep", () => {
 
     expect(result.current.step.key).toBe("welcome");
     expect(localStorage.getItem("bazarr.onboarding.step::/bazarr")).toBeNull();
-    expect(localStorage.getItem("bazarr.onboarding.step")).toBeNull();
+    // Only this install's own cursor is discarded. Reading the legacy one
+    // again lands on Welcome the same way, and another install may still
+    // need it.
+    expect(localStorage.getItem("bazarr.onboarding.step")).toBe("2");
   });
 
   it("discards an index naming a step this run does not walk", () => {

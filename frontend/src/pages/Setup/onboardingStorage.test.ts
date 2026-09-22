@@ -32,10 +32,10 @@ describe("onboarding storage", () => {
 
       expect(readOnboardingValue(name)).toBe("kept");
       expect(localStorage.getItem(onboardingKey(name))).toBe("kept");
-      // Taken as it is adopted: two instances behind one proxy share this key,
-      // and the second to load must not inherit the first one's place.
-      expect(localStorage.getItem(`bazarr.onboarding.${name}`)).toBeNull();
-      // Nothing left to adopt a second time.
+      // Copied, not moved: an install served from the root reads and writes
+      // this very key, so taking it would empty that install's wizard.
+      expect(localStorage.getItem(`bazarr.onboarding.${name}`)).toBe("kept");
+      // Reading again is served by this install's own key.
       expect(readOnboardingValue(name)).toBe("kept");
     },
   );
@@ -58,6 +58,24 @@ describe("onboarding storage", () => {
     expect(onboardingKey("step")).toBe("bazarr.onboarding.step");
     expect(readOnboardingValue("step")).toBe("seerr");
     expect(localStorage.getItem("bazarr.onboarding.step")).toBe("seerr");
+  });
+
+  it("leaves another install's value where that install can still read it", () => {
+    // Both installs sit behind one proxy on one origin, so they share
+    // localStorage. The first is served from the root and never stopped using
+    // the un-namespaced key. The second is served from /bazarr.
+    localStorage.setItem("bazarr.onboarding.step", "root install");
+
+    underBaseUrl("/bazarr");
+    expect(readOnboardingValue("step")).toBe("root install");
+    writeOnboardingValue("step", "subpath install");
+
+    underBaseUrl("");
+    expect(onboardingKey("step")).toBe("bazarr.onboarding.step");
+    expect(readOnboardingValue("step")).toBe("root install");
+    expect(localStorage.getItem("bazarr.onboarding.step::/bazarr")).toBe(
+      "subpath install",
+    );
   });
 
   it("reports nothing when there is nothing under either key", () => {
