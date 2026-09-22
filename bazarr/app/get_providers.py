@@ -158,12 +158,15 @@ PROVIDERS_FORCED_OFF = ["addic7ed", "tvsubtitles", "legendasdivx", "napiprojekt"
 
 throttle_count = {}
 # The compat fanout records throttles from inside its provider futures, so two
-# providers failing at once now reach set_throttled_providers() concurrently.
-# That function stages every write through one fixed .tmp path, so without this
-# the second thread's os.replace() finds the file the first already moved and
-# raises FileNotFoundError out of the provider's own error handler, which the
-# fanout then reports instead of the failure it was recording.
-_THROTTLE_FILE_LOCK = threading.Lock()
+# providers failing at once now reach this table concurrently, and both races
+# that opens end the same way: an exception out of the provider's own error
+# handler, which the fanout then reports in place of the failure it was
+# recording. One is the staging file, which every writer moves through the same
+# throttled_providers.dat.tmp path. The other is `tp` itself, which one thread
+# can resize while another is serializing it. So the lock covers every mutation
+# of the table and its persistence, not only the write. It is reentrant because
+# those pairs call set_throttled_providers(), which takes it again.
+_THROTTLE_LOCK = threading.RLock()
 
 # Remote exception names the worker transport carries when a provider raised a
 # timeout. The envelope keeps the class name but not the class, so a search
@@ -301,8 +304,9 @@ def get_providers():
                 providers_list.remove(provider)
             else:
                 logging.info("Using %s again after %s, (disabled because: %s)", provider, throttle_desc, reason)
-                del tp[provider]
-                set_throttled_providers(tp)
+                with _THROTTLE_LOCK:
+                    tp.pop(provider, None)
+                    set_throttled_providers(tp)
         # if forced only is enabled: # fixme: Prepared for forced only implementation to remove providers with don't support forced only subtitles
         #     for provider in providers_list:
         #         if provider in PROVIDERS_FORCED_OFF:
@@ -688,8 +692,9 @@ def provider_throttle(name, exception, ids=None, language=None, sports_context=N
                 except (IOError, OSError):
                     logging.debug("Couldn't remove cache file: %s", os.path.basename(fn))
         else:
-            tp[name] = (cls_name, throttle_until, throttle_description)
-            set_throttled_providers(tp)
+            with _THROTTLE_LOCK:
+                tp[name] = (cls_name, throttle_until, throttle_description)
+                set_throttled_providers(tp)
 
             trac_info = _get_traceback_info(exception)
 
@@ -763,30 +768,35 @@ def update_throttled_provider():
     existing_providers = provider_registry.names()
     providers_list = [x for x in settings.general.enabled_providers if x in existing_providers]
 
-    for provider in list(tp):
-        if provider not in providers_list:
-            del tp[provider]
-            set_throttled_providers(tp)
-
-        reason, until, throttle_desc = tp.get(provider, (None, None, None))
-
-        if reason:
-            now = datetime.datetime.now()
-            if now < until:
-                pass
-            else:
-                logging.info("Using %s again after %s, (disabled because: %s)", provider, throttle_desc, reason)
-                del tp[provider]
+    # Held across the whole sweep: it both deletes from the table and hands the
+    # table to the writer, so a recorder arriving mid-sweep would otherwise
+    # resize a dict this loop is already walking.
+    with _THROTTLE_LOCK:
+        for provider in list(tp):
+            if provider not in providers_list:
+                tp.pop(provider, None)
                 set_throttled_providers(tp)
 
             reason, until, throttle_desc = tp.get(provider, (None, None, None))
 
             if reason:
                 now = datetime.datetime.now()
-                if now >= until:
+                if now < until:
+                    pass
+                else:
                     logging.info("Using %s again after %s, (disabled because: %s)", provider, throttle_desc, reason)
-                    del tp[provider]
+                    tp.pop(provider, None)
                     set_throttled_providers(tp)
+
+                reason, until, throttle_desc = tp.get(provider, (None, None, None))
+
+                if reason:
+                    now = datetime.datetime.now()
+                    if now >= until:
+                        logging.info("Using %s again after %s, (disabled because: %s)", provider, throttle_desc,
+                                     reason)
+                        tp.pop(provider, None)
+                        set_throttled_providers(tp)
 
     event_stream(type='badges')
 
@@ -827,12 +837,13 @@ def snapshot_throttled_providers():
 
 
 def reset_throttled_providers(only_auth_or_conf_error=False):
-    for provider in list(tp):
-        if only_auth_or_conf_error and tp[provider][0] not in ['AuthenticationError', 'ConfigurationError',
-                                                               'PaymentRequired']:
-            continue
-        del tp[provider]
-    set_throttled_providers(tp)
+    with _THROTTLE_LOCK:
+        for provider in list(tp):
+            if only_auth_or_conf_error and tp[provider][0] not in ['AuthenticationError', 'ConfigurationError',
+                                                                   'PaymentRequired']:
+                continue
+            tp.pop(provider, None)
+        set_throttled_providers(tp)
     update_throttled_provider()
     if only_auth_or_conf_error:
         logging.info('BAZARR throttled providers have been reset (only AuthenticationError, ConfigurationError and '
@@ -879,7 +890,7 @@ def set_throttled_providers(data):
     # iteration off a dict another recorder is writing to. The compat fanout
     # records from inside its provider futures, so both races are now reachable
     # from a single search.
-    with _THROTTLE_FILE_LOCK:
+    with _THROTTLE_LOCK:
         serializable = {}
         for name, val in data.items():
             cls_name, throttle_until, description = val

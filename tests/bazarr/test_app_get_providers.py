@@ -398,3 +398,40 @@ def test_concurrent_recorders_do_not_race_on_the_staging_file(monkeypatch, tmp_p
 
     assert failures == []
     assert (tmp_path / "config" / "throttled_providers.dat").exists()
+
+
+def test_recording_a_throttle_never_walks_a_table_another_thread_is_resizing(monkeypatch, tmp_path):
+    """The staging file is only half of it. provider_throttle hands the shared
+    table straight to the writer, so a second recorder adding its own provider
+    mid-serialization raises "dictionary changed size during iteration", and
+    that escapes the first provider's error handler for the fanout to report in
+    place of its real failure. Both the mutation and the write belong under one
+    lock."""
+    import threading
+    from subliminal_patch.exceptions import APIThrottled
+
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(get_providers.args, "config_dir", str(tmp_path))
+    monkeypatch.setattr(get_providers, "tp", {})
+    monkeypatch.setattr(get_providers, "throttle_count", {})
+    monkeypatch.setattr(get_providers, "event_stream", lambda *args, **kwargs: None)
+    names = [f"racing_provider_{index}" for index in range(12)]
+    monkeypatch.setattr(get_providers.settings.general, "enabled_providers", names)
+    monkeypatch.setattr(get_providers.provider_registry, "names", lambda: list(names))
+    failures = []
+
+    def record(name):
+        try:
+            get_providers.provider_throttle(name, APIThrottled("slow down"), wait=False)
+        except Exception as error:
+            # Catching everything is the point: none must escape.
+            failures.append(error)
+
+    threads = [threading.Thread(target=record, args=(name,)) for name in names]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert failures == []
+    assert set(get_providers.tp) == set(names)
