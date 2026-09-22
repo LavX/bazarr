@@ -132,5 +132,10 @@ def test_pg_status_page_reads_only_destinations_in_use(pg_session):
         entries = versions.statuses(pg_session, settings(), refresh=False)
     finally:
         versions.reset()
-    assert entries == [{'id': live.id, 'kind': 'emby', 'name': 'On',
-                        'state': 'connected', 'version': '4.8.11.0'}]
+    entry, = entries
+    # How long this answer stands, which the page needs to know when to come
+    # back. It is a clock reading, not a stored value, so it is checked for
+    # range rather than matched exactly.
+    assert 0 < entry.pop('refresh_in') <= versions.CACHE_SECONDS
+    assert entry == {'id': live.id, 'kind': 'emby', 'name': 'On',
+                     'state': 'connected', 'version': '4.8.11.0'}
