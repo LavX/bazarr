@@ -1,5 +1,6 @@
 import { FC, MouseEvent, useEffect, useRef, useState } from "react";
 import { Alert, Button, Group, Stack, Text } from "@mantine/core";
+import { useSystemSettings } from "@/apis/hooks";
 import { useMediaServerInstances } from "@/apis/hooks/mediaServers";
 import PlexSettings from "@/pages/Settings/Plex/PlexSettings";
 import StepLayout from "@/pages/Setup/StepLayout";
@@ -31,6 +32,7 @@ interface Props extends WizardStepProps {
 const PlexServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
   const { markSaved } = useOnboardingSelection();
   const { data: instances, refetch } = useMediaServerInstances("plex");
+  const { refetch: refetchSettings } = useSystemSettings();
   const [confirming, setConfirming] = useState(false);
   const [continuing, setContinuing] = useState(false);
   const pending = useRef<HTMLButtonElement | null>(null);
@@ -76,12 +78,31 @@ const PlexServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
     // stay in the wizard, and Back or a resumed setup would walk the reader
     // through a connection they had already made.
     setContinuing(true);
-    void refetch()
-      .then(({ data }) => {
-        // The account flow owns the row. If it made one, the draft is no longer
-        // a draft, so its step stops being generated and the picker shows it as
-        // connected instead.
-        const row = (data ?? instances)?.[0];
+    // The settings are asked again for the same reason the rows are: the id
+    // the account flow records is written by the same transition that makes
+    // the row, and this query holds its answers until something says
+    // otherwise, so the cached copy can still be the one from before the
+    // sign-in.
+    void Promise.all([refetch(), refetchSettings()])
+      .then(([rows, settings]) => {
+        // The account flow owns the row, and which row that is comes from the
+        // id it recorded, by the rule the backend applies
+        // (media_servers/plex_account.py::_account_row): a recorded id or
+        // nothing. The first Plex row is not that rule. A reader who added a
+        // server by hand in Settings can have it sorted ahead of the
+        // account's own, and this draft would then be marked as saved to a
+        // row it never wrote, leaving the account's destination reported as a
+        // connection the wizard had made.
+        const recorded = settings.data?.plex?.instance_id;
+        if (!recorded) {
+          // Nothing recorded means the account flow wrote no destination, so
+          // there is no row this draft can honestly claim. Its step stays,
+          // which is what a connection that was not made should do.
+          return;
+        }
+        const row = (rows.data ?? instances)?.find(
+          (candidate) => candidate.id === recorded,
+        );
         if (row) {
           markSaved(draft.draftId, row.id);
         }

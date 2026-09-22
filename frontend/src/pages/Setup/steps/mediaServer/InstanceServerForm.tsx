@@ -16,7 +16,10 @@ import {
   useMediaServerTest,
 } from "@/apis/hooks/mediaServers";
 import type { MediaServerOptions, PathMapping } from "@/apis/raw/mediaServers";
-import { KINDS_WITH_PATH_MAPPINGS } from "@/apis/raw/mediaServers";
+import {
+  KINDS_WITH_PATH_MAPPINGS,
+  LIBRARY_OPTION_KEYS,
+} from "@/apis/raw/mediaServers";
 import {
   CREDENTIAL_LABELS,
   kindName,
@@ -35,6 +38,13 @@ import {
   useMediaServerSubmit,
 } from "./submit";
 import styles from "./InstanceServerForm.module.scss";
+
+// Every options key a library handle can be chosen into, whichever kind did
+// the choosing.
+const LIBRARY_KEYS = [
+  ...Object.values(LIBRARY_OPTION_KEYS.jellyfin),
+  ...Object.values(LIBRARY_OPTION_KEYS.plex),
+] as (keyof MediaServerOptions)[];
 
 interface Props extends WizardStepProps {
   // Plex is not here: its connection comes from the account flow, not a form.
@@ -111,6 +121,46 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
       updateDraft(draft.draftId, patch);
     },
     [clear, draft.draftId, updateDraft],
+  );
+
+  // The libraries this instance refreshes, and on Silo the library each
+  // mapping is scoped to, are handles the server that answered handed out.
+  // Editing a connection field points the draft at a different server, and the
+  // test and libraries hooks answer that by resetting, which takes the pickers
+  // off screen: the old server's choices stayed in the draft with nothing
+  // saying so, and Continue then wrote a library id from one server against
+  // another. They go when the connection they were chosen against does, and a
+  // fresh test and load against the new server is what puts them back.
+  const withoutLibraryChoices = useCallback(
+    (patch: Partial<MediaServerDraft>): Partial<MediaServerDraft> => {
+      const chosen = LIBRARY_KEYS.filter((key) => {
+        const value = draft.options[key];
+        return Array.isArray(value) && value.length > 0;
+      });
+      const scoped = draft.pathMappings.some(
+        (mapping) => mapping.library_id !== undefined,
+      );
+      if (chosen.length === 0 && !scoped) {
+        return patch;
+      }
+      const options: MediaServerOptions = { ...draft.options };
+      for (const key of chosen) {
+        delete options[key];
+      }
+      return {
+        ...patch,
+        options,
+        ...(scoped
+          ? {
+              pathMappings: draft.pathMappings.map((mapping) => ({
+                local_path: mapping.local_path,
+                remote_path: mapping.remote_path,
+              })),
+            }
+          : {}),
+      };
+    },
+    [draft.options, draft.pathMappings],
   );
 
   const connection = useMemo(
@@ -335,7 +385,12 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
           }
           value={draft.url}
           error={errors.url}
-          onChange={(event) => set({ url: event.currentTarget.value }, "url")}
+          onChange={(event) =>
+            set(
+              withoutLibraryChoices({ url: event.currentTarget.value }),
+              "url",
+            )
+          }
         />
         <PasswordInput
           label={credential}
@@ -343,14 +398,21 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
           value={draft.apiKey}
           error={errors.apiKey}
           onChange={(event) =>
-            set({ apiKey: event.currentTarget.value }, "apiKey")
+            set(
+              withoutLibraryChoices({ apiKey: event.currentTarget.value }),
+              "apiKey",
+            )
           }
         />
         <Switch
           label="Verify SSL certificate"
           description="Applies to HTTPS connections."
           checked={draft.verifySsl}
-          onChange={(event) => set({ verifySsl: event.currentTarget.checked })}
+          onChange={(event) =>
+            set(
+              withoutLibraryChoices({ verifySsl: event.currentTarget.checked }),
+            )
+          }
         />
       </div>
 

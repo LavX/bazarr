@@ -24,6 +24,10 @@ const mockedSettingsMutation = vi.mocked(useSettingsMutation);
 
 const onNext = vi.fn();
 const mutate = vi.fn();
+// The Plex re-enable is awaited, so the row needs the promise-returning half
+// of the mutation as well: a failure there is the one the reader has to hear
+// about.
+const mutateAsync = vi.fn();
 
 const row = (kind: MediaServerKind, name: string, id: string) => ({
   id,
@@ -92,8 +96,10 @@ describe("MediaServerStep", () => {
     localStorage.clear();
     setInstances({});
     setSettings();
+    mutateAsync.mockResolvedValue(undefined);
     mockedSettingsMutation.mockReturnValue({
       mutate,
+      mutateAsync,
     } as unknown as ReturnType<typeof useSettingsMutation>);
   });
 
@@ -443,7 +449,7 @@ describe("MediaServerStep", () => {
 
     await waitFor(() => expect(calls).toEqual(["logout", "delete"]));
     await waitFor(() =>
-      expect(mutate).toHaveBeenCalledWith({
+      expect(mutateAsync).toHaveBeenCalledWith({
         "settings-general-use_plex": true,
       }),
     );
