@@ -1,19 +1,12 @@
 import { FC, useMemo, useState } from "react";
-import {
-  Alert,
-  Button,
-  Group,
-  MultiSelect,
-  Stack,
-  Text,
-  Title,
-} from "@mantine/core";
+import { Alert, Button, Group, MultiSelect } from "@mantine/core";
 import {
   useLanguageProfiles,
   useLanguages,
   useSettingsMutation,
 } from "@/apis/hooks";
 import { enabledLanguageKey, languageProfileKey } from "@/pages/Settings/keys";
+import StepLayout from "@/pages/Setup/StepLayout";
 import type { WizardStepProps } from "./types";
 
 /**
@@ -93,16 +86,29 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   const canContinue = alreadyConfigured || selected.length > 0;
 
   return (
-    <Stack gap="lg">
-      <Stack gap="xs">
-        <Title order={2}>Subtitle languages</Title>
-        <Text c="dimmed">
-          Pick the languages you want subtitles in. Bazarr only searches for
-          languages that belong to a profile, so we will turn your selection
-          into a default profile that gets applied to every show and movie.
-        </Text>
-      </Stack>
-
+    <StepLayout
+      title="Subtitle languages"
+      layout="stacked"
+      description="Pick the languages you want subtitles in. Bazarr only searches for languages that belong to a profile, so we will turn your selection into a default profile that gets applied to every show and movie."
+      actions={
+        <Group justify="space-between">
+          <Group gap="sm">
+            {onBack && (
+              <Button variant="default" onClick={onBack}>
+                Back
+              </Button>
+            )}
+          </Group>
+          <Button
+            onClick={handleContinue}
+            loading={settings.isPending}
+            disabled={!canContinue}
+          >
+            Continue
+          </Button>
+        </Group>
+      }
+    >
       {alreadyConfigured ? (
         <Alert color="green" title="Languages already configured">
           A language profile already exists, so we will keep it as-is.
@@ -118,24 +124,7 @@ const LanguagesStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
           onChange={setSelected}
         />
       )}
-
-      <Group justify="space-between">
-        <Group gap="sm">
-          {onBack && (
-            <Button variant="default" onClick={onBack}>
-              Back
-            </Button>
-          )}
-        </Group>
-        <Button
-          onClick={handleContinue}
-          loading={settings.isPending}
-          disabled={!canContinue}
-        >
-          Continue
-        </Button>
-      </Group>
-    </Stack>
+    </StepLayout>
   );
 };
 

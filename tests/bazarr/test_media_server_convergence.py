@@ -1141,29 +1141,77 @@ def test_saving_a_key_after_a_sign_out_switches_the_destination_back_on(plex_acc
     assert repo.get_decrypted_api_key(row.id) == 'second-key'
 
 
-def test_an_account_with_nothing_configured_still_binds_the_row_it_owns(schema_session):
-    """A reconcile that changes no field still records which row is the
-    account's, or the fallback could hand it a row someone added by hand."""
+def test_the_account_never_binds_a_row_it_did_not_create(schema_session):
+    """An unrecorded id owns nothing, however few Plex rows there are.
+
+    Adopting the only row there is looked harmless while the account was the
+    only thing that ever made one. It is not: a row somebody added by hand is
+    also the only row there is, and binding it hands the next sign-in that
+    server's URL and credential to overwrite.
+    """
     from media_servers.plex_account import sync_plex_instance
     from media_servers.repository import MediaServerInstanceRepository
     repo = MediaServerInstanceRepository(schema_session)
-    owned = repo.create(kind='plex', name='Account', url='https://account.example:32400',
-                        api_key='key', enabled=True, verify_ssl=False, path_mappings=[])
-    # Nothing in the account section, so the reconcile has no field to write.
+    hand_added = repo.create(kind='plex', name='Hand added', url='https://hand.example:32400',
+                             api_key='hand-key', enabled=True, verify_ssl=True, path_mappings=[])
     config = plex_settings()
     writes = []
 
+    # Nothing in the account section: no row of its own, and none adopted.
     assert sync_plex_instance(schema_session, config,
-                              persist=lambda: writes.append(True)).id == owned.id
-    assert config.plex.instance_id == owned.id, 'the no-op reconcile still binds the owner'
-    assert writes == [True]
+                              persist=lambda: writes.append(True)) is None
+    assert config.plex.instance_id == ''
+    assert writes == []
 
-    # Now a second row exists, and the recorded id is what keeps them apart.
-    hand_added = repo.create(kind='plex', name='Hand added', url='https://hand.example:32400',
-                             api_key='other', enabled=True, verify_ssl=True, path_mappings=[])
+    # Signing in gets the account its own row beside the hand-added one.
     config.plex.auth_method = 'oauth'
     config.plex.token = 'account-token'
-    config.plex.server_url = 'https://moved.example:32400'
-    assert sync_plex_instance(schema_session, config, signed_in=True).id == owned.id
-    assert repo.get(owned.id).url == 'https://moved.example:32400'
+    config.plex.server_url = 'https://account.example:32400'
+    owned = sync_plex_instance(schema_session, config, signed_in=True,
+                               persist=lambda: writes.append(True))
+    assert owned.id != hand_added.id
+    assert config.plex.instance_id == owned.id and writes == [True]
     assert repo.get(hand_added.id).url == 'https://hand.example:32400'
+    assert repo.get_decrypted_api_key(hand_added.id) == 'hand-key'
+
+
+def test_a_hand_added_row_survives_a_fresh_sign_in_after_a_disconnect(schema_session):
+    """The regression: disconnecting deletes the account's row, and the next
+    sign-in must build a new one rather than take over the sibling left behind.
+
+    Disconnecting the Plex destination in the wizard signs the account out and
+    deletes its row, which is what the reader asked for. The recorded id then
+    points at nothing, and under the old fallback the very next sign-in claimed
+    whichever Plex row remained and wrote its own server URL and token over it.
+    """
+    from media_servers.plex_account import sync_plex_instance
+    from media_servers.repository import MediaServerInstanceRepository
+    repo = MediaServerInstanceRepository(schema_session)
+    config = plex_settings(auth_method='oauth', token='account-token',
+                           server_url='https://account.example:32400')
+    owned = sync_plex_instance(schema_session, config)
+    hand_added = repo.create(kind='plex', name='Hand added', url='https://hand.example:32400',
+                             api_key='hand-key', enabled=True, verify_ssl=True, path_mappings=[])
+
+    # Disconnect: sign out, then delete the row the account owned.
+    config.general.use_plex = False
+    config.plex.token = ''
+    config.plex.server_url = ''
+    sync_plex_instance(schema_session, config, signed_out=True)
+    repo.delete(owned.id)
+    assert config.plex.instance_id == owned.id, 'the id outlives the row it pointed at'
+
+    # A fresh sign-in, with a server picked.
+    config.general.use_plex = True
+    config.plex.token = 'new-token'
+    config.plex.server_url = 'https://new.example:32400'
+    rebuilt = sync_plex_instance(schema_session, config, signed_in=True)
+
+    assert rebuilt.id not in (owned.id, hand_added.id)
+    assert config.plex.instance_id == rebuilt.id
+    assert repo.get(rebuilt.id).url == 'https://new.example:32400'
+    assert repo.get_decrypted_api_key(rebuilt.id) == 'new-token'
+    kept = repo.get(hand_added.id)
+    assert kept.url == 'https://hand.example:32400'
+    assert repo.get_decrypted_api_key(hand_added.id) == 'hand-key'
+    assert bool(kept.enabled) is True and bool(kept.verify_ssl) is True

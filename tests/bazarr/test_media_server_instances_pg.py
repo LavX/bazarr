@@ -87,7 +87,22 @@ def test_pg_encrypted_crud_restart_and_no_import_resurrection(pg_session, pg_eng
         assert rows.get(sibling.id).id != original_id
     repo.delete(original_id)
     backfill_instances(pg_session, config)
-    assert [row.id for row in repo.list(kind)] == [sibling.id]
+    if kind == 'plex':
+        # Plex is the one kind the import does not latch: its scalars keep
+        # changing, so every startup reconciles the account onto a destination.
+        # Deleting that row without signing out therefore rebuilds it, which is
+        # the documented way round, because signing out is what disconnects.
+        # What must never happen is the account taking the sibling instead,
+        # which is what falling back to whichever Plex row sorted first did.
+        rebuilt = [row.id for row in repo.list(kind)]
+        assert original_id not in rebuilt
+        assert sorted(rebuilt) == sorted([sibling.id, config.plex.instance_id])
+        assert config.plex.instance_id != sibling.id
+        assert repo.get(sibling.id).name == 'Renamed'
+        assert repo.get(sibling.id).url == payload(kind, 'B')['url']
+        assert repo.get_decrypted_api_key(sibling.id) == payload(kind, 'B')['api_key']
+    else:
+        assert [row.id for row in repo.list(kind)] == [sibling.id]
 
 
 @pytest.mark.parametrize('kind', ['emby', 'silo'])

@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { showNotification } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AxiosError } from "axios";
@@ -158,13 +158,34 @@ export function useDeleteArrInstance() {
   });
 }
 
-export function useTestArrInstanceConnection() {
-  return useMutation({
+/**
+ * The connection a test verdict belongs to. Pass the values the form currently
+ * holds and the last verdict is dropped the moment any of them changes: a
+ * green "Connected to Sonarr, version 4.0.0" that was measured against a
+ * different address or a different key is worse than no verdict at all,
+ * because it reads as an answer about what is on screen now.
+ */
+export interface ArrTestConnection {
+  ip?: string;
+  port?: number | string;
+  baseUrl?: string;
+  ssl?: boolean;
+  apiKey?: string;
+}
+
+export function useTestArrInstanceConnection(
+  connection: ArrTestConnection = {},
+) {
+  const mutation = useMutation({
     // The key never appears here: mutation keys are static strings and the
     // request body is the only place credentials travel.
     mutationKey: [...arrKey, QueryKeys.Actions, "test"],
     mutationFn: (body: ArrInstanceTest) => api.arrInstances.test(body),
   });
+  const { reset } = mutation;
+  const { ip, port, baseUrl, ssl, apiKey } = connection;
+  useEffect(() => reset(), [ip, port, baseUrl, ssl, apiKey, reset]);
+  return mutation;
 }
 
 // Tests a saved instance using its stored key (decrypted server-side). The key
