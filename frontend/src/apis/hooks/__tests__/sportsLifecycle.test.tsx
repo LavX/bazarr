@@ -27,10 +27,17 @@ vi.mock("@/apis/raw", () => ({ default: {} }));
 const availability = vi.hoisted(() => ({
   enabled: undefined as boolean | undefined,
 }));
+const sportarrInstances = vi.hoisted(() => [
+  { id: 42, kind: "sportarr", enabled: true },
+]);
+// useSportsAvailability now delegates to the generic per-kind helper, so the
+// mock has to answer that too or every sports hook loses its availability.
 vi.mock("../arrInstances", () => ({
-  useArrInstances: () => ({
-    data: [{ id: 42, kind: "sportarr", enabled: true }],
-    isLoading: false,
+  useArrInstances: () => ({ data: sportarrInstances, isLoading: false }),
+  useArrKindAvailability: () => ({
+    instances: sportarrInstances,
+    enabled: availability.enabled === true,
+    isLoading: availability.enabled === undefined,
   }),
 }));
 vi.mock("../system", () => ({

@@ -86,7 +86,15 @@ def probe_instance(session, instance_id, body, *, libraries=False):
     except MediaServerError as error:
         return ({'data': [], 'error_code': error.code} if libraries else
                 {'success': False, 'error_code': error.code}), 400
-    return _probe(row.kind, url, key, verify_ssl, libraries), 200
+    result = _probe(row.kind, url, key, verify_ssl, libraries)
+    # A test that used exactly what is saved has just learned this
+    # destination's version, so the status page gets it without a probe of its
+    # own. A test of unsaved edits describes some other connection and is not
+    # recorded against the saved instance.
+    if not libraries and not set(body or {}) & {'url', 'api_key', 'clear_api_key', 'verify_ssl'}:
+        from .versions import record
+        record(row.id, row.revision, result)
+    return result, 200
 
 
 def probe_connection(body, *, libraries=False):
@@ -145,7 +153,7 @@ def _jellyfin_probe(url, key, verify_ssl, libraries):
 
 def _plex_probe(url, key, verify_ssl, libraries):
     """Plex sections, addressed by name because that is what Plex refreshes by."""
-    from plex.operations import plex_server_for
+    from plex.operations import plex_server_for, plex_server_identity
     types = {'movie': 'movies', 'show': 'series'}
     try:
         server = plex_server_for(url, key, bool(verify_ssl))
@@ -154,10 +162,14 @@ def _plex_probe(url, key, verify_ssl, libraries):
         data = [{'id': section.title, 'name': section.title,
                  'type': types.get(section.type, section.type)}
                 for section in server.library.sections()]
+        # The pooled client's own friendlyName and version were read when it
+        # was built and are never re-read, so reporting them from the object
+        # would pin an upgraded Plex to its old version forever. Ask the
+        # server, over the connection that client already holds.
+        name, version = ('', '') if libraries else plex_server_identity(url, key, bool(verify_ssl))
     except Exception:
         return ({'data': [], 'error_code': 'connection_error'} if libraries
                 else {'success': False, 'error_code': 'connection_error'})
     if libraries:
         return {'data': data, 'error_code': None}
-    return {'success': True, 'server_name': getattr(server, 'friendlyName', '') or '',
-            'version': getattr(server, 'version', '') or ''}
+    return {'success': True, 'server_name': name, 'version': version}

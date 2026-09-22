@@ -28,6 +28,34 @@ declare namespace System {
     progress_message: string;
   }
 
+  /**
+   * One configured media server destination. These are multi-instance, so the
+   * status endpoint reports a list: two Embys are two entries, each named
+   * after the instance. Only destinations actually in use appear at all.
+   *
+   * `state` is what is honestly known right now. "checking" means no probe has
+   * answered yet, not that the server is down, and it resolves on a later
+   * poll. "unreachable" carries no version rather than a stale one.
+   */
+  interface MediaServerStatus {
+    id: string;
+    kind: "emby" | "jellyfin" | "plex" | "silo";
+    name: string;
+    state: "connected" | "unreachable" | "checking";
+    /** Empty when the server does not report one. Silo never does. */
+    version: string;
+    /**
+     * Seconds this answer can stay as it is. Zero means a probe is running
+     * now, so asking again shortly may return something else. Anything else
+     * is time left on a cached value that cannot change before it expires,
+     * which is how long the page may wait before asking again.
+     *
+     * Absent on responses from before the field existed, which reads as "no
+     * idea", not as "ask again immediately".
+     */
+    refresh_in?: number;
+  }
+
   interface Status {
     bazarr_config_directory: string;
     bazarr_directory: string;
@@ -40,6 +68,11 @@ declare namespace System {
     radarr_version: string;
     sportarr_version: string;
     sonarr_version: string;
+    /**
+     * Absent on responses from before media servers were reported, so every
+     * reader must tolerate undefined rather than assume a list.
+     */
+    media_servers?: System.MediaServerStatus[];
     start_time: number;
     timezone: string;
     cpu_cores: number;
