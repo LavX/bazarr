@@ -154,7 +154,7 @@ def test_mods_emits_local_episode_id(schema_session, monkeypatch):
     from subtitles.tools import mods as mods_mod
 
     monkeypatch.setattr("app.database.database", schema_session)
-    monkeypatch.setattr(mods_mod, "subtitles_apply_mods", lambda **k: None)
+    monkeypatch.setattr(mods_mod, "subtitles_apply_mods", lambda **k: "/s3/e.en.srt")
 
     events = []
     import app.event_handler as eh

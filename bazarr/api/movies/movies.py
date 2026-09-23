@@ -5,7 +5,8 @@ from flask_restx import Resource, Namespace, reqparse, fields, marshal
 from arr_instances.resolution import scoped
 from app.database import TableMovies, database, update, select, func
 from radarr.sync.movies import update_one_movie, update_one_movie_for_instance
-from subtitles.indexer.movies import list_missing_subtitles_movies, movies_scan_subtitles
+from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
+from subtitles.indexer.movies import movies_scan_disk
 from app.event_handler import event_stream
 from subtitles.wanted import wanted_search_missing_subtitles_movies, wanted_scan_subtitles_movies
 from subtitles.mass_download import movies_download_subtitles
@@ -153,6 +154,7 @@ class Movies(Resource):
         arrInstanceIdList = args.get('arr_instance_id')
         profileIdList = args.get('profileid')
         targetList = localIdList if localIdList else radarrIdList
+        changed = []
 
         for idx in range(len(targetList)):
             profileId = profileIdList[idx]
@@ -207,11 +209,12 @@ class Movies(Resource):
                         arr_instance_id,
                     ))
 
-            list_missing_subtitles_movies(no=radarrId, arr_instance_id=arr_instance_id)
-
+            changed.append((radarrId, arr_instance_id))
             event_stream(type='movie', payload=radarrId)
-            event_stream(type='movie-wanted', payload=radarrId)
-        event_stream(type='badges')
+
+        # Recalculated by a queued job, which announces the wanted rows and the
+        # badges once it has, so the save no longer waits for it.
+        queue_missing_subtitles_recalculation(movies=changed)
 
         return '', 204
 
@@ -235,8 +238,8 @@ class Movies(Resource):
         arr_instance_id = args.get('arr_instance_id')
         action = args.get('action')
         if action == "scan-disk":
-            movies_scan_subtitles(radarrid, arr_instance_id=arr_instance_id)
-            return '', 204
+            job_id = movies_scan_disk(radarrid, arr_instance_id=arr_instance_id)
+            return {'job_id': job_id or None}, 202
         elif action == "search-missing":
             try:
                 movies_download_subtitles(radarrid, arr_instance_id=arr_instance_id)

@@ -271,22 +271,35 @@ def test_manual_api_requires_owner_and_returns_refreshed_event(
             raise OSError("injected index failure")
 
         monkeypatch.setattr(indexer, "store_subtitles_sports", failed_refresh)
+    # The download is a queued job now: the route answers 202 with its id, and
+    # the publication outcome is the job's result. Run it inline.
+    from sportarr import manual_jobs
+
+    queued = []
+    monkeypatch.setattr(routes, "sports_manually_download_subtitle",
+                        lambda *args: queued.append(args) or 3)
+    monkeypatch.setattr(manual_jobs, "database", session)
+    monkeypatch.setattr(manual_jobs, "event_stream", lambda **kwargs: None)
+    candidate = response.json["data"][0]
     response = client.post(
         "/api/sports/events/61/download",
-        json={"candidate": response.json["data"][0], "arr_instance_id": 1},
+        json={"candidate": candidate, "arr_instance_id": 1},
         headers=headers,
     )
-    assert response.status_code == 200
-    assert response.json["publication"]["published"] is True
-    assert response.json["publication"]["history"] == "committed"
-    assert response.json["publication"]["index"] == (
+    assert response.status_code == 202
+    assert response.json == {"job_id": 3}
+    assert len(queued) == 1 and queued[0][0] == 61 and queued[0][2] == 1
+    result = manual_jobs.sports_manually_download_subtitle(*queued[0], job_id=3)
+    assert result["publication"]["published"] is True
+    assert result["publication"]["history"] == "committed"
+    assert result["publication"]["index"] == (
         "owner_changed"
         if index_failure == "owner"
         else "failed"
         if index_failure
         else "completed"
     )
-    event = response.json["event"]
+    event = result["event"]
     if index_failure == "owner":
         assert event is None
         return

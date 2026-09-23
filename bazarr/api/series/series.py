@@ -10,7 +10,8 @@ from sqlalchemy import case
 from app.database import get_exclusion_clause, TableEpisodes, TableShows, database, select, update, func
 from arr_instances.resolution import scoped
 from sonarr.sync.series import update_one_series, update_one_series_for_instance
-from subtitles.indexer.series import list_missing_subtitles, series_scan_subtitles
+from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
+from subtitles.indexer.series import series_scan_disk
 from subtitles.mass_download import series_download_subtitles
 from app.jobs_queue import jobs_queue
 from subtitles.wanted import wanted_search_missing_subtitles_series, wanted_scan_subtitles_series
@@ -202,6 +203,7 @@ class Series(Resource):
         arrInstanceIdList = args.get('arr_instance_id')
         profileIdList = args.get('profileid')
         targetList = localIdList if localIdList else seriesIdList
+        changed = []
 
         for idx in range(len(targetList)):
             profileId = profileIdList[idx]
@@ -228,7 +230,6 @@ class Series(Resource):
                     .where(TableShows.id == localId))
                 seriesId = series.sonarrSeriesId
                 arr_instance_id = series.arr_instance_id
-                episode_id_query = select(TableEpisodes.sonarrEpisodeId).where(TableEpisodes.series_id == localId)
             else:
                 seriesId = targetList[idx]
                 arr_instance_id = arrInstanceIdList[idx] if idx < len(arrInstanceIdList) else None
@@ -256,22 +257,14 @@ class Series(Resource):
                         TableShows.arr_instance_id,
                         arr_instance_id,
                     ))
-                episode_id_query = scoped(
-                    select(TableEpisodes.sonarrEpisodeId).where(TableEpisodes.sonarrSeriesId == seriesId),
-                    TableEpisodes.arr_instance_id,
-                    arr_instance_id,
-                )
 
-            list_missing_subtitles(no=seriesId, arr_instance_id=arr_instance_id)
-
+            changed.append((seriesId, arr_instance_id))
             event_stream(type='series', payload=seriesId)
 
-            episode_id_list = database.execute(episode_id_query).all()
-
-            for item in episode_id_list:
-                event_stream(type='episode-wanted', payload=item.sonarrEpisodeId)
-
-        event_stream(type='badges')
+        # What is missing is recalculated by a queued job, which announces the
+        # episodes and the badges once it has. Doing it here, one full pass per
+        # series, held the save for as long as the whole selection took.
+        queue_missing_subtitles_recalculation(series=changed)
 
         return '', 204
 
@@ -295,8 +288,8 @@ class Series(Resource):
         arr_instance_id = args.get('arr_instance_id')
         action = args.get('action')
         if action == "scan-disk":
-            series_scan_subtitles(seriesid, arr_instance_id=arr_instance_id)
-            return '', 204
+            job_id = series_scan_disk(seriesid, arr_instance_id=arr_instance_id)
+            return {'job_id': job_id or None}, 202
         elif action == "search-missing":
             try:
                 series_download_subtitles(seriesid, arr_instance_id=arr_instance_id)

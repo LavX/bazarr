@@ -19,7 +19,7 @@ from subtitles.tools.subsyncer import SubSyncer  # noqa: F401
 from subtitles.tools.subsync_engines import is_sync_engine_output
 from subtitles.tools.translate.main import translate_subtitles_file
 from subtitles.tools.translate.batch import extract_embedded_subtitle
-from subtitles.tools.mods import subtitles_apply_mods
+from subtitles.tools.mods import apply_subtitle_mods
 from subtitles.indexer.series import store_subtitles
 from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.sync import sync_subtitles
@@ -224,6 +224,7 @@ class Subtitles(Resource):
     @authenticate
     @api_ns_subtitles.doc(parser=patch_request_parser)
     @api_ns_subtitles.response(204, "Success")
+    @api_ns_subtitles.response(202, "Mod queued as a job")
     @api_ns_subtitles.response(401, "Not Authenticated")
     @api_ns_subtitles.response(400, "Generated sync output files cannot be synchronized again")
     @api_ns_subtitles.response(404, "Episode/movie not found")
@@ -606,30 +607,22 @@ class Subtitles(Resource):
             except OSError:
                 return "Unable to edit subtitles file. Check logs.", 409
         else:
-            try:
-                output_path = subtitles_apply_mods(
-                    language=language,
-                    subtitle_path=subtitles_path,
-                    mods=[action],
-                    video_path=video_path,
-                    # Resolve keep-lyrics against the owning instance (#227).
-                    arr_instance_id=arr_instance_id,
-                    media_type=media_type,
-                    **({'sports_event_id': id} if media_type == 'sports' else {}),
-                )
-                if media_type == "sports" and not output_path:
-                    return "Unable to modify subtitles file. Check logs.", 409
-                postprocess_subtitles(
-                    output_path if media_type == "sports" else subtitles_path,
-                    video_path, media_type, metadata, id,
-                    arr_instance_id=arr_instance_id
-                )
-            except ValueError as exc:
-                if media_type != "sports":
-                    raise
-                return str(exc), 409
-            except OSError:
-                return "Unable to edit subtitles file. Check logs.", 409
+            # Queued, like sync and translate above: a mod rewrites the file and
+            # re-indexes the media, which used to hold this request, and its
+            # failures answered 409, which nothing on the client reported. The
+            # job raises with the reason instead, so it lands on the standard
+            # failed path.
+            job_id = apply_subtitle_mods(
+                language=language,
+                subtitle_path=subtitles_path,
+                mods=[action],
+                video_path=video_path,
+                media_type=media_type,
+                media_id=id,
+                # Resolve keep-lyrics against the owning instance (#227).
+                arr_instance_id=arr_instance_id,
+            )
+            return {"job_id": job_id or None}, 202
 
         return "", 204
 

@@ -3,9 +3,9 @@ from flask import request
 from flask_restx import Namespace, Resource, reqparse
 
 from api.utils import authenticate
+from provider_hub import jobs as hub_jobs
 from provider_hub import service
-from provider_hub.manifest import ManifestValidationError
-from provider_hub.service import CatalogSourceError, ProviderHubInstallError
+from provider_hub.service import CatalogSourceError
 
 
 api_ns_provider_hub = Namespace('Provider Hub', description='Provider Hub catalog and installation lifecycle')
@@ -23,10 +23,10 @@ class ProviderHubCatalog(Resource):
 @api_ns_provider_hub.route('provider-hub/catalog/refresh')
 class ProviderHubCatalogRefresh(Resource):
     @authenticate
-    @api_ns_provider_hub.response(200, 'Success')
+    @api_ns_provider_hub.response(202, 'Refresh queued as a job')
     @api_ns_provider_hub.response(401, 'Not Authenticated')
     def post(self):
-        return service.refresh_catalog()
+        return {"job_id": hub_jobs.queue_catalog_refresh()}, 202
 
 
 @api_ns_provider_hub.route('provider-hub/catalog/sources')
@@ -134,7 +134,7 @@ class ProviderHubProviderTest(Resource):
 @api_ns_provider_hub.route('provider-hub/installations')
 class ProviderHubInstallations(Resource):
     @authenticate
-    @api_ns_provider_hub.response(200, 'Success')
+    @api_ns_provider_hub.response(202, 'Install queued as a job')
     @api_ns_provider_hub.response(400, 'Invalid manifest')
     @api_ns_provider_hub.response(401, 'Not Authenticated')
     def post(self):
@@ -142,16 +142,15 @@ class ProviderHubInstallations(Resource):
         manifest = payload.get("manifest") if isinstance(payload, dict) else None
         if not isinstance(manifest, dict):
             return 'manifest is required', 400
-        try:
-            return service.stage_install(manifest)
-        except (ManifestValidationError, ProviderHubInstallError) as error:
-            return str(error), 400
+        # Validation, the bundle download and the smoke test run in the job,
+        # which raises with the reason when any of them fails.
+        return {"job_id": hub_jobs.queue_install(manifest)}, 202
 
 
 @api_ns_provider_hub.route('provider-hub/installations/local')
 class ProviderHubLocalInstallations(Resource):
     @authenticate
-    @api_ns_provider_hub.response(200, 'Success')
+    @api_ns_provider_hub.response(202, 'Install queued as a job')
     @api_ns_provider_hub.response(400, 'Invalid package')
     @api_ns_provider_hub.response(401, 'Not Authenticated')
     def post(self):
@@ -159,22 +158,22 @@ class ProviderHubLocalInstallations(Resource):
         if upload is None:
             return 'a .zip package file is required', 400
         archive_bytes = upload.read()
-        try:
-            return service.stage_install_local(archive_bytes)
-        except (ManifestValidationError, ProviderHubInstallError) as error:
-            return str(error), 400
+        if not archive_bytes:
+            return 'uploaded package is empty', 400
+        return {"job_id": hub_jobs.queue_install_local(archive_bytes, upload.filename or None)}, 202
 
 
 @api_ns_provider_hub.route('provider-hub/installations/<string:provider_id>')
 class ProviderHubInstallation(Resource):
     @authenticate
-    @api_ns_provider_hub.response(204, 'Success')
+    @api_ns_provider_hub.response(202, 'Uninstall queued as a job')
     @api_ns_provider_hub.response(401, 'Not Authenticated')
     @api_ns_provider_hub.response(404, 'Provider not found')
     def delete(self, provider_id):
-        if not service.remove_installation(provider_id):
+        provider = service.get_provider(provider_id)
+        if not provider:
             return 'Provider not found', 404
-        return '', 204
+        return {"job_id": hub_jobs.queue_uninstall(provider_id, provider.get("name"))}, 202
 
 
 @api_ns_provider_hub.route('provider-hub/updates/check')
@@ -194,15 +193,15 @@ class ProviderHubUpdatesApply(Resource):
 
     @authenticate
     @api_ns_provider_hub.doc(parser=post_request_parser)
-    @api_ns_provider_hub.response(200, 'Success')
+    @api_ns_provider_hub.response(202, 'Update queued as a job')
     @api_ns_provider_hub.response(401, 'Not Authenticated')
     @api_ns_provider_hub.response(404, 'Provider not found')
     def post(self):
         args = self.post_request_parser.parse_args()
-        provider = service.apply_update(args["provider_id"])
+        provider = service.get_provider(args["provider_id"])
         if not provider:
             return 'Provider not found', 404
-        return provider
+        return {"job_id": hub_jobs.queue_update(args["provider_id"], provider.get("name"))}, 202
 
 
 @api_ns_provider_hub.route('provider-hub/jobs')

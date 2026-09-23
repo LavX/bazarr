@@ -932,8 +932,23 @@ def test_the_subtitle_tools_endpoint_publishes_its_mod_action(upload_flow, mutat
     args = {'action': 'OCR_fixes', 'language': 'en', 'path': str(source), 'type': media_type,
             'id': 42, 'arr_instance_id': 7, 'forced': 'False', 'hi': 'False'}
     stub = SimpleNamespace(patch_request_parser=SimpleNamespace(parse_args=lambda: args))
+    # The route queues the mod as a job and answers 202; the job applies it.
+    queued = []
+    monkeypatch.setattr(api_mod, 'apply_subtitle_mods', lambda **kwargs: queued.append(kwargs) or 3)
 
-    assert api_mod.Subtitles.patch.__wrapped__(stub) == ('', 204)
+    assert api_mod.Subtitles.patch.__wrapped__(stub) == ({'job_id': 3}, 202)
+    assert len(queued) == 1
+
+    import app.database
+    import app.event_handler
+    from subtitles.indexer import movies as movies_indexer
+    from subtitles.indexer import series as series_indexer
+    monkeypatch.setattr(app.event_handler, 'event_stream', lambda **kwargs: None)
+    monkeypatch.setattr(series_indexer, 'store_subtitles', lambda *a, **k: None)
+    monkeypatch.setattr(movies_indexer, 'store_subtitles_movie', lambda *a, **k: None)
+    monkeypatch.setattr(app.database, 'database',
+                        Mock(execute=Mock(return_value=Mock(first=Mock(return_value=None)))))
+    mods.apply_subtitle_mods(**queued[0], job_id=3)
 
     assert source.read_text() == 'Modified'
     assert len(mutations) == 1

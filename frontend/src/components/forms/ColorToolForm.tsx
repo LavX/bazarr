@@ -4,10 +4,7 @@ import { useForm } from "@mantine/form";
 import { useSubtitleAction } from "@/apis/hooks";
 import { Selector, SelectorOption } from "@/components";
 import { useModals, withModal } from "@/modules/modals";
-import { task } from "@/modules/task";
 import FormUtils from "@/utilities/form";
-
-const TaskName = "Changing Color";
 
 function convertToAction(color: string) {
   return `color(name=${color})`;
@@ -86,7 +83,7 @@ interface Props {
 }
 
 const ColorToolForm: FunctionComponent<Props> = ({ selections, onSubmit }) => {
-  const { mutateAsync } = useSubtitleAction();
+  const { mutate } = useSubtitleAction();
   const modals = useModals();
 
   const form = useForm({
@@ -107,7 +104,7 @@ const ColorToolForm: FunctionComponent<Props> = ({ selections, onSubmit }) => {
         const action = convertToAction(color);
 
         selections.forEach((s) =>
-          task.create(s.path, TaskName, mutateAsync, {
+          mutate({
             action,
             form: s,
           }),

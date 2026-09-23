@@ -5,10 +5,7 @@ import { faMinus, faPlus } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useSubtitleAction } from "@/apis/hooks";
 import { useModals, withModal } from "@/modules/modals";
-import { task } from "@/modules/task";
 import FormUtils from "@/utilities/form";
-
-const TaskName = "Changing Time";
 
 function convertToAction(h: number, m: number, s: number, ms: number) {
   return `shift_offset(h=${h},m=${m},s=${s},ms=${ms})`;
@@ -20,7 +17,7 @@ interface Props {
 }
 
 const TimeOffsetForm: FunctionComponent<Props> = ({ selections, onSubmit }) => {
-  const { mutateAsync } = useSubtitleAction();
+  const { mutate } = useSubtitleAction();
   const modals = useModals();
 
   const form = useForm({
@@ -68,7 +65,7 @@ const TimeOffsetForm: FunctionComponent<Props> = ({ selections, onSubmit }) => {
         }
 
         selections.forEach((s) =>
-          task.create(s.path, TaskName, mutateAsync, {
+          mutate({
             action,
             form: s,
           }),
