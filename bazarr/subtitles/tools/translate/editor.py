@@ -10,6 +10,9 @@ translated lines as the job's returned value for the editor to pick up.
 """
 
 import logging
+import threading
+import time
+from collections import OrderedDict
 
 import requests
 
@@ -24,6 +27,32 @@ logger = logging.getLogger(__name__)
 
 EDITOR_TRANSLATION_MODULE = 'subtitles.tools.translate.editor'
 EDITOR_TRANSLATION_FUNC = 'translate_editor_lines'
+
+# The queue keeps only the last ten finished jobs across everything it runs, so a
+# translation the editor has not collected yet could be pushed out by unrelated
+# work. Finished editor results are kept here too, bounded and for an hour.
+RESULT_RETENTION_SECONDS = 3600
+RESULT_RETENTION_COUNT = 32
+_results = OrderedDict()
+_results_lock = threading.Lock()
+
+
+def _retain_result(job_id, result):
+    now = time.monotonic()
+    with _results_lock:
+        _results[job_id] = (now + RESULT_RETENTION_SECONDS, result)
+        _results.move_to_end(job_id)
+        while len(_results) > RESULT_RETENTION_COUNT or (
+                _results and next(iter(_results.values()))[0] < now):
+            _results.popitem(last=False)
+
+
+def _retained_result(job_id):
+    with _results_lock:
+        entry = _results.get(job_id)
+    if entry and entry[0] >= time.monotonic():
+        return entry[1]
+    return None
 
 
 def editor_translation_label(title, source_language, target_language, line_count):
@@ -117,7 +146,25 @@ def translate_editor_lines(lines, positions, source_language, target_language, t
             result_lines.append({'position': positions[index], 'line': item.get('line', '')})
 
     _rename(job_id, 'Partially translated' if service.partial_error else 'Translated')
-    return {'lines': result_lines, 'partial': service.partial_error}
+    result = {'lines': result_lines, 'partial': service.partial_error}
+    if job_id:
+        _retain_result(job_id, result)
+    return result
+
+
+def cancel_editor_translation(job_id):
+    """Stop an editor translation whether it is still queued or already running.
+
+    Returns False when there is no such job left to stop. A job leaves the
+    pending queue and enters the running one in a single step, so trying pending
+    first and running second cannot miss a job that starts in between.
+    """
+    job = next(iter(jobs_queue.list_jobs_from_queue(job_id=job_id)), None)
+    if not job or job.get('module') != EDITOR_TRANSLATION_MODULE or job.get('func') != EDITOR_TRANSLATION_FUNC:
+        return False
+    if jobs_queue.remove_job_from_pending_queue(job_id=job_id):
+        return True
+    return jobs_queue.cancel_running_job(job_id=job_id)
 
 
 def editor_translation_state(job_id):
@@ -127,7 +174,13 @@ def editor_translation_state(job_id):
     returned value of some other job.
     """
     job = next(iter(jobs_queue.list_jobs_from_queue(job_id=job_id)), None)
-    if not job or job.get('module') != EDITOR_TRANSLATION_MODULE or job.get('func') != EDITOR_TRANSLATION_FUNC:
+    if job is None:
+        retained = _retained_result(job_id)
+        if retained is None:
+            return None
+        return {'jobId': job_id, 'status': 'completed', 'lines': retained.get('lines') or [],
+                'partial': retained.get('partial')}
+    if job.get('module') != EDITOR_TRANSLATION_MODULE or job.get('func') != EDITOR_TRANSLATION_FUNC:
         return None
     status = job.get('status')
     state = {'jobId': job['job_id'], 'status': status}

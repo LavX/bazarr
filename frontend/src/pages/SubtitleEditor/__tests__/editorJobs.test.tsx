@@ -200,6 +200,68 @@ describe("TranslatePanel on the job path", () => {
   });
 });
 
+describe("TranslatePanel recovery and cancel", () => {
+  it("picks up a job that finished while its terminal event was missed", async () => {
+    server.use(
+      http.post("/api/translator/editor", () =>
+        HttpResponse.json({ jobId: 7 }, { status: 202 }),
+      ),
+      http.get("/api/system/jobs", ({ request }) =>
+        HttpResponse.json({
+          data:
+            new URL(request.url).searchParams.get("id") === "7"
+              ? [job({ status: "completed", progress_value: 100 })]
+              : [],
+        }),
+      ),
+      http.get("/api/translator/editor", () =>
+        HttpResponse.json({
+          jobId: 7,
+          status: "completed",
+          lines: [
+            { position: 0, line: "Szia" },
+            { position: 1, line: "Világ" },
+          ],
+        }),
+      ),
+    );
+    renderPanel();
+    const user = userEvent.setup();
+
+    const translate = await screen.findByRole("button", { name: "Translate" });
+    await waitFor(() => expect(translate).toBeEnabled());
+    await user.click(translate);
+
+    // No socket update at all: the re-read of the tracked job finds it done.
+    expect(
+      await screen.findByText(/Translation complete\. 2\/2 lines translated\./),
+    ).toBeVisible();
+  });
+
+  it("asks the server to stop the job, queued or running", async () => {
+    const cancelled: string[] = [];
+    server.use(
+      http.post("/api/translator/editor", () =>
+        HttpResponse.json({ jobId: 7 }, { status: 202 }),
+      ),
+      http.delete("/api/translator/editor", ({ request }) => {
+        cancelled.push(new URL(request.url).searchParams.get("jobId") ?? "");
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    renderPanel();
+    const user = userEvent.setup();
+
+    const translate = await screen.findByRole("button", { name: "Translate" });
+    await waitFor(() => expect(translate).toBeEnabled());
+    await user.click(translate);
+    await user.click(await screen.findByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => expect(cancelled).toEqual(["7"]));
+    expect(screen.getByRole("button", { name: "Translate" })).toBeVisible();
+  });
+});
+
 describe("WaveformTimeline on the job path", () => {
   it("waits for the peaks job's terminal event, then fetches the peaks", async () => {
     let peakRequests = 0;

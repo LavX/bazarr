@@ -29,6 +29,8 @@ def queue(monkeypatch):
     for module in (editor, job_dedupe, openrouter_translator):
         monkeypatch.setattr(module, 'jobs_queue', fresh)
     fresh.events = events
+    # A fresh queue numbers its jobs from 1 again, so earlier results must go.
+    monkeypatch.setattr(editor, '_results', type(editor._results)())
     return fresh
 
 
@@ -184,6 +186,59 @@ def test_the_state_answers_only_for_editor_translation_jobs(queue):
     assert editor.editor_translation_state(999) is None
 
 
+def test_cancel_stops_a_queued_or_a_running_editor_translation(queue):
+    queued = editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+    running = editor.enqueue_editor_translation(LINES, 'English', 'German')
+    job = next(job for job in queue.jobs_pending_queue if job.job_id == running)
+    queue.jobs_pending_queue.remove(job)
+    queue.jobs_running_queue.append(job)
+    other = queue.feed_jobs_pending_queue('Something else', 'utilities.cache', 'cache_maintenance')
+
+    assert editor.cancel_editor_translation(queued) is True
+    assert all(pending.job_id != queued for pending in queue.jobs_pending_queue)
+    assert editor.cancel_editor_translation(running) is True
+    assert job.cancelled is True
+    # Only editor translations can be stopped through this door.
+    assert editor.cancel_editor_translation(other) is False
+    assert editor.cancel_editor_translation(999) is False
+
+
+def test_a_result_outlives_its_job_leaving_the_bounded_queue(queue, sidecar):
+    job_id = editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+    sidecar.polls = [{'status': 'completed', 'progress': 100,
+                      'result': {'lines': [{'position': 0, 'line': 'Szia'}, {'position': 1, 'line': 'Világ'}]}}]
+    _run(queue, job_id)
+    # Ten unrelated jobs finishing push it out of the queue's completed list.
+    queue.jobs_completed_queue.clear()
+
+    state = editor.editor_translation_state(job_id)
+
+    assert state['status'] == 'completed'
+    assert state['lines'] == [{'position': 0, 'line': 'Szia'}, {'position': 1, 'line': 'Világ'}]
+
+
+def test_a_library_translation_failure_reason_lands_on_its_job(monkeypatch):
+    from subtitles.tools.translate import main
+
+    recorded = []
+    monkeypatch.setattr(main.jobs_queue, 'update_job_progress', lambda **kwargs: recorded.append(kwargs))
+    monkeypatch.setattr(main.jobs_queue, 'get_job_name', lambda job_id: 'Translating Example')
+    monkeypatch.setattr(main.jobs_queue, 'update_job_name', lambda **kwargs: None)
+    monkeypatch.setattr(main, 'get_title', lambda *args, **kwargs: 'Example')
+
+    def refuse(*args, **kwargs):
+        raise openrouter_translator.TranslationServiceError('Cannot connect to the AI Subtitle Translator service.')
+
+    monkeypatch.setattr(main, 'validate_translation_params', refuse)
+
+    with pytest.raises(openrouter_translator.TranslationServiceError):
+        main.translate_subtitles_file('/v.mkv', '/v.en.srt', 'en', 'hu', False, False, 'movie', None, None, 1, {},
+                                      job_id=5)
+
+    assert {'job_id': 5, 'progress_message': 'Cannot connect to the AI Subtitle Translator service.',
+            'allow_cancelled': True} in recorded
+
+
 class TestEditorTranslationEndpoint:
     @staticmethod
     def _call(method, **context):
@@ -209,6 +264,12 @@ class TestEditorTranslationEndpoint:
     def test_post_without_a_configured_service_is_unavailable(self, queue, monkeypatch):
         monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_url', '')
         assert self._call('post', json={'lines': LINES, 'targetLanguage': 'hu'})[1] == 503
+
+    def test_delete_stops_the_job(self, queue, sidecar):
+        job_id = editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+        assert self._call('delete', query_string={'jobId': job_id}) == ('', 204)
+        assert queue.list_jobs_from_queue() == []
+        assert self._call('delete', query_string={'jobId': job_id})[1] == 404
 
     def test_get_reads_the_job_state(self, queue, sidecar):
         job_id = editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')

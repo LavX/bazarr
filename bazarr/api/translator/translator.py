@@ -7,7 +7,8 @@ from flask_restx import Resource, Namespace
 
 from app.config import settings
 from app.jobs_queue import jobs_queue
-from subtitles.tools.translate.editor import editor_translation_state, enqueue_editor_translation
+from subtitles.tools.translate.editor import (cancel_editor_translation, editor_translation_state,
+                                              enqueue_editor_translation)
 from subtitles.tools.translate.services.auth import get_translator_auth_headers
 from ..utils import authenticate
 
@@ -136,6 +137,20 @@ class TranslatorEditorJobs(Resource):
         if state is None:
             return {"status": "not_found"}, 404
         return state, 200
+
+    @authenticate
+    @api_ns_translator.doc(
+        responses={204: 'Stopped', 400: 'Bad Request', 404: 'Not Found'}
+    )
+    def delete(self):
+        """Stop an editor translation job, queued or running."""
+        try:
+            job_id = int(flask_request.args.get("jobId", ""))
+        except (TypeError, ValueError):
+            return {"error": "jobId must be an integer"}, 400
+        if not cancel_editor_translation(job_id):
+            return {"status": "not_found"}, 404
+        return '', 204
 
 
 @api_ns_translator.route('translator/jobs/<job_id>')

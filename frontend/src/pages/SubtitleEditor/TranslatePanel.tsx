@@ -10,10 +10,10 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useLanguages } from "@/apis/hooks/languages";
 import { useTranslatorModels } from "@/apis/hooks/translator";
 import {
+  cancelEditorTranslation,
   isTerminalJob,
   queueEditorTranslation,
   readEditorTranslation,
-  stopEditorJob,
   useEditorJob,
 } from "./editorJobs";
 
@@ -359,12 +359,12 @@ export default function TranslatePanel({
 
   const handleCancel = useCallback(() => {
     if (jobId != null) {
-      void stopEditorJob(jobData, jobId).catch(() => undefined);
+      void cancelEditorTranslation(jobId).catch(() => undefined);
     }
     setPhase("idle");
     onTranslatingChange?.(false);
     setJobId(null);
-  }, [jobId, jobData, onTranslatingChange]);
+  }, [jobId, onTranslatingChange]);
 
   const handleApply = useCallback(() => {
     if (translatedLines.size === 0 || applied) return;
