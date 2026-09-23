@@ -103,7 +103,7 @@ def test_the_download_route_queues_a_job_and_answers_at_once(queued):
 
 @pytest.mark.parametrize("reason", KNOWN_REASONS + (SPORTS_FALLBACK_REASON,))
 def test_the_download_job_fails_with_the_reason_it_was_given(download_job, reason):
-    from app.job_errors import JobFailed
+    from app.jobs_queue import JobFailed
 
     def fails(*args):
         raise OSError(reason)
@@ -111,8 +111,9 @@ def test_the_download_job_fails_with_the_reason_it_was_given(download_job, reaso
     with pytest.raises(JobFailed) as failure:
         download_job(fails)
     assert str(failure.value) == reason
-    # The reason is on the job too, where the jobs drawer shows it.
-    assert download_job.progress == [reason]
+    # The queue files the reason as job.error, which the drawer shows. The
+    # progress message carries progress only.
+    assert download_job.progress == []
 
 
 def test_a_reasonless_failure_still_says_something(monkeypatch, download_job):
@@ -120,7 +121,7 @@ def test_a_reasonless_failure_still_says_something(monkeypatch, download_job):
     a blank reason, which would leave the user with a failure and nothing to
     read."""
     from api.sports import subtitles as api_mod
-    from app.job_errors import JobFailed
+    from app.jobs_queue import JobFailed
 
     monkeypatch.setattr(api_mod, "manual_search_sports", _failing)
     assert search(arr_instance_id=1, language="en") == ({"message": SEARCH_FALLBACK}, 409)

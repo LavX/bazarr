@@ -95,7 +95,8 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
             is_progress=False,
         )
 
-    from app.job_errors import fail_job, reason_of
+    from app.job_errors import reason_of
+    from app.jobs_queue import JobFailed
 
     mod_label = MOD_LABELS.get(mods[0], mods[0]) if mods else 'Apply Mods'
     filename = os.path.basename(subtitle_path)
@@ -110,7 +111,7 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
             job_id=job_id,
             new_job_name=f'Failed {mod_label}: {filename}',
         )
-        fail_job(job_id, f'{mod_label} failed on {filename}: {reason_of(error)}', error)
+        raise JobFailed(f'{mod_label} failed on {filename}: {reason_of(error)}') from error
 
     if not output_path:
         # subtitles_apply_mods answers None for a file it cannot parse and for a
@@ -120,8 +121,8 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
             job_id=job_id,
             new_job_name=f'Failed {mod_label}: {filename}',
         )
-        fail_job(job_id, f'{mod_label} failed on {filename}: the subtitle file could not be read '
-                         f'or the mod produced no content')
+        raise JobFailed(f'{mod_label} failed on {filename}: the subtitle file could not be read '
+                        f'or the mod produced no content')
 
     # apply chmod if required. Remove HI can rename the file, so the one to
     # chmod is the output, not the path the request named.

@@ -62,7 +62,9 @@ describe("waitForJob", () => {
     const waiting = waitForJob(client, 1);
     client.setQueryData(JOBS_KEY, [
       // eslint-disable-next-line camelcase
-      job(1, "failed", { progress_message: "Could not install X: offline" }),
+      job(1, "failed", {
+        error: { reason: "failed", message: "Could not install X: offline" },
+      }),
     ]);
 
     await expect(waiting).rejects.toBeInstanceOf(JobFailedError);
@@ -71,14 +73,14 @@ describe("waitForJob", () => {
     );
   });
 
-  it("prefers the job's error field when the backend sends one", async () => {
+  it("reads the reason from the job's error, not its progress message", async () => {
     client.setQueryData(JOBS_KEY, [
       {
         ...job(2, "failed", {
           // eslint-disable-next-line camelcase
           progress_message: "Installing",
         }),
-        error: "hash mismatch",
+        error: { reason: "failed", message: "hash mismatch" },
       },
     ]);
 
@@ -101,7 +103,9 @@ describe("waitForJob", () => {
     vi.useFakeTimers();
     mockedJobs.mockImplementation(async () => [
       // eslint-disable-next-line camelcase
-      job(4, "failed", { progress_message: "Refresh failed" }),
+      job(4, "failed", {
+        error: { reason: "failed", message: "Refresh failed" },
+      }),
     ]);
     const waiting = waitForJob(client, 4);
     const outcome = expect(waiting).rejects.toThrow("Refresh failed");

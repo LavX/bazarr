@@ -10,8 +10,8 @@ the queue is what reports progress and failure. A failure raises with the
 provider's name and the reason, which is what marks the job failed.
 """
 
-from app.job_errors import fail_job, reason_of
-from app.jobs_queue import jobs_queue
+from app.job_errors import reason_of
+from app.jobs_queue import JobFailed, jobs_queue
 
 from . import service
 
@@ -76,7 +76,7 @@ def install_provider(manifest, job_id=None):
     try:
         return service.stage_install(manifest)
     except Exception as error:
-        fail_job(job_id, f"Could not install {name}: {reason_of(error)}", error)
+        raise JobFailed(f"Could not install {name}: {reason_of(error)}") from error
 
 
 def install_local_provider(archive_bytes, filename=None, job_id=None):
@@ -84,7 +84,7 @@ def install_local_provider(archive_bytes, filename=None, job_id=None):
     try:
         installation = service.stage_install_local(archive_bytes)
     except Exception as error:
-        fail_job(job_id, f"Could not install {label}: {reason_of(error)}", error)
+        raise JobFailed(f"Could not install {label}: {reason_of(error)}") from error
     name = None
     if isinstance(installation, dict):
         name = installation.get("name") or installation.get("provider_id")
@@ -98,16 +98,16 @@ def uninstall_provider(provider_id, name=None, job_id=None):
     try:
         removed = service.remove_installation(provider_id)
     except Exception as error:
-        fail_job(job_id, f"Could not uninstall {label}: {reason_of(error)}", error)
+        raise JobFailed(f"Could not uninstall {label}: {reason_of(error)}") from error
     if not removed:
-        fail_job(job_id, f"Could not uninstall {label}: it is not installed")
+        raise JobFailed(f"Could not uninstall {label}: it is not installed")
 
 
 def update_provider(provider_id, name=None, job_id=None):
     label = name or provider_id
     provider = service.get_provider(provider_id, redact=False)
     if not provider:
-        fail_job(job_id, f"Could not update {label}: it is not installed")
+        raise JobFailed(f"Could not update {label}: it is not installed")
     if provider.get("origin") == "local":
         # A local package is never replaced from a catalog; the request has
         # always been accepted and ignored.
@@ -115,14 +115,14 @@ def update_provider(provider_id, name=None, job_id=None):
     try:
         result = service.apply_update(provider_id)
     except Exception as error:
-        fail_job(job_id, f"Could not update {label}: {reason_of(error)}", error)
+        raise JobFailed(f"Could not update {label}: {reason_of(error)}") from error
     # apply_update reports its failures on the installation rather than by
     # raising: a failed stage or a missing manifest leaves last_error set and
     # nothing staged, while a staged update clears last_error.
     if not result:
-        fail_job(job_id, f"Could not update {label}: it is not installed")
+        raise JobFailed(f"Could not update {label}: it is not installed")
     if result.get("last_error"):
-        fail_job(job_id, f"Could not update {label}: {result['last_error']}")
+        raise JobFailed(f"Could not update {label}: {result['last_error']}")
     return result
 
 
@@ -130,7 +130,7 @@ def refresh_catalog(job_id=None):
     try:
         result = service.refresh_catalog()
     except Exception as error:
-        fail_job(job_id, f"Could not refresh the provider catalog: {reason_of(error)}", error)
+        raise JobFailed(f"Could not refresh the provider catalog: {reason_of(error)}") from error
     # A source that could not be fetched is recorded on the source and the
     # refresh carries on with the others, so its reason is read back here.
     sources = (service.load_state().get("catalog_sources") or {}).values()
@@ -140,5 +140,5 @@ def refresh_catalog(job_id=None):
         if isinstance(source, dict) and source.get("last_error")
     ]
     if failed:
-        fail_job(job_id, f"Could not refresh the provider catalog from {', '.join(failed)}")
+        raise JobFailed(f"Could not refresh the provider catalog from {', '.join(failed)}")
     return result

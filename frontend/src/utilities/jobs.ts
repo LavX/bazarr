@@ -18,7 +18,7 @@ export const JOB_FALLBACK_POLL_MS = 5000;
 const JOBS_KEY = [QueryKeys.System, QueryKeys.Jobs];
 const TERMINAL = new Set(["completed", "failed"]);
 
-type JobRecord = System.Jobs & { error?: string | null };
+type JobRecord = System.Jobs;
 
 export class JobFailedError extends Error {
   readonly jobId: number;
@@ -30,14 +30,11 @@ export class JobFailedError extends Error {
   }
 }
 
-// The reason the job raised with. Newer backends carry it as `error`; until
-// then the job function writes the same sentence into its progress message.
+// The reason the job failed with, as the queue records it for the drawer
+// and the failure toast.
 function failureMessage(job: JobRecord): string {
-  if (typeof job.error === "string" && job.error.length > 0) {
-    return job.error;
-  }
-  if (job.progress_message) {
-    return job.progress_message;
+  if (job.error?.message) {
+    return job.error.message;
   }
   return `${job.job_name || "The job"} failed`;
 }
@@ -100,7 +97,7 @@ function settleUnknown(jobId: number) {
     // eslint-disable-next-line camelcase
     job_name: "",
     status: "failed",
-    error: UNKNOWN_JOB_OUTCOME,
+    error: { reason: "unknown", message: UNKNOWN_JOB_OUTCOME },
   } as JobRecord);
 }
 

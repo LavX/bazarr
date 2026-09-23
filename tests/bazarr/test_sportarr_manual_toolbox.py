@@ -142,7 +142,7 @@ def run_toolbox(endpoint, monkeypatch, **kwargs):
     refusal, so every assertion below still reads the way it was written.
     """
     from app import event_handler
-    from app.job_errors import JobFailed
+    from app.jobs_queue import JobFailed
     from subtitles.tools import mods
 
     # The job announces its result over the socket, which no test runs.

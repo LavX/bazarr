@@ -65,7 +65,10 @@ function report(jobs: Array<[number, string, string?]>) {
         job_id: id,
         job_name: `Installing provider ${id}`,
         status,
-        progress_message: message ?? "",
+        error:
+          status === "failed"
+            ? { reason: "failed", message: message ?? "" }
+            : null,
         /* eslint-enable camelcase */
       })),
     );

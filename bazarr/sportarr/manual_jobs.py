@@ -23,7 +23,7 @@ def sports_manually_download_subtitle(event_id, candidate, arr_instance_id=None,
     if not job_id:
         return jobs_queue.add_job_from_function("Manually downloading Subtitles", is_progress=False)
 
-    from app.job_errors import fail_job
+    from app.jobs_queue import JobFailed
     from sportarr import library
     from sportarr.subtitles import manual_download_sports
 
@@ -37,7 +37,7 @@ def sports_manually_download_subtitle(event_id, candidate, arr_instance_id=None,
         # sentence and the sports layer re-raises it as the exception's
         # argument, so the exception already says what to do.
         jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Failed to download Subtitles for {title}")
-        fail_job(job_id, str(error).strip() or DOWNLOAD_FALLBACK, error)
+        raise JobFailed(str(error).strip() or DOWNLOAD_FALLBACK) from error
 
     publication = result.publication if isinstance(result.publication, dict) else {}
     if publication.get("status") == "published_with_warnings":

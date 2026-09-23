@@ -24,7 +24,6 @@ from test_settings_profile_deletion import post_settings  # noqa: F401
 @pytest.fixture
 def queue(monkeypatch):
     """A private queue wired into every module these actions enqueue through."""
-    from app import job_errors
     from app import jobs_queue as jobs_queue_module
     from provider_hub import jobs as hub_jobs
     from sportarr import manual_jobs
@@ -34,7 +33,7 @@ def queue(monkeypatch):
     from subtitles.tools import mods
 
     private = jobs_queue_module.JobsQueue()
-    for module in (job_errors, hub_jobs, manual_jobs, missing_refresh, movies_indexer,
+    for module in (hub_jobs, manual_jobs, missing_refresh, movies_indexer,
                    series_indexer, mods):
         monkeypatch.setattr(module, "jobs_queue", private)
     # add_job_from_function's wait loop and a few helpers read the module global.
@@ -114,7 +113,7 @@ def test_a_mod_job_that_cannot_write_fails_with_the_reason(queue, mod_job, monke
 
     assert job["status"] == "failed"
     assert job["job_name"] == "Failed Remove HI Tags: Movie.en.srt"
-    assert job["progress_message"] == "Remove HI Tags failed on Movie.en.srt: Read-only file system"
+    assert job["error"]["message"] == "Remove HI Tags failed on Movie.en.srt: Read-only file system"
 
 
 def test_a_mod_that_produces_nothing_fails_instead_of_completing(queue, mod_job, monkeypatch):
@@ -128,7 +127,7 @@ def test_a_mod_that_produces_nothing_fails_instead_of_completing(queue, mod_job,
     job = run_next(queue)
 
     assert job["status"] == "failed"
-    assert "Common Fixes failed on Movie.en.srt" in job["progress_message"]
+    assert "Common Fixes failed on Movie.en.srt" in job["error"]["message"]
 
 
 def test_the_subtitles_route_queues_the_mod_and_answers_202(monkeypatch, tmp_path):
@@ -209,7 +208,7 @@ def test_scan_disk_job_fails_with_the_title_and_reason(queue, monkeypatch, kind)
 
     assert job["status"] == "failed"
     assert job["job_name"] == "Scanning disk for The Show"
-    assert job["progress_message"] == "Scanning disk for The Show failed: ffprobe is not installed"
+    assert job["error"]["message"] == "Scanning disk for The Show failed: ffprobe is not installed"
     assert events == []
 
 
@@ -342,7 +341,7 @@ def test_the_recalculation_job_fails_with_what_failed(recalculation, monkeypatch
     job = run_next(missing_refresh.jobs_queue)
 
     assert job["status"] == "failed"
-    assert job["progress_message"] == "Recalculating missing subtitles for movies failed: database is locked"
+    assert job["error"]["message"] == "Recalculating missing subtitles for movies failed: database is locked"
 
 
 def test_mass_edit_recalculates_only_the_edited_items_in_a_job(recalculation, monkeypatch):
@@ -470,7 +469,7 @@ def test_install_job_failure_names_the_provider_and_the_reason(queue, monkeypatc
     job = run_next(queue)
 
     assert job["status"] == "failed"
-    assert job["progress_message"] == "Could not install Example: bundle hash mismatch for provider.py"
+    assert job["error"]["message"] == "Could not install Example: bundle hash mismatch for provider.py"
 
 
 def test_uninstall_is_queued_runs_as_a_job_and_keeps_the_hub_log(queue, hub_state):
@@ -503,7 +502,7 @@ def test_uninstall_job_fails_when_the_provider_is_gone(queue, hub_state, monkeyp
     job = run_next(queue)
 
     assert job["status"] == "failed"
-    assert job["progress_message"] == "Could not uninstall Example: it is not installed"
+    assert job["error"]["message"] == "Could not uninstall Example: it is not installed"
 
 
 def test_update_is_queued_and_fails_with_the_recorded_error(queue, hub_state, monkeypatch):
@@ -519,7 +518,7 @@ def test_update_is_queued_and_fails_with_the_recorded_error(queue, hub_state, mo
                                              "last_error": "No update manifest is available"})
     result = run_next(queue)
     assert result["status"] == "failed"
-    assert result["progress_message"] == "Could not update Example: No update manifest is available"
+    assert result["error"]["message"] == "Could not update Example: No update manifest is available"
 
 
 def test_catalog_refresh_is_queued_and_fails_with_the_source_reason(queue, monkeypatch):
@@ -535,7 +534,7 @@ def test_catalog_refresh_is_queued_and_fails_with_the_source_reason(queue, monke
         "official": {"name": "Official", "last_error": "GitHub answered 503"}}})
     result = run_next(queue)
     assert result["status"] == "failed"
-    assert result["progress_message"] == (
+    assert result["error"]["message"] == (
         "Could not refresh the provider catalog from Official (GitHub answered 503)")
 
 
@@ -584,7 +583,7 @@ def test_a_failed_sports_download_fails_its_job_with_the_reason(queue, monkeypat
 
     assert job["status"] == "failed"
     assert job["job_name"] == "Failed to download Subtitles for Final"
-    assert job["progress_message"] == "All providers are throttled"
+    assert job["error"]["message"] == "All providers are throttled"
 
 
 def test_a_sports_download_that_publishes_completes(queue, monkeypatch):

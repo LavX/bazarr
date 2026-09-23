@@ -55,7 +55,8 @@ function report(client: QueryClient, id: number, status: string, message = "") {
       job_id: id,
       job_name: `Job ${id}`,
       status,
-      progress_message: message,
+      // A failed job carries its reason in error, the way the queue sends it.
+      error: status === "failed" ? { reason: "failed", message } : null,
       /* eslint-enable camelcase */
     },
   ]);
@@ -148,7 +149,10 @@ describe("Provider Hub jobs", () => {
           job_id: 23,
           job_name: "Refresh",
           status: "failed",
-          progress_message: "Could not refresh the provider catalog",
+          error: {
+            reason: "failed",
+            message: "Could not refresh the provider catalog",
+          },
         },
         /* eslint-enable camelcase */
       ]),

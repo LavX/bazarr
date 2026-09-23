@@ -105,7 +105,8 @@ def _library_steps():
 
 
 def recalculate_missing_subtitles(series=None, movies=None, request=None, job_id=None):
-    from app.job_errors import fail_job, reason_of
+    from app.job_errors import reason_of
+    from app.jobs_queue import JobFailed
 
     if series is None and movies is None:
         steps = _library_steps()
@@ -116,8 +117,7 @@ def recalculate_missing_subtitles(series=None, movies=None, request=None, job_id
             try:
                 recalculate()
             except Exception as error:
-                fail_job(job_id, f"Recalculating missing subtitles for {name} failed: {reason_of(error)}",
-                         error)
+                raise JobFailed(f"Recalculating missing subtitles for {name} failed: {reason_of(error)}") from error
         jobs_queue.update_job_progress(job_id=job_id, progress_value='max', progress_message='Done')
         return
 
@@ -135,8 +135,8 @@ def recalculate_missing_subtitles(series=None, movies=None, request=None, job_id
         try:
             list_missing_subtitles(no=series_id, arr_instance_id=owner)
         except Exception as error:
-            fail_job(job_id, f"Recalculating missing subtitles for series {series_id} failed: "
-                             f"{reason_of(error)}", error)
+            raise JobFailed(f"Recalculating missing subtitles for series {series_id} failed: "
+                            f"{reason_of(error)}") from error
         event_stream(type='series', payload=series_id)
         episodes = database.execute(
             scoped(select(TableEpisodes.sonarrEpisodeId).where(TableEpisodes.sonarrSeriesId == series_id),
@@ -149,8 +149,8 @@ def recalculate_missing_subtitles(series=None, movies=None, request=None, job_id
         try:
             list_missing_subtitles_movies(no=radarr_id, arr_instance_id=owner)
         except Exception as error:
-            fail_job(job_id, f"Recalculating missing subtitles for movie {radarr_id} failed: "
-                             f"{reason_of(error)}", error)
+            raise JobFailed(f"Recalculating missing subtitles for movie {radarr_id} failed: "
+                            f"{reason_of(error)}") from error
         event_stream(type='movie', payload=radarr_id)
         event_stream(type='movie-wanted', payload=radarr_id)
         done += 1
