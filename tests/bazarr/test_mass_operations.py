@@ -1,5 +1,7 @@
 # coding=utf-8
 
+import pytest
+
 from unittest.mock import patch, MagicMock, call  # noqa: F401
 
 
@@ -755,12 +757,17 @@ class TestProcessMediaActions:
     def test_error_handling(self, mock_jobs_queue, mock_scan):
         from subtitles.mass_operations import _process_media_action
 
+        from subtitles.job_errors import SubtitleJobError
+
         mock_scan.side_effect = RuntimeError("scan failed")
         items = [{'type': 'series', 'sonarrSeriesId': 1}]
-        result = _process_media_action(items, action='scan-disk', job_id='test')
+        # A failed item fails the batch job with the item's reason, so the
+        # error reaches the Jobs drawer instead of the unread returned value.
+        with pytest.raises(SubtitleJobError) as raised:
+            _process_media_action(items, action='scan-disk', job_id='test')
 
-        assert len(result['errors']) == 1
-        assert 'scan failed' in result['errors'][0]
+        assert '1 of 1 items failed' in str(raised.value)
+        assert 'series 1 (scan failed)' in str(raised.value)
 
     @patch('subtitles.mass_operations.jobs_queue')
     def test_unknown_type_skipped_scan_disk(self, mock_jobs_queue):
@@ -1295,14 +1302,16 @@ class TestMassBatchOperationProcessing:
         mock_collect.return_value = ([
             {'srt_path': '/subs/test.srt', 'video_path': '/video/test.mkv'},
         ], 0)
-        result = mass_batch_operation(
-            items=[{'type': 'movie', 'radarrId': 1}],
-            action='remove_HI',
-            job_id='test',
-        )
-        assert result['queued'] == 0
-        assert len(result['errors']) == 1
-        assert 'failed' in result['errors'][0]
+        from subtitles.job_errors import SubtitleJobError
+
+        with pytest.raises(SubtitleJobError) as raised:
+            mass_batch_operation(
+                items=[{'type': 'movie', 'radarrId': 1}],
+                action='remove_HI',
+                job_id='test',
+            )
+        assert 'Mass remove_HI: 1 of 1 items failed (0 done, 0 skipped)' in str(raised.value)
+        assert 'test.srt (' in str(raised.value)
 
     @patch('subtitles.mass_operations.jobs_queue')
     @patch('subtitles.mass_operations._process_subtitle_item', return_value=False)
@@ -1312,14 +1321,17 @@ class TestMassBatchOperationProcessing:
         mock_collect.return_value = ([
             {'srt_path': '/subs/test.srt', 'video_path': '/video/test.mkv'},
         ], 0)
-        result = mass_batch_operation(
-            items=[{'type': 'movie', 'radarrId': 1}],
-            action='sync',
-            job_id='test',
-        )
-        # When _process_subtitle_item returns False, it counts as failed (added to skipped)
-        assert result['queued'] == 0
-        assert result['skipped'] == 1
+        from subtitles.job_errors import SubtitleJobError
+
+        # When _process_subtitle_item returns False the item failed, and the
+        # batch job fails naming it.
+        with pytest.raises(SubtitleJobError) as raised:
+            mass_batch_operation(
+                items=[{'type': 'movie', 'radarrId': 1}],
+                action='sync',
+                job_id='test',
+            )
+        assert 'test.srt (no sync engine produced output)' in str(raised.value)
 
     @patch('subtitles.mass_operations.jobs_queue')
     @patch('subtitles.mass_operations._process_subtitle_item', return_value=True)
@@ -1676,11 +1688,17 @@ class TestMassBatchOperationWithEmbeddedItems:
              'video_path': '/video/ep2.mkv'},
         ], 0)
 
-        result = mass_batch_operation(items=[{'type': 'episode', 'sonarrEpisodeId': 1}],
-                                      action='translate', job_id='test')
+        from subtitles.job_errors import SubtitleJobError
 
+        with pytest.raises(SubtitleJobError) as raised:
+            mass_batch_operation(items=[{'type': 'episode', 'sonarrEpisodeId': 1}],
+                                 action='translate', job_id='test')
+
+        # Every item still ran; the batch fails at the end with both named.
         assert mock_process.call_count == 2
-        assert len(result['errors']) == 2
+        assert '2 of 2 items failed' in str(raised.value)
+        assert 'ep1.mkv (en track)' in str(raised.value)
+        assert 'ep2.mkv (en track)' in str(raised.value)
 
 
 class TestSubtitleVariantParsing:

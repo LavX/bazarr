@@ -176,7 +176,7 @@ def test_translating_binds_its_own_operation_per_item():
 
 
 def test_a_target_the_profile_does_not_want_skips_the_item_not_the_batch():
-    from subtitles.mass_operations import _process_subtitle_item
+    from subtitles.mass_operations import ITEM_SKIPPED, _process_subtitle_item
 
     item = {
         'video_path': '/mapped/race.mkv', 'srt_path': '/mapped/race.hu.srt',
@@ -187,7 +187,7 @@ def test_a_target_the_profile_does_not_want_skips_the_item_not_the_batch():
     with patch('sportarr.profile_hooks.manual_translation_operation',
                side_effect=ValueError('not wanted')), \
          patch('subtitles.tools.translate.main.translate_subtitles_file') as translate:
-        assert _process_subtitle_item(item, 'translate', {'to_lang': 'de'}, job_id=1) is False
+        assert _process_subtitle_item(item, 'translate', {'to_lang': 'de'}, job_id=1) is ITEM_SKIPPED
     translate.assert_not_called()
 
 
@@ -642,10 +642,18 @@ def test_mass_sports_mod_refreshes_once_for_successful_files(sports_toolbox, spo
     if end == 'cancelled':
         with pytest.raises(JobCancelled):
             mass_operations.mass_batch_operation(**args)
+    elif end == 'invalid':
+        # The batch still finishes every item, then fails its job naming the
+        # one that was not rewritten.
+        from subtitles.job_errors import SubtitleJobError
+
+        with pytest.raises(SubtitleJobError) as raised:
+            mass_operations.mass_batch_operation(**args)
+        assert '1 of 2 items failed (1 done, 0 skipped)' in str(raised.value)
+        assert 'event.de.forced.srt' in str(raised.value)
     else:
         result = mass_operations.mass_batch_operation(**args)
-        assert result == {'queued': 2 if end == 'success' else 1,
-                          'skipped': 0 if end == 'success' else 1, 'errors': []}
+        assert result == {'queued': 2, 'skipped': 0, 'errors': []}
     assert (folder / '1' / 'event.en.srt').exists()
     assert not (folder / '1' / 'event.en.hi.srt').exists()
     if end != 'success':

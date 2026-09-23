@@ -514,7 +514,16 @@ declare namespace Api {
   }
 
   interface CombineResult {
-    status: "built" | "skipped" | "failed" | "batch_complete" | "not_found";
+    status:
+      | "built"
+      | "skipped"
+      | "failed"
+      | "batch_complete"
+      | "not_found"
+      | "queued";
+    // A series or league combine is queued as one job and reports through it.
+    // null when an identical combine is already queued.
+    job_id?: number | null;
     path?: string;
     alignment?: string;
     reason?: string;

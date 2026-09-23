@@ -67,14 +67,26 @@ def test_a_published_combine_with_a_failed_follow_up_is_not_reported_clean():
     the index refresh cannot probe the recording, the engine returns
     status='built' carrying the error. Every consumer counted that as a clean
     build, so the operator got a green summary for a subtitle the event may not
-    list until it is reindexed.
+    list until it is reindexed. The league combine runs as a queued job now, and
+    its tally keeps that distinction.
     """
+    from subtitles.tools.combine.batch import CombineTally
+
+    tally = CombineTally('events')
+    tally.add('Race 1', {'status': 'built', 'path': '/x.srt', 'reason': '', 'error': 'index refresh failed'})
+    tally.add('Race 2', {'status': 'built', 'path': '/y.srt', 'reason': '', 'error': ''})
+
+    assert tally.summary()['built'] == 2
+    assert tally.summary()['warnings'] == 1
+    assert tally.failed == 0
+    assert '1 needing attention' in tally.counts()
+
+
+def test_the_league_route_queues_one_combine_job():
     import inspect
 
     from api.sports import subtitles
 
     source = inspect.getsource(subtitles.SportsLeagueSubtitlesCombine)
-    counted = source[source.index('if result_status == "built":'):]
-    assert "warnings += 1" in counted.split("elif")[0]
-    assert "result.error" in counted.split("elif")[0]
-    assert '"warnings": warnings' in source
+    assert 'func="combine_league_subtitles"' in source
+    assert 'try_combine_for_video' not in source

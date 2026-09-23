@@ -183,15 +183,10 @@ class SportsLeagueSubtitlesCombine(Resource):
     """
 
     @authenticate
-    @api_ns_sports_subtitles.response(200, "Batch combine summary")
+    @api_ns_sports_subtitles.response(202, "Combine job queued")
     @api_ns_sports_subtitles.response(401, "Not Authenticated")
     @api_ns_sports_subtitles.response(404, "Sports league not found")
     def post(self, league_id):
-        from sportarr.identity import resolve_event_in_session
-        from sportarr.profile_hooks import capture_profile_operation
-        from sportarr.subtitles import candidate_signature
-        from subtitles.tools.combine.main import try_combine_for_video
-
         try:
             body = request.get_json(silent=True) or {}
             owner = _optional_owner(body.get("arr_instance_id") or request.args.get("arr_instance_id"))
@@ -204,58 +199,31 @@ class SportsLeagueSubtitlesCombine(Resource):
         except ValueError as exc:
             return {"message": str(exc)}, 400
 
-        event_ids = database.execute(
+        event_count = len(database.execute(
             select(TableSportsEvents.id).where(
                 TableSportsEvents.league_id == league_id,
                 TableSportsEvents.arr_instance_id == owner,
             )
-        ).scalars().all()
-        if not event_ids:
+        ).scalars().all())
+        if not event_count:
             return {"status": "not_found"}, 404
 
-        built = skipped = failed = warnings = 0
-        details = []
-        for event_id in event_ids:
-            try:
-                context = resolve_event_in_session(database, event_id, owner)
-                operation = capture_profile_operation(context, candidate_signature(context))
-                if not operation.profile:
-                    result_status, result = "skipped", None
-                else:
-                    result = try_combine_for_video(
-                        video_path=context.mapped_path,
-                        media_type="sports",
-                        sports_operation=operation,
-                    )
-                    result_status = result.status
-            except (ValueError, OSError) as exc:
-                # One unreadable or moved recording must not end the batch.
-                result_status, result = "failed", None
-                details.append({"eventId": event_id, "status": "failed",
-                                "path": "", "reason": "", "error": str(exc)})
-            else:
-                details.append({
-                    "eventId": event_id,
-                    "status": result_status,
-                    "path": result.path if result else "",
-                    "reason": result.reason if result else "no language profile is assigned",
-                    "error": result.error if result else "",
-                })
-            if result_status == "built":
-                built += 1
-                # Published, but a follow-up step did not complete: the index
-                # refresh, most often. Counted apart from a clean build so the
-                # summary cannot report an unqualified success for a subtitle
-                # the event may not list yet.
-                if result is not None and result.error:
-                    warnings += 1
-            elif result_status == "skipped":
-                skipped += 1
-            else:
-                failed += 1
+        # One queued job for the whole league: it reports per-event progress
+        # and fails with a summary when any event failed.
+        from app.jobs_queue import jobs_queue
 
-        return {"status": "batch_complete", "built": built, "skipped": skipped,
-                "failed": failed, "warnings": warnings, "details": details}, 200
+        league = database.execute(
+            select(TableSportsLeagues.title).where(TableSportsLeagues.id == league_id)
+        ).first()
+        job_id = jobs_queue.feed_jobs_pending_queue(
+            job_name=f"Combining subtitles for {league.title if league else f'league {league_id}'}",
+            module="subtitles.tools.combine.batch",
+            func="combine_league_subtitles",
+            kwargs={"league_id": league_id, "arr_instance_id": owner},
+            is_progress=True,
+            progress_max=event_count,
+        )
+        return {"status": "queued", "job_id": job_id or None}, 202
 
 
 @api_ns_sports_subtitles.route("/sports/events/<int:event_id>/subtitles/upload")

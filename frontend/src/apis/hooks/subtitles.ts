@@ -1,5 +1,6 @@
 import { showNotification } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { refreshWhenJobFinishes } from "@/apis/hooks/jobWatch";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { BatchAction, BatchItem, BatchOptions } from "@/apis/raw/subtitles";
@@ -345,25 +346,29 @@ export function useBatchAction() {
       action: BatchAction;
       options?: BatchOptions;
     }) => api.subtitles.batch(params.items, params.action, params.options),
-    onSuccess: () => {
-      void client.invalidateQueries({
-        queryKey: [QueryKeys.Series],
-      });
-      void client.invalidateQueries({
-        queryKey: [QueryKeys.Movies],
-      });
-      // Episode/movie history live under the Series/Movies roots above. The
-      // only history query not covered is the System history stats.
-      void client.invalidateQueries({
-        queryKey: [QueryKeys.System, QueryKeys.History],
-      });
-      // Sports rows can be in a batch now, and their library, wanted, history
-      // and exclusion queries all live under this one root.
-      void client.invalidateQueries({
-        queryKey: [QueryKeys.Sports],
-      });
-      void client.invalidateQueries({
-        queryKey: [QueryKeys.Translator],
+    onSuccess: (data) => {
+      // The request only queues the batch, so refreshing now would refetch the
+      // tables before anything changed. Refresh when the job finishes instead.
+      refreshWhenJobFinishes(client, data?.job_id, () => {
+        void client.invalidateQueries({
+          queryKey: [QueryKeys.Series],
+        });
+        void client.invalidateQueries({
+          queryKey: [QueryKeys.Movies],
+        });
+        // Episode/movie history live under the Series/Movies roots above. The
+        // only history query not covered is the System history stats.
+        void client.invalidateQueries({
+          queryKey: [QueryKeys.System, QueryKeys.History],
+        });
+        // Sports rows can be in a batch now, and their library, wanted,
+        // history and exclusion queries all live under this one root.
+        void client.invalidateQueries({
+          queryKey: [QueryKeys.Sports],
+        });
+        void client.invalidateQueries({
+          queryKey: [QueryKeys.Translator],
+        });
       });
     },
   });

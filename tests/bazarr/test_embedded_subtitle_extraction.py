@@ -629,17 +629,15 @@ def _build_subtitles_api_flask_app():
                 sys.modules[mod_name] = original
 
 
-def test_bitmap_codec_returns_400_with_clear_message(tmp_path):
-    """PATCH /subtitles with embedded path + bitmap track → 400 with readable message.
+def test_embedded_translate_queues_the_extraction_instead_of_running_it(tmp_path):
+    """PATCH /subtitles with an embedded track answers at once and queues the work.
 
-    Why: Ensures the UI receives a meaningful error (not a generic 500) when a
-    user attempts to translate a PGS/VobSub embedded track so they understand
-    why the action failed.
-    What: Mocks extract_embedded_subtitle to return None (bitmap rejection path),
-    posts to the translate endpoint, and asserts HTTP 400 plus a human-readable
-    body containing 'bitmap', 'PGS', or 'cannot extract'.
-    Test: Assert response.status_code == 400; assert any of the keywords appear
-    in the decoded response body.
+    Why: extraction runs ffmpeg for seconds per track, and it used to run inside
+    the request before the translation was queued. The job extracts now, and a
+    bitmap track fails that job with a readable reason (see the next test).
+    What: posts to the translate endpoint for a movie's embedded track and
+    asserts a 204, no extraction in the request, and a translation queued with
+    the embedded source.
     """
     import importlib
     import sys
@@ -757,20 +755,13 @@ def test_bitmap_codec_returns_400_with_clear_message(tmp_path):
             },
         )
 
-        assert response.status_code == 400, (
-            f"Expected 400 for bitmap codec, got {response.status_code}. "
+        assert response.status_code == 204, (
+            f"Expected 204 for a queued embedded translation, got {response.status_code}. "
             f"Body: {response.data!r}"
         )
-
-        body_str = response.data.decode("utf-8").lower()
-        has_keyword = any(
-            kw in body_str
-            for kw in ("bitmap", "pgs", "vobsub", "cannot extract", "codec")
-        )
-        assert has_keyword, (
-            f"Expected a human-readable bitmap error message in response body, "
-            f"got: {response.data!r}"
-        )
+        stubs["subtitles.tools.translate.batch"].extract_embedded_subtitle.assert_not_called()
+        queued = stubs["subtitles.tools.translate.main"].translate_subtitles_file.call_args.kwargs
+        assert queued["embedded_source"] == {"language": "en", "hi": False, "forced": False}
 
     finally:
         for mod_name, original in saved.items():
@@ -960,3 +951,40 @@ def test_forced_track_selected_by_title(tmp_path):
         f"forced request should map the title-forced track (index 1), "
         f"got cmd: {captured['cmd']}"
     )
+
+
+def test_a_bitmap_track_fails_the_translation_job_with_a_clear_reason(monkeypatch):
+    """The job's extraction step raises, so the job is failed and the reason
+    names the likely bitmap codec instead of the job ending completed."""
+    from subtitles.job_errors import SubtitleJobError
+    from subtitles.tools.translate import batch, main
+
+    calls = {}
+
+    def extract(video_path, language, media_type, hi=False, forced=False, arr_instance_id=None):
+        calls.update(video_path=video_path, language=language, hi=hi, forced=forced,
+                     arr_instance_id=arr_instance_id)
+        return None
+
+    monkeypatch.setattr(batch, "extract_embedded_subtitle", extract)
+    monkeypatch.setattr(main.jobs_queue, "update_job_progress", lambda **kwargs: True)
+
+    with pytest.raises(SubtitleJobError) as raised:
+        main._extract_embedded_source("/media/film.mkv", "movie",
+                                      {"language": "en", "hi": True, "forced": False}, 7, 3)
+
+    assert "bitmap" in str(raised.value)
+    assert calls == {"video_path": "/media/film.mkv", "language": "en", "hi": True, "forced": False,
+                     "arr_instance_id": 3}
+
+
+def test_the_translation_job_extracts_before_it_translates(monkeypatch, tmp_path):
+    from subtitles.tools.translate import batch, main
+
+    extracted = tmp_path / "abc.en.srt"
+    extracted.write_text("1\n")
+    monkeypatch.setattr(batch, "extract_embedded_subtitle", lambda *a, **k: str(extracted))
+    monkeypatch.setattr(main.jobs_queue, "update_job_progress", lambda **kwargs: True)
+
+    assert main._extract_embedded_source("/media/film.mkv", "movie", {"language": "en"}, 7, None) == \
+        str(extracted)

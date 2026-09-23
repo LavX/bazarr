@@ -10,6 +10,7 @@ from app.jobs_queue import jobs_queue, JobCancelled
 from sportarr.connection import check_cancelled
 from sportarr.output import validate_output_path
 from subtitles.tools.subsyncer import SubSyncer
+from subtitles.job_errors import SubtitleJobError
 from subtitles.tools.subsync_engines import (
     DEFAULT_ENABLED_ENGINES,
     ENGINE_LABELS,
@@ -121,6 +122,10 @@ def _sync_complete_job_name(srt_path, sync_result):
         return f"Skipped sync for {srt_path}"
 
     return f"Failed to sync {srt_path}"
+
+
+def _sync_only_skipped(sync_result):
+    return bool(sync_result and sync_result.skipped_results and not sync_result.failed_results)
 
 
 def _sync_outcome_message(sync_result):
@@ -385,6 +390,9 @@ def sync_subtitles(video_path,
             _report_progress(job_id, track_job_progress, owns_job_progress, message, value, total, name)
 
         report('Preparing synchronization', value=0, total=progress_total, name=f"Syncing {srt_path}")
+        # This call is the queued sync job itself, not a step inside a download
+        # or a batch that owns the job.
+        owns_sync_job = bool(job_id and track_job_progress and owns_job_progress)
 
         def update_progress(message, value, total):
             report(message, value=value, total=total)
@@ -466,12 +474,21 @@ def sync_subtitles(video_path,
                                                        published_versions)
             except JobCancelled:
                 raise
-            except Exception:
+            except Exception as e:
                 logging.exception(f'BAZARR an unhandled exception occurs during the synchronization process for this '  # noqa: G004
                                   f'subtitle file: {srt_path}')
+                if owns_sync_job:
+                    raise SubtitleJobError(f'Sync failed: {e}') from e
                 return False
             else:
-                return bool(sync_result and sync_result.success)
+                if sync_result and sync_result.success:
+                    return True
+                if owns_sync_job and not _sync_only_skipped(sync_result):
+                    # The queue marks a job failed only when it raises. A caller
+                    # that runs this inside its own job (a download, a batch)
+                    # still gets False and decides for itself.
+                    raise SubtitleJobError(_sync_outcome_message(sync_result))
+                return False
             finally:
                 try:
                     try:

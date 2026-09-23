@@ -18,7 +18,13 @@ from subtitles.indexer.utils import get_subtitle_destination_path
 
 def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, forced, hi,
                              media_type, sonarr_series_id, sonarr_episode_id, radarr_id, metadata,
-                             job_id=None, arr_instance_id=None, sports_operation=None):
+                             job_id=None, arr_instance_id=None, sports_operation=None, embedded_source=None):
+    """Translate a subtitle file, as a queued job.
+
+    ``embedded_source`` names an embedded track to translate instead of a file:
+    a dict with ``language`` (alpha2), ``hi`` and ``forced``. The track is
+    extracted by the job, so the request that queues it returns at once.
+    """
     if not job_id:
         # Build job label with media title. Note: no local variables can be
         # assigned here because add_job_from_function introspects the frame
@@ -58,6 +64,9 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
                 raise ValueError('Sports translation cannot use native media metadata')
             cancel = SportsJobSignal(arr_instance_id, job_id)
             sports_operation.validate(wanted=True, cancel=cancel)
+        if embedded_source:
+            source_srt_file = _extract_embedded_source(video_path, media_type, embedded_source, job_id,
+                                                       arr_instance_id)
         logging.debug(f'Translation request: video={video_path}, source={source_srt_file}, from={from_lang}, to={to_lang}')  # noqa: G004
 
         validate_translation_params(video_path, source_srt_file, from_lang, to_lang)
@@ -171,3 +180,27 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
             fail_name = f'Failed: {from_lang.upper()} → {to_lang.upper()} using {translator_label}'
         jobs_queue.update_job_name(job_id=job_id, new_job_name=fail_name)
         raise
+
+
+def _extract_embedded_source(video_path, media_type, embedded_source, job_id, arr_instance_id):
+    """Extract the embedded track this translation reads, inside the job.
+
+    The file lands in the persistent extracted_subs cache, so it is not removed
+    after the translation reads it.
+    """
+    from subtitles.job_errors import SubtitleJobError
+    from subtitles.tools.translate.batch import extract_embedded_subtitle
+
+    jobs_queue.update_job_progress(job_id=job_id, progress_message='Extracting the embedded subtitle track')
+    extracted = extract_embedded_subtitle(
+        video_path,
+        embedded_source.get('language'),
+        media_type,
+        hi=bool(embedded_source.get('hi')),
+        forced=bool(embedded_source.get('forced')),
+        arr_instance_id=arr_instance_id,
+    )
+    if not extracted:
+        raise SubtitleJobError('Could not extract the embedded subtitle track. Its codec may be bitmap '
+                               '(PGS or VobSub), or the language track was not found.')
+    return extracted

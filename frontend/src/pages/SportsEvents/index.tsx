@@ -430,11 +430,6 @@ const SportsEventsView: FunctionComponent = () => {
             Could not combine subtitles for this league.
           </Alert>
         )}
-        {combine.isSuccess && combine.data.status === "batch_complete" && (
-          <Alert color="blue" mb="md">
-            {`Combined ${combine.data.built ?? 0}, skipped ${combine.data.skipped ?? 0}, failed ${combine.data.failed ?? 0}.`}
-          </Alert>
-        )}
         <SportsJobFeedback
           queued={automatic.data}
           owner={automatic.variables?.owner}
