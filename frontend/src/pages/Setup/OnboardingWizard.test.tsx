@@ -7,12 +7,16 @@ import OnboardingWizardView from "./OnboardingWizard";
 // Navigation + the settings mutation are the only external effects we assert.
 const navigate = vi.fn();
 const mutate = vi.fn();
+// What the address bar says. The shell reads the step key off the route, so a
+// test that stands the wizard on a mid step has to say so here as well.
+let routeParams: { stepKey?: string } = {};
 
 vi.mock("react-router", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react-router")>();
   return {
     ...actual,
     useNavigate: () => navigate,
+    useParams: () => routeParams,
   };
 });
 
@@ -31,6 +35,7 @@ const mockedSettingsMutation = vi.mocked(useSettingsMutation);
 describe("OnboardingWizardView", () => {
   beforeEach(() => {
     localStorage.clear();
+    routeParams = {};
     vi.clearAllMocks();
     mockedSettingsMutation.mockReturnValue({
       mutate,
@@ -237,6 +242,50 @@ describe("OnboardingWizardView", () => {
     await waitFor(() => {
       expect(navigate).toHaveBeenCalledWith("/");
     });
+  });
+
+  it("leaving from a mid step clears the cursor for good", async () => {
+    // The reset cleared the cursor and the URL sync effect wrote it straight
+    // back, because the URL still named the step being left and the list still
+    // knew it. Settings, General then reopened setup on that step.
+    const user = userEvent.setup();
+    let onSuccess: (() => void) | undefined;
+    mutate.mockImplementation(
+      (_input: unknown, opts?: { onSuccess?: () => void }) => {
+        onSuccess = opts?.onSuccess;
+      },
+    );
+
+    localStorage.setItem("bazarr.onboarding.intent", "library");
+    localStorage.setItem("bazarr.onboarding.step", "sonarr");
+    routeParams = { stepKey: "sonarr" };
+
+    const view = customRender(<OnboardingWizardView />);
+    expect(
+      await screen.findByRole("heading", { name: /sonarr/i }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /set up later/i }));
+    await user.click(
+      await screen.findByRole("button", { name: /^leave setup$/i }),
+    );
+    onSuccess?.();
+
+    await waitFor(() => {
+      expect(navigate).toHaveBeenCalledWith("/");
+    });
+    // The wizard keeps rendering until the navigation unmounts it, so the
+    // effect that used to resurrect the cursor has had its chance by now.
+    expect(localStorage.getItem("bazarr.onboarding.step")).toBeNull();
+
+    view.unmount();
+    routeParams = {};
+    customRender(<OnboardingWizardView />);
+
+    expect(
+      await screen.findByRole("heading", { name: /welcome to bazarr/i }),
+    ).toBeInTheDocument();
+    expect(localStorage.getItem("bazarr.onboarding.step")).toBeNull();
   });
 
   it("a failed leave says so and keeps the reader in the wizard", async () => {

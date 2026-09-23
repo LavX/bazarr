@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   useProviderHubCatalog,
   useProviderHubInstall,
+  useProviderHubRefreshCatalog,
   useSettingsMutation,
   useSystem,
   useSystemSettings,
@@ -19,6 +20,7 @@ vi.mock("@/apis/hooks", async (importOriginal) => {
     ...actual,
     useProviderHubCatalog: vi.fn(),
     useProviderHubInstall: vi.fn(),
+    useProviderHubRefreshCatalog: vi.fn(),
     useSettingsMutation: vi.fn(),
     useSystem: vi.fn(),
     useSystemSettings: vi.fn(),
@@ -41,6 +43,7 @@ vi.mock("./redirect", () => ({
 
 const mockedCatalog = vi.mocked(useProviderHubCatalog);
 const mockedInstall = vi.mocked(useProviderHubInstall);
+const mockedRefreshCatalog = vi.mocked(useProviderHubRefreshCatalog);
 const mockedSettingsMutation = vi.mocked(useSettingsMutation);
 const mockedSystemSettings = vi.mocked(useSystemSettings);
 const mockedSystem = vi.mocked(useSystem);
@@ -55,10 +58,11 @@ const onUseInstalled = vi.fn();
 const onNext = vi.fn();
 
 const refetchCatalog = vi.fn();
+const refreshCatalogAsync = vi.fn();
 
-function setCatalog(entries: unknown[]) {
+function setCatalog(entries: unknown[], sources: unknown[] = []) {
   mockedCatalog.mockReturnValue({
-    data: { sources: [], entries },
+    data: { sources, entries },
     // Settled: the stage reads this to tell an empty catalog from one that has
     // not answered yet.
     isPending: false,
@@ -201,6 +205,11 @@ describe("ProviderInstallStage", () => {
     setEnabledProviders([]);
     mutateAsync.mockResolvedValue(undefined);
     settingsMutateAsync.mockResolvedValue(undefined);
+    refreshCatalogAsync.mockResolvedValue(undefined);
+    mockedRefreshCatalog.mockReturnValue({
+      mutateAsync: refreshCatalogAsync,
+      isPending: false,
+    } as unknown as ReturnType<typeof useProviderHubRefreshCatalog>);
     mockedInstall.mockReturnValue({
       mutateAsync,
       isPending: false,
@@ -277,6 +286,75 @@ describe("ProviderInstallStage", () => {
 
     await user.click(screen.getByRole("button", { name: /retry/i }));
     expect(refetchCatalog).toHaveBeenCalled();
+  });
+
+  it("treats an empty catalog whose source failed to refresh as a failure", async () => {
+    // The catalog answers 200 with nothing when its only source could not be
+    // read, which is what a transient GitHub failure on the first boot after
+    // an install looks like. That is a broken catalog, not an empty one, and
+    // the reader was shown "No providers available" with nothing to press.
+    const user = userEvent.setup();
+    setCatalog(
+      [],
+      [
+        {
+          name: "bazarr-provider-catalog",
+          url: "https://example.invalid/catalog",
+          trusted: true,
+          last_error: "GitHub returned 503",
+        },
+      ],
+    );
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    expect(
+      screen.getByText(/could not load the provider catalog/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/github returned 503/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no providers available/i)).toBeNull();
+
+    // Reading the catalog again would hand back the same saved error: the
+    // backend remembers the attempt and does not go back out for the source
+    // on a plain read. Retry asks for a refresh instead.
+    await user.click(screen.getByRole("button", { name: /retry/i }));
+    expect(refreshCatalogAsync).toHaveBeenCalled();
+    expect(refetchCatalog).not.toHaveBeenCalled();
+  });
+
+  it("falls back to re-reading the catalog when the refresh will not go through", async () => {
+    const user = userEvent.setup();
+    refreshCatalogAsync.mockRejectedValue(new Error("refresh refused"));
+    setCatalog(
+      [],
+      [
+        {
+          name: "bazarr-provider-catalog",
+          url: "https://example.invalid/catalog",
+          trusted: true,
+          last_error: "GitHub returned 503",
+        },
+      ],
+    );
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /retry/i }));
+    await waitFor(() => {
+      expect(refetchCatalog).toHaveBeenCalled();
+    });
   });
 
   it("names the search box for a screen reader", () => {

@@ -107,6 +107,15 @@ const OnboardingWizardBody: FunctionComponent = () => {
   // Back go forwards, and replacing the current entry left the same step in
   // the two entries on top, so browser Back appeared to do nothing once.
   const trail = useRef<string[]>([]);
+  // Leaving setup is final, and the effect below is what used to undo it. The
+  // reset clears the cursor, but this component keeps rendering until the
+  // navigation unmounts it, and on that render the URL still names the step
+  // being left while the list still knows it: the effect read that as a link
+  // somebody followed and wrote the cursor straight back. "Run first-time
+  // setup" then reopened on that step with the rail showing a phase nobody had
+  // reached. Once this is set, neither the URL nor the cursor is worth
+  // correcting any more.
+  const left = useRef(false);
 
   // Moving the cursor and the URL is one action, so the effect below only ever
   // has to deal with a URL that moved on its own: a browser Back or Forward,
@@ -144,6 +153,9 @@ const OnboardingWizardBody: FunctionComponent = () => {
   }, [goTo, navigate, steps, index]);
 
   useEffect(() => {
+    if (left.current) {
+      return;
+    }
     if (stepKey === current.key) {
       pendingUrl.current = null;
       synced.current = true;
@@ -224,6 +236,7 @@ const OnboardingWizardBody: FunctionComponent = () => {
       { "settings-general-setup_complete": true },
       {
         onSuccess: () => {
+          left.current = true;
           reset();
           resetIntent();
           clearSelection();
