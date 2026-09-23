@@ -34,7 +34,7 @@ import { Action, DropContent, Selector } from "@/components/inputs";
 import SimpleTable from "@/components/tables/SimpleTable";
 import TextPopover from "@/components/TextPopover";
 import { useModals, withModal } from "@/modules/modals";
-import { notification } from "@/modules/task";
+import { notification } from "@/modules/notification";
 import { useArrayAction, useSelectorOptions } from "@/utilities";
 import { expandArchives, isArchiveFile } from "@/utilities/archives";
 import FormUtils from "@/utilities/form";

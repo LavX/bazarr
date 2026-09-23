@@ -19,7 +19,7 @@ vi.mock("@/apis/raw", () => ({
   },
 }));
 
-vi.mock("@/modules/task", () => ({
+vi.mock("@/modules/notification", () => ({
   notification: {
     info: vi.fn(),
   },

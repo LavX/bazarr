@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import type { ProviderHubInstallRequest } from "@/apis/raw/providerHub";
-import { notification } from "@/modules/task";
+import { notification } from "@/modules/notification";
 import { waitForJob } from "@/utilities/jobs";
 
 const providerHubKey = [QueryKeys.ProviderHub];

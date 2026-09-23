@@ -11,7 +11,7 @@ import {
 import { showNotification } from "@mantine/notifications";
 import { useCombineSubtitles } from "@/apis/hooks/combine";
 import { useModals, withModal } from "@/modules/modals";
-import { notification } from "@/modules/task";
+import { notification } from "@/modules/notification";
 
 type Scope =
   | { kind: "movie"; radarrId: number; arrInstanceId?: number }

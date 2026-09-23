@@ -8,7 +8,7 @@ import type {
   MediaServerInstance,
   MediaServerKind,
 } from "@/apis/raw/mediaServers";
-import { notification } from "@/modules/task";
+import { notification } from "@/modules/notification";
 import { kindName } from "@/pages/Settings/MediaServers/kinds";
 
 interface Props {
