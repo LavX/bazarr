@@ -24,6 +24,7 @@ import { AxiosError } from "axios";
 import {
   useProviderHubCatalog,
   useProviderHubInstall,
+  useProviderHubRefreshCatalog,
   useSettingsMutation,
   useSystem,
   useSystemSettings,
@@ -173,6 +174,7 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
     refetch: refetchCatalog,
   } = useProviderHubCatalog();
   const install = useProviderHubInstall();
+  const refreshCatalog = useProviderHubRefreshCatalog();
   const { restart } = useSystem();
   const settingsMutation = useSettingsMutation();
   const { data: systemSettings } = useSystemSettings();
@@ -287,6 +289,24 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
     )?.last_error ?? null;
   const catalogUnusable =
     catalogFailed || (choices.length === 0 && sourceError !== null);
+
+  // Retrying a source that recorded an error is not a matter of asking for the
+  // catalog again: the backend remembers the attempt and will not go back out
+  // for that source on a plain read, so the same saved error comes back however
+  // many times the button is pressed. A refresh is what tries the source again,
+  // and it invalidates the catalog itself on the way back.
+  const handleCatalogRetry = useCallback(async () => {
+    if (!catalogFailed) {
+      try {
+        await refreshCatalog.mutateAsync();
+        return;
+      } catch {
+        // The refresh itself did not get through. Fall back to re-reading what
+        // the backend already has, which is what this button used to do.
+      }
+    }
+    await refetchCatalog();
+  }, [catalogFailed, refetchCatalog, refreshCatalog]);
 
   const toggle = useCallback((providerId: string) => {
     setSelected((current) =>
@@ -711,8 +731,8 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
             <Group gap="sm">
               <Button
                 variant="default"
-                loading={catalogFetching}
-                onClick={() => void refetchCatalog()}
+                loading={catalogFetching || refreshCatalog.isPending}
+                onClick={() => void handleCatalogRetry()}
               >
                 Retry
               </Button>
@@ -745,10 +765,12 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
       ) : (
         <Stack gap="sm">
           {recommended.length > 0 && (
-            // The hint reads beside the button rather than under it. On a real
-            // catalog this list is 36 entries, and two lines of prose above it
-            // are two rows of providers below the bottom of the window.
-            <Group gap="sm" align="center" wrap="nowrap">
+            // The hint reads beside the button where there is room for it
+            // rather than under it: on a real catalog the list is 61 entries,
+            // and two lines of prose above it are two rows of providers below
+            // the bottom of the window. On a card too narrow for both it wraps,
+            // which is the old stacked shape and costs nothing there.
+            <Group gap="sm" align="center">
               <Button
                 variant="light"
                 onClick={() => void handleInstallRecommended()}
