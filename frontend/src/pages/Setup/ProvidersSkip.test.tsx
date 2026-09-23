@@ -200,6 +200,48 @@ describe("the providers step is not a dead end", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("lets a busy step finish by advancing the wizard itself", async () => {
+    // The guard is for the reader leaving through the browser, not for the
+    // step's own work: a provider save ends by advancing the wizard, and
+    // blocking that left the next step rendered under the old address.
+    vi.mocked(useProviderHubProviders).mockReturnValue({
+      data: [
+        {
+          provider_id: "opensubtitles",
+          active_version: "1.0.0",
+          manifest: { id: "opensubtitles", name: "OpenSubtitles" },
+        },
+      ],
+      isLoading: false,
+    } as unknown as ReturnType<typeof useProviderHubProviders>);
+    // Pending from the press until the answer, which is the window the guard
+    // reads and the window the step advances in.
+    let pending = false;
+    vi.mocked(useSettingsMutation).mockImplementation(
+      () =>
+        ({
+          mutate: (_payload: unknown, opts?: { onSuccess?: () => void }) => {
+            pending = true;
+            setTimeout(() => opts?.onSuccess?.(), 20);
+          },
+          mutateAsync: vi.fn(),
+          isPending: pending,
+        }) as unknown as ReturnType<typeof useSettingsMutation>,
+    );
+
+    const user = userEvent.setup();
+    const router = openProvidersStep();
+
+    await user.click(
+      await screen.findByRole("checkbox", { name: /opensubtitles/i }),
+    );
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/setup/translator"),
+    );
+  });
+
   it("browser Back does not leave the install running into nothing", async () => {
     // The skip is hidden while a run is going, but the address bar is another
     // way out of the same screen: going back unmounted the stage while the

@@ -86,6 +86,30 @@ describe("LanguagesStep", () => {
     ).not.toBeDisabled();
   });
 
+  it("does not guess European Portuguese for a Brazilian browser", async () => {
+    // Bazarr keeps pt-BR as its own language, "pb", and "pt" is a different
+    // one. Cutting the tag at the hyphen would have built the default profile
+    // in a language the reader never picked.
+    setBrowserLanguage("pt-BR");
+    setLanguages([
+      {
+        code2: "pb",
+        code3: "pob",
+        name: "Portuguese (Brazil)",
+        enabled: false,
+      },
+      { code2: "pt", code3: "por", name: "Portuguese", enabled: false },
+    ]);
+    const user = userEvent.setup();
+
+    customRender(<LanguagesStep onNext={onNext} />);
+
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    expect(mutate).toHaveBeenCalledTimes(1);
+    expect(mutate.mock.calls[0][0]["languages-enabled"]).toEqual(["pb"]);
+  });
+
   it("says the list is loading instead of showing an empty selector", () => {
     // An interactive, empty selector beside a disabled Continue reads as
     // broken, and nothing on the step said the list was still on its way.

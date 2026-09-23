@@ -184,8 +184,14 @@ const OnboardingWizardBody: FunctionComponent = () => {
   // reader back armed after its own cleanup had run. The attempt is dropped
   // rather than queued: once the run is over, Back works again.
   const blocker = useBlocker(
-    ({ currentLocation, nextLocation }) =>
-      stepBusy && currentLocation.pathname !== nextLocation.pathname,
+    ({ currentLocation, nextLocation, historyAction }) =>
+      // Only a history move, which is the reader leaving through the back or
+      // forward button. The wizard's own moves are pushes and replacements,
+      // and blocking those would stop the busy step from finishing its work:
+      // a provider save ends by advancing the wizard itself.
+      historyAction === "POP" &&
+      stepBusy &&
+      currentLocation.pathname !== nextLocation.pathname,
   );
   useEffect(() => {
     if (blocker.state === "blocked" && !stepBusy) {

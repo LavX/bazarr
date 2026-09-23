@@ -11,12 +11,33 @@ import { useStepDraft } from "@/pages/Setup/useStepDrafts";
 import type { WizardStepProps } from "./types";
 
 /**
- * The browser's language, as a two letter code. "en-GB" and "en" both give
- * "en", which is what Bazarr's code2 column holds.
+ * Bazarr's own codes for the regional languages it treats as separate.
+ *
+ * Cutting the tag at the hyphen is wrong for exactly these: pt-BR is "pb"
+ * here and pt is European Portuguese, zh-TW and zh-HK are "zt" and zh is
+ * Simplified. Preselecting the base code would have built a default profile
+ * in a language the reader never picked and did not ask for.
+ */
+const REGIONAL_CODES: Record<string, string> = {
+  "pt-br": "pb",
+  "zh-tw": "zt",
+  "zh-hk": "zt",
+  "zh-mo": "zt",
+  "zh-hant": "zt",
+};
+
+/**
+ * The browser's language as one of Bazarr's code2 values. "en-GB" and "en"
+ * both give "en"; the regional ones above keep their own code.
  */
 function browserCode2(): string | null {
   const tag = typeof navigator === "undefined" ? "" : navigator.language;
-  const code = tag.split("-")[0]?.toLowerCase() ?? "";
+  const lower = tag.toLowerCase();
+  const regional = REGIONAL_CODES[lower];
+  if (regional !== undefined) {
+    return regional;
+  }
+  const code = lower.split("-")[0] ?? "";
   return code.length === 2 ? code : null;
 }
 
