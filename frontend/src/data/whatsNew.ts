@@ -110,7 +110,7 @@ export const whatsNew: Record<string, WhatsNewSlide[]> = {
     },
     {
       title: "Search subtitles for any title, owned or not",
-      body: "Look up any film or show by title and search your providers for it, even with an empty library and no Sonarr or Radarr connected. Each provider reports its own progress as it runs, the result opens as a formatted preview under the row, and Download saves the file straight to the device you are reading on. Browsing and refreshing never contact a subtitle provider: only a search you asked for does. The download runs as a job, and when the file is ready a notification offers Save, which keeps it for 30 minutes.",
+      body: "Look up any film or show by title and search your providers for it, even with an empty library and no Sonarr or Radarr connected. Each provider reports its own progress as it runs, the result opens as a formatted preview under the row, and Download saves the file straight to the device you are reading on. Browsing and refreshing never contact a subtitle provider: only a search you asked for does. The download runs as a job, and when the file is ready a notification offers Save, which keeps it for up to 30 minutes.",
       icon: faMagnifyingGlass,
       cta: { label: "Open Discover", to: "/discover" },
     },
