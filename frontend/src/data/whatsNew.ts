@@ -133,7 +133,7 @@ export const whatsNew: Record<string, WhatsNewSlide[]> = {
     },
     {
       title: "The setup wizard takes every media server you run",
-      body: "The wizard offered one media server kind behind a radio button, and switching kinds threw away what you had typed, so an install running Jellyfin and Plex, or two Embys, could not say so during setup. You now tick as many kinds as you run, add a second server of a kind, and get one screen per server. Pressing Continue on an untouched Sonarr step used to create an enabled instance with no address and no key and switch Sonarr on, which the Finish screen then reported as connected; an untouched step writes nothing at all now. Every step also fits a 1920 by 1080 screen with nothing hidden behind a scrollbar.",
+      body: "The wizard offered one media server kind behind a radio button, and switching kinds threw away what you had typed, so an install running Jellyfin and Plex, or two Embys, could not say so during setup. You now tick as many kinds as you run, add a second server of a kind, and get one screen per server. Pressing Continue on an untouched Sonarr step used to create an enabled instance with no address and no key and switch Sonarr on, which the Finish screen then reported as connected; an untouched step writes nothing at all now. Every step also fits a 1920 by 1080 screen with nothing hidden behind a scrollbar. Setup no longer has to be finished in one sitting either: Set up later asks before it ends onboarding, and Settings, General has a Run first-time setup control that reopens the wizard.",
       icon: faServer,
       cta: { label: "Open Connections", to: "/settings/connections" },
     },
