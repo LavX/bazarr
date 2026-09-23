@@ -9,7 +9,6 @@ the async translate job and the manual content endpoint alike.
 from types import SimpleNamespace
 
 import pytest
-from flask import Flask
 
 from app import config
 from subtitles.tools.translate.services import openrouter_translator
@@ -189,8 +188,6 @@ def test_translate_job_sends_the_routing_in_the_config(mocker, monkeypatch):
         return_value=SimpleNamespace(status_code=200, json=lambda: {'jobId': 'job-1'}),
     )
     service = _build_service()
-    mocker.patch.object(openrouter_translator, 'show_progress')
-    mocker.patch.object(openrouter_translator, 'hide_progress')
     mocker.patch.object(service, '_poll_job', return_value=[{'index': 0, 'content': 'Szia'}])
 
     result = service._submit_and_poll(['Hi'])
@@ -201,65 +198,58 @@ def test_translate_job_sends_the_routing_in_the_config(mocker, monkeypatch):
     assert payload['config']['model'] == 'deepseek/deepseek-v4-flash'
 
 
-def test_content_endpoint_sends_the_routing_in_the_config(mocker, monkeypatch):
-    from api.translator import translator as api_mod
+def test_editor_translation_job_sends_the_routing_in_the_config(mocker, monkeypatch):
+    from subtitles.tools.translate import editor
 
     _translator_settings(monkeypatch, 'nitro')
     _sidecar_health(monkeypatch, '1.3.4')
-    mocker.patch.object(api_mod, 'get_translator_auth_headers', return_value={})
+    mocker.patch.object(openrouter_translator, 'get_translator_auth_headers', return_value={})
     post = mocker.patch.object(
-        api_mod.requests,
+        openrouter_translator.requests,
         'post',
         return_value=SimpleNamespace(status_code=200, json=lambda: {'jobId': 'job-2'}),
     )
+    mocker.patch.object(openrouter_translator.OpenRouterTranslatorService, '_poll_job',
+                        return_value=[{'position': 0, 'line': 'Szia'}])
 
-    app = Flask(__name__)
-    with app.test_request_context(
-        '/api/translator/jobs', method='POST', json={'lines': ['Hi'], 'targetLanguage': 'hu'}
-    ):
-        body, status = api_mod.TranslatorJobs.post.__wrapped__(api_mod.TranslatorJobs())
+    result = editor.translate_editor_lines(['Hi'], [0], '', 'hu', '', '')
 
-    assert status == 200
-    assert body == {'jobId': 'job-2'}
+    assert result == {'lines': [{'position': 0, 'line': 'Szia'}], 'partial': None}
     payload = post.call_args.kwargs['json']
     assert payload['config']['provider'] == {'sort': 'nitro'}
 
 
 @pytest.fixture
 def submit_request(mocker, monkeypatch):
-    from api.translator import translator as api_mod
+    from subtitles.tools.translate import editor
 
     _translator_settings(monkeypatch, 'throughput')
     mocker.patch.object(openrouter_translator, 'get_title', return_value='Some Movie')
     mocker.patch.object(openrouter_translator, 'language_from_alpha2', lambda code: code)
     mocker.patch.object(openrouter_translator, 'get_translator_auth_headers', return_value={})
-    mocker.patch.object(api_mod, 'get_translator_auth_headers', return_value={})
     post = mocker.patch.object(
         openrouter_translator.requests, 'post',
         return_value=SimpleNamespace(status_code=200, json=lambda: {'jobId': 'selection-job'}),
     )
     service = _build_service()
-    # _submit_and_poll owns the progress notification when it is called without one,
-    # so a direct call reaches the real event stream unless these are stubbed.
-    mocker.patch.object(openrouter_translator, 'show_progress')
-    mocker.patch.object(openrouter_translator, 'hide_progress')
-    mocker.patch.object(service, '_poll_job', return_value=[{'position': 0, 'line': 'Szia'}])
-    messages = []
-    monkeypatch.setattr(openrouter_translator, 'show_message', messages.append)
+    # The library job ('queued') and the editor job ('editor') share the submission,
+    # so both are stubbed at the poll that follows it.
+    mocker.patch.object(openrouter_translator.OpenRouterTranslatorService, '_poll_job',
+                        return_value=[{'position': 0, 'line': 'Szia'}])
 
     def send(boundary):
-        if boundary == 'queued':
-            return service._submit_and_poll(['Hi'])
-        app = Flask(__name__)
-        with app.test_request_context(
-            '/api/translator/jobs', method='POST', json={'lines': ['Hi'], 'targetLanguage': 'hu'}
-        ):
-            return api_mod.TranslatorJobs.post.__wrapped__(api_mod.TranslatorJobs())
+        # A refusal is raised with its reason, which is what the job records.
+        try:
+            if boundary == 'queued':
+                return service._submit_and_poll(['Hi'])
+            return editor.translate_editor_lines(['Hi'], [0], '', 'hu', '', '')
+        except openrouter_translator.TranslationServiceError as error:
+            return error
 
-    return SimpleNamespace(send=send, post=post, messages=messages, service=service)
+    return SimpleNamespace(send=send, post=post, service=service)
 
 
-@pytest.mark.parametrize('boundary', ['queued', 'manual'])
+@pytest.mark.parametrize('boundary', ['queued', 'editor'])
 @pytest.mark.parametrize('model', [
     'deepseek/example', 'deepseek/example:free', 'deepseek/example:thinking',
     'deepseek/example:nitro', 'deepseek/example:free:floor',
@@ -282,7 +272,7 @@ def test_smartfast_request_preserves_variants_and_clears_custom_providers(
     assert payload['provider'] == {'sort': 'smartfast'}
 
 
-@pytest.mark.parametrize('boundary', ['queued', 'manual'])
+@pytest.mark.parametrize('boundary', ['queued', 'editor'])
 @pytest.mark.parametrize('order', [['deepinfra'], [' DeepInfra ', 'deepinfra', 'PARASAIL/fp8']])
 @pytest.mark.parametrize('suffix', ['nitro', 'floor', 'smartfast'])
 def test_custom_request_keeps_only_selected_providers_in_order(
@@ -303,7 +293,7 @@ def test_custom_request_keeps_only_selected_providers_in_order(
     assert config.settings.translator.openrouter_model == f'deepseek/example:free:{suffix}'
 
 
-@pytest.mark.parametrize('boundary', ['queued', 'manual'])
+@pytest.mark.parametrize('boundary', ['queued', 'editor'])
 @pytest.mark.parametrize('suffix', ['smartfast', 'SMARTFAST'])
 def test_typed_smartfast_selects_smartfast_with_legacy_routing(monkeypatch, submit_request, boundary, suffix):
     _sidecar_health(monkeypatch, '2.0.0')
@@ -317,7 +307,7 @@ def test_typed_smartfast_selects_smartfast_with_legacy_routing(monkeypatch, subm
     assert payload['provider'] == {'sort': 'smartfast'}
 
 
-@pytest.mark.parametrize('boundary', ['queued', 'manual'])
+@pytest.mark.parametrize('boundary', ['queued', 'editor'])
 @pytest.mark.parametrize('routing', ['smartfast', 'custom'])
 @pytest.mark.parametrize('suffix', ['NITRO', 'FLOOR', 'SMARTFAST'])
 def test_selection_strips_routing_tokens_case_insensitively_without_changing_variants(
@@ -335,7 +325,7 @@ def test_selection_strips_routing_tokens_case_insensitively_without_changing_var
     assert config.settings.translator.openrouter_model == f'DeepSeek/Example:Free:{suffix}:Thinking'
 
 
-@pytest.mark.parametrize('boundary', ['queued', 'manual'])
+@pytest.mark.parametrize('boundary', ['queued', 'editor'])
 @pytest.mark.parametrize('suffix, expected_model, expected_sort', [
     ('NITRO', 'DeepSeek/Example:Free:nitro', 'throughput'),
     ('FLOOR', 'DeepSeek/Example:Free:floor', 'price'),
@@ -352,7 +342,7 @@ def test_typed_legacy_routing_canonicalizes_only_the_routing_token(
     assert payload['provider'] == {'sort': expected_sort}
 
 
-@pytest.mark.parametrize('boundary', ['queued', 'manual'])
+@pytest.mark.parametrize('boundary', ['queued', 'editor'])
 @pytest.mark.parametrize('routing, version, minimum', [
     # A version we READ and that is too old is actionable: name the version to install.
     # An unreadable version only refuses for custom, which has no safe fallback.
@@ -368,19 +358,15 @@ def test_unsupported_selection_fails_clearly_without_submission(
     result = submit_request.send(boundary)
 
     submit_request.post.assert_not_called()
-    if boundary == 'manual':
-        body, status = result
-        assert status == 400
-        message = body['error']
-    else:
-        assert result is None
-        assert submit_request.messages == []
-        message = submit_request.service.routing_error
+    assert isinstance(result, openrouter_translator.TranslationServiceError)
+    message = str(result)
+    if boundary == 'queued':
+        assert submit_request.service.routing_error in message
     assert minimum in message
     assert routing in message.lower()
 
 
-@pytest.mark.parametrize('boundary', ['queued', 'manual'])
+@pytest.mark.parametrize('boundary', ['queued', 'editor'])
 @pytest.mark.parametrize('order', [[], [' '], ['invalid provider'], ['https://provider.example'], ['../provider'],
                                   ['deepinfra', 1], 'deepinfra', ['provider'] * 21, ['p' * 161]])
 def test_invalid_custom_order_fails_before_any_network(
@@ -393,13 +379,8 @@ def test_invalid_custom_order_fails_before_any_network(
 
     assert health_calls == []
     submit_request.post.assert_not_called()
-    if boundary == 'manual':
-        assert result[1] == 400
-        assert 'provider' in result[0]['error'].lower()
-    else:
-        assert result is None
-        assert submit_request.messages == []
-        assert 'provider' in (submit_request.service.routing_error or '').lower()
+    assert isinstance(result, openrouter_translator.TranslationServiceError)
+    assert 'provider' in str(result).lower()
 
 
 def test_encrypted_queued_custom_request_preserves_routing(monkeypatch, submit_request):
@@ -460,7 +441,7 @@ def test_smartfast_support_uses_version_even_when_upstream_is_unhealthy(monkeypa
     assert openrouter_translator.build_provider_config() == {'sort': 'smartfast'}
 
 
-@pytest.mark.parametrize('boundary', ['queued', 'manual'])
+@pytest.mark.parametrize('boundary', ['queued', 'editor'])
 def test_old_service_cannot_receive_a_typed_smartfast_model(monkeypatch, submit_request, boundary):
     _sidecar_health(monkeypatch, '1.3.4')
     monkeypatch.setattr(config.settings.translator, 'openrouter_model', 'deepseek/example:smartfast')
@@ -468,13 +449,8 @@ def test_old_service_cannot_receive_a_typed_smartfast_model(monkeypatch, submit_
     result = submit_request.send(boundary)
 
     submit_request.post.assert_not_called()
-    if boundary == 'manual':
-        assert result[1] == 400
-        assert '2.0.0' in result[0]['error']
-    else:
-        assert result is None
-        assert submit_request.messages == []
-        assert '2.0.0' in (submit_request.service.routing_error or '')
+    assert isinstance(result, openrouter_translator.TranslationServiceError)
+    assert '2.0.0' in str(result)
 
 
 @pytest.mark.parametrize('model, expected_model, expected_sort', [

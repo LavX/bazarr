@@ -154,8 +154,6 @@ def test_translation_saves_atomic_results_in_configured_folder(
     monkeypatch.setattr(service_module.requests, "get", lambda *args, **kwargs: SimpleNamespace(
         status_code=200, json=lambda: {"status": status, "result": {"lines": lines},
                                       "error": "Some batches failed" if failure else None}))
-    for name in ("show_progress", "hide_progress", "show_message"):
-        monkeypatch.setattr(service_module, name, lambda *args, **kwargs: None)
     history = []
     monkeypatch.setattr(service_module, "history_log_movie", lambda **kwargs: history.append(kwargs))
     monkeypatch.setattr(service_module.jobs_queue, "update_job_progress", lambda **kwargs: None)
@@ -184,7 +182,8 @@ def test_translation_saves_atomic_results_in_configured_folder(
                   forced=False, hi=False, media_type="movies", sonarr_series_id=None,
                   sonarr_episode_id=None, radarr_id=9, metadata={}, job_id="fixture-job", arr_instance_id=3)
     if failure:
-        with pytest.raises(RuntimeError, match="failed translation result"):
+        # The service raises the reason itself now, so the job fails with it.
+        with pytest.raises(service_module.TranslationServiceError, match="synthetic write failure"):
             translate_main.translate_subtitles_file(**kwargs)
     else:
         assert translate_main.translate_subtitles_file(**kwargs) == str(destination)

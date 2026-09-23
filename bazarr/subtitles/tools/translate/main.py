@@ -179,6 +179,9 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         else:
             fail_name = f'Failed: {from_lang.upper()} → {to_lang.upper()} using {translator_label}'
         jobs_queue.update_job_name(job_id=job_id, new_job_name=fail_name)
+        # A TranslationServiceError is a JobFailed, so its reason becomes the
+        # job's error. Anything else keeps its type: synchronous callers answer
+        # a ValueError as a 409.
         raise
 
 

@@ -38,7 +38,6 @@ import {
 } from "@/apis/hooks/subtitles";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
-import client from "@/apis/raw/client";
 import { useSearchSource } from "@/contexts/UniversalSearch";
 import {
   readStoredValue,
@@ -66,6 +65,12 @@ import {
   subtitleDocumentReducer,
 } from "./document";
 import EditableCueTable from "./EditableCueTable";
+import {
+  isTerminalJob,
+  queueEditorTranslation,
+  readEditorTranslation,
+  useEditorJob,
+} from "./editorJobs";
 import {
   buildEditorAutosaveKey,
   buildEditorSubtitlesUrl,
@@ -313,6 +318,10 @@ export default function EditorPage() {
     string | undefined
   >();
   const [referenceOpen, setReferenceOpen] = useState(false);
+  const [lineTranslationJob, setLineTranslationJob] = useState<{
+    jobId: number;
+    targetIdx: number;
+  } | null>(null);
   const [translatingLineIdx, setTranslatingLineIdx] = useState<number | null>(
     null,
   );
@@ -1380,43 +1389,18 @@ export default function EditorPage() {
 
     setTranslatingLineIdx(targetIdx);
     try {
-      const sourceLangName = referenceLanguage || "";
-      const result = await client.axios.post("/translator/jobs", {
+      const queuedJobId = await queueEditorTranslation({
         lines: [{ position: 0, line: sourceText }],
-        sourceLanguage: sourceLangName,
+        sourceLanguage: referenceLanguage || "",
         targetLanguage: language || "",
         title: data?.mediaTitle || "",
         mediaType: mediaType || "",
       });
-      const jobResult = result.data;
-      if (!jobResult.jobId) {
+      if (queuedJobId) {
+        setLineTranslationJob({ jobId: queuedJobId, targetIdx });
+      } else {
         setTranslatingLineIdx(null);
-        return;
       }
-      const poll = async () => {
-        for (let i = 0; i < 120; i++) {
-          await new Promise((r) => setTimeout(r, 2000));
-          const resp = await client.axios.get(
-            `/translator/jobs/${jobResult.jobId}`,
-          );
-          const job = resp.data;
-          if (job.status === "completed" || job.status === "partial") {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const lines = (job.result as any)?.lines;
-            if (lines?.[0]?.line) {
-              dispatch({
-                type: "APPLY_OP",
-                op: createEditText(targetIdx, lines[0].line),
-              });
-            }
-            break;
-          } else if (job.status === "failed" || job.status === "cancelled") {
-            break;
-          }
-        }
-        setTranslatingLineIdx(null);
-      };
-      poll();
     } catch {
       setTranslatingLineIdx(null);
     }
@@ -1430,6 +1414,33 @@ export default function EditorPage() {
     data,
     mediaType,
   ]);
+
+  // The single-line translation is a queued job like the panel's. Its end
+  // arrives through the jobs cache, and only then is the result read.
+  const lineJob = useEditorJob(lineTranslationJob?.jobId);
+  const lineJobFinished = isTerminalJob(lineJob);
+  useEffect(() => {
+    if (!lineTranslationJob || !lineJobFinished) return;
+    let active = true;
+    const { jobId, targetIdx } = lineTranslationJob;
+    readEditorTranslation(jobId)
+      .then((state) => {
+        const line = state.status === "completed" ? state.lines?.[0]?.line : "";
+        if (active && line) {
+          dispatch({ type: "APPLY_OP", op: createEditText(targetIdx, line) });
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (active) {
+          setLineTranslationJob(null);
+          setTranslatingLineIdx(null);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [lineTranslationJob, lineJobFinished]);
 
   // Clear auto-focus flag after it fires
   useEffect(() => {

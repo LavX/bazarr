@@ -424,6 +424,8 @@ jobs:
             tests/bazarr/test_sportarr_subtitle_delete.py \
             tests/bazarr/test_sportarr_subtitle_upload.py \
             tests/bazarr/test_editor_instance_scope.py \
+            tests/bazarr/test_editor_translation_job.py \
+            tests/bazarr/test_waveform_peaks_job.py \
             tests/bazarr/test_history_blacklist_scope.py \
             tests/bazarr/test_history_metrics.py \
             tests/bazarr/test_history_metrics_postgres.py \
