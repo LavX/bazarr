@@ -19,6 +19,8 @@ These are higher-cost tests that exercise crypto + registry + migration
 together; the simpler unit suites already prove each piece in
 isolation.
 """
+import logging
+import sys
 from unittest.mock import MagicMock, patch  # noqa: F401
 
 import pytest
@@ -358,6 +360,32 @@ def test_legacy_plex_migration_recovers_plaintext():
     # Legacy encryption_key intentionally left in place (still SYSTEM,
     # masked by the API serializer) for downgrade safety.
     assert settings.plex.encryption_key == legacy_key
+
+
+def test_legacy_plex_migration_does_not_import_the_api_package(monkeypatch, caplog):
+    """app.config runs this migration while it is still importing. Loading
+    the api package from here pulls app.config back in half-initialised,
+    so the migration must decode the legacy payload without it. Blocking
+    the api package reproduces the startup import failure."""
+    legacy_key = "legacy-plex-encryption-key-pre-unification"
+    settings = _FakeSettings({
+        "plex": {
+            "apikey": _legacy_plex_encrypt("real-plex-apikey-12345", legacy_key),
+            "token": _legacy_plex_encrypt("real-plex-oauth-token-67890", legacy_key),
+            "encryption_key": legacy_key,
+            "apikey_encrypted": True,
+        },
+    })
+    for name in ("api", "api.plex", "api.plex.security"):
+        monkeypatch.setitem(sys.modules, name, None)
+
+    with caplog.at_level(logging.ERROR, logger="secret_store.migration"):
+        migrate_legacy_plex_encryption(settings)
+
+    assert settings.plex.apikey == "real-plex-apikey-12345"
+    assert settings.plex.token == "real-plex-oauth-token-67890"
+    assert settings.plex.apikey_encrypted is False
+    assert not caplog.records
 
 
 def test_legacy_plex_migration_skips_when_flag_unset():
