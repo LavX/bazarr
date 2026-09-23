@@ -38,6 +38,30 @@ class JobCancelled(Exception):
     pass
 
 
+class JobFailed(Exception):
+    """Raised by a job that failed for a reason it can name.
+
+    The job ends up in the failed queue like any other failure. Its ``error``
+    carries ``reason`` and the one-line ``message``, which the user sees in the
+    failure notification and in the Jobs drawer. The queue logs it at DEBUG
+    only: the job is expected to have logged the cause itself, once.
+    ``retryable`` overrides the job's own flag for this failure, for example a
+    reason that no retry can fix.
+    """
+
+    def __init__(self, message: str, reason: str = "failed", returned_value=None, retryable: bool = None):
+        super().__init__(message)
+        self.reason = reason
+        self.returned_value = returned_value
+        self.retryable = retryable
+
+
+# What a user sees for a failure the job did not name. The exception text can
+# carry paths or provider payloads, so it stays in the log.
+UNEXPECTED_JOB_ERROR = {"reason": "unexpected_error",
+                        "message": "The job failed unexpectedly. Check the logs for details."}
+
+
 class Job:
     """
     Represents a job with details necessary for its identification and execution.
@@ -75,9 +99,19 @@ class Job:
     :type progress_message: str
     :ivar job_returned_value: Value returned by the job function, initialized to None.
     :type job_returned_value: Any
+    :ivar error: Why the job failed, ``{"reason", "message"}``, or None. Shown to the user.
+    :type error: dict, optional
+    :ivar action: What the user can do with the finished job, set by the job itself:
+        ``{"kind", "label", ...}``. The frontend knows how to run each kind.
+    :type action: dict, optional
+    :ivar retryable: Whether a failed job may be queued again with the same arguments.
+    :type retryable: bool
+    :ivar retry_of: The id of the failed job this one retries, or None.
+    :type retry_of: int, optional
     """
     def __init__(self, job_id: int, job_name: str, module: str, func: str, args: list = None, kwargs: dict = None,
-                 is_progress: bool = False, is_signalr: bool = False, progress_max: int = 0, job_returned_value=None,):
+                 is_progress: bool = False, is_signalr: bool = False, progress_max: int = 0, job_returned_value=None,
+                 retryable: bool = False, retry_of: int = None):
         self.job_id = job_id
         self.job_name = job_name
         self.module = module
@@ -92,6 +126,10 @@ class Job:
         self.progress_max = progress_max
         self.progress_message = ""
         self.job_returned_value = job_returned_value
+        self.error = None
+        self.action = None
+        self.retryable = retryable
+        self.retry_of = retry_of
         self.cancelled = False
         # Observation only. ``last_run_time`` is overwritten at creation, start
         # and terminal state, so it cannot tell those three apart; these can.
@@ -153,7 +191,8 @@ class JobsQueue:
         flush_thread.start()
 
     def feed_jobs_pending_queue(self, job_name, module, func, args: list = None, kwargs: dict = None,
-                                is_progress=False, is_signalr=False, progress_max: int = 0,):
+                                is_progress=False, is_signalr=False, progress_max: int = 0,
+                                retryable: bool = False, retry_of: int = None):
         """
         Adds a new job to the pending jobs queue with specified details and triggers an event
         to notify about the queue update. Each job is uniquely identified by a job ID,
@@ -176,6 +215,10 @@ class JobsQueue:
         :type is_signalr: bool
         :param progress_max: Maximum value of the job's progress, initialized to 0.
         :type progress_max: int
+        :param retryable: Whether the user may retry the job with the same arguments if it fails.
+        :type retryable: bool
+        :param retry_of: The id of the failed job this one retries.
+        :type retry_of: int
         :return: The unique job ID assigned to the newly queued job.
         :rtype: int | bool
         """
@@ -201,7 +244,9 @@ class JobsQueue:
                     kwargs=kwargs,
                     is_progress=is_progress,
                     is_signalr=is_signalr,
-                    progress_max=progress_max,)
+                    progress_max=progress_max,
+                    retryable=retryable,
+                    retry_of=retry_of,)
             )
 
         logging.debug(f"Task {job_name} ({new_job_id}) added to queue")  # noqa: G004
@@ -353,6 +398,38 @@ class JobsQueue:
             if job.job_id == job_id:
                 return job.job_name
         return ""
+
+    def set_job_action(self, job_id: int, action: dict) -> bool:
+        """Offer the user something to do with this job once it has finished.
+
+        ``action`` is a flat, JSON-safe dict with a ``kind`` the frontend knows
+        how to run and a ``label`` for its button, plus whatever that kind
+        needs, for example ``{"kind": "discover.save", "label": "Save",
+        "ticket": 12}``. The completion notification and the Jobs drawer show
+        it; nothing else about the job is exposed.
+        """
+        with self._queue_lock:
+            for job in self.jobs_running_queue:
+                if job.job_id == job_id:
+                    job.action = dict(action)
+                    return True
+        return False
+
+    def retry_job(self, job_id: int) -> Union[int, bool]:
+        """Queue a failed, retryable job again with its original arguments.
+
+        Returns the new job's id, which carries ``retry_of`` so whoever was
+        following the failed job can follow its retry, or False.
+        """
+        with self._queue_lock:
+            job = next((item for item in self.jobs_failed_queue if item.job_id == job_id), None)
+        if job is None or not job.retryable:
+            return False
+        kwargs = {key: value for key, value in (job.kwargs or {}).items() if key != 'job_id'}
+        return self.feed_jobs_pending_queue(job_name=job.job_name, module=job.module, func=job.func,
+                                            args=list(job.args or []), kwargs=kwargs,
+                                            is_progress=job.is_progress, progress_max=job.progress_max,
+                                            retryable=True, retry_of=job.job_id)
 
     def get_job_returned_value(self, job_id: int):
         """
@@ -787,15 +864,18 @@ class JobsQueue:
                 self.jobs_running_queue.remove(job)
             self.jobs_completed_queue.append(job)
             return False
+        except JobFailed as e:
+            logging.debug(f"Job {job.job_name} ({job.job_id}) failed: {e}")  # noqa: G004
+            job.job_returned_value = e.returned_value
+            job.error = {"reason": e.reason, "message": str(e)}
+            if e.retryable is not None:
+                job.retryable = e.retryable
+            self._mark_failed(job)
+            return False
         except Exception as e:
             logging.exception(f"Exception raised while running function: {e}")  # noqa: G004
-            job.status = 'failed'
-            job.last_run_time = datetime.now()
-            job.observed_finished_at = datetime.now(timezone.utc)
-            activity.finish(job.activity_id, outcome='failed')
-            with self._queue_lock:
-                self.jobs_running_queue.remove(job)
-            self.jobs_failed_queue.append(job)
+            job.error = dict(UNEXPECTED_JOB_ERROR)
+            self._mark_failed(job)
             return False
         else:
             job.status = 'completed'
@@ -819,11 +899,22 @@ class JobsQueue:
                 payload = {
                     "job_id": job.job_id,
                     "status": job.status,  # 'completed' or 'failed'
-                    "progress_value": None  # Trigger frontend API call to update the whole job payload
+                    "progress_value": None,  # Trigger frontend API call to update the whole job payload
+                    "error": job.error,
+                    "action": job.action,
                 }
                 event_stream(type='jobs', action='update', payload=payload)
             except Exception as e:
                 logging.exception(f"Exception raised while sending event: {e}")  # noqa: G004
+
+    def _mark_failed(self, job):
+        job.status = 'failed'
+        job.last_run_time = datetime.now()
+        job.observed_finished_at = datetime.now(timezone.utc)
+        activity.finish(job.activity_id, outcome='failed')
+        with self._queue_lock:
+            self.jobs_running_queue.remove(job)
+        self.jobs_failed_queue.append(job)
 
     def _is_an_existing_job(self, module, func, args, kwargs):
         """

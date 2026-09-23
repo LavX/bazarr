@@ -206,8 +206,20 @@ export interface DiscoverDownloadFeedback {
   contextKey?: string;
   context: DiscoverContext;
   row: DiscoverSubtitleResult;
-  status: "pending" | "started" | "expired" | "failed";
+  /**
+   * pending: queued or running as a job. ready: finished, the file is kept
+   * under its ticket until the reader saves it. started: handed to the
+   * browser. expired and failed carry the job's classified reason.
+   */
+  status: "pending" | "ready" | "started" | "expired" | "failed";
   filename?: string;
+  /** The standard job carrying this download; a retry replaces it. */
+  jobId?: number;
+  /** What a finished job's file is fetched by. */
+  ticket?: number;
+  /** The failed job's own one-line reason, the same text its notification shows. */
+  message?: string;
+  retryable?: boolean;
 }
 
 export interface DiscoverPreviewData {

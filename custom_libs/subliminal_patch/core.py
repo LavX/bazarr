@@ -812,6 +812,9 @@ class SZProviderPool(ProviderPool):
                 break
             except SubtitleCandidateRejected as e:
                 logger.warning('Subtitle candidate rejected: %s', e)
+                # Callers that only see False can still tell "nothing usable in
+                # this candidate" apart from a provider error, and name either.
+                subtitle.rejected_reason = str(e)
                 return False
 
             except (requests.ConnectionError,
@@ -820,6 +823,7 @@ class SZProviderPool(ProviderPool):
                     requests.Timeout,
                     socket.timeout) as e:
                 logger.error('Provider %r connection error', subtitle.provider_name)
+                subtitle.download_error = e
                 self.throttle_callback(subtitle.provider_name, e, ids=ids, language=subtitle.language,
                                        sports_context=getattr(subtitle, 'sports_context', None))
 
@@ -831,6 +835,7 @@ class SZProviderPool(ProviderPool):
             except Exception as e:
                 logger.exception('Unexpected error in provider %r, Traceback: %s', subtitle.provider_name,
                                  traceback.format_exc())
+                subtitle.download_error = e
                 self.throttle_callback(subtitle.provider_name, e, ids=ids, language=subtitle.language,
                                        sports_context=getattr(subtitle, 'sports_context', None))
                 self.discarded_providers.add(subtitle.provider_name)

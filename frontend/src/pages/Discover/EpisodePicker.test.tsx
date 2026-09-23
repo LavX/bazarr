@@ -10,6 +10,7 @@ import { AllProviders } from "@/providers";
 import { act, rawRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import * as files from "@/utilities/files";
+import { downloadJobHandlers } from "./downloadJobHarness";
 import {
   findSelectInput,
   openReleaseSearch,
@@ -483,16 +484,10 @@ it.each([
           episodeSnapshot(context, requests.length > 1 ? "late" : "accepted"),
         );
       }),
-      http.get(
-        "/api/discover/download",
-        () =>
-          new HttpResponse("1\n00:00:01,000 --> 00:00:02,000\nHome\n\n", {
-            headers: {
-              "Content-Type": "application/x-subrip",
-              "Content-Disposition": 'attachment; filename="Home.srt"',
-            },
-          }),
-      ),
+      ...downloadJobHandlers({
+        body: () => "1\n00:00:01,000 --> 00:00:02,000\nHome\n\n",
+        filename: () => "Home.srt",
+      }),
     );
     try {
       const { user } = browse("/discover?show=100&season=2&episode=1");
@@ -520,6 +515,7 @@ it.each([
       await user.click(
         await screen.findByRole("button", { name: "Download SRT" }),
       );
+      await user.click(await screen.findByRole("button", { name: "Save SRT" }));
       await screen.findByText(/Download started for/);
       await user.click(screen.getByRole("button", { name: "Search again" }));
       await waitFor(() => expect(finish).toBeDefined());
@@ -604,13 +600,9 @@ it.each([
           });
         return HttpResponse.json(episodeSnapshot(context, id));
       }),
-      http.get(
-        "/api/discover/download",
-        () =>
-          new HttpResponse("1\n00:00:01,000 --> 00:00:02,000\nHome\n\n", {
-            headers: { "Content-Type": "application/x-subrip" },
-          }),
-      ),
+      ...downloadJobHandlers({
+        body: () => "1\n00:00:01,000 --> 00:00:02,000\nHome\n\n",
+      }),
     );
     try {
       const { user } = browse("/discover?show=100&season=2&episode=1");
@@ -638,6 +630,7 @@ it.each([
       await user.click(
         await screen.findByRole("button", { name: "Download SRT" }),
       );
+      await user.click(await screen.findByRole("button", { name: "Save SRT" }));
       await screen.findByText(/Download started for/);
       await user.click(screen.getByRole("button", { name: "Search again" }));
       await waitFor(() => expect(finish).toBeDefined());
