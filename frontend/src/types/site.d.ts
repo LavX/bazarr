@@ -14,6 +14,8 @@ declare namespace Manager {
     progress_max: number;
     progress_message: string;
     status: string;
+    error?: System.JobError | null;
+    action?: System.JobAction | null;
   }
 }
 

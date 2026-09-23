@@ -26,6 +26,30 @@ declare namespace System {
     progress_value: number;
     progress_max: number;
     progress_message: string;
+    /** Why a failed job failed, set by the job. */
+    error?: JobError | null;
+    /** What the user can do with a finished job, set by the job. */
+    action?: JobAction | null;
+    /** Whether a failed job may be queued again with its original arguments. */
+    retryable?: boolean;
+    /** The failed job this one retries. */
+    retry_of?: number | null;
+  }
+
+  interface JobError {
+    reason: string;
+    message: string;
+  }
+
+  /**
+   * A typed action a finished job offers. The frontend runs each kind through
+   * the handler registered for it, so the drawer and the notification never
+   * need to know which feature the job belongs to.
+   */
+  interface JobAction {
+    kind: string;
+    label: string;
+    [key: string]: unknown;
   }
 
   /**

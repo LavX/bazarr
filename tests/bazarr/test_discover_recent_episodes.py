@@ -7,12 +7,14 @@ import pytest
 import test_discover_metadata as fixtures
 import test_discover_episodes as episode_fixtures
 import test_discover_search as search_fixtures
+import test_discover_download as download_fixtures
 
 upstream = fixtures.upstream
 authenticated_client = fixtures.authenticated_client
 retrieval_database = fixtures.retrieval_database
 episode_sources = episode_fixtures.episode_sources
 providers = search_fixtures.providers
+job_events = download_fixtures.job_events
 
 
 def get(client, query=""):
@@ -418,8 +420,7 @@ def test_empty_library_can_retrieve_the_exact_feed_episode(authenticated_client,
         "season": detail["target_season"], "episode": detail["target_episode"], "episode_identity": detail})
     assert response.status_code == 200
     row = response.json["results"][0]
-    downloaded = authenticated_client.get("/api/discover/download", headers={"X-API-KEY": "metadata-test-key"},
-                                         query_string={"result_id": row["id"], "search_id": row["search_id"]})
+    downloaded = download_fixtures.get(authenticated_client, row, headers={"X-API-KEY": "metadata-test-key"})
     assert downloaded.status_code == 200 and downloaded.data == content
     assert fetched == ["recent-sub"]
     assert len(providers.videos) == 1

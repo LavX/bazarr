@@ -318,8 +318,10 @@ def test_results_separate_known_matches_conflicts_and_unknown(
 
 
 def test_download_names_its_own_release_provider_and_scope(
-    authenticated_client, providers, copy_database, hashing, catalog_provider, tmp_path,
+    authenticated_client, providers, copy_database, hashing, catalog_provider, tmp_path, monkeypatch,
 ):
+    import test_discover_download as download_fixtures
+    monkeypatch.setattr("app.jobs_queue.event_stream", lambda **kwargs: None)
     _, session = copy_database
     add_instance(session, 1, "Radarr HD")
     add_movie(session, 5, 1, media_file(tmp_path / "hd", "matrix.mkv", b"HD"),
@@ -328,9 +330,7 @@ def test_download_names_its_own_release_provider_and_scope(
     copy_id = copies(authenticated_client, media_type="movie", imdb_id="tt0133093").json["items"][0]["copy_id"]
     snapshot = post(authenticated_client, {**MOVIE, "copy_id": copy_id}).json
     chosen = snapshot["results"][1]
-    response = authenticated_client.get("/api/discover/download", query_string={
-        "result_id": chosen["id"], "search_id": chosen["search_id"]},
-        headers={"X-API-KEY": "discover-test-key"})
+    response = download_fixtures.get(authenticated_client, chosen)
     assert response.status_code == 200
     assert response.data == SRT
     disposition = response.headers["Content-Disposition"]
@@ -457,9 +457,11 @@ def test_different_editions_of_one_title_stay_separate_copies(
 
 
 def test_a_changed_file_retires_the_earlier_result_handles(
-    authenticated_client, providers, copy_database, hashing, catalog_provider, tmp_path,
+    authenticated_client, providers, copy_database, hashing, catalog_provider, tmp_path, monkeypatch,
 ):
     """Size and timestamps are held constant, so only the content hash can see this."""
+    import test_discover_download as download_fixtures
+    monkeypatch.setattr("app.jobs_queue.event_stream", lambda **kwargs: None)
     _, session = copy_database
     add_instance(session, 1, "Radarr HD")
     path = media_file(tmp_path / "hd", "matrix.mkv", b"HD")
@@ -470,9 +472,7 @@ def test_a_changed_file_retires_the_earlier_result_handles(
     row = first["results"][0]
 
     def download(chosen):
-        return authenticated_client.get("/api/discover/download", query_string={
-            "result_id": chosen["id"], "search_id": chosen["search_id"]},
-            headers={"X-API-KEY": "discover-test-key"})
+        return download_fixtures.get(authenticated_client, chosen)
 
     assert download(row).status_code == 200
     assert providers.videos[0][1].hashes["opensubtitles"] == opensubtitles_hash(path)
@@ -570,8 +570,9 @@ def test_episode_copies_resolve_within_their_own_owner(
 
 
 def test_copy_matching_never_writes_rows_or_settings(
-    authenticated_client, providers, copy_database, hashing, catalog_provider, tmp_path,
+    authenticated_client, providers, copy_database, hashing, catalog_provider, tmp_path, monkeypatch,
 ):
+    import test_discover_download as download_fixtures
     from app import database as db
     from app.config import settings
     engine, session = copy_database
@@ -591,9 +592,8 @@ def test_copy_matching_never_writes_rows_or_settings(
     try:
         copy_id = copies(authenticated_client, media_type="movie", imdb_id="tt0133093").json["items"][0]["copy_id"]
         row = post(authenticated_client, {**MOVIE, "copy_id": copy_id}).json["results"][0]
-        authenticated_client.get("/api/discover/download", query_string={
-            "result_id": row["id"], "search_id": row["search_id"]},
-            headers={"X-API-KEY": "discover-test-key"})
+        monkeypatch.setattr("app.jobs_queue.event_stream", lambda **kwargs: None)
+        assert download_fixtures.get(authenticated_client, row).status_code == 200
     finally:
         sa.event.remove(engine, "before_cursor_execute", record)
     assert statements, "the copy path must actually reach the database"

@@ -21,6 +21,13 @@ class SystemJobs(Resource):
         'progress_value': fields.Integer(),
         'progress_max': fields.Integer(),
         'progress_message': fields.String(),
+        # Why a failed job failed, {reason, message}, and what the user can do
+        # with a finished one, {kind, label, ...}. Both are set by the job and
+        # are the only parts of its outcome that are sent.
+        'error': fields.Raw(),
+        'action': fields.Raw(),
+        'retryable': fields.Boolean(),
+        'retry_of': fields.Integer(),
     })
 
     get_request_parser = reqparse.RequestParser()
@@ -43,7 +50,8 @@ class SystemJobs(Resource):
     post_request_parser = reqparse.RequestParser()
     post_request_parser.add_argument('id', type=int, required=True, help='Job ID act onto')
     post_request_parser.add_argument('action', type=str, required=True,
-                                     help='Action to perform from ["force_start", "move_top", "move_bottom", "cancel"]')
+                                     help='Action to perform from ["force_start", "move_top", "move_bottom", "cancel", '
+                                          '"retry"]')
 
     @authenticate
     @api_ns_system_jobs.doc(parser=post_request_parser)
@@ -62,6 +70,11 @@ class SystemJobs(Resource):
             jobs_queue.move_job_in_pending_queue(job_id=job_id, move_destination="bottom")
         elif action == "cancel":
             jobs_queue.cancel_running_job(job_id=job_id)
+        elif action == "retry":
+            new_job_id = jobs_queue.retry_job(job_id=job_id)
+            if not new_job_id:
+                return 'Job cannot be retried', 400
+            return {'job_id': new_job_id}, 200
         return '', 204
 
     patch_request_parser = reqparse.RequestParser()
