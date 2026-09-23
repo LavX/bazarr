@@ -7,6 +7,7 @@ import { AllProviders } from "@/providers";
 import { rawRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import * as files from "@/utilities/files";
+import { downloadJobHandlers, DownloadRequest } from "./downloadJobHarness";
 import { pickOption } from "./selectTestHelpers";
 import Discover from "./testHarness";
 
@@ -121,7 +122,7 @@ function finished(results: ReturnType<typeof row>[]) {
 let observation: ReturnType<typeof running>;
 let releaseSearch: (() => void) | undefined;
 let holdProgress: ((value: unknown) => void) | undefined;
-let downloads: URLSearchParams[];
+let downloads: DownloadRequest[];
 let save: ReturnType<typeof vi.spyOn>;
 
 function renderDiscover() {
@@ -203,14 +204,10 @@ beforeEach(() => {
         });
       return HttpResponse.json(observation);
     }),
-    http.get("/api/discover/download", ({ request }) => {
-      downloads.push(new URL(request.url).searchParams);
-      return new HttpResponse(srt, {
-        headers: {
-          "Content-Type": "application/x-subrip",
-          "Content-Disposition": 'attachment; filename="live.en.srt"',
-        },
-      });
+    ...downloadJobHandlers({
+      body: () => srt,
+      filename: () => "live.en.srt",
+      requests: downloads,
     }),
   );
 });
@@ -283,10 +280,11 @@ it("downloads a row the running search has already published", async () => {
     { timeout: 5000 },
   );
   await user.click(screen.getByRole("button", { name: "Download SRT" }));
+  await user.click(await screen.findByRole("button", { name: "Save SRT" }));
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
-  expect(Object.fromEntries(downloads[0])).toEqual({
-    result_id: "live-1",
-    search_id: "search-1",
+  expect(downloads[0]).toMatchObject({
+    result: "live-1",
+    search: "search-1",
   });
   releaseSearch?.();
 });

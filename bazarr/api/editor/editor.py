@@ -1038,7 +1038,7 @@ def run_editor_sync(job_key, video_path, tmp_in, tmp_out, encoding, max_offset, 
                     no_fix_framerate=True, vad=None, job_id=None, output_mode='keep_all', enabled_engines=None,
                     preview_workspace=None):
     """Background sync worker. Called by jobs_queue."""
-    from app.jobs_queue import jobs_queue
+    from app.jobs_queue import jobs_queue, JobCancelled
 
     def update_progress(name, value, count):
         _editor_sync_jobs[job_key]['message'] = name
@@ -1124,9 +1124,17 @@ def run_editor_sync(job_key, video_path, tmp_in, tmp_out, encoding, max_offset, 
             completed_job['results'] = engine_results
         _editor_sync_jobs[job_key] = completed_job
 
+    except JobCancelled:
+        _editor_sync_jobs[job_key] = {'status': 'failed', 'content': None, 'message': 'Cancelled by user'}
+        raise
     except Exception as e:
         logger.exception('Editor sync failed')
-        _editor_sync_jobs[job_key] = {'status': 'failed', 'content': None, 'message': str(e)[:500]}
+        message = str(e)[:500] or 'Sync failed'
+        _editor_sync_jobs[job_key] = {'status': 'failed', 'content': None, 'message': message}
+        # The editor reads the outcome from the side store above; the job
+        # itself has to fail too, or the Jobs drawer lists it as completed.
+        from app.jobs_queue import JobFailed
+        raise JobFailed(f'Editor sync failed: {message}') from e
     finally:
         # Clean up in-memory result after 10 minutes
         import threading

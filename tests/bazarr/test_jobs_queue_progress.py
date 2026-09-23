@@ -71,3 +71,83 @@ def test_cancelled_jobs_stop_by_default_but_can_report_committed_results():
         assert "published" in job.progress_message
         with pytest.raises(JobCancelled):
             queue.update_job_progress(job.job_id)
+
+
+# Fixture job bodies for the outcome tests below. _run_job resolves them by
+# module and name exactly as it does any production job.
+def named_failure(job_id=None):
+    from app.jobs_queue import JobFailed
+    raise JobFailed("The provider took too long to answer.", reason="timeout")
+
+
+def unexpected_failure(job_id=None):
+    raise RuntimeError("/secret/path/in/exception")
+
+
+def finished_with_action(job_id=None, queue=None):
+    queue.set_job_action(job_id, {"kind": "example.view", "label": "View", "id": 7})
+    return "done"
+
+
+def test_a_job_outcome_carries_its_error_or_action_to_the_user(caplog):
+    import logging
+    from pytest import MonkeyPatch
+    import app.jobs_queue as module
+    from test_sportarr_workflows import private_queue
+
+    with MonkeyPatch.context() as monkeypatch:
+        queue = private_queue(monkeypatch)
+        events = []
+        monkeypatch.setattr(module, "event_stream", lambda **kwargs: events.append(kwargs["payload"]))
+        monkeypatch.setattr(module.activity, "finish", lambda *args, **kwargs: None)
+
+        def run(func, **kwargs):
+            job_id = queue.feed_jobs_pending_queue("Example", __name__, func, kwargs=kwargs, retryable=True)
+            job = queue.jobs_pending_queue.popleft()
+            queue.jobs_running_queue.append(job)
+            with caplog.at_level(logging.DEBUG):
+                queue._run_job(job)
+            return job_id, job
+
+        _, named = run("named_failure")
+        assert named.status == "failed"
+        assert named.error == {"reason": "timeout", "message": "The provider took too long to answer."}
+        assert events[-1]["error"] == named.error and events[-1]["status"] == "failed"
+        # A named failure is logged by the job itself, so the queue adds no traceback.
+        assert not any(record.levelno >= logging.ERROR for record in caplog.records)
+
+        _, unexpected = run("unexpected_failure")
+        assert unexpected.error == module.UNEXPECTED_JOB_ERROR
+        assert "/secret" not in str(unexpected.error)
+
+        _, finished = run("finished_with_action", queue=queue)
+        assert finished.status == "completed" and finished.error is None
+        assert finished.action == {"kind": "example.view", "label": "View", "id": 7}
+        assert events[-1]["action"] == finished.action
+
+        retried = queue.retry_job(named.job_id)
+        assert retried and queue.jobs_pending_queue[-1].retry_of == named.job_id
+        assert queue.jobs_pending_queue[-1].kwargs == {}
+        assert queue.retry_job(finished.job_id) is False
+
+
+def test_the_jobs_list_sends_last_run_time_as_utc():
+    # The drawer showed "2 hours ago" for a job that had just finished: the
+    # time went out without an offset and the browser read it as its own local
+    # time. It now goes out as UTC with an explicit Z.
+    from datetime import datetime, timedelta, timezone
+    from flask_restx import marshal
+    from api.system.jobs import SystemJobs
+
+    job = _make_job()
+    assert job.last_run_time.tzinfo is not None
+    sent = marshal([vars(job)], SystemJobs.get_response_model)[0]["last_run_time"]
+    assert sent.endswith("Z")
+    parsed = datetime.fromisoformat(sent.replace("Z", "+00:00"))
+    assert abs(parsed - datetime.now(timezone.utc)) < timedelta(minutes=1)
+
+    # A naive value is the server's local time, whatever zone that is.
+    naive = datetime(2026, 9, 23, 12, 0, 0)
+    job.last_run_time = naive
+    sent = marshal([vars(job)], SystemJobs.get_response_model)[0]["last_run_time"]
+    assert datetime.fromisoformat(sent.replace("Z", "+00:00")) == naive.astimezone(timezone.utc)

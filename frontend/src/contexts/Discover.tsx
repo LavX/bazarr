@@ -8,12 +8,15 @@ import {
   useReducer,
   useRef,
 } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   useDiscoverDownload,
   useDiscoverPreview,
   useDiscoverSearch,
 } from "@/apis/hooks/discover";
+import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
+import { registerJobAction } from "@/modules/jobs";
 import type {
   DiscoverContext as SearchContext,
   DiscoverDownloadFeedback,
@@ -55,7 +58,13 @@ interface DiscoverContextValue {
    */
   seedLanguage: (language: string) => void;
   findSubtitles: (refresh?: boolean) => Promise<void>;
+  /**
+   * Queue the exact result as a standard job. The row follows that job
+   * through the jobs cache; the finished file is saved with saveSubtitle.
+   */
   downloadSubtitle: (row: DiscoverSubtitleResult) => Promise<void>;
+  /** Hand the finished download's file to the browser. Needs a click. */
+  saveSubtitle: () => Promise<void>;
   previewSubtitle: (row: DiscoverSubtitleResult) => Promise<void>;
   closePreview: () => void;
   /**
@@ -82,6 +91,11 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
     new Map<string, { savedAt: number; state: DiscoverState }>(),
   );
   const authenticated = useRef(true);
+  // Bumped on every sign-in change, so a response that outlives one is dropped.
+  const authEpoch = useRef(0);
+  // Jobs this row has seen in the jobs cache. One that disappears again was
+  // removed from the queue, which is how a queued job is cancelled.
+  const seenJobs = useRef(new Set<number>());
   const generation = useRef(0);
   const draft = useRef(state.draft);
   const currentState = useRef(state);
@@ -94,10 +108,12 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
     useDiscoverDownload();
   const mutation = useDiscoverSearch();
   const { mutateAsync, reset } = mutation;
+  const client = useQueryClient();
 
   useEffect(() => {
     const onAuth = (event: WindowEventMap["app-auth-changed"]) => {
       authenticated.current = event.detail.authenticated;
+      authEpoch.current += 1;
       if (!event.detail.authenticated) {
         pages.current.clear();
         searches.current.clear();
@@ -397,25 +413,16 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
           });
           return;
         }
-        const response = await fetchDownload({
+        const jobId = await fetchDownload({
           resultId: row.id,
           searchId: row.search_id,
         });
         if (!stillCurrent()) return;
-        if (
-          !response.data.size ||
-          !response.data.type.includes("application/x-subrip")
-        )
-          throw new Error("Invalid subtitle response");
-        const filename = filenameFromContentDisposition(
-          response.headers["content-disposition"],
-          "subtitle.srt",
-        );
-        saveBlobAs(response.data, filename);
+        // Still pending: the jobs cache moves it on from here.
         dispatch({
           type: "download",
           key,
-          feedback: { ...feedback, status: "started", filename },
+          feedback: { ...feedback, jobId },
         });
       } catch (error) {
         if (!stillCurrent()) return;
@@ -433,6 +440,199 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
     },
     [fetchDownload],
   );
+
+  /**
+   * Follow the row's job in the standard jobs cache, which the jobs socket
+   * events keep current. A retry started from the job's notification or the
+   * drawer replaces the failed job, so the row follows the retry too.
+   */
+  const followJob = useCallback(() => {
+    const feedback = currentState.current.download;
+    if (
+      !feedback?.jobId ||
+      !feedback.contextKey ||
+      (feedback.status !== "pending" && feedback.status !== "failed")
+    )
+      return;
+    const jobs = client.getQueryData<System.Jobs[]>([
+      QueryKeys.System,
+      QueryKeys.Jobs,
+    ]);
+    if (!Array.isArray(jobs)) return;
+    const key = feedback.contextKey;
+    const retry = jobs.find((job) => job.retry_of === feedback.jobId);
+    if (retry) {
+      dispatch({
+        type: "download",
+        key,
+        feedback: {
+          ...feedback,
+          status: "pending",
+          jobId: retry.job_id,
+          message: undefined,
+        },
+      });
+      return;
+    }
+    const job = jobs.find((candidate) => candidate.job_id === feedback.jobId);
+    if (feedback.status !== "pending") return;
+    if (!job) {
+      if (seenJobs.current.has(feedback.jobId))
+        dispatch({
+          type: "download",
+          key,
+          feedback: {
+            ...feedback,
+            status: "failed",
+            message: "The download was cancelled.",
+            retryable: true,
+          },
+        });
+      return;
+    }
+    seenJobs.current.add(job.job_id);
+    if (job.status === "completed") {
+      const action = job.action;
+      dispatch({
+        type: "download",
+        key,
+        feedback:
+          action?.kind === "discover.save" && typeof action.ticket === "number"
+            ? {
+                ...feedback,
+                status: "ready",
+                ticket: action.ticket,
+                filename:
+                  typeof action.filename === "string"
+                    ? action.filename
+                    : undefined,
+              }
+            : {
+                ...feedback,
+                status: "failed",
+                message: job.progress_message || "The download was cancelled.",
+                retryable: true,
+              },
+      });
+    } else if (job.status === "failed") {
+      dispatch({
+        type: "download",
+        key,
+        feedback: {
+          ...feedback,
+          status: job.error?.reason === "expired_handle" ? "expired" : "failed",
+          message: job.error?.message,
+          retryable: !!job.retryable,
+        },
+      });
+    }
+  }, [client]);
+
+  useEffect(
+    () =>
+      client.getQueryCache().subscribe((event) => {
+        const key = event.query.queryKey;
+        if (
+          key.length === 2 &&
+          key[0] === QueryKeys.System &&
+          key[1] === QueryKeys.Jobs
+        )
+          followJob();
+      }),
+    [client, followJob],
+  );
+  // The job may have finished before its id reached the row.
+  useEffect(() => followJob(), [state.download, followJob]);
+
+  const saveTicket = useCallback(async (ticket: number) => {
+    const epoch = authEpoch.current;
+    let response;
+    try {
+      response = await api.discover.downloadTicket(ticket);
+    } catch (error) {
+      // The reason arrives as a blob body; read it so the caller can show it.
+      const data = (error as { response?: { data?: unknown } }).response?.data;
+      if (data instanceof Blob) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(await data.text());
+        } catch {
+          parsed = undefined;
+        }
+        throw Object.assign(new Error("Download unavailable"), {
+          response: { data: parsed },
+        });
+      }
+      throw error;
+    }
+    // Signed out, or in as someone else, while the file was on its way.
+    if (!authenticated.current || epoch !== authEpoch.current) return;
+    if (
+      !response.data.size ||
+      !response.data.type.includes("application/x-subrip")
+    )
+      throw new Error("Invalid subtitle response");
+    const filename = filenameFromContentDisposition(
+      response.headers["content-disposition"],
+      "subtitle.srt",
+    );
+    saveBlobAs(response.data, filename);
+    const feedback = currentState.current.download;
+    if (feedback?.ticket === ticket && feedback.contextKey)
+      dispatch({
+        type: "download",
+        key: feedback.contextKey,
+        feedback: { ...feedback, status: "started", filename },
+      });
+  }, []);
+
+  /** Save a ticket; a failure also fails the row that is waiting on it. */
+  const saveOrFail = useCallback(
+    async (ticket: number) => {
+      try {
+        await saveTicket(ticket);
+      } catch (error) {
+        const feedback = currentState.current.download;
+        if (feedback?.ticket === ticket && feedback.contextKey) {
+          const data = (
+            error as { response?: { data?: { message?: unknown } } }
+          ).response?.data;
+          dispatch({
+            type: "download",
+            key: feedback.contextKey,
+            feedback: {
+              ...feedback,
+              status: "failed",
+              message:
+                typeof data?.message === "string"
+                  ? data.message
+                  : "The file could not be saved. Download it again.",
+              retryable: true,
+            },
+          });
+        }
+        throw error;
+      }
+    },
+    [saveTicket],
+  );
+
+  // The standard completion action for a Discover download job. The
+  // notification and the Jobs drawer run it without knowing about Discover.
+  useEffect(
+    () =>
+      registerJobAction("discover.save", (action) =>
+        saveOrFail(Number(action.ticket)),
+      ),
+    [saveOrFail],
+  );
+
+  const saveSubtitle = useCallback(async () => {
+    const ticket = currentState.current.download?.ticket;
+    if (!ticket) return;
+    // The row shows the failure itself, so nothing is rethrown here.
+    await saveOrFail(ticket).catch(() => undefined);
+  }, [saveOrFail]);
 
   const closePreview = useCallback(() => {
     previewSequence.current += 1;
@@ -549,6 +749,7 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
       seedLanguage,
       findSubtitles,
       downloadSubtitle,
+      saveSubtitle,
       previewSubtitle,
       closePreview,
       cancelPending,
@@ -563,6 +764,7 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
       seedLanguage,
       findSubtitles,
       downloadSubtitle,
+      saveSubtitle,
       previewSubtitle,
       closePreview,
       cancelPending,

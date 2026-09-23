@@ -88,6 +88,7 @@ const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
     let skipped = 0;
     let failed = 0;
     let warnings = 0;
+    let queued = 0;
 
     for (const item of items) {
       let scope:
@@ -141,7 +142,10 @@ const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
           body: sportsScope ? {} : { languages: selected, format },
         });
 
-        if (result.status === "batch_complete") {
+        if (result.status === "queued") {
+          // A series or league runs as its own job and reports there.
+          queued += 1;
+        } else if (result.status === "batch_complete") {
           built += result.built ?? 0;
           skipped += result.skipped ?? 0;
           failed += result.failed ?? 0;
@@ -170,7 +174,10 @@ const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
       title: "Combine complete",
       message:
         `Built ${built}, skipped ${skipped}, failed ${failed}` +
-        (warnings > 0 ? `, ${warnings} needing attention` : ""),
+        (warnings > 0 ? `, ${warnings} needing attention` : "") +
+        (queued > 0
+          ? `, ${queued} series or league job${queued === 1 ? "" : "s"} queued`
+          : ""),
       color: failed > 0 || warnings > 0 ? "yellow" : "green",
     });
 

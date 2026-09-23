@@ -6,6 +6,7 @@ import {
   useNavigate,
 } from "react-router";
 import { Button, useMantineColorScheme } from "@mantine/core";
+import { cleanNotifications } from "@mantine/notifications";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -18,6 +19,15 @@ import server from "@/tests/mocks/node";
 import type { DiscoverSearchSnapshot } from "@/types/discover";
 import { setAuthenticated } from "@/utilities/event";
 import * as files from "@/utilities/files";
+import {
+  downloadJobHandlers,
+  DownloadRequest,
+  emitJob,
+  findJobToast,
+  JobOutcome,
+  jobs,
+  setJob,
+} from "./downloadJobHarness";
 import { pickOption } from "./selectTestHelpers";
 import Discover from "./testHarness";
 
@@ -184,16 +194,15 @@ async function searchWithCopy(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
   await screen.findByRole("heading", { name: "Breaking.Bad.S02E01.forced" });
 }
-let requests: {
-  result: string | null;
-  search: string | null;
-  authenticated: boolean;
-}[];
+let requests: DownloadRequest[];
+let tickets: number[];
 let searches: unknown[];
 let save: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   localStorage.clear();
+  cleanNotifications();
   requests = [];
+  tickets = [];
   searches = [];
   save = vi.spyOn(files, "saveBlobAs").mockImplementation(() => undefined);
   save.mockClear();
@@ -208,30 +217,38 @@ beforeEach(() => {
       searches.push(await request.json());
       return HttpResponse.json(snapshot());
     }),
-    http.get("/api/discover/download", ({ request }) => {
-      const params = new URL(request.url).searchParams;
-      requests.push({
-        result: params.get("result_id"),
-        search: params.get("search_id"),
-        authenticated: !!request.headers.get("X-API-KEY"),
-      });
-      const forced = params.get("result_id")?.endsWith("forced");
-      return new HttpResponse(forced ? forcedSrt : fullSrt, {
-        headers: {
-          "Content-Type": "application/x-subrip",
-          "Content-Disposition": `attachment; filename="Breaking_Bad.S02E01.eng.${forced ? "forced" : "full"}.srt"`,
-        },
-      });
-    }),
+    ...handlers(),
   );
 });
+
+function handlers(
+  overrides: Partial<Parameters<typeof downloadJobHandlers>[0]> = {},
+) {
+  return downloadJobHandlers({
+    body: (id) => (id.endsWith("forced") ? forcedSrt : fullSrt),
+    filename: (id) =>
+      `Breaking_Bad.S02E01.eng.${id.endsWith("forced") ? "forced" : "full"}.srt`,
+    requests,
+    tickets,
+    ...overrides,
+  });
+}
+
+/** Click Download, wait for the job to finish, then Save from the row. */
+async function downloadAndSave(
+  user: ReturnType<typeof userEvent.setup>,
+  scope = "forced",
+) {
+  await user.click(row(scope).getByRole("button", { name: "Download SRT" }));
+  await user.click(await row(scope).findByRole("button", { name: "Save SRT" }));
+}
 
 describe("Discover attachments", () => {
   it("downloads only the clicked forced row with its exact identifiers and device filename", async () => {
     const { user } = renderDiscover();
     await search(user);
     expect(requests).toEqual([]);
-    await user.click(row().getByRole("button", { name: "Download SRT" }));
+    await downloadAndSave(user);
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
     expect(requests).toEqual([
       { result: "search-1-forced", search: "search-1", authenticated: true },
@@ -249,7 +266,7 @@ describe("Discover attachments", () => {
   it("retains download feedback through appearance and navigation without submitting providers", async () => {
     const { user, router } = renderDiscover();
     await search(user);
-    await user.click(row().getByRole("button", { name: "Download SRT" }));
+    await downloadAndSave(user);
     await screen.findByText(/Download started for/);
     await user.click(screen.getByRole("button", { name: "Change appearance" }));
     await user.click(screen.getByRole("link", { name: "Subtitle Hub" }));
@@ -265,7 +282,7 @@ describe("Discover attachments", () => {
     const { user } = renderDiscover();
     await search(user);
     server.use(
-      http.get("/api/discover/download", () =>
+      http.post("/api/discover/download", () =>
         HttpResponse.json(
           {
             reason: "result_expired",
@@ -339,7 +356,7 @@ describe("Discover attachments", () => {
     expect(
       screen.queryByRole("heading", { name: "Breaking.Bad.S02E01.full" }),
     ).not.toBeInTheDocument();
-    await user.click(row().getByRole("button", { name: "Download SRT" }));
+    await downloadAndSave(user);
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
     expect(requests[0]).toMatchObject({
       result: "search-1-forced",
@@ -351,7 +368,7 @@ describe("Discover attachments", () => {
     const { user } = renderDiscover();
     await search(user);
     server.use(
-      http.get("/api/discover/download", () =>
+      http.post("/api/discover/download", () =>
         HttpResponse.json({}, { status: 410 }),
       ),
       http.post("/api/discover/search", () => HttpResponse.error()),
@@ -373,7 +390,7 @@ describe("Discover attachments", () => {
     async (field) => {
       const { user } = renderDiscover();
       await search(user);
-      await user.click(row().getByRole("button", { name: "Download SRT" }));
+      await downloadAndSave(user);
       await screen.findByText(/Download started for/);
       if (field !== "Subtitle language")
         await user.click(
@@ -406,13 +423,11 @@ describe("Discover attachments", () => {
     async (change) => {
       let finish: (() => void) | undefined;
       server.use(
-        http.get("/api/discover/download", async () => {
-          await new Promise<void>((resolve) => {
-            finish = resolve;
-          });
-          return new HttpResponse(forcedSrt, {
-            headers: { "Content-Type": "application/x-subrip" },
-          });
+        ...handlers({
+          hold: () =>
+            new Promise<void>((resolve) => {
+              finish = resolve;
+            }),
         }),
       );
       const { user } = renderDiscover();
@@ -450,19 +465,18 @@ describe("Discover attachments", () => {
       expect(
         screen.queryByText(/Download started for/),
       ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Save SRT" }),
+      ).not.toBeInTheDocument();
     },
   );
 
-  it.each([401, 502, 200])(
-    "never saves an error or app-shell payload (%s)",
+  it.each([401, 503])(
+    "reports a refused enqueue without saving anything (%s)",
     async (status) => {
       server.use(
-        http.get("/api/discover/download", () =>
-          status === 200
-            ? new HttpResponse("<html>app shell</html>", {
-                headers: { "Content-Type": "text/html" },
-              })
-            : HttpResponse.json({ message: "Could not download" }, { status }),
+        http.post("/api/discover/download", () =>
+          HttpResponse.json({ message: "Could not queue" }, { status }),
         ),
       );
       const { user } = renderDiscover();
@@ -480,6 +494,206 @@ describe("Discover attachments", () => {
         ).toBeInTheDocument();
     },
   );
+
+  it.each(["app shell", "expired ticket"])(
+    "never saves a ticket answer that is not the subtitle (%s)",
+    async (kind) => {
+      server.use(
+        ...handlers({
+          ticket: () =>
+            kind === "app shell"
+              ? new HttpResponse("<html>app shell</html>", {
+                  headers: { "Content-Type": "text/html" },
+                })
+              : HttpResponse.json(
+                  {
+                    message:
+                      "This download is no longer available. Download it again from the results.",
+                    reason: "ticket_expired",
+                  },
+                  { status: 404 },
+                ),
+        }),
+      );
+      const { user } = renderDiscover();
+      await search(user);
+      await downloadAndSave(user);
+      expect(await screen.findByText(/Download failed for/)).toHaveTextContent(
+        kind === "app shell"
+          ? /could not be saved/
+          : /no longer available\. Download it again/,
+      );
+      expect(save).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe("Discover download as a standard job", () => {
+  function jobId() {
+    return Math.max(...jobs.keys());
+  }
+
+  it("follows the job through the jobs socket event: pending, then ready with Save in the row and in the notification", async () => {
+    server.use(...handlers({ outcome: () => ({ status: "running" }) }));
+    const { user } = renderDiscover();
+    await search(user);
+    await user.click(row().getByRole("button", { name: "Download SRT" }));
+    expect(
+      await screen.findByText(/Preparing download for Breaking Bad S02 E01/),
+    ).toHaveTextContent(/runs in Jobs/);
+    await waitFor(() => expect(requests).toHaveLength(1));
+    setJob(jobId(), { status: "running" });
+    emitJob(jobId());
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryData<System.Jobs[]>([
+          QueryKeys.System,
+          QueryKeys.Jobs,
+        ]),
+      ).toEqual([
+        expect.objectContaining({ job_id: jobId(), status: "running" }),
+      ]),
+    );
+    expect(screen.getByText(/Preparing download for/)).toBeInTheDocument();
+    expect(row().queryByRole("button", { name: "Save SRT" })).toBeNull();
+    setJob(jobId(), { status: "completed" });
+    emitJob(jobId());
+    expect(
+      await screen.findByText(/Ready to save Breaking Bad S02 E01/),
+    ).toBeInTheDocument();
+    expect(row().getByRole("button", { name: "Save SRT" })).toBeEnabled();
+    // The standard job notification, with the job's own action.
+    const toast = await findJobToast(`Download ${requests[0].result}`);
+    expect(within(toast).getByText("Ready to save")).toBeInTheDocument();
+    expect(within(toast).getByRole("button", { name: "Save" })).toBeEnabled();
+    // Nothing is fetched or saved without a click.
+    expect(tickets).toEqual([]);
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it("saves from the notification by fetching the ticket, then saveBlobAs", async () => {
+    const { user } = renderDiscover();
+    await search(user);
+    await user.click(row().getByRole("button", { name: "Download SRT" }));
+    const toast = await findJobToast(`Download search-1-forced`);
+    await user.click(within(toast).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    expect(tickets).toEqual([jobId()]);
+    expect(save.mock.calls[0][0]).toBeInstanceOf(Blob);
+    expect(save.mock.calls[0][0].size).toBe(forcedSrt.length);
+    expect(save.mock.calls[0][1]).toBe("Breaking_Bad.S02E01.eng.forced.srt");
+    expect(
+      await screen.findByText(/Download started for Breaking Bad S02 E01/),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the classified failure in the notification and the row, and Retry follows the retried job", async () => {
+    const failure: JobOutcome = {
+      status: "failed",
+      retryable: true,
+      error: {
+        reason: "invalid_subtitle",
+        message:
+          "The provider returned a file that is not a usable subtitle. Choose another result.",
+      },
+    };
+    server.use(...handlers({ outcome: () => failure }));
+    const { user } = renderDiscover();
+    await search(user);
+    await user.click(row().getByRole("button", { name: "Download SRT" }));
+    const toast = await findJobToast(`Download search-1-forced`);
+    expect(within(toast).getByText(failure.error!.message)).toBeInTheDocument();
+    // The row says the same thing as the notification.
+    expect(await screen.findByText(/Download failed for/)).toHaveTextContent(
+      failure.error!.message,
+    );
+    const failed = jobId();
+    await user.click(within(toast).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(jobId()).toBe(failed + 1));
+    expect(jobs.get(jobId())?.retry_of).toBe(failed);
+    expect(
+      await screen.findByText(/Ready to save Breaking Bad S02 E01/),
+    ).toBeInTheDocument();
+    await user.click(row().getByRole("button", { name: "Save SRT" }));
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    expect(tickets).toEqual([jobId()]);
+  });
+
+  it("fails the row when Save from the notification finds the ticket gone", async () => {
+    server.use(
+      ...handlers({
+        ticket: () =>
+          HttpResponse.json(
+            {
+              message:
+                "This download is no longer available. Download it again from the results.",
+              reason: "ticket_expired",
+            },
+            { status: 404 },
+          ),
+      }),
+    );
+    const { user } = renderDiscover();
+    await search(user);
+    await user.click(row().getByRole("button", { name: "Download SRT" }));
+    const toast = await findJobToast(`Download search-1-forced`);
+    await user.click(within(toast).getByRole("button", { name: "Save" }));
+    expect(await screen.findByText(/Download failed for/)).toHaveTextContent(
+      /no longer available\. Download it again/,
+    );
+    expect(row().queryByRole("button", { name: "Save SRT" })).toBeNull();
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it("releases the row when its queued job is cancelled from the Jobs drawer", async () => {
+    server.use(...handlers({ outcome: () => ({ status: "running" }) }));
+    const { user } = renderDiscover();
+    await search(user);
+    await user.click(row().getByRole("button", { name: "Download SRT" }));
+    await waitFor(() => expect(requests).toHaveLength(1));
+    emitJob(jobId());
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryData([QueryKeys.System, QueryKeys.Jobs]),
+      ).toHaveLength(1),
+    );
+    expect(
+      row("full").getByRole("button", { name: "Download SRT" }),
+    ).toBeDisabled();
+    // Cancel removes a queued job; the drawer's refetch no longer lists it.
+    act(() => queryClient.setQueryData([QueryKeys.System, QueryKeys.Jobs], []));
+    expect(await screen.findByText(/Download failed for/)).toHaveTextContent(
+      "The download was cancelled.",
+    );
+    expect(
+      row("full").getByRole("button", { name: "Download SRT" }),
+    ).toBeEnabled();
+  });
+
+  it("turns an expired handle found by the job into the expired recovery", async () => {
+    server.use(
+      ...handlers({
+        outcome: () => ({
+          status: "failed",
+          retryable: false,
+          error: {
+            reason: "expired_handle",
+            message:
+              "This result has expired. Search again for this selection.",
+          },
+        }),
+      }),
+    );
+    const { user } = renderDiscover();
+    await search(user);
+    await user.click(row().getByRole("button", { name: "Download SRT" }));
+    expect(
+      await screen.findByRole("button", {
+        name: "Search again for expired result",
+      }),
+    ).toBeEnabled();
+    expect(row().getByRole("button", { name: "Download SRT" })).toBeDisabled();
+  });
 });
 
 it("releases pending download state when transport refresh retires its expired row", async () => {
@@ -489,13 +703,11 @@ it("releases pending download state when transport refresh retires its expired r
   let finish: (() => void) | undefined;
   server.use(
     http.post("/api/discover/search", () => HttpResponse.json(first)),
-    http.get("/api/discover/download", async () => {
-      await new Promise<void>((resolve) => {
-        finish = resolve;
-      });
-      return new HttpResponse(forcedSrt, {
-        headers: { "Content-Type": "application/x-subrip" },
-      });
+    ...handlers({
+      hold: () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
     }),
   );
   const { user } = renderDiscover();
@@ -645,7 +857,7 @@ describe("Discover results against a chosen library copy", () => {
         searches.push(await request.json());
         return HttpResponse.json(copySnapshot());
       }),
-      http.get("/api/discover/download", () =>
+      http.post("/api/discover/download", () =>
         HttpResponse.json(
           { reason: "result_expired", recoverable: true, message: "gone" },
           { status: 410 },

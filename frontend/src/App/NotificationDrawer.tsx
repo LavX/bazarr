@@ -33,6 +33,7 @@ import { startCase } from "lodash";
 import { debounce } from "lodash";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
+import { JobActions } from "@/modules/jobs";
 import { progressPercent } from "@/utilities";
 import classes from "./NotificationDrawer.module.css";
 
@@ -505,14 +506,23 @@ const NotificationDrawer: FunctionComponent<NotificationDrawerProps> = ({
                                         )}
                                       </Group>
                                     </Group>
-                                    {job?.progress_message && (
-                                      <Text
-                                        size="xs"
-                                        c="var(--bz-text-tertiary)"
-                                      >
-                                        {job.progress_message}
-                                      </Text>
-                                    )}
+                                    {job?.progress_message &&
+                                      job.progress_message !==
+                                        job.error?.message && (
+                                        <Text
+                                          size="xs"
+                                          c="var(--bz-text-tertiary)"
+                                        >
+                                          {job.progress_message}
+                                        </Text>
+                                      )}
+                                    {status === "failed" &&
+                                      job?.error?.message && (
+                                        <Text size="xs" c="red.6">
+                                          {job.error.message}
+                                        </Text>
+                                      )}
+                                    {job && <JobActions job={job} />}
                                   </Stack>
                                 </Group>
                               </Card>
