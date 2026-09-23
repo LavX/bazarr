@@ -91,6 +91,11 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
     new Map<string, { savedAt: number; state: DiscoverState }>(),
   );
   const authenticated = useRef(true);
+  // Bumped on every sign-in change, so a response that outlives one is dropped.
+  const authEpoch = useRef(0);
+  // Jobs this row has seen in the jobs cache. One that disappears again was
+  // removed from the queue, which is how a queued job is cancelled.
+  const seenJobs = useRef(new Set<number>());
   const generation = useRef(0);
   const draft = useRef(state.draft);
   const currentState = useRef(state);
@@ -108,6 +113,7 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
   useEffect(() => {
     const onAuth = (event: WindowEventMap["app-auth-changed"]) => {
       authenticated.current = event.detail.authenticated;
+      authEpoch.current += 1;
       if (!event.detail.authenticated) {
         pages.current.clear();
         searches.current.clear();
@@ -469,7 +475,22 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
       return;
     }
     const job = jobs.find((candidate) => candidate.job_id === feedback.jobId);
-    if (feedback.status !== "pending" || !job) return;
+    if (feedback.status !== "pending") return;
+    if (!job) {
+      if (seenJobs.current.has(feedback.jobId))
+        dispatch({
+          type: "download",
+          key,
+          feedback: {
+            ...feedback,
+            status: "failed",
+            message: "The download was cancelled.",
+            retryable: true,
+          },
+        });
+      return;
+    }
+    seenJobs.current.add(job.job_id);
     if (job.status === "completed") {
       const action = job.action;
       dispatch({
@@ -524,6 +545,7 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
   useEffect(() => followJob(), [state.download, followJob]);
 
   const saveTicket = useCallback(async (ticket: number) => {
+    const epoch = authEpoch.current;
     let response;
     try {
       response = await api.discover.downloadTicket(ticket);
@@ -543,6 +565,8 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
       }
       throw error;
     }
+    // Signed out, or in as someone else, while the file was on its way.
+    if (!authenticated.current || epoch !== authEpoch.current) return;
     if (
       !response.data.size ||
       !response.data.type.includes("application/x-subrip")

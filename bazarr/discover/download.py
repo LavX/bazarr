@@ -113,6 +113,10 @@ class _Flight:
     ready: Event = field(default_factory=Event)
     artifact: _Artifact | None = None
     error: Exception | None = None
+    # The latest deadline of anyone waiting. A download job that joins a
+    # preview's fetch keeps its own, longer budget instead of inheriting the
+    # preview's.
+    deadline: float = 0
 
 
 _cache: OrderedDict = OrderedDict()
@@ -367,9 +371,10 @@ def _fetch(key, flight, record, result_id, search_id, authority, deadline):
         # and result handles must never race through the same mutable instance.
         subtitle = deepcopy(record["subtitle"])
         artifact = _Artifact(_provider_bytes(subtitle), _filename(record))
+        deadline = max(deadline, flight.deadline)
         with _locked(deadline):
             current = _record(result_id, search_id, authority)
-            if time.monotonic() >= deadline:
+            if time.monotonic() >= max(deadline, flight.deadline):
                 raise TimeoutError("Subtitle retrieval timed out")
             _prune(authority.scope)
             while _cache and (len(_cache) >= CACHE_MAX_ENTRIES or _cache_bytes + len(artifact.content) > CACHE_MAX_BYTES):
@@ -410,10 +415,12 @@ def _artifact(result_id, search_id, authority, wait_seconds=None):
             flight = None
         else:
             flight = _inflight.get(key)
-            if flight is None:
+            if flight is not None:
+                flight.deadline = max(flight.deadline, deadline)
+            else:
                 if len(_inflight) >= FETCH_MAX_CONCURRENT:
                     raise TimeoutError("Subtitle retrieval busy")
-                flight = _Flight()
+                flight = _Flight(deadline=deadline)
                 _inflight[key] = flight
                 Thread(target=_fetch, args=(key, flight, record, result_id, search_id, authority, deadline),
                        daemon=True, name="discover-subtitle").start()

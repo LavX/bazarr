@@ -619,6 +619,31 @@ describe("Discover download as a standard job", () => {
     expect(tickets).toEqual([jobId()]);
   });
 
+  it("releases the row when its queued job is cancelled from the Jobs drawer", async () => {
+    server.use(...handlers({ outcome: () => ({ status: "running" }) }));
+    const { user } = renderDiscover();
+    await search(user);
+    await user.click(row().getByRole("button", { name: "Download SRT" }));
+    await waitFor(() => expect(requests).toHaveLength(1));
+    emitJob(jobId());
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryData([QueryKeys.System, QueryKeys.Jobs]),
+      ).toHaveLength(1),
+    );
+    expect(
+      row("full").getByRole("button", { name: "Download SRT" }),
+    ).toBeDisabled();
+    // Cancel removes a queued job; the drawer's refetch no longer lists it.
+    act(() => queryClient.setQueryData([QueryKeys.System, QueryKeys.Jobs], []));
+    expect(await screen.findByText(/Download failed for/)).toHaveTextContent(
+      "The download was cancelled.",
+    );
+    expect(
+      row("full").getByRole("button", { name: "Download SRT" }),
+    ).toBeEnabled();
+  });
+
   it("turns an expired handle found by the job into the expired recovery", async () => {
     server.use(
       ...handlers({

@@ -540,3 +540,27 @@ def test_oversized_provider_content_is_rejected_without_caching(authenticated_cl
     monkeypatch.setattr(providers.pool['discover_download'], 'download_subtitle', fetch)
     assert preview(authenticated_client, row).status_code == 502
     assert not any(key[1] == row['id'] for key in download._cache)
+
+
+def test_a_download_job_joining_a_preview_fetch_keeps_its_own_budget(authenticated_client, choices, providers, monkeypatch):
+    import time
+    from discover import download
+    row = post(authenticated_client, fixtures.CONTEXT).json['results'][0]
+    entered = Event()
+
+    def slow(subtitle):
+        entered.set()
+        time.sleep(0.6)
+        subtitle.content = LITERAL
+
+    monkeypatch.setattr(providers.pool['discover_download'], 'download_subtitle', slow)
+    monkeypatch.setattr(download, 'FETCH_WAIT_SECONDS', 0.2)
+    monkeypatch.setattr(download, 'JOB_WAIT_SECONDS', 5)
+    with ThreadPoolExecutor(2) as executor:
+        first = executor.submit(preview, authenticated_client.application.test_client(), row)
+        assert entered.wait(2)
+        second = executor.submit(fixtures.get, authenticated_client.application.test_client(), row)
+        # The preview gives up at its own deadline; the job it joined does not.
+        assert first.result(timeout=3).status_code == 502
+        attachment = second.result(timeout=6)
+    assert attachment.status_code == 200 and attachment.data == LITERAL

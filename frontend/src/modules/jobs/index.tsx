@@ -108,6 +108,15 @@ export const JobActions: FunctionComponent<{
 const notified = new Set<number>();
 
 /**
+ * Forget which jobs were announced. Job ids restart with the backend, so this
+ * runs whenever the socket connects; no terminal event is ever replayed on a
+ * reconnect, so nothing is announced twice.
+ */
+export function resetJobNotifications() {
+  notified.clear();
+}
+
+/**
  * Tell the user a job finished, once. Called from the jobs socket handler
  * with the job's fresh state, so only a finish that happens while the app is
  * open is announced: a reload lists old finished jobs without toasting them.

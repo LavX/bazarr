@@ -7,7 +7,7 @@ import { isArray, isEmpty, isNumber } from "lodash";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
-import { notifyJobOutcome } from "@/modules/jobs";
+import { notifyJobOutcome, resetJobNotifications } from "@/modules/jobs";
 import { notification } from "@/modules/task";
 import { LOG } from "@/utilities/console";
 import { setOnlineStatus } from "@/utilities/event";
@@ -23,7 +23,10 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
     },
     {
       key: "connect",
-      any: () => setOnlineStatus(true),
+      any: () => {
+        resetJobNotifications();
+        setOnlineStatus(true);
+      },
     },
     {
       key: "connect_error",
