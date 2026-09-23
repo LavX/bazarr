@@ -34,6 +34,7 @@ import type {
   ProviderHubManifest,
 } from "@/apis/raw/providerHub";
 import { parseManifest } from "@/pages/Settings/Providers/hub/utils";
+import StepLayout from "@/pages/Setup/StepLayout";
 import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import { isRecommendedProvider } from "./recommended";
 import { redirectToSetup } from "./redirect";
@@ -274,6 +275,18 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [catalog],
   );
+
+  // A catalog that answers 200 with nothing because its only source could not
+  // be refreshed is a broken catalog, not an empty one. The first boot after an
+  // install is exactly when GitHub is most likely to have been unreachable for
+  // a moment, and the reader was shown "No providers available" with no way to
+  // try again.
+  const sourceError =
+    (catalog?.sources ?? []).find(
+      (source) => source.last_error != null && source.last_error !== "",
+    )?.last_error ?? null;
+  const catalogUnusable =
+    catalogFailed || (choices.length === 0 && sourceError !== null);
 
   const toggle = useCallback((providerId: string) => {
     setSelected((current) =>
@@ -552,8 +565,8 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
 
   if (outcomes !== null) {
     return (
-      <Stack gap="lg">
-        <Stack gap="xs">
+      <Stack gap="md">
+        <Stack gap={4}>
           <Title order={2}>
             {staged.length > 0
               ? "Some providers did not install"
@@ -574,7 +587,7 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
 
         {enableFailure}
 
-        <List spacing="sm" center className={styles.outcomes}>
+        <List spacing={4} center className={styles.outcomes}>
           {outcomes.map((outcome) => (
             <List.Item
               key={outcome.providerId}
@@ -591,8 +604,13 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
                 </ThemeIcon>
               }
             >
-              <Text>{outcome.name}</Text>
-              <Text size="sm" c="dimmed">
+              <Text size="sm">{outcome.name}</Text>
+              <Text
+                size="xs"
+                c="dimmed"
+                className={styles.note}
+                title={outcome.staged ? undefined : outcome.error}
+              >
                 {outcome.staged
                   ? "Installed, waiting for the restart"
                   : outcome.error}
@@ -629,25 +647,46 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
     );
   }
 
+  // The consequence is said in the aside rather than enforced by a disabled
+  // button. This step restarts the application and talks to a catalog over the
+  // network, so it is the last one that should be a dead end when either of
+  // those goes wrong.
   return (
-    <Stack gap="lg">
-      <Stack gap="xs">
-        <Title order={2}>Add subtitle providers</Title>
-        <Text c="dimmed">
-          Pick the providers you want Bazarr+ to search. Installing providers
-          stages new code, so Bazarr+ needs to restart once to load them. The
-          wizard will pick up where it left off after the restart.
-        </Text>
-        {/* The consequence, said here rather than enforced by a disabled
-            button. This step restarts the application and talks to a catalog
-            over the network, so it is the last one that should be a dead end
-            when either goes wrong. */}
+    <StepLayout
+      layout="wide"
+      title="Add subtitle providers"
+      description="Pick what Bazarr+ should search. Installing stages new code, so Bazarr+ restarts once and the wizard picks up where it left off."
+      aside={
         <Text c="dimmed" size="sm">
           Until you enable a provider, Bazarr+ has nothing to search. You can do
           this from the Subtitle Hub whenever you like.
         </Text>
-      </Stack>
-
+      }
+      stickyActions
+      actions={
+        <Group justify="space-between">
+          <Group gap="sm">
+            {onBack && (
+              <Button variant="default" onClick={onBack}>
+                Back
+              </Button>
+            )}
+            {hasInstalled && (
+              <Button variant="subtle" onClick={onUseInstalled}>
+                Use already-installed providers
+              </Button>
+            )}
+          </Group>
+          <Button
+            onClick={() => void handleInstall()}
+            loading={installing}
+            disabled={selected.length === 0}
+          >
+            Install &amp; restart
+          </Button>
+        </Group>
+      }
+    >
       {catalogPending ? (
         // A catalog still on its way has not told us it is empty. Reading the
         // list before it arrives said "No providers available" on a healthy
@@ -656,14 +695,19 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
         <Stack align="center" py="xl">
           <Loader />
         </Stack>
-      ) : catalogFailed ? (
+      ) : catalogUnusable ? (
         // A catalog that could not be fetched is not an empty catalog. Both
         // arrive here as `data: undefined`, and reading them as the same thing
         // told people with a proxy problem, an offline box or a broken catalog
         // source that Bazarr+ has no providers, and offered them no retry.
         <Alert color="red" title="Could not load the provider catalog">
           <Stack gap="sm" align="flex-start">
-            <Text size="sm">{describeCatalogError(catalogError)}</Text>
+            <Text size="sm">
+              {catalogFailed
+                ? describeCatalogError(catalogError)
+                : (sourceError ??
+                  "Bazarr+ could not read the provider catalog and gave no reason.")}
+            </Text>
             <Group gap="sm">
               <Button
                 variant="default"
@@ -701,12 +745,16 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
       ) : (
         <Stack gap="sm">
           {recommended.length > 0 && (
-            <Stack gap={4} align="flex-start">
+            // The hint reads beside the button rather than under it. On a real
+            // catalog this list is 36 entries, and two lines of prose above it
+            // are two rows of providers below the bottom of the window.
+            <Group gap="sm" align="center" wrap="nowrap">
               <Button
                 variant="light"
                 onClick={() => void handleInstallRecommended()}
                 loading={installing}
                 aria-describedby={RECOMMENDED_HINT_ID}
+                style={{ flex: "0 0 auto" }}
               >
                 Install {recommended.length} recommended{" "}
                 {recommended.length === 1 ? "provider" : "providers"}
@@ -716,7 +764,7 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
                 They are installed and enabled together, and Bazarr+ restarts
                 once to load them. Picking your own below still works.
               </Text>
-            </Stack>
+            </Group>
           )}
           <TextInput
             aria-label="Search providers"
@@ -732,10 +780,20 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
           ) : (
             <div className={styles.grid}>
               {visible.map((choice) => (
-                <div key={choice.providerId} className={styles.cell}>
+                <div
+                  key={choice.providerId}
+                  className={styles.cell}
+                  title={choice.description}
+                >
+                  {/* The name and the tick, and nothing else. A real catalog
+                      is 61 entries: a line of description under each one is
+                      sixteen more rows than the window has, and the source
+                      name it usually carries is the same for all of them.
+                      What it does say is on the row, for a pointer and for
+                      the search box, and in full in Settings, Providers. */}
                   <Checkbox
+                    className={styles.entry}
                     label={choice.name}
-                    description={choice.description}
                     checked={selected.includes(choice.providerId)}
                     onChange={() => toggle(choice.providerId)}
                   />
@@ -743,63 +801,43 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
               ))}
             </div>
           )}
-          {selected.length > 0 && (
-            <Text size="sm" c="dimmed">
-              {selected.length} selected
-            </Text>
+          {progress !== null ? (
+            // Live region rather than decoration: on a 36-provider run this is
+            // the only thing that distinguishes working from hung, so it has to
+            // reach a screen reader too. It sits where the selection count
+            // does, because the run is what the count was counting towards.
+            <Stack gap={4} role="status" aria-live="polite">
+              <Group justify="space-between" gap="sm" wrap="nowrap">
+                <Text size="sm">
+                  {`Installing provider ${Math.min(progress.done + 1, progress.total)} of ${progress.total}`}
+                  {progress.latest === null
+                    ? ""
+                    : `, finished ${progress.latest}`}
+                </Text>
+                <Text size="sm" c="dimmed">
+                  {`${progress.done} of ${progress.total} done`}
+                </Text>
+              </Group>
+              <Progress
+                size="sm"
+                value={
+                  progress.total === 0
+                    ? 0
+                    : (progress.done / progress.total) * 100
+                }
+                aria-label="Provider installation progress"
+              />
+            </Stack>
+          ) : (
+            selected.length > 0 && (
+              <Text size="sm" c="dimmed">
+                {selected.length} selected
+              </Text>
+            )
           )}
         </Stack>
       )}
-
-      <Group justify="space-between">
-        <Group gap="sm">
-          {onBack && (
-            <Button variant="default" onClick={onBack}>
-              Back
-            </Button>
-          )}
-          {hasInstalled && (
-            <Button variant="subtle" onClick={onUseInstalled}>
-              Use already-installed providers
-            </Button>
-          )}
-        </Group>
-        <Button
-          onClick={() => void handleInstall()}
-          loading={installing}
-          disabled={selected.length === 0}
-        >
-          Install &amp; restart
-        </Button>
-      </Group>
-
-      {progress !== null && (
-        // Live region rather than decoration: on a 36-provider run this is the
-        // only thing that distinguishes working from hung, so it has to reach
-        // a screen reader too.
-        <Stack gap={6} role="status" aria-live="polite">
-          <Group justify="space-between" gap="sm" wrap="nowrap">
-            <Text size="sm">
-              {`Installing provider ${Math.min(progress.done + 1, progress.total)} of ${progress.total}`}
-              {progress.latest === null ? "" : `, finished ${progress.latest}`}
-            </Text>
-            <Text size="sm" c="dimmed">
-              {`${progress.done} of ${progress.total} done`}
-            </Text>
-          </Group>
-          <Progress
-            value={
-              progress.total === 0 ? 0 : (progress.done / progress.total) * 100
-            }
-            aria-label="Provider installation progress"
-          />
-          <Text size="xs" c="dimmed">
-            Bazarr+ restarts once when this finishes, and the wizard picks up
-            where it left off.
-          </Text>
-        </Stack>
-      )}
-    </Stack>
+    </StepLayout>
   );
 };
 

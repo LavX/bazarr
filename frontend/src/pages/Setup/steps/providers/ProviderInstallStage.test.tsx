@@ -56,9 +56,9 @@ const onNext = vi.fn();
 
 const refetchCatalog = vi.fn();
 
-function setCatalog(entries: unknown[]) {
+function setCatalog(entries: unknown[], sources: unknown[] = []) {
   mockedCatalog.mockReturnValue({
-    data: { sources: [], entries },
+    data: { sources, entries },
     // Settled: the stage reads this to tell an empty catalog from one that has
     // not answered yet.
     isPending: false,
@@ -274,6 +274,42 @@ describe("ProviderInstallStage", () => {
     expect(
       screen.queryByText(/no installable providers were found/i),
     ).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: /retry/i }));
+    expect(refetchCatalog).toHaveBeenCalled();
+  });
+
+  it("treats an empty catalog whose source failed to refresh as a failure", async () => {
+    // The catalog answers 200 with nothing when its only source could not be
+    // read, which is what a transient GitHub failure on the first boot after
+    // an install looks like. That is a broken catalog, not an empty one, and
+    // the reader was shown "No providers available" with nothing to press.
+    const user = userEvent.setup();
+    setCatalog(
+      [],
+      [
+        {
+          name: "bazarr-provider-catalog",
+          url: "https://example.invalid/catalog",
+          trusted: true,
+          last_error: "GitHub returned 503",
+        },
+      ],
+    );
+    customRender(
+      <ProviderInstallStage
+        hasInstalled={false}
+        onInstalledNeedsRestart={onInstalledNeedsRestart}
+        onUseInstalled={onUseInstalled}
+        onNext={onNext}
+      />,
+    );
+
+    expect(
+      screen.getByText(/could not load the provider catalog/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/github returned 503/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no providers available/i)).toBeNull();
 
     await user.click(screen.getByRole("button", { name: /retry/i }));
     expect(refetchCatalog).toHaveBeenCalled();

@@ -27,6 +27,12 @@ interface Props {
   aside?: ReactNode;
   /** The Back and Continue row, always full width under everything else. */
   actions?: ReactNode;
+  /**
+   * Keep the actions row against the bottom of the window when the step body
+   * is a list long enough to run past it. For a step that fits, which is every
+   * step on a display the wizard is built for, this changes nothing.
+   */
+  stickyActions?: boolean;
   layout?: StepLayoutVariant;
   /** The controls. Omit for a step that only explains. */
   children?: ReactNode;
@@ -56,6 +62,7 @@ const StepLayout: FC<Props> = ({
   description,
   aside,
   actions,
+  stickyActions = false,
   layout = "split",
   children,
 }) => (
@@ -74,7 +81,17 @@ const StepLayout: FC<Props> = ({
       {aside}
     </div>
     {children && <div className={styles.controls}>{children}</div>}
-    {actions && <div className={styles.actions}>{actions}</div>}
+    {actions && (
+      <div
+        className={
+          stickyActions
+            ? `${styles.actions} ${styles.actionsSticky}`
+            : styles.actions
+        }
+      >
+        {actions}
+      </div>
+    )}
   </div>
 );
 

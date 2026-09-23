@@ -8,6 +8,12 @@
 // provider needs a username and a password, the one beside it needs nothing at
 // all. A grid row is as tall as its tallest cell, so a single provider with
 // credentials left a hole under each of its neighbours. Columns pack.
+//
+// A real catalog is 61 entries, not the handful a stub serves, and three
+// columns of cards each carrying a name, a description and 12px of air hid
+// 1356px inside the shell at 1920x940. So a provider is one compact row now:
+// its control, its name, and at most one line about it where there is anything
+// to say; and the card divides into five columns rather than three.
 .grid {
   column-count: 1;
   column-gap: 24px;
@@ -19,9 +25,26 @@
   }
 }
 
-@media (min-width: 1200px) {
+@media (min-width: 1000px) {
   .grid {
     column-count: 3;
+  }
+}
+
+// The shell stops growing at 1120px, so from here the column count is about
+// the card rather than the display: a wider window adds nothing to divide up,
+// and a narrower one is still dividing the same 1120px until the shell starts
+// shrinking with it.
+@media (min-width: 1120px) {
+  .grid {
+    column-count: 4;
+    column-gap: 20px;
+  }
+}
+
+@media (min-width: 1200px) {
+  .grid {
+    column-count: 5;
   }
 }
 
@@ -30,17 +53,37 @@
 .cell {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
   break-inside: avoid;
-  padding-bottom: 12px;
+  padding-bottom: 6px;
+}
+
+// The name and the line under it, as tight as they read. Mantine's own
+// description spacing is built for a form with a handful of inputs, not for a
+// list of three dozen entries where every extra pixel is multiplied by nine
+// rows.
+.entry {
+  label {
+    line-height: 1.25;
+  }
+}
+
+// What a provider is, in one line that never becomes two. The full text is on
+// the row's title attribute for anyone who wants it.
+.note {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.2;
 }
 
 // The outcome list after an install run. Same reason, same shape.
 .outcomes {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 8px 24px;
+  gap: 6px 24px;
 }
 
 @media (min-width: 760px) {
@@ -52,5 +95,12 @@
 @media (min-width: 1200px) {
   .outcomes {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1400px) {
+  .outcomes {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px 20px;
   }
 }

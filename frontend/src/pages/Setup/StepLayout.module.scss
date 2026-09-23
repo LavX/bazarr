@@ -66,3 +66,15 @@
     grid-row: 2;
   }
 }
+
+// A step whose body is a long list keeps Back and Continue in sight. Nothing
+// inside the wizard scrolls, so on a step that fits this rule does nothing at
+// all; it is there so a catalog longer than any budget allows for cannot push
+// the only way forward under the bottom of the window.
+.actionsSticky {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  padding-top: 12px;
+  background: var(--bz-surface-card);
+}

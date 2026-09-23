@@ -9,7 +9,6 @@ import {
   Stack,
   Text,
   TextInput,
-  Title,
 } from "@mantine/core";
 import { AxiosError } from "axios";
 import {
@@ -21,6 +20,7 @@ import type {
   ProviderHubInstallation,
   ProviderHubManifest,
 } from "@/apis/raw/providerHub";
+import StepLayout from "@/pages/Setup/StepLayout";
 import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import styles from "./ProviderGrid.module.scss";
 
@@ -326,19 +326,49 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
   };
 
   return (
-    <Stack gap="lg">
-      <Stack gap="xs">
-        <Title order={2}>Enable and configure providers</Title>
-        <Text c="dimmed">
-          Turn on the providers you want to use and enter any credentials they
-          need.
-        </Text>
-        <Text c="dimmed" size="sm">
-          Until you enable a provider, Bazarr+ has nothing to search. You can do
-          this from the Subtitle Hub whenever you like.
-        </Text>
-      </Stack>
-
+    <StepLayout
+      layout="wide"
+      title="Enable and configure providers"
+      description="Turn on the providers you want to use and enter any credentials they need."
+      aside={
+        <Stack gap={4}>
+          <Text c="dimmed" size="sm">
+            Until you enable a provider, Bazarr+ has nothing to search. You can
+            do this from the Subtitle Hub whenever you like.
+          </Text>
+          <Text size="xs" c="dimmed">
+            Advanced provider options are available later in Settings,
+            Providers.
+          </Text>
+        </Stack>
+      }
+      stickyActions
+      actions={
+        // Install more sits beside Back rather than on a line of its own: it is
+        // where the reader goes next if this list is not enough, which is what
+        // the rest of this row is for, and two spare lines above the buttons
+        // are two lines the list does not get.
+        <Group justify="space-between">
+          <Group gap="sm">
+            {onBack && (
+              <Button variant="default" onClick={onBack}>
+                Back
+              </Button>
+            )}
+            <Anchor component="button" type="button" onClick={onInstallMore}>
+              Install more providers
+            </Anchor>
+          </Group>
+          <Button
+            onClick={handleContinue}
+            loading={settings.isPending}
+            disabled={!canContinue}
+          >
+            Continue
+          </Button>
+        </Group>
+      }
+    >
       {/* A list that failed to load is not a list of nothing. Without this the
           step showed a heading, a rule that at least one provider must be
           enabled, an empty region and a dead Continue, on a step that cannot
@@ -364,16 +394,31 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
           const providerId = provider.provider_id;
           const isEnabled = enabled.includes(providerId);
           const fields = essentialFields(fieldsFromManifest(provider.manifest));
+          // What this provider will ask for, said before it is ticked and in
+          // one line. The list is three dozen entries on a real install, so a
+          // provider that needs nothing says nothing at all: "No credentials
+          // needed" under every row was a second row of nothing, thirty-six
+          // times over, and it pushed the buttons off the screen.
+          const needs = fields
+            .filter((field) => field.type !== "checkbox")
+            .map((field) => field.label)
+            .join(", ");
           return (
             <div key={providerId} className={styles.cell}>
               <Checkbox
+                className={styles.entry}
                 label={providerLabel(provider)}
                 checked={isEnabled}
                 onChange={() => toggleEnabled(providerId)}
               />
-              {isEnabled && fields.length === 0 && (
-                <Text size="sm" c="dimmed" pl="xl">
-                  No credentials needed.
+              {!isEnabled && needs.length > 0 && (
+                <Text
+                  size="xs"
+                  c="dimmed"
+                  className={styles.note}
+                  title={`Needs ${needs}`}
+                >
+                  Needs {needs}
                 </Text>
               )}
               {isEnabled &&
@@ -404,6 +449,7 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
                     return (
                       <PasswordInput
                         key={field.key}
+                        size="xs"
                         label={field.label}
                         description={field.description}
                         error={fieldError}
@@ -421,6 +467,7 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
                   return (
                     <TextInput
                       key={field.key}
+                      size="xs"
                       label={field.label}
                       description={field.description}
                       error={fieldError}
@@ -458,35 +505,7 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
           {saveError}
         </Alert>
       )}
-
-      <Text size="xs" c="dimmed">
-        Advanced provider options are available later in Settings, Providers.
-      </Text>
-
-      {/* Beside Back rather than on a line of its own: it is where the reader
-          goes next if this list is not enough, which is what the rest of this
-          row is for, and two spare lines above the buttons are two lines the
-          list does not get. */}
-      <Group justify="space-between">
-        <Group gap="sm">
-          {onBack && (
-            <Button variant="default" onClick={onBack}>
-              Back
-            </Button>
-          )}
-          <Anchor component="button" type="button" onClick={onInstallMore}>
-            Install more providers
-          </Anchor>
-        </Group>
-        <Button
-          onClick={handleContinue}
-          loading={settings.isPending}
-          disabled={!canContinue}
-        >
-          Continue
-        </Button>
-      </Group>
-    </Stack>
+    </StepLayout>
   );
 };
 
