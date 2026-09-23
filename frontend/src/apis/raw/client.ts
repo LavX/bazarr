@@ -1,7 +1,7 @@
 import { showNotification } from "@mantine/notifications";
 import Axios, { AxiosError, AxiosInstance, CancelTokenSource } from "axios";
+import { notification } from "@/modules/notification";
 import socketio from "@/modules/socketio";
-import { notification } from "@/modules/task";
 import { Environment } from "@/utilities";
 import { LOG } from "@/utilities/console";
 import { setAuthenticated } from "@/utilities/event";

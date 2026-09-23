@@ -2,13 +2,12 @@
  * Behavior tests for createDefaultReducer().
  *
  * Covers every reducer key: verifies that socket events trigger the correct
- * queryClient.invalidateQueries calls (with exact query keys) and that the
- * "progress" reducer shows / updates / hides Mantine notifications correctly.
+ * queryClient.invalidateQueries calls (with exact query keys).
  *
  * The "episode" reducer (local-id cache lookup + series fallback) is already
  * exercised by the sibling reducer.test.ts; here we focus on the gaps:
- * progress notifications, inline jobs cache mutation, all "any" key reducers,
- * connect/disconnect lifecycle, and the "message" notification path.
+ * inline jobs cache mutation, all "any" key reducers and the
+ * connect/disconnect lifecycle.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { QueryKeys } from "@/apis/queries/keys";
@@ -44,13 +43,6 @@ vi.mock("@mantine/notifications", () => ({
   updateNotification: updateNotificationMock,
   hideNotification: hideNotificationMock,
 }));
-
-// Use the REAL notification module so we can assert on the exact shape it
-// produces (the progress reducer calls notification.progress.* directly).
-vi.mock("@/modules/task", async (importOriginal) => {
-  const real = await importOriginal<typeof import("@/modules/task")>();
-  return { ...real };
-});
 
 vi.mock("@/utilities/console", () => ({ LOG: logMock }));
 
@@ -108,132 +100,6 @@ describe("lifecycle reducers", () => {
   it("sets online status to false on connect_error", () => {
     any("connect_error");
     expect(setOnlineStatusMock).toHaveBeenCalledWith(false);
-  });
-});
-
-// ---- message reducer ------------------------------------------------------
-
-describe("message reducer", () => {
-  it("calls showNotification once per incoming message", () => {
-    update("message", ["Download complete", "Subtitle synced"]);
-    expect(showNotificationMock).toHaveBeenCalledTimes(2);
-  });
-
-  it("shows a notification with the message text", () => {
-    update("message", ["Hello"]);
-    const [args] = showNotificationMock.mock.calls;
-    expect(args[0]).toMatchObject({ message: "Hello" });
-  });
-});
-
-// ---- progress reducer -----------------------------------------------------
-
-describe("progress reducer", () => {
-  const item = (
-    overrides: Partial<{
-      id: string;
-      header: string;
-      name: string;
-      value: number;
-      count: number;
-    }> = {},
-  ) => ({
-    id: "prog-1",
-    header: "Downloading",
-    name: "sub.srt",
-    value: 1,
-    count: 5,
-    ...overrides,
-  });
-
-  it("always calls showNotification (pending) before updateNotification", () => {
-    update("progress", [item()]);
-
-    expect(showNotificationMock).toHaveBeenCalledTimes(1);
-    expect(updateNotificationMock).toHaveBeenCalledTimes(1);
-
-    // showNotification must come before updateNotification
-    const showOrder = showNotificationMock.mock.invocationCallOrder[0];
-    const updateOrder = updateNotificationMock.mock.invocationCallOrder[0];
-    expect(showOrder).toBeLessThan(updateOrder);
-  });
-
-  it("showNotification receives a pending notification with the correct id and header", () => {
-    update("progress", [item({ id: "x1", header: "Syncing" })]);
-
-    expect(showNotificationMock).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "x1", title: "Syncing", loading: true }),
-    );
-  });
-
-  it("calls updateNotification with an in-progress payload when value < count", () => {
-    update("progress", [item({ value: 2, count: 10 })]);
-
-    expect(updateNotificationMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: "prog-1",
-        loading: true,
-        autoClose: false,
-        message: expect.stringContaining("2/10"),
-      }),
-    );
-  });
-
-  it("calls updateNotification with a completion payload when value === count", () => {
-    update("progress", [item({ value: 5, count: 5, header: "Done" })]);
-
-    expect(updateNotificationMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: "prog-1",
-        message: "All Tasks Completed",
-        color: "green",
-      }),
-    );
-  });
-
-  it("calls updateNotification with a completion payload when value > count", () => {
-    update("progress", [item({ value: 6, count: 5 })]);
-
-    expect(updateNotificationMock).toHaveBeenCalledWith(
-      expect.objectContaining({ message: "All Tasks Completed" }),
-    );
-  });
-
-  it("handles multiple items in one event, calling show+update for each", () => {
-    update("progress", [
-      item({ id: "a", value: 1, count: 3 }),
-      item({ id: "b", value: 3, count: 3 }),
-    ]);
-
-    expect(showNotificationMock).toHaveBeenCalledTimes(2);
-    expect(updateNotificationMock).toHaveBeenCalledTimes(2);
-  });
-
-  it("delete: calls hideNotification for each id (inside setTimeout)", () => {
-    vi.useFakeTimers();
-
-    del("progress", ["prog-1", "prog-2"]);
-
-    // Not yet called — it's behind a setTimeout
-    expect(hideNotificationMock).not.toHaveBeenCalled();
-
-    vi.runAllTimers();
-
-    expect(hideNotificationMock).toHaveBeenCalledWith("prog-1");
-    expect(hideNotificationMock).toHaveBeenCalledWith("prog-2");
-
-    vi.useRealTimers();
-  });
-
-  it("progress pending notification has loading: true and no autoClose", () => {
-    update("progress", [item()]);
-    const pendingCall = showNotificationMock.mock.calls[0][0] as Record<
-      string,
-      unknown
-    >;
-    expect(pendingCall.loading).toBe(true);
-    // Pending notifications should not auto-close
-    expect(pendingCall.autoClose).toBeUndefined();
   });
 });
 

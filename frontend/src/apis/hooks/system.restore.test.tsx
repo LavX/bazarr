@@ -5,7 +5,7 @@ import { renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useRestoreBackups } from "@/apis/hooks/system";
 import { QueryKeys } from "@/apis/queries/keys";
-import { notification } from "@/modules/task";
+import { notification } from "@/modules/notification";
 
 const restoreBackups = vi.hoisted(() =>
   vi.fn().mockResolvedValue({

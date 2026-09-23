@@ -58,7 +58,7 @@ import SubtitleToolsModal, {
   SportsToolsItem,
 } from "@/components/modals/SubtitleToolsModal";
 import { useModals } from "@/modules/modals";
-import { notification } from "@/modules/task";
+import { notification } from "@/modules/notification";
 import ItemOverview from "@/pages/views/ItemOverview";
 import { useLanguageProfileBy } from "@/utilities/languages";
 import { navigateApp } from "@/utilities/whatsNew";

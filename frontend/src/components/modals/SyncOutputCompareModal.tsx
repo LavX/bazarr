@@ -13,7 +13,7 @@ import {
 import { showNotification } from "@mantine/notifications";
 import { usePromoteSyncSubtitle } from "@/apis/hooks";
 import api from "@/apis/raw";
-import { notification } from "@/modules/task";
+import { notification } from "@/modules/notification";
 import { formatTimestamp } from "@/pages/SubtitleEditor/CueTable";
 import { getParser } from "@/pages/SubtitleEditor/parsers";
 import type { SubtitleFormat } from "@/pages/SubtitleEditor/types";
