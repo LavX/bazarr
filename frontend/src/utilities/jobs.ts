@@ -85,6 +85,25 @@ function settle(jobId: number, job: JobRecord | undefined) {
   }
 }
 
+export const UNKNOWN_JOB_OUTCOME =
+  "Bazarr+ no longer reports this job, so whether it worked is not known.";
+
+function settleUnknown(jobId: number) {
+  const list = waiters.get(jobId);
+  if (list === undefined) {
+    return;
+  }
+  // Reuses settle's cleanup with a synthetic failed record.
+  settle(jobId, {
+    // eslint-disable-next-line camelcase
+    job_id: jobId,
+    // eslint-disable-next-line camelcase
+    job_name: "",
+    status: "failed",
+    error: UNKNOWN_JOB_OUTCOME,
+  } as JobRecord);
+}
+
 function checkCache(client: QueryClient) {
   const jobs = client.getQueryData<JobRecord[]>(JOBS_KEY) ?? [];
   for (const [jobId, entries] of Array.from(waiters.entries())) {
@@ -112,12 +131,12 @@ function pollOnce() {
           }
           continue;
         }
-        // Absent from a list read after the wait began: the backend keeps
-        // pending and running jobs in full and only the last few finished
-        // ones, so this job finished and has aged out. Its outcome is gone
-        // with it; the caller refetches whatever the job changed.
+        // Absent from a list read after the wait began: the job was removed,
+        // the backend restarted, or it finished and aged out of the short
+        // history. None of those says it worked, so it is not reported as
+        // success.
         if (pending.every((waiter) => waiter.registeredAt <= startedAt)) {
-          settle(jobId, undefined);
+          settleUnknown(jobId);
         }
       }
     })
@@ -128,7 +147,8 @@ function pollOnce() {
 
 /**
  * Resolves with the job once it completed, rejects with a JobFailedError
- * carrying the job's reason once it failed. A null id, which the backend
+ * carrying the job's reason once it failed, or once the backend stops
+ * reporting it at all. A null id, which the backend
  * answers when it could not queue anything to follow, resolves at once.
  */
 export function waitForJob(

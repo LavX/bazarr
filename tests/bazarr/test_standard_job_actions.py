@@ -605,3 +605,23 @@ def test_a_sports_download_that_publishes_completes(queue, monkeypatch):
     assert job["job_name"] == "Manually downloaded Subtitles for Final"
     assert job["job_returned_value"] == {"event": {"id": 61}, "publication": {"published": True}}
     assert {"type": "sports", "action": "update", "payload": 61} in events
+
+
+def test_a_sports_download_published_with_warnings_says_so_on_its_job(queue, monkeypatch):
+    from sportarr import library, manual_jobs
+    from sportarr import subtitles as sports_subtitles
+
+    monkeypatch.setattr(manual_jobs, "database",
+                        SimpleNamespace(get=lambda *a, **k: SimpleNamespace(title="Final")))
+    monkeypatch.setattr(manual_jobs, "event_stream", lambda **kwargs: None)
+    warning = "Subtitle published; index did not complete. Index refresh failed; no refresh queued."
+    monkeypatch.setattr(sports_subtitles, "manual_download_sports",
+                        lambda *args, **kwargs: SimpleNamespace(publication={
+                            "published": True, "status": "published_with_warnings", "message": warning}))
+    monkeypatch.setattr(library, "get_event", lambda *args: {"id": 61})
+    manual_jobs.sports_manually_download_subtitle(61, {"subtitle": "cached"}, 1)
+    job = run_next(queue)
+
+    assert job["status"] == "completed"
+    assert job["job_name"] == "Downloaded Subtitles with warnings for Final"
+    assert job["progress_message"] == warning

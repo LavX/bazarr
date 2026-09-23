@@ -39,7 +39,18 @@ def sports_manually_download_subtitle(event_id, candidate, arr_instance_id=None,
         jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Failed to download Subtitles for {title}")
         fail_job(job_id, str(error).strip() or DOWNLOAD_FALLBACK, error)
 
-    jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Manually downloaded Subtitles for {title}")
+    publication = result.publication if isinstance(result.publication, dict) else {}
+    if publication.get("status") == "published_with_warnings":
+        # Published, so not a failed download, but part of the work after the
+        # write did not finish. The warning names what, and what to do, so it
+        # goes on the job where the drawer shows it.
+        jobs_queue.update_job_name(job_id=job_id,
+                                   new_job_name=f"Downloaded Subtitles with warnings for {title}")
+        if publication.get("message"):
+            jobs_queue.update_job_progress(job_id=job_id, progress_message=publication["message"],
+                                           allow_cancelled=True)
+    else:
+        jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Manually downloaded Subtitles for {title}")
     try:
         event = library.get_event(database, event_id, arr_instance_id)
     except Exception:

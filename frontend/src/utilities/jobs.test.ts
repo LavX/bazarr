@@ -2,7 +2,12 @@ import { QueryClient } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
-import { JOB_FALLBACK_POLL_MS, JobFailedError, waitForJob } from "./jobs";
+import {
+  JOB_FALLBACK_POLL_MS,
+  JobFailedError,
+  UNKNOWN_JOB_OUTCOME,
+  waitForJob,
+} from "./jobs";
 
 vi.mock("@/apis/raw", () => ({
   default: { system: { jobs: vi.fn() } },
@@ -105,5 +110,15 @@ describe("waitForJob", () => {
     await outcome;
     // One request for everything waiting, not one per job.
     expect(mockedJobs).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not report a job the backend no longer lists as a success", async () => {
+    vi.useFakeTimers();
+    mockedJobs.mockImplementation(async () => []);
+    const waiting = waitForJob(client, 5);
+    const outcome = expect(waiting).rejects.toThrow(UNKNOWN_JOB_OUTCOME);
+
+    await vi.advanceTimersByTimeAsync(JOB_FALLBACK_POLL_MS);
+    await outcome;
   });
 });
