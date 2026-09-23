@@ -6,7 +6,7 @@ import { isObject } from "lodash";
 import { useSubtitleAction, useSystemSettings } from "@/apis/hooks";
 import { Selector } from "@/components/inputs";
 import { useModals, withModal } from "@/modules/modals";
-import { notification } from "@/modules/task";
+import { notification } from "@/modules/notification";
 import { useSelectorOptions } from "@/utilities";
 import FormUtils from "@/utilities/form";
 import { useEnabledLanguages } from "@/utilities/languages";

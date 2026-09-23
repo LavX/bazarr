@@ -26,7 +26,7 @@ import {
   Selector,
 } from "@/components/inputs";
 import { useModals, withModal } from "@/modules/modals";
-import { notification } from "@/modules/task";
+import { notification } from "@/modules/notification";
 import { syncMaxOffsetSecondsOptions } from "@/pages/Settings/Subtitles/options";
 import { fromPython, toPython } from "@/utilities";
 

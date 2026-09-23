@@ -1,14 +1,8 @@
-import {
-  hideNotification,
-  showNotification,
-  updateNotification,
-} from "@mantine/notifications";
 import { isArray, isEmpty, isNumber } from "lodash";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { notifyJobOutcome, resetJobNotifications } from "@/modules/jobs";
-import { notification } from "@/modules/task";
 import { LOG } from "@/utilities/console";
 import { setOnlineStatus } from "@/utilities/event";
 
@@ -37,51 +31,6 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
     {
       key: "disconnect",
       any: () => setOnlineStatus(false),
-    },
-    {
-      key: "message",
-      update: (msg) => {
-        msg
-          .map((message) => notification.info("Notification", message))
-          .forEach((data) => showNotification(data));
-      },
-    },
-    {
-      key: "progress",
-      update: (items) => {
-        items.forEach((item) => {
-          // Ensure the notification exists before updating it. showNotification
-          // is a no-op when a notification with this id is already displayed.
-          showNotification(notification.progress.pending(item.id, item.header));
-
-          // Translation progress can reach 100 while the sidecar is finalizing.
-          // Its explicit delete event owns completion, including failed jobs.
-          if (
-            item.value >= item.count &&
-            !item.id.startsWith("translate_progress_")
-          ) {
-            updateNotification(notification.progress.end(item.id, item.header));
-          } else {
-            updateNotification(
-              notification.progress.update(
-                item.id,
-                item.header,
-                item.name,
-                item.value,
-                item.count,
-              ),
-            );
-          }
-        });
-      },
-      delete: (ids) => {
-        // hide_progress fires when a job finishes or is cancelled. Give the
-        // user a moment to read the final state before closing.
-        setTimeout(
-          () => ids.forEach((id) => hideNotification(id)),
-          notification.PROGRESS_TIMEOUT,
-        );
-      },
     },
     {
       key: "series",

@@ -56,7 +56,7 @@ import { SeriesUploadModal } from "@/components/forms/SeriesUploadForm";
 import { SubtitleDownloadModal } from "@/components/forms/SubtitleDownloadForm";
 import { SubtitleToolsModal } from "@/components/modals";
 import { useModals } from "@/modules/modals";
-import { notification } from "@/modules/task";
+import { notification } from "@/modules/notification";
 import ItemOverview from "@/pages/views/ItemOverview";
 import { RouterNames } from "@/Router/RouterNames";
 import { useLanguageProfileBy } from "@/utilities/languages";

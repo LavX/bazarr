@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { isAxiosError } from "axios";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
-import { notification } from "@/modules/task";
+import { notification } from "@/modules/notification";
 import { Environment } from "@/utilities";
 import { setAuthenticated } from "@/utilities/event";
 

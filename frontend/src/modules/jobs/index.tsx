@@ -4,7 +4,7 @@ import { hideNotification, showNotification } from "@mantine/notifications";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
-import { notification } from "@/modules/task";
+import { notification } from "@/modules/notification";
 
 /**
  * The standard outcome of a job: one notification when it finishes, and the

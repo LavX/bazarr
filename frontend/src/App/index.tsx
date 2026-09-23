@@ -27,7 +27,7 @@ import ErrorBoundary from "@/components/ErrorBoundary";
 import { useWhatsNewAutoOpen } from "@/components/modals/useWhatsNewAutoOpen";
 import NavbarProvider from "@/contexts/Navbar";
 import OnlineProvider from "@/contexts/Online";
-import { notification } from "@/modules/task";
+import { notification } from "@/modules/notification";
 import CriticalError from "@/pages/errors/CriticalError";
 import { useOnboardingState } from "@/pages/Setup/useOnboardingState";
 import { RouterNames } from "@/Router/RouterNames";

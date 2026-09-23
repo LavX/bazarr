@@ -49,7 +49,7 @@ import { SubtitleDownloadModal } from "@/components/forms/SubtitleDownloadForm";
 import { MovieHistoryModal, SubtitleToolsModal } from "@/components/modals";
 import { MovieSearchModal } from "@/components/modals/ManualSearchModal";
 import { useModals } from "@/modules/modals";
-import { notification } from "@/modules/task";
+import { notification } from "@/modules/notification";
 import ItemOverview from "@/pages/views/ItemOverview";
 import { RouterNames } from "@/Router/RouterNames";
 import { useLanguageProfileBy } from "@/utilities/languages";

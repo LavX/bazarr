@@ -4,7 +4,7 @@ import { refreshWhenJobFinishes } from "@/apis/hooks/jobWatch";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { BatchAction, BatchItem, BatchOptions } from "@/apis/raw/subtitles";
-import { notification } from "@/modules/task";
+import { notification } from "@/modules/notification";
 import { filenameFromContentDisposition, saveBlobAs } from "@/utilities/files";
 
 export function useSubtitleAction() {
