@@ -92,9 +92,9 @@ def migrate_legacy_plex_encryption(settings_obj) -> None:
     blob as the auth token after decrypt - breaking OAuth users on
     upgrade.
 
-    Approach: when plex.encryption_key is non-empty, attempt
-    `TokenManager.decrypt` on every legacy field. URLSafeSerializer
-    raises on plaintext / empty / already-unified-marker values, so
+    Approach: when plex.encryption_key is non-empty, attempt a
+    URLSafeSerializer load (the legacy TokenManager format) on every
+    legacy field. URLSafeSerializer raises on plaintext / empty / already-unified-marker values, so
     the same code path covers both the apikey-encrypted flag case AND
     the OAuth-no-flag case without false positives.
     """
@@ -120,18 +120,13 @@ def migrate_legacy_plex_encryption(settings_obj) -> None:
             )
         return
 
-    # Lazy import - keeps the secret_store package usable without a full
-    # bazarr environment for the simpler tests.
-    try:
-        from api.plex.security import TokenManager  # noqa: PLC0415, RUF100
-    except Exception as e:  # pragma: no cover
-        logger.error(
-            f"Cannot load legacy Plex TokenManager for migration: "  # noqa: G004
-            f"{type(e).__name__}; leaving legacy values in place."
-        )
-        return
+    # Decode the legacy payload with itsdangerous directly. Importing
+    # api.plex.security here would load the whole api package, which
+    # imports app.config while app.config is still running this migration,
+    # so the import always failed at startup.
+    from itsdangerous import URLSafeSerializer
 
-    token_manager = TokenManager(legacy_key)
+    serializer = URLSafeSerializer(legacy_key)
     migrated_any = False
     for field in _PLEX_LEGACY_FIELDS:
         ciphertext = plex.get(field, "") if hasattr(plex, "get") \
@@ -143,7 +138,10 @@ def migrate_legacy_plex_encryption(settings_obj) -> None:
             # commit 2 deploy and this migration running). Nothing to do.
             continue
         try:
-            plaintext = token_manager.decrypt(ciphertext)
+            payload = serializer.loads(ciphertext)
+            plaintext = payload["token"]
+            if not isinstance(plaintext, str) or not plaintext:
+                continue
         except Exception:
             # URLSafeSerializer rejects this payload. Two legitimate
             # causes: the value was already plaintext (fresh manual
