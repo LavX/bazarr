@@ -242,6 +242,35 @@ describe("the providers step is not a dead end", () => {
     );
   });
 
+  it("takes Back away while the install runs", async () => {
+    // Back moves the cursor itself, which unmounts the step before any
+    // history guard can see it.
+    let settle: (() => void) | undefined;
+    mutateAsync.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          settle = resolve;
+        }),
+    );
+    const user = userEvent.setup();
+    openProvidersStep(["/setup/languages", "/setup/providers"]);
+
+    await user.click(
+      await screen.findByRole("checkbox", { name: /opensubtitles/i }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: /install .{0,3} restart/i }),
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: /^back$/i }),
+      ).not.toBeInTheDocument(),
+    );
+
+    settle?.();
+  });
+
   it("browser Back does not leave the install running into nothing", async () => {
     // The skip is hidden while a run is going, but the address bar is another
     // way out of the same screen: going back unmounted the stage while the

@@ -373,7 +373,11 @@ const OnboardingWizardBody: FunctionComponent = () => {
           <StepComponent
             key={current.key}
             onNext={next}
-            onBack={index > 0 ? back : undefined}
+            // No Back while the step is finishing work either. Back moves the
+            // cursor itself, which unmounts the step before any history guard
+            // can see it, and an install that loses its screen still restarts
+            // Bazarr+ at a reader who is no longer there.
+            onBack={index > 0 && !stepBusy ? back : undefined}
             draftId={current.draftId}
             stepKey={current.key}
           />
