@@ -502,3 +502,28 @@ def series_scan_subtitles(no, arr_instance_id=None):
                         path_mappings.path_replace_instance(episode.path,
                                                             episode.arr_instance_id, 'series'),
                         use_cache=False, arr_instance_id=episode.arr_instance_id, ownership_index=ownership_index)
+
+
+def series_scan_disk(series_id, arr_instance_id=None, job_id=None):
+    """Scan disk for one series from its detail page, as a queued job.
+
+    The request used to run the whole scan itself, one ffprobe pass per
+    episode, which held the page's request for as long as the series took and
+    reported nothing while it did.
+    """
+    if not job_id:
+        return jobs_queue.add_job_from_function("Scanning disk for series subtitles", is_progress=False)
+
+    from app.job_errors import fail_job, reason_of
+
+    show = database.execute(
+        scoped(select(TableShows.title).where(TableShows.sonarrSeriesId == series_id),
+               TableShows.arr_instance_id, arr_instance_id)).first()
+    if not show:
+        fail_job(job_id, f"Scanning disk failed: series {series_id} is no longer in the library")
+    jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Scanning disk for {show.title}")
+    try:
+        series_scan_subtitles(series_id, arr_instance_id=arr_instance_id)
+    except Exception as error:
+        fail_job(job_id, f"Scanning disk for {show.title} failed: {reason_of(error)}", error)
+    event_stream(type='series', payload=series_id)

@@ -284,8 +284,7 @@ def post_settings(profile_db, monkeypatch):
 
     monkeypatch.setattr(endpoint, "database", profile_db)
     monkeypatch.setattr(endpoint, "event_stream", lambda *a, **kw: None)
-    monkeypatch.setattr(endpoint, "list_missing_subtitles", lambda *a, **kw: None)
-    monkeypatch.setattr(endpoint, "list_missing_subtitles_movies", lambda *a, **kw: None)
+    monkeypatch.setattr(endpoint, "queue_missing_subtitles_recalculation", lambda *a, **kw: None)
 
     from arr_instances import resolution
     monkeypatch.setattr(resolution, "database", profile_db, raising=False)

@@ -3,10 +3,7 @@ import { Button, Divider, Group, NumberInput, Stack } from "@mantine/core";
 import { useForm } from "@mantine/form";
 import { useSubtitleAction } from "@/apis/hooks";
 import { useModals, withModal } from "@/modules/modals";
-import { task } from "@/modules/task";
 import FormUtils from "@/utilities/form";
-
-const TaskName = "Changing Frame Rate";
 
 function convertToAction(from: number, to: number) {
   return `change_FPS(from=${from},to=${to})`;
@@ -18,7 +15,7 @@ interface Props {
 }
 
 const FrameRateForm: FunctionComponent<Props> = ({ selections, onSubmit }) => {
-  const { mutateAsync } = useSubtitleAction();
+  const { mutate } = useSubtitleAction();
   const modals = useModals();
 
   const form = useForm({
@@ -44,7 +41,7 @@ const FrameRateForm: FunctionComponent<Props> = ({ selections, onSubmit }) => {
         const action = convertToAction(from, to);
 
         selections.forEach((s) =>
-          task.create(s.path, TaskName, mutateAsync, {
+          mutate({
             action,
             form: s,
           }),

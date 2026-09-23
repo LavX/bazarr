@@ -1645,17 +1645,11 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             update_subzero = True
 
     if use_embedded_subs_changed or undefined_audio_track_default_changed or adaptive_searching_max_age_changed:
-        from .scheduler import scheduler
-        from subtitles.indexer.series import list_missing_subtitles
-        from subtitles.indexer.movies import list_missing_subtitles_movies
-        if settings.general.use_sonarr:
-            list_missing_subtitles()
-        if settings.general.use_radarr:
-            list_missing_subtitles_movies()
-
-        if settings.general.use_sportarr:
-            from subtitles.indexer.sports import list_missing_subtitles_sports
-            list_missing_subtitles_sports()
+        # Queued rather than run here: this is inside the settings save
+        # request, and a library-wide pass held it long enough for a proxy to
+        # time out a save that had already been written.
+        from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
+        queue_missing_subtitles_recalculation()
 
     if undefined_subtitles_track_default_changed:
         from .scheduler import scheduler

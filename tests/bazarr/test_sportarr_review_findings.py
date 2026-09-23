@@ -601,7 +601,10 @@ def test_applying_mods_to_a_recording_announces_a_sports_event(monkeypatch, tmp_
     announced = []
     reindexed = []
 
-    monkeypatch.setattr(mods, 'subtitles_apply_mods', lambda **kwargs: None)
+    from sportarr import notify
+
+    monkeypatch.setattr(mods, 'subtitles_apply_mods', lambda **kwargs: str(subtitle))
+    monkeypatch.setattr(notify, 'notify_rescan', lambda owner: None)
     monkeypatch.setattr(event_handler, 'event_stream',
                         lambda **kwargs: announced.append(kwargs))
     monkeypatch.setattr(sports_indexer, 'store_subtitles_sports',

@@ -10,8 +10,9 @@ from werkzeug.datastructures import FileStorage
 from app.database import (database, select, TableArrInstances, TableSportsEvents,
                           TableSportsLeagues)
 from subliminal_patch.core import SUBTITLE_EXTENSIONS
-from sportarr import library
-from sportarr.subtitles import manual_search_sports, manual_download_sports
+from sportarr.identity import resolve_event_in_session
+from sportarr.manual_jobs import sports_manually_download_subtitle
+from sportarr.subtitles import manual_search_sports
 from .leagues import _body, _optional_owner, _owner
 from ..utils import authenticate
 from sportarr.errors import SportsNotFound
@@ -97,25 +98,22 @@ class SportsDownload(Resource):
         try:
             body = _body()
             owner = _owner(body.get("arr_instance_id"))
-            result = manual_download_sports(event_id, body.get("candidate"), owner)
-            try:
-                event = library.get_event(database, event_id, owner)
-            except Exception:
-                # Publication already happened. A later owner/read failure must
-                # not turn the response into an ordinary failed download.
-                event = None
-            return {"event": event, "publication": result.publication}, 200
+            candidate = body.get("candidate")
+            if not isinstance(candidate, dict) or not isinstance(candidate.get("subtitle"), str):
+                raise ValueError("A cached subtitle result is required")
+            # Answered here rather than by the job: a missing event or a
+            # malformed request is the caller's to fix, and a 404 or 400 says so
+            # at once.
+            resolve_event_in_session(database, event_id, owner)
         except SportsNotFound as exc:
             return {'message': str(exc)}, 404
         except ValueError as exc:
             return {"message": str(exc)}, 400
-        except OSError as exc:
-            # Same contract as the search route above: the reason is the
-            # sentence manual_download_subtitle returned, and the constant only
-            # covers a raise that carried none.
-            return {
-                "message": str(exc) or "Subtitle was not published. Check the file and provider before trying again."
-            }, 409
+        # Queued like the library's manual download. The job raises with the
+        # reason the download or its publication failed, which is the
+        # sentence this route used to answer 409 with.
+        job_id = sports_manually_download_subtitle(event_id, candidate, owner)
+        return {"job_id": job_id or None}, 202
 
 
 @api_ns_sports_subtitles.route("/sports/events/<int:event_id>/subtitles/combine")

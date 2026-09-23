@@ -81,39 +81,54 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
     """Job-aware wrapper for subtitles_apply_mods.
 
     When called without a job_id, queues the work as a backend job and returns
-    immediately. When called with a job_id (by the job queue consumer), does the
-    actual work and handles post-processing (store_subtitles, event_stream, chmod).
+    its id immediately. When called with a job_id (by the job queue consumer),
+    does the actual work and handles post-processing (store_subtitles,
+    event_stream, chmod). A mod that could not be applied raises with the
+    reason, which is what marks the job failed.
     """
     if not job_id:
         # No local variables can be assigned before add_job_from_function because
         # it introspects the frame and re-passes all locals as kwargs on re-invocation.
-        jobs_queue.add_job_from_function(
+        return jobs_queue.add_job_from_function(
             (lambda m, p: f'{MOD_LABELS.get(m, m)}: {os.path.basename(p)}')(
                 mods[0] if mods else 'mods', subtitle_path),
             is_progress=False,
         )
-        return
+
+    from app.job_errors import fail_job, reason_of
 
     mod_label = MOD_LABELS.get(mods[0], mods[0]) if mods else 'Apply Mods'
     filename = os.path.basename(subtitle_path)
 
     try:
-        subtitles_apply_mods(language=language, subtitle_path=subtitle_path,
-                             mods=mods, video_path=video_path,
-                             arr_instance_id=arr_instance_id, media_type=media_type,
-                             **({'sports_event_id': media_id} if media_type == 'sports' else {}))
-    except Exception:
+        output_path = subtitles_apply_mods(language=language, subtitle_path=subtitle_path,
+                                           mods=mods, video_path=video_path,
+                                           arr_instance_id=arr_instance_id, media_type=media_type,
+                                           **({'sports_event_id': media_id} if media_type == 'sports' else {}))
+    except Exception as error:
         jobs_queue.update_job_name(
             job_id=job_id,
             new_job_name=f'Failed {mod_label}: {filename}',
         )
-        raise
+        fail_job(job_id, f'{mod_label} failed on {filename}: {reason_of(error)}', error)
 
-    # apply chmod if required
+    if not output_path:
+        # subtitles_apply_mods answers None for a file it cannot parse and for a
+        # mod that produced nothing to write. Nothing changed on disk, and the
+        # request that queued this used to answer 409 for it.
+        jobs_queue.update_job_name(
+            job_id=job_id,
+            new_job_name=f'Failed {mod_label}: {filename}',
+        )
+        fail_job(job_id, f'{mod_label} failed on {filename}: the subtitle file could not be read '
+                         f'or the mod produced no content')
+
+    # apply chmod if required. Remove HI can rename the file, so the one to
+    # chmod is the output, not the path the request named.
     chmod = int(settings.general.chmod, 8) if not sys.platform.startswith(
         'win') and settings.general.chmod_enabled else None
-    if chmod and os.path.exists(subtitle_path):
-        os.chmod(subtitle_path, chmod)
+    if chmod and os.path.exists(output_path):
+        os.chmod(output_path, chmod)
 
     # re-index subtitles so Bazarr's DB picks up the changes
     from subtitles.indexer.series import store_subtitles
@@ -157,6 +172,13 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
             except Exception:
                 logging.exception('BAZARR could not reindex sports event %s after applying mods',
                                   media_id)
+            # The file publication already reached every media server; only
+            # Sportarr still needs its own rescan, as the request path did.
+            try:
+                from sportarr.notify import notify_rescan
+                notify_rescan(arr_instance_id)
+            except Exception:
+                logging.exception('BAZARR could not ask Sportarr to rescan after applying mods')
             event_stream(type='sports', action='update', payload=media_id)
         else:
             event_stream(type='movie', payload=media_id)

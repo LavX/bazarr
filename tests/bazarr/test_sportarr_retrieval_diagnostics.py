@@ -62,87 +62,116 @@ def _failing(*args, **kwargs):
     raise OSError()
 
 
-@pytest.mark.parametrize("reason", KNOWN_REASONS + (SPORTS_FALLBACK_REASON,))
-def test_the_download_route_repeats_the_reason_it_was_given(monkeypatch, reason):
+@pytest.fixture
+def download_job(monkeypatch):
+    """Run the queued sports download job inline against a stubbed download."""
+    from app.jobs_queue import jobs_queue
+    from sportarr import manual_jobs
+    from sportarr import subtitles as sports_subtitles
+
+    monkeypatch.setattr(manual_jobs, "database", SimpleNamespace(get=lambda *a, **k: SimpleNamespace(title="Match")))
+    monkeypatch.setattr(manual_jobs, "event_stream", lambda **kwargs: None)
+    monkeypatch.setattr(jobs_queue, "update_job_name", lambda **kwargs: True)
+    progress = []
+    monkeypatch.setattr(jobs_queue, "update_job_progress",
+                        lambda **kwargs: progress.append(kwargs.get("progress_message")) or True)
+
+    def run(download):
+        monkeypatch.setattr(sports_subtitles, "manual_download_sports", download)
+        return manual_jobs.sports_manually_download_subtitle(
+            61, {"subtitle": "cached"}, 1, job_id=9)
+
+    run.progress = progress
+    return run
+
+
+@pytest.fixture
+def queued(monkeypatch):
     from api.sports import subtitles as api_mod
+
+    calls = []
+    monkeypatch.setattr(api_mod, "resolve_event_in_session", lambda *args, **kwargs: None)
+    monkeypatch.setattr(api_mod, "sports_manually_download_subtitle",
+                        lambda *args: calls.append(args) or 5)
+    return calls
+
+
+def test_the_download_route_queues_a_job_and_answers_at_once(queued):
+    assert download(arr_instance_id=1, candidate={"subtitle": "cached"}) == ({"job_id": 5}, 202)
+    assert queued == [(61, {"subtitle": "cached"}, 1)]
+
+
+@pytest.mark.parametrize("reason", KNOWN_REASONS + (SPORTS_FALLBACK_REASON,))
+def test_the_download_job_fails_with_the_reason_it_was_given(download_job, reason):
+    from app.job_errors import JobFailed
 
     def fails(*args):
         raise OSError(reason)
 
-    monkeypatch.setattr(api_mod, "manual_download_sports", fails)
-    body, status = download(arr_instance_id=1, candidate={"subtitle": "cached"})
-    assert status == 409
-    assert body == {"message": reason}
+    with pytest.raises(JobFailed) as failure:
+        download_job(fails)
+    assert str(failure.value) == reason
+    # The reason is on the job too, where the jobs drawer shows it.
+    assert download_job.progress == [reason]
 
 
-def test_the_search_route_repeats_the_reason_it_was_given(monkeypatch):
+def test_a_reasonless_failure_still_says_something(monkeypatch, download_job):
+    """An argument-less OSError from anywhere below must not fail the job with
+    a blank reason, which would leave the user with a failure and nothing to
+    read."""
     from api.sports import subtitles as api_mod
-
-    def fails(*args):
-        raise OSError("All providers are throttled")
-
-    monkeypatch.setattr(api_mod, "manual_search_sports", fails)
-    body, status = search(arr_instance_id=1, language="en")
-    assert status == 409
-    assert body == {"message": "All providers are throttled"}
-
-
-def test_a_reasonless_failure_still_says_something(monkeypatch):
-    """An argument-less OSError from anywhere below must not answer a blank
-    message, which would leave the user with a 409 and nothing to read."""
-    from api.sports import subtitles as api_mod
+    from app.job_errors import JobFailed
 
     monkeypatch.setattr(api_mod, "manual_search_sports", _failing)
     assert search(arr_instance_id=1, language="en") == ({"message": SEARCH_FALLBACK}, 409)
 
-    monkeypatch.setattr(api_mod, "manual_download_sports", _failing)
-    assert download(arr_instance_id=1, candidate={"subtitle": "cached"}) == (
-        {"message": DOWNLOAD_FALLBACK},
-        409,
-    )
+    with pytest.raises(JobFailed) as failure:
+        download_job(_failing)
+    assert str(failure.value) == DOWNLOAD_FALLBACK
 
 
-def test_the_not_found_and_malformed_branches_are_unchanged(monkeypatch):
+def test_the_not_found_and_malformed_branches_are_unchanged(monkeypatch, queued):
     from api.sports import subtitles as api_mod
     from sportarr.errors import SportsNotFound
 
-    def missing(*args):
+    def missing(*args, **kwargs):
         raise SportsNotFound("Sports event not found for this owner")
 
-    def malformed(*args):
+    def malformed(*args, **kwargs):
         raise ValueError("A valid subtitle language and boolean variants are required")
 
-    for attribute, call, body in (
-        ("manual_search_sports", search, dict(arr_instance_id=1, language="en")),
-        ("manual_download_sports", download, dict(arr_instance_id=1, candidate={"subtitle": "cached"})),
-    ):
-        monkeypatch.setattr(api_mod, attribute, missing)
-        assert call(**body) == ({"message": "Sports event not found for this owner"}, 404)
-        monkeypatch.setattr(api_mod, attribute, malformed)
-        assert call(**body) == (
-            {"message": "A valid subtitle language and boolean variants are required"},
-            400,
-        )
+    monkeypatch.setattr(api_mod, "manual_search_sports", missing)
+    assert search(arr_instance_id=1, language="en") == ({"message": "Sports event not found for this owner"}, 404)
+    monkeypatch.setattr(api_mod, "manual_search_sports", malformed)
+    assert search(arr_instance_id=1, language="en") == (
+        {"message": "A valid subtitle language and boolean variants are required"}, 400)
+
+    # The download route answers these before queueing anything.
+    monkeypatch.setattr(api_mod, "resolve_event_in_session", missing)
+    assert download(arr_instance_id=1, candidate={"subtitle": "cached"}) == (
+        {"message": "Sports event not found for this owner"}, 404)
+    monkeypatch.setattr(api_mod, "resolve_event_in_session", malformed)
+    assert download(arr_instance_id=1, candidate={"subtitle": "cached"}) == (
+        {"message": "A valid subtitle language and boolean variants are required"}, 400)
+    assert download(arr_instance_id=1, candidate={"subtitle": 3}) == (
+        {"message": "A cached subtitle result is required"}, 400)
+    assert download(candidate={"subtitle": "cached"})[1] == 400
+    assert queued == []
 
 
-def test_a_published_download_is_not_reported_as_a_failure(monkeypatch):
+def test_a_published_download_is_not_reported_as_a_failure(monkeypatch, download_job):
     """Publication happens before the read-back, so a later owner or read
-    failure must still answer 200 with no event rather than a 409."""
-    from api.sports import subtitles as api_mod
+    failure must still complete the job with no event rather than fail it."""
+    from sportarr import library
 
     publication = {"status": "published", "message": "Published"}
-    monkeypatch.setattr(
-        api_mod, "manual_download_sports", lambda *args: SimpleNamespace(publication=publication)
-    )
 
     def gone(*args):
         raise RuntimeError("event vanished after publication")
 
-    monkeypatch.setattr(api_mod.library, "get_event", gone)
-    assert download(arr_instance_id=1, candidate={"subtitle": "cached"}) == (
-        {"event": None, "publication": publication},
-        200,
-    )
+    monkeypatch.setattr(library, "get_event", gone)
+    assert download_job(lambda *args: SimpleNamespace(publication=publication)) == {
+        "event": None, "publication": publication}
 
 
 def _module_tree(relative_path):

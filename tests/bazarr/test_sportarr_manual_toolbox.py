@@ -133,11 +133,36 @@ def sports_toolbox(indexed_library, monkeypatch):  # noqa: F811
 
 
 def run_toolbox(endpoint, monkeypatch, **kwargs):
+    """Drive the route, then the job it queues, and answer as the route used to.
+
+    A mod is a queued job now: the route answers 202 with the job id and the
+    job raises when the mod cannot be applied. Running the job inline here keeps
+    these tests about what the mod does to the files, and maps the job outcome
+    back to the old answers, ('', 204) for success and (reason, 409) for a
+    refusal, so every assertion below still reads the way it was written.
+    """
+    from app import event_handler
+    from app.job_errors import JobFailed
+    from subtitles.tools import mods
+
+    # The job announces its result over the socket, which no test runs.
+    monkeypatch.setattr(event_handler, 'event_stream', lambda **kwargs: None)
     args = dict(action='remove_tags', language='en', path='/sports/event.en.hi.srt',
                 type='sports', id=61, arr_instance_id=1)
     args.update(kwargs)
+    queued = []
     monkeypatch.setattr(endpoint.Subtitles.patch_request_parser, 'parse_args', lambda: args)
-    return inspect.unwrap(endpoint.Subtitles.patch)(endpoint.Subtitles())
+    monkeypatch.setattr(endpoint, 'apply_subtitle_mods', lambda **kw: queued.append(kw) or 7)
+    response = inspect.unwrap(endpoint.Subtitles.patch)(endpoint.Subtitles())
+    if response[1] != 202:
+        return response
+    assert response == ({'job_id': 7}, 202)
+    assert len(queued) == 1
+    try:
+        mods.apply_subtitle_mods(**queued[0], job_id=7)
+    except JobFailed as failure:
+        return str(failure), 409
+    return '', 204
 
 
 def test_toolbox_maps_indexed_remote_sidecar_before_editing(sports_toolbox, monkeypatch):
