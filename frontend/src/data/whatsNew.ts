@@ -10,6 +10,7 @@ import {
   faFilm,
   faGaugeHigh,
   faLayerGroup,
+  faListCheck,
   faMagnifyingGlass,
   faPaperPlane,
   faScaleBalanced,
@@ -109,7 +110,7 @@ export const whatsNew: Record<string, WhatsNewSlide[]> = {
     },
     {
       title: "Search subtitles for any title, owned or not",
-      body: "Look up any film or show by title and search your providers for it, even with an empty library and no Sonarr or Radarr connected. Each provider reports its own progress as it runs, the result opens as a formatted preview under the row, and Download saves the file straight to the device you are reading on. Browsing and refreshing never contact a subtitle provider: only a search you asked for does.",
+      body: "Look up any film or show by title and search your providers for it, even with an empty library and no Sonarr or Radarr connected. Each provider reports its own progress as it runs, the result opens as a formatted preview under the row, and Download saves the file straight to the device you are reading on. Browsing and refreshing never contact a subtitle provider: only a search you asked for does. The download runs as a job, and when the file is ready a notification offers Save, which keeps it for up to 30 minutes.",
       icon: faMagnifyingGlass,
       cta: { label: "Open Discover", to: "/discover" },
     },
@@ -118,6 +119,11 @@ export const whatsNew: Record<string, WhatsNewSlide[]> = {
       body: "A search across 36 providers used to show nothing until the last one answered, although the progress bar was already counting results. Rows now appear as each provider finishes, in the order they arrive, and you can download one while the rest are still working: on a real install the first rows landed at 6 seconds on a search that finished at 21. Providers are reported honestly too, so one that never got to run is no longer recorded as a timeout, and a failing site now backs off the way it does for a library search instead of being hit again every minute.",
       icon: faMagnifyingGlass,
       cta: { label: "Open Discover", to: "/discover" },
+    },
+    {
+      title: "Jobs tell you when they are done, and why they failed",
+      body: "A manual download, upload or sync that failed used to be listed as completed, and some actions never showed in the Jobs button at all. Downloads, uploads, syncs, subtitle tools, scan disk, combine, Provider Hub installs, editor translations and waveforms now all run as jobs, and saving a language profile returns at once while a Recalculating missing subtitles job does the library pass. A failed job says why in its notification and in the Jobs drawer, with Retry when another attempt can help, and a finished one that has something for you, like a Discover download, offers it right there. Tables refresh when the job finishes rather than when it is queued.",
+      icon: faListCheck,
     },
     {
       title: "No library? The app stops offering what it cannot open",
@@ -187,7 +193,7 @@ export const whatsNew: Record<string, WhatsNewSlide[]> = {
     },
     {
       title: "Translations that stall, vanish or talk over each other",
-      body: "Setting reasoning to Disabled now really disables it instead of leaving the model's own default running, which is what had jobs timing out on reasoning tokens, and a cleared setting counts as disabled too. Thanks to wouterrutgers for finding and fixing the first half of that. Progress also stays on screen until the file is published rather than ending while the service is still finalising, and two translations running at once each keep their own notification.",
+      body: "Setting reasoning to Disabled now really disables it instead of leaving the model's own default running, which is what had jobs timing out on reasoning tokens, and a cleared setting counts as disabled too. Thanks to wouterrutgers for finding and fixing the first half of that. Progress also stays visible until the file is published rather than ending while the service is still finalising, and two translations running at once each keep their own progress, on their own job in the Jobs button.",
       icon: faWandMagicSparkles,
       cta: { label: "Open Translator settings", to: "/settings/translator" },
     },
