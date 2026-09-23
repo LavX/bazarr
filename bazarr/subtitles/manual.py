@@ -20,7 +20,7 @@ from utilities.path_mappings import path_mappings
 from app.database import (database, get_profiles_list, select, TableEpisodes, TableShows, get_audio_profile_languages,
                           TableMovies)
 from app import activity
-from app.jobs_queue import jobs_queue
+from app.jobs_queue import jobs_queue, JobCancelled, JobFailed
 from app.notifier import send_notifications, send_notifications_movie
 from sonarr.history import history_log
 from radarr.history import history_log_movie
@@ -185,7 +185,8 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
     subtitle = subtitle_cache.get(subtitle)
     if subtitle is None:
         logging.error("BAZARR Subtitle not found in cache (expired or invalid ID)")
-        return 'Subtitle not found in cache. Please search again.'
+        raise JobFailed('The search result has expired. Search again and pick the subtitle from the new '
+                               'results.')
     from sportarr.subtitles import SportsCandidate, validate_candidate
     if context is not None:
         from copy import deepcopy
@@ -211,59 +212,68 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
     subtitle.mods = get_subzero_mods(arr_instance_id)
     video = get_video(force_unicode(path), title, sceneName, providers={provider}, media_type=media_type,
                       **({'context': context, 'cancel': cancel} if context is not None else {}))
-    if video:
-        try:
-            if provider:
-                download_subtitles([subtitle], _get_pool(media_type, profile_id, context=context)
-                                   if context is not None else _get_pool(media_type, profile_id))
-                logging.debug(f'BAZARR Subtitles file downloaded for this file: {path}')  # noqa: G004
-            else:
-                logging.info("BAZARR All providers are throttled")
-                return 'All providers are throttled'
-        except Exception:
-            logging.exception(f'BAZARR Error downloading Subtitles for this file {path}')  # noqa: G004
-            return 'Error downloading Subtitles'
+    if not video:
+        raise JobFailed(f'Could not read the video file {path}. Check that it exists and that the path '
+                               f'mapping is right.')
+    try:
+        if provider:
+            download_subtitles([subtitle], _get_pool(media_type, profile_id, context=context)
+                               if context is not None else _get_pool(media_type, profile_id))
+            logging.debug(f'BAZARR Subtitles file downloaded for this file: {path}')  # noqa: G004
         else:
-            if not subtitle.is_valid():
-                logging.error(f"BAZARR Downloaded subtitles isn't valid for this file: {path}")  # noqa: G004
-                return "Downloaded subtitles isn't valid. Check log."
-            if context is not None:
-                from sportarr.subtitles import save_sports_subtitle
-                return save_sports_subtitle(video, subtitle, candidate, audio_language, job_id=job_id, cancel=cancel)
-            try:
-                with subtitle_write_locks(path, os.path.join(get_target_folder(path) or os.path.dirname(path), '.destination')):
-                    saved_subtitles = _save_downloaded_subtitles(
-                        video, subtitle, path,
-                        on_publish=publication_callback(media_type, path, 'download', arr_instance_id))
+            logging.info("BAZARR All providers are throttled")
+            raise JobFailed('All providers are throttled. Try again later.')
+    except (JobFailed, JobCancelled):
+        raise
+    except Exception as e:
+        logging.exception(f'BAZARR Error downloading Subtitles for this file {path}')  # noqa: G004
+        raise JobFailed(f'Downloading the subtitle from {provider} failed: {e}') from e
+    else:
+        if not subtitle.is_valid():
+            if not subtitle.content:
+                # The pool answers False without raising when the provider is
+                # throttled, discarded or refuses the download, which leaves the
+                # subtitle empty.
+                logging.error(f"BAZARR {provider} returned no subtitle for this file: {path}")  # noqa: G004
+                raise JobFailed(f'{provider} did not return the subtitle. It may be throttled or '
+                                       f'unavailable; try again later or pick a result from another provider.')
+            logging.error(f"BAZARR Downloaded subtitles isn't valid for this file: {path}")  # noqa: G004
+            raise JobFailed(f'The subtitle downloaded from {provider} is not a valid subtitle file.')
+        if context is not None:
+            from sportarr.subtitles import save_sports_subtitle
+            return save_sports_subtitle(video, subtitle, candidate, audio_language, job_id=job_id, cancel=cancel)
+        try:
+            with subtitle_write_locks(path, os.path.join(get_target_folder(path) or os.path.dirname(path), '.destination')):
+                saved_subtitles = _save_downloaded_subtitles(
+                    video, subtitle, path,
+                    on_publish=publication_callback(media_type, path, 'download', arr_instance_id))
 
-            except Exception as e:
-                logging.exception(f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')  # noqa: G004
-                return 'Error saving Subtitles file to disk'
+        except Exception as e:
+            logging.exception(f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')  # noqa: G004
+            raise JobFailed(f'Saving the subtitle to disk failed: {e}') from e
+        else:
+            if saved_subtitles:
+                clear_mismatch_after_manual_save(video, media_type, saved_subtitles,
+                                                 arr_instance_id)
+                _, max_score, _ = _get_scores(media_type)
+                for saved_subtitle in saved_subtitles:
+                    processed_subtitle = process_subtitle(subtitle=saved_subtitle, media_type=media_type,
+                                                          audio_language=audio_language, is_upgrade=False,
+                                                          is_manual=True, path=path, max_score=max_score,
+                                                          job_id=job_id, arr_instance_id=arr_instance_id)
+                    if processed_subtitle:
+                        return processed_subtitle
+                    else:
+                        logging.debug(f"BAZARR unable to process this subtitles: {subtitle}")  # noqa: G004
+                        continue
+                raise JobFailed('The subtitle was saved but could not be processed. Check the logs.')
             else:
-                if saved_subtitles:
-                    clear_mismatch_after_manual_save(video, media_type, saved_subtitles,
-                                                     arr_instance_id)
-                    _, max_score, _ = _get_scores(media_type)
-                    for saved_subtitle in saved_subtitles:
-                        processed_subtitle = process_subtitle(subtitle=saved_subtitle, media_type=media_type,
-                                                              audio_language=audio_language, is_upgrade=False,
-                                                              is_manual=True, path=path, max_score=max_score,
-                                                              job_id=job_id, arr_instance_id=arr_instance_id)
-                        if processed_subtitle:
-                            return processed_subtitle
-                        else:
-                            logging.debug(f"BAZARR unable to process this subtitles: {subtitle}")  # noqa: G004
-                            continue
-                else:
-                    logging.error(
-                        f"BAZARR Tried to manually download a Subtitles for file: {path} but we weren't able to do "  # noqa: G004
-                        f"(probably throttled by {subtitle.provider_name}. Please retry later or select a Subtitles "
-                        f"from another provider.")
-                    return 'Something went wrong, check the logs for error'
-
-    subliminal.region.backend.sync()
-
-    logging.debug(f'BAZARR Ended manually downloading Subtitles for file: {path}')  # noqa: G004
+                logging.error(
+                    f"BAZARR Tried to manually download a Subtitles for file: {path} but we weren't able to do "  # noqa: G004
+                    f"(probably throttled by {subtitle.provider_name}. Please retry later or select a Subtitles "
+                    f"from another provider.")
+                raise JobFailed(f'No subtitle file was written, probably because {subtitle.provider_name} '
+                                       f'is throttled. Try again later or pick a result from another provider.')
 
 
 def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode_id, hi, forced, use_original_format,
@@ -289,7 +299,7 @@ def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode
         .first()
 
     if not episodeInfo:
-        return 'Episode not found', 404
+        raise JobFailed('The episode is no longer in the library.')
 
     title = episodeInfo.title
     observed = activity.register(activity.activity_id_for_job(job_id), operation='manual_download',
@@ -316,30 +326,27 @@ def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode
                                           sceneName, title, 'series', use_original_format,
                                           profile_id=episodeInfo.profileId, job_id=job_id,
                                           arr_instance_id=arr_instance_id)
-    except OSError:
-        return 'Unable to save subtitles file', 500
-    else:
-        if isinstance(result, tuple) and len(result):
-            result = result[0]
-        if isinstance(result, str):
-            return result, 500
-        elif result:
-            # The subtitle exists and its history row is about to be written.
-            # The job name flips to "downloaded" in the finally block whatever
-            # happened, so the name is not evidence and this is.
-            activity.note_publication(observed, outcome='success',
-                                      language=getattr(result, 'language', None),
-                                      provider=selected_provider)
-            history_log(2, sonarr_series_id, sonarr_episode_id, result, arr_instance_id=arr_instance_id)
-            if not settings.general.dont_notify_manual_actions:
-                send_notifications(sonarr_series_id, sonarr_episode_id, result.message,
-                                   arr_instance_id=arr_instance_id)
-            store_subtitles(result.path, episodePath, arr_instance_id=arr_instance_id)
-            return '', 204
-    finally:
-        jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Manually downloaded Subtitles for {title} - "
-                                                               f"S{episodeInfo.season:02d}E{episodeInfo.episode:02d} - "
-                                                               f"{episodeInfo.episodeTitle}")
+    except OSError as e:
+        raise JobFailed(f'Unable to save the subtitle file: {e}') from e
+    if isinstance(result, tuple) and len(result):
+        result = result[0]
+    if not result:
+        raise JobFailed('The subtitle could not be downloaded. Check the logs.')
+    # The subtitle exists and its history row is about to be written, so this
+    # is the evidence of a publication. A failure raised above instead, and
+    # the job keeps its "downloading" name next to the failed status.
+    activity.note_publication(observed, outcome='success',
+                              language=getattr(result, 'language', None),
+                              provider=selected_provider)
+    history_log(2, sonarr_series_id, sonarr_episode_id, result, arr_instance_id=arr_instance_id)
+    if not settings.general.dont_notify_manual_actions:
+        send_notifications(sonarr_series_id, sonarr_episode_id, result.message,
+                           arr_instance_id=arr_instance_id)
+    store_subtitles(result.path, episodePath, arr_instance_id=arr_instance_id)
+    jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Manually downloaded Subtitles for {title} - "
+                                                           f"S{episodeInfo.season:02d}E{episodeInfo.episode:02d} - "
+                                                           f"{episodeInfo.episodeTitle}")
+    return '', 204
 
 
 def movie_manually_download_specific_subtitle(radarr_id, hi, forced, use_original_format, selected_provider, subtitle,
@@ -360,7 +367,7 @@ def movie_manually_download_specific_subtitle(radarr_id, hi, forced, use_origina
         .first()
 
     if not movieInfo:
-        return 'Movie not found', 404
+        raise JobFailed('The movie is no longer in the library.')
 
     title = movieInfo.title
     observed = activity.register(activity.activity_id_for_job(job_id), operation='manual_download',
@@ -383,25 +390,22 @@ def movie_manually_download_specific_subtitle(radarr_id, hi, forced, use_origina
                                           sceneName, title, 'movie', use_original_format,
                                           profile_id=movieInfo.profileId, job_id=job_id,
                                           arr_instance_id=arr_instance_id)
-    except OSError:
-        return 'Unable to save subtitles file', 500
-    else:
-        if isinstance(result, tuple) and len(result):
-            result = result[0]
-        if isinstance(result, str):
-            return result, 500
-        elif result:
-            activity.note_publication(observed, outcome='success',
-                                      language=getattr(result, 'language', None),
-                                      provider=selected_provider)
-            history_log_movie(2, radarr_id, result, arr_instance_id=arr_instance_id)
-            if not settings.general.dont_notify_manual_actions:
-                send_notifications_movie(radarr_id, result.message, arr_instance_id=arr_instance_id)
-            store_subtitles_movie(result.path, moviePath, arr_instance_id=arr_instance_id)
-            return '', 204
-    finally:
-        jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Manually downloaded Subtitles for {title} "
-                                                               f"({movieInfo.year})")
+    except OSError as e:
+        raise JobFailed(f'Unable to save the subtitle file: {e}') from e
+    if isinstance(result, tuple) and len(result):
+        result = result[0]
+    if not result:
+        raise JobFailed('The subtitle could not be downloaded. Check the logs.')
+    activity.note_publication(observed, outcome='success',
+                              language=getattr(result, 'language', None),
+                              provider=selected_provider)
+    history_log_movie(2, radarr_id, result, arr_instance_id=arr_instance_id)
+    if not settings.general.dont_notify_manual_actions:
+        send_notifications_movie(radarr_id, result.message, arr_instance_id=arr_instance_id)
+    store_subtitles_movie(result.path, moviePath, arr_instance_id=arr_instance_id)
+    jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Manually downloaded Subtitles for {title} "
+                                                           f"({movieInfo.year})")
+    return '', 204
 
 
 def _get_language_obj(profile_id):

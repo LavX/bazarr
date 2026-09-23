@@ -79,6 +79,14 @@ export interface ProviderHubJob {
   updated_at?: string | null;
 }
 
+/**
+ * What a lifecycle action answers: the id of the backend job doing the work.
+ * Null when the backend queued nothing to follow.
+ */
+export interface ProviderHubJobRef {
+  job_id: number | null;
+}
+
 export interface ProviderHubTestResult {
   provider_id: string;
   ok: boolean;
@@ -97,7 +105,8 @@ class ProviderHubApi extends BaseApi {
   }
 
   async refreshCatalog() {
-    await this.postRaw("/catalog/refresh");
+    const response = await this.postRaw<ProviderHubJobRef>("/catalog/refresh");
+    return response.data;
   }
 
   async addCatalogSource(name: string, url: string) {
@@ -127,10 +136,9 @@ class ProviderHubApi extends BaseApi {
   }
 
   async install(manifest: ProviderHubManifest) {
-    const response = await this.postRaw<ProviderHubInstallation>(
-      "/installations",
-      { manifest },
-    );
+    const response = await this.postRaw<ProviderHubJobRef>("/installations", {
+      manifest,
+    });
     return response.data;
   }
 
@@ -139,7 +147,7 @@ class ProviderHubApi extends BaseApi {
     form.append("file", file);
     // Override the client's default application/json Content-Type so Axios sends
     // real multipart/form-data (with boundary) and Flask populates request.files.
-    const response = await this.postRaw<ProviderHubInstallation>(
+    const response = await this.postRaw<ProviderHubJobRef>(
       "/installations/local",
       form,
       undefined,
@@ -149,7 +157,10 @@ class ProviderHubApi extends BaseApi {
   }
 
   async uninstall(providerId: string) {
-    await this.delete(`/installations/${providerId}`);
+    const response = await this.delete<ProviderHubJobRef>(
+      `/installations/${providerId}`,
+    );
+    return response.data;
   }
 
   async test(providerId: string) {
@@ -167,7 +178,7 @@ class ProviderHubApi extends BaseApi {
   async applyUpdate(providerId: string) {
     const params: LooseObject = {};
     params["provider_id"] = providerId;
-    const response = await this.postRaw<ProviderHubInstallation>(
+    const response = await this.postRaw<ProviderHubJobRef>(
       "/updates/apply",
       undefined,
       params,

@@ -1146,164 +1146,147 @@ describe("sports event detail", () => {
   });
 });
 
-it.each([false, true])(
-  "shows committed sports publication and refresh outcome, warning=%s",
-  async (warning) => {
-    let saved = false;
-    const event = {
-      id: 61,
-      arr_instance_id: 42,
-      league_id: 51,
-      title: "Event",
-      path: "/sports/event.mkv",
-      profileId: null,
-      hasFile: true,
-      missing_subtitles: [],
-    };
-    server.use(
-      http.get("/api/system/arr-instances", () =>
-        HttpResponse.json([sportarr]),
-      ),
-      // This case sits outside the describe block, so it registers the master
-      // toggle itself rather than inheriting the suite's beforeEach.
-      http.get("/api/system/settings", () =>
-        HttpResponse.json({ general: { use_sportarr: true } }),
-      ),
-      // The Status column queries sync status for any on-disk subtitle.
-      http.get("/api/sports/events/*/subtitles/*/sync-status", () =>
-        HttpResponse.json({
-          synced: false,
-          confirmed: false,
-          editedAfterSync: false,
-          lastModified: 0,
-          lastSyncTimestamp: null,
-          jobStatus: null,
-        }),
-      ),
-      http.get("/api/sports/leagues/51", () =>
-        HttpResponse.json({ id: 51, arr_instance_id: 42, title: "League" }),
-      ),
-      http.get("/api/system/languages", () =>
-        HttpResponse.json([
-          { code2: "en", code3: "eng", name: "English", enabled: true },
-        ]),
-      ),
-      http.get("/api/sports/leagues/51/events", () =>
-        HttpResponse.json({
-          data: [
-            {
-              ...event,
-              subtitles: saved ? [["en", "/sports/event.en.srt", 80]] : [],
-            },
-          ],
-          total: 1,
-        }),
-      ),
-      http.post("/api/sports/events/61/search", async ({ request }) => {
-        expect(await request.json()).toEqual({
-          arr_instance_id: 42,
-          language: "en",
-          hi: false,
-          forced: false,
-        });
-        return HttpResponse.json({
-          data: [
-            {
-              provider: "fixture",
-              subtitle: "owned-candidate",
-              language: "en",
-              forced: "False",
-              hearing_impaired: "False",
-              score: 80,
-              orig_score: 144,
-              score_without_hash: 144,
-              release_info: ["Event.Release"],
-              matches: ["title"],
-              dont_matches: [],
-              original_format: false,
-            },
-          ],
-        });
+// The download is queued as a backend job, like the library's manual
+// download: the route answers with the job id, the row is marked downloaded,
+// and the page refreshes the event. The publication outcome is the job's
+// result and reaches the reader through the jobs drawer, not this modal.
+it("queues the sports download as a job and refreshes the event", async () => {
+  let saved = false;
+  const event = {
+    id: 61,
+    arr_instance_id: 42,
+    league_id: 51,
+    title: "Event",
+    path: "/sports/event.mkv",
+    profileId: null,
+    hasFile: true,
+    missing_subtitles: [],
+  };
+  server.use(
+    http.get("/api/system/arr-instances", () => HttpResponse.json([sportarr])),
+    // This case sits outside the describe block, so it registers the master
+    // toggle itself rather than inheriting the suite's beforeEach.
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({ general: { use_sportarr: true } }),
+    ),
+    // The Status column queries sync status for any on-disk subtitle.
+    http.get("/api/sports/events/*/subtitles/*/sync-status", () =>
+      HttpResponse.json({
+        synced: false,
+        confirmed: false,
+        editedAfterSync: false,
+        lastModified: 0,
+        lastSyncTimestamp: null,
+        jobStatus: null,
       }),
-      http.post("/api/sports/events/61/download", async ({ request }) => {
-        const body = (await request.json()) as {
-          arr_instance_id: number;
-          candidate: { subtitle: string };
-        };
-        expect(body.arr_instance_id).toBe(42);
-        expect(body.candidate.subtitle).toBe("owned-candidate");
-        saved = true;
-        return HttpResponse.json({
-          event: { ...event, subtitles: [["en", "/sports/event.en.srt", 80]] },
-          publication: {
-            published: true,
-            status: warning ? "published_with_warnings" : "published",
-            message: warning
-              ? "Subtitle published; index did not complete. History committed. Index refresh failed; no refresh queued."
-              : "Subtitle published. Processing and history completed; subtitle index refreshed.",
-            history: "committed",
-            index: warning ? "failed" : "completed",
-            refresh_attempts: warning ? 2 : 1,
-            refresh_queued: false,
+    ),
+    http.get("/api/sports/leagues/51", () =>
+      HttpResponse.json({ id: 51, arr_instance_id: 42, title: "League" }),
+    ),
+    http.get("/api/system/languages", () =>
+      HttpResponse.json([
+        { code2: "en", code3: "eng", name: "English", enabled: true },
+      ]),
+    ),
+    http.get("/api/sports/leagues/51/events", () =>
+      HttpResponse.json({
+        data: [
+          {
+            ...event,
+            subtitles: saved ? [["en", "/sports/event.en.srt", 80]] : [],
           },
-        });
+        ],
+        total: 1,
       }),
-    );
-    renderDetail();
-    await userEvent.click(
-      await screen.findByRole("button", { name: "Manual Search" }),
-    );
-    // Scoped to the modal: the page toolbox now carries its own Search button,
-    // exactly as the episodes page does.
-    const dialog = within(await screen.findByRole("dialog"));
-    await waitFor(() =>
-      expect(dialog.getByRole("button", { name: "Search" })).toBeEnabled(),
-    );
-    await userEvent.click(dialog.getByRole("button", { name: "Search" }));
-    expect(await dialog.findByText("Event.Release")).toBeInTheDocument();
-    // findBy, not getBy: the results table is re-rendered as the sports
-    // queries settle, so a one-shot query can land between the old rows going
-    // and the new ones mounting, with the release text already matched.
-    await userEvent.click(
-      await dialog.findByRole("button", { name: "Download" }),
-    );
-    // Scoped to the page table: the search modal renders a results table too,
-    // and "en" appears in both, so anything wider is ambiguous.
-    await waitFor(() => {
-      const pageTable = screen
-        .getAllByRole("table")
-        // eslint-disable-next-line testing-library/no-node-access
-        .find((t) => t.closest('[role="dialog"]') === null);
-      if (!pageTable) throw new Error("No page table");
-      expect(within(pageTable).getByText("en")).toBeInTheDocument();
-    });
+    ),
+    http.post("/api/sports/events/61/search", async ({ request }) => {
+      expect(await request.json()).toEqual({
+        arr_instance_id: 42,
+        language: "en",
+        hi: false,
+        forced: false,
+      });
+      return HttpResponse.json({
+        data: [
+          {
+            provider: "fixture",
+            subtitle: "owned-candidate",
+            language: "en",
+            forced: "False",
+            hearing_impaired: "False",
+            score: 80,
+            orig_score: 144,
+            score_without_hash: 144,
+            release_info: ["Event.Release"],
+            matches: ["title"],
+            dont_matches: [],
+            original_format: false,
+          },
+        ],
+      });
+    }),
+    http.post("/api/sports/events/61/download", async ({ request }) => {
+      const body = (await request.json()) as {
+        arr_instance_id: number;
+        candidate: { subtitle: string };
+      };
+      expect(body.arr_instance_id).toBe(42);
+      expect(body.candidate.subtitle).toBe("owned-candidate");
+      saved = true;
+      return HttpResponse.json({ job_id: 9 }, { status: 202 });
+    }),
+  );
+  renderDetail();
+  await userEvent.click(
+    await screen.findByRole("button", { name: "Manual Search" }),
+  );
+  // Scoped to the modal: the page toolbox now carries its own Search button,
+  // exactly as the episodes page does.
+  const dialog = within(await screen.findByRole("dialog"));
+  await waitFor(() =>
+    expect(dialog.getByRole("button", { name: "Search" })).toBeEnabled(),
+  );
+  await userEvent.click(dialog.getByRole("button", { name: "Search" }));
+  expect(await dialog.findByText("Event.Release")).toBeInTheDocument();
+  // findBy, not getBy: the results table is re-rendered as the sports
+  // queries settle, so a one-shot query can land between the old rows going
+  // and the new ones mounting, with the release text already matched.
+  await userEvent.click(
+    await dialog.findByRole("button", { name: "Download" }),
+  );
+  // Scoped to the page table: the search modal renders a results table too,
+  // and "en" appears in both, so anything wider is ambiguous.
+  await waitFor(() => {
+    const pageTable = screen
+      .getAllByRole("table")
+      // eslint-disable-next-line testing-library/no-node-access
+      .find((t) => t.closest('[role="dialog"]') === null);
+    if (!pageTable) throw new Error("No page table");
+    expect(within(pageTable).getByText("en")).toBeInTheDocument();
+  });
+  // Nothing about the publication is claimed here before the job has run.
+  expect(
+    screen.queryByText(/subtitle index refreshed/),
+  ).not.toBeInTheDocument();
+  // A download that succeeded reports no failure. The sentence a failure
+  // carries is now the backend's own, so the one fixed string the failure
+  // path can still render is the fallback for a failure that said nothing.
+  expect(
+    screen.queryByText("The request failed and said nothing further."),
+  ).not.toBeInTheDocument();
+  // Re-queried rather than reusing the handle captured above: the modal
+  // re-renders when the sports query is invalidated, which can replace the
+  // dialog node and leave the old handle pointing at a detached tree.
+  // Scoped to it either way, because the page toolbox carries its own
+  // Download button for the league's subtitle bundle.
+  // The whole lookup retries, not just the dialog: the modal re-renders when
+  // the sports query is invalidated, so a one-shot query inside it can land
+  // between the results table being replaced and the new one mounting.
+  await waitFor(() =>
     expect(
-      await screen.findByText(
-        warning
-          ? /Index refresh failed; no refresh queued/
-          : /subtitle index refreshed/,
-      ),
-    ).toBeInTheDocument();
-    // A download that succeeded reports no failure. The sentence a failure
-    // carries is now the backend's own, so the one fixed string the failure
-    // path can still render is the fallback for a failure that said nothing.
-    expect(
-      screen.queryByText("The request failed and said nothing further."),
-    ).not.toBeInTheDocument();
-    // Re-queried rather than reusing the handle captured above: the modal
-    // re-renders when the sports query is invalidated, which can replace the
-    // dialog node and leave the old handle pointing at a detached tree.
-    // Scoped to it either way, because the page toolbox carries its own
-    // Download button for the league's subtitle bundle.
-    // The whole lookup retries, not just the dialog: the modal re-renders when
-    // the sports query is invalidated, so a one-shot query inside it can land
-    // between the results table being replaced and the new one mounting.
-    await waitFor(() =>
-      expect(
-        within(screen.getByRole("dialog")).getByRole("button", {
-          name: "Download",
-        }),
-      ).toBeDisabled(),
-    );
-  },
-);
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Download",
+      }),
+    ).toBeDisabled(),
+  );
+});

@@ -279,10 +279,11 @@ def test_the_league_bundle_requires_an_enabled_owner():
 # --------------------------------------------------------------------------
 
 def test_saving_settings_does_not_walk_sports_rows_when_sportarr_is_off():
-    from api.system import settings as settings_api
+    # The settings save queues the recalculation; the job is what walks the rows.
+    from subtitles.indexer import missing_refresh
 
-    source = inspect.getsource(settings_api)
-    index = source.index('list_missing_subtitles_sports()')
+    source = inspect.getsource(missing_refresh)
+    index = source.index('list_missing_subtitles_sports')
     assert 'if settings.general.use_sportarr:' in source[:index][-400:]
 
 

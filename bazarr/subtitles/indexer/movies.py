@@ -479,3 +479,24 @@ def movies_scan_subtitles(no, arr_instance_id=None):
                               path_mappings.path_replace_instance(movie.path,
                                                                   movie.arr_instance_id, 'movie'),
                               use_cache=False, arr_instance_id=movie.arr_instance_id, ownership_index=ownership_index)
+
+
+def movies_scan_disk(radarr_id, arr_instance_id=None, job_id=None):
+    """Scan disk for one movie from its detail page, as a queued job."""
+    if not job_id:
+        return jobs_queue.add_job_from_function("Scanning disk for movie subtitles", is_progress=False)
+
+    from app.job_errors import reason_of
+    from app.jobs_queue import JobFailed
+
+    movie = database.execute(
+        scoped(select(TableMovies.title).where(TableMovies.radarrId == radarr_id),
+               TableMovies.arr_instance_id, arr_instance_id)).first()
+    if not movie:
+        raise JobFailed(f"Scanning disk failed: movie {radarr_id} is no longer in the library")
+    jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Scanning disk for {movie.title}")
+    try:
+        movies_scan_subtitles(radarr_id, arr_instance_id=arr_instance_id)
+    except Exception as error:
+        raise JobFailed(f"Scanning disk for {movie.title} failed: {reason_of(error)}") from error
+    event_stream(type='movie', payload=radarr_id)

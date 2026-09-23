@@ -16,6 +16,7 @@ import { AllProviders } from "@/providers";
 import { rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import * as files from "@/utilities/files";
+import { downloadJobHandlers, DownloadRequest } from "./downloadJobHarness";
 import {
   openReleaseSearch,
   pickOption,
@@ -26,7 +27,7 @@ import Discover from "./testHarness";
 const query = "Example.Movie.2024.1080p.WEB-DL";
 const srt = "1\n00:00:03,000 --> 00:00:04,000\nRaw translation\n\n";
 let searches: Record<string, unknown>[];
-let downloads: URLSearchParams[];
+let downloads: DownloadRequest[];
 let save: ReturnType<typeof vi.spyOn>;
 
 function snapshot(context: Record<string, unknown>, id: string) {
@@ -212,14 +213,10 @@ beforeEach(() => {
       delete context.refresh;
       return HttpResponse.json(snapshot(context, `raw-${searches.length}`));
     }),
-    http.get("/api/discover/download", ({ request }) => {
-      downloads.push(new URL(request.url).searchParams);
-      return new HttpResponse(srt, {
-        headers: {
-          "Content-Type": "application/x-subrip",
-          "Content-Disposition": `attachment; filename="${query}.en.forced.srt"`,
-        },
-      });
+    ...downloadJobHandlers({
+      body: () => srt,
+      filename: () => `${query}.en.forced.srt`,
+      requests: downloads,
     }),
   );
 });
@@ -270,18 +267,19 @@ it("downloads the exact raw row and recovers 410 with the original query and lan
   const { user } = renderDiscover();
   await rawSearch(user);
   await user.click(screen.getByRole("button", { name: "Download SRT" }));
+  await user.click(await screen.findByRole("button", { name: "Save SRT" }));
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
   expect(save.mock.calls[0][0].size).toBe(srt.length);
   expect(save.mock.calls[0][1]).toBe(`${query}.en.forced.srt`);
-  expect(Object.fromEntries(downloads[0])).toEqual({
-    result_id: "raw-1-forced",
-    search_id: "raw-1",
+  expect(downloads[0]).toMatchObject({
+    result: "raw-1-forced",
+    search: "raw-1",
   });
   expect(await screen.findByText(/Download started for/)).toHaveTextContent(
     `${query} (unverified release query) · eng`,
   );
   server.use(
-    http.get("/api/discover/download", () =>
+    http.post("/api/discover/download", () =>
       HttpResponse.json({}, { status: 410 }),
     ),
   );
@@ -319,6 +317,7 @@ it("preserves both mode inputs and retires incompatible results and feedback", a
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
   await screen.findByRole("heading", { name: `${query}.forced` });
   await user.click(screen.getByRole("button", { name: "Download SRT" }));
+  await user.click(await screen.findByRole("button", { name: "Save SRT" }));
   await screen.findByText(/Download started for/);
   await user.click(
     screen.getByRole("button", { name: "Return to identified title" }),
@@ -345,6 +344,7 @@ it("keeps the active release draft and handles when accepted metadata reconciles
   expect(screen.getByLabelText("Release name")).toHaveValue(query);
   expect(screen.getByRole("button", { name: "Download SRT" })).toBeEnabled();
   await user.click(screen.getByRole("button", { name: "Download SRT" }));
+  await user.click(await screen.findByRole("button", { name: "Save SRT" }));
   await screen.findByText(/Download started for/);
   expect(searches).toHaveLength(1);
   await user.click(
@@ -405,13 +405,12 @@ it.each(["mode", "query"])(
 it("rejects a late raw download after switching mode away and back", async () => {
   let finish: (() => void) | undefined;
   server.use(
-    http.get("/api/discover/download", async () => {
-      await new Promise<void>((resolve) => {
-        finish = resolve;
-      });
-      return new HttpResponse(srt, {
-        headers: { "Content-Type": "application/x-subrip" },
-      });
+    ...downloadJobHandlers({
+      body: () => srt,
+      hold: () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
     }),
   );
   const { user } = renderDiscover();

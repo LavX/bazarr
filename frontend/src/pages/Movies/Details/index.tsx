@@ -49,7 +49,7 @@ import { SubtitleDownloadModal } from "@/components/forms/SubtitleDownloadForm";
 import { MovieHistoryModal, SubtitleToolsModal } from "@/components/modals";
 import { MovieSearchModal } from "@/components/modals/ManualSearchModal";
 import { useModals } from "@/modules/modals";
-import { notification, task, TaskGroup } from "@/modules/task";
+import { notification } from "@/modules/task";
 import ItemOverview from "@/pages/views/ItemOverview";
 import { RouterNames } from "@/Router/RouterNames";
 import { useLanguageProfileBy } from "@/utilities/languages";
@@ -207,11 +207,14 @@ const MovieDetailView: FunctionComponent = () => {
               disabled={hasTask}
               onClick={() => {
                 if (movie) {
-                  task.create(movie.title, TaskGroup.ScanDisk, action, {
+                  // Queued as a backend job: the request returns at once and the
+                  // scan reports through the jobs drawer. HTTP errors are
+                  // already reported by the API client.
+                  action({
                     action: "scan-disk",
                     radarrid: movie.radarrId,
                     arr_instance_id: movie.arr_instance_id,
-                  });
+                  }).catch(() => undefined);
                 }
               }}
             >

@@ -1,5 +1,7 @@
 # coding=utf-8
 
+from datetime import timezone
+
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
 
 from app.jobs_queue import jobs_queue
@@ -9,18 +11,37 @@ from ..utils import authenticate
 api_ns_system_jobs = Namespace('System Jobs', description='List, force start, move or delete jobs from the queue')
 
 
+class UtcTimestamp(fields.Raw):
+    """An ISO 8601 timestamp in UTC with an explicit ``Z``.
+
+    The browser reads a timestamp without an offset as its own local time, so a
+    job that just finished on a server in another time zone read as hours old.
+    A naive value is taken as the server's local time.
+    """
+
+    def format(self, value):
+        return value.astimezone(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+
+
 @api_ns_system_jobs.route('system/jobs')
 class SystemJobs(Resource):
     get_response_model = api_ns_system_jobs.model('SystemJobsGetResponse', {
         'job_id': fields.Integer(),
         'job_name': fields.String(),
         'status': fields.String(),
-        'last_run_time': fields.String(),
+        'last_run_time': UtcTimestamp(),
         'is_progress': fields.Boolean(),
         'is_signalr': fields.Boolean(),
         'progress_value': fields.Integer(),
         'progress_max': fields.Integer(),
         'progress_message': fields.String(),
+        # Why a failed job failed, {reason, message}, and what the user can do
+        # with a finished one, {kind, label, ...}. Both are set by the job and
+        # are the only parts of its outcome that are sent.
+        'error': fields.Raw(),
+        'action': fields.Raw(),
+        'retryable': fields.Boolean(),
+        'retry_of': fields.Integer(),
     })
 
     get_request_parser = reqparse.RequestParser()
@@ -43,7 +64,8 @@ class SystemJobs(Resource):
     post_request_parser = reqparse.RequestParser()
     post_request_parser.add_argument('id', type=int, required=True, help='Job ID act onto')
     post_request_parser.add_argument('action', type=str, required=True,
-                                     help='Action to perform from ["force_start", "move_top", "move_bottom", "cancel"]')
+                                     help='Action to perform from ["force_start", "move_top", "move_bottom", "cancel", '
+                                          '"retry"]')
 
     @authenticate
     @api_ns_system_jobs.doc(parser=post_request_parser)
@@ -62,6 +84,11 @@ class SystemJobs(Resource):
             jobs_queue.move_job_in_pending_queue(job_id=job_id, move_destination="bottom")
         elif action == "cancel":
             jobs_queue.cancel_running_job(job_id=job_id)
+        elif action == "retry":
+            new_job_id = jobs_queue.retry_job(job_id=job_id)
+            if not new_job_id:
+                return 'Job cannot be retried', 400
+            return {'job_id': new_job_id}, 200
         return '', 204
 
     patch_request_parser = reqparse.RequestParser()

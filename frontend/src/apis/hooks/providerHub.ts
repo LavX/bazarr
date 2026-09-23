@@ -4,6 +4,7 @@ import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import type { ProviderHubInstallRequest } from "@/apis/raw/providerHub";
 import { notification } from "@/modules/task";
+import { waitForJob } from "@/utilities/jobs";
 
 const providerHubKey = [QueryKeys.ProviderHub];
 
@@ -32,8 +33,13 @@ export function useProviderHubRefreshCatalog() {
   const client = useQueryClient();
   return useMutation({
     mutationKey: [...providerHubKey, QueryKeys.Actions, "refresh-catalog"],
-    mutationFn: () => api.providerHub.refreshCatalog(),
-    onSuccess: () => {
+    mutationFn: async () => {
+      const { job_id: jobId } = await api.providerHub.refreshCatalog();
+      await waitForJob(client, jobId);
+    },
+    // Settled, not success: a refresh that failed for one source still
+    // refreshed the others and recorded the failure on the source.
+    onSettled: () => {
       client.invalidateQueries({ queryKey: providerHubKey });
     },
   });
@@ -80,8 +86,12 @@ export function useProviderHubInstall() {
   const client = useQueryClient();
   return useMutation({
     mutationKey: [...providerHubKey, QueryKeys.Actions, "install"],
-    mutationFn: ({ manifest }: ProviderHubInstallRequest) =>
-      api.providerHub.install(manifest),
+    // Resolves when the install job has finished, not when it was queued, and
+    // rejects with the job's reason when it failed.
+    mutationFn: async ({ manifest }: ProviderHubInstallRequest) => {
+      const { job_id: jobId } = await api.providerHub.install(manifest);
+      await waitForJob(client, jobId);
+    },
     onSettled: () => {
       client.invalidateQueries({ queryKey: providerHubKey });
     },
@@ -92,7 +102,10 @@ export function useProviderHubInstallLocal() {
   const client = useQueryClient();
   return useMutation({
     mutationKey: [...providerHubKey, QueryKeys.Actions, "install-local"],
-    mutationFn: (file: File) => api.providerHub.installLocal(file),
+    mutationFn: async (file: File) => {
+      const { job_id: jobId } = await api.providerHub.installLocal(file);
+      await waitForJob(client, jobId);
+    },
     onSettled: () => {
       client.invalidateQueries({ queryKey: providerHubKey });
     },
@@ -103,8 +116,11 @@ export function useProviderHubUninstall() {
   const client = useQueryClient();
   return useMutation({
     mutationKey: [...providerHubKey, QueryKeys.Actions, "uninstall"],
-    mutationFn: (providerId: string) => api.providerHub.uninstall(providerId),
-    onSuccess: () => {
+    mutationFn: async (providerId: string) => {
+      const { job_id: jobId } = await api.providerHub.uninstall(providerId);
+      await waitForJob(client, jobId);
+    },
+    onSettled: () => {
       client.invalidateQueries({ queryKey: providerHubKey });
     },
   });
@@ -148,8 +164,12 @@ export function useProviderHubApplyUpdate() {
   const client = useQueryClient();
   return useMutation({
     mutationKey: [...providerHubKey, QueryKeys.Actions, "apply-update"],
-    mutationFn: (providerId: string) => api.providerHub.applyUpdate(providerId),
-    onSuccess: () => {
+    mutationFn: async (providerId: string) => {
+      const { job_id: jobId } = await api.providerHub.applyUpdate(providerId);
+      await waitForJob(client, jobId);
+    },
+    // A failed update is recorded on the installation, so refresh either way.
+    onSettled: () => {
       client.invalidateQueries({ queryKey: providerHubKey });
     },
   });

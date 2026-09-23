@@ -13,10 +13,7 @@ import { useForm } from "@mantine/form";
 import { useSubtitleAction, useSubtitleContents } from "@/apis/hooks";
 import { Selector } from "@/components/inputs";
 import { useModals, withModal } from "@/modules/modals";
-import { task } from "@/modules/task";
 import { useSelectorOptions } from "@/utilities";
-
-const TaskName = "Two-Point Fit";
 
 function convertToAction(
   r: { hour: number; min: number; sec: number; ms: number }, // offset to zero
@@ -48,7 +45,7 @@ const TwoPointFitForm: FunctionComponent<Props> = ({
   selections,
   onSubmit,
 }) => {
-  const { mutateAsync } = useSubtitleAction();
+  const { mutate } = useSubtitleAction();
   const modals = useModals();
 
   const query = useSubtitleContents(selections[0].path);
@@ -131,7 +128,7 @@ const TwoPointFitForm: FunctionComponent<Props> = ({
         const action = convertToAction(r, first.to, scale);
 
         selections.forEach((s) =>
-          task.create(s.path, TaskName, mutateAsync, {
+          mutate({
             action,
             form: s,
           }),

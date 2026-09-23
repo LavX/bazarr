@@ -727,6 +727,11 @@ def test_profile_editor_changes_recompute_sports_missing(indexed_library, monkey
     monkeypatch.setattr(endpoint, "event_stream", lambda *a, **kw: None)
     monkeypatch.setattr(endpoint, "save_settings", lambda *a: None)
     monkeypatch.setattr(endpoint, "forget_deleted_language_profiles", lambda *a: None)
+    # The save queues the recalculation instead of running it; the job is run
+    # below, which is where the sports rows are recomputed now.
+    queued = []
+    monkeypatch.setattr(endpoint, "queue_missing_subtitles_recalculation",
+                        lambda **kwargs: queued.append(kwargs))
     monkeypatch.setattr(settings.general, "use_sonarr", False)
     monkeypatch.setattr(settings.general, "use_radarr", False)
     # The sports recompute is gated on the master toggle now, like the sonarr
@@ -755,6 +760,11 @@ def test_profile_editor_changes_recompute_sports_missing(indexed_library, monkey
         },
     )
     assert response.status_code == 204
+    assert row(session, 61).missing_subtitles == "['de']", "the save recomputed inside the request"
+    assert queued == [{}]
+    from subtitles.indexer import missing_refresh
+
+    missing_refresh.recalculate_missing_subtitles(job_id=1)
     assert row(session, 61).missing_subtitles == "[]"
 
 
@@ -943,11 +953,18 @@ def test_global_embedded_setting_refreshes_sports_missing(indexed_library, monke
     )
     monkeypatch.setattr(config.settings.general, 'use_sportarr', master_enabled)
     config.save_settings([("settings-general-use_embedded_subs", ["false"])])
+    # The missing-subtitles recalculation is queued, not run inside the save,
+    # and it is the job that honours the Sportarr master toggle.
+    assert queued[0]["func"] == "recalculate_missing_subtitles"
+    assert row(session, 61).missing_subtitles == "[]"
+    from subtitles.indexer import missing_refresh
+
+    missing_refresh.recalculate_missing_subtitles(**queued[0]["kwargs"], job_id=1)
     if master_enabled:
-        assert queued[0]["func"] == "sports_full_scan_subtitles"
+        assert queued[1]["func"] == "sports_full_scan_subtitles"
         assert row(session, 61).missing_subtitles == "['fr']"
     else:
-        assert queued == []
+        assert [entry["func"] for entry in queued] == ["recalculate_missing_subtitles"]
         assert row(session, 61).missing_subtitles == "[]"
 
 

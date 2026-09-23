@@ -668,6 +668,7 @@ def manual_search_sports(
 
 def manual_download_sports(event_id, candidate, arr_instance_id=None, *, cancel=None):
     from subtitles.cache import subtitle_cache
+    from app.jobs_queue import JobFailed
     from subtitles.manual import manual_download_subtitle
 
     context = resolve_event_in_session(database, event_id, arr_instance_id)
@@ -681,22 +682,27 @@ def manual_download_sports(event_id, candidate, arr_instance_id=None, *, cancel=
         raise ValueError("Subtitle provider does not match its cached result")
     row = database.get(TableSportsEvents, event_id, populate_existing=True)
     languages = get_audio_profile_languages(row.audio_language)
-    result = manual_download_subtitle(
-        context.mapped_path,
-        languages[0]["name"] if languages else "None",
-        str(cached.subtitle.language.hi),
-        str(cached.subtitle.language.forced),
-        candidate["subtitle"],
-        cached.subtitle.provider_name,
-        row.sceneName or "None",
-        row.title,
-        "sports",
-        cached.subtitle.use_original_format,
-        context.profile_id,
-        arr_instance_id=context.arr_instance_id,
-        context=context,
-        cancel=cancel,
-    )
+    try:
+        result = manual_download_subtitle(
+            context.mapped_path,
+            languages[0]["name"] if languages else "None",
+            str(cached.subtitle.language.hi),
+            str(cached.subtitle.language.forced),
+            candidate["subtitle"],
+            cached.subtitle.provider_name,
+            row.sceneName or "None",
+            row.title,
+            "sports",
+            cached.subtitle.use_original_format,
+            context.profile_id,
+            arr_instance_id=context.arr_instance_id,
+            context=context,
+            cancel=cancel,
+        )
+    except JobFailed as exc:
+        # The route answers an OSError with its sentence as a 409, which is how
+        # this synchronous path has always reported a download that failed.
+        raise OSError(str(exc)) from exc
     if isinstance(result, str) or not result:
         raise OSError(result or "Could not download sports subtitle")
     return result

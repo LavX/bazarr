@@ -1,11 +1,8 @@
 import { useState } from "react";
-import { Alert, Checkbox, Group, NativeSelect, Stack } from "@mantine/core";
+import { Checkbox, Group, NativeSelect, Stack } from "@mantine/core";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
-import sports, {
-  SportsEventReference,
-  SportsPublication,
-} from "@/apis/raw/sports";
+import sports, { SportsEventReference } from "@/apis/raw/sports";
 import { withModal } from "@/modules/modals";
 import {
   useEnabledLanguages,
@@ -51,7 +48,6 @@ function SportsSearchView({
   const [hi, setHi] = useState(initialHi);
   const [forced, setForced] = useState(initialForced);
   const [downloading, setDownloading] = useState(false);
-  const [publication, setPublication] = useState<SportsPublication>();
 
   function useSearch() {
     return useQuery({
@@ -75,10 +71,11 @@ function SportsSearchView({
   ) {
     if (downloading) return;
     setDownloading(true);
-    setPublication(undefined);
     try {
-      const result = await sports.downloadSubtitle(event, candidate);
-      setPublication(result.publication);
+      // Queued as a backend job, the way the library's manual download is:
+      // the row is marked once the job is queued, and the job reports its
+      // outcome, or the reason it failed, through the jobs drawer.
+      await sports.downloadSubtitle(event, candidate);
     } finally {
       // The sports root, not just "events". Wanted, history and blacklist are
       // all cached under [Sports, <kind>, ...], so invalidating only "events"
@@ -115,11 +112,6 @@ function SportsSearchView({
           disabled={downloading}
         />
       </Group>
-      {publication && (
-        <Alert color={publication.status === "published" ? "green" : "yellow"}>
-          {publication.message}
-        </Alert>
-      )}
       <ManualSearchView
         key={`${language}:${hi}:${forced}`}
         item={item}

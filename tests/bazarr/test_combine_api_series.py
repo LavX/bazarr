@@ -142,35 +142,33 @@ _module_isolation.restore(_SYS_BEFORE)
 # ---------------------------------------------------------------------------
 
 @patch.object(series_module, '_list_series_episodes')
-@patch.object(series_module, 'try_combine_for_video')
-@patch.object(series_module, 'path_mappings')
-def test_series_batch_combine(mock_paths, mock_combine, mock_list):
-    mock_paths.path_replace_instance.side_effect = lambda p, owner, kind: p
+@patch.object(series_module, 'jobs_queue')
+@patch.object(series_module, 'database')
+def test_series_combine_queues_one_job(mock_db, mock_jobs, mock_list):
+    """The route no longer loops the episodes in the request: it queues one job
+    for the series and answers with its id."""
     mock_list.return_value = [
         {'sonarrEpisodeId': 1, 'path': '/tv/Show/S01E01.mkv', 'sonarrSeriesId': 5, 'arr_instance_id': 7},
         {'sonarrEpisodeId': 2, 'path': '/tv/Show/S01E02.mkv', 'sonarrSeriesId': 5, 'arr_instance_id': 7},
-        {'sonarrEpisodeId': 3, 'path': '/tv/Show/S01E03.mkv', 'sonarrSeriesId': 5, 'arr_instance_id': 7},
     ]
-    mock_combine.side_effect = [
-        type('R', (), {'status': 'built', 'path': '/x1.srt',
-                       'alignment': 'ok', 'error': '', 'reason': ''})(),
-        type('R', (), {'status': 'skipped', 'path': '',
-                       'reason': 'missing source', 'alignment': '', 'error': ''})(),
-        type('R', (), {'status': 'built', 'path': '/x3.srt',
-                       'alignment': 'ok', 'error': '', 'reason': ''})(),
-    ]
+    mock_db.execute.return_value.first.return_value = type('Row', (), {'title': 'Show'})()
+    mock_jobs.feed_jobs_pending_queue.return_value = 31
     resource = series_module.SeriesSubtitlesCombine()
     with patch.object(series_module, 'request') as mock_request:
-        mock_request.get_json.return_value = {}
+        mock_request.get_json.return_value = {'languages': ['en', 'hu'], 'format': 'ass'}
         mock_request.args.get.return_value = 8
         body, status = resource.post(5)
-    assert status == 200
-    assert body['status'] == 'batch_complete'
-    assert body['built'] == 2
-    assert body['skipped'] == 1
-    assert body['failed'] == 0
-    assert len(body['details']) == 3
+    assert status == 202
+    assert body == {'status': 'queued', 'job_id': 31}
     mock_list.assert_called_once_with(5, arr_instance_id=8)
+    kwargs = mock_jobs.feed_jobs_pending_queue.call_args.kwargs
+    assert kwargs['job_name'] == 'Combining subtitles for Show'
+    assert kwargs['module'] == 'subtitles.tools.combine.batch'
+    assert kwargs['func'] == 'combine_series_subtitles'
+    assert kwargs['kwargs'] == {'series_id': 5, 'languages': ['en', 'hu'], 'format': 'ass',
+                                'arr_instance_id': 8}
+    assert kwargs['is_progress'] is True
+    assert kwargs['progress_max'] == 2
 
 
 @patch.object(series_module, '_list_series_episodes')

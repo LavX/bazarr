@@ -9,10 +9,12 @@ def test_movie_profile_update_accepts_local_id(schema_session, monkeypatch):
 
     captured = []
     monkeypatch.setattr(movies, "database", schema_session)
+    # The recalculation is queued now; what the request hands the queue is
+    # the (upstream id, owner) of every item it changed.
     monkeypatch.setattr(
         movies,
-        "list_missing_subtitles_movies",
-        lambda no, arr_instance_id=None: captured.append((no, arr_instance_id)),
+        "queue_missing_subtitles_recalculation",
+        lambda movies=None: captured.extend(movies or []),
     )
     monkeypatch.setattr(movies, "event_stream", lambda **kwargs: None)
 
@@ -53,7 +55,7 @@ def test_movie_profile_update_rejects_ambiguous_upstream_id(schema_session, monk
     from app.database import TableLanguagesProfiles, TableMovies, select
 
     monkeypatch.setattr(movies, "database", schema_session)
-    monkeypatch.setattr(movies, "list_missing_subtitles_movies", lambda **kwargs: None)
+    monkeypatch.setattr(movies, "queue_missing_subtitles_recalculation", lambda **kwargs: None)
     monkeypatch.setattr(movies, "event_stream", lambda **kwargs: None)
 
     schema_session.add(TableLanguagesProfiles(profileId=4, name="Profile", items="[]"))
@@ -79,10 +81,12 @@ def test_movie_profile_update_scopes_legacy_upstream_id(schema_session, monkeypa
 
     captured = []
     monkeypatch.setattr(movies, "database", schema_session)
+    # The recalculation is queued now; what the request hands the queue is
+    # the (upstream id, owner) of every item it changed.
     monkeypatch.setattr(
         movies,
-        "list_missing_subtitles_movies",
-        lambda no, arr_instance_id=None: captured.append((no, arr_instance_id)),
+        "queue_missing_subtitles_recalculation",
+        lambda movies=None: captured.extend(movies or []),
     )
     monkeypatch.setattr(movies, "event_stream", lambda **kwargs: None)
 
@@ -136,10 +140,12 @@ def test_series_profile_update_accepts_local_id(schema_session, monkeypatch):
 
     captured = []
     monkeypatch.setattr(series, "database", schema_session)
+    # The recalculation is queued now; what the request hands the queue is
+    # the (upstream id, owner) of every item it changed.
     monkeypatch.setattr(
         series,
-        "list_missing_subtitles",
-        lambda no, arr_instance_id=None: captured.append((no, arr_instance_id)),
+        "queue_missing_subtitles_recalculation",
+        lambda series=None: captured.extend(series or []),
     )
     monkeypatch.setattr(series, "event_stream", lambda **kwargs: None)
 
@@ -178,7 +184,7 @@ def test_series_profile_update_rejects_ambiguous_upstream_id(schema_session, mon
     from app.database import TableLanguagesProfiles, TableShows, select
 
     monkeypatch.setattr(series, "database", schema_session)
-    monkeypatch.setattr(series, "list_missing_subtitles", lambda **kwargs: None)
+    monkeypatch.setattr(series, "queue_missing_subtitles_recalculation", lambda **kwargs: None)
     monkeypatch.setattr(series, "event_stream", lambda **kwargs: None)
 
     schema_session.add(TableLanguagesProfiles(profileId=5, name="Profile", items="[]"))
@@ -204,10 +210,12 @@ def test_series_profile_update_scopes_legacy_upstream_id(schema_session, monkeyp
 
     captured = []
     monkeypatch.setattr(series, "database", schema_session)
+    # The recalculation is queued now; what the request hands the queue is
+    # the (upstream id, owner) of every item it changed.
     monkeypatch.setattr(
         series,
-        "list_missing_subtitles",
-        lambda no, arr_instance_id=None: captured.append((no, arr_instance_id)),
+        "queue_missing_subtitles_recalculation",
+        lambda series=None: captured.extend(series or []),
     )
     monkeypatch.setattr(series, "event_stream", lambda **kwargs: None)
 

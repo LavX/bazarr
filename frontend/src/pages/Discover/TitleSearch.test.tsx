@@ -516,7 +516,7 @@ it.each([
           ],
         });
       }),
-      http.get(
+      http.post(
         "/api/discover/download",
         () => new HttpResponse(null, { status: 410 }),
       ),

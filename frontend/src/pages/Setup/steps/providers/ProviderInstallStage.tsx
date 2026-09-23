@@ -405,8 +405,10 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
       setEnableError(null);
       // Installing the recommended set is 36 providers on a real catalog, and
       // a single spinner over a run that long is indistinguishable from a
-      // frozen page. Each install reports as it settles, so the bar moves and
-      // the count is the truth rather than an animation.
+      // frozen page. Each install is a backend job, and it settles when the
+      // jobs socket reports that job completed or failed in the [System, Jobs]
+      // cache (see useProviderHubInstall), so the bar moves with the jobs the
+      // drawer shows and the count is the truth rather than an animation.
       setProgress({ done: 0, total: targets.length, latest: null });
       const results = await Promise.allSettled(
         targets.map((choice) =>

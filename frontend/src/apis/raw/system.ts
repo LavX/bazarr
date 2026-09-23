@@ -128,6 +128,15 @@ class SystemApi extends BaseApi {
     });
   }
 
+  /** Queue a failed, retryable job again; answers with the new job's id. */
+  async retryJob(id: number) {
+    const response = await this.post<{ job_id: number }>("/jobs", undefined, {
+      id,
+      action: "retry",
+    });
+    return response.data.job_id;
+  }
+
   async releases() {
     const response = await this.get<DataWrapper<ReleaseInfo[]>>("/releases");
     return response.data;
