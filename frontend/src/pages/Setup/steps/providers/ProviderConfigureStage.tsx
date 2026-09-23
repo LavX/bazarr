@@ -21,6 +21,7 @@ import type {
   ProviderHubInstallation,
   ProviderHubManifest,
 } from "@/apis/raw/providerHub";
+import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import styles from "./ProviderGrid.module.scss";
 
 type FieldType = "text" | "password" | "checkbox";
@@ -190,6 +191,11 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
   } = useProviderHubProviders();
   const { data: systemSettings } = useSystemSettings();
   const settings = useSettingsMutation();
+  // A save in flight owns this step until it answers: the shell's skip would
+  // advance the wizard while the write is still going, and the mutation's own
+  // onSuccess would then advance it a second time and report a failure to a
+  // stage nobody is rendering.
+  useReportStepBusy(settings.isPending);
 
   const installed = useMemo(() => providers ?? [], [providers]);
 

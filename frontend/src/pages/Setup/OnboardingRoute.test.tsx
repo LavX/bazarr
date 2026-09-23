@@ -181,6 +181,26 @@ describe("the wizard's own URL", () => {
     await waitFor(() => expect(router.state.location.pathname).toBe("/"));
   });
 
+  it("does not read the stored cursor as an entry to go back to", async () => {
+    // A link opened straight onto a step resolves against the stored cursor,
+    // and that step was never an entry in this browser's history. Counting it
+    // as one made the wizard's Back leave the application.
+    localStorage.setItem("bazarr.onboarding.step", "welcome");
+    const user = userEvent.setup();
+    const router = openWizardAt("/setup/intent", ["/", "/setup/intent"]);
+
+    await screen.findByRole("heading", { name: /what do you want bazarr/i });
+
+    await user.click(screen.getByRole("button", { name: /^back$/i }));
+
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/setup/welcome"),
+    );
+    expect(
+      screen.getByRole("heading", { name: /welcome to bazarr/i }),
+    ).toBeInTheDocument();
+  });
+
   it("falls back to the persisted cursor when the URL names no step", async () => {
     localStorage.setItem("bazarr.onboarding.step", "languages");
 

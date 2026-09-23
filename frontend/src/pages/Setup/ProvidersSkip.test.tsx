@@ -170,6 +170,36 @@ describe("the providers step is not a dead end", () => {
     settle?.();
   });
 
+  it("does not offer the skip while the configure stage is saving", async () => {
+    // On a rerun the step opens on the configure stage, and its Continue
+    // writes the settings. Skipping while that write is in the air advances
+    // the wizard, and the write's own success then advances it again.
+    vi.mocked(useProviderHubProviders).mockReturnValue({
+      data: [
+        {
+          provider_id: "opensubtitles",
+          active_version: "1.0.0",
+          manifest: { id: "opensubtitles", name: "OpenSubtitles" },
+        },
+      ],
+      isLoading: false,
+    } as unknown as ReturnType<typeof useProviderHubProviders>);
+    vi.mocked(useSettingsMutation).mockReturnValue({
+      mutate: vi.fn(),
+      mutateAsync: vi.fn(),
+      isPending: true,
+    } as unknown as ReturnType<typeof useSettingsMutation>);
+
+    openProvidersStep();
+
+    expect(
+      await screen.findByRole("heading", { name: /enable and configure/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /i will pick providers later/i }),
+    ).not.toBeInTheDocument();
+  });
+
   it("browser Back does not leave the install running into nothing", async () => {
     // The skip is hidden while a run is going, but the address bar is another
     // way out of the same screen: going back unmounted the stage while the

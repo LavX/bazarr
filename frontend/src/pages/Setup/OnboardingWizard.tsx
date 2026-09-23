@@ -96,6 +96,11 @@ const OnboardingWizardBody: FunctionComponent = () => {
   // and a moved URL beside a stale cursor look exactly alike from here, and
   // whichever one this effect guessed at, it guessed wrong half the time.
   const pendingUrl = useRef<string | null>(null);
+  // Whether the URL and the cursor have agreed at least once. Until they have,
+  // a URL that names another step is a link somebody opened, not a move
+  // through this wizard, and the step it resolved from was never an entry in
+  // the browser's history to go back to.
+  const synced = useRef(false);
   // The steps behind the current entry that this wizard pushed, oldest first.
   // It is what lets Back walk the history that is already there instead of
   // writing more of it: pushing the earlier step on top made the next browser
@@ -141,6 +146,7 @@ const OnboardingWizardBody: FunctionComponent = () => {
   useEffect(() => {
     if (stepKey === current.key) {
       pendingUrl.current = null;
+      synced.current = true;
       return;
     }
     if (pendingUrl.current === current.key) {
@@ -153,10 +159,13 @@ const OnboardingWizardBody: FunctionComponent = () => {
       if (trail.current[trail.current.length - 1] === stepKey) {
         // Backwards: the entry underneath is the one being moved to.
         trail.current.pop();
-      } else {
-        // Forwards, or a pasted link. Either way the entry being left is now
-        // the one underneath, and forgetting that made the wizard's own Back
-        // write a third entry over two that already said the same step.
+      } else if (synced.current) {
+        // Forwards, or a link followed from inside the wizard. Either way the
+        // step being left is now the entry underneath, and forgetting that
+        // made the wizard's own Back write a third entry over two that
+        // already said the same step. A link opened before the two ever
+        // agreed is not that: the entry underneath it belongs to whatever the
+        // reader was looking at, which is not a step of this wizard.
         trail.current.push(current.key);
       }
       goTo(stepKey);
