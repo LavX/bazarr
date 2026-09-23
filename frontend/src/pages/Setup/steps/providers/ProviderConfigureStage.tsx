@@ -21,6 +21,7 @@ import type {
   ProviderHubInstallation,
   ProviderHubManifest,
 } from "@/apis/raw/providerHub";
+import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import styles from "./ProviderGrid.module.scss";
 
 type FieldType = "text" | "password" | "checkbox";
@@ -190,6 +191,11 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
   } = useProviderHubProviders();
   const { data: systemSettings } = useSystemSettings();
   const settings = useSettingsMutation();
+  // A save in flight owns this step until it answers: the shell's skip would
+  // advance the wizard while the write is still going, and the mutation's own
+  // onSuccess would then advance it a second time and report a failure to a
+  // stage nobody is rendering.
+  useReportStepBusy(settings.isPending);
 
   const installed = useMemo(() => providers ?? [], [providers]);
 
@@ -325,7 +331,11 @@ const ProviderConfigureStage: FC<ProviderConfigureStageProps> = ({
         <Title order={2}>Enable and configure providers</Title>
         <Text c="dimmed">
           Turn on the providers you want to use and enter any credentials they
-          need. You must enable at least one provider to continue.
+          need.
+        </Text>
+        <Text c="dimmed" size="sm">
+          Until you enable a provider, Bazarr+ has nothing to search. You can do
+          this from the Subtitle Hub whenever you like.
         </Text>
       </Stack>
 

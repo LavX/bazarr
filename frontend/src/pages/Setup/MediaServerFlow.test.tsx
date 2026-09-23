@@ -350,7 +350,7 @@ describe("media server selection", () => {
     await waitFor(() => expect(creates).toHaveLength(1));
 
     // The shell's own skip, while the master switch write is still in the air.
-    await user.click(screen.getByRole("button", { name: /skip this step/i }));
+    await user.click(screen.getByRole("button", { name: /do this later/i }));
     await screen.findByRole("heading", { name: /^emby$/i });
 
     release?.();
@@ -483,7 +483,7 @@ describe("media server selection", () => {
     expect(creates).toHaveLength(1);
   });
 
-  it("Skip setup forgets the servers that were ticked", async () => {
+  it("leaving setup forgets the servers that were ticked", async () => {
     // clearSelection only queues a state update, and the persistence effect
     // runs after the commit; the navigation unmounts the provider in that same
     // commit, so the drafts could still be in localStorage to be restored on
@@ -503,7 +503,10 @@ describe("media server selection", () => {
       ).not.toBeNull(),
     );
 
-    await user.click(screen.getByRole("button", { name: /skip setup/i }));
+    await user.click(screen.getByRole("button", { name: /set up later/i }));
+    await user.click(
+      await screen.findByRole("button", { name: /^leave setup$/i }),
+    );
 
     await waitFor(() => expect(navigate).toHaveBeenCalledWith("/"));
     expect(storedOnLeaving).toBeNull();

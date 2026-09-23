@@ -32,26 +32,121 @@ const LANGUAGES: Language.Server[] = [
   { code2: "es", code3: "spa", name: "Spanish", enabled: false },
 ];
 
-function setLanguages(data: unknown) {
+function setLanguages(data: unknown, isLoading = false) {
   mockedUseLanguages.mockReturnValue({
     data,
+    isLoading,
   } as unknown as ReturnType<typeof useLanguages>);
 }
 
-function setProfiles(data: unknown) {
+// The step guesses a first language from the browser, so every test says what
+// the browser is. "zz-ZZ" matches nothing in the list, which is the old
+// behaviour of starting with an empty selection.
+function setBrowserLanguage(tag: string) {
+  Object.defineProperty(window.navigator, "language", {
+    value: tag,
+    configurable: true,
+  });
+}
+
+function setProfiles(
+  data: unknown,
+  state: { isLoading?: boolean; isError?: boolean } = {},
+) {
   mockedUseLanguageProfiles.mockReturnValue({
     data,
+    isLoading: state.isLoading ?? false,
+    isError: state.isError ?? false,
   } as unknown as ReturnType<typeof useLanguageProfiles>);
 }
 
 describe("LanguagesStep", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    setBrowserLanguage("zz-ZZ");
     setLanguages(LANGUAGES);
     setProfiles([]);
     mockedUseSettingsMutation.mockReturnValue({
       mutate,
     } as unknown as ReturnType<typeof useSettingsMutation>);
+  });
+
+  it("starts on the browser's language when the list has it", async () => {
+    // The step used to open with an empty selector and a disabled Continue,
+    // which is a gate satisfied by nothing the reader can see. A working
+    // default satisfies it instead, and they can still change it.
+    setBrowserLanguage("es-ES");
+    customRender(<LanguagesStep onNext={onNext} />);
+
+    // The pill in the field, so the guess is visible and removable rather
+    // than a hidden default.
+    expect((await screen.findAllByText("Spanish")).length).toBeGreaterThan(0);
+    expect(
+      screen.getByRole("button", { name: /continue/i }),
+    ).not.toBeDisabled();
+  });
+
+  it("does not guess European Portuguese for a Brazilian browser", async () => {
+    // Bazarr keeps pt-BR as its own language, "pb", and "pt" is a different
+    // one. Cutting the tag at the hyphen would have built the default profile
+    // in a language the reader never picked.
+    setBrowserLanguage("pt-BR");
+    setLanguages([
+      {
+        code2: "pb",
+        code3: "pob",
+        name: "Portuguese (Brazil)",
+        enabled: false,
+      },
+      { code2: "pt", code3: "por", name: "Portuguese", enabled: false },
+    ]);
+    const user = userEvent.setup();
+
+    customRender(<LanguagesStep onNext={onNext} />);
+
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    expect(mutate).toHaveBeenCalledTimes(1);
+    expect(mutate.mock.calls[0][0]["languages-enabled"]).toEqual(["pb"]);
+  });
+
+  it("says the list is loading instead of showing an empty selector", () => {
+    // An interactive, empty selector beside a disabled Continue reads as
+    // broken, and nothing on the step said the list was still on its way.
+    setLanguages(undefined, true);
+    customRender(<LanguagesStep onNext={onNext} />);
+
+    const field = screen.getByPlaceholderText("Loading languages");
+    expect(field).toBeDisabled();
+  });
+
+  it("never writes a profile before it knows whether one exists", () => {
+    // The preselected language makes Continue pressable straight away, and the
+    // profiles query answers separately. Writing the Default profile in that
+    // window replaces the profiles a configured install already has, which is
+    // exactly the install that reaches this step again from Settings.
+    setBrowserLanguage("en-GB");
+    setProfiles(undefined, { isLoading: true });
+
+    customRender(<LanguagesStep onNext={onNext} />);
+
+    expect(screen.getByRole("button", { name: /continue/i })).toBeDisabled();
+  });
+
+  it("advances without writing when the profiles cannot be read", async () => {
+    setBrowserLanguage("en-GB");
+    setProfiles(undefined, { isError: true });
+    const user = userEvent.setup();
+    customRender(<LanguagesStep onNext={onNext} />);
+
+    expect(
+      screen.getByText(/could not read the language profiles/i),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    expect(mutate).not.toHaveBeenCalled();
+    expect(onNext).toHaveBeenCalled();
   });
 
   it("disables Continue until a language is selected", async () => {

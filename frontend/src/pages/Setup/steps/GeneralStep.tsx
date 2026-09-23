@@ -1,8 +1,9 @@
-import { FC, useState } from "react";
+import { FC } from "react";
 import { Button, Group, Select, Switch, TextInput } from "@mantine/core";
 import { useSettingsMutation, useSystemSettings } from "@/apis/hooks";
 import { folderOptions } from "@/pages/Settings/Subtitles/options";
 import StepLayout from "@/pages/Setup/StepLayout";
+import { useStepDraft } from "@/pages/Setup/useStepDrafts";
 import type { WizardStepProps } from "./types";
 
 // The "alongside media" default keeps subtitles next to the video file; any
@@ -18,7 +19,7 @@ function needsCustomFolder(value: string): boolean {
  * pre-fills from the current settings and only writes the keys the user actually
  * changed, so Continue with no edits just advances.
  */
-const GeneralStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
+const GeneralStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
   const { data: settings } = useSystemSettings();
   const mutation = useSettingsMutation();
 
@@ -28,11 +29,19 @@ const GeneralStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   const initialSubfolderCustom = general?.subfolder_custom ?? "";
   const initialUpgrade = general?.upgrade_subs ?? true;
 
-  const [subfolder, setSubfolder] = useState<string>(initialSubfolder);
-  const [subfolderCustom, setSubfolderCustom] = useState<string>(
-    initialSubfolderCustom,
-  );
-  const [upgradeSubs, setUpgradeSubs] = useState<boolean>(initialUpgrade);
+  // Held by the wizard, so Back and forward keep the edits. Only a field the
+  // reader actually changed is stored, so the rest still follows the settings
+  // query when it answers after this step first rendered.
+  const [draft, patchDraft] = useStepDraft(stepKey, {
+    subfolder: initialSubfolder,
+    subfolderCustom: initialSubfolderCustom,
+    upgradeSubs: initialUpgrade,
+  });
+  const { subfolder, subfolderCustom, upgradeSubs } = draft;
+  const setSubfolder = (value: string) => patchDraft({ subfolder: value });
+  const setSubfolderCustom = (value: string) =>
+    patchDraft({ subfolderCustom: value });
+  const setUpgradeSubs = (value: boolean) => patchDraft({ upgradeSubs: value });
 
   const showCustomFolder = needsCustomFolder(subfolder);
 

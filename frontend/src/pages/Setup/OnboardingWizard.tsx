@@ -1,6 +1,22 @@
-import { FunctionComponent, useMemo } from "react";
-import { useNavigate } from "react-router";
-import { Box, Button, Group, Paper, Text } from "@mantine/core";
+import {
+  FunctionComponent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { useBlocker, useNavigate, useParams } from "react-router";
+import {
+  Alert,
+  Box,
+  Button,
+  Group,
+  Modal,
+  Paper,
+  Stack,
+  Text,
+} from "@mantine/core";
 import { faCheck } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useSettingsMutation } from "@/apis/hooks";
@@ -16,6 +32,8 @@ import {
   OnboardingSelectionProvider,
   useOnboardingSelection,
 } from "./useOnboardingSelection";
+import { StepBusyProvider, useStepBusy } from "./useStepBusy";
+import { StepDraftProvider, useClearStepDrafts } from "./useStepDrafts";
 import { useWizardStep } from "./useWizardStep";
 import styles from "./OnboardingWizard.module.scss";
 
@@ -35,8 +53,13 @@ import styles from "./OnboardingWizard.module.scss";
 const OnboardingWizardBody: FunctionComponent = () => {
   const { intent, resetIntent } = useOnboardingIntent();
   const { drafts, clearSelection } = useOnboardingSelection();
+  const clearStepDrafts = useClearStepDrafts();
+  const stepBusy = useStepBusy();
   const navigate = useNavigate();
+  const { stepKey } = useParams<{ stepKey?: string }>();
   const mutation = useSettingsMutation();
+  const [leaving, setLeaving] = useState(false);
+  const [leaveError, setLeaveError] = useState<string | null>(null);
 
   const signature = drafts
     .map((draft) => `${draft.draftId}:${draft.kind}:${draft.instanceId ?? ""}`)
@@ -59,8 +82,122 @@ const OnboardingWizardBody: FunctionComponent = () => {
     [intent, mediaServers],
   );
 
-  const { index, step: current, next, back, reset } = useWizardStep(steps);
+  const { index, step: current, goTo, reset } = useWizardStep(steps);
   const StepComponent = current.Component;
+
+  // The step key is in the URL, so the wizard has history of its own: browser
+  // Back walks one step back instead of leaving the application, a reload
+  // lands on the step it left, and a step can be linked to in a support
+  // thread. The persisted cursor stays as the fallback for a bare /setup.
+  const knownParam =
+    stepKey !== undefined && steps.some((s) => s.key === stepKey);
+  // The key of a move already asked for and not yet arrived. Without it the
+  // two directions are indistinguishable: a stale URL beside a moved cursor
+  // and a moved URL beside a stale cursor look exactly alike from here, and
+  // whichever one this effect guessed at, it guessed wrong half the time.
+  const pendingUrl = useRef<string | null>(null);
+  // Whether the URL and the cursor have agreed at least once. Until they have,
+  // a URL that names another step is a link somebody opened, not a move
+  // through this wizard, and the step it resolved from was never an entry in
+  // the browser's history to go back to.
+  const synced = useRef(false);
+  // The steps behind the current entry that this wizard pushed, oldest first.
+  // It is what lets Back walk the history that is already there instead of
+  // writing more of it: pushing the earlier step on top made the next browser
+  // Back go forwards, and replacing the current entry left the same step in
+  // the two entries on top, so browser Back appeared to do nothing once.
+  const trail = useRef<string[]>([]);
+
+  // Moving the cursor and the URL is one action, so the effect below only ever
+  // has to deal with a URL that moved on its own: a browser Back or Forward,
+  // or a pasted link.
+  const moveTo = useCallback(
+    (key: string, from: string) => {
+      pendingUrl.current = key;
+      goTo(key);
+      trail.current.push(from);
+      navigate(`/setup/${key}`);
+    },
+    [goTo, navigate],
+  );
+  const next = useCallback(
+    () => moveTo(steps[Math.min(index + 1, steps.length - 1)].key, current.key),
+    [moveTo, steps, index, current.key],
+  );
+  const back = useCallback(() => {
+    const target = steps[Math.max(index - 1, 0)].key;
+    pendingUrl.current = target;
+    // The cursor moves here rather than waiting on the history move, because
+    // the step list is this component's, not the browser's.
+    goTo(target);
+    if (trail.current[trail.current.length - 1] === target) {
+      // The entry underneath is the step being gone back to, so go back to it
+      // rather than writing a third entry over the two that already say it.
+      trail.current.pop();
+      navigate(-1);
+      return;
+    }
+    // The list changed under the history (a media server was unticked, say),
+    // so the entry underneath is not this step. Replace rather than push: an
+    // earlier step stacked on a later one turns browser Back into forward.
+    navigate(`/setup/${target}`, { replace: true });
+  }, [goTo, navigate, steps, index]);
+
+  useEffect(() => {
+    if (stepKey === current.key) {
+      pendingUrl.current = null;
+      synced.current = true;
+      return;
+    }
+    if (pendingUrl.current === current.key) {
+      // Our own navigation, still on its way. It is also what keeps the wizard
+      // working where there is no router to answer it at all.
+      return;
+    }
+    if (knownParam && stepKey !== undefined) {
+      pendingUrl.current = stepKey;
+      if (trail.current[trail.current.length - 1] === stepKey) {
+        // Backwards: the entry underneath is the one being moved to.
+        trail.current.pop();
+      } else if (synced.current) {
+        // Forwards, or a link followed from inside the wizard. Either way the
+        // step being left is now the entry underneath, and forgetting that
+        // made the wizard's own Back write a third entry over two that
+        // already said the same step. A link opened before the two ever
+        // agreed is not that: the entry underneath it belongs to whatever the
+        // reader was looking at, which is not a step of this wizard.
+        trail.current.push(current.key);
+      }
+      goTo(stepKey);
+      return;
+    }
+    // The URL names no step, or names one this run does not walk. Neither is
+    // an entry worth being able to go back to, so it is replaced.
+    pendingUrl.current = current.key;
+    navigate(`/setup/${current.key}`, { replace: true });
+  }, [stepKey, knownParam, current.key, goTo, navigate]);
+
+  // A step in the middle of work it has to finish is not left through the
+  // address bar either. The skip is hidden for the same reason, and a browser
+  // Back that unmounted the providers step left its installs finishing into
+  // nothing, its restart arriving at nobody, and the poll that brings the
+  // reader back armed after its own cleanup had run. The attempt is dropped
+  // rather than queued: once the run is over, Back works again.
+  const blocker = useBlocker(
+    ({ currentLocation, nextLocation, historyAction }) =>
+      // Only a history move, which is the reader leaving through the back or
+      // forward button. The wizard's own moves are pushes and replacements,
+      // and blocking those would stop the busy step from finishing its work:
+      // a provider save ends by advancing the wizard itself.
+      historyAction === "POP" &&
+      stepBusy &&
+      currentLocation.pathname !== nextLocation.pathname,
+  );
+  useEffect(() => {
+    if (blocker.state === "blocked" && !stepBusy) {
+      blocker.reset?.();
+    }
+  }, [blocker, stepBusy]);
 
   // Progress is reported per phase, never as a step total. Before the intent
   // is answered nobody knows which path runs, and the media server segment
@@ -78,7 +215,11 @@ const OnboardingWizardBody: FunctionComponent = () => {
       ? `${current.segment} ${inSegment.findIndex((s) => s.key === current.key) + 1} of ${inSegment.length}`
       : `${inPhase.findIndex((s) => s.key === current.key) + 1} of ${inPhase.length}`;
 
-  const handleSkip = () => {
+  // Marking setup complete ends onboarding, so it asks first. The write can
+  // also fail, and a failed write used to produce nothing at all: no spinner,
+  // no message, no navigation, just a button that had apparently done nothing.
+  const handleLeave = () => {
+    setLeaveError(null);
     mutation.mutate(
       { "settings-general-setup_complete": true },
       {
@@ -86,14 +227,20 @@ const OnboardingWizardBody: FunctionComponent = () => {
           reset();
           resetIntent();
           clearSelection();
+          clearStepDrafts();
           // The storage key is cleared here rather than left to the provider's
           // effect: the navigation below unmounts the provider in the same
           // commit, so the effect need not run, and the skipped drafts would
           // still be there to restore on the next visit to setup.
           clearPersistedSelection();
+          setLeaving(false);
           // The Redirector picks routing back up once setup is marked complete.
           navigate("/");
         },
+        onError: () =>
+          setLeaveError(
+            "Bazarr+ could not save that. You are still in setup, so nothing is lost. Check that Bazarr+ is reachable and try again.",
+          ),
       },
     );
   };
@@ -110,11 +257,69 @@ const OnboardingWizardBody: FunctionComponent = () => {
             </Text>
           </div>
           <Group gap="sm">
-            <Button variant="subtle" color="gray" onClick={handleSkip}>
-              Skip setup
+            <Button
+              variant="subtle"
+              color="gray"
+              // Leaving ends the wizard, which takes the step with it, so it
+              // waits for a step that is in the middle of work it has to
+              // finish. An install left this way kept going into nothing and
+              // restarted Bazarr+ at a reader who was already somewhere else.
+              disabled={stepBusy}
+              onClick={() => {
+                setLeaveError(null);
+                setLeaving(true);
+              }}
+            >
+              Set up later
             </Button>
           </Group>
         </header>
+
+        <Modal
+          opened={leaving}
+          // Dismissing does not cancel the write, so while one is in the air
+          // there is nothing to dismiss to: pressing Keep going and then
+          // landing on the home page anyway is the answer the reader did not
+          // give.
+          onClose={() => {
+            if (!mutation.isPending) {
+              setLeaving(false);
+            }
+          }}
+          closeOnClickOutside={!mutation.isPending}
+          closeOnEscape={!mutation.isPending}
+          withCloseButton={!mutation.isPending}
+          title="Leave setup?"
+          centered
+        >
+          <Stack gap="md">
+            <Text size="sm">
+              You can run first-time setup again any time from Settings,
+              General. Anything you have already saved stays saved.
+            </Text>
+            {leaveError && (
+              <Alert color="red" title="Could not leave setup">
+                {leaveError}
+              </Alert>
+            )}
+            <Group justify="flex-end">
+              <Button
+                variant="default"
+                onClick={() => setLeaving(false)}
+                disabled={mutation.isPending}
+              >
+                Keep going
+              </Button>
+              <Button
+                color="red"
+                onClick={handleLeave}
+                loading={mutation.isPending}
+              >
+                Leave setup
+              </Button>
+            </Group>
+          </Stack>
+        </Modal>
 
         <div className={styles.rail} aria-hidden>
           {WIZARD_PHASES.map((phase, position) => {
@@ -168,18 +373,24 @@ const OnboardingWizardBody: FunctionComponent = () => {
           <StepComponent
             key={current.key}
             onNext={next}
-            onBack={index > 0 ? back : undefined}
+            // No Back while the step is finishing work either. Back moves the
+            // cursor itself, which unmounts the step before any history guard
+            // can see it, and an install that loses its screen still restarts
+            // Bazarr+ at a reader who is no longer there.
+            onBack={index > 0 && !stepBusy ? back : undefined}
             draftId={current.draftId}
+            stepKey={current.key}
           />
         </Paper>
 
-        {current.optional ? (
+        {current.optional && !stepBusy ? (
           <div className={styles.stepSkip}>
             <Button variant="subtle" color="gray" onClick={next}>
-              Skip this step
+              {current.skipLabel ?? "Do this later"}
             </Button>
           </div>
         ) : (
+          !current.optional &&
           current.requiredReason && (
             <Text className={styles.stepNote}>{current.requiredReason}</Text>
           )
@@ -192,7 +403,11 @@ const OnboardingWizardBody: FunctionComponent = () => {
 const OnboardingWizardView: FunctionComponent = () => (
   <OnboardingIntentProvider>
     <OnboardingSelectionProvider>
-      <OnboardingWizardBody />
+      <StepDraftProvider>
+        <StepBusyProvider>
+          <OnboardingWizardBody />
+        </StepBusyProvider>
+      </StepDraftProvider>
     </OnboardingSelectionProvider>
   </OnboardingIntentProvider>
 );

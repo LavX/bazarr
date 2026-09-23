@@ -70,6 +70,18 @@ describe("onboarding step registry", () => {
     }
   });
 
+  it("no step in the subtitles phase is a dead end", () => {
+    // Providers was required, and its only forward control is disabled until
+    // something is ticked, on the one step that restarts the application and
+    // reads a catalog over the network. A catalog that would not load left the
+    // reader with the permanent skip in the header as the only way out.
+    const providers = ONBOARDING_STEPS.find((s) => s.key === "providers");
+
+    expect(providers?.optional).toBe(true);
+    expect(providers?.requiredReason).toBeUndefined();
+    expect(providers?.skipLabel).toBe("I will pick providers later");
+  });
+
   it("the library path keeps the arr steps and drops nothing they need", () => {
     const keys = keysFor("library");
 

@@ -423,6 +423,16 @@ export function useRoutes(): CustomRouteObject[] {
         hidden: true,
         element: <OnboardingWizardView></OnboardingWizardView>,
       },
+      {
+        // The step key is part of the URL, so the wizard keeps history of its
+        // own: browser Back walks one step back instead of leaving the
+        // application, a reload resumes on the step it left, and a step can be
+        // linked to. Bare /setup above still works and redirects to the step
+        // the persisted cursor names.
+        path: "/setup/:stepKey",
+        hidden: true,
+        element: <OnboardingWizardView></OnboardingWizardView>,
+      },
     ],
     [
       data?.episodes,

@@ -10,6 +10,9 @@ import type { WizardStepProps } from "./types";
  * that and nothing else. Everything the Translator settings page exposes (the
  * model, routing, batching) has a working default.
  *
+ * Nothing here is carried across a Back: the one field is an API key, and the
+ * wizard keeps credentials out of the drafts it holds for every other step.
+ *
  * Writing the key alone would be inert, because the translator engine defaults
  * to Google Translate, so a filled-in key also selects OpenRouter as the
  * engine. Both keys go through the same settings path the Translator page uses.

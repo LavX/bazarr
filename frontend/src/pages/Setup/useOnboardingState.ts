@@ -15,12 +15,20 @@ export function useOnboardingState(): {
   isLoading: boolean;
 } {
   const { data: settings, isLoading: settingsLoading } = useSystemSettings();
-  const { data: arrInstances, isLoading: instancesLoading } = useArrInstances();
+  const {
+    data: arrInstances,
+    isLoading: instancesLoading,
+    isError: instancesFailed,
+  } = useArrInstances();
 
   const isLoading = settingsLoading || instancesLoading;
 
   const general = settings?.general;
-  const hasInstances = (arrInstances?.length ?? 0) > 0;
+  // A failed instances read is "we do not know", not "there are none". Read as
+  // none, an install with a hundred series and a momentarily unreachable
+  // database answers the first-run question with yes and routes its owner into
+  // the setup wizard over a configured install.
+  const hasInstances = instancesFailed || (arrInstances?.length ?? 0) > 0;
   const hasProviders = (general?.enabled_providers?.length ?? 0) > 0;
 
   const needsOnboarding =

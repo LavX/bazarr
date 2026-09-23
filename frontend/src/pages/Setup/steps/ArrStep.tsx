@@ -23,6 +23,7 @@ import type {
   ArrInstanceTest,
 } from "@/apis/raw/arrInstances";
 import StepLayout from "@/pages/Setup/StepLayout";
+import { useStepDraft } from "@/pages/Setup/useStepDrafts";
 import type { WizardStepProps } from "./types";
 
 export interface ArrStepProps extends WizardStepProps {
@@ -66,7 +67,7 @@ interface FieldErrors {
  * health warning. So: an untouched step advances without creating, and a
  * touched one has to name an address and a key before anything is written.
  */
-const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack }) => {
+const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
   const meta = KIND_META[kind];
 
   const { data: instances } = useArrInstances();
@@ -76,11 +77,25 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack }) => {
 
   const existing = (instances ?? []).find((i) => i.kind === kind) ?? null;
 
-  const [name, setName] = useState(`Main ${meta.label}`);
-  const [ip, setIp] = useState("");
-  const [port, setPort] = useState<number | string>(meta.port);
-  const [baseUrl, setBaseUrl] = useState("");
-  const [ssl, setSsl] = useState(false);
+  // Parked on the wizard rather than in this component: the shell remounts a
+  // step whenever the cursor moves, so going back one screen to re-read a
+  // question used to empty a filled-in form with no warning that it would.
+  // The API key is deliberately not in here. It is a credential, and a
+  // credential that outlives the screen it was typed on is one more place it
+  // can be read from; it is also the one field a reader expects to retype.
+  const [draft, patchDraft] = useStepDraft(stepKey, {
+    name: `Main ${meta.label}`,
+    ip: "",
+    port: meta.port as number | string,
+    baseUrl: "",
+    ssl: false,
+  });
+  const { name, ip, port, baseUrl, ssl } = draft;
+  const setName = (value: string) => patchDraft({ name: value });
+  const setIp = (value: string) => patchDraft({ ip: value });
+  const setPort = (value: number | string) => patchDraft({ port: value });
+  const setBaseUrl = (value: string) => patchDraft({ baseUrl: value });
+  const setSsl = (value: boolean) => patchDraft({ ssl: value });
   const [apiKey, setApiKey] = useState("");
   const [errors, setErrors] = useState<FieldErrors>({});
   const [saveError, setSaveError] = useState<string | null>(null);

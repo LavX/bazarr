@@ -140,7 +140,7 @@ describe("OnboardingWizardView", () => {
     await answerIntent(user, /sonarr, radarr or sportarr/i);
     await screen.findByRole("heading", { name: /^sonarr$/i });
 
-    await user.click(screen.getByRole("button", { name: /skip this step/i }));
+    await user.click(screen.getByRole("button", { name: /do this later/i }));
 
     expect(
       await screen.findByRole("heading", { name: /^radarr$/i }),
@@ -155,7 +155,7 @@ describe("OnboardingWizardView", () => {
     await screen.findByRole("heading", { name: /what do you want bazarr/i });
 
     expect(
-      screen.queryByRole("button", { name: /skip this step/i }),
+      screen.queryByRole("button", { name: /do this later/i }),
     ).not.toBeInTheDocument();
     expect(screen.getByText(/nothing here is locked in/i)).toBeInTheDocument();
   });
@@ -190,7 +190,27 @@ describe("OnboardingWizardView", () => {
     expect(screen.getByText(/finish \u00b7 2 of 2/i)).toBeInTheDocument();
   });
 
-  it("Skip setup saves setup_complete and navigates home", async () => {
+  it("Set up later asks before it ends onboarding", async () => {
+    // One click used to end onboarding for good, with no confirmation and
+    // nothing in the application linking back to /setup afterwards.
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+
+    await user.click(screen.getByRole("button", { name: /set up later/i }));
+
+    expect(mutate).not.toHaveBeenCalled();
+    // The promise the confirmation makes, which Settings, General now keeps.
+    expect(await screen.findByText(/settings,\s*general/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /keep going/i }));
+
+    expect(mutate).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("heading", { name: /welcome to bazarr/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("confirming Set up later saves setup_complete and navigates home", async () => {
     const user = userEvent.setup();
     let onSuccess: (() => void) | undefined;
     mutate.mockImplementation(
@@ -201,7 +221,10 @@ describe("OnboardingWizardView", () => {
 
     customRender(<OnboardingWizardView />);
 
-    await user.click(screen.getByRole("button", { name: /skip setup/i }));
+    await user.click(screen.getByRole("button", { name: /set up later/i }));
+    await user.click(
+      await screen.findByRole("button", { name: /^leave setup$/i }),
+    );
 
     expect(mutate).toHaveBeenCalledWith(
       { "settings-general-setup_complete": true },
@@ -214,5 +237,99 @@ describe("OnboardingWizardView", () => {
     await waitFor(() => {
       expect(navigate).toHaveBeenCalledWith("/");
     });
+  });
+
+  it("a failed leave says so and keeps the reader in the wizard", async () => {
+    // A failed write used to produce nothing at all: no spinner, no message,
+    // no navigation, just a button that had apparently done nothing.
+    const user = userEvent.setup();
+    mutate.mockImplementation(
+      (_input: unknown, opts?: { onError?: (reason: unknown) => void }) => {
+        opts?.onError?.(new Error("no"));
+      },
+    );
+
+    customRender(<OnboardingWizardView />);
+
+    await user.click(screen.getByRole("button", { name: /set up later/i }));
+    await user.click(
+      await screen.findByRole("button", { name: /^leave setup$/i }),
+    );
+
+    expect(await screen.findByText(/could not save that/i)).toBeInTheDocument();
+    expect(navigate).not.toHaveBeenCalledWith("/");
+    expect(
+      screen.getByRole("heading", { name: /welcome to bazarr/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("cannot be dismissed while the leave write is still in the air", async () => {
+    // Dismissing does not cancel the write, so a Keep going that still landed
+    // on the home page a second later is an answer the reader did not give.
+    const user = userEvent.setup();
+    mutate.mockImplementation(() => {
+      // Never settles: the modal stays in its pending state.
+    });
+    mockedSettingsMutation.mockReturnValue({
+      mutate,
+      isPending: true,
+    } as unknown as ReturnType<typeof useSettingsMutation>);
+
+    customRender(<OnboardingWizardView />);
+
+    await user.click(screen.getByRole("button", { name: /set up later/i }));
+    const keepGoing = await screen.findByRole("button", {
+      name: /keep going/i,
+    });
+
+    expect(keepGoing).toBeDisabled();
+    await user.keyboard("{Escape}");
+
+    expect(
+      screen.getByRole("button", { name: /^leave setup$/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("the providers step can be skipped instead of trapping the reader", async () => {
+    // The one step that restarts the application was also the one step with no
+    // exit but the permanent skip in the header.
+    const user = userEvent.setup();
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
+    localStorage.setItem("bazarr.onboarding.step", "providers");
+
+    customRender(<OnboardingWizardView />);
+
+    const skip = await screen.findByRole("button", {
+      name: /i will pick providers later/i,
+    });
+    expect(
+      screen.queryByText(/nothing for bazarr\+ to fetch subtitles from/i),
+    ).not.toBeInTheDocument();
+
+    await user.click(skip);
+
+    expect(
+      await screen.findByRole("heading", { name: /subtitle translation/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps what was typed on a step across Back and forward", async () => {
+    // Every step held its fields in its own useState and the shell remounts a
+    // step on every move, so re-reading the previous question emptied the form
+    // with no warning.
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+
+    await answerIntent(user, /sonarr, radarr or sportarr/i);
+    await screen.findByRole("heading", { name: /^sonarr$/i });
+
+    await user.type(screen.getByLabelText(/address/i), "10.0.0.5");
+
+    await user.click(screen.getByRole("button", { name: /^back$/i }));
+    await screen.findByRole("heading", { name: /what do you want bazarr/i });
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    await screen.findByRole("heading", { name: /^sonarr$/i });
+    expect(screen.getByLabelText(/address/i)).toHaveValue("10.0.0.5");
   });
 });

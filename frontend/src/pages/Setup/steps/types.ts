@@ -41,6 +41,9 @@ export interface WizardStepProps {
   // Which media server draft this step configures. Only the generated media
   // server steps carry one; every other step ignores it.
   draftId?: string;
+  // The key of the step being rendered, handed down so a step can park what
+  // was typed in it under that key and get it back after a Back and forward.
+  stepKey?: string;
 }
 
 export interface WizardStepDef {
@@ -63,6 +66,13 @@ export interface WizardStepDef {
   // control from this, with one label for every step; steps never render
   // their own (steps/index.test.tsx fails if one does).
   optional?: boolean;
+  // What the shell's skip control says on this step. The default suits any
+  // step ("Do this later"); a step whose consequence is worth naming says so
+  // here instead. Only read when the step is optional. It never starts with
+  // the same word as the header control that ends onboarding: two controls on
+  // one screen reading "Skip setup" and "Skip this step" were one click apart
+  // and a whole wizard apart in consequence.
+  skipLabel?: string;
   // Why a step that is not optional has no skip, shown in one line under the
   // card. Required on every non-optional step so "you cannot skip this" is
   // never left unexplained.
