@@ -7,7 +7,6 @@ import logging
 import os
 import re
 import shutil
-import struct
 import subprocess
 import threading
 import time
@@ -21,6 +20,7 @@ from app.database import (TableArrInstances, TableEpisodes, TableMovies, TableSh
                           TableSportsEvents, database, select)
 from app.get_args import args
 from utilities.path_mappings import path_mappings
+from utilities.waveform_peaks import request_peaks
 from api.subtitles.content import resolve_subtitle_path  # noqa: F401
 from subtitles.tools.subsync_engines import (create_preview_workspace, discard_preview_workspace,
                                              is_sync_engine_language_key)
@@ -31,7 +31,6 @@ logger = logging.getLogger(__name__)
 
 api_ns_editor = Namespace('Editor', description='Video editor streaming and metadata')
 
-PEAKS_CACHE_DIR = os.path.join(args.config_dir, 'cache', 'peaks')
 HLS_CACHE_DIR = os.path.join(args.config_dir, 'cache', 'hls')
 
 # Bump this whenever the HLS encoding strategy changes in a way that makes
@@ -770,7 +769,7 @@ class EditorHls(Resource):
 class EditorPeaks(Resource):
     @authenticate
     def get(self):
-        """Return pre-generated waveform peaks as JSON for wavesurfer.js."""
+        """Return waveform peaks as JSON for wavesurfer.js, or 202 with the job generating them."""
         resolved = _resolve_or_abort()
         if len(resolved) == 2:
             return resolved
@@ -779,115 +778,18 @@ class EditorPeaks(Resource):
 
         audio_track = request.args.get('audioTrack', '0')
         try:
-            audio_track_idx = int(audio_track)
+            audio_track_idx = max(0, int(audio_track))
         except (ValueError, TypeError):
             audio_track_idx = 0
 
-        # Build a cache key from the file path and modification time
-        stat = os.stat(video_path)
-        # Use a stable filename derived from the video path
-        import hashlib
-        path_hash = hashlib.md5(video_path.encode()).hexdigest()
-        track_suffix = f'_t{audio_track_idx}' if audio_track_idx > 0 else ''
-        cache_file = os.path.join(PEAKS_CACHE_DIR, f'{path_hash}_{int(stat.st_mtime)}{track_suffix}.json')
-
-        # Check cache
-        if os.path.isfile(cache_file):
-            try:
-                with open(cache_file, 'r') as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, OSError):
-                # Corrupted cache, regenerate
-                pass
-
-        # Get duration first
-        probe_data = _probe_video(video_path)
-        if not probe_data:
-            return 'Failed to probe video file', 500
-
-        duration = None
-        fmt = probe_data.get('format', {})
-        if 'duration' in fmt:
-            try:
-                duration = float(fmt['duration'])
-            except (ValueError, TypeError):
-                pass
-
-        if duration is None:
-            return 'Could not determine video duration', 500
-
-        # Generate peaks by having ffmpeg output low-rate PCM and processing in chunks.
-        # Use 800Hz sample rate (much less data than 8000Hz) and produce ~10 peaks/sec.
-        try:
-            ffmpeg = _get_ffmpeg()
-        except Exception:
-            logger.exception('ffmpeg binary not available')
-            return 'ffmpeg not found', 500
-
-        sample_rate = 800
-        target_rate = 10
-        samples_per_peak = max(1, sample_rate // target_rate)  # 80 samples per peak
-        chunk_bytes = samples_per_peak * 4  # 320 bytes per peak
-
-        cmd = [
-            ffmpeg,
-            '-i', video_path,
-            '-map', f'0:a:{audio_track_idx}',
-            '-ac', '1',
-            '-ar', str(sample_rate),
-            '-f', 'f32le',
-            '-v', 'error',
-            'pipe:1',
-        ]
-
-        peaks = []
-        try:
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            while True:
-                data = process.stdout.read(chunk_bytes)
-                if not data:
-                    break
-                n = len(data) // 4
-                if n == 0:
-                    break
-                chunk = struct.unpack(f'<{n}f', data[:n * 4])
-                max_val = max(chunk, key=abs)
-                peaks.append(round(max_val, 4))
-            process.wait(timeout=10)
-            if process.returncode != 0:
-                stderr_out = process.stderr.read().decode(errors='replace')[:500]
-                logger.error('ffmpeg peaks generation failed: %s', stderr_out)
-                if not peaks:
-                    return 'Failed to generate audio peaks', 500
-        except subprocess.TimeoutExpired:
-            if process.poll() is None:
-                process.kill()
-            if not peaks:
-                return 'Peak generation timed out', 500
-
-        if not peaks:
-            return 'No audio data found in file', 500
-
-        # Normalize to [-1, 1]
-        max_abs = max(abs(p) for p in peaks)
-        if max_abs > 0:
-            peaks = [round(p / max_abs, 4) for p in peaks]
-
-        response_data = {
-            'peaks': peaks,
-            'duration': round(duration, 2),
-            'sampleRate': target_rate,
-        }
-
-        # Cache the result
-        try:
-            os.makedirs(PEAKS_CACHE_DIR, exist_ok=True)
-            with open(cache_file, 'w') as f:
-                json.dump(response_data, f)
-        except OSError:
-            logger.warning('Failed to cache peaks for %s', video_path)
-
-        return response_data
+        # Cached peaks are served at once. Otherwise one job per file and track
+        # generates them, and the editor fetches again when that job finishes.
+        state, value = request_peaks(video_path, audio_track_idx)
+        if state == 'ready':
+            return value
+        if not value:
+            return 'Waveform generation could not be queued', 503
+        return {'jobId': value, 'status': 'pending'}, 202
 
 
 @api_ns_editor.route('editor/info')
