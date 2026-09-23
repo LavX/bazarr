@@ -582,10 +582,14 @@ def test_each_failure_is_classified_logged_once_and_shown_on_the_job(
     assert job["status"] == "failed"
     listed = authenticated_client.get("/api/system/jobs", query_string={"id": job["job_id"]}, headers=HEADERS)
     listed = listed.json["data"][0]
-    assert listed["error"] == {"reason": kind, "message": FAILURE_MESSAGES[kind]}
+    # The pool benches a provider that raised, so its failure says so and a
+    # retry, which could not reach it, is not offered.
+    message = FAILURE_MESSAGES["provider_paused" if kind == "provider_error" else kind]
+    assert listed["error"] == {"reason": kind, "message": message}
     assert listed["action"] is None
-    # A retry repeats the same checks, so an expired result is not offered one.
-    assert listed["retryable"] is (kind != "expired_handle")
+    # Retry is offered only where something outside the result could change:
+    # the same expired handle, archive or file would fail the same way again.
+    assert listed["retryable"] is (kind == "timeout")
     warnings = [record for record in caplog.records
                 if record.levelno == logging.WARNING and record.getMessage().startswith("Discover download failed")]
     assert len(warnings) == 1
@@ -643,15 +647,20 @@ def test_a_clean_file_keeps_its_exact_bytes():
 
 
 def test_a_failed_download_is_retried_through_the_standard_queue(authenticated_client, choices, providers, monkeypatch):
+    import time
+    from discover import download
     row = post(authenticated_client, CONTEXT).json["results"][0]
     queued = enqueue(authenticated_client, row)
-    original = providers.pool["discover_download"].download_subtitle
-    monkeypatch.setattr(providers.pool["discover_download"], "download_subtitle",
-                        lambda subtitle: (_ for _ in ()).throw(RuntimeError("fixture flaky")))
-    assert run_queued_job(queued.json["job_id"])["status"] == "failed"
-    monkeypatch.setattr(providers.pool["discover_download"], "download_subtitle", original)
-    # The pool benches a provider after an unexpected error; that is its policy, not the job's.
-    providers.pool.discarded_providers.discard("discover_download")
+
+    def slow(subtitle):
+        time.sleep(0.3)
+        subtitle.content = FULL_SRT
+
+    monkeypatch.setattr(providers.pool["discover_download"], "download_subtitle", slow)
+    monkeypatch.setattr(download, "JOB_WAIT_SECONDS", 0.05)
+    failed = run_queued_job(queued.json["job_id"])
+    assert failed["status"] == "failed" and failed["error"]["reason"] == "timeout" and failed["retryable"]
+    monkeypatch.setattr(download, "JOB_WAIT_SECONDS", 5)
     retried = authenticated_client.post("/api/system/jobs", query_string={"id": queued.json["job_id"], "action": "retry"},
                                         headers=HEADERS)
     assert retried.status_code == 200
@@ -664,3 +673,20 @@ def test_a_failed_download_is_retried_through_the_standard_queue(authenticated_c
     # A completed job is not retried.
     assert authenticated_client.post("/api/system/jobs", query_string={"id": job_id, "action": "retry"},
                                      headers=HEADERS).status_code == 400
+
+
+def test_stop_during_the_fetch_cancels_instead_of_offering_save(authenticated_client, choices, providers, monkeypatch):
+    from app.jobs_queue import jobs_queue
+    row = post(authenticated_client, CONTEXT).json["results"][0]
+    queued = enqueue(authenticated_client, row)
+
+    def stopped_meanwhile(subtitle):
+        jobs_queue.cancel_running_job(queued.json["job_id"])
+        subtitle.content = FULL_SRT
+
+    monkeypatch.setattr(providers.pool["discover_download"], "download_subtitle", stopped_meanwhile)
+    job = run_queued_job(queued.json["job_id"])
+    assert job["status"] == "completed" and job["progress_message"] == "Cancelled by user"
+    assert job["action"] is None
+    assert authenticated_client.get("/api/discover/download", query_string={"job": job["job_id"]},
+                                    headers=HEADERS).status_code == 404

@@ -619,6 +619,32 @@ describe("Discover download as a standard job", () => {
     expect(tickets).toEqual([jobId()]);
   });
 
+  it("fails the row when Save from the notification finds the ticket gone", async () => {
+    server.use(
+      ...handlers({
+        ticket: () =>
+          HttpResponse.json(
+            {
+              message:
+                "This download is no longer available. Download it again from the results.",
+              reason: "ticket_expired",
+            },
+            { status: 404 },
+          ),
+      }),
+    );
+    const { user } = renderDiscover();
+    await search(user);
+    await user.click(row().getByRole("button", { name: "Download SRT" }));
+    const toast = await findJobToast(`Download search-1-forced`);
+    await user.click(within(toast).getByRole("button", { name: "Save" }));
+    expect(await screen.findByText(/Download failed for/)).toHaveTextContent(
+      /no longer available\. Download it again/,
+    );
+    expect(row().queryByRole("button", { name: "Save SRT" })).toBeNull();
+    expect(save).not.toHaveBeenCalled();
+  });
+
   it("releases the row when its queued job is cancelled from the Jobs drawer", async () => {
     server.use(...handlers({ outcome: () => ({ status: "running" }) }));
     const { user } = renderDiscover();

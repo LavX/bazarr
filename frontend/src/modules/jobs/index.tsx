@@ -1,6 +1,8 @@
 import { FunctionComponent, useState } from "react";
 import { Button, Group, Stack, Text } from "@mantine/core";
 import { hideNotification, showNotification } from "@mantine/notifications";
+import queryClient from "@/apis/queries";
+import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { notification } from "@/modules/task";
 
@@ -62,6 +64,10 @@ export async function runJobAction(job: System.Jobs) {
 export async function retryJob(job: System.Jobs) {
   try {
     await api.system.retryJob(job.job_id);
+    // The socket normally brings the new job in; this covers a missed event.
+    void queryClient.invalidateQueries({
+      queryKey: [QueryKeys.System, QueryKeys.Jobs],
+    });
   } catch (error) {
     showNotification(
       notification.error(

@@ -586,39 +586,53 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
       });
   }, []);
 
+  /** Save a ticket; a failure also fails the row that is waiting on it. */
+  const saveOrFail = useCallback(
+    async (ticket: number) => {
+      try {
+        await saveTicket(ticket);
+      } catch (error) {
+        const feedback = currentState.current.download;
+        if (feedback?.ticket === ticket && feedback.contextKey) {
+          const data = (
+            error as { response?: { data?: { message?: unknown } } }
+          ).response?.data;
+          dispatch({
+            type: "download",
+            key: feedback.contextKey,
+            feedback: {
+              ...feedback,
+              status: "failed",
+              message:
+                typeof data?.message === "string"
+                  ? data.message
+                  : "The file could not be saved. Download it again.",
+              retryable: true,
+            },
+          });
+        }
+        throw error;
+      }
+    },
+    [saveTicket],
+  );
+
   // The standard completion action for a Discover download job. The
   // notification and the Jobs drawer run it without knowing about Discover.
   useEffect(
     () =>
       registerJobAction("discover.save", (action) =>
-        saveTicket(Number(action.ticket)),
+        saveOrFail(Number(action.ticket)),
       ),
-    [saveTicket],
+    [saveOrFail],
   );
 
   const saveSubtitle = useCallback(async () => {
-    const feedback = currentState.current.download;
-    if (!feedback?.ticket || !feedback.contextKey) return;
-    try {
-      await saveTicket(feedback.ticket);
-    } catch (error) {
-      const data = (error as { response?: { data?: { message?: unknown } } })
-        .response?.data;
-      dispatch({
-        type: "download",
-        key: feedback.contextKey,
-        feedback: {
-          ...feedback,
-          status: "failed",
-          message:
-            typeof data?.message === "string"
-              ? data.message
-              : "The file could not be saved. Download it again.",
-          retryable: true,
-        },
-      });
-    }
-  }, [saveTicket]);
+    const ticket = currentState.current.download?.ticket;
+    if (!ticket) return;
+    // The row shows the failure itself, so nothing is rethrown here.
+    await saveOrFail(ticket).catch(() => undefined);
+  }, [saveOrFail]);
 
   const closePreview = useCallback(() => {
     previewSequence.current += 1;

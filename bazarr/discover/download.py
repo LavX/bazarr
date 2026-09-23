@@ -62,6 +62,8 @@ class UnauthorizedResultError(PermissionError):
 FAILURE_MESSAGES = {
     "expired_handle": "This result has expired. Search again for this selection.",
     "provider_error": "The provider did not return a subtitle. Retry or choose another result.",
+    # Same reason, but the pool has benched the provider, so a retry cannot reach it yet.
+    "provider_paused": "The provider did not return a subtitle and is paused for now. Choose another result.",
     "archive_no_match": "The provider's archive has no subtitle for this language or episode. Choose another result.",
     "invalid_subtitle": "The provider returned a file that is not a usable subtitle. Choose another result.",
     "timeout": "The provider took too long to answer. Retry in a moment.",
@@ -75,14 +77,13 @@ class DownloadFailure(ValueError):
     leaves the process in a response.
     """
 
-    def __init__(self, reason, detail=""):
-        super().__init__(FAILURE_MESSAGES[reason])
+    def __init__(self, reason, detail="", paused=False):
         self.reason = reason
         self.detail = str(detail)[:500]
-
-    @property
-    def message(self):
-        return FAILURE_MESSAGES[self.reason]
+        # A retry only helps if the provider can be asked again.
+        self.retryable = reason not in ("expired_handle", "archive_no_match", "invalid_subtitle") and not paused
+        self.message = FAILURE_MESSAGES["provider_paused" if paused else reason]
+        super().__init__(self.message)
 
 
 def classify_failure(error):
@@ -337,11 +338,23 @@ def _cues(content):
     return cues, total, truncated
 
 
+def _provider_paused(name):
+    """Whether the pool will refuse this provider on the next attempt."""
+    try:
+        from app.get_providers import provider_is_usable
+        pool = service._get_compat_pool()
+        return name in getattr(pool, "discarded_providers", ()) or not provider_is_usable(name)
+    except Exception:
+        return False
+
+
 def _provider_bytes(subtitle):
+    name = getattr(subtitle, "provider_name", None)
     try:
         content = service._fetch_subtitle_bytes(subtitle)
     except Exception as error:
-        raise DownloadFailure("timeout" if isinstance(error, TimeoutError) else "provider_error", error) from error
+        raise DownloadFailure("timeout" if isinstance(error, TimeoutError) else "provider_error", error,
+                              paused=_provider_paused(name)) from error
     if not content:
         # The pool reports a candidate it rejected, which for Provider Hub is an
         # archive without a member for this language or episode, only as an
@@ -354,8 +367,9 @@ def _provider_bytes(subtitle):
         if error is not None:
             import requests
             timed_out = isinstance(error, (TimeoutError, requests.Timeout))
-            raise DownloadFailure("timeout" if timed_out else "provider_error", f"{type(error).__name__}: {error}")
-        raise DownloadFailure("provider_error", "provider returned no subtitle content")
+            raise DownloadFailure("timeout" if timed_out else "provider_error", f"{type(error).__name__}: {error}",
+                                  paused=_provider_paused(name))
+        raise DownloadFailure("provider_error", "provider returned no subtitle content", paused=_provider_paused(name))
     try:
         return _normalize(content)
     except Exception as error:
@@ -526,6 +540,20 @@ def fetch_ticket(job_id, *, authority: ResultAuthority) -> tuple[bytes, str]:
     return cached[1].content, cached[1].filename
 
 
+def _fail(error, provider, filename):
+    """Log one classified WARNING and end the job with the reason the user sees."""
+    from app.jobs_queue import JobFailed
+    failure = classify_failure(error)
+    logging.warning("Discover download failed: reason=%s provider=%s filename=%s: %s",
+                    failure.reason, provider, filename, failure.detail or type(error).__name__,
+                    exc_info=logging.getLogger().isEnabledFor(logging.DEBUG))
+    # A retry repeats the same checks and the same file, so it is only offered
+    # when something outside the result could have changed.
+    raise JobFailed(failure.message, reason=failure.reason, retryable=failure.retryable,
+                    returned_value={"ticket": None, "filename": filename, "reason": failure.reason,
+                                    "message": failure.message}) from None
+
+
 def run_download_job(result_id, search_id, authority, provider=None, filename=None, job_id=None):
     """The job body: fetch the exact result and keep its file for the ticket.
 
@@ -534,21 +562,20 @@ def run_download_job(result_id, search_id, authority, provider=None, filename=No
     ``provider`` and ``filename`` are what the result was when it was queued,
     so the log can name it even when the handle has expired since.
     """
-    from app.jobs_queue import JobFailed, jobs_queue
+    from app.jobs_queue import jobs_queue
     try:
         artifact = _artifact(result_id, search_id, authority, wait_seconds=JOB_WAIT_SECONDS)
         if not authority.is_current():
             raise UnauthorizedResultError("Authentication changed")
+    except Exception as error:
+        _fail(error, provider, filename)
+    # Stop in the drawer only flags the job; honour it before offering Save.
+    # This raises JobCancelled, which the queue records as cancelled.
+    jobs_queue.update_job_progress(job_id=job_id, progress_message="Keeping the file for saving")
+    try:
         _store_ticket(job_id, authority.scope, artifact)
     except Exception as error:
-        failure = classify_failure(error)
-        logging.warning("Discover download failed: reason=%s provider=%s filename=%s: %s",
-                        failure.reason, provider, filename, failure.detail or type(error).__name__,
-                        exc_info=logging.getLogger().isEnabledFor(logging.DEBUG))
-        # A retry repeats the same checks, so it cannot bring an expired result back.
-        raise JobFailed(failure.message, reason=failure.reason, retryable=failure.reason != "expired_handle",
-                        returned_value={"ticket": None, "filename": filename, "reason": failure.reason,
-                                        "message": failure.message}) from None
+        _fail(error, provider, filename)
     jobs_queue.update_job_progress(job_id=job_id, progress_message="Ready to save", allow_cancelled=True)
     jobs_queue.set_job_action(job_id, {"kind": "discover.save", "label": "Save", "ticket": job_id,
                                        "filename": artifact.filename})
