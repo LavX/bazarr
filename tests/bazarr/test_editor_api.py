@@ -15,7 +15,7 @@ from collections import namedtuple
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch, mock_open  # noqa: F401
 
-import pytest  # noqa: F401
+import pytest
 
 _SYS_BEFORE = dict(sys.modules)
 

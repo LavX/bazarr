@@ -1,7 +1,21 @@
+/* eslint-disable camelcase -- job fixtures use the server's field names. */
 import { QueryClient } from "@tanstack/react-query";
-import { describe, expect, it, vi } from "vitest";
-import { refreshWhenJobFinishes, whenJobFinishes } from "@/apis/hooks/jobWatch";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  JOB_WATCH_POLL_MS,
+  refreshWhenJobFinishes,
+  whenJobFinishes,
+} from "@/apis/hooks/jobWatch";
 import { QueryKeys } from "@/apis/queries/keys";
+import api from "@/apis/raw";
+
+vi.mock("@/apis/raw", () => ({
+  default: { system: { jobs: vi.fn().mockResolvedValue([]) } },
+}));
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 const JOBS = [QueryKeys.System, QueryKeys.Jobs];
 
@@ -81,5 +95,38 @@ describe("refreshWhenJobFinishes", () => {
     expect(refresh).not.toHaveBeenCalled();
     setJob(client, 7, "completed");
     expect(refresh).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("whenJobFinishes fallback", () => {
+  it("asks for the job directly when its terminal event never arrives", async () => {
+    vi.useFakeTimers();
+    const client = new QueryClient();
+    const done = vi.fn();
+    vi.mocked(api.system.jobs)
+      .mockResolvedValueOnce([{ job_id: 7, status: "running" }] as never)
+      .mockResolvedValueOnce([{ job_id: 7, status: "failed" }] as never);
+    whenJobFinishes(client, 7, done);
+
+    await vi.advanceTimersByTimeAsync(JOB_WATCH_POLL_MS);
+    expect(done).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(JOB_WATCH_POLL_MS);
+    expect(done).toHaveBeenCalledExactlyOnceWith("failed");
+    expect(api.system.jobs).toHaveBeenCalledWith(7);
+
+    await vi.advanceTimersByTimeAsync(JOB_WATCH_POLL_MS * 3);
+    expect(api.system.jobs).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops waiting for a job that left the queue", async () => {
+    vi.useFakeTimers();
+    const client = new QueryClient();
+    const done = vi.fn();
+    vi.mocked(api.system.jobs).mockResolvedValueOnce([]);
+    whenJobFinishes(client, 9, done);
+
+    await vi.advanceTimersByTimeAsync(JOB_WATCH_POLL_MS);
+    expect(done).toHaveBeenCalledExactlyOnceWith("completed");
   });
 });

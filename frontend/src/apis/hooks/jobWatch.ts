@@ -1,8 +1,13 @@
 import { QueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
+import api from "@/apis/raw";
 
 const JOBS_KEY = [QueryKeys.System, QueryKeys.Jobs];
 const TERMINAL = new Set(["completed", "failed"]);
+
+// How often the job is asked for directly, in case its terminal socket event
+// never reaches the cache (a dropped socket, a failed refetch in the reducer).
+export const JOB_WATCH_POLL_MS = 15_000;
 
 type CachedJob = { job_id?: number; status?: string };
 
@@ -38,17 +43,42 @@ export function whenJobFinishes(
   }
 
   let done = false;
+  const finish = (status: string) => {
+    if (done) return;
+    done = true;
+    unsubscribe();
+    clearInterval(timer);
+    onFinished(status);
+  };
+
   const unsubscribe = client.getQueryCache().subscribe((event) => {
     if (done || event.type !== "updated" || !isJobsQuery(event.query.queryKey))
       return;
     const status = cachedStatus(client, jobId);
-    if (status && TERMINAL.has(status)) {
-      done = true;
-      unsubscribe();
-      onFinished(status);
-    }
+    if (status && TERMINAL.has(status)) finish(status);
   });
-  return unsubscribe;
+
+  const timer = setInterval(() => {
+    api.system
+      .jobs(jobId)
+      .then((jobs) => {
+        const job = Array.isArray(jobs) ? jobs[0] : undefined;
+        if (!job) {
+          // Gone from the queue (trimmed, or the server restarted): whatever
+          // it did is done, so refresh rather than wait forever.
+          finish("completed");
+        } else if (TERMINAL.has(job.status)) {
+          finish(job.status);
+        }
+      })
+      .catch(() => undefined);
+  }, JOB_WATCH_POLL_MS);
+
+  return () => {
+    done = true;
+    unsubscribe();
+    clearInterval(timer);
+  };
 }
 
 /**

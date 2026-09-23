@@ -752,6 +752,27 @@ class TestProcessMediaActions:
         assert result['queued'] == 4
         assert result['errors'] == []
 
+    @patch('subtitles.mass_operations.upgrade_episodes_subtitles')
+    @patch('subtitles.mass_operations.jobs_queue')
+    def test_a_stopped_upgrade_stays_cancelled(self, mock_jobs_queue, mock_upgrade_series):
+        """Cancellation is not a failed item: it must reach the queue as itself."""
+        from app.jobs_queue import JobCancelled
+        from subtitles.mass_operations import _process_media_action
+
+        mock_upgrade_series.side_effect = JobCancelled('stopped')
+        with pytest.raises(JobCancelled):
+            _process_media_action([{'type': 'series', 'sonarrSeriesId': 1}], action='upgrade', job_id='test')
+
+    @patch('subtitles.mass_operations.upgrade_episodes_subtitles')
+    @patch('subtitles.mass_operations.jobs_queue')
+    def test_a_failed_upgrade_fails_the_batch(self, mock_jobs_queue, mock_upgrade_series):
+        from subtitles.job_errors import SubtitleJobError
+        from subtitles.mass_operations import _process_media_action
+
+        mock_upgrade_series.side_effect = RuntimeError('provider pool exploded')
+        with pytest.raises(SubtitleJobError, match='provider pool exploded'):
+            _process_media_action([{'type': 'series', 'sonarrSeriesId': 1}], action='upgrade', job_id='test')
+
     @patch('subtitles.mass_operations.series_scan_subtitles')
     @patch('subtitles.mass_operations.jobs_queue')
     def test_error_handling(self, mock_jobs_queue, mock_scan):

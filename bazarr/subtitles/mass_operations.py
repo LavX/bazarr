@@ -1163,6 +1163,8 @@ def _process_media_action(items, action, job_id):
                 upgrade_sports_subtitles(job_id=job_id, arr_instance_id=owner,
                                         **{key: sorted(ids) for key, ids in selection.items()})
             queued = len(sonarr_series_filters) + len(radarr_filters) + len(sports_selections)
+        except JobCancelled:
+            raise
         except Exception as e:
             logger.error(f'Error during upgrade: {e}')  # noqa: G004
             errors.append(str(e))
@@ -1191,6 +1193,8 @@ def _process_media_action(items, action, job_id):
             for owner in sports_scan_owners:
                 sports_full_scan_subtitles(job_id=job_id, arr_instance_id=owner)
             queued += len(sports_scan_owners)
+        except JobCancelled:
+            raise
         except Exception as e:
             logger.error(f'Error during sports scan-disk: {e}')  # noqa: G004
             errors.append(str(e))
