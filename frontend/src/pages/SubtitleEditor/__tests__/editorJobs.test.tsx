@@ -347,7 +347,10 @@ describe("WaveformTimeline on the job path", () => {
         job({
           job_id: 9,
           status: "failed",
-          progress_message: "ffmpeg could not read audio track 1",
+          error: {
+            reason: "failed",
+            message: "ffmpeg could not read audio track 1",
+          },
         }),
       ]);
     });

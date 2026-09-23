@@ -16,7 +16,7 @@ import struct
 import subprocess
 
 from app.get_args import args
-from app.jobs_queue import jobs_queue
+from app.jobs_queue import JobFailed, jobs_queue
 from utilities.job_dedupe import enqueue_or_existing
 
 logger = logging.getLogger(__name__)
@@ -33,10 +33,6 @@ SAMPLE_RATE = 800
 PEAKS_PER_SECOND = 10
 # Report progress once per this many peaks, i.e. per minute of audio.
 PROGRESS_EVERY_PEAKS = PEAKS_PER_SECOND * 60
-
-
-class WaveformError(RuntimeError):
-    """Peaks could not be generated. The message says why, in words for the user."""
 
 
 def peaks_cache_file(video_path, audio_track):
@@ -125,13 +121,13 @@ def _duration(video_path):
     except Exception:
         ffprobe = None
     if not ffprobe:
-        raise WaveformError('ffprobe is not available, so the waveform cannot be generated.')
+        raise JobFailed('ffprobe is not available, so the waveform cannot be generated.')
     result = subprocess.run([ffprobe, '-v', 'quiet', '-print_format', 'json', '-show_format', video_path],
                             capture_output=True, timeout=30)
     try:
         return float(json.loads(result.stdout)['format']['duration'])
     except (ValueError, KeyError, TypeError):
-        raise WaveformError(f'Could not read the duration of {os.path.basename(video_path)}.')
+        raise JobFailed(f'Could not read the duration of {os.path.basename(video_path)}.')
 
 
 def _extract_peaks(video_path, audio_track, duration, job_id):
@@ -141,7 +137,7 @@ def _extract_peaks(video_path, audio_track, duration, job_id):
     except Exception:
         ffmpeg = None
     if not ffmpeg:
-        raise WaveformError('ffmpeg is not available, so the waveform cannot be generated.')
+        raise JobFailed('ffmpeg is not available, so the waveform cannot be generated.')
 
     samples_per_peak = max(1, SAMPLE_RATE // PEAKS_PER_SECOND)
     chunk_bytes = samples_per_peak * 4
@@ -178,15 +174,15 @@ def _extract_peaks(video_path, audio_track, duration, job_id):
         logger.error('ffmpeg peaks generation failed: %s', stderr_out)
     if not peaks:
         if stderr_out:
-            raise WaveformError(f'ffmpeg could not read audio track {audio_track + 1}: {stderr_out.strip()}')
-        raise WaveformError(f'No audio data found in {os.path.basename(video_path)}.')
+            raise JobFailed(f'ffmpeg could not read audio track {audio_track + 1}: {stderr_out.strip()}')
+        raise JobFailed(f'No audio data found in {os.path.basename(video_path)}.')
     return peaks
 
 
 def generate_waveform_peaks(video_path, audio_track, job_id=None):
     """Generate and cache the peaks for one media file and audio track."""
     if not os.path.isfile(video_path):
-        raise WaveformError(f'{os.path.basename(video_path)} is no longer on disk.')
+        raise JobFailed(f'{os.path.basename(video_path)} is no longer on disk.')
     if read_cached_peaks(video_path, audio_track) is not None:
         return
 
@@ -211,7 +207,7 @@ def generate_waveform_peaks(video_path, audio_track, job_id=None):
             os.remove(temporary)
         except OSError:
             pass
-        raise WaveformError(f'Could not save the waveform: {error.strerror or error}')
+        raise JobFailed(f'Could not save the waveform: {error.strerror or error}')
     prune_peaks_cache(keep=cache_file)
     jobs_queue.update_job_progress(job_id=job_id, progress_value=100, progress_max=100,
                                    progress_message='Waveform ready')

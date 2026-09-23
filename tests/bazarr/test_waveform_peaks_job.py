@@ -113,12 +113,12 @@ def test_a_file_without_that_audio_track_fails_the_job_with_the_reason(queue, tm
     assert job.status == 'failed'
     assert job in queue.jobs_failed_queue
     assert not os.path.isdir(waveform_peaks.PEAKS_CACHE_DIR) or not os.listdir(waveform_peaks.PEAKS_CACHE_DIR)
-    with pytest.raises(waveform_peaks.WaveformError, match='could not read audio track 1'):
+    with pytest.raises(waveform_peaks.JobFailed, match='could not read audio track 1'):
         waveform_peaks.generate_waveform_peaks(video, 0)
 
 
 def test_a_file_that_disappeared_fails_with_the_reason(queue, tmp_path):
-    with pytest.raises(waveform_peaks.WaveformError, match='no longer on disk'):
+    with pytest.raises(waveform_peaks.JobFailed, match='no longer on disk'):
         waveform_peaks.generate_waveform_peaks(str(tmp_path / 'gone.mkv'), 0)
 
 

@@ -147,6 +147,7 @@ def test_an_unreachable_service_fails_the_job_with_the_reason(queue, sidecar, mo
     state = editor.editor_translation_state(job_id)
     assert state['status'] == 'failed'
     assert 'Cannot connect to the AI Subtitle Translator' in state['error']
+    assert job.error['message'] == state['error']
     assert [event for event in queue.events if event['type'] in ('progress', 'message')] == []
 
 
@@ -231,12 +232,18 @@ def test_a_library_translation_failure_reason_lands_on_its_job(monkeypatch):
 
     monkeypatch.setattr(main, 'validate_translation_params', refuse)
 
-    with pytest.raises(openrouter_translator.TranslationServiceError):
+    from app.jobs_queue import JobFailed
+
+    # The service error is the queue's JobFailed, so its reason is the job's
+    # error; the progress message is left alone.
+    assert issubclass(openrouter_translator.TranslationServiceError, JobFailed)
+    with pytest.raises(openrouter_translator.TranslationServiceError,
+                       match='Cannot connect to the AI Subtitle Translator service.'):
         main.translate_subtitles_file('/v.mkv', '/v.en.srt', 'en', 'hu', False, False, 'movie', None, None, 1, {},
                                       job_id=5)
 
-    assert {'job_id': 5, 'progress_message': 'Cannot connect to the AI Subtitle Translator service.',
-            'allow_cancelled': True} in recorded
+    assert not any('progress_message' in call and 'Cannot connect' in str(call['progress_message'])
+                   for call in recorded)
 
 
 class TestEditorTranslationEndpoint:

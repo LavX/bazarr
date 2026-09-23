@@ -20,7 +20,7 @@ from app import activity
 from languages.get_languages import language_from_alpha2, language_from_alpha3
 from radarr.history import history_log_movie
 from sonarr.history import history_log
-from app.jobs_queue import jobs_queue, JobCancelled
+from app.jobs_queue import jobs_queue, JobCancelled, JobFailed
 
 from ..core.translator_utils import add_translator_info, create_process_result, get_title
 from .auth import get_translator_auth_headers
@@ -66,11 +66,12 @@ class ProviderRoutingError(ValueError):
     """The selected provider routing cannot be honored safely."""
 
 
-class TranslationServiceError(RuntimeError):
+class TranslationServiceError(JobFailed, RuntimeError):
     """The AI Subtitle Translator could not produce a translation.
 
-    The message is the reason in words a user can act on. It is raised rather than
-    returned so the jobs queue records the job as failed.
+    The message is the reason in words a user can act on. It is the queue's
+    JobFailed, so a job that raises it is recorded as failed with that reason
+    as its error, which the failure toast and the Jobs drawer show.
     """
 
 

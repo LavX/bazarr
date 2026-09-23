@@ -140,7 +140,7 @@ export default function WaveformTimeline({
   const peaksJob = useEditorJob(peaksJobId);
   const peaksJobFinished = isTerminalJob(peaksJob);
   const peaksJobStatus = peaksJob?.status;
-  const peaksJobMessage = peaksJob?.progress_message;
+  const peaksJobMessage = peaksJob?.error?.message;
   useEffect(() => {
     if (peaksJobId == null || !peaksJobFinished) return;
     setPeaksJobId(null);

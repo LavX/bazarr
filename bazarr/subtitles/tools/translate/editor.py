@@ -133,9 +133,9 @@ def translate_editor_lines(lines, positions, source_language, target_language, t
     except JobCancelled:
         _cancel_remote_job(service.remote_job_id, settings.translator.openrouter_url)
         raise
-    except Exception as error:
-        # The reason goes on the job as well, so the drawer shows why it failed.
-        jobs_queue.update_job_progress(job_id=job_id, progress_message=str(error), allow_cancelled=True)
+    except Exception:
+        # A TranslationServiceError is a JobFailed, so its reason becomes the
+        # job's error, which the editor, the failure toast and the drawer show.
         _rename(job_id, 'Failed')
         raise
 
@@ -193,5 +193,5 @@ def editor_translation_state(job_id):
             state['lines'] = returned.get('lines') or []
             state['partial'] = returned.get('partial')
     elif status == 'failed':
-        state['error'] = job.get('error') or job.get('progress_message') or 'Translation failed.'
+        state['error'] = (job.get('error') or {}).get('message') or 'Translation failed.'
     return state

@@ -173,17 +173,15 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
     except Exception as e:
         activity.note_publication(observed, outcome='failed', detail=str(e))
         logging.error(f'Translation failed: {str(e)}', exc_info=True)  # noqa: G004, G201
-        # The reason goes on the job, so the Jobs drawer says why it failed.
-        try:
-            jobs_queue.update_job_progress(job_id=job_id, progress_message=str(e)[:500], allow_cancelled=True)
-        except Exception:
-            logging.debug('Could not record the translation failure on its job')
         current_name = jobs_queue.get_job_name(job_id)
         if current_name and 'Translating' in current_name:
             fail_name = current_name.replace('Translating', 'Failed')
         else:
             fail_name = f'Failed: {from_lang.upper()} → {to_lang.upper()} using {translator_label}'
         jobs_queue.update_job_name(job_id=job_id, new_job_name=fail_name)
+        # A TranslationServiceError is a JobFailed, so its reason becomes the
+        # job's error. Anything else keeps its type: synchronous callers answer
+        # a ValueError as a 409.
         raise
 
 
