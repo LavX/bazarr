@@ -325,7 +325,10 @@ def test_optional_sync_failure_or_skip_keeps_the_successful_upload(upload_flow, 
                 assert flow.queue.cancel_running_job(sync_job.job_id)
         flow.release_engine.set()
         sync_thread.join(2)
-        assert sync_job.status == "completed"
+        # The upload stays completed either way. A sync that failed is its own
+        # job, and it now fails instead of reading as completed; a cancelled or
+        # skipped one completes.
+        assert sync_job.status == ("failed" if outcome == "failure" else "completed")
         if outcome == "cancel":
             assert sync_job.progress_message == "Cancelled by user"
         assert sync_job.job_returned_value is not True

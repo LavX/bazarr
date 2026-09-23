@@ -6,20 +6,13 @@ from flask import request as flask_request
 from flask_restx import Resource, Namespace
 
 from app.config import settings
-from app import activity
 from app.jobs_queue import jobs_queue
+from subtitles.tools.translate.editor import (cancel_editor_translation, editor_translation_state,
+                                              enqueue_editor_translation)
 from subtitles.tools.translate.services.auth import get_translator_auth_headers
-from subtitles.tools.translate.services.openrouter_translator import (build_routing_config,
-                                                                     ProviderRoutingError,
-                                                                     TRANSLATOR_SERVICE_ID)
 from ..utils import authenticate
 
 api_ns_translator = Namespace('Translator', description='AI Subtitle Translator service operations')
-
-# This host submits an editor translation and then stops following it: the
-# browser polls the service directly. The observation therefore carries an
-# expiry rather than claiming the work runs until this process restarts.
-EDITOR_OBSERVATION_TTL_SECONDS = 600
 
 logger = logging.getLogger(__name__)
 
@@ -30,25 +23,6 @@ def get_service_url():
     if url:
         return url.rstrip('/')
     return None
-
-
-def _observe_editor_submission(submitted, payload):
-    """Record an editor translation this host submitted, with editor scope.
-
-    No library owner is known on this path, so none is guessed. The remote job
-    identity is retained so a later observation of the same job attaches to this
-    submission instead of looking like separate work.
-    """
-    remote_job_id = submitted.get('jobId') if isinstance(submitted, dict) else None
-    if not remote_job_id:
-        return
-    identity = activity.register(
-        activity.new_activity_id('translation'), operation='translation', scope_kind='editor',
-        ttl_seconds=EDITOR_OBSERVATION_TTL_SECONDS,
-        title=payload.get('title') or None, language=payload.get('targetLanguage') or None,
-        source_language=payload.get('sourceLanguage') or None)
-    activity.note_remote_submission(identity, service_id=TRANSLATOR_SERVICE_ID,
-                                    remote_job_id=remote_job_id)
 
 
 @api_ns_translator.route('translator/status')
@@ -118,69 +92,65 @@ class TranslatorJobs(Resource):
             logger.error(f"Error getting jobs: {e}")  # noqa: G004
             return {"error": str(e)}, 500
 
+
+@api_ns_translator.route('translator/editor')
+class TranslatorEditorJobs(Resource):
     @authenticate
     @api_ns_translator.doc(
-        responses={200: 'Success', 400: 'Bad Request', 503: 'Service Unavailable'}
+        responses={202: 'Queued', 400: 'Bad Request', 503: 'Service Unavailable'}
     )
     def post(self):
-        """Submit a content translation job to the translator service"""
-        service_url = get_service_url()
-        if not service_url:
+        """Queue a translation of subtitle editor lines as a Bazarr job.
+
+        Answers 202 with the job id. Progress arrives on the jobs socket like any
+        other job, and GET returns the translated lines once the job has finished.
+        """
+        if not get_service_url():
             return {"error": "AI Subtitle Translator service URL not configured"}, 503
 
         data = flask_request.get_json(silent=True) or {}
-        if not data.get("lines") or not data.get("targetLanguage"):
+        lines = data.get("lines")
+        if not lines or not data.get("targetLanguage"):
             return {"error": "Missing required fields: lines, targetLanguage"}, 400
-
         try:
-            model, provider = build_routing_config()
-        except ProviderRoutingError as error:
-            return {"error": str(error)}, 400
+            lines = [{"position": int(item["position"]), "line": str(item["line"])} for item in lines]
+        except (KeyError, TypeError, ValueError):
+            return {"error": "Each line needs a position and a line"}, 400
 
-        from subtitles.tools.translate.services.encryption import encrypt_api_key
+        job_id = enqueue_editor_translation(lines, data.get("sourceLanguage", ""), data["targetLanguage"],
+                                            title=data.get("title", ""), media_type=data.get("mediaType", ""))
+        if not job_id:
+            return {"error": "The translation could not be queued, try again"}, 409
+        return {"jobId": job_id}, 202
 
-        api_key = settings.translator.openrouter_api_key
-        encryption_key = settings.translator.openrouter_encryption_key
-        if api_key and encryption_key:
-            try:
-                api_key = encrypt_api_key(api_key, encryption_key)
-            except ValueError:
-                pass
-
-        payload = {
-            "lines": data["lines"],
-            "sourceLanguage": data.get("sourceLanguage", ""),
-            "targetLanguage": data["targetLanguage"],
-            "title": data.get("title", ""),
-            "mediaType": data.get("mediaType", ""),
-            "config": {
-                "apiKey": api_key,
-                "model": model,
-                "temperature": settings.translator.openrouter_temperature,
-                "provider": provider,
-            }
-        }
-
+    @authenticate
+    @api_ns_translator.doc(
+        responses={200: 'Success', 400: 'Bad Request', 404: 'Not Found'}
+    )
+    def get(self):
+        """The state of an editor translation job, with its lines once it has completed."""
         try:
-            response = requests.post(
-                f"{service_url}/api/v1/jobs/translate/content",
-                json=payload,
-                headers={"Content-Type": "application/json", **get_translator_auth_headers()},
-                timeout=30
-            )
-            if response.status_code == 200:
-                submitted = response.json()
-                _observe_editor_submission(submitted, payload)
-                return submitted, 200
-            else:
-                return {"error": f"Service returned {response.status_code}"}, 502
-        except requests.exceptions.ConnectionError:
-            return {"error": "Cannot connect to AI Subtitle Translator service"}, 503
-        except requests.exceptions.Timeout:
-            return {"error": "Service timeout"}, 503
-        except Exception as e:
-            logger.error(f"Error submitting translation job: {e}")  # noqa: G004
-            return {"error": str(e)}, 500
+            job_id = int(flask_request.args.get("jobId", ""))
+        except (TypeError, ValueError):
+            return {"error": "jobId must be an integer"}, 400
+        state = editor_translation_state(job_id)
+        if state is None:
+            return {"status": "not_found"}, 404
+        return state, 200
+
+    @authenticate
+    @api_ns_translator.doc(
+        responses={204: 'Stopped', 400: 'Bad Request', 404: 'Not Found'}
+    )
+    def delete(self):
+        """Stop an editor translation job, queued or running."""
+        try:
+            job_id = int(flask_request.args.get("jobId", ""))
+        except (TypeError, ValueError):
+            return {"error": "jobId must be an integer"}, 400
+        if not cancel_editor_translation(job_id):
+            return {"status": "not_found"}, 404
+        return '', 204
 
 
 @api_ns_translator.route('translator/jobs/<job_id>')

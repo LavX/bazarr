@@ -10,6 +10,7 @@ import WaveSurfer from "wavesurfer.js";
 import RegionsPlugin from "wavesurfer.js/dist/plugins/regions.esm.js";
 import TimelinePlugin from "wavesurfer.js/dist/plugins/timeline.esm.js";
 import { Environment } from "@/utilities/env";
+import { isTerminalJob, useEditorJob } from "./editorJobs";
 import { appendArrInstanceParam } from "./editorScope";
 import type { Cue } from "./types";
 
@@ -88,6 +89,13 @@ export default function WaveformTimeline({
   const [loading, setLoading] = useState(true);
   const updatingFromRegion = useRef(false);
   const seekingFromCue = useRef(false);
+  // Peaks the server has not generated yet come back as 202 with a job id. The
+  // editor then waits for that job's terminal event on the jobs socket and
+  // asks again, instead of holding a request open while ffmpeg runs.
+  const [peaksJobId, setPeaksJobId] = useState<number | null>(null);
+  const [waveformError, setWaveformError] = useState("");
+  const peaksAttempts = useRef(0);
+  const peaksGeneration = useRef(0);
 
   const apiKey = Environment.apiKey ?? "";
   const peaksUrl =
@@ -97,6 +105,62 @@ export default function WaveformTimeline({
           arrInstanceId,
         )
       : null;
+
+  const loadPeaks = useCallback(() => {
+    const ws = wsRef.current;
+    if (!ws || !peaksUrl) return;
+    const generation = peaksGeneration.current;
+    peaksAttempts.current += 1;
+    fetch(peaksUrl)
+      .then(async (r) => {
+        if (r.status === 202) {
+          const body = (await r.json()) as { jobId?: number };
+          if (generation !== peaksGeneration.current) return;
+          if (body?.jobId) {
+            setPeaksJobId(body.jobId);
+          } else {
+            setLoading(false);
+          }
+          return;
+        }
+        if (!r.ok) throw new Error("Failed to fetch peaks");
+        const data = await r.json();
+        if (generation !== peaksGeneration.current) return;
+        if (data?.peaks && data?.duration) {
+          ws.load("", [new Float32Array(data.peaks)], data.duration);
+        } else {
+          setLoading(false);
+        }
+      })
+      .catch(() => {
+        if (generation === peaksGeneration.current) setLoading(false);
+      });
+  }, [peaksUrl]);
+
+  const peaksJob = useEditorJob(peaksJobId);
+  const peaksJobFinished = isTerminalJob(peaksJob);
+  const peaksJobStatus = peaksJob?.status;
+  const peaksJobMessage = peaksJob?.error?.message;
+  useEffect(() => {
+    if (peaksJobId == null || !peaksJobFinished) return;
+    setPeaksJobId(null);
+    if (peaksJobStatus === "completed" && peaksAttempts.current < 3) {
+      loadPeaks();
+    } else {
+      setLoading(false);
+      setWaveformError(
+        peaksJobStatus === "failed" && peaksJobMessage
+          ? peaksJobMessage
+          : "The waveform could not be generated.",
+      );
+    }
+  }, [
+    peaksJobId,
+    peaksJobFinished,
+    peaksJobStatus,
+    peaksJobMessage,
+    loadPeaks,
+  ]);
 
   // Initialize wavesurfer once, load peaks separately
   useEffect(() => {
@@ -154,23 +218,14 @@ export default function WaveformTimeline({
     });
 
     // Fetch peaks and load
-    fetch(peaksUrl)
-      .then((r) => {
-        if (!r.ok) throw new Error("Failed to fetch peaks");
-        return r.json();
-      })
-      .then((data) => {
-        if (data?.peaks && data?.duration) {
-          ws.load("", [new Float32Array(data.peaks)], data.duration);
-        } else {
-          setLoading(false);
-        }
-      })
-      .catch(() => {
-        setLoading(false);
-      });
+    peaksGeneration.current += 1;
+    peaksAttempts.current = 0;
+    setPeaksJobId(null);
+    setWaveformError("");
+    loadPeaks();
 
     return () => {
+      peaksGeneration.current += 1;
       ws.destroy();
       wsRef.current = null;
       regionsRef.current = null;
@@ -359,9 +414,35 @@ export default function WaveformTimeline({
             }}
           />
           <div style={{ color: "#e68a00", fontSize: 13, fontWeight: 600 }}>
-            Loading waveform, please wait...
+            {peaksJobId != null
+              ? `Generating waveform${
+                  peaksJob && peaksJob.progress_max > 0
+                    ? ` (${Math.round((peaksJob.progress_value / peaksJob.progress_max) * 100)}%)`
+                    : ""
+                }...`
+              : "Loading waveform, please wait..."}
           </div>
           <style>{`@keyframes waveform-spin { to { transform: rotate(360deg); } }`}</style>
+        </div>
+      )}
+      {waveformError && !loading && (
+        <div
+          role="status"
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            right: 0,
+            height: 110,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "var(--bz-text-secondary)",
+            fontSize: 12,
+            zIndex: 5,
+          }}
+        >
+          {waveformError}
         </div>
       )}
       <div style={controlsStyle}>

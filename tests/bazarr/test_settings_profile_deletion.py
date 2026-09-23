@@ -58,8 +58,7 @@ def post_settings(schema_session, monkeypatch):
 
     monkeypatch.setattr(endpoint, "database", schema_session)
     monkeypatch.setattr(endpoint, "event_stream", lambda *a, **kw: None)
-    monkeypatch.setattr(endpoint, "list_missing_subtitles", lambda *a, **kw: None)
-    monkeypatch.setattr(endpoint, "list_missing_subtitles_movies", lambda *a, **kw: None)
+    monkeypatch.setattr(endpoint, "queue_missing_subtitles_recalculation", lambda *a, **kw: None)
     monkeypatch.setattr(endpoint.TableLanguagesProfiles, "__table__",
                         endpoint.TableLanguagesProfiles.__table__)
 

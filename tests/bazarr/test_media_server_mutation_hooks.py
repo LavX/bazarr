@@ -40,7 +40,10 @@ def test_upload_requires_write_but_survives_later_index_failure(upload_flow, mut
     from subtitles.tools import subsync_engines
     if failure == 'write':
         monkeypatch.setattr(subsync_engines.os, 'replace', Mock(side_effect=OSError('controlled write failure')))
-        upload_flow.submit('movie', job_id='upload')
+        from app.jobs_queue import JobFailed
+        # A write that never landed fails the upload job with the reason.
+        with pytest.raises(JobFailed, match='controlled write failure'):
+            upload_flow.submit('movie', job_id='upload')
         assert mutations == []
     else:
         monkeypatch.setattr(upload, '_refresh_uploaded_subtitles', Mock(side_effect=RuntimeError('controlled index failure')))
@@ -243,13 +246,17 @@ def test_download_adapters_preserve_distinct_owner_path_and_profile(colliding_me
         return []
 
     if entry == 'manual':
+        from app.jobs_queue import JobFailed
         monkeypatch.setattr(module, 'manual_download_subtitle', download)
-        if media_type == 'movie':
-            module.movie_manually_download_specific_subtitle(42, False, False, False, 'fixture', 'subtitle',
-                                                             job_id='download', arr_instance_id=2)
-        else:
-            module.episode_manually_download_specific_subtitle(99, 42, False, False, False, 'fixture', 'subtitle',
-                                                               job_id='download', arr_instance_id=2)
+        # The stub publishes nothing, which fails the manual download job; the
+        # arguments it was handed are what this test is about.
+        with pytest.raises(JobFailed):
+            if media_type == 'movie':
+                module.movie_manually_download_specific_subtitle(42, False, False, False, 'fixture', 'subtitle',
+                                                                 job_id='download', arr_instance_id=2)
+            else:
+                module.episode_manually_download_specific_subtitle(99, 42, False, False, False, 'fixture',
+                                                                   'subtitle', job_id='download', arr_instance_id=2)
     else:
         monkeypatch.setattr(module, 'generate_subtitles', download)
         monkeypatch.setattr(module, 'event_stream', Mock())
@@ -358,11 +365,19 @@ def _drive_editor_preview(flow, monkeypatch, **payload):
         accepted, status = editor.EditorSync().post()
     assert status == 202, accepted
     job = flow.queue.jobs_pending_queue[-1]
-    editor.run_editor_sync(**job.kwargs)
+    from app.jobs_queue import JobCancelled
+    from app.jobs_queue import JobFailed
+    # A failed or cancelled preview raises out of the job, as the queue needs
+    # it to; the editor still reads the outcome from its side store below.
+    raised = None
+    try:
+        editor.run_editor_sync(**job.kwargs)
+    except (JobCancelled, JobFailed) as exc:
+        raised = exc
     with app.test_request_context(query_string={'jobKey': accepted['jobKey']}, headers=headers):
         result, _status = editor.EditorSync().get()
     return SimpleNamespace(result=result, kwargs=job.kwargs, scheduled=scheduled,
-                           workspace=Path(job.kwargs['tmp_in']).parent)
+                           workspace=Path(job.kwargs['tmp_in']).parent, raised=raised)
 
 
 def test_editor_keep_all_preview_aligns_without_claiming_a_library_destination(upload_flow, mutations, monkeypatch):
@@ -448,6 +463,7 @@ def test_editor_preview_cancellation_publishes_and_keeps_nothing(upload_flow, mu
     run = _drive_editor_preview(flow, monkeypatch)
 
     assert run.result['status'] == 'failed', run.result
+    assert isinstance(run.raised, JobCancelled), 'a cancelled preview must stay cancelled, not fail'
     assert mutations == []
     assert not list(run.workspace.glob('*.ffsubsync.srt'))
     assert sorted(path.name for path in flow.video.parent.iterdir()) == media_folder
@@ -916,8 +932,23 @@ def test_the_subtitle_tools_endpoint_publishes_its_mod_action(upload_flow, mutat
     args = {'action': 'OCR_fixes', 'language': 'en', 'path': str(source), 'type': media_type,
             'id': 42, 'arr_instance_id': 7, 'forced': 'False', 'hi': 'False'}
     stub = SimpleNamespace(patch_request_parser=SimpleNamespace(parse_args=lambda: args))
+    # The route queues the mod as a job and answers 202; the job applies it.
+    queued = []
+    monkeypatch.setattr(api_mod, 'apply_subtitle_mods', lambda **kwargs: queued.append(kwargs) or 3)
 
-    assert api_mod.Subtitles.patch.__wrapped__(stub) == ('', 204)
+    assert api_mod.Subtitles.patch.__wrapped__(stub) == ({'job_id': 3}, 202)
+    assert len(queued) == 1
+
+    import app.database
+    import app.event_handler
+    from subtitles.indexer import movies as movies_indexer
+    from subtitles.indexer import series as series_indexer
+    monkeypatch.setattr(app.event_handler, 'event_stream', lambda **kwargs: None)
+    monkeypatch.setattr(series_indexer, 'store_subtitles', lambda *a, **k: None)
+    monkeypatch.setattr(movies_indexer, 'store_subtitles_movie', lambda *a, **k: None)
+    monkeypatch.setattr(app.database, 'database',
+                        Mock(execute=Mock(return_value=Mock(first=Mock(return_value=None)))))
+    mods.apply_subtitle_mods(**queued[0], job_id=3)
 
     assert source.read_text() == 'Modified'
     assert len(mutations) == 1

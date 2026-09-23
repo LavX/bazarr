@@ -98,7 +98,9 @@ def test_the_episode_video_path_is_mapped_for_the_owning_instance(schema_session
         f'extraction reverses it with that same one; got {recorded["mapped"]!r}')
 
 
-def test_the_owner_reaches_episode_extraction(schema_session, endpoint):
+def test_the_owner_reaches_the_queued_episode_extraction(schema_session, endpoint):
+    """Extraction runs inside the translation job now, so the request only
+    queues it. The owner the job extracts with is the one it is queued with."""
     call, recorded = endpoint
     schema_session.add(TableShows(id=1, arr_instance_id=2, sonarrSeriesId=7,
                                   title='S', path='/tv/s', profileId=None))
@@ -108,14 +110,16 @@ def test_the_owner_reaches_episode_extraction(schema_session, endpoint):
                                      season=1, episode=1))
     schema_session.commit()
 
-    call()
+    assert call() == ("", 204)
 
-    assert recorded['extracted']['arr_instance_id'] == 2, (
-        'extraction was handed no owner, so its row lookup and metadata cache '
+    assert recorded['extracted'] is None, 'the request must not run ffmpeg itself'
+    assert recorded['translated']['embedded_source'] == {'language': 'en', 'hi': False, 'forced': False}
+    assert recorded['translated']['arr_instance_id'] == 2, (
+        'the job was handed no owner, so its row lookup and metadata cache '
         'run unscoped')
 
 
-def test_the_owner_reaches_movie_extraction(schema_session, endpoint):
+def test_the_owner_reaches_the_queued_movie_extraction(schema_session, endpoint):
     call, recorded = endpoint
     schema_session.add(TableMovies(id=1, arr_instance_id=3, radarrId=9, title='M',
                                    path='/movies/m.mkv', tmdbId='1'))
@@ -124,7 +128,23 @@ def test_the_owner_reaches_movie_extraction(schema_session, endpoint):
     call(type='movie', id=9, arr_instance_id=3)
 
     assert recorded['mapped'] == [('/movies/m.mkv', 3, 'movie')]
-    assert recorded['extracted']['arr_instance_id'] == 3
+    assert recorded['extracted'] is None
+    assert recorded['translated']['embedded_source']['language'] == 'en'
+    assert recorded['translated']['arr_instance_id'] == 3
+
+
+def test_the_source_track_variant_is_what_the_job_extracts(schema_session, endpoint):
+    """from_hi/from_forced describe the source track and hi/forced the output,
+    so the job must be told the source variant, not the output one."""
+    call, recorded = endpoint
+    schema_session.add(TableMovies(id=1, arr_instance_id=3, radarrId=9, title='M',
+                                   path='/movies/m.mkv', tmdbId='1'))
+    schema_session.commit()
+
+    call(type='movie', id=9, arr_instance_id=3, hi='False', from_hi='True', from_forced='False')
+
+    assert recorded['translated']['embedded_source'] == {'language': 'en', 'hi': True, 'forced': False}
+    assert recorded['translated']['hi'] is False
 
 
 def test_the_queued_translation_keeps_the_instance_mapped_video_path(

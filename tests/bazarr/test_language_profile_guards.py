@@ -100,8 +100,8 @@ def upload(profile_db, monkeypatch):
 
     ``save_subtitles`` is the first thing past the profile lookup that touches
     the filesystem, so it reports what the upload decided and then returns
-    nothing, which makes the function log and return the way it does for any
-    target it cannot write.
+    nothing. An upload that wrote nothing fails its job, which is the point
+    this helper stops at.
     """
     from subtitles import processing as processing_module
     from subtitles import upload as upload_module
@@ -122,11 +122,14 @@ def upload(profile_db, monkeypatch):
     monkeypatch.setattr(upload_module, "save_subtitles", _save_subtitles)
 
     def _call(media_type, **ids):
-        upload_module.manual_upload_subtitle(
-            path="/movies/100.mkv" if media_type == "movie" else "/series/10/100.mkv",
-            language="en", forced=False, hi=False, media_type=media_type,
-            subtitle=io.BytesIO(SRT), filename="upload.srt", audio_language="[]",
-            job_id=1, **ids)
+        from app.jobs_queue import JobFailed
+
+        with pytest.raises(JobFailed, match="nothing was written"):
+            upload_module.manual_upload_subtitle(
+                path="/movies/100.mkv" if media_type == "movie" else "/series/10/100.mkv",
+                language="en", forced=False, hi=False, media_type=media_type,
+                subtitle=io.BytesIO(SRT), filename="upload.srt", audio_language="[]",
+                job_id=1, **ids)
         return decided
 
     return _call
@@ -284,8 +287,7 @@ def post_settings(profile_db, monkeypatch):
 
     monkeypatch.setattr(endpoint, "database", profile_db)
     monkeypatch.setattr(endpoint, "event_stream", lambda *a, **kw: None)
-    monkeypatch.setattr(endpoint, "list_missing_subtitles", lambda *a, **kw: None)
-    monkeypatch.setattr(endpoint, "list_missing_subtitles_movies", lambda *a, **kw: None)
+    monkeypatch.setattr(endpoint, "queue_missing_subtitles_recalculation", lambda *a, **kw: None)
 
     from arr_instances import resolution
     monkeypatch.setattr(resolution, "database", profile_db, raising=False)

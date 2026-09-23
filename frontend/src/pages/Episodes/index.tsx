@@ -56,7 +56,7 @@ import { SeriesUploadModal } from "@/components/forms/SeriesUploadForm";
 import { SubtitleDownloadModal } from "@/components/forms/SubtitleDownloadForm";
 import { SubtitleToolsModal } from "@/components/modals";
 import { useModals } from "@/modules/modals";
-import { notification, task, TaskGroup } from "@/modules/task";
+import { notification } from "@/modules/task";
 import ItemOverview from "@/pages/views/ItemOverview";
 import { RouterNames } from "@/Router/RouterNames";
 import { useLanguageProfileBy } from "@/utilities/languages";
@@ -378,11 +378,14 @@ const SeriesEpisodesView: FunctionComponent = () => {
                   disabled={!available || hasTask}
                   onClick={() => {
                     if (series) {
-                      task.create(series.title, TaskGroup.ScanDisk, action, {
+                      // Queued as a backend job: the request returns at once and the
+                      // scan reports through the jobs drawer. HTTP errors are
+                      // already reported by the API client.
+                      action({
                         action: "scan-disk",
                         seriesid: series.sonarrSeriesId,
                         arr_instance_id: series.arr_instance_id,
-                      });
+                      }).catch(() => undefined);
                     }
                   }}
                 >

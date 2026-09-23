@@ -1,7 +1,10 @@
-"""Translation progress through submission, polling and subtitle publication."""
-from concurrent.futures import ThreadPoolExecutor
+"""Translation progress through submission, polling and subtitle publication.
+
+The AI translation reports progress on its Bazarr job and fails by raising, so the
+jobs queue records the outcome. It no longer drives the old progress and message
+socket channels, which put a second, disconnected notification on screen.
+"""
 from pathlib import Path
-from threading import Barrier, Lock
 from types import SimpleNamespace
 
 import pytest
@@ -21,9 +24,9 @@ def lifecycle(tmp_path, monkeypatch):
     monkeypatch.setattr(module, 'get_translator_auth_headers', lambda: {})
     monkeypatch.setattr(module, 'language_from_alpha2', lambda code: {'en': 'English', 'hu': 'Hungarian'}[code])
     monkeypatch.setattr(module, 'language_from_alpha3', lambda code: 'Hungarian')
-    monkeypatch.setattr(module.jobs_queue, 'update_job_progress', lambda **kwargs: None)
+    progress = []
+    monkeypatch.setattr(module.jobs_queue, 'update_job_progress', lambda **kwargs: progress.append(kwargs))
     monkeypatch.setattr(module, 'history_log', lambda **kwargs: None)
-    monkeypatch.setattr(module, 'show_message', lambda message: None)
     events = []
     monkeypatch.setattr(event_handler.socketio, 'emit', lambda event, payload: events.append(payload))
     service = module.OpenRouterTranslatorService(
@@ -40,24 +43,15 @@ def lifecycle(tmp_path, monkeypatch):
     clock = SimpleNamespace(now=0)
     monkeypatch.setattr(module.time, 'monotonic', lambda: clock.now)
     monkeypatch.setattr(module.time, 'sleep', lambda seconds: setattr(clock, 'now', clock.now + seconds))
-    return SimpleNamespace(service=service, events=events, payloads=payloads, clock=clock)
+    return SimpleNamespace(service=service, events=events, payloads=payloads, clock=clock, progress=progress)
 
 
 def response(payload):
     return SimpleNamespace(status_code=200, json=lambda: payload)
 
 
-def assert_lifecycle(events):
-    progress = [event for event in events if event['type'] == 'progress']
-    updates = [event['payload'] for event in progress if event['action'] == 'update']
-    deletes = [event['payload'] for event in progress if event['action'] == 'delete']
-    assert updates
-    identity = updates[0]['id']
-    assert identity.startswith('translate_progress_')
-    assert all(update['id'] == identity for update in updates)
-    assert deletes == [identity]
-    assert progress[-1]['action'] == 'delete'
-    return identity
+def assert_no_legacy_channels(events):
+    assert [event for event in events if event['type'] in ('progress', 'message')] == []
 
 
 @pytest.mark.parametrize('mode, expected', [
@@ -67,16 +61,19 @@ def assert_lifecycle(events):
 def test_reasoning_selection_reaches_sidecar_request(lifecycle, monkeypatch, mode, expected):
     monkeypatch.setattr(module.settings.translator, 'openrouter_reasoning', mode)
     monkeypatch.setattr(module.requests, 'get', lambda *args, **kwargs: response({'status': 'cancelled'}))
-    lifecycle.service.translate()
+    with pytest.raises(module.TranslationServiceError):
+        lifecycle.service.translate()
     assert lifecycle.payloads[0]['config']['reasoning'] == expected
 
 
 @pytest.mark.parametrize('host_id', [None, 41])
-@pytest.mark.parametrize('exit_kind', [
-    'completed', 'partial', 'failed', 'cancelled', 'hard_cap', 'unreachable',
-    'invalid_status', 'host_cancelled', 'submit_error', 'write_error', 'sync',
+@pytest.mark.parametrize('exit_kind, reason', [
+    ('completed', None), ('partial', None), ('sync', None),
+    ('failed', 'Fixture failure'), ('cancelled', 'cancelled'), ('hard_cap', '12 hours'),
+    ('unreachable', 'unreachable'), ('invalid_status', 'AI translation failed'),
+    ('host_cancelled', None), ('submit_error', 'Cannot connect'), ('write_error', 'Fixture save failure'),
 ])
-def test_progress_cleanup_covers_real_translation_exits(lifecycle, monkeypatch, host_id, exit_kind):
+def test_every_exit_reports_through_the_job_only(lifecycle, monkeypatch, host_id, exit_kind, reason):
     lines = [{'position': 0, 'line': 'Szia'}]
     responses = iter([
         response({'status': 'processing', 'progress': 100, 'message': 'Finishing'}),
@@ -119,60 +116,33 @@ def test_progress_cleanup_covers_real_translation_exits(lifecycle, monkeypatch, 
     if exit_kind == 'host_cancelled':
         with pytest.raises(module.JobCancelled):
             lifecycle.service.translate(job_id=host_id)
+    elif reason:
+        with pytest.raises(module.TranslationServiceError, match=reason):
+            lifecycle.service.translate(job_id=host_id)
+        assert not Path(lifecycle.service.dest_srt_file).exists()
     else:
         result = lifecycle.service.translate(job_id=host_id)
-        if exit_kind in ('completed', 'partial', 'sync'):
-            assert result == lifecycle.service.dest_srt_file
-            assert 'Szia' in Path(result).read_text(encoding='utf-8')
-        else:
-            assert result is False
-    assert_lifecycle(lifecycle.events)
+        assert result == lifecycle.service.dest_srt_file
+        assert 'Szia' in Path(result).read_text(encoding='utf-8')
+    assert_no_legacy_channels(lifecycle.events)
 
 
-@pytest.mark.parametrize('host_id', [None, 41])
-def test_four_operations_with_same_destination_have_independent_notifications(lifecycle, monkeypatch, host_id):
-    barrier = Barrier(4)
-    lock = Lock()
-    arrivals = []
+def test_remote_progress_is_mirrored_onto_the_host_job(lifecycle, monkeypatch):
+    polls = iter([
+        response({'status': 'processing', 'progress': 40, 'message': 'Batch 2 of 5', 'model_used': 'm'}),
+        response({'status': 'completed', 'progress': 100, 'result': {'lines': [{'position': 0, 'line': 'Szia'}]}}),
+    ])
+    monkeypatch.setattr(module.requests, 'get', lambda *args, **kwargs: next(polls))
 
-    def get(*args, **kwargs):
-        with lock:
-            arrivals.append(1)
-        barrier.wait(timeout=5)
-        return response({'status': 'completed', 'result': {'lines': [{'position': 0, 'line': 'Szia'}]}})
+    lifecycle.service.translate(job_id=41)
 
-    monkeypatch.setattr(module.requests, 'get', get)
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = [executor.submit(lifecycle.service._submit_and_poll, ['Hello'], host_id) for _ in range(4)]
-        assert all(future.result(timeout=10) == [{'position': 0, 'line': 'Szia'}] for future in futures)
-    assert len(arrivals) == 4
-    updates = [event['payload']['id'] for event in lifecycle.events if event['action'] == 'update']
-    deletes = [event['payload'] for event in lifecycle.events if event['action'] == 'delete']
-    assert len(set(updates)) == 4
-    assert len(deletes) == 4
-    assert set(deletes) == set(updates)
-    for identity in set(updates):
-        assert_lifecycle([event for event in lifecycle.events if (
-            event['payload'] == identity or isinstance(event['payload'], dict) and event['payload']['id'] == identity)])
+    mirrored = [update for update in lifecycle.progress if 'progress_value' in update]
+    assert mirrored[0] == {'job_id': 41, 'progress_value': 40, 'progress_max': 100,
+                           'progress_message': 'Batch 2 of 5 [m]'}
+    assert_no_legacy_channels(lifecycle.events)
 
 
-def test_reusing_service_allocates_a_new_operation_identity(lifecycle, monkeypatch):
-    monkeypatch.setattr(module.requests, 'get', lambda *args, **kwargs: response({'status': 'cancelled'}))
-    lifecycle.service.translate()
-    first = assert_lifecycle(lifecycle.events)
-    lifecycle.events.clear()
-    lifecycle.service.translate()
-    assert assert_lifecycle(lifecycle.events) != first
-
-
-def test_standalone_poll_cleans_up_on_unexpected_error(lifecycle, monkeypatch):
-    monkeypatch.setattr(module.requests, 'get', lambda *args, **kwargs: response(None))
-    with pytest.raises(AttributeError):
-        lifecycle.service._poll_job('http://fixture', 'job', 1)
-    assert_lifecycle(lifecycle.events)
-
-
-def test_real_host_queue_cancellation_propagates_and_cleans_progress(lifecycle, monkeypatch):
+def test_real_host_queue_cancellation_propagates(lifecycle, monkeypatch):
     queue = module.jobs_queue
     monkeypatch.setattr(queue, 'update_job_progress', type(queue).update_job_progress.__get__(queue))
     monkeypatch.setattr(queue, 'jobs_running_queue', [SimpleNamespace(
@@ -184,22 +154,17 @@ def test_real_host_queue_cancellation_propagates_and_cleans_progress(lifecycle, 
         lifecycle.service.translate(job_id=41)
 
     assert not Path(lifecycle.service.dest_srt_file).exists()
-    assert_lifecycle(lifecycle.events)
+    assert_no_legacy_channels(lifecycle.events)
 
 
 @pytest.mark.parametrize('host_id', [None, 41])
 @pytest.mark.parametrize('exit_kind', ['success', 'save_error', 'cancel_before_publish', 'publish_error'])
-def test_notification_stays_active_through_subtitle_publication(lifecycle, monkeypatch, host_id, exit_kind):
+def test_subtitle_publication_order_and_failures(lifecycle, monkeypatch, host_id, exit_kind):
     from subtitles.tools import subsync_engines
 
     destination = Path(lifecycle.service.dest_srt_file)
     destination.write_text('Existing subtitle', encoding='utf-8')
     observations = []
-
-    def observe(stage):
-        deletes = [event for event in lifecycle.events
-                   if event['type'] == 'progress' and event['action'] == 'delete']
-        observations.append((stage, len(deletes)))
 
     monkeypatch.setattr(module.requests, 'get', lambda *args, **kwargs: response({
         'status': 'completed', 'progress': 100,
@@ -209,24 +174,24 @@ def test_notification_stays_active_through_subtitle_publication(lifecycle, monke
     real_replace = subsync_engines.os.replace
 
     def save(subtitles, path, *args, **kwargs):
-        observe('save')
+        observations.append('save')
         if exit_kind == 'save_error':
             raise OSError('Fixture save failure')
         return real_save(subtitles, path, *args, **kwargs)
 
     def host_progress(**kwargs):
         if 'progress_value' not in kwargs:
-            observe('before_publish')
+            observations.append('before_publish')
             if exit_kind == 'cancel_before_publish':
                 raise module.JobCancelled()
 
     def replace(source, target):
-        observe('replace')
+        observations.append('replace')
         if exit_kind == 'publish_error':
             raise OSError('Fixture publication failure')
         real_replace(source, target)
         assert 'Szia' in destination.read_text(encoding='utf-8')
-        observe('published')
+        observations.append('published')
 
     monkeypatch.setattr(module.pysubs2.SSAFile, 'save', save)
     monkeypatch.setattr(module.jobs_queue, 'update_job_progress', host_progress)
@@ -234,15 +199,15 @@ def test_notification_stays_active_through_subtitle_publication(lifecycle, monke
     if exit_kind == 'cancel_before_publish':
         with pytest.raises(module.JobCancelled):
             lifecycle.service.translate(job_id=host_id)
+    elif exit_kind == 'success':
+        assert lifecycle.service.translate(job_id=host_id) == str(destination)
     else:
-        result = lifecycle.service.translate(job_id=host_id)
-        assert result == (str(destination) if exit_kind == 'success' else False)
+        with pytest.raises(module.TranslationServiceError, match='Fixture'):
+            lifecycle.service.translate(job_id=host_id)
 
-    assert_lifecycle(lifecycle.events)
-    assert observations
-    assert all(deletes == 0 for stage, deletes in observations), observations
+    assert_no_legacy_channels(lifecycle.events)
     assert not list(destination.parent.glob('.bazarr-write-*'))
     if exit_kind == 'success':
-        assert [stage for stage, deletes in observations] == ['save', 'before_publish', 'replace', 'published']
+        assert observations == ['save', 'before_publish', 'replace', 'published']
     else:
         assert destination.read_text(encoding='utf-8') == 'Existing subtitle'

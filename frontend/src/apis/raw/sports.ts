@@ -76,9 +76,12 @@ export interface SportsPublication {
   cancelled: boolean;
   message: string;
 }
+/**
+ * A manual download is queued as a backend job, like the library's. The
+ * publication outcome is the job's result, and a failure fails the job.
+ */
 export interface SportsDownloadResult {
-  event: SportsEvent | null;
-  publication: SportsPublication;
+  job_id: number | null;
 }
 
 export interface SportsRecord {

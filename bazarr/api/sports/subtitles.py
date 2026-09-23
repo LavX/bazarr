@@ -10,8 +10,9 @@ from werkzeug.datastructures import FileStorage
 from app.database import (database, select, TableArrInstances, TableSportsEvents,
                           TableSportsLeagues)
 from subliminal_patch.core import SUBTITLE_EXTENSIONS
-from sportarr import library
-from sportarr.subtitles import manual_search_sports, manual_download_sports
+from sportarr.identity import resolve_event_in_session
+from sportarr.manual_jobs import sports_manually_download_subtitle
+from sportarr.subtitles import manual_search_sports
 from .leagues import _body, _optional_owner, _owner
 from ..utils import authenticate
 from sportarr.errors import SportsNotFound
@@ -97,25 +98,22 @@ class SportsDownload(Resource):
         try:
             body = _body()
             owner = _owner(body.get("arr_instance_id"))
-            result = manual_download_sports(event_id, body.get("candidate"), owner)
-            try:
-                event = library.get_event(database, event_id, owner)
-            except Exception:
-                # Publication already happened. A later owner/read failure must
-                # not turn the response into an ordinary failed download.
-                event = None
-            return {"event": event, "publication": result.publication}, 200
+            candidate = body.get("candidate")
+            if not isinstance(candidate, dict) or not isinstance(candidate.get("subtitle"), str):
+                raise ValueError("A cached subtitle result is required")
+            # Answered here rather than by the job: a missing event or a
+            # malformed request is the caller's to fix, and a 404 or 400 says so
+            # at once.
+            resolve_event_in_session(database, event_id, owner)
         except SportsNotFound as exc:
             return {'message': str(exc)}, 404
         except ValueError as exc:
             return {"message": str(exc)}, 400
-        except OSError as exc:
-            # Same contract as the search route above: the reason is the
-            # sentence manual_download_subtitle returned, and the constant only
-            # covers a raise that carried none.
-            return {
-                "message": str(exc) or "Subtitle was not published. Check the file and provider before trying again."
-            }, 409
+        # Queued like the library's manual download. The job raises with the
+        # reason the download or its publication failed, which is the
+        # sentence this route used to answer 409 with.
+        job_id = sports_manually_download_subtitle(event_id, candidate, owner)
+        return {"job_id": job_id or None}, 202
 
 
 @api_ns_sports_subtitles.route("/sports/events/<int:event_id>/subtitles/combine")
@@ -183,15 +181,10 @@ class SportsLeagueSubtitlesCombine(Resource):
     """
 
     @authenticate
-    @api_ns_sports_subtitles.response(200, "Batch combine summary")
+    @api_ns_sports_subtitles.response(202, "Combine job queued")
     @api_ns_sports_subtitles.response(401, "Not Authenticated")
     @api_ns_sports_subtitles.response(404, "Sports league not found")
     def post(self, league_id):
-        from sportarr.identity import resolve_event_in_session
-        from sportarr.profile_hooks import capture_profile_operation
-        from sportarr.subtitles import candidate_signature
-        from subtitles.tools.combine.main import try_combine_for_video
-
         try:
             body = request.get_json(silent=True) or {}
             owner = _optional_owner(body.get("arr_instance_id") or request.args.get("arr_instance_id"))
@@ -204,58 +197,31 @@ class SportsLeagueSubtitlesCombine(Resource):
         except ValueError as exc:
             return {"message": str(exc)}, 400
 
-        event_ids = database.execute(
+        event_count = len(database.execute(
             select(TableSportsEvents.id).where(
                 TableSportsEvents.league_id == league_id,
                 TableSportsEvents.arr_instance_id == owner,
             )
-        ).scalars().all()
-        if not event_ids:
+        ).scalars().all())
+        if not event_count:
             return {"status": "not_found"}, 404
 
-        built = skipped = failed = warnings = 0
-        details = []
-        for event_id in event_ids:
-            try:
-                context = resolve_event_in_session(database, event_id, owner)
-                operation = capture_profile_operation(context, candidate_signature(context))
-                if not operation.profile:
-                    result_status, result = "skipped", None
-                else:
-                    result = try_combine_for_video(
-                        video_path=context.mapped_path,
-                        media_type="sports",
-                        sports_operation=operation,
-                    )
-                    result_status = result.status
-            except (ValueError, OSError) as exc:
-                # One unreadable or moved recording must not end the batch.
-                result_status, result = "failed", None
-                details.append({"eventId": event_id, "status": "failed",
-                                "path": "", "reason": "", "error": str(exc)})
-            else:
-                details.append({
-                    "eventId": event_id,
-                    "status": result_status,
-                    "path": result.path if result else "",
-                    "reason": result.reason if result else "no language profile is assigned",
-                    "error": result.error if result else "",
-                })
-            if result_status == "built":
-                built += 1
-                # Published, but a follow-up step did not complete: the index
-                # refresh, most often. Counted apart from a clean build so the
-                # summary cannot report an unqualified success for a subtitle
-                # the event may not list yet.
-                if result is not None and result.error:
-                    warnings += 1
-            elif result_status == "skipped":
-                skipped += 1
-            else:
-                failed += 1
+        # One queued job for the whole league: it reports per-event progress
+        # and fails with a summary when any event failed.
+        from app.jobs_queue import jobs_queue
 
-        return {"status": "batch_complete", "built": built, "skipped": skipped,
-                "failed": failed, "warnings": warnings, "details": details}, 200
+        league = database.execute(
+            select(TableSportsLeagues.title).where(TableSportsLeagues.id == league_id)
+        ).first()
+        job_id = jobs_queue.feed_jobs_pending_queue(
+            job_name=f"Combining subtitles for {league.title if league else f'league {league_id}'}",
+            module="subtitles.tools.combine.batch",
+            func="combine_league_subtitles",
+            kwargs={"league_id": league_id, "arr_instance_id": owner},
+            is_progress=True,
+            progress_max=event_count,
+        )
+        return {"status": "queued", "job_id": job_id or None}, 202
 
 
 @api_ns_sports_subtitles.route("/sports/events/<int:event_id>/subtitles/upload")

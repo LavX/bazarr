@@ -176,6 +176,7 @@ jobs:
             tests/bazarr/test_app_get_providers.py \
             tests/bazarr/test_retired_provider_config_compat.py \
             tests/bazarr/test_settings_profile_deletion.py \
+            tests/bazarr/test_standard_job_actions.py \
             tests/bazarr/test_jellyfin_apikey_location.py \
             tests/bazarr/test_emby_api.py \
             tests/bazarr/test_silo_api.py \
@@ -423,6 +424,8 @@ jobs:
             tests/bazarr/test_sportarr_subtitle_delete.py \
             tests/bazarr/test_sportarr_subtitle_upload.py \
             tests/bazarr/test_editor_instance_scope.py \
+            tests/bazarr/test_editor_translation_job.py \
+            tests/bazarr/test_waveform_peaks_job.py \
             tests/bazarr/test_history_blacklist_scope.py \
             tests/bazarr/test_history_metrics.py \
             tests/bazarr/test_history_metrics_postgres.py \
@@ -443,6 +446,7 @@ jobs:
             tests/bazarr/test_path_mappings_instance.py \
             tests/bazarr/test_threading_followup.py \
             tests/bazarr/test_mass_operations.py \
+            tests/bazarr/test_subtitle_jobs_fail_honestly.py \
             tests/bazarr/test_embedded_extraction_instance_scope.py \
             tests/bazarr/test_ffprobe_cache_instance_scope.py \
             tests/bazarr/test_triage_low_findings.py \

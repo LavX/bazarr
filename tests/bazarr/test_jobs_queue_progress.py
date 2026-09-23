@@ -129,3 +129,25 @@ def test_a_job_outcome_carries_its_error_or_action_to_the_user(caplog):
         assert retried and queue.jobs_pending_queue[-1].retry_of == named.job_id
         assert queue.jobs_pending_queue[-1].kwargs == {}
         assert queue.retry_job(finished.job_id) is False
+
+
+def test_the_jobs_list_sends_last_run_time_as_utc():
+    # The drawer showed "2 hours ago" for a job that had just finished: the
+    # time went out without an offset and the browser read it as its own local
+    # time. It now goes out as UTC with an explicit Z.
+    from datetime import datetime, timedelta, timezone
+    from flask_restx import marshal
+    from api.system.jobs import SystemJobs
+
+    job = _make_job()
+    assert job.last_run_time.tzinfo is not None
+    sent = marshal([vars(job)], SystemJobs.get_response_model)[0]["last_run_time"]
+    assert sent.endswith("Z")
+    parsed = datetime.fromisoformat(sent.replace("Z", "+00:00"))
+    assert abs(parsed - datetime.now(timezone.utc)) < timedelta(minutes=1)
+
+    # A naive value is the server's local time, whatever zone that is.
+    naive = datetime(2026, 9, 23, 12, 0, 0)
+    job.last_run_time = naive
+    sent = marshal([vars(job)], SystemJobs.get_response_model)[0]["last_run_time"]
+    assert datetime.fromisoformat(sent.replace("Z", "+00:00")) == naive.astimezone(timezone.utc)

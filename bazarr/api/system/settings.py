@@ -10,11 +10,10 @@ from api.utils import None_Keys
 from app.database import TableLanguagesProfiles, TableSettingsLanguages, TableSettingsNotifier, \
     normalize_profile_items, update_profile_id_list, database, insert, update, delete, select
 from app.event_handler import event_stream
-from app.config import (settings, save_settings, get_settings, validate_metadata_settings,
+from app.config import (save_settings, get_settings, validate_metadata_settings,
                         MetadataPersistenceError, MetadataFollowupError)
 from app.scheduler import scheduler  # noqa: F401
-from subtitles.indexer.series import list_missing_subtitles
-from subtitles.indexer.movies import list_missing_subtitles_movies
+from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
 from subtitles.language_profiles import validate_combine_rule, CombineRuleError
 from arr_instances.resolution import forget_deleted_language_profiles
 
@@ -50,6 +49,7 @@ class SystemSettings(Resource):
         except ValidationError as error:
             return error.message, 406
         deleted_profile_ids = []
+        profiles_changed = False
         enabled_languages = request.form.getlist('languages-enabled')
         if len(enabled_languages) != 0:
             database.execute(
@@ -132,16 +132,11 @@ class SystemSettings(Resource):
 
             event_stream("languages")
 
-            if settings.general.use_sonarr:
-                list_missing_subtitles()
-            if settings.general.use_radarr:
-                list_missing_subtitles_movies()
-            # Gated like its two siblings above. Ungated, saving any setting on
-            # an install with Sportarr switched off still walked every sports
-            # event row, one transaction and one locking select each.
-            if settings.general.use_sportarr:
-                from subtitles.indexer.sports import list_missing_subtitles_sports
-                list_missing_subtitles_sports()
+            # Recalculated by a queued job once the settings below are saved,
+            # not here: a library-wide pass inside this request is what made
+            # the save slow enough for a proxy to time it out and report a
+            # save that went through as "Save failed".
+            profiles_changed = True
 
         # Update Notification
         notifications = request.form.getlist('notifications-providers')
@@ -153,8 +148,18 @@ class SystemSettings(Resource):
                     url=item['url'])
                 .where(TableSettingsNotifier.name == item['name']))
 
+        saved = False
         try:
-            save_settings(zip(request.form.keys(), request.form.listvalues()))
+            try:
+                save_settings(zip(request.form.keys(), request.form.listvalues()))
+                saved = True
+            finally:
+                # The profile rows above are already written whatever the rest
+                # of the save does, so what is missing follows them even when
+                # it fails. A save that succeeds queues it below instead, once
+                # the references to deleted profiles are cleared.
+                if profiles_changed and not saved:
+                    queue_missing_subtitles_recalculation()
         except MetadataPersistenceError:
             return "Discover settings could not be saved. Try again.", 503
         except MetadataFollowupError:
@@ -177,6 +182,10 @@ class SystemSettings(Resource):
             # and the untouched enable checkbox is not in the form to turn it
             # back on.
             forget_deleted_language_profiles(deleted_profile_ids)
+            # After the settings, so the job reads the arr toggles this same
+            # save may have changed. The response does not wait for it.
+            if profiles_changed:
+                queue_missing_subtitles_recalculation()
             event_stream("settings")
             return '', 204
 

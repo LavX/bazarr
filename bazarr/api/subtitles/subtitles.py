@@ -19,7 +19,7 @@ from subtitles.tools.subsyncer import SubSyncer  # noqa: F401
 from subtitles.tools.subsync_engines import is_sync_engine_output
 from subtitles.tools.translate.main import translate_subtitles_file
 from subtitles.tools.translate.batch import extract_embedded_subtitle
-from subtitles.tools.mods import subtitles_apply_mods
+from subtitles.tools.mods import apply_subtitle_mods
 from subtitles.indexer.series import store_subtitles
 from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.sync import sync_subtitles
@@ -224,6 +224,7 @@ class Subtitles(Resource):
     @authenticate
     @api_ns_subtitles.doc(parser=patch_request_parser)
     @api_ns_subtitles.response(204, "Success")
+    @api_ns_subtitles.response(202, "Mod queued as a job")
     @api_ns_subtitles.response(401, "Not Authenticated")
     @api_ns_subtitles.response(400, "Generated sync output files cannot be synchronized again")
     @api_ns_subtitles.response(404, "Episode/movie not found")
@@ -243,12 +244,15 @@ class Subtitles(Resource):
         forced = True if args.get("forced") == "True" else False
         hi = True if args.get("hi") == "True" else False
 
-        # Embedded track: path is absent/empty, extract the subtitle from the
-        # video container into {config_dir}/extracted_subs/ first.
+        # Embedded track: path is absent/empty, the subtitle comes out of the
+        # video container into {config_dir}/extracted_subs/.
         # Only translate is supported for embedded tracks (no file to sync/mod).
-        # NOTE: do NOT delete the extracted file here; translate_subtitles_file()
-        # dispatches an async background job that reads the file after this request
-        # returns. The extracted_subs/ directory is intentionally persistent.
+        # Episodes and movies extract inside the queued translation job, so this
+        # request returns at once; ffmpeg takes seconds per track. A sports
+        # translation binds its source file into the profile operation before
+        # it is queued, so sports still extracts here.
+        # The extracted_subs/ directory is intentionally persistent.
+        embedded_source = None
         if not subtitles_path and action == "translate":
             from_language_arg = args.get("from_language")
             if not from_language_arg:
@@ -314,11 +318,6 @@ class Subtitles(Resource):
                 ep_meta = database.execute(ep_stmt).first()
                 if not ep_meta:
                     return "Episode not found", 404
-                # The owning instance's mapping, not the global one: extraction
-                # reverses this path with path_replace_reverse_instance, and the
-                # two only round-trip when the same mapping made both.
-                embedded_video_path = path_mappings.path_replace_instance(
-                    ep_meta.path, arr_instance_id, 'episode')
             else:
                 mv_stmt = scoped(
                     select(TableMovies.path).where(TableMovies.radarrId == id),
@@ -328,26 +327,36 @@ class Subtitles(Resource):
                 mv_meta = database.execute(mv_stmt).first()
                 if not mv_meta:
                     return "Movie not found", 404
-                embedded_video_path = path_mappings.path_replace_instance(
-                    mv_meta.path, arr_instance_id, 'movie')
 
-            extracted = extract_embedded_subtitle(
-                embedded_video_path,
-                from_language_arg,
-                media_type,
-                hi=source_hi,
-                forced=source_forced,
-                arr_instance_id=arr_instance_id,
-            )
-            if not extracted:
-                return (
-                    "Could not extract embedded subtitle: codec may be bitmap (PGS/VobSub) "
-                    "or the language track was not found",
-                    400,
+            if media_type == "sports":
+                extracted = extract_embedded_subtitle(
+                    embedded_video_path,
+                    from_language_arg,
+                    media_type,
+                    hi=source_hi,
+                    forced=source_forced,
+                    arr_instance_id=arr_instance_id,
                 )
-            subtitles_path = extracted
+                if not extracted:
+                    return (
+                        "Could not extract embedded subtitle: codec may be bitmap (PGS/VobSub) "
+                        "or the language track was not found",
+                        400,
+                    )
+                subtitles_path = extracted
+            else:
+                # The job extracts from video_path, which the metadata lookup
+                # below maps with the owning instance's mapping: extraction
+                # reverses it with path_replace_reverse_instance, and the two
+                # only round-trip when the same mapping made both.
+                embedded_source = {
+                    "language": from_language_arg,
+                    "hi": source_hi,
+                    "forced": source_forced,
+                }
 
-        if media_type != "sports" and (not subtitles_path or not os.path.exists(subtitles_path)):
+        if media_type != "sports" and embedded_source is None and (
+                not subtitles_path or not os.path.exists(subtitles_path)):
             return "Subtitles file not found. Path mapping issue?", 500
 
         if action == "sync" and is_sync_engine_output(subtitles_path):
@@ -591,36 +600,29 @@ class Subtitles(Resource):
                     metadata=None if media_type == "sports" else metadata,
                     arr_instance_id=arr_instance_id,
                     sports_operation=sports_operation,
+                    embedded_source=embedded_source,
                 )
             except ValueError as exc:
                 return str(exc), 409
             except OSError:
                 return "Unable to edit subtitles file. Check logs.", 409
         else:
-            try:
-                output_path = subtitles_apply_mods(
-                    language=language,
-                    subtitle_path=subtitles_path,
-                    mods=[action],
-                    video_path=video_path,
-                    # Resolve keep-lyrics against the owning instance (#227).
-                    arr_instance_id=arr_instance_id,
-                    media_type=media_type,
-                    **({'sports_event_id': id} if media_type == 'sports' else {}),
-                )
-                if media_type == "sports" and not output_path:
-                    return "Unable to modify subtitles file. Check logs.", 409
-                postprocess_subtitles(
-                    output_path if media_type == "sports" else subtitles_path,
-                    video_path, media_type, metadata, id,
-                    arr_instance_id=arr_instance_id
-                )
-            except ValueError as exc:
-                if media_type != "sports":
-                    raise
-                return str(exc), 409
-            except OSError:
-                return "Unable to edit subtitles file. Check logs.", 409
+            # Queued, like sync and translate above: a mod rewrites the file and
+            # re-indexes the media, which used to hold this request, and its
+            # failures answered 409, which nothing on the client reported. The
+            # job raises with the reason instead, so it lands on the standard
+            # failed path.
+            job_id = apply_subtitle_mods(
+                language=language,
+                subtitle_path=subtitles_path,
+                mods=[action],
+                video_path=video_path,
+                media_type=media_type,
+                media_id=id,
+                # Resolve keep-lyrics against the owning instance (#227).
+                arr_instance_id=arr_instance_id,
+            )
+            return {"job_id": job_id or None}, 202
 
         return "", 204
 

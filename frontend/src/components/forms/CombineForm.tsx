@@ -73,16 +73,9 @@ const CombineForm: FunctionComponent<Props> = ({
         );
       } else if (result.status === "skipped") {
         showNotification(notification.warn("Skipped", result.reason ?? ""));
-      } else if (result.status === "batch_complete") {
-        const built = result.built ?? 0;
-        const skipped = result.skipped ?? 0;
-        const failed = result.failed ?? 0;
-        showNotification(
-          notification.info(
-            "Series combine complete",
-            `Built ${built}, skipped ${skipped}, failed ${failed}`,
-          ),
-        );
+      } else if (result.status === "queued") {
+        // A series combine runs as a queued job, which reports its progress
+        // and outcome through Jobs.
       } else {
         showNotification(
           notification.error("Combine failed", result.error ?? ""),

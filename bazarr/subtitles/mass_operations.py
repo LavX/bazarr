@@ -8,7 +8,7 @@ from app.config import settings
 from app.event_handler import event_stream
 from app.database import (TableArrInstances, TableEpisodes, TableMovies, TableHistory, TableHistoryMovie,
                           TableHistorySports, TableShows, TableSportsEvents, database, select)
-from app.jobs_queue import JobCancelled, jobs_queue
+from app.jobs_queue import JobCancelled, JobFailed, jobs_queue
 from sportarr.notify import rescan_batch
 from subtitles.sync import sync_subtitles
 from subtitles.tools.subsync_engines import is_sync_engine_output
@@ -21,6 +21,7 @@ from subtitles.upgrade import upgrade_episodes_subtitles, upgrade_movies_subtitl
 from sportarr.workflows import upgrade_sports_subtitles
 from utilities.path_mappings import path_mappings
 from sqlalchemy import or_
+from subtitles.job_errors import describe_failures
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,25 @@ VALID_ACTIONS = {
 MEDIA_ACTIONS = {'scan-disk', 'search-missing', 'upgrade'}
 
 MOD_ACTIONS = {'OCR_fixes', 'common', 'remove_HI', 'remove_tags', 'fix_uppercase', 'reverse_rtl', 'emoji'}
+
+# Returned by _process_subtitle_item for an item that was deliberately left
+# alone, so it counts as skipped rather than failed.
+ITEM_SKIPPED = object()
+
+# Why an item that returned no result failed, for the job's failure reason.
+_NO_RESULT_REASONS = {
+    'sync': 'no sync engine produced output',
+    'translate': 'the embedded track could not be extracted',
+}
+
+
+def _media_item_display_name(item):
+    """What a failed media action item is called in the job's failure reason."""
+    item_type = item.get('type') or 'item'
+    for key in ('sonarrEpisodeId', 'sonarrSeriesId', 'radarrId', 'sportsEventId', 'sportsLeagueId'):
+        if item.get(key):
+            return f'{item_type} {item[key]}'
+    return item_type
 
 
 def _item_display_name(item):
@@ -888,7 +908,8 @@ def _collect_sports(event_ids=None, action='sync', force_resync=False,
 def _process_subtitle_item(item, action, options, job_id):
     """Process a single subtitle item based on the action.
 
-    Returns True on success, False on failure.
+    Returns True on success, False on failure, ITEM_SKIPPED for an item that
+    was deliberately left alone.
     """
     if action == 'sync':
         sync_kwargs = {
@@ -978,7 +999,7 @@ def _process_subtitle_item(item, action, options, job_id):
                 # skip for this item and not a failure of the batch.
                 logger.warning('BAZARR skipping sports translation for event %s: %s',
                                item['sports_event_id'], e)
-                return False
+                return ITEM_SKIPPED
         # Don't pass the batch job_id to translate. translate_subtitles_file
         # has its own job/progress lifecycle that would hijack the batch job.
         # Calling without job_id makes it queue as its own separate job.
@@ -1142,9 +1163,12 @@ def _process_media_action(items, action, job_id):
                 upgrade_sports_subtitles(job_id=job_id, arr_instance_id=owner,
                                         **{key: sorted(ids) for key, ids in selection.items()})
             queued = len(sonarr_series_filters) + len(radarr_filters) + len(sports_selections)
+        except JobCancelled:
+            raise
         except Exception as e:
             logger.error(f'Error during upgrade: {e}')  # noqa: G004
             errors.append(str(e))
+        _raise_for_batch_failures(action, errors, len(items), queued, 0)
         return {'queued': queued, 'skipped': 0, 'errors': errors}
 
     # Sports disc scans come in two shapes. The wanted page's Scan All sends
@@ -1169,6 +1193,8 @@ def _process_media_action(items, action, job_id):
             for owner in sports_scan_owners:
                 sports_full_scan_subtitles(job_id=job_id, arr_instance_id=owner)
             queued += len(sports_scan_owners)
+        except JobCancelled:
+            raise
         except Exception as e:
             logger.error(f'Error during sports scan-disk: {e}')  # noqa: G004
             errors.append(str(e))
@@ -1243,10 +1269,13 @@ def _process_media_action(items, action, job_id):
                     skipped += 1
                     continue
             queued += 1
+        except JobCancelled:
+            raise
         except Exception as e:
             logger.error(f'Error processing {action} for {item}: {e}')  # noqa: G004
-            errors.append(str(e))
+            errors.append(f'{_media_item_display_name(item)} ({e})')
 
+    _raise_for_batch_failures(action, errors, len(items), queued, skipped)
     return {'queued': queued, 'skipped': skipped, 'errors': errors}
 
 
@@ -1306,6 +1335,8 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
     processed = 0
     failed = 0
     all_errors = []
+    # One line per failed item, "name (reason)", for the job's failure reason.
+    failures = []
 
     for i, item in enumerate(all_items, start=1):
         jobs_queue.update_job_progress(
@@ -1316,15 +1347,19 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
 
         try:
             result = _process_subtitle_item(item, action, options, job_id)
-            if result:
+            if result is ITEM_SKIPPED:
+                total_skipped += 1
+            elif result:
                 processed += 1
             else:
                 failed += 1
+                failures.append(f'{_item_display_name(item)} ({_NO_RESULT_REASONS.get(action, "no output was written")})')
         except JobCancelled:
             raise
         except Exception as e:
             logger.error(f'Error during {action} on {_item_display_name(item)}: {e}')  # noqa: G004
             all_errors.append(str(e))
+            failures.append(f'{_item_display_name(item)} ({e})')
             failed += 1
         finally:
             jobs_queue.update_job_progress(
@@ -1341,4 +1376,18 @@ def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
         f'BAZARR mass {action} complete: {processed} processed, {failed} failed, '  # noqa: G004
         f'{total_skipped} skipped, {len(all_errors)} errors'
     )
+    _raise_for_batch_failures(action, failures, total_count, processed, total_skipped)
     return {'queued': processed, 'skipped': total_skipped + failed, 'errors': all_errors}
+
+
+def _raise_for_batch_failures(action, failures, total, done, skipped):
+    """Fail the batch job when any item failed, naming the first few.
+
+    The queue marks a job failed only when it raises. The per-item errors used
+    to live only in the returned value, which nothing shows, so a batch where
+    every item failed still read as completed.
+    """
+    if not failures:
+        return
+    raise JobFailed(f'Mass {action}: {len(failures)} of {total} items failed ({done} done, '
+                           f'{skipped} skipped). {describe_failures(failures)}')

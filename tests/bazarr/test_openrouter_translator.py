@@ -20,8 +20,6 @@ def service(tmp_path, monkeypatch):
     monkeypatch.setattr(module, 'language_from_alpha3', lambda code: 'Hungarian')
     monkeypatch.setattr(module.requests, 'post', lambda *args, **kwargs: SimpleNamespace(
         status_code=200, json=lambda: {'jobId': 'fixture-job'}))
-    monkeypatch.setattr(module, 'show_progress', lambda **kwargs: None)
-    monkeypatch.setattr(module, 'hide_progress', lambda **kwargs: None)
     monkeypatch.setattr(module.jobs_queue, 'update_job_progress', lambda **kwargs: None)
     translator = module.OpenRouterTranslatorService(
         source_srt_file=str(source), dest_srt_file=str(tmp_path / 'output.hu.srt'),
@@ -35,11 +33,18 @@ def service(tmp_path, monkeypatch):
 
 @pytest.fixture
 def events(monkeypatch):
-    captured = SimpleNamespace(messages=[], history=[])
-    monkeypatch.setattr(module, 'show_message', captured.messages.append)
+    captured = SimpleNamespace(history=[])
     monkeypatch.setattr(module, 'history_log', lambda **kwargs: captured.history.append(kwargs))
     monkeypatch.setattr(module, 'history_log_movie', lambda **kwargs: captured.history.append(kwargs))
     return captured
+
+
+def _fails(call, *args):
+    # A failed translation raises its reason, which the jobs queue records as the
+    # job's failure. It used to return False and let the job end as completed.
+    with pytest.raises(module.TranslationServiceError) as raised:
+        call(*args)
+    return raised.value
 
 
 def _response(monkeypatch, status, result=None, **fields):
@@ -81,7 +86,7 @@ def test_poll_preserves_usable_lines(service, events, monkeypatch, status, struc
 
     assert service._poll_job('http://fixture', 'job', 3) == lines
     if status == 'partial':
-        assert any('partial' in message.lower() for message in events.messages)
+        assert service.partial_error == 'One batch failed'
 
 
 @pytest.mark.parametrize('status', ['partial', 'completed'])
@@ -89,13 +94,14 @@ def test_poll_preserves_usable_lines(service, events, monkeypatch, status, struc
                                     {'lines': 'invalid'}, 'invalid'])
 def test_poll_rejects_missing_or_empty_lines(service, events, monkeypatch, status, result):
     _response(monkeypatch, status, result)
-    assert service._poll_job('http://fixture', 'job', 3) is None
+    _fails(service._poll_job, 'http://fixture', 'job', 3)
 
 
 @pytest.mark.parametrize('status', ['failed', 'cancelled'])
 def test_poll_does_not_return_failed_output(service, events, monkeypatch, status):
     _response(monkeypatch, status, [{'position': 0, 'line': 'Egy'}], error='Unavailable')
-    assert service._poll_job('http://fixture', 'job', 3) is None
+    reason = str(_fails(service._poll_job, 'http://fixture', 'job', 3))
+    assert ('Unavailable' in reason) if status == 'failed' else ('cancelled' in reason)
 
 
 @pytest.mark.parametrize('media_type', ['episode', 'movie'])
@@ -118,7 +124,7 @@ def test_partial_translation_writes_ordered_cues_and_records_warning(service, ev
     assert 'partial' in message.lower()
     assert 'source language' in message.lower()
     assert 'malformed response' in message
-    assert any('partial' in message.lower() for message in events.messages)
+    assert 'malformed response' in service.partial_error
 
 
 @pytest.mark.parametrize('lines', [
@@ -136,7 +142,7 @@ def test_invalid_results_do_not_overwrite_files(service, events, monkeypatch, st
     source = Path(service.source_srt_file).read_bytes()
     _response(monkeypatch, status, {'lines': lines})
 
-    assert service.translate() is False
+    _fails(service.translate)
 
     assert destination.read_bytes() == b'existing subtitle'
     assert Path(service.source_srt_file).read_bytes() == source
@@ -158,7 +164,7 @@ def test_partial_detail_is_bounded_and_cleared_for_next_operation(service, event
     _response(monkeypatch, 'partial', lines, error='Failure detail')
     assert service.translate() == service.dest_srt_file
     _response(monkeypatch, 'failed', error='Unavailable')
-    assert service.translate() is False
+    assert 'Unavailable' in str(_fails(service.translate))
     assert not service.partial_error
 
 
@@ -173,7 +179,7 @@ def test_partial_without_error_detail_still_marks_the_saved_output(service, even
 
 def test_empty_source_does_not_report_a_saved_translation(service, events):
     Path(service.source_srt_file).write_text('', encoding='utf-8')
-    assert service.translate() is False
+    _fails(service.translate)
     assert not Path(service.dest_srt_file).exists()
     assert events.history == []
 
@@ -189,13 +195,16 @@ def test_sync_fallback_uses_the_same_result_validation(service, events, monkeypa
     ])
     monkeypatch.setattr(module.requests, 'post', lambda *args, **kwargs: next(responses))
 
-    result = service.translate()
+    try:
+        result = service.translate()
+    except module.TranslationServiceError as error:
+        result = error
     if valid:
         assert result == service.dest_srt_file
         assert [cue.plaintext for cue in pysubs2.load(result)] == ['Egy', 'Two', 'Three']
         assert 'partial' in events.history[-1]['result'].message.lower()
     else:
-        assert result is False
+        assert isinstance(result, module.TranslationServiceError)
         assert not Path(service.dest_srt_file).exists()
         assert events.history == []
 
@@ -213,7 +222,7 @@ def test_save_failure_preserves_destination_and_cleans_temporary_file(service, e
 
     monkeypatch.setattr(pysubs2.SSAFile, 'save', fail_save)
 
-    assert service.translate() is False
+    _fails(service.translate)
     assert destination.read_bytes() == b'existing subtitle'
     assert set(destination.parent.iterdir()) == before
     assert events.history == []
@@ -235,7 +244,7 @@ def test_missing_or_blank_cues_are_reported_as_partial(service, events, monkeypa
     assert [cue.plaintext for cue in output[:3]] == ['Egy', 'Two', 'Three']
     assert 'partially translated' in output[-1].plaintext.lower()
     assert 'partial' in events.history[-1]['result'].message.lower()
-    assert any('partial' in message.lower() for message in events.messages)
+    assert service.partial_error
 
 
 def test_long_destination_filename_retains_atomic_saving_and_permissions(service, events, monkeypatch):
@@ -263,7 +272,7 @@ def test_existing_staging_file_is_never_overwritten_or_removed(service, events, 
     monkeypatch.setattr(subsync_engines.uuid, 'uuid4', lambda: SimpleNamespace(hex='fixture-collision'))
     _response(monkeypatch, 'completed', [{'position': 0, 'line': 'Egy'}])
 
-    assert service.translate() is False
+    _fails(service.translate)
     assert staging.read_bytes() == b'other operation'
     assert destination.read_bytes() == b'existing subtitle'
     assert not events.history

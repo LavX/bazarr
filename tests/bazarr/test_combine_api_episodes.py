@@ -64,7 +64,8 @@ _patches = {
     'app.database': MagicMock(),
     'app.event_handler': MagicMock(),
     'app.get_providers': MagicMock(),
-    'app.jobs_queue': MagicMock(),
+    # A real class: the translator service error subclasses JobFailed at import.
+    'app.jobs_queue': MagicMock(JobFailed=type('JobFailed', (Exception,), {})),
     'app.scheduler': MagicMock(),
     'app.signalr_client': MagicMock(),
     'utilities.path_mappings': MagicMock(),
