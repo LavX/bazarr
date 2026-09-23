@@ -193,7 +193,7 @@ export const whatsNew: Record<string, WhatsNewSlide[]> = {
     },
     {
       title: "Translations that stall, vanish or talk over each other",
-      body: "Setting reasoning to Disabled now really disables it instead of leaving the model's own default running, which is what had jobs timing out on reasoning tokens, and a cleared setting counts as disabled too. Thanks to wouterrutgers for finding and fixing the first half of that. Progress also stays on screen until the file is published rather than ending while the service is still finalising, and two translations running at once each keep their own notification.",
+      body: "Setting reasoning to Disabled now really disables it instead of leaving the model's own default running, which is what had jobs timing out on reasoning tokens, and a cleared setting counts as disabled too. Thanks to wouterrutgers for finding and fixing the first half of that. Progress also stays visible until the file is published rather than ending while the service is still finalising, and two translations running at once each keep their own progress, on their own job in the Jobs button.",
       icon: faWandMagicSparkles,
       cta: { label: "Open Translator settings", to: "/settings/translator" },
     },
