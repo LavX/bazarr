@@ -27,6 +27,7 @@ import {
   useSubtitleCreate,
 } from "@/apis/hooks/subtitles";
 import { QueryKeys } from "@/apis/queries/keys";
+import api from "@/apis/raw";
 
 // ---------------------------------------------------------------------------
 // Module mock: replace the raw API with lightweight stubs that resolve
@@ -314,6 +315,45 @@ describe("useBatchAction", () => {
     expect(usedBareHistory).toBe(false);
   });
 });
+
+describe("useBatchAction – queued job", () => {
+  it("refreshes the tables on the job's terminal event, not on enqueue", async () => {
+    const { client, spy, wrapper } = makeClientAndWrapper();
+    vi.mocked(api.subtitles.batch).mockResolvedValueOnce({
+      queued: 2,
+      skipped: 0,
+      errors: [],
+      // eslint-disable-next-line camelcase
+      job_id: 31,
+    });
+    const { result } = renderHook(() => useBatchAction(), { wrapper });
+
+    result.current.mutate({
+      items: [{ type: "movie", radarrId: 5 }],
+      action: "scan-disk",
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    // Queued: nothing has changed yet, so nothing is refetched.
+    expect(capturedKeys(spy)).not.toContainEqual([QueryKeys.Movies]);
+
+    // The reducer writes the running and then the terminal jobs event into
+    // the jobs cache; only the terminal one refreshes.
+    // eslint-disable-next-line camelcase
+    client.setQueryData(jobsKey, [{ job_id: 31, status: "running" }]);
+    expect(capturedKeys(spy)).not.toContainEqual([QueryKeys.Movies]);
+
+    // eslint-disable-next-line camelcase
+    client.setQueryData(jobsKey, [{ job_id: 31, status: "completed" }]);
+    const keys = capturedKeys(spy);
+    expect(keys).toContainEqual([QueryKeys.Series]);
+    expect(keys).toContainEqual([QueryKeys.Movies]);
+    expect(keys).toContainEqual([QueryKeys.Sports]);
+    expect(keys).toContainEqual([QueryKeys.System, QueryKeys.History]);
+  });
+});
+
+const jobsKey = [QueryKeys.System, QueryKeys.Jobs];
 
 // ---------------------------------------------------------------------------
 // usePromoteSyncSubtitle

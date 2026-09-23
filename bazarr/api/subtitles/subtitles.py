@@ -243,12 +243,15 @@ class Subtitles(Resource):
         forced = True if args.get("forced") == "True" else False
         hi = True if args.get("hi") == "True" else False
 
-        # Embedded track: path is absent/empty, extract the subtitle from the
-        # video container into {config_dir}/extracted_subs/ first.
+        # Embedded track: path is absent/empty, the subtitle comes out of the
+        # video container into {config_dir}/extracted_subs/.
         # Only translate is supported for embedded tracks (no file to sync/mod).
-        # NOTE: do NOT delete the extracted file here; translate_subtitles_file()
-        # dispatches an async background job that reads the file after this request
-        # returns. The extracted_subs/ directory is intentionally persistent.
+        # Episodes and movies extract inside the queued translation job, so this
+        # request returns at once; ffmpeg takes seconds per track. A sports
+        # translation binds its source file into the profile operation before
+        # it is queued, so sports still extracts here.
+        # The extracted_subs/ directory is intentionally persistent.
+        embedded_source = None
         if not subtitles_path and action == "translate":
             from_language_arg = args.get("from_language")
             if not from_language_arg:
@@ -314,11 +317,6 @@ class Subtitles(Resource):
                 ep_meta = database.execute(ep_stmt).first()
                 if not ep_meta:
                     return "Episode not found", 404
-                # The owning instance's mapping, not the global one: extraction
-                # reverses this path with path_replace_reverse_instance, and the
-                # two only round-trip when the same mapping made both.
-                embedded_video_path = path_mappings.path_replace_instance(
-                    ep_meta.path, arr_instance_id, 'episode')
             else:
                 mv_stmt = scoped(
                     select(TableMovies.path).where(TableMovies.radarrId == id),
@@ -328,26 +326,36 @@ class Subtitles(Resource):
                 mv_meta = database.execute(mv_stmt).first()
                 if not mv_meta:
                     return "Movie not found", 404
-                embedded_video_path = path_mappings.path_replace_instance(
-                    mv_meta.path, arr_instance_id, 'movie')
 
-            extracted = extract_embedded_subtitle(
-                embedded_video_path,
-                from_language_arg,
-                media_type,
-                hi=source_hi,
-                forced=source_forced,
-                arr_instance_id=arr_instance_id,
-            )
-            if not extracted:
-                return (
-                    "Could not extract embedded subtitle: codec may be bitmap (PGS/VobSub) "
-                    "or the language track was not found",
-                    400,
+            if media_type == "sports":
+                extracted = extract_embedded_subtitle(
+                    embedded_video_path,
+                    from_language_arg,
+                    media_type,
+                    hi=source_hi,
+                    forced=source_forced,
+                    arr_instance_id=arr_instance_id,
                 )
-            subtitles_path = extracted
+                if not extracted:
+                    return (
+                        "Could not extract embedded subtitle: codec may be bitmap (PGS/VobSub) "
+                        "or the language track was not found",
+                        400,
+                    )
+                subtitles_path = extracted
+            else:
+                # The job extracts from video_path, which the metadata lookup
+                # below maps with the owning instance's mapping: extraction
+                # reverses it with path_replace_reverse_instance, and the two
+                # only round-trip when the same mapping made both.
+                embedded_source = {
+                    "language": from_language_arg,
+                    "hi": source_hi,
+                    "forced": source_forced,
+                }
 
-        if media_type != "sports" and (not subtitles_path or not os.path.exists(subtitles_path)):
+        if media_type != "sports" and embedded_source is None and (
+                not subtitles_path or not os.path.exists(subtitles_path)):
             return "Subtitles file not found. Path mapping issue?", 500
 
         if action == "sync" and is_sync_engine_output(subtitles_path):
@@ -591,6 +599,7 @@ class Subtitles(Resource):
                     metadata=None if media_type == "sports" else metadata,
                     arr_instance_id=arr_instance_id,
                     sports_operation=sports_operation,
+                    embedded_source=embedded_source,
                 )
             except ValueError as exc:
                 return str(exc), 409

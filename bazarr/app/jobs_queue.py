@@ -119,7 +119,7 @@ class Job:
         self.args = args
         self.kwargs = kwargs
         self.status = 'pending'
-        self.last_run_time = datetime.now()
+        self.last_run_time = datetime.now(timezone.utc)
         self.is_progress = is_progress
         self.is_signalr = is_signalr
         self.progress_value = 0
@@ -832,7 +832,7 @@ class JobsQueue:
             return False
         try:
             job.status = 'running'
-            job.last_run_time = datetime.now()
+            job.last_run_time = datetime.now(timezone.utc)
             job.observed_started_at = datetime.now(timezone.utc)
             if 'job_id' not in job.kwargs or not job.kwargs['job_id']:
                 job.kwargs['job_id'] = job.job_id
@@ -857,7 +857,7 @@ class JobsQueue:
             logging.info(f"Job {job.job_name} ({job.job_id}) was cancelled by user")  # noqa: G004
             job.status = 'completed'
             job.progress_message = "Cancelled by user"
-            job.last_run_time = datetime.now()
+            job.last_run_time = datetime.now(timezone.utc)
             job.observed_finished_at = datetime.now(timezone.utc)
             activity.finish(job.activity_id, outcome='cancelled')
             with self._queue_lock:
@@ -879,7 +879,7 @@ class JobsQueue:
             return False
         else:
             job.status = 'completed'
-            job.last_run_time = datetime.now()
+            job.last_run_time = datetime.now(timezone.utc)
             job.observed_finished_at = datetime.now(timezone.utc)
             # A generic completed envelope is not a publication. Only a typed
             # outcome recorded at a real publication boundary can claim one.
@@ -909,7 +909,7 @@ class JobsQueue:
 
     def _mark_failed(self, job):
         job.status = 'failed'
-        job.last_run_time = datetime.now()
+        job.last_run_time = datetime.now(timezone.utc)
         job.observed_finished_at = datetime.now(timezone.utc)
         activity.finish(job.activity_id, outcome='failed')
         with self._queue_lock:

@@ -27,7 +27,7 @@ from languages.custom_lang import CustomLanguage
 from app.database import (TableEpisodes, TableMovies, TableShows,
                          get_profiles_list, get_audio_profile_languages,
                           database, select)
-from app.jobs_queue import jobs_queue
+from app.jobs_queue import jobs_queue, JobFailed
 from app.event_handler import event_stream
 from app.notifier import send_notifications
 from app.notifier import send_notifications_movie
@@ -160,7 +160,7 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
             sonarrEpisodeId = episode_metadata.sonarrEpisodeId
             use_original_format = _profile_original_format(episode_metadata.profileId)
         else:
-            return
+            raise JobFailed(f'Could not upload {filename}: the episode is no longer in the library.')
     else:
         movie_metadata = database.execute(scoped(
             select(TableMovies.radarrId, TableMovies.profileId,
@@ -173,7 +173,7 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
             radarrId = movie_metadata.radarrId
             use_original_format = _profile_original_format(movie_metadata.profileId)
         else:
-            return
+            raise JobFailed(f'Could not upload {filename}: the movie is no longer in the library.')
 
     audio_language = get_audio_profile_languages(audio_language)
     if len(audio_language) and isinstance(audio_language[0], dict):
@@ -225,11 +225,12 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
                                   if source_version is not None else None)
     except Exception as e:
         logging.exception(f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')  # noqa: G004
-        return
+        raise JobFailed(f'Could not save {filename} to disk: {e}') from e
 
     if len(saved_subtitles) < 1:
-        logging.exception(f'BAZARR Error saving Subtitles file to disk for this file: {path}')  # noqa: G004
-        return
+        logging.error(f'BAZARR Error saving Subtitles file to disk for this file: {path}')  # noqa: G004
+        raise JobFailed(f'Could not save {filename} to disk: nothing was written. Check that the file is a '
+                               f'readable subtitle and that the media folder is writable.')
 
     # An uploaded subtitle satisfies the language as surely as a downloaded one,
     # so whatever mismatch was recorded for it no longer describes anything. This

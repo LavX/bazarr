@@ -12,11 +12,10 @@ from arr_instances.resolution import scoped
 from sonarr.sync.series import update_one_series, update_one_series_for_instance
 from subtitles.indexer.series import list_missing_subtitles, series_scan_subtitles
 from subtitles.mass_download import series_download_subtitles
-from subtitles.tools.combine.main import try_combine_for_video
+from app.jobs_queue import jobs_queue
 from subtitles.wanted import wanted_search_missing_subtitles_series, wanted_scan_subtitles_series
 from app.event_handler import event_stream
 from api.swaggerui import subtitles_model, subtitles_language_model, audio_language_model
-from utilities.path_mappings import path_mappings
 
 from api.utils import authenticate, None_Keys, postprocess
 
@@ -348,7 +347,7 @@ def _list_series_episodes(series_id, arr_instance_id=None):
 @api_ns_series.route('series/<int:series_id>/subtitles/combine')
 class SeriesSubtitlesCombine(Resource):
     @authenticate
-    @api_ns_series.response(200, 'Batch combine summary')
+    @api_ns_series.response(202, 'Combine job queued')
     @api_ns_series.response(401, 'Not Authenticated')
     @api_ns_series.response(404, 'Series not found')
     def post(self, series_id):
@@ -363,38 +362,18 @@ class SeriesSubtitlesCombine(Resource):
         if not episodes:
             return {'status': 'not_found'}, 404
 
-        built, skipped, failed = 0, 0, 0
-        details = []
-        for ep in episodes:
-            owner = ep['arr_instance_id']
-            video_path = path_mappings.path_replace_instance(ep['path'], owner, 'episode')
-            r = try_combine_for_video(
-                video_path=video_path,
-                media_type='series',
-                radarr_id=None,
-                sonarr_series_id=ep['sonarrSeriesId'],
-                sonarr_episode_id=ep['sonarrEpisodeId'],
-                languages=languages,
-                format=format_,
-                arr_instance_id=owner,
-            )
-            details.append({
-                'episodeId': ep['sonarrEpisodeId'],
-                'status': r.status,
-                'path': r.path,
-                'reason': r.reason,
-                'error': r.error,
-            })
-            if r.status == 'built':
-                built += 1
-            elif r.status == 'skipped':
-                skipped += 1
-            else:
-                failed += 1
-        return {
-            'status': 'batch_complete',
-            'built': built,
-            'skipped': skipped,
-            'failed': failed,
-            'details': details,
-        }, 200
+        # One queued job for the whole series: it reports per-episode progress
+        # and fails with a summary when any episode failed.
+        show = database.execute(scoped(
+            select(TableShows.title).where(TableShows.sonarrSeriesId == series_id),
+            TableShows.arr_instance_id, arr_instance_id)).first()
+        job_id = jobs_queue.feed_jobs_pending_queue(
+            job_name=f"Combining subtitles for {show.title if show else f'series {series_id}'}",
+            module='subtitles.tools.combine.batch',
+            func='combine_series_subtitles',
+            kwargs={'series_id': series_id, 'languages': languages, 'format': format_,
+                    'arr_instance_id': arr_instance_id},
+            is_progress=True,
+            progress_max=len(episodes),
+        )
+        return {'status': 'queued', 'job_id': job_id or None}, 202
