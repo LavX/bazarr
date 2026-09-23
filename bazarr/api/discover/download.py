@@ -2,6 +2,7 @@ from io import BytesIO
 from functools import wraps
 import hashlib
 import hmac
+import logging
 import secrets
 
 from flask import request, send_file
@@ -9,7 +10,8 @@ from flask_restx import Namespace, Resource
 from werkzeug.exceptions import Unauthorized
 
 from app.config import settings
-from discover.download import ExpiredResultError, ResultAuthority, UnauthorizedResultError, download_result, preview_result
+from discover.download import (ExpiredResultError, ResultAuthority, UnauthorizedResultError, classify_failure,
+                               enqueue_download, fetch_ticket, preview_result)
 from ..utils import _safe_apikey_compare, authenticate
 
 api_ns_discover_download = Namespace("Discover", description="Exact subtitle attachments and preview")
@@ -59,28 +61,74 @@ def _authority():
     return authority
 
 
-def _retrieve(preview=False):
+def _identity(source):
+    if any(len(source.getlist(key)) != 1 for key in ("result_id", "search_id")):
+        raise ExpiredResultError("Discover result expired")
+    return source.get("result_id"), source.get("search_id")
+
+
+_EXPIRED = ({"message": "This result has expired. Search again for this selection.",
+             "reason": "result_expired", "recoverable": True}, 410, _HEADERS)
+_UNAUTHORIZED = ({"message": "Authentication changed. Sign in again."}, 401, _HEADERS)
+
+
+def _preview():
     try:
         authority = _authority()
-        if any(len(request.args.getlist(key)) != 1 for key in ("result_id", "search_id")):
-            raise ExpiredResultError("Discover result expired")
-        identity = (request.args.get("result_id"), request.args.get("search_id"))
-        if preview:
-            payload = preview_result(*identity, authority=authority)
-            if not authority.is_current():
-                raise UnauthorizedResultError("Authentication changed")
-            return payload, 200, _HEADERS
-        content, filename = download_result(*identity, authority=authority)
+        payload = preview_result(*_identity(request.args), authority=authority)
+        if not authority.is_current():
+            raise UnauthorizedResultError("Authentication changed")
+        return payload, 200, _HEADERS
+    except UnauthorizedResultError:
+        return _UNAUTHORIZED
+    except ExpiredResultError:
+        return _EXPIRED
+    except Exception as error:
+        failure = classify_failure(error)
+        logging.warning("Discover preview failed: reason=%s: %s", failure.reason, failure.detail or type(error).__name__)
+        return {"message": "The provider could not return a valid subtitle. Retry or choose another result.",
+                "reason": "preview_failed", "recoverable": True}, 502, _HEADERS
+
+
+def _enqueue():
+    """Queue the exact result as a standard job and answer with its id at once."""
+    try:
+        authority = _authority()
+        body = request.get_json(silent=True)
+        if isinstance(body, dict):
+            identity = body.get("result_id"), body.get("search_id")
+            if not all(isinstance(value, str) for value in identity):
+                raise ExpiredResultError("Discover result expired")
+        else:
+            identity = _identity(request.args)
+        job_id = enqueue_download(*identity, authority=authority)
+    except UnauthorizedResultError:
+        return _UNAUTHORIZED
+    except ExpiredResultError:
+        return _EXPIRED
+    except Exception as error:
+        failure = classify_failure(error)
+        logging.warning("Discover download could not be queued: reason=%s: %s", failure.reason,
+                        failure.detail or type(error).__name__)
+        return {"message": failure.message, "reason": failure.reason, "recoverable": True}, 503, _HEADERS
+    return {"job_id": job_id}, 202, _HEADERS
+
+
+def _ticket():
+    """Hand over the file a finished download job kept, under the same key check."""
+    try:
+        authority = _authority()
+        tickets = request.args.getlist("job")
+        if len(tickets) != 1 or not tickets[0].isdigit():
+            raise ExpiredResultError("Discover download expired")
+        content, filename = fetch_ticket(int(tickets[0]), authority=authority)
         if not authority.is_current():
             raise UnauthorizedResultError("Authentication changed")
     except UnauthorizedResultError:
-        return {"message": "Authentication changed. Sign in again."}, 401, _HEADERS
+        return _UNAUTHORIZED
     except ExpiredResultError:
-        return {"message": "This result has expired. Search again for this selection.",
-                "reason": "result_expired", "recoverable": True}, 410, _HEADERS
-    except Exception:
-        return {"message": "The provider could not return a valid subtitle. Retry or choose another result.",
-                "reason": "preview_failed" if preview else "download_failed", "recoverable": True}, 502, _HEADERS
+        return {"message": "This download is no longer available. Download it again from the results.",
+                "reason": "ticket_expired", "recoverable": True}, 404, _HEADERS
     response = send_file(BytesIO(content), mimetype="application/x-subrip", as_attachment=True,
                          download_name=filename, etag=False, conditional=False)
     response.headers.update(_HEADERS)
@@ -92,7 +140,14 @@ class DiscoverDownload(Resource):
     @_private_auth_errors
     @authenticate
     def get(self):
-        return _retrieve()
+        """Fetch the file of a finished download job by its ticket (?job=<id>)."""
+        return _ticket()
+
+    @_private_auth_errors
+    @authenticate
+    def post(self):
+        """Queue the download of one exact result as a job; answers with the job id."""
+        return _enqueue()
 
 
 @api_ns_discover_download.route("discover/preview")
@@ -100,4 +155,4 @@ class DiscoverPreview(Resource):
     @_private_auth_errors
     @authenticate
     def get(self):
-        return _retrieve(preview=True)
+        return _preview()

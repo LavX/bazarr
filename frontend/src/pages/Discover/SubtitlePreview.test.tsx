@@ -19,6 +19,7 @@ import type {
 } from "@/types/discover";
 import { setAuthenticated } from "@/utilities/event";
 import * as files from "@/utilities/files";
+import { downloadJobHandlers } from "./downloadJobHarness";
 import SubtitleResults from "./SubtitleResults";
 
 const episode: MetadataEpisode = {
@@ -186,13 +187,9 @@ beforeEach(() => {
         truncated: false,
       });
     }),
-    http.get(
-      "/api/discover/download",
-      () =>
-        new HttpResponse("1\n00:00:01,000 --> 00:00:02,000\n" + cue + "\n\n", {
-          headers: { "Content-Type": "application/x-subrip" },
-        }),
-    ),
+    ...downloadJobHandlers({
+      body: () => "1\n00:00:01,000 --> 00:00:02,000\n" + cue + "\n\n",
+    }),
   );
 });
 it("renders safe inline cues with a raw view and retains forced-row download identity", async () => {
@@ -222,6 +219,7 @@ it("renders safe inline cues with a raw view and retains forced-row download ide
   ]);
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   await user.click(forcedRow().getByRole("button", { name: "Download SRT" }));
+  await user.click(await screen.findByRole("button", { name: "Save SRT" }));
   await waitFor(() => expect(save).toHaveBeenCalledOnce());
   await user.click(modal.getByRole("button", { name: "Close preview" }));
   await waitFor(() =>
@@ -368,13 +366,12 @@ it("shows parser recovery without invented cues and retires an expired row", asy
 it("retires a pending download when preview discovers that the same handle expired", async () => {
   let finish: (() => void) | undefined;
   server.use(
-    http.get("/api/discover/download", async () => {
-      await new Promise<void>((resolve) => {
-        finish = resolve;
-      });
-      return new HttpResponse("old bytes", {
-        headers: { "Content-Type": "application/x-subrip" },
-      });
+    ...downloadJobHandlers({
+      body: () => "old bytes",
+      hold: () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
     }),
     http.get("/api/discover/preview", () =>
       HttpResponse.json({ reason: "result_expired" }, { status: 410 }),

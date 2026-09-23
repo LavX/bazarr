@@ -40,9 +40,50 @@ def choices(providers, monkeypatch):
     return candidates, fetched
 
 
-def get(client, row, **kwargs):
-    return client.get("/api/discover/download", query_string={"result_id": row["id"],
-                      "search_id": row["search_id"], **kwargs}, headers={"X-API-KEY": "discover-test-key"})
+HEADERS = {"X-API-KEY": "discover-test-key"}
+
+
+@pytest.fixture(autouse=True)
+def job_events(monkeypatch):
+    """Record the jobs socket events instead of emitting them without a server."""
+    from app import jobs_queue as queue_module
+    events = []
+    monkeypatch.setattr(queue_module, "event_stream", lambda **kwargs: events.append(kwargs))
+    return events
+
+
+def run_queued_job(job_id):
+    """Run one queued job exactly as the queue consumer does: reserve, then run."""
+    from app.jobs_queue import jobs_queue
+    with jobs_queue._queue_lock:
+        job = next(item for item in jobs_queue.jobs_pending_queue if item.job_id == job_id)
+        jobs_queue.jobs_pending_queue.remove(job)
+        jobs_queue.jobs_running_queue.append(job)
+    jobs_queue._run_job(job)
+    return jobs_queue.list_jobs_from_queue(job_id=job_id)[0]
+
+
+def enqueue(client, row, headers=None, **kwargs):
+    return client.post("/api/discover/download", json={"result_id": row["id"], "search_id": row["search_id"],
+                       **kwargs}, headers=HEADERS if headers is None else headers)
+
+
+def get(client, row, headers=None, **kwargs):
+    """The whole download: queue the job, run it, then fetch the file by its ticket.
+
+    A refusal at enqueue comes back as that response. A failed job comes back
+    as a 502 whose json is the job's public result, so callers can assert the
+    classified reason.
+    """
+    from types import SimpleNamespace
+    headers = HEADERS if headers is None else headers
+    queued = enqueue(client, row, headers, **kwargs)
+    if queued.status_code != 202:
+        return queued
+    job = run_queued_job(queued.json["job_id"])
+    if job["status"] != "completed":
+        return SimpleNamespace(status_code=502, json=job["job_returned_value"], headers={}, data=b"", job=job)
+    return client.get("/api/discover/download", query_string={"job": queued.json["job_id"]}, headers=headers)
 
 
 def test_exact_forced_attachment_without_library_or_hub_mutation(
@@ -94,9 +135,9 @@ def test_exact_forced_attachment_without_library_or_hub_mutation(
 def test_download_requires_ui_authorization(authenticated_client, choices):
     row = post(authenticated_client, CONTEXT).json["results"][0]
     for headers in [{}, {"X-API-KEY": "wrong"}]:
-        response = authenticated_client.get("/api/discover/download", query_string={
-            "result_id": row["id"], "search_id": row["search_id"]}, headers=headers)
-        assert response.status_code == 401
+        assert enqueue(authenticated_client, row, headers).status_code == 401
+        assert authenticated_client.get("/api/discover/download", query_string={"job": "1"},
+                                        headers=headers).status_code == 401
     assert choices[1] == []
 
 
@@ -108,7 +149,7 @@ def test_rejects_bad_handles_without_fetch(authenticated_client, choices, invali
            "missing": ".".join(parts[:2]), "extra": row["id"] + ".more",
            "oversized": "d1.1." + "x" * 10000, "url": "http://127.0.0.1/sub.srt",
            "wrong-search": row["id"]}[invalid]
-    response = get(authenticated_client, {**row, "id": bad}, **({"search_id": "different"} if invalid == "wrong-search" else {}))
+    response = get(authenticated_client, {**row, "id": bad, **({"search_id": "different"} if invalid == "wrong-search" else {})})
     assert response.status_code == 410
     assert response.json["reason"] == "result_expired"
     assert response.json["recoverable"] is True
@@ -120,8 +161,7 @@ def test_missing_identity_never_fetches(authenticated_client, choices, missing):
     row = post(authenticated_client, CONTEXT).json["results"][0]
     params = {"result_id": row["id"], "search_id": row["search_id"]}
     params.pop(missing)
-    response = authenticated_client.get("/api/discover/download", query_string=params,
-                                        headers={"X-API-KEY": "discover-test-key"})
+    response = authenticated_client.post("/api/discover/download", json=params, headers=HEADERS)
     assert response.status_code == 410
     assert choices[1] == []
 
@@ -171,7 +211,7 @@ def test_invalid_or_empty_provider_content_is_not_an_attachment(authenticated_cl
     monkeypatch.setattr(providers.pool["discover_download"], "download_subtitle", download)
     response = get(authenticated_client, row)
     assert response.status_code == 502
-    assert response.json["reason"] == "download_failed"
+    assert response.json["reason"] == ("provider_error" if payload == b"" else "invalid_subtitle")
     assert "Content-Disposition" not in response.headers
 
 
@@ -244,7 +284,7 @@ def test_provider_missing_file_does_not_claim_handle_expiry(authenticated_client
     monkeypatch.setattr(service, "_fetch_subtitle_bytes", missing)
     response = get(authenticated_client, row)
     assert response.status_code == 502
-    assert response.json["reason"] == "download_failed"
+    assert response.json["reason"] == "provider_error"
 
 
 def test_movie_filename_has_exact_title_year_and_language(authenticated_client, choices):
@@ -277,7 +317,7 @@ def test_raw_attachment_and_expiry_recovery_keep_query_without_identity(
     assert response.status_code == 200
     snapshot = response.json
     row = snapshot["results"][1]
-    wrong = get(authenticated_client, row, search_id="identified-search")
+    wrong = get(authenticated_client, {**row, "search_id": "identified-search"})
     assert wrong.status_code == 410 and choices[1] == []
     download = get(authenticated_client, row)
     assert download.status_code == 200 and download.data == FORCED_SRT
@@ -430,5 +470,197 @@ def test_a_cache_hit_reobserves_the_copy_only_when_the_request_waited(
         # Stand in for a contended cache lock: any elapsed time now counts.
         monkeypatch.setattr(owner, "COPY_RECHECK_AFTER_SECONDS", -1)
     assert get(authenticated_client, row).status_code == 200
-    assert len(observations) == (2 if waited else 1)
+    # One observation is the enqueue check, which refuses a retired copy before
+    # a job is queued at all. The rest belong to the job's own delivery.
+    assert len(observations) == (3 if waited else 2)
     assert choices[1] == ["forced"]
+
+
+def test_download_is_a_standard_job_and_the_file_is_fetched_by_ticket(authenticated_client, choices, job_events):
+    from app.jobs_queue import jobs_queue
+    row = next(row for row in post(authenticated_client, CONTEXT).json["results"] if row["scope"] == "forced")
+    queued = enqueue(authenticated_client, row)
+    assert queued.status_code == 202
+    job_id = queued.json["job_id"]
+    # Nothing is fetched until the queue runs the job.
+    assert choices[1] == []
+    assert {"type": "jobs", "action": "update",
+            "payload": {"job_id": job_id, "progress_value": None, "status": "pending"}} in job_events
+    # A second click while the job waits answers with the same job.
+    assert enqueue(authenticated_client, row).json["job_id"] == job_id
+    job = jobs_queue.list_jobs_from_queue(job_id=job_id)[0]
+    assert job["job_name"] == ("Breaking Bad S02E01 · en · discover_download · "
+                               "Breaking.Bad.S02E01.forced.discover_download.en.forced.srt")
+    finished = run_queued_job(job_id)
+    assert finished["status"] == "completed" and finished["progress_message"] == "Ready to save"
+    assert choices[1] == ["forced"]
+    listed = authenticated_client.get("/api/system/jobs", query_string={"id": job_id}, headers=HEADERS).json["data"][0]
+    # The standard completion action, which the notification and the drawer offer.
+    assert listed["action"] == {"kind": "discover.save", "label": "Save", "ticket": job_id,
+                                "filename": "Breaking.Bad.S02E01.forced.discover_download.en.forced.srt"}
+    assert listed["error"] is None and listed["retryable"] is True
+    # The terminal socket event carries the same outcome.
+    assert job_events[-1]["payload"] == {"job_id": job_id, "status": "completed", "progress_value": None,
+                                         "error": None, "action": listed["action"]}
+    # Neither the bytes nor the authority scope ever reach the jobs list.
+    everything = authenticated_client.get("/api/system/jobs", headers=HEADERS)
+    assert b"Forced translation" not in everything.data and b"authority" not in everything.data
+    assert b"scope" not in everything.data
+    for _ in range(2):
+        response = authenticated_client.get("/api/discover/download", query_string={"job": job_id}, headers=HEADERS)
+        assert response.status_code == 200 and response.data == FORCED_SRT
+        assert response.mimetype == "application/x-subrip" and response.headers["Cache-Control"] == "no-store"
+        assert "Breaking.Bad.S02E01.forced.discover_download.en.forced.srt" in response.headers["Content-Disposition"]
+    assert choices[1] == ["forced"]
+
+
+def test_a_ticket_is_bound_to_the_key_that_asked_and_expires(authenticated_client, choices, monkeypatch):
+    from app.config import settings
+    from discover import download
+    row = post(authenticated_client, CONTEXT).json["results"][0]
+    queued = enqueue(authenticated_client, row)
+    assert run_queued_job(queued.json["job_id"])["status"] == "completed"
+    ticket = {"job": queued.json["job_id"]}
+    for bad in ("x", "", "-1"):
+        assert authenticated_client.get("/api/discover/download", query_string={"job": bad},
+                                        headers=HEADERS).status_code == 404
+    assert authenticated_client.get("/api/discover/download", query_string={"job": ticket["job"] + 1},
+                                    headers=HEADERS).status_code == 404
+    monkeypatch.setattr(settings.auth, "apikey", "rotated-fixture-key")
+    assert authenticated_client.get("/api/discover/download", query_string=ticket, headers=HEADERS).status_code == 401
+    rotated = authenticated_client.get("/api/discover/download", query_string=ticket,
+                                       headers={"X-API-KEY": "rotated-fixture-key"})
+    assert rotated.status_code == 404 and rotated.json["reason"] == "ticket_expired"
+    monkeypatch.setattr(settings.auth, "apikey", "discover-test-key")
+    assert authenticated_client.get("/api/discover/download", query_string=ticket, headers=HEADERS).status_code in (200, 404)
+    # Past the TTL the file is gone and the answer says what to do.
+    queued = enqueue(authenticated_client, row)
+    assert run_queued_job(queued.json["job_id"])["status"] == "completed"
+    ticket = {"job": queued.json["job_id"]}
+    assert authenticated_client.get("/api/discover/download", query_string=ticket, headers=HEADERS).status_code == 200
+    monkeypatch.setattr(download.time, "monotonic", lambda real=download.time.monotonic: real() + download.TICKET_TTL_SECONDS + 1)
+    expired = authenticated_client.get("/api/discover/download", query_string=ticket, headers=HEADERS)
+    assert expired.status_code == 404
+    assert expired.json == {"message": "This download is no longer available. Download it again from the results.",
+                            "reason": "ticket_expired", "recoverable": True}
+
+
+def _fail_with(kind, providers, monkeypatch):
+    from compat import file_id_store
+    from discover import download
+    from subliminal_patch.exceptions import SubtitleCandidateRejected
+
+    def provider(subtitle):
+        if kind == "provider_error":
+            raise RuntimeError("fixture upstream 500")
+        if kind == "archive_no_match":
+            raise SubtitleCandidateRejected("No matching subtitle language; provider=discover_download")
+        subtitle.content = b"1\n00:00:02,000 --> 00:00:01,000\nWrong timing\n\n"
+
+    monkeypatch.setattr(providers.pool["discover_download"], "download_subtitle", provider)
+    if kind == "expired_handle":
+        file_id_store.reset_store()
+    if kind == "timeout":
+        # The provider error path is covered above; this one is the job's own wait.
+        monkeypatch.setattr(download, "JOB_WAIT_SECONDS", 0.05)
+        monkeypatch.setattr(providers.pool["discover_download"], "download_subtitle",
+                            lambda subtitle: __import__("time").sleep(0.5))
+
+
+@pytest.mark.parametrize("kind", ["expired_handle", "provider_error", "archive_no_match", "invalid_subtitle", "timeout"])
+def test_each_failure_is_classified_logged_once_and_shown_on_the_job(
+    authenticated_client, choices, providers, monkeypatch, caplog, kind,
+):
+    import logging
+    from discover.download import FAILURE_MESSAGES
+    row = post(authenticated_client, CONTEXT).json["results"][0]
+    queued = enqueue(authenticated_client, row)
+    assert queued.status_code == 202
+    _fail_with(kind, providers, monkeypatch)
+    with caplog.at_level(logging.WARNING):
+        job = run_queued_job(queued.json["job_id"])
+    assert job["status"] == "failed"
+    listed = authenticated_client.get("/api/system/jobs", query_string={"id": job["job_id"]}, headers=HEADERS)
+    listed = listed.json["data"][0]
+    assert listed["error"] == {"reason": kind, "message": FAILURE_MESSAGES[kind]}
+    assert listed["action"] is None
+    # A retry repeats the same checks, so an expired result is not offered one.
+    assert listed["retryable"] is (kind != "expired_handle")
+    warnings = [record for record in caplog.records
+                if record.levelno == logging.WARNING and record.getMessage().startswith("Discover download failed")]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert f"reason={kind}" in message and "filename=Breaking.Bad.S02E01.full.discover_download.en.full.srt" in message
+    assert "provider=discover_download" in message
+    assert {"expired_handle": "expired", "provider_error": "RuntimeError: fixture upstream 500",
+            "archive_no_match": "No matching subtitle language", "invalid_subtitle": "timing",
+            "timeout": "timed out"}[kind] in message
+    # No traceback at WARNING, and the job queue adds none of its own.
+    assert warnings[0].exc_info in (None, False)
+    assert not any(record.levelno >= logging.ERROR and "Exception raised while running function" in record.getMessage()
+                   for record in caplog.records)
+    assert authenticated_client.get("/api/discover/download", query_string={"job": job["job_id"]},
+                                    headers=HEADERS).status_code == 404
+
+
+OWNER_SRT = (b"357\n00:55:21,100 --> 00:55:24,900\nBefore the gap\n\n"
+             b"358\n00:55:25,014 --> 00:55:28,408\n\n\n"
+             b"359\n00:55:29,000 --> 00:55:31,500\nAfter the gap\nsecond line\n\n")
+
+
+def test_an_empty_cue_is_dropped_instead_of_rejecting_the_file(authenticated_client, choices, providers, monkeypatch):
+    import test_discover_preview as preview_fixtures
+    row = post(authenticated_client, CONTEXT).json["results"][0]
+
+    def provider(subtitle):
+        subtitle.content = OWNER_SRT
+
+    monkeypatch.setattr(providers.pool["discover_download"], "download_subtitle", provider)
+    response = get(authenticated_client, row)
+    assert response.status_code == 200
+    assert b"358\n" not in response.data
+    assert response.data == (b"357\n00:55:21,100 --> 00:55:24,900\nBefore the gap\n\n"
+                             b"359\n00:55:29,000 --> 00:55:31,500\nAfter the gap\nsecond line\n\n")
+    preview = preview_fixtures.preview(authenticated_client, row).json
+    assert [cue["text"] for cue in preview["cues"]] == ["Before the gap", "After the gap\nsecond line"]
+    assert preview["total_cues"] == 2
+
+
+@pytest.mark.parametrize("content", [
+    b"358\n00:55:25,014 --> 00:55:28,408\n\n\n359\n00:55:29,000 --> 00:55:31,500\n\n",
+    b"1\n00:00:01,000 --> 00:00:02,000\nText\n\n2\nno timing here\nText\n\n",
+])
+def test_a_file_without_any_usable_cue_is_still_invalid(content):
+    from discover.download import _normalize
+    with pytest.raises(Exception):
+        _normalize(content)
+
+
+def test_a_clean_file_keeps_its_exact_bytes():
+    from discover.download import _normalize
+    crlf = FULL_SRT.replace(b"\n", b"\r\n")
+    assert _normalize(crlf) == crlf
+
+
+def test_a_failed_download_is_retried_through_the_standard_queue(authenticated_client, choices, providers, monkeypatch):
+    row = post(authenticated_client, CONTEXT).json["results"][0]
+    queued = enqueue(authenticated_client, row)
+    original = providers.pool["discover_download"].download_subtitle
+    monkeypatch.setattr(providers.pool["discover_download"], "download_subtitle",
+                        lambda subtitle: (_ for _ in ()).throw(RuntimeError("fixture flaky")))
+    assert run_queued_job(queued.json["job_id"])["status"] == "failed"
+    monkeypatch.setattr(providers.pool["discover_download"], "download_subtitle", original)
+    # The pool benches a provider after an unexpected error; that is its policy, not the job's.
+    providers.pool.discarded_providers.discard("discover_download")
+    retried = authenticated_client.post("/api/system/jobs", query_string={"id": queued.json["job_id"], "action": "retry"},
+                                        headers=HEADERS)
+    assert retried.status_code == 200
+    job_id = retried.json["job_id"]
+    assert job_id != queued.json["job_id"]
+    job = run_queued_job(job_id)
+    assert job["status"] == "completed" and job["retry_of"] == queued.json["job_id"]
+    response = authenticated_client.get("/api/discover/download", query_string={"job": job_id}, headers=HEADERS)
+    assert response.data == FULL_SRT
+    # A completed job is not retried.
+    assert authenticated_client.post("/api/system/jobs", query_string={"id": job_id, "action": "retry"},
+                                     headers=HEADERS).status_code == 400

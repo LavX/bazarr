@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 import hashlib
 import json
+import logging
 import re
 from threading import Event, Lock, Thread
 import time
@@ -25,6 +26,11 @@ CACHE_MAX_BYTES = 16 * 1024 * 1024
 SUBTITLE_MAX_BYTES = 2 * 1024 * 1024
 FETCH_MAX_CONCURRENT = 4
 FETCH_WAIT_SECONDS = 12
+# A download job is not holding a request open, so it can give a slow provider
+# longer than a preview can.
+JOB_WAIT_SECONDS = 60
+# How long a finished download job's file stays available to save.
+TICKET_TTL_SECONDS = 30 * 60
 PREVIEW_MAX_CUES = 40
 PREVIEW_MAX_CHARACTERS = 24000
 # One filesystem name, in bytes. ext4, APFS and SMB all stop here.
@@ -51,6 +57,43 @@ class ExpiredResultError(FileNotFoundError):
 
 class UnauthorizedResultError(PermissionError):
     """The request's captured application authority is no longer current."""
+
+
+FAILURE_MESSAGES = {
+    "expired_handle": "This result has expired. Search again for this selection.",
+    "provider_error": "The provider did not return a subtitle. Retry or choose another result.",
+    "archive_no_match": "The provider's archive has no subtitle for this language or episode. Choose another result.",
+    "invalid_subtitle": "The provider returned a file that is not a usable subtitle. Choose another result.",
+    "timeout": "The provider took too long to answer. Retry in a moment.",
+}
+
+
+class DownloadFailure(ValueError):
+    """A classified reason why no subtitle could be delivered.
+
+    ``detail`` is the underlying error text. It is for the log only and never
+    leaves the process in a response.
+    """
+
+    def __init__(self, reason, detail=""):
+        super().__init__(FAILURE_MESSAGES[reason])
+        self.reason = reason
+        self.detail = str(detail)[:500]
+
+    @property
+    def message(self):
+        return FAILURE_MESSAGES[self.reason]
+
+
+def classify_failure(error):
+    """Map any error from the download path onto one fixed reason."""
+    if isinstance(error, DownloadFailure):
+        return error
+    if isinstance(error, (ExpiredResultError, UnauthorizedResultError)):
+        return DownloadFailure("expired_handle", error)
+    if isinstance(error, TimeoutError):
+        return DownloadFailure("timeout", error)
+    return DownloadFailure("provider_error", error)
 
 
 @dataclass(frozen=True)
@@ -121,7 +164,7 @@ def _normalize(content):
         raise ValueError("Subtitle has no dialogue")
     if any(event.start < 0 or event.end <= event.start for event in parsed):
         raise ValueError("Invalid subtitle timing")
-    srt = text.encode("utf-8") if parsed.format == "srt" else parsed.to_string("srt").encode("utf-8")
+    srt = _drop_empty_cues(text if parsed.format == "srt" else parsed.to_string("srt")).encode("utf-8")
     if len(srt) > SUBTITLE_MAX_BYTES:
         raise ValueError("Oversized normalized subtitle")
     # Validate the promised SRT representation as well as the source format.
@@ -228,11 +271,39 @@ _TIMING = re.compile(
 )
 
 
+def _blocks(text):
+    return re.split(r"\n[ \t]*\n+", text.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n").strip("\n"))
+
+
+def _is_empty_cue(block):
+    """A numbered timing line with no text under it, which real files carry."""
+    lines = block.split("\n")
+    if lines and lines[0].strip().isdigit():
+        lines.pop(0)
+    return (len(lines) >= 1 and _TIMING.fullmatch(lines[0]) is not None
+            and not "\n".join(lines[1:]).strip())
+
+
+def _drop_empty_cues(text):
+    """Remove cues that have timing but no text; leave everything else as it was.
+
+    One empty cue used to reject a whole file. Any other malformed block still
+    does, in _cues. The text is only rebuilt when something was dropped, so a
+    clean file keeps its exact bytes.
+    """
+    blocks = _blocks(text)
+    kept = [block for block in blocks if not _is_empty_cue(block)]
+    if len(kept) == len(blocks):
+        return text
+    return "\n\n".join(kept) + "\n\n" if kept else ""
+
+
 def _cues(content):
-    text = content.decode("utf-8").lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
     cues, total, characters = [], 0, 0
     truncated = False
-    for block in re.split(r"\n[ \t]*\n+", text.strip("\n")):
+    for block in _blocks(content.decode("utf-8")):
+        if _is_empty_cue(block):
+            continue
         lines = block.split("\n")
         if lines and lines[0].strip().isdigit():
             lines.pop(0)
@@ -262,6 +333,32 @@ def _cues(content):
     return cues, total, truncated
 
 
+def _provider_bytes(subtitle):
+    try:
+        content = service._fetch_subtitle_bytes(subtitle)
+    except Exception as error:
+        raise DownloadFailure("timeout" if isinstance(error, TimeoutError) else "provider_error", error) from error
+    if not content:
+        # The pool reports a candidate it rejected, which for Provider Hub is an
+        # archive without a member for this language or episode, only as an
+        # empty result. It leaves the reason on the subtitle.
+        rejected = getattr(subtitle, "rejected_reason", None)
+        if rejected:
+            raise DownloadFailure("archive_no_match", rejected)
+        # Any other provider exception is swallowed the same way, and kept.
+        error = getattr(subtitle, "download_error", None)
+        if error is not None:
+            import requests
+            timed_out = isinstance(error, (TimeoutError, requests.Timeout))
+            raise DownloadFailure("timeout" if timed_out else "provider_error", f"{type(error).__name__}: {error}")
+        raise DownloadFailure("provider_error", "provider returned no subtitle content")
+    try:
+        return _normalize(content)
+    except Exception as error:
+        # pysubs2 raises its own exception types for text that is no subtitle.
+        raise DownloadFailure("invalid_subtitle", error) from error
+
+
 def _fetch(key, flight, record, result_id, search_id, authority, deadline):
     global _cache_bytes
     try:
@@ -269,7 +366,7 @@ def _fetch(key, flight, record, result_id, search_id, authority, deadline):
         # The provider mutates content and redirect fields. Separate credential scopes
         # and result handles must never race through the same mutable instance.
         subtitle = deepcopy(record["subtitle"])
-        artifact = _Artifact(_normalize(service._fetch_subtitle_bytes(subtitle)), _filename(record))
+        artifact = _Artifact(_provider_bytes(subtitle), _filename(record))
         with _locked(deadline):
             current = _record(result_id, search_id, authority)
             if time.monotonic() >= deadline:
@@ -283,18 +380,19 @@ def _fetch(key, flight, record, result_id, search_id, authority, deadline):
                 _cache_bytes += len(artifact.content)
             flight.artifact = artifact
     except Exception as error:
-        # Keep only a fixed error classification, never provider payloads/tracebacks.
+        # A fixed classification for every caller. The underlying text rides
+        # along as detail for the log and is never put in a response.
         flight.error = (ExpiredResultError("Discover result expired") if isinstance(error, ExpiredResultError)
                         else UnauthorizedResultError("Authentication changed") if isinstance(error, UnauthorizedResultError)
-                        else ValueError("No usable subtitle returned"))
+                        else classify_failure(error))
     finally:
         with _lock:
             _inflight.pop(key, None)
             flight.ready.set()
 
 
-def _artifact(result_id, search_id, authority):
-    deadline = time.monotonic() + FETCH_WAIT_SECONDS
+def _artifact(result_id, search_id, authority, wait_seconds=None):
+    deadline = time.monotonic() + (FETCH_WAIT_SECONDS if wait_seconds is None else wait_seconds)
     record = _record(result_id, search_id, authority)
     _require_current_copy(record["context"])
     validated = time.monotonic()
@@ -348,10 +446,106 @@ def _artifact(result_id, search_id, authority):
     return artifact
 
 
-def download_result(result_id: str, search_id: str, *, authority: ResultAuthority) -> tuple[bytes, str]:
-    """Return the exact guarded normalized SRT and device filename. No library writes."""
-    artifact = _artifact(result_id, search_id, authority)
-    return artifact.content, artifact.filename
+def _job_label(record):
+    context = record["context"]
+    subtitle = record["subtitle"]
+    title = context.get("query") if context.get("mode") == "release" else (context.get("title") or context.get("imdb_id"))
+    if context.get("media_type") == "episode" and context.get("season") is not None:
+        title = f"{title} S{context['season']:02d}E{context['episode']:02d}"
+    parts = (title, context.get("language"), getattr(subtitle, "provider_name", None), _filename(record))
+    return " · ".join(str(part) for part in parts if part)
+
+
+def _ticket_key(scope, job_id):
+    return (scope, "job", int(job_id))
+
+
+def _existing_job(result_id, search_id, scope):
+    from app.jobs_queue import jobs_queue
+    for status in ("pending", "running"):
+        for job in jobs_queue.list_jobs_from_queue(status=status):
+            kwargs = job.get("kwargs") or {}
+            if (job.get("module") == __name__ and job.get("func") == "run_download_job"
+                    and kwargs.get("result_id") == result_id and kwargs.get("search_id") == search_id
+                    and getattr(kwargs.get("authority"), "scope", None) == scope):
+                return job["job_id"]
+    return None
+
+
+def enqueue_download(result_id: str, search_id: str, *, authority: ResultAuthority) -> int:
+    """Validate the exact result now and queue its retrieval as a standard job.
+
+    Returns the job id, which is also the ticket the finished file is fetched
+    by. Clicking the same result while its job is still queued or running
+    answers with that job rather than queueing a second one.
+    """
+    from app.jobs_queue import jobs_queue
+    record = _record(result_id, search_id, authority)
+    _require_current_copy(record["context"])
+    job_id = jobs_queue.feed_jobs_pending_queue(
+        job_name=_job_label(record), module=__name__, func="run_download_job",
+        kwargs={"result_id": result_id, "search_id": search_id, "authority": authority,
+                "provider": getattr(record["subtitle"], "provider_name", None), "filename": _filename(record)},
+        retryable=True)
+    if not job_id:
+        job_id = _existing_job(result_id, search_id, authority.scope)
+    if not job_id:
+        raise TimeoutError("Subtitle retrieval busy")
+    return job_id
+
+
+def _store_ticket(job_id, scope, artifact):
+    global _cache_bytes
+    key = _ticket_key(scope, job_id)
+    with _locked(time.monotonic() + FETCH_WAIT_SECONDS):
+        _prune(scope)
+        if key in _cache:
+            _evict(key)
+        while _cache and (len(_cache) >= CACHE_MAX_ENTRIES or _cache_bytes + len(artifact.content) > CACHE_MAX_BYTES):
+            _evict(next(iter(_cache)))
+        _cache[key] = (time.monotonic() + TICKET_TTL_SECONDS, artifact)
+        _cache_bytes += len(artifact.content)
+
+
+def fetch_ticket(job_id, *, authority: ResultAuthority) -> tuple[bytes, str]:
+    """The file a finished download job produced, under the key that asked for it."""
+    if not authority.is_current():
+        raise UnauthorizedResultError("Authentication changed")
+    with _locked(time.monotonic() + FETCH_WAIT_SECONDS):
+        _prune(authority.scope)
+        cached = _cache.get(_ticket_key(authority.scope, job_id))
+    if cached is None:
+        raise ExpiredResultError("Discover download expired")
+    return cached[1].content, cached[1].filename
+
+
+def run_download_job(result_id, search_id, authority, provider=None, filename=None, job_id=None):
+    """The job body: fetch the exact result and keep its file for the ticket.
+
+    It re-runs every handle, scope and copy check itself, because the reader's
+    key or the result may have changed while the job waited in the queue.
+    ``provider`` and ``filename`` are what the result was when it was queued,
+    so the log can name it even when the handle has expired since.
+    """
+    from app.jobs_queue import JobFailed, jobs_queue
+    try:
+        artifact = _artifact(result_id, search_id, authority, wait_seconds=JOB_WAIT_SECONDS)
+        if not authority.is_current():
+            raise UnauthorizedResultError("Authentication changed")
+        _store_ticket(job_id, authority.scope, artifact)
+    except Exception as error:
+        failure = classify_failure(error)
+        logging.warning("Discover download failed: reason=%s provider=%s filename=%s: %s",
+                        failure.reason, provider, filename, failure.detail or type(error).__name__,
+                        exc_info=logging.getLogger().isEnabledFor(logging.DEBUG))
+        # A retry repeats the same checks, so it cannot bring an expired result back.
+        raise JobFailed(failure.message, reason=failure.reason, retryable=failure.reason != "expired_handle",
+                        returned_value={"ticket": None, "filename": filename, "reason": failure.reason,
+                                        "message": failure.message}) from None
+    jobs_queue.update_job_progress(job_id=job_id, progress_message="Ready to save", allow_cancelled=True)
+    jobs_queue.set_job_action(job_id, {"kind": "discover.save", "label": "Save", "ticket": job_id,
+                                       "filename": artifact.filename})
+    return {"ticket": job_id, "filename": artifact.filename, "size": len(artifact.content)}
 
 
 def preview_result(result_id: str, search_id: str, *, authority: ResultAuthority) -> dict:

@@ -12,6 +12,7 @@ choices = fixtures.choices
 retrieval_database = fixtures.retrieval_database
 resolved_episode = fixtures.resolved_episode
 post = fixtures.post
+job_events = fixtures.job_events
 
 LITERAL = b'1\n00:00:01,000 --> 00:00:02,000\nHello <script>alert(1)</script>\n\n'
 
@@ -92,7 +93,7 @@ def test_invalid_srt_timing_syntax_remains_rejected_by_both_consumers(
     assert 'cues' not in response.json and response.json['recoverable']
     attachment = fixtures.get(authenticated_client, row)
     assert attachment.status_code == 502
-    assert attachment.json['reason'] == 'download_failed'
+    assert attachment.json['reason'] == 'invalid_subtitle'
     assert 'Content-Disposition' not in attachment.headers
 
 
@@ -147,7 +148,11 @@ def test_validated_transports_share_scope(authenticated_client, choices, transpo
         data['apikey'] = 'discover-test-key'
         if transport == 'wrong-query-form':
             params['apikey'] = 'wrong'
-    response = authenticated_client.get('/api/discover/download', query_string=params, headers=headers, data=data)
+    queued = authenticated_client.post('/api/discover/download', query_string=params, headers=headers, data=data)
+    assert queued.status_code == 202
+    assert fixtures.run_queued_job(queued.json['job_id'])['status'] == 'completed'
+    response = authenticated_client.get('/api/discover/download', query_string={'job': queued.json['job_id']},
+                                        headers=fixtures.HEADERS)
     assert response.status_code == 200 and choices[1] == ['full']
 
 
@@ -172,8 +177,7 @@ def test_cached_bytes_never_bypass_authority_or_handle(authenticated_client, cho
     assert response.status_code == (401 if invalidated == 'rotation' else 410)
     assert choices[1] == ['full']
     if invalidated == 'rotation':
-        response = authenticated_client.get('/api/discover/download', query_string={
-            'result_id': row['id'], 'search_id': row['search_id']}, headers={'X-API-KEY': 'rotated-fixture-key'})
+        response = fixtures.get(authenticated_client, row, headers={'X-API-KEY': 'rotated-fixture-key'})
         assert response.status_code == 200 and choices[1] == ['full', 'full']
 
 
@@ -290,6 +294,7 @@ def test_fetch_waits_and_slots_are_bounded_without_late_cache_publication(authen
 
     monkeypatch.setattr(providers.pool['discover_download'], 'download_subtitle', fetch)
     monkeypatch.setattr(download, 'FETCH_WAIT_SECONDS', 0.08)
+    monkeypatch.setattr(download, 'JOB_WAIT_SECONDS', 0.08)
     monkeypatch.setattr(download, 'FETCH_MAX_CONCURRENT', 1)
     with ThreadPoolExecutor(2) as executor:
         first = executor.submit(preview, authenticated_client.application.test_client(), rows[0])
@@ -348,7 +353,10 @@ def test_coalesced_waiters_recheck_authority_and_exact_expiry(authenticated_clie
             release.set()
         expected = 401 if during == 'rotation' else 410
         assert first.result().status_code == expected
-        assert second.result().status_code == expected
+        # The download joined the same flight as a job, which fails with the
+        # classified reason instead of an HTTP status.
+        assert second.result().status_code == 502
+        assert second.result().json['reason'] == 'expired_handle'
     assert not any(key[1] == row['id'] for key in download._cache)
 
 
@@ -460,7 +468,8 @@ def test_preview_authentication_rejects_before_fetch(authenticated_client, choic
     row = post(authenticated_client, fixtures.CONTEXT).json['results'][0]
     if transport == 'cookie':
         authenticated_client.set_cookie('session', 'logged-in-fixture')
-    response = authenticated_client.get('/api/discover/' + endpoint, query_string={
+    method = authenticated_client.get if endpoint == 'preview' else authenticated_client.post
+    response = method('/api/discover/' + endpoint, query_string={
         'result_id': row['id'], 'search_id': row['search_id']},
         headers={'X-API-KEY': 'wrong'} if transport == 'wrong' else {})
     assert response.status_code == 401

@@ -213,6 +213,7 @@ def test_supported_show_identity_requires_explicit_manual_numbers(library_databa
 
 providers = retrieval_fixtures.providers
 choices = download_fixtures.choices
+job_events = download_fixtures.job_events
 
 
 @pytest.mark.parametrize("kind", ["movie", "show"])
@@ -237,8 +238,7 @@ def test_fallback_selection_continues_real_explicit_search_and_exact_attachment(
     searched = authenticated_client.post("/api/discover/search", json=payload, headers={"X-API-KEY": "metadata-test-key"})
     assert searched.status_code == 200
     row = next(row for row in searched.json["results"] if row["scope"] == "forced")
-    downloaded = authenticated_client.get("/api/discover/download", query_string={"result_id": row["id"], "search_id": row["search_id"]},
-                                         headers={"X-API-KEY": "metadata-test-key"})
+    downloaded = download_fixtures.get(authenticated_client, row, headers={"X-API-KEY": "metadata-test-key"})
     assert downloaded.status_code == 200
     assert downloaded.data == download_fixtures.FORCED_SRT
     assert "attachment" in downloaded.headers["Content-Disposition"]

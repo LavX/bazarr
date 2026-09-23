@@ -7,6 +7,7 @@ import { isArray, isEmpty, isNumber } from "lodash";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
+import { notifyJobOutcome } from "@/modules/jobs";
 import { notification } from "@/modules/task";
 import { LOG } from "@/utilities/console";
 import { setOnlineStatus } from "@/utilities/event";
@@ -390,6 +391,13 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
                   : next;
 
               queryClient.setQueryData(keys, trimmed);
+              // The terminal event is the one place a finish is announced.
+              if (
+                payload.status === "completed" ||
+                payload.status === "failed"
+              ) {
+                notifyJobOutcome(incoming as System.Jobs);
+              }
             })
             .catch((e: unknown) => {
               LOG("warning", "Failed to fetch job update", payload.job_id, e);

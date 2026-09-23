@@ -4,6 +4,7 @@ import {
   faDownload,
   faEye,
   faFileLines,
+  faFloppyDisk,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useDiscover } from "@/contexts/Discover";
@@ -56,6 +57,7 @@ export default function SubtitleResults({
   const {
     state,
     downloadSubtitle,
+    saveSubtitle,
     previewSubtitle,
     closePreview,
     searchAgain,
@@ -277,6 +279,21 @@ export default function SubtitleResults({
                   >
                     Download
                   </Button>
+                  {feedback?.status === "ready" &&
+                    feedback.row.id === row.id &&
+                    feedback.row.search_id === row.search_id && (
+                      <Button
+                        variant="filled"
+                        color="brand"
+                        leftSection={<FontAwesomeIcon icon={faFloppyDisk} />}
+                        aria-label="Save SRT"
+                        title="Save the downloaded SRT to your device"
+                        mih={44}
+                        onClick={() => void saveSubtitle()}
+                      >
+                        Save
+                      </Button>
+                    )}
                 </Group>
               </Group>
             </article>
@@ -300,13 +317,37 @@ export default function SubtitleResults({
         >
           <Text>
             {feedback.status === "pending"
-              ? `Preparing download for ${identity}.`
-              : feedback.status === "started"
-                ? `Download started for ${identity}.`
-                : feedback.status === "expired"
-                  ? `This result has expired: ${identity}. Search again for the same selection.`
-                  : `Download failed for ${identity}. Retry this result or choose another subtitle.`}
+              ? `Preparing download for ${identity}. It runs in Jobs, so you can keep browsing.`
+              : feedback.status === "ready"
+                ? `Ready to save ${identity}.`
+                : feedback.status === "started"
+                  ? `Download started for ${identity}.`
+                  : feedback.status === "expired"
+                    ? `This result has expired: ${identity}. Search again for the same selection.`
+                    : `Download failed for ${identity}. ${feedback.message ?? "Retry this result or choose another subtitle."}`}
           </Text>
+          {feedback.status === "ready" && (
+            <Button
+              variant="filled"
+              color="brand"
+              mt="sm"
+              aria-label="Save downloaded subtitle"
+              onClick={() => void saveSubtitle()}
+            >
+              Save
+            </Button>
+          )}
+          {feedback.status === "failed" && feedback.retryable && (
+            <Button
+              variant="light"
+              mt="sm"
+              aria-label="Retry download"
+              disabled={state.retiredResultIds.includes(feedback.row.id)}
+              onClick={() => void downloadSubtitle(feedback.row)}
+            >
+              Retry
+            </Button>
+          )}
           {feedback.status === "expired" && (
             <Button
               variant="filled"
