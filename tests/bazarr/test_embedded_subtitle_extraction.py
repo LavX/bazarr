@@ -956,7 +956,7 @@ def test_forced_track_selected_by_title(tmp_path):
 def test_a_bitmap_track_fails_the_translation_job_with_a_clear_reason(monkeypatch):
     """The job's extraction step raises, so the job is failed and the reason
     names the likely bitmap codec instead of the job ending completed."""
-    from subtitles.job_errors import SubtitleJobError
+    from app.jobs_queue import JobFailed
     from subtitles.tools.translate import batch, main
 
     calls = {}
@@ -969,7 +969,7 @@ def test_a_bitmap_track_fails_the_translation_job_with_a_clear_reason(monkeypatc
     monkeypatch.setattr(batch, "extract_embedded_subtitle", extract)
     monkeypatch.setattr(main.jobs_queue, "update_job_progress", lambda **kwargs: True)
 
-    with pytest.raises(SubtitleJobError) as raised:
+    with pytest.raises(JobFailed) as raised:
         main._extract_embedded_source("/media/film.mkv", "movie",
                                       {"language": "en", "hi": True, "forced": False}, 7, 3)
 

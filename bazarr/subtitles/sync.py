@@ -6,11 +6,10 @@ import gc
 from media_servers.events import publication_callback
 
 from app.config import settings
-from app.jobs_queue import jobs_queue, JobCancelled
+from app.jobs_queue import jobs_queue, JobCancelled, JobFailed
 from sportarr.connection import check_cancelled
 from sportarr.output import validate_output_path
 from subtitles.tools.subsyncer import SubSyncer
-from subtitles.job_errors import SubtitleJobError
 from subtitles.tools.subsync_engines import (
     DEFAULT_ENABLED_ENGINES,
     ENGINE_LABELS,
@@ -478,7 +477,7 @@ def sync_subtitles(video_path,
                 logging.exception(f'BAZARR an unhandled exception occurs during the synchronization process for this '  # noqa: G004
                                   f'subtitle file: {srt_path}')
                 if owns_sync_job:
-                    raise SubtitleJobError(f'Sync failed: {e}') from e
+                    raise JobFailed(f'Sync failed: {e}') from e
                 return False
             else:
                 if sync_result and sync_result.success:
@@ -487,7 +486,7 @@ def sync_subtitles(video_path,
                     # The queue marks a job failed only when it raises. A caller
                     # that runs this inside its own job (a download, a batch)
                     # still gets False and decides for itself.
-                    raise SubtitleJobError(_sync_outcome_message(sync_result))
+                    raise JobFailed(_sync_outcome_message(sync_result))
                 return False
             finally:
                 try:

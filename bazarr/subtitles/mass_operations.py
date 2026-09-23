@@ -8,7 +8,7 @@ from app.config import settings
 from app.event_handler import event_stream
 from app.database import (TableArrInstances, TableEpisodes, TableMovies, TableHistory, TableHistoryMovie,
                           TableHistorySports, TableShows, TableSportsEvents, database, select)
-from app.jobs_queue import JobCancelled, jobs_queue
+from app.jobs_queue import JobCancelled, JobFailed, jobs_queue
 from sportarr.notify import rescan_batch
 from subtitles.sync import sync_subtitles
 from subtitles.tools.subsync_engines import is_sync_engine_output
@@ -21,7 +21,7 @@ from subtitles.upgrade import upgrade_episodes_subtitles, upgrade_movies_subtitl
 from sportarr.workflows import upgrade_sports_subtitles
 from utilities.path_mappings import path_mappings
 from sqlalchemy import or_
-from subtitles.job_errors import SubtitleJobError, describe_failures
+from subtitles.job_errors import describe_failures
 
 logger = logging.getLogger(__name__)
 
@@ -1389,5 +1389,5 @@ def _raise_for_batch_failures(action, failures, total, done, skipped):
     """
     if not failures:
         return
-    raise SubtitleJobError(f'Mass {action}: {len(failures)} of {total} items failed ({done} done, '
+    raise JobFailed(f'Mass {action}: {len(failures)} of {total} items failed ({done} done, '
                            f'{skipped} skipped). {describe_failures(failures)}')

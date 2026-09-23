@@ -1133,8 +1133,8 @@ def run_editor_sync(job_key, video_path, tmp_in, tmp_out, encoding, max_offset, 
         _editor_sync_jobs[job_key] = {'status': 'failed', 'content': None, 'message': message}
         # The editor reads the outcome from the side store above; the job
         # itself has to fail too, or the Jobs drawer lists it as completed.
-        from subtitles.job_errors import SubtitleJobError
-        raise SubtitleJobError(f'Editor sync failed: {message}') from e
+        from app.jobs_queue import JobFailed
+        raise JobFailed(f'Editor sync failed: {message}') from e
     finally:
         # Clean up in-memory result after 10 minutes
         import threading

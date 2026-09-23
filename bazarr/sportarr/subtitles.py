@@ -668,7 +668,7 @@ def manual_search_sports(
 
 def manual_download_sports(event_id, candidate, arr_instance_id=None, *, cancel=None):
     from subtitles.cache import subtitle_cache
-    from subtitles.job_errors import SubtitleJobError
+    from app.jobs_queue import JobFailed
     from subtitles.manual import manual_download_subtitle
 
     context = resolve_event_in_session(database, event_id, arr_instance_id)
@@ -699,7 +699,7 @@ def manual_download_sports(event_id, candidate, arr_instance_id=None, *, cancel=
             context=context,
             cancel=cancel,
         )
-    except SubtitleJobError as exc:
+    except JobFailed as exc:
         # The route answers an OSError with its sentence as a 409, which is how
         # this synchronous path has always reported a download that failed.
         raise OSError(str(exc)) from exc

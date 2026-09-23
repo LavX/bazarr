@@ -766,11 +766,11 @@ class TestProcessMediaActions:
     @patch('subtitles.mass_operations.upgrade_episodes_subtitles')
     @patch('subtitles.mass_operations.jobs_queue')
     def test_a_failed_upgrade_fails_the_batch(self, mock_jobs_queue, mock_upgrade_series):
-        from subtitles.job_errors import SubtitleJobError
+        from app.jobs_queue import JobFailed
         from subtitles.mass_operations import _process_media_action
 
         mock_upgrade_series.side_effect = RuntimeError('provider pool exploded')
-        with pytest.raises(SubtitleJobError, match='provider pool exploded'):
+        with pytest.raises(JobFailed, match='provider pool exploded'):
             _process_media_action([{'type': 'series', 'sonarrSeriesId': 1}], action='upgrade', job_id='test')
 
     @patch('subtitles.mass_operations.series_scan_subtitles')
@@ -778,13 +778,13 @@ class TestProcessMediaActions:
     def test_error_handling(self, mock_jobs_queue, mock_scan):
         from subtitles.mass_operations import _process_media_action
 
-        from subtitles.job_errors import SubtitleJobError
+        from app.jobs_queue import JobFailed
 
         mock_scan.side_effect = RuntimeError("scan failed")
         items = [{'type': 'series', 'sonarrSeriesId': 1}]
         # A failed item fails the batch job with the item's reason, so the
         # error reaches the Jobs drawer instead of the unread returned value.
-        with pytest.raises(SubtitleJobError) as raised:
+        with pytest.raises(JobFailed) as raised:
             _process_media_action(items, action='scan-disk', job_id='test')
 
         assert '1 of 1 items failed' in str(raised.value)
@@ -1323,9 +1323,9 @@ class TestMassBatchOperationProcessing:
         mock_collect.return_value = ([
             {'srt_path': '/subs/test.srt', 'video_path': '/video/test.mkv'},
         ], 0)
-        from subtitles.job_errors import SubtitleJobError
+        from app.jobs_queue import JobFailed
 
-        with pytest.raises(SubtitleJobError) as raised:
+        with pytest.raises(JobFailed) as raised:
             mass_batch_operation(
                 items=[{'type': 'movie', 'radarrId': 1}],
                 action='remove_HI',
@@ -1342,11 +1342,11 @@ class TestMassBatchOperationProcessing:
         mock_collect.return_value = ([
             {'srt_path': '/subs/test.srt', 'video_path': '/video/test.mkv'},
         ], 0)
-        from subtitles.job_errors import SubtitleJobError
+        from app.jobs_queue import JobFailed
 
         # When _process_subtitle_item returns False the item failed, and the
         # batch job fails naming it.
-        with pytest.raises(SubtitleJobError) as raised:
+        with pytest.raises(JobFailed) as raised:
             mass_batch_operation(
                 items=[{'type': 'movie', 'radarrId': 1}],
                 action='sync',
@@ -1709,9 +1709,9 @@ class TestMassBatchOperationWithEmbeddedItems:
              'video_path': '/video/ep2.mkv'},
         ], 0)
 
-        from subtitles.job_errors import SubtitleJobError
+        from app.jobs_queue import JobFailed
 
-        with pytest.raises(SubtitleJobError) as raised:
+        with pytest.raises(JobFailed) as raised:
             mass_batch_operation(items=[{'type': 'episode', 'sonarrEpisodeId': 1}],
                                  action='translate', job_id='test')
 

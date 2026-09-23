@@ -514,11 +514,13 @@ class _JobCancelled(Exception):
     """Stands in for app.jobs_queue.JobCancelled, which the worker catches."""
 
 
+class _JobFailed(Exception):
+    """Stands in for app.jobs_queue.JobFailed, which fails the sync's job."""
+
+
 def _run_expecting_failure(**kwargs):
     """A failed editor sync fails its job as well as the side store."""
-    from subtitles.job_errors import SubtitleJobError
-
-    with pytest.raises(SubtitleJobError) as raised:
+    with pytest.raises(_JobFailed) as raised:
         run_editor_sync(**kwargs)
     assert str(raised.value).startswith('Editor sync failed: ')
     return raised.value
@@ -552,7 +554,7 @@ class TestRunEditorSync:
         with patch('api.editor.editor.SubSyncer', mock_subsync_cls, create=True), \
              patch.dict('sys.modules', {'subtitles.tools.subsyncer': MagicMock(SubSyncer=mock_subsync_cls)}), \
              patch('api.editor.editor.jobs_queue', mock_jobs_queue, create=True), \
-             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled)}), \
+             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled, JobFailed=_JobFailed)}), \
              patch('threading.Timer'):  # prevent cleanup timer
 
             run_editor_sync(
@@ -599,7 +601,7 @@ class TestRunEditorSync:
         with patch('api.editor.editor.SubSyncer', mock_subsync_cls, create=True), \
              patch.dict('sys.modules', {'subtitles.tools.subsyncer': MagicMock(SubSyncer=mock_subsync_cls)}), \
              patch('api.editor.editor.jobs_queue', mock_jobs_queue, create=True), \
-             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled)}), \
+             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled, JobFailed=_JobFailed)}), \
              patch('threading.Timer'):
 
             run_editor_sync(
@@ -639,7 +641,7 @@ class TestRunEditorSync:
         with patch('api.editor.editor.SubSyncer', mock_subsync_cls, create=True), \
              patch.dict('sys.modules', {'subtitles.tools.subsyncer': MagicMock(SubSyncer=mock_subsync_cls)}), \
              patch('api.editor.editor.jobs_queue', mock_jobs_queue, create=True), \
-             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled)}), \
+             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled, JobFailed=_JobFailed)}), \
              patch('threading.Timer'):
             _run_expecting_failure(
                 job_key=job_key,
@@ -681,7 +683,7 @@ class TestRunEditorSync:
         with patch('api.editor.editor.SubSyncer', mock_subsync_cls, create=True), \
              patch.dict('sys.modules', {'subtitles.tools.subsyncer': MagicMock(SubSyncer=mock_subsync_cls)}), \
              patch('api.editor.editor.jobs_queue', mock_jobs_queue, create=True), \
-             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled)}), \
+             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled, JobFailed=_JobFailed)}), \
              patch('threading.Timer'):
             _run_expecting_failure(
                 job_key=job_key,
@@ -724,7 +726,7 @@ class TestRunEditorSync:
         with patch('api.editor.editor.SubSyncer', mock_subsync_cls, create=True), \
              patch.dict('sys.modules', {'subtitles.tools.subsyncer': MagicMock(SubSyncer=mock_subsync_cls)}), \
              patch('api.editor.editor.jobs_queue', mock_jobs_queue, create=True), \
-             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled)}), \
+             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled, JobFailed=_JobFailed)}), \
              patch('threading.Timer'):
             _run_expecting_failure(
                 job_key=job_key,
@@ -761,7 +763,7 @@ class TestRunEditorSync:
         with patch('api.editor.editor.SubSyncer', mock_subsync_cls, create=True), \
              patch.dict('sys.modules', {'subtitles.tools.subsyncer': MagicMock(SubSyncer=mock_subsync_cls)}), \
              patch('api.editor.editor.jobs_queue', mock_jobs_queue, create=True), \
-             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled)}), \
+             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled, JobFailed=_JobFailed)}), \
              patch('threading.Timer'):
             run_editor_sync(
                 job_key=job_key,
@@ -791,7 +793,7 @@ class TestRunEditorSync:
         mock_jobs_queue.update_job_progress.side_effect = _JobCancelled('stop')
 
         with patch.dict('sys.modules', {'subtitles.tools.subsyncer': MagicMock(SubSyncer=mock_subsync_cls)}), \
-             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled)}), \
+             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled, JobFailed=_JobFailed)}), \
              patch('threading.Timer'):
             with pytest.raises(_JobCancelled):
                 run_editor_sync(job_key=job_key, video_path='/video/test.mkv', tmp_in=tmp_in,
@@ -822,7 +824,7 @@ class TestRunEditorSync:
         with patch('api.editor.editor.SubSyncer', mock_subsync_cls, create=True), \
              patch.dict('sys.modules', {'subtitles.tools.subsyncer': MagicMock(SubSyncer=mock_subsync_cls)}), \
              patch('api.editor.editor.jobs_queue', mock_jobs_queue, create=True), \
-             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled)}), \
+             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled, JobFailed=_JobFailed)}), \
              patch('threading.Timer'):
             _run_expecting_failure(
                 job_key=job_key,
@@ -1089,12 +1091,12 @@ class TestEditorSyncPost:
              patch('tempfile.mkstemp', return_value=(99, '/tmp/bazarr_sync_xyz.srt')), \
              patch('os.write'), \
              patch('os.close'), \
-             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled)}), \
+             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled, JobFailed=_JobFailed)}), \
              patch('api.editor.editor.jobs_queue', mock_jobs_queue, create=True), \
              patch('threading.Thread') as mock_thread:  # noqa: F841
 
             # Need to also patch the import inside the method
-            with patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled)}):
+            with patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled, JobFailed=_JobFailed)}):
                 result = sync_resource.post()
 
             body, status = result

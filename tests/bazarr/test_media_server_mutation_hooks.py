@@ -40,9 +40,9 @@ def test_upload_requires_write_but_survives_later_index_failure(upload_flow, mut
     from subtitles.tools import subsync_engines
     if failure == 'write':
         monkeypatch.setattr(subsync_engines.os, 'replace', Mock(side_effect=OSError('controlled write failure')))
-        from subtitles.job_errors import SubtitleJobError
+        from app.jobs_queue import JobFailed
         # A write that never landed fails the upload job with the reason.
-        with pytest.raises(SubtitleJobError, match='controlled write failure'):
+        with pytest.raises(JobFailed, match='controlled write failure'):
             upload_flow.submit('movie', job_id='upload')
         assert mutations == []
     else:
@@ -246,11 +246,11 @@ def test_download_adapters_preserve_distinct_owner_path_and_profile(colliding_me
         return []
 
     if entry == 'manual':
-        from subtitles.job_errors import SubtitleJobError
+        from app.jobs_queue import JobFailed
         monkeypatch.setattr(module, 'manual_download_subtitle', download)
         # The stub publishes nothing, which fails the manual download job; the
         # arguments it was handed are what this test is about.
-        with pytest.raises(SubtitleJobError):
+        with pytest.raises(JobFailed):
             if media_type == 'movie':
                 module.movie_manually_download_specific_subtitle(42, False, False, False, 'fixture', 'subtitle',
                                                                  job_id='download', arr_instance_id=2)
@@ -366,13 +366,13 @@ def _drive_editor_preview(flow, monkeypatch, **payload):
     assert status == 202, accepted
     job = flow.queue.jobs_pending_queue[-1]
     from app.jobs_queue import JobCancelled
-    from subtitles.job_errors import SubtitleJobError
+    from app.jobs_queue import JobFailed
     # A failed or cancelled preview raises out of the job, as the queue needs
     # it to; the editor still reads the outcome from its side store below.
     raised = None
     try:
         editor.run_editor_sync(**job.kwargs)
-    except (JobCancelled, SubtitleJobError) as exc:
+    except (JobCancelled, JobFailed) as exc:
         raised = exc
     with app.test_request_context(query_string={'jobKey': accepted['jobKey']}, headers=headers):
         result, _status = editor.EditorSync().get()

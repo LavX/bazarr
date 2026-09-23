@@ -11,9 +11,9 @@ a summary when any item failed.
 import logging
 
 from app.database import TableEpisodes, TableShows, TableSportsEvents, TableSportsLeagues, database, select
-from app.jobs_queue import jobs_queue
+from app.jobs_queue import jobs_queue, JobFailed
 from arr_instances.resolution import scoped
-from subtitles.job_errors import SubtitleJobError, describe_failures
+from subtitles.job_errors import describe_failures
 from utilities.path_mappings import path_mappings
 
 from .main import try_combine_for_video
@@ -62,7 +62,7 @@ class CombineTally:
     def finish(self, job_id, title):
         total = len(self.details)
         if self.failures:
-            raise SubtitleJobError(f'Combine for {title}: {self.failed} of {total} {self.noun} failed '
+            raise JobFailed(f'Combine for {title}: {self.failed} of {total} {self.noun} failed '
                                    f'({self.counts()}). {describe_failures(self.failures)}')
         jobs_queue.update_job_name(job_id=job_id, new_job_name=f'Combined subtitles for {title}: {self.counts()}')
         return self.summary()
@@ -85,7 +85,7 @@ def combine_series_subtitles(series_id, languages=None, format=None, arr_instanc
         .order_by(TableEpisodes.season, TableEpisodes.episode),
         TableEpisodes.arr_instance_id, arr_instance_id)).all()
     if not rows:
-        raise SubtitleJobError('The series has no episodes in the library.')
+        raise JobFailed('The series has no episodes in the library.')
 
     title = rows[0].title
     tally = CombineTally('episodes')
@@ -133,7 +133,7 @@ def combine_league_subtitles(league_id, arr_instance_id, job_id=None):
         .order_by(TableSportsEvents.id)
     ).all()
     if not events:
-        raise SubtitleJobError('The league has no events in the library.')
+        raise JobFailed('The league has no events in the library.')
 
     title = league.title if league else f'league {league_id}'
     tally = CombineTally('events')

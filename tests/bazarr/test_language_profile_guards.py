@@ -122,9 +122,9 @@ def upload(profile_db, monkeypatch):
     monkeypatch.setattr(upload_module, "save_subtitles", _save_subtitles)
 
     def _call(media_type, **ids):
-        from subtitles.job_errors import SubtitleJobError
+        from app.jobs_queue import JobFailed
 
-        with pytest.raises(SubtitleJobError, match="nothing was written"):
+        with pytest.raises(JobFailed, match="nothing was written"):
             upload_module.manual_upload_subtitle(
                 path="/movies/100.mkv" if media_type == "movie" else "/series/10/100.mkv",
                 language="en", forced=False, hi=False, media_type=media_type,

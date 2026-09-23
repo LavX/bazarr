@@ -4,7 +4,7 @@
 The jobs queue marks a job failed only when the job raises. Manual download,
 upload, sync and the series/league combine reported failure by returning a
 string, a tuple or False, so the Jobs drawer listed them as completed. These
-pin the new contract: the job raises SubtitleJobError with a sentence the user
+pin the new contract: the job raises JobFailed with a sentence the user
 can act on, the queue files it under failed, and a successful run still returns
 what its caller needs.
 """
@@ -18,7 +18,7 @@ import app.database  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
-# The queue: a raised SubtitleJobError is a failed job, a return is not.
+# The queue: a raised JobFailed is a failed job, a return is not.
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
@@ -99,7 +99,7 @@ def test_a_series_combine_with_failed_episodes_fails_its_job_with_a_summary(seri
 
 
 def test_the_series_combine_failure_names_the_first_few_episodes(series_combine, monkeypatch):
-    from subtitles.job_errors import SubtitleJobError
+    from app.jobs_queue import JobFailed
 
     flow = series_combine
     flow.db.execute.return_value.all.return_value = _episode_rows(5)
@@ -107,7 +107,7 @@ def test_the_series_combine_failure_names_the_first_few_episodes(series_combine,
     monkeypatch.setattr(flow.batch, 'try_combine_for_video', lambda **kwargs: next(outcomes))
     monkeypatch.setattr(flow.batch.jobs_queue, 'update_job_progress', lambda **kwargs: True)
 
-    with pytest.raises(SubtitleJobError) as raised:
+    with pytest.raises(JobFailed) as raised:
         flow.batch.combine_series_subtitles(5, job_id=1)
 
     message = str(raised.value)
@@ -137,10 +137,12 @@ def test_a_series_without_episodes_fails_the_combine_job(series_combine):
     job = flow.run('subtitles.tools.combine.batch', 'combine_series_subtitles', {'series_id': 5})
 
     assert job.status == 'failed'
+    # The sentence reaches the drawer and the failure toast through job.error.
+    assert job.error == {'reason': 'failed', 'message': 'The series has no episodes in the library.'}
 
 
 def test_a_league_combine_skips_events_without_a_profile_and_fails_on_errors(monkeypatch):
-    from subtitles.job_errors import SubtitleJobError
+    from app.jobs_queue import JobFailed
     from subtitles.tools.combine import batch
     from sportarr import identity, profile_hooks, subtitles as sports_subtitles
 
@@ -163,7 +165,7 @@ def test_a_league_combine_skips_events_without_a_profile_and_fails_on_errors(mon
                         lambda context, signature: SimpleNamespace(profile=context.event_id == 1))
     monkeypatch.setattr(batch, 'try_combine_for_video', lambda **kwargs: _combine_result('built', path='/c.srt'))
 
-    with pytest.raises(SubtitleJobError) as raised:
+    with pytest.raises(JobFailed) as raised:
         batch.combine_league_subtitles(9, 4, job_id=1)
 
     assert str(raised.value) == ('Combine for Formula 1: 1 of 3 events failed (built 1, skipped 1, failed 1). '
@@ -197,27 +199,27 @@ def _download(manual):
 
 
 def test_an_expired_search_result_fails_the_download(manual, monkeypatch):
-    from subtitles.job_errors import SubtitleJobError
+    from app.jobs_queue import JobFailed
 
     monkeypatch.setattr(manual.subtitle_cache, 'get', lambda key: None)
-    with pytest.raises(SubtitleJobError, match='search result has expired'):
+    with pytest.raises(JobFailed, match='search result has expired'):
         _download(manual)
 
 
 def test_a_throttled_provider_fails_the_download_instead_of_completing(manual, monkeypatch):
     """The pool answers False for a throttled provider and leaves the subtitle
     empty. That used to come back as a string, so the job read completed."""
-    from subtitles.job_errors import SubtitleJobError
+    from app.jobs_queue import JobFailed
 
     monkeypatch.setattr(manual.subtitle_cache, 'get', lambda key: _cached_subtitle())
     monkeypatch.setattr(manual, 'download_subtitles', lambda subtitles, pool: None)
-    with pytest.raises(SubtitleJobError) as raised:
+    with pytest.raises(JobFailed) as raised:
         _download(manual)
     assert str(raised.value).startswith('opensubtitles did not return the subtitle. It may be throttled')
 
 
 def test_a_provider_error_is_the_reason_the_download_failed(manual, monkeypatch):
-    from subtitles.job_errors import SubtitleJobError
+    from app.jobs_queue import JobFailed
 
     monkeypatch.setattr(manual.subtitle_cache, 'get', lambda key: _cached_subtitle())
 
@@ -225,7 +227,7 @@ def test_a_provider_error_is_the_reason_the_download_failed(manual, monkeypatch)
         raise RuntimeError('HTTP 429 Too Many Requests')
 
     monkeypatch.setattr(manual, 'download_subtitles', boom)
-    with pytest.raises(SubtitleJobError, match='from opensubtitles failed: HTTP 429 Too Many Requests'):
+    with pytest.raises(JobFailed, match='from opensubtitles failed: HTTP 429 Too Many Requests'):
         _download(manual)
 
 
@@ -257,14 +259,14 @@ def test_a_successful_download_still_returns_the_processed_subtitle(manual, monk
 
 
 def test_nothing_written_fails_the_download(manual, monkeypatch):
-    from subtitles.job_errors import SubtitleJobError
+    from app.jobs_queue import JobFailed
 
     monkeypatch.setattr(manual.subtitle_cache, 'get', lambda key: _cached_subtitle(content=b'1', valid=True))
     monkeypatch.setattr(manual, 'download_subtitles', lambda subtitles, pool: None)
     monkeypatch.setattr(manual, 'subtitle_write_locks', lambda *args: nullcontext())
     monkeypatch.setattr(manual, 'publication_callback', lambda *args: None)
     monkeypatch.setattr(manual, '_save_downloaded_subtitles', lambda *args, **kwargs: [])
-    with pytest.raises(SubtitleJobError, match='No subtitle file was written'):
+    with pytest.raises(JobFailed, match='No subtitle file was written'):
         _download(manual)
 
 
@@ -300,15 +302,15 @@ def test_manual_download_is_queued_under_its_standard_label(movie_wrapper):
 
 
 def test_a_failed_manual_download_raises_and_writes_no_history(movie_wrapper, monkeypatch):
-    from subtitles.job_errors import SubtitleJobError
+    from app.jobs_queue import JobFailed
 
     flow = movie_wrapper
 
     def throttled(*args, **kwargs):
-        raise SubtitleJobError('opensubtitles did not return the subtitle.')
+        raise JobFailed('opensubtitles did not return the subtitle.')
 
     monkeypatch.setattr(flow.manual, 'manual_download_subtitle', throttled)
-    with pytest.raises(SubtitleJobError, match='opensubtitles did not return the subtitle.'):
+    with pytest.raises(JobFailed, match='opensubtitles did not return the subtitle.'):
         flow.manual.movie_manually_download_specific_subtitle(9, 'False', 'False', 'False', 'opensubtitles',
                                                               'cache-id', job_id=4)
     assert flow.history == [] and flow.published == []
@@ -317,10 +319,10 @@ def test_a_failed_manual_download_raises_and_writes_no_history(movie_wrapper, mo
 
 
 def test_a_movie_gone_from_the_library_fails_the_download(movie_wrapper):
-    from subtitles.job_errors import SubtitleJobError
+    from app.jobs_queue import JobFailed
 
     movie_wrapper.db.execute.return_value.first.return_value = None
-    with pytest.raises(SubtitleJobError, match='no longer in the library'):
+    with pytest.raises(JobFailed, match='no longer in the library'):
         movie_wrapper.manual.movie_manually_download_specific_subtitle(9, 'False', 'False', 'False',
                                                                        'opensubtitles', 'cache-id', job_id=4)
 
@@ -343,7 +345,7 @@ def test_the_sports_route_still_answers_a_failed_download_with_its_reason(monkey
     the sentence, so the job error is translated back at that boundary."""
     from subtitles import manual
     from subtitles.cache import subtitle_cache
-    from subtitles.job_errors import SubtitleJobError
+    from app.jobs_queue import JobFailed
     from sportarr import subtitles as sports
 
     candidate = SimpleNamespace(subtitle=SimpleNamespace(provider_name='p', language=SimpleNamespace(
@@ -357,7 +359,7 @@ def test_the_sports_route_still_answers_a_failed_download_with_its_reason(monkey
     monkeypatch.setattr(sports, 'get_audio_profile_languages', lambda value: [])
 
     def throttled(*args, **kwargs):
-        raise SubtitleJobError('p did not return the subtitle.')
+        raise JobFailed('p did not return the subtitle.')
 
     monkeypatch.setattr(manual, 'manual_download_subtitle', throttled)
     with pytest.raises(OSError, match='p did not return the subtitle.'):
@@ -384,7 +386,7 @@ def test_an_upload_for_media_gone_from_the_library_fails(monkeypatch, media_type
 
     from languages import get_languages
     from subtitles import processing, upload
-    from subtitles.job_errors import SubtitleJobError
+    from app.jobs_queue import JobFailed
 
     monkeypatch.setattr(get_languages, 'languages_dict', [
         {'code2': 'en', 'code3': 'eng', 'code3b': 'eng', 'name': 'English'},
@@ -394,7 +396,7 @@ def test_an_upload_for_media_gone_from_the_library_fails(monkeypatch, media_type
     db.execute.return_value.first.return_value = None
     monkeypatch.setattr(upload, 'database', db)
 
-    with pytest.raises(SubtitleJobError, match='Could not upload Film.en.srt: the .* is no longer in the library'):
+    with pytest.raises(JobFailed, match='Could not upload Film.en.srt: the .* is no longer in the library'):
         upload.manual_upload_subtitle('/m/Film.mkv', 'en', False, False, media_type, BytesIO(b'1'),
                                       'Film.en.srt', '[]', job_id=6, sonarrEpisodeId=3, radarrId=9)
 
@@ -441,20 +443,20 @@ def _engine(status, reason=None, message=None):
 
 
 def test_a_queued_sync_whose_engines_fail_fails_its_job(sync_run):
-    from subtitles.job_errors import SubtitleJobError
+    from app.jobs_queue import JobFailed
     from subtitles.tools.subsync_engines import REASON_ENGINE_FAILED
 
     sync_run.outcome.results = [_engine('failed', REASON_ENGINE_FAILED, 'ffsubsync crashed')]
-    with pytest.raises(SubtitleJobError) as raised:
+    with pytest.raises(JobFailed) as raised:
         sync_run.call()
     assert str(raised.value).startswith('Sync failed: no output from 1 engine.')
 
 
 def test_a_queued_sync_that_raises_fails_with_the_reason(sync_run):
-    from subtitles.job_errors import SubtitleJobError
+    from app.jobs_queue import JobFailed
 
     sync_run.outcome.raises = RuntimeError('alass: missing binary')
-    with pytest.raises(SubtitleJobError, match='Sync failed: alass: missing binary'):
+    with pytest.raises(JobFailed, match='Sync failed: alass: missing binary'):
         sync_run.call()
 
 

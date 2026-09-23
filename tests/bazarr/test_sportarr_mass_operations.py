@@ -645,9 +645,9 @@ def test_mass_sports_mod_refreshes_once_for_successful_files(sports_toolbox, spo
     elif end == 'invalid':
         # The batch still finishes every item, then fails its job naming the
         # one that was not rewritten.
-        from subtitles.job_errors import SubtitleJobError
+        from app.jobs_queue import JobFailed
 
-        with pytest.raises(SubtitleJobError) as raised:
+        with pytest.raises(JobFailed) as raised:
             mass_operations.mass_batch_operation(**args)
         assert '1 of 2 items failed (1 done, 0 skipped)' in str(raised.value)
         assert 'event.de.forced.srt' in str(raised.value)

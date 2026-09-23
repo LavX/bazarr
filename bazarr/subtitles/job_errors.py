@@ -1,15 +1,5 @@
 # coding=utf-8
-
-
-class SubtitleJobError(Exception):
-    """A queued subtitle job could not do what the user asked.
-
-    The jobs queue only marks a job failed when the job raises, so a job that
-    reported its failure by returning a string or False used to end up in the
-    Completed group. Raise this instead, with a sentence the user can act on:
-    its text is what the job reports as the reason it failed.
-    """
-
+"""Wording shared by subtitle jobs that fail with ``app.jobs_queue.JobFailed``."""
 
 # How many failed item names a batch failure spells out before "and N more".
 FAILURE_NAMES_SHOWN = 3

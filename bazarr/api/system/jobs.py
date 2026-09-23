@@ -1,5 +1,7 @@
 # coding=utf-8
 
+from datetime import timezone
+
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
 
 from app.jobs_queue import jobs_queue
@@ -9,13 +11,25 @@ from ..utils import authenticate
 api_ns_system_jobs = Namespace('System Jobs', description='List, force start, move or delete jobs from the queue')
 
 
+class UtcTimestamp(fields.Raw):
+    """An ISO 8601 timestamp in UTC with an explicit ``Z``.
+
+    The browser reads a timestamp without an offset as its own local time, so a
+    job that just finished on a server in another time zone read as hours old.
+    A naive value is taken as the server's local time.
+    """
+
+    def format(self, value):
+        return value.astimezone(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+
+
 @api_ns_system_jobs.route('system/jobs')
 class SystemJobs(Resource):
     get_response_model = api_ns_system_jobs.model('SystemJobsGetResponse', {
         'job_id': fields.Integer(),
         'job_name': fields.String(),
         'status': fields.String(),
-        'last_run_time': fields.String(),
+        'last_run_time': UtcTimestamp(),
         'is_progress': fields.Boolean(),
         'is_signalr': fields.Boolean(),
         'progress_value': fields.Integer(),

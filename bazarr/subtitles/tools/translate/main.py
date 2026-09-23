@@ -188,7 +188,7 @@ def _extract_embedded_source(video_path, media_type, embedded_source, job_id, ar
     The file lands in the persistent extracted_subs cache, so it is not removed
     after the translation reads it.
     """
-    from subtitles.job_errors import SubtitleJobError
+    from app.jobs_queue import JobFailed
     from subtitles.tools.translate.batch import extract_embedded_subtitle
 
     jobs_queue.update_job_progress(job_id=job_id, progress_message='Extracting the embedded subtitle track')
@@ -201,6 +201,6 @@ def _extract_embedded_source(video_path, media_type, embedded_source, job_id, ar
         arr_instance_id=arr_instance_id,
     )
     if not extracted:
-        raise SubtitleJobError('Could not extract the embedded subtitle track. Its codec may be bitmap '
+        raise JobFailed('Could not extract the embedded subtitle track. Its codec may be bitmap '
                                '(PGS or VobSub), or the language track was not found.')
     return extracted
