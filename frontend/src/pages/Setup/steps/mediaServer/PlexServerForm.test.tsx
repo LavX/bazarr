@@ -2,9 +2,9 @@
 
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDraft } from "@/pages/Setup/useOnboardingSelection";
-import { customRender, screen, waitFor } from "@/tests";
+import { cleanup, customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import PlexServerForm from "./PlexServerForm";
 
@@ -81,6 +81,26 @@ describe("PlexServerForm", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
+    // Continue turns the button's loading spinner on and off again within
+    // about a frame, and Mantine's transition hook animates that spinner with
+    // animation frames. When its first frame runs between the commit that
+    // turns the spinner off and that commit's effects, the flushSync inside
+    // the frame runs those effects early. The hook then overwrites the frame
+    // they requested, so unmounting cannot cancel it, and that orphaned frame
+    // later arms a real timeout that fires after jsdom has gone:
+    // "window is not defined" from use-transition, failing the whole run.
+    // Nothing here asserts on the spinner, so the frames are held and never
+    // run.
+    vi.useFakeTimers({
+      toFake: ["requestAnimationFrame", "cancelAnimationFrame"],
+    });
+  });
+
+  afterEach(() => {
+    // Unmount while the frames are still held, so anything the transition
+    // asks for on the way out is dropped with them.
+    cleanup();
+    vi.useRealTimers();
   });
 
   it("asks for the Plex row again before deciding the draft is saved", async () => {
