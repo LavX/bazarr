@@ -14,6 +14,7 @@ from sportarr.identity import resolve_event_in_session
 from sportarr.manual_jobs import sports_manually_download_subtitle
 from sportarr.subtitles import manual_search_sports
 from .leagues import _body, _optional_owner, _owner
+from ..swaggerui import job_queued_model
 from ..utils import authenticate
 from sportarr.errors import SportsNotFound
 
@@ -93,7 +94,13 @@ class SportsSearch(Resource):
 
 @api_ns_sports_subtitles.route("/sports/events/<int:event_id>/download")
 class SportsDownload(Resource):
+    post_job_model = api_ns_sports_subtitles.model('JobQueued', job_queued_model)
+
     @authenticate
+    @api_ns_sports_subtitles.response(202, "Download queued as a job", post_job_model)
+    @api_ns_sports_subtitles.response(400, "Bad request, or no cached subtitle result")
+    @api_ns_sports_subtitles.response(401, "Not Authenticated")
+    @api_ns_sports_subtitles.response(404, "Sports event not found for this owner")
     def post(self, event_id):
         try:
             body = _body()

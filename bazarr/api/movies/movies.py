@@ -10,7 +10,7 @@ from subtitles.indexer.movies import movies_scan_disk
 from app.event_handler import event_stream
 from subtitles.wanted import wanted_search_missing_subtitles_movies, wanted_scan_subtitles_movies
 from subtitles.mass_download import movies_download_subtitles
-from api.swaggerui import subtitles_model, subtitles_language_model, audio_language_model
+from api.swaggerui import subtitles_model, subtitles_language_model, audio_language_model, job_queued_model
 
 from api.utils import authenticate, None_Keys, postprocess
 
@@ -225,9 +225,12 @@ class Movies(Resource):
     patch_request_parser.add_argument('action', type=str, required=False, help='Action to perform from ["scan-disk", '
                                                                                '"search-missing", "search-wanted", "sync"]')
 
+    patch_job_model = api_ns_movies.model('JobQueued', job_queued_model)
+
     @authenticate
     @api_ns_movies.doc(parser=patch_request_parser)
-    @api_ns_movies.response(204, 'Success')
+    @api_ns_movies.response(202, 'scan-disk queued as a job', patch_job_model)
+    @api_ns_movies.response(204, 'Success for every other action')
     @api_ns_movies.response(400, 'Unknown action')
     @api_ns_movies.response(401, 'Not Authenticated')
     @api_ns_movies.response(500, 'Movie file not found. Path mapping issue?')

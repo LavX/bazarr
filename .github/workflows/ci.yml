@@ -390,6 +390,7 @@ jobs:
             tests/bazarr/test_seerr_operations.py \
             tests/bazarr/test_seerr_api.py \
             tests/bazarr/test_editor_api.py \
+            tests/bazarr/test_api_job_responses.py \
             tests/bazarr/test_arr_atomicity_secrets.py \
             tests/bazarr/test_arr_pg_cutover_migration.py \
             tests/bazarr/test_media_server_instances_pg.py \

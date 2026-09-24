@@ -40,6 +40,9 @@ class DiscoverSearch(Resource):
                 progress.finish(identity)
 
     @authenticate
+    @api_ns_discover_search.response(200, "Latest progress of the search")
+    @api_ns_discover_search.response(202, "No progress recorded yet for this progress_id")
+    @api_ns_discover_search.response(401, "Not Authenticated")
     def get(self):
         identity = request.args.get("progress_id", "")
         observation = progress.read(identity)

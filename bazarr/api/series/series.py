@@ -16,7 +16,7 @@ from subtitles.mass_download import series_download_subtitles
 from app.jobs_queue import jobs_queue
 from subtitles.wanted import wanted_search_missing_subtitles_series, wanted_scan_subtitles_series
 from app.event_handler import event_stream
-from api.swaggerui import subtitles_model, subtitles_language_model, audio_language_model
+from api.swaggerui import subtitles_model, subtitles_language_model, audio_language_model, job_queued_model
 
 from api.utils import authenticate, None_Keys, postprocess
 
@@ -275,9 +275,12 @@ class Series(Resource):
     patch_request_parser.add_argument('action', type=str, required=False, help='Action to perform from ["scan-disk", '
                                                                                '"search-missing", "search-wanted", "sync"]')
 
+    patch_job_model = api_ns_series.model('JobQueued', job_queued_model)
+
     @authenticate
     @api_ns_series.doc(parser=patch_request_parser)
-    @api_ns_series.response(204, 'Success')
+    @api_ns_series.response(202, 'scan-disk queued as a job', patch_job_model)
+    @api_ns_series.response(204, 'Success for every other action')
     @api_ns_series.response(400, 'Unknown action')
     @api_ns_series.response(401, 'Not Authenticated')
     @api_ns_series.response(500, 'Series directory not found. Path mapping issue?')
