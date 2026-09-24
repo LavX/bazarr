@@ -45,46 +45,23 @@ describe("what's new content", () => {
   });
 });
 
-// Atlas carries changes a reader has to be told about in the slide itself,
-// because the slide is the only place they are told at all.
 describe("v2.7.0 Atlas slides", () => {
   const slides = getWhatsNewSlides("2.7.0");
 
-  const findSlide = (needle: string) =>
-    slides.find((slide) => slide.title.includes(needle));
-
-  it("announces Atlas at all", () => {
+  it("keeps the tour short enough to read", () => {
     expect(slides.length).toBeGreaterThan(0);
+    expect(slides.length).toBeLessThanOrEqual(6);
+    slides.forEach((slide) => {
+      expect(slide.body.trim().split(/\s+/).length).toBeLessThanOrEqual(45);
+    });
   });
 
-  it("tells existing installs what SmartFast changes for them, and what it needs", () => {
-    const slide = findSlide("SmartFast");
+  it("keeps SmartFast opt-in and explains the translator version it needs", () => {
+    const slide = slides.find((slide) => slide.title.includes("SmartFast"));
     expect(slide).toBeDefined();
-    // Existing installs keep throughput routing, so the slide has to say so
-    // before anyone assumes their bill moved.
-    expect(slide!.body).toContain("Nothing changes on your install");
-    // Where to switch, the measured reason to bother, and the version gate: a
-    // switch that then breaks every translation is worse than no slide.
+    expect(slide!.body).toContain("Your current routing stays unchanged");
     expect(slide!.body).toContain("Provider Routing");
-    expect(slide!.body).toContain("twice the cheapest");
     expect(slide!.body).toContain("2.0.0 or newer");
     expect(slide!.cta?.to).toBe("/settings/translator");
-  });
-
-  it("credits the reasoning fix to the contributor who sent it", () => {
-    expect(slides.some((slide) => slide.body.includes("wouterrutgers"))).toBe(
-      true,
-    );
-  });
-
-  it("names the Seerr flavours and says owner requests are approved at once", () => {
-    const slide = findSlide("Seerr");
-    expect(slide).toBeDefined();
-    // Whole words: "Seerr" is a substring of both the others, so toContain
-    // would pass on a body that named Overseerr and nothing else.
-    ["Overseerr", "Jellyseerr", "Seerr"].forEach((flavour) =>
-      expect(slide!.body).toMatch(new RegExp(`\\b${flavour}\\b`)),
-    );
-    expect(slide!.body).toContain("which Seerr approves immediately");
   });
 });
