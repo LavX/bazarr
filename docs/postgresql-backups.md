@@ -24,18 +24,22 @@ read.
 
 ## Client and server versions
 
-**Keep the client tools at or above the major version of the server.** `pg_dump` refuses outright to dump
-from a server newer than itself, so a client older than the server cannot make a backup at all.
+**Keep the client tools at or above the major version of the server.** `pg_dump` dumps a server of its own
+major version or older, and refuses outright to dump from a server newer than itself, so a client older than
+the server cannot make a backup at all.
 
-The other direction works but is worth knowing about. A dump written by a newer client sets server parameters
+That rule is about making the dump. Restoring is where the other direction shows up, and it works but is
+worth knowing about. A dump written by a newer client sets server parameters
 an older server has never heard of (`transaction_timeout`, added in PostgreSQL 17, is the one people meet).
 `pg_restore` reports those as errors, ignores them, and exits non-zero even though every row was restored.
 Bazarr+ recognises that one error class, logs it as a warning naming the client and server major versions, and
 treats the restore as successful. Any other error, or any mixture, is still a failure and the restore is
 refused.
 
-The Docker image ships whatever `postgresql-client` Debian provides, currently major version 17. A server at
-17 or newer sees no warning; a server at 16 or older sees the warning above on every restore.
+The Docker image ships whatever `postgresql-client` its Debian base provides, currently major version 17. Run
+`pg_dump --version` inside the container to see the one you have. With a 17 client, a server at 17 backs up
+and restores without a warning, a server at 16 or older backs up and shows the warning above on every
+restore, and a server at 18 or newer cannot be backed up at all.
 
 ## What a restore does
 
