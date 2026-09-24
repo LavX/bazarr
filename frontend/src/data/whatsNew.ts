@@ -5,20 +5,15 @@ import {
   faCompass,
   faDatabase,
   faDownload,
-  faFileLines,
   faFileZipper,
-  faFilm,
   faGaugeHigh,
   faLayerGroup,
   faListCheck,
-  faMagnifyingGlass,
-  faPaperPlane,
   faScaleBalanced,
   faServer,
   faShieldHalved,
   faSliders,
   faStore,
-  faTag,
   faTowerBroadcast,
   faTrophy,
   faWandMagicSparkles,
@@ -28,9 +23,8 @@ export interface WhatsNewSlide {
   /** Short headline for the change. */
   title: string;
   /**
-   * Plain-language prose describing it, two to five sentences. The modal wraps
-   * and scrolls it, so the bodies from v2.6.0 on run to a short paragraph;
-   * verified rendering at 400px and 1280px wide.
+   * Lead with the user benefit and keep new slides to two short sentences.
+   * Detailed fixes and implementation notes belong in the full release notes.
    */
   body: string;
   /** Optional imported asset URL; takes priority over `icon`. */
@@ -103,141 +97,39 @@ const clockworkSlides: WhatsNewSlide[] = [
 export const whatsNew: Record<string, WhatsNewSlide[]> = {
   "2.7.0": [
     {
-      title: "Discover is where Bazarr+ opens now",
-      body: "Instead of a table, the first thing you see is your own library: what it holds, what it is working on, and what is still missing, grouped per library with a link into each queue. Needs attention collects throttled providers, disconnected library sync and unreachable root folders, and stays quiet when there is nothing to report. Below your library sit trending titles, digital releases and recent episodes.",
+      title: "Find subtitles for any film or show",
+      body: "Search, preview and save subtitles from Discover, even without Sonarr or Radarr. Results appear as providers finish, so you can download without waiting for the whole search.",
       icon: faCompass,
-      cta: { label: "Open Discover", to: "/discover" },
+      cta: { label: "Find subtitles", to: "/discover" },
     },
     {
-      title: "Search subtitles for any title, owned or not",
-      body: "Look up any film or show by title and search your providers for it, even with an empty library and no Sonarr or Radarr connected. Each provider reports its own progress as it runs, the result opens as a formatted preview under the row, and Download saves the file straight to the device you are reading on. Browsing and refreshing never contact a subtitle provider: only a search you asked for does. The download runs as a job and the file saves itself the moment it is ready. If you leave the page first, Save in the Jobs drawer keeps it for up to 30 minutes.",
-      icon: faMagnifyingGlass,
-      cta: { label: "Open Discover", to: "/discover" },
+      title: "Give sports the same subtitle tools",
+      body: "Connect Sportarr to search, sync and translate subtitles for your recordings. Set a language profile for each league and let Bazarr+ find what is missing.",
+      icon: faTrophy,
+      cta: { label: "Connect Sportarr", to: "/settings/connections#sportarr" },
     },
     {
-      title: "Discover shows subtitles while the search is still running",
-      body: "A search across dozens of providers used to show nothing until the last one answered, although the progress bar was already counting results. Rows now appear as each provider finishes, in the order they arrive, and you can download one while the rest are still working: on a real install the first rows landed at 6 seconds on a search that finished at 21. Providers are reported honestly too, so one that never got to run is no longer recorded as a timeout, and a failing site now backs off the way it does for a library search instead of being hit again every minute.",
-      icon: faMagnifyingGlass,
-      cta: { label: "Open Discover", to: "/discover" },
+      title: "See new subtitles in your media server",
+      body: "Connect Emby, Silo, Jellyfin or Plex, including multiple servers of each kind. After a subtitle arrives, Bazarr+ asks the matching servers to refresh it.",
+      icon: faServer,
+      cta: { label: "Open connection settings", to: "/settings/connections" },
     },
     {
-      title: "Jobs tell you when they are done, and why they failed",
-      body: "A manual download, upload or sync that failed used to be listed as completed, and some actions never showed in the Jobs button at all. Downloads, uploads, syncs, subtitle tools, scan disk, combine, Provider Hub installs, editor translations and waveforms now all run as jobs, and saving a language profile returns at once while a Recalculating missing subtitles job does the library pass. A failed job says why in its notification and in the Jobs drawer, with Retry when another attempt can help, and a finished one that has something for you, like a Discover download, offers it right there. Tables refresh when the job finishes rather than when it is queued.",
+      title: "Spend less on translation with SmartFast",
+      body: "SmartFast balances price and speed when choosing an OpenRouter provider. Your current routing stays unchanged; switch under Provider Routing after updating AI Subtitle Translator to 2.0.0 or newer.",
+      icon: faGaugeHigh,
+      cta: { label: "Choose translation routing", to: "/settings/translator" },
+    },
+    {
+      title: "Know when your work is done",
+      body: "Downloads, translations and other long tasks report their progress in Jobs. If something fails, you get a reason and a Retry action when another attempt can help.",
       icon: faListCheck,
     },
     {
-      title: "No library? The app stops offering what it cannot open",
-      body: "On an install with no Sonarr, Radarr or Sportarr, the sidebar listed Series, Movies and Sports anyway and every one of them was a dead end. Those entries now appear with the integration that owns them, per kind, so an install running only Radarr gets Movies and not Series. Discover's line about connecting a library became a notice you can close for good, and the heading that marked where your own library ends is gone on a page that has no library half to divide from.",
-      icon: faCompass,
-      cta: { label: "Open Discover", to: "/discover" },
-    },
-    {
-      title: "The setup wizard can install the providers that need no account",
-      body: "A fresh install used to show a long list of provider checkboxes with nothing to say which of them work without signing up for something. The Providers step now leads with one action that installs and enables every provider needing no account, no configuration and no helper service, and it names the count before you click. The set is read off the catalog manifests rather than kept in a list, so it stays right as the catalog changes, and anything it leaves out is still one tick away in the same list.",
-      icon: faStore,
-      cta: { label: "Open Subtitle Hub", to: "/subtitle-hub" },
-    },
-    {
-      title: "The setup wizard takes every media server you run",
-      body: "The wizard offered one media server kind behind a radio button, and switching kinds threw away what you had typed, so an install running Jellyfin and Plex, or two Embys, could not say so during setup. You now tick as many kinds as you run, add a second server of a kind, and get one screen per server. Pressing Continue on an untouched Sonarr step used to create an enabled instance with no address and no key and switch Sonarr on, which the Finish screen then reported as connected; an untouched step writes nothing at all now. Every step also fits a 1920 by 1080 screen with nothing hidden behind a scrollbar. Setup no longer has to be finished in one sitting either: Set up later asks before it ends onboarding, and Settings, General has a Run first-time setup control that reopens the wizard.",
-      icon: faServer,
-      cta: { label: "Open Connections", to: "/settings/connections" },
-    },
-    {
-      title: "Request a title in Seerr from Discover",
-      body: "If you run Overseerr, Jellyseerr or Seerr, a title page says what Seerr already knows and offers the matching action: request it, pick seasons, or nothing at all when it is already available or blocklisted. A series opens a season picker that keeps what Seerr holds, what you already own and what is left to request apart. Bazarr+ never approves anything itself, but requests are made as the Seerr owner, which Seerr approves immediately, and the page says so beside the action.",
-      icon: faPaperPlane,
-      cta: { label: "Open Connections", to: "/settings/connections" },
-    },
-    {
-      title: "Sports are a media type, not a side door",
-      body: "Sportarr recordings now go through the same workflows as series and movies: manual search and download, uploads, the subtitle editor, sync, translate, combine, Wanted, History, Excluded and global search. Every job, file read and provider callback stays with the Sportarr instance that owns the recording. Subtitle settings take a global default with per-instance overrides, and disabled instances drop out of scheduled work.",
-      icon: faTrophy,
-      cta: { label: "Open Sports", to: "/sports" },
-    },
-    {
-      title: "Several Emby and Silo servers, not one of each",
-      body: "Add as many Emby and Silo servers as you run, each with its own URL, encrypted key, TLS setting and path mappings, the way Sonarr and Radarr already worked. A new subtitle is refreshed on every server whose mappings cover that file, and one unreachable server no longer holds up the rest. Emby matches an item by provider id, then exact path, then title and year; Silo matches by path and falls back to a library scan. Both are new here, and both cover movies, episodes and sports recordings. The Emby and Silo sections in Connections link out to a guide covering path mappings, the refresh states and what each server can match on.",
-      icon: faServer,
-      cta: { label: "Open Connections", to: "/settings/connections" },
-    },
-    {
-      title: "Statistics that answer something",
-      body: "System, Statistics plots downloads per day with the share that arrived without a manual search, downloads and mean match quality per provider with a blacklist rate beside them, the spread of match scores, and which languages you actually end up with. A provider high on downloads and high on blacklist rate is the one to turn off, which nothing surfaced before. Scores are normalised per media type first, so an episode out of 360 and a film out of 180 no longer average into a meaningless number.",
+      title: "See which providers work best for you",
+      body: "Compare provider results, subtitle quality and download activity in System > Statistics. See which providers deliver the best matches and which languages you download most.",
       icon: faChartLine,
-      cta: { label: "Open Statistics", to: "/system/statistics" },
-    },
-    {
-      title: "Announcements you can actually read",
-      body: 'The announcements page was a four column table that gave the date 79px and the announcement 1614px, so "4 months ago" wrapped onto four lines while a whole paragraph sat unbroken beside it, and at 400px the Dismiss button was off the screen. It is a stack of cards in the same shape as the release notes now: a kind, a headline, the age on one line, and the body cut to four lines with a control that opens the rest. A link the feed left mid sentence is a link, and dismissing works exactly as before.',
-      icon: faTowerBroadcast,
-      cta: { label: "Open Announcements", to: "/system/announcements" },
-    },
-    {
-      title: "A log worth attaching to a bug report",
-      body: "Debug mode used to be the only control over the log and it turned on everything at once, including two loggers that write a line per event: a replay of one debug day produced 957,284 rows and 158MB. Those two and the scheduler now stop at WARNING in debug, so a real fault still shows and the flood does not. A normal install gains the provider lifecycle lines that explain why a search found nothing, roughly two per provider and one per candidate, with debug left off.",
-      icon: faFileLines,
-      cta: { label: "Open System Logs", to: "/system/logs" },
-    },
-    {
-      title: "System Status shows what you actually run",
-      body: "The Status page listed Sonarr and Radarr whether or not they were configured, so a fresh install read two rows with nothing beside them, and it never mentioned a media server at all. A row now appears only for an integration that is configured and has answered, and every Emby, Jellyfin, Silo and Plex destination gets one of its own with the version read from the server. An unreachable server says so instead of rendering blank, a Silo says it is connected without inventing a version it does not publish, and the page keeps checking while one is still being probed.",
-      icon: faGaugeHigh,
-      cta: { label: "Open System Status", to: "/system/status" },
-    },
-    {
-      title: "SmartFast routing: cheaper OpenRouter translations if you switch",
-      body: "SmartFast asks OpenRouter for an endpoint that is cheap and still fast enough, rather than the fastest one at any price. Nothing changes on your install: your current routing is kept until you pick SmartFast yourself under Settings, AI Translator, Provider Routing. It is worth the click if you are on Fastest, which is where every install that predates the routing selector sits: the September benchmark runs kept landing it on endpoints priced around twice the cheapest endpoint serving the same model. SmartFast needs AI Subtitle Translator 2.0.0 or newer and an older service refuses it, so update the translator before you switch.",
-      icon: faGaugeHigh,
-      cta: { label: "Open Translator settings", to: "/settings/translator" },
-    },
-    {
-      title: "Translations that stall, vanish or talk over each other",
-      body: "Setting reasoning to Disabled now really disables it instead of leaving the model's own default running, which is what had jobs timing out on reasoning tokens, and a cleared setting counts as disabled too. Thanks to wouterrutgers for finding and fixing the first half of that. Progress also stays visible until the file is published rather than ending while the service is still finalising, and two translations running at once each keep their own progress, on their own job in the Jobs button.",
-      icon: faWandMagicSparkles,
-      cta: { label: "Open Translator settings", to: "/settings/translator" },
-    },
-    {
-      title: "Sessions, cookies and the event stream are closed up",
-      body: "A failed form login used to leave a cookie good enough to fetch the log file and the config backup, and that backup carries every credential in the install. That is closed. The legacy password upgrade no longer routes your plaintext password through the browser cookie, CORS stays off unless you turn it on, and the event socket refuses anyone who cannot prove who they are. Everyone is signed out once on this upgrade, and session lifetime, cookie security and the trusted proxy are read at startup, so changing them needs a restart.",
-      icon: faShieldHalved,
-      cta: { label: "Open General settings", to: "/settings/general" },
-    },
-    {
-      title: "Combined subtitles keep their characters",
-      body: "Combining subtitles preserves valid UTF-8 and BOM-marked Unicode instead of guessing an encoding, so accented and non-Latin text survives the merge. Encoding detection is now a fallback for legacy files only. A movie's translated badge also follows the file on disk, so replacing or deleting a subtitle clears a stale badge while a later sync keeps a current translation marked.",
-      icon: faLayerGroup,
-      cta: { label: "Open Subtitles settings", to: "/settings/subtitles" },
-    },
-    {
-      title: "Editor playback works on your second Sonarr or Radarr",
-      body: "Video playback in the subtitle editor failed for media on an explicitly selected instance: the playlist loaded and everything it pointed at came back 404. The selected instance is now carried through the initialization and media requests too.",
-      icon: faFilm,
-      cta: { label: "Open your series", to: "/series" },
-    },
-    {
-      title: "A failed search or download tells you what went wrong",
-      body: "A manual search or download that failed showed a fixed sentence pointing you at the file and the providers, while the real reason was already in the response and in the log. Episodes, movies and sports all threw it away, so a subtitle that arrived and could not be used and a provider that was throttled read exactly the same. The reason now reaches the dialog, and the old sentence is kept only for a failure that carried none.",
-      icon: faMagnifyingGlass,
-      cta: { label: "Open your series", to: "/series" },
-    },
-    {
-      title: "The tab says which build you are running",
-      body: "Page titles used to stop at the instance name. They now end with the running version, so a tab reads Series - Bazarr+ v2.7.0, and Discover sets a title at all. A custom instance name is still the base, so it follows whatever you named this install.",
-      icon: faTag,
-      cta: { label: "Open System Status", to: "/system/status" },
-    },
-    {
-      title: "Translated upgrades are their own switch, and off",
-      body: "Translated subtitles shared the upgrade toggle with manual downloads, and that toggle was on by default, so the upgrade job kept replacing a translation with a provider listing every cycle even when the score did not improve. Settings, Subtitles now has one switch for manually downloaded or uploaded subtitles and another for translated ones. Both are off on a new install. On this upgrade your manual setting is kept and translated upgrades are off, so turn them on if you want provider subtitles to replace your translations.",
-      icon: faSliders,
-      cta: { label: "Open Subtitles settings", to: "/settings/subtitles" },
-    },
-    {
-      title: "The same subtitle stops being downloaded every cycle",
-      body: "With translated upgrades on, a translation could be upgraded forever: the same provider listing, the same score, every cycle, until Bazarr+ was stopped to halt the traffic. The upgrade wrote its result under the language the provider returned while the translation kept its hearing-impaired or forced variant, so nothing ever replaced the row the upgrade measured against, and deleting the translated file let the next scan translate it again. A translation is now replaced by a real subtitle once instead of once per cycle, and a genuinely better listing still upgrades.",
-      icon: faClockRotateLeft,
-      cta: { label: "Open Subtitles settings", to: "/settings/subtitles" },
+      cta: { label: "Explore your statistics", to: "/system/statistics" },
     },
   ],
   "2.6.2": [
