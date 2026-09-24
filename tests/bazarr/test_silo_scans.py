@@ -3,6 +3,7 @@
 import asyncio
 import copy
 from datetime import datetime, timedelta, timezone
+import gc
 import ipaddress
 import socket
 import ssl
@@ -195,6 +196,28 @@ class NativeService:
                 return web.json_response(body, status=status)
             return web.json_response({"status": "accepted", "mode": "file", "library_id": 7}, status=202)
         return web.Response(status=404)
+
+
+@pytest.fixture(autouse=True)
+def no_cyclic_gc_inside_deadlines():
+    """Keep full garbage collections out of the refresh deadlines these tests time.
+
+    The client and this fake service share the pytest process, and deadlines here
+    are as short as 80 ms. CI runs this file after dozens of others, with roughly
+    700k tracked objects on the heap, and one automatic full collection of that
+    heap stops both for about 200 ms or more. Landing inside a refresh, it expired
+    the deadline before the snapshot was read, so a malformed snapshot reported
+    ``timeout`` instead of ``invalid_response``. Where it lands depends on every
+    allocation before it, so it moved between machines. Collection resumes
+    between tests, and reclaims what each one left.
+    """
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if enabled:
+            gc.enable()
 
 
 @pytest.fixture
