@@ -125,11 +125,11 @@
           <span class="code-lang">Shell</span>
           <button class="copy" data-copy-from="migration-backup-code" aria-label="Copy backup commands">Copy</button>
         </div>
-        <pre id="migration-backup-code"><code>docker compose down
+        <pre id="migration-backup-code"><code>docker compose down &amp;&amp;
 cp -a ./config ./config-backup-$(date +%Y%m%d)</code></pre>
       </div>
 
-      <p>This gives you a dated backup you can restore from if anything goes wrong. The config directory contains your SQLite database (<code>db/bazarr.db</code>), settings, logs, and cached data. Note the folder name, for example <code>config-backup-20260924</code>: the revert steps below ask for it.</p>
+      <p>The copy only runs if Bazarr stopped. If <code>docker compose down</code> reports an error, fix that first and run both lines again. This gives you a dated backup you can restore from if anything goes wrong. The config directory contains your SQLite database (<code>db/bazarr.db</code>), settings, logs, and cached data. Note the folder name, for example <code>config-backup-20260924</code>: the revert steps below ask for it.</p>
 
       <div class="note note-warning">
         <strong>Do not skip this step.</strong> While the migration is straightforward and non-destructive, having a backup means you can always go back.
@@ -245,21 +245,22 @@ image: ghcr.io/lavx/bazarr:latest</code></pre>
       <p>If you want to switch back to upstream Bazarr for any reason:</p>
 
       <ol class="steps">
-        <li><strong>Stop Bazarr+.</strong> Run <code>docker compose down</code>.</li>
         <li>
-          <strong>Restore your backup.</strong> Run <code>ls -d ./config-backup-*</code> to list your backups and put the exact folder you made before migrating in <code>BACKUP</code>. The commands check that folder exists, copy it next to your config, and only then swap it in. Your current config is moved to <code>./config-bazarr-plus</code>, not deleted, and if any step fails the config you had stays where it is.
+          <strong>Stop Bazarr+ and restore your backup.</strong> Run <code>ls -d ./config-backup-*</code> to list your backups and put the exact folder you made before migrating in <code>BACKUP</code>. The commands check that folder exists, stop Bazarr+, copy the backup next to your config, and only then swap it in. If Bazarr+ does not stop, nothing is copied or moved. Your current config is moved to <code>./config-bazarr-plus</code>, not deleted, and if any step fails the config you had stays where it is.
           <div class="code" style="margin-top: 12px;">
             <div class="code-head">
               <span class="code-lang">Shell</span>
               <button class="copy" data-copy-from="migration-restore-code" aria-label="Copy restore commands">Copy</button>
             </div>
             <pre id="migration-restore-code"><code>BACKUP=./config-backup-YYYYMMDD   # your backup folder's exact name
-if [ -d "$BACKUP" ]; then
+if [ ! -d "$BACKUP" ]; then
+  echo "No backup folder at $BACKUP"
+elif docker compose down; then
   cp -a "$BACKUP" ./config-restore &amp;&amp;
   mv ./config ./config-bazarr-plus &amp;&amp;
   mv ./config-restore ./config
 else
-  echo "No backup folder at $BACKUP"
+  echo "Bazarr+ did not stop, so nothing was restored"
 fi</code></pre>
           </div>
         </li>
