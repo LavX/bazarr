@@ -145,6 +145,8 @@ cd bazarr
 
 # Backend
 pip install -r requirements.txt
+# Only when testing against PostgreSQL: the driver is kept in a separate file
+pip install -r postgres-requirements.txt
 python bazarr.py --no-update --config ./config
 
 # Frontend (separate terminal)
@@ -152,3 +154,7 @@ cd frontend
 npm ci
 npm start
 ```
+
+PostgreSQL backups and restores also need the PostgreSQL client tools (`pg_dump` and `pg_restore`,
+the `postgresql-client` package) on the PATH, at the server's major version or newer. See
+[docs/postgresql-backups.md](docs/postgresql-backups.md).

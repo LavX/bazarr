@@ -21,12 +21,12 @@ for interoperability purposes (nominative fair use).
 Bazarr+ depends on the following third-party open-source libraries. Full
 license texts are included in the `libs/` directory where applicable.
 
-- dogpile.cache — MIT — used for the compat endpoint's search result cache
-- PyJWT — MIT — used for HS256 JWT synthesis on the compat endpoint
-- guessit — LGPL v3 — used for filename metadata parsing
-- babelfish — BSD 3-Clause — used for language code conversion
-- subliminal — MIT — used as the provider framework
-- subliminal_patch — fork of subliminal — modifications copyright (C) the
+- dogpile.cache (MIT): used for the compat endpoint's search result cache
+- PyJWT (MIT): used for HS256 JWT synthesis on the compat endpoint
+- guessit (LGPL v3): used for filename metadata parsing
+- babelfish (BSD 3-Clause): used for language code conversion
+- subliminal (MIT): used as the provider framework
+- subliminal_patch: fork of subliminal, modifications copyright (C) the
   respective contributors
 
 ## Metadata sources
@@ -35,11 +35,11 @@ Bazarr+ enriches subtitle search responses with title, year, and series
 information from the following metadata sources when a library-local
 lookup is not available:
 
-- **TheTVDB** (https://thetvdb.com) — Metadata provided by TheTVDB.
+- **TheTVDB** (https://thetvdb.com): Metadata provided by TheTVDB.
   Please consider adding missing information or subscribing. Accessed
   via the TVDB v4 API under a project-tier license key embedded in
   Bazarr+ for no-configuration episode resolution.
-- **OMDb API** (https://www.omdbapi.com) — Movie metadata is resolved
+- **OMDb API** (https://www.omdbapi.com): Movie metadata is resolved
   through OMDb when an operator supplies their own API key in settings.
   No key is shipped by default.
 

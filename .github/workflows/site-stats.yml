@@ -77,9 +77,16 @@ jobs:
 
           # Installable providers in the plugin catalog. Its catalog.json is the
           # same file the app reads, so this number is the product's own.
+          # The catalog also carries a test fixture (SmokeHub) whose manifest is
+          # marked "smoketest"; it is not a real provider and is left out by the
+          # same rule the setup wizard uses to hide it. site/js/stats.js applies
+          # the identical filter, so keep the two in step.
           providers=$(curl -sfL --max-time 20 \
             "https://raw.githubusercontent.com/${{ github.repository_owner }}/bazarr-provider-catalog/main/catalog.json" \
-            | jq '.providers | length' 2>/dev/null || echo "")
+            | jq '[.providers[]
+                   | select((.manifest.provider_id // "") + " " + (.manifest.name // "") + " " + (.manifest.description // "")
+                            | test("smoketest"; "i") | not)]
+                  | length' 2>/dev/null || echo "")
           [ -n "$providers" ] || providers=$(keep providers)
 
           # Upstream feature-request upvotes shown in the comparison table. They
