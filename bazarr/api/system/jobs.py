@@ -20,6 +20,10 @@ class UtcTimestamp(fields.Raw):
     A naive value is taken as the server's local time.
     """
 
+    # Raw documents itself as an object. The value is always an ISO 8601 string.
+    __schema_type__ = 'string'
+    __schema_format__ = 'date-time'
+
     def format(self, value):
         return value.astimezone(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
 

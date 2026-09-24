@@ -34,7 +34,9 @@ def test_series_and_movie_actions_document_the_scan_job(spec):
         # scan-disk queues a job, every other action still answers 204.
         assert {"202", "204"} <= set(responses), path
         model = spec["definitions"][_schema_ref(responses["202"])]
-        assert "job_id" in model["properties"]
+        # An identical job already queued answers with a null id.
+        assert model["properties"]["job_id"]["type"] == "integer"
+        assert model["properties"]["job_id"]["x-nullable"] is True
 
 
 def test_listing_jobs_documents_the_list_it_returns(spec):
@@ -45,3 +47,5 @@ def test_listing_jobs_documents_the_list_it_returns(spec):
     assert jobs["type"] == "array"
     job = spec["definitions"][jobs["items"]["$ref"].rsplit("/", 1)[-1]]
     assert {"job_id", "status"} <= set(job["properties"])
+    assert job["properties"]["last_run_time"]["type"] == "string"
+    assert job["properties"]["last_run_time"]["format"] == "date-time"
