@@ -141,9 +141,22 @@ export const Subtitle: FunctionComponent<Props> = ({
     !isSyncOutputSubtitle(subtitle) &&
     syncOutputs.length > 0;
 
+  // The same language can show up twice in one row: once as a file on disk
+  // and once as a track inside the video. The badges differ only in shade,
+  // so name the source on hover.
+  const badgeTitle = missing
+    ? "Missing"
+    : isEmbedded
+      ? "Embedded in the video file"
+      : `File: ${subtitle.path!.split(/[\\/]/).pop()}`;
+
   const badgeEl = (
     <Group gap={4} wrap="nowrap">
-      <Badge variant={variant} style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
+      <Badge
+        variant={variant}
+        title={badgeTitle}
+        style={{ whiteSpace: "nowrap", flexShrink: 0 }}
+      >
         <Language.Text value={subtitle} long={false}></Language.Text>
       </Badge>
       {isSyncOutputSubtitle(subtitle) && (
