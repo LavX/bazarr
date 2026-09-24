@@ -219,7 +219,6 @@ it("renders safe inline cues with a raw view and retains forced-row download ide
   ]);
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   await user.click(forcedRow().getByRole("button", { name: "Download SRT" }));
-  await user.click(await screen.findByRole("button", { name: "Save SRT" }));
   await waitFor(() => expect(save).toHaveBeenCalledOnce());
   await user.click(modal.getByRole("button", { name: "Close preview" }));
   await waitFor(() =>

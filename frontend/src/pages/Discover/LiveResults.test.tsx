@@ -280,7 +280,6 @@ it("downloads a row the running search has already published", async () => {
     { timeout: 5000 },
   );
   await user.click(screen.getByRole("button", { name: "Download SRT" }));
-  await user.click(await screen.findByRole("button", { name: "Save SRT" }));
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
   expect(downloads[0]).toMatchObject({
     result: "live-1",

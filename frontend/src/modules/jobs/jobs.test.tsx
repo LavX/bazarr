@@ -9,7 +9,13 @@ import NotificationDrawer from "@/App/NotificationDrawer";
 import { AllProviders } from "@/providers";
 import { act, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
-import { notifyJobOutcome, registerJobAction } from ".";
+import {
+  claimJobCompletion,
+  dismissJobOutcome,
+  notifyJobOutcome,
+  registerJobAction,
+  resetJobNotifications,
+} from ".";
 
 let nextId = 5000;
 
@@ -132,4 +138,75 @@ it("shows a failed job's error and its Retry in the Jobs drawer", async () => {
     within(drawer).getByText("Not a usable subtitle."),
   ).toBeInTheDocument();
   expect(within(drawer).getByRole("button", { name: "Retry" })).toBeEnabled();
+});
+
+it("leaves a completion its feature handles unannounced, and keeps its action in the Jobs drawer", async () => {
+  const handler = vi.fn();
+  const handled = new Set<number>();
+  const unregister = registerJobAction("example.save", handler, {
+    handlesCompletion: (candidate) => handled.has(candidate.job_id),
+  });
+  const own = job({
+    progress_message: "Ready to save",
+    action: { kind: "example.save", label: "Save", ticket: 1 },
+  });
+  const earlier = job({
+    progress_message: "Ready to save",
+    action: { kind: "example.save", label: "Save", ticket: 2 },
+  });
+  handled.add(own.job_id);
+  server.use(
+    http.get("/api/system/jobs", () =>
+      HttpResponse.json({ data: [own, earlier] }),
+    ),
+  );
+  queryClient.setQueryData([QueryKeys.System, QueryKeys.Jobs], [own, earlier]);
+  rawRender(
+    <AllProviders>
+      <NotificationDrawer opened onClose={() => undefined} />
+    </AllProviders>,
+  );
+  act(() => {
+    notifyJobOutcome(own);
+    notifyJobOutcome(earlier);
+  });
+  // Only the job nobody is handling is announced with its action.
+  await screen.findByText(earlier.job_name, { selector: "[role=alert] *" });
+  expect(
+    screen
+      .getAllByRole("alert")
+      .some((alert) => within(alert).queryByText(own.job_name)),
+  ).toBe(false);
+  const drawer = await screen.findByRole("dialog");
+  const saves = within(drawer).getAllByRole("button", { name: "Save" });
+  expect(saves).toHaveLength(2);
+  const user = userEvent.setup();
+  await user.click(saves[0]);
+  await waitFor(() => expect(handler).toHaveBeenCalledTimes(1));
+  unregister();
+});
+
+it("takes back a completion announced before its feature claimed the job", async () => {
+  const unregister = registerJobAction("example.late", vi.fn());
+  rawRender(<AllProviders>{null}</AllProviders>);
+  const done = job({
+    progress_message: "Ready",
+    action: { kind: "example.late", label: "Open" },
+  });
+  act(() => notifyJobOutcome(done));
+  await screen.findByText(done.job_name);
+  act(() => dismissJobOutcome(done.job_id));
+  await waitFor(() => expect(screen.queryByText(done.job_name)).toBeNull());
+  // And it is not announced again.
+  act(() => notifyJobOutcome(done));
+  expect(screen.queryByText(done.job_name)).toBeNull();
+  unregister();
+});
+
+it("claims a completion once until the job ids restart with a new socket session", () => {
+  const id = ++nextId;
+  expect(claimJobCompletion(id)).toBe(true);
+  expect(claimJobCompletion(id)).toBe(false);
+  resetJobNotifications();
+  expect(claimJobCompletion(id)).toBe(true);
 });

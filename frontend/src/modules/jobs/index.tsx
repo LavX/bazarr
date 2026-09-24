@@ -20,12 +20,30 @@ type JobActionHandler = (
   job: System.Jobs,
 ) => Promise<void> | void;
 
-const handlers = new Map<string, JobActionHandler>();
+interface JobActionOptions {
+  /**
+   * True when the feature is already handling this completed job itself, so
+   * the completion is not announced with the action. The action stays in the
+   * Jobs drawer.
+   */
+  handlesCompletion?: (job: System.Jobs) => boolean;
+}
 
-export function registerJobAction(kind: string, handler: JobActionHandler) {
+const handlers = new Map<string, JobActionHandler>();
+const options = new Map<string, JobActionOptions>();
+
+export function registerJobAction(
+  kind: string,
+  handler: JobActionHandler,
+  jobOptions: JobActionOptions = {},
+) {
   handlers.set(kind, handler);
+  options.set(kind, jobOptions);
   return () => {
-    if (handlers.get(kind) === handler) handlers.delete(kind);
+    if (handlers.get(kind) === handler) {
+      handlers.delete(kind);
+      options.delete(kind);
+    }
   };
 }
 
@@ -113,13 +131,45 @@ export const JobActions: FunctionComponent<{
 
 const notified = new Set<number>();
 
+function outcomeId(jobId: number) {
+  return `job-outcome-${jobId}`;
+}
+
 /**
- * Forget which jobs were announced. Job ids restart with the backend, so this
+ * Take back a completion that was announced before the feature knew the job
+ * was its own, and keep it from being announced later.
+ */
+export function dismissJobOutcome(jobId: number) {
+  notified.add(jobId);
+  hideNotification(outcomeId(jobId));
+}
+
+const claimed = new Set<number>();
+
+/**
+ * Claim a completed job for the feature that handles it itself. Answers false
+ * when it was already claimed, so a completion reported twice is handled once.
+ * Any announcement already shown for it is taken back.
+ */
+export function claimJobCompletion(jobId: number) {
+  if (claimed.has(jobId)) return false;
+  claimed.add(jobId);
+  dismissJobOutcome(jobId);
+  return true;
+}
+
+export function isJobCompletionClaimed(jobId: number) {
+  return claimed.has(jobId);
+}
+
+/**
+ * Forget which jobs were announced or claimed. Job ids restart with the backend, so this
  * runs whenever the socket connects; no terminal event is ever replayed on a
  * reconnect, so nothing is announced twice.
  */
 export function resetJobNotifications() {
   notified.clear();
+  claimed.clear();
 }
 
 /**
@@ -127,14 +177,22 @@ export function resetJobNotifications() {
  * with the job's fresh state, so only a finish that happens while the app is
  * open is announced: a reload lists old finished jobs without toasting them.
  * A failure is always announced; a completion only when it offers an action,
- * so routine scheduled jobs stay quiet.
+ * so routine scheduled jobs stay quiet, and not when the feature that owns the
+ * action is already handling it.
  */
 export function notifyJobOutcome(job: System.Jobs) {
   if (job.status !== "completed" && job.status !== "failed") return;
   if (notified.has(job.job_id)) return;
-  if (job.status === "completed" && !runnable(job)) return;
+  if (job.status === "completed") {
+    const action = runnable(job);
+    if (!action) return;
+    if (options.get(action.kind)?.handlesCompletion?.(job)) {
+      notified.add(job.job_id);
+      return;
+    }
+  }
   notified.add(job.job_id);
-  const id = `job-outcome-${job.job_id}`;
+  const id = outcomeId(job.job_id);
   const failed = job.status === "failed";
   showNotification({
     id,

@@ -515,8 +515,7 @@ it.each([
       await user.click(
         await screen.findByRole("button", { name: "Download SRT" }),
       );
-      await user.click(await screen.findByRole("button", { name: "Save SRT" }));
-      await screen.findByText(/Download started for/);
+      await screen.findByText(/Saved to your device:/);
       await user.click(screen.getByRole("button", { name: "Search again" }));
       await waitFor(() => expect(finish).toBeDefined());
       server.use(
@@ -542,7 +541,7 @@ it.each([
         ).not.toBeInTheDocument(),
       );
       expect(
-        screen.queryByText(/Download started for/),
+        screen.queryByText(/Saved to your device:/),
       ).not.toBeInTheDocument();
       expect(
         screen.getByRole("button", { name: "Find subtitles" }),
@@ -630,8 +629,7 @@ it.each([
       await user.click(
         await screen.findByRole("button", { name: "Download SRT" }),
       );
-      await user.click(await screen.findByRole("button", { name: "Save SRT" }));
-      await screen.findByText(/Download started for/);
+      await screen.findByText(/Saved to your device:/);
       await user.click(screen.getByRole("button", { name: "Search again" }));
       await waitFor(() => expect(finish).toBeDefined());
       server.use(
@@ -662,7 +660,7 @@ it.each([
       expect(
         screen.getByRole("heading", { name: "accepted episode subtitle" }),
       ).toBeInTheDocument();
-      expect(screen.getByText(/Download started for/)).toBeInTheDocument();
+      expect(screen.getByText(/Saved to your device:/)).toBeInTheDocument();
       expect(
         screen.getByRole("button", { name: "Finding subtitles" }),
       ).toBeInTheDocument();

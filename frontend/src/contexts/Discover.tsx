@@ -8,6 +8,7 @@ import {
   useReducer,
   useRef,
 } from "react";
+import { showNotification } from "@mantine/notifications";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   useDiscoverDownload,
@@ -16,7 +17,12 @@ import {
 } from "@/apis/hooks/discover";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
-import { registerJobAction } from "@/modules/jobs";
+import {
+  claimJobCompletion,
+  isJobCompletionClaimed,
+  registerJobAction,
+} from "@/modules/jobs";
+import { notification } from "@/modules/notification";
 import type {
   DiscoverContext as SearchContext,
   DiscoverDownloadFeedback,
@@ -60,10 +66,10 @@ interface DiscoverContextValue {
   findSubtitles: (refresh?: boolean) => Promise<void>;
   /**
    * Queue the exact result as a standard job. The row follows that job
-   * through the jobs cache; the finished file is saved with saveSubtitle.
+   * through the jobs cache and saves the finished file as soon as it is ready.
    */
   downloadSubtitle: (row: DiscoverSubtitleResult) => Promise<void>;
-  /** Hand the finished download's file to the browser. Needs a click. */
+  /** Save the finished file again after the automatic save failed. */
   saveSubtitle: () => Promise<void>;
   previewSubtitle: (row: DiscoverSubtitleResult) => Promise<void>;
   closePreview: () => void;
@@ -96,6 +102,9 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
   // Jobs this row has seen in the jobs cache. One that disappears again was
   // removed from the queue, which is how a queued job is cancelled.
   const seenJobs = useRef(new Set<number>());
+  // Ticket fetches in flight, so Save in the drawer during the automatic save
+  // joins it instead of saving the file a second time.
+  const saving = useRef(new Map<number, Promise<string | null>>());
   const generation = useRef(0);
   const draft = useRef(state.draft);
   const currentState = useRef(state);
@@ -441,6 +450,104 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
     [fetchDownload],
   );
 
+  /** Fetch a ticket's file and save it; null when the sign-in changed meanwhile. */
+  const fetchAndSave = useCallback(async (ticket: number) => {
+    const epoch = authEpoch.current;
+    let response;
+    try {
+      response = await api.discover.downloadTicket(ticket);
+    } catch (error) {
+      // The reason arrives as a blob body; read it so the caller can show it.
+      const data = (error as { response?: { data?: unknown } }).response?.data;
+      if (data instanceof Blob) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(await data.text());
+        } catch {
+          parsed = undefined;
+        }
+        throw Object.assign(new Error("Download unavailable"), {
+          response: { data: parsed },
+        });
+      }
+      throw error;
+    }
+    // Signed out, or in as someone else, while the file was on its way.
+    if (!authenticated.current || epoch !== authEpoch.current) return null;
+    if (
+      !response.data.size ||
+      !response.data.type.includes("application/x-subrip")
+    )
+      throw new Error("Invalid subtitle response");
+    const filename = filenameFromContentDisposition(
+      response.headers["content-disposition"],
+      "subtitle.srt",
+    );
+    saveBlobAs(response.data, filename);
+    const feedback = currentState.current.download;
+    if (feedback?.ticket === ticket && feedback.contextKey)
+      dispatch({
+        type: "download",
+        key: feedback.contextKey,
+        feedback: { ...feedback, status: "started", filename },
+      });
+    return filename;
+  }, []);
+
+  const saveTicket = useCallback(
+    (ticket: number) => {
+      const running = saving.current.get(ticket);
+      if (running) return running;
+      const next = fetchAndSave(ticket).finally(() =>
+        saving.current.delete(ticket),
+      );
+      saving.current.set(ticket, next);
+      return next;
+    },
+    [fetchAndSave],
+  );
+
+  /**
+   * Save a finished job's file without a click, once per job. A programmatic
+   * download needs no user activation. When it fails the row offers Save and
+   * a notification says why.
+   */
+  const autoSave = useCallback(
+    async (jobId: number, ticket: number, suggested?: string) => {
+      // The jobs cache reports a completion more than once, and the generic
+      // job outcome sees it too; the claim is what keeps one save per job.
+      if (!claimJobCompletion(jobId)) return;
+      const settle = (changes: Partial<DiscoverDownloadFeedback>) => {
+        const feedback = currentState.current.download;
+        if (feedback?.jobId === jobId && feedback.contextKey)
+          dispatch({
+            type: "download",
+            key: feedback.contextKey,
+            feedback: { ...feedback, ticket, ...changes },
+          });
+      };
+      try {
+        const filename = await saveTicket(ticket);
+        if (filename === null) return;
+        settle({ status: "started", filename });
+        showNotification(notification.info("Saved", filename));
+      } catch (error) {
+        settle({ status: "ready", filename: suggested });
+        const data = (error as { response?: { data?: { message?: unknown } } })
+          .response?.data;
+        showNotification(
+          notification.error(
+            "The subtitle was not saved",
+            typeof data?.message === "string"
+              ? data.message
+              : "The file could not be saved automatically. Use Save to try again.",
+          ),
+        );
+      }
+    },
+    [saveTicket],
+  );
+
   /**
    * Follow the row's job in the standard jobs cache, which the jobs socket
    * events keep current. A retry started from the job's notification or the
@@ -493,27 +600,23 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
     seenJobs.current.add(job.job_id);
     if (job.status === "completed") {
       const action = job.action;
-      dispatch({
-        type: "download",
-        key,
-        feedback:
-          action?.kind === "discover.save" && typeof action.ticket === "number"
-            ? {
-                ...feedback,
-                status: "ready",
-                ticket: action.ticket,
-                filename:
-                  typeof action.filename === "string"
-                    ? action.filename
-                    : undefined,
-              }
-            : {
-                ...feedback,
-                status: "failed",
-                message: job.progress_message || "The download was cancelled.",
-                retryable: true,
-              },
-      });
+      if (action?.kind === "discover.save" && typeof action.ticket === "number")
+        void autoSave(
+          job.job_id,
+          action.ticket,
+          typeof action.filename === "string" ? action.filename : undefined,
+        );
+      else
+        dispatch({
+          type: "download",
+          key,
+          feedback: {
+            ...feedback,
+            status: "failed",
+            message: job.progress_message || "The download was cancelled.",
+            retryable: true,
+          },
+        });
     } else if (job.status === "failed") {
       dispatch({
         type: "download",
@@ -526,7 +629,7 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
         },
       });
     }
-  }, [client]);
+  }, [client, autoSave]);
 
   useEffect(
     () =>
@@ -543,48 +646,6 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
   );
   // The job may have finished before its id reached the row.
   useEffect(() => followJob(), [state.download, followJob]);
-
-  const saveTicket = useCallback(async (ticket: number) => {
-    const epoch = authEpoch.current;
-    let response;
-    try {
-      response = await api.discover.downloadTicket(ticket);
-    } catch (error) {
-      // The reason arrives as a blob body; read it so the caller can show it.
-      const data = (error as { response?: { data?: unknown } }).response?.data;
-      if (data instanceof Blob) {
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(await data.text());
-        } catch {
-          parsed = undefined;
-        }
-        throw Object.assign(new Error("Download unavailable"), {
-          response: { data: parsed },
-        });
-      }
-      throw error;
-    }
-    // Signed out, or in as someone else, while the file was on its way.
-    if (!authenticated.current || epoch !== authEpoch.current) return;
-    if (
-      !response.data.size ||
-      !response.data.type.includes("application/x-subrip")
-    )
-      throw new Error("Invalid subtitle response");
-    const filename = filenameFromContentDisposition(
-      response.headers["content-disposition"],
-      "subtitle.srt",
-    );
-    saveBlobAs(response.data, filename);
-    const feedback = currentState.current.download;
-    if (feedback?.ticket === ticket && feedback.contextKey)
-      dispatch({
-        type: "download",
-        key: feedback.contextKey,
-        feedback: { ...feedback, status: "started", filename },
-      });
-  }, []);
 
   /** Save a ticket; a failure also fails the row that is waiting on it. */
   const saveOrFail = useCallback(
@@ -621,8 +682,16 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
   // notification and the Jobs drawer run it without knowing about Discover.
   useEffect(
     () =>
-      registerJobAction("discover.save", (action) =>
-        saveOrFail(Number(action.ticket)),
+      registerJobAction(
+        "discover.save",
+        (action) => saveOrFail(Number(action.ticket)),
+        {
+          // A job started on this page saves itself, so its completion is not
+          // announced with Save. Other jobs keep Save in the notification.
+          handlesCompletion: (job) =>
+            isJobCompletionClaimed(job.job_id) ||
+            currentState.current.download?.jobId === job.job_id,
+        },
       ),
     [saveOrFail],
   );
