@@ -145,7 +145,7 @@ export const whatsNew: Record<string, WhatsNewSlide[]> = {
     },
     {
       title: "Request a title in Seerr from Discover",
-      body: "If you run Overseerr, Jellyseerr or Seerr, a title page says what Seerr already knows and offers the matching action: request it, pick seasons, or nothing at all when it is already available or blocklisted. A series opens a season picker that keeps what Seerr holds, what you already own and what is left to request apart. Bazarr+ never approves anything: the request is made as the Seerr owner and approval stays in Seerr.",
+      body: "If you run Overseerr, Jellyseerr or Seerr, a title page says what Seerr already knows and offers the matching action: request it, pick seasons, or nothing at all when it is already available or blocklisted. A series opens a season picker that keeps what Seerr holds, what you already own and what is left to request apart. Bazarr+ never approves anything itself, but requests are made as the Seerr owner, which Seerr approves immediately, and the page says so beside the action.",
       icon: faPaperPlane,
       cta: { label: "Open Connections", to: "/settings/connections" },
     },
