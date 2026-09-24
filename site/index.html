@@ -91,7 +91,7 @@
       "url": "https://lavx.github.io/bazarr/#q1",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Yes. Bazarr+ uses the same database with a few added columns created on first run. Your database, settings, download history and subtitle files are all preserved. Back up your config directory first, swap the container image, and start."
+        "text": "Yes. Bazarr+ uses the same database with a few added columns created on first run. Your database, settings, download history and subtitle files are all preserved. Stop Bazarr, back up your config directory, swap the container image, and start."
       }
     },
     {
@@ -100,7 +100,7 @@
       "url": "https://lavx.github.io/bazarr/#q2",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Yes. Restore your config backup, change the image back, and start. The only manual step is clearing the password field in config.yaml , since upstream cannot read the PBKDF2 hash. The migration guide has the details."
+        "text": "Yes. Stop Bazarr+, restore the config backup you made before migrating, change the image back, and start. That backup still holds your old password hash, so nothing needs resetting. If you have no backup, the migration guide lists what to fix by hand, including clearing the password field in config.yaml, since upstream cannot read the PBKDF2 hash."
       }
     },
     {
@@ -654,7 +654,7 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
           <div class="faq-answer" id="a1" role="region" aria-labelledby="q1"><div>
-            <p>Yes. Bazarr+ uses the same database with a few added columns created on first run. Your database, settings, download history and subtitle files are all preserved. Back up your config directory first, swap the container image, and start.</p>
+            <p>Yes. Bazarr+ uses the same database with a few added columns created on first run. Your database, settings, download history and subtitle files are all preserved. Stop Bazarr, back up your config directory, swap the container image, and start.</p>
           </div></div>
         </div>
 
@@ -664,7 +664,7 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
           <div class="faq-answer" id="a2" role="region" aria-labelledby="q2"><div>
-            <p>Yes. Restore your config backup, change the image back, and start. The only manual step is clearing the password field in <code class="inline">config.yaml</code>, since upstream cannot read the PBKDF2 hash. The <a href="guides/migration.html#reverting-if-needed">migration guide</a> has the details.</p>
+            <p>Yes. Stop Bazarr+, restore the config backup you made before migrating, change the image back, and start. That backup still holds your old password hash, so nothing needs resetting. If you have no backup, the <a href="guides/migration.html#reverting-if-needed">migration guide</a> lists what to fix by hand, including clearing the password field in <code class="inline">config.yaml</code>, since upstream cannot read the PBKDF2 hash.</p>
           </div></div>
         </div>
 
