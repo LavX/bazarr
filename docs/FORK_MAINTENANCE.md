@@ -52,7 +52,6 @@ Key files that define Bazarr+ and differentiate it from upstream:
 |------|---------|
 | `custom_libs/subliminal_patch/providers/opensubtitles_scraper.py` | OpenSubtitles.org scraper mixin |
 | `custom_libs/subliminal_patch/providers/opensubtitles.py` | Modified provider with scraper support |
-| `opensubtitles-scraper/` | Git submodule: web scraper service |
 | `ai-subtitle-translator/` | Git submodule: AI translator service |
 | `package_info` | Fork identification (shown in System Status) |
 | `bazarr/app/check_update.py` | Uses fork's releases, not upstream |

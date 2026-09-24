@@ -164,7 +164,7 @@ docker pull ghcr.io/lavx/ai-subtitle-translator:latest
 
 ### Option 3: Run without Docker
 
-Requires Python 3.14 and Node.js 18+ (for building the frontend).
+Requires Python 3.14 and, for building the frontend, the Node.js version pinned in [`frontend/.nvmrc`](frontend/.nvmrc). With nvm, `nvm install` inside `frontend/` picks it up.
 
 ```bash
 # Clone with submodules
@@ -173,6 +173,9 @@ cd bazarr
 
 # Install Python dependencies
 pip install -r requirements.txt
+# Only if you use PostgreSQL instead of the default SQLite: its driver is
+# kept in a separate file
+pip install -r postgres-requirements.txt
 # signalrcore over-pins the vulnerable msgpack==1.1.2, so install it with
 # --no-deps (its only runtime dep is msgpack, pinned to 1.2.1 above)
 pip install --no-deps signalrcore==1.0.2
@@ -190,6 +193,9 @@ python3 docker/supervisor.py --config ./data --port 6767
 - `unar` or `unrar` (compressed subtitle extraction). Bazarr+ tries `unrar`,
   then `unar`, then `7z`. `p7zip` alone is often not enough: several
   distributions build 7-Zip without a RAR decoder.
+- `postgresql-client` (`pg_dump` and `pg_restore`), only if you use PostgreSQL.
+  Backups and restores need them, at the server's major version or newer. See
+  [PostgreSQL backups](docs/postgresql-backups.md).
 
 **Notes:**
 - The `--config` flag sets where the database, logs, and settings are stored
@@ -318,7 +324,7 @@ Bazarr+ exposes an OpenSubtitles-compatible REST API (`/api/v1`) so external cli
 - **Per-key provider scoping**: each key carries an allowed and excluded provider list, so different clients reach different subsets of your providers. A reserved `local` name controls access to on-disk subtitles. A per-request `only_providers` allow-list can narrow a key's grant but never widen it
 - **Provider fanout**: search runs your enabled providers in parallel via a dedicated bounded thread pool with dogpile coalescing
 - **JWT auth**: short-lived bearer tokens bound to their issuing key, with sliding-window rate limiting and immediate revocation on logout
-- **Signed stream tokens**: downloads return one-shot HMAC-signed stream URLs with a TTL; raw provider URLs are never exposed
+- **Signed stream tokens**: downloads return HMAC-signed stream URLs that expire after a short TTL (5 minutes by default); raw provider URLs are never exposed. A stream URL is a bearer link that is not consumed on use: anyone holding it can fetch the subtitle again until it expires, though it can stop working sooner when the search result behind it expires or Bazarr+ restarts. Logging out or rotating, disabling or deleting a key does not revoke a link already issued; regenerating the Hub secrets or disabling the Hub stops it working
 - **SSRF guard with DNS rebinding protection**: every outbound URL the API touches blocks loopback, RFC1918, link-local, and any IP that fails revalidation post-DNS resolution
 - **TVDB v4 + OMDB enrichment**: given an IMDB id, the layer hydrates season/episode and TVDB series id so providers that key on TVDB just work; the OMDB refiner (broken since the Python 3 migration upstream) is revived
 - **Usage UI**: Overview cards and a 30-day usage chart, a per-key usage tooltip, and an idempotent legacy seed that preserves your existing shared token as an unlimited default key so older clients keep working

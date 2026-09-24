@@ -1,6 +1,8 @@
 # Per-instance Subtitle settings: design
 
-Status: draft for review
+> Historical: this design shipped in v2.5.0 and is kept for history. It describes the plan as it stood before implementation, so its "current state" sections no longer match the code. See the [README](../README.md#per-instance-subtitle-settings) for current behaviour.
+
+Status: implemented in v2.5.0 (originally a draft for review)
 Tracking issue: https://github.com/LavX/bazarr/issues/227
 Follow-up to: https://github.com/LavX/bazarr/issues/156 (multiple Sonarr/Radarr instances)
 
