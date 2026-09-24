@@ -1,5 +1,6 @@
 import { Button, Group, Text, Title } from "@mantine/core";
 import {
+  faCheck,
   faChevronDown,
   faDownload,
   faEye,
@@ -294,6 +295,22 @@ export default function SubtitleResults({
                         Save
                       </Button>
                     )}
+                  {feedback?.status === "started" &&
+                    feedback.row.id === row.id &&
+                    feedback.row.search_id === row.search_id && (
+                      <Text
+                        size="sm"
+                        c="green"
+                        fw={600}
+                        title={
+                          feedback.filename
+                            ? `Saved ${feedback.filename}`
+                            : "Saved"
+                        }
+                      >
+                        <FontAwesomeIcon icon={faCheck} /> Saved
+                      </Text>
+                    )}
                 </Group>
               </Group>
             </article>
@@ -319,9 +336,9 @@ export default function SubtitleResults({
             {feedback.status === "pending"
               ? `Preparing download for ${identity}. It runs in Jobs, so you can keep browsing.`
               : feedback.status === "ready"
-                ? `Ready to save ${identity}.`
+                ? `Not saved yet: ${identity}. Use Save to try again.`
                 : feedback.status === "started"
-                  ? `Download started for ${identity}.`
+                  ? `Saved to your device: ${identity}.`
                   : feedback.status === "expired"
                     ? `This result has expired: ${identity}. Search again for the same selection.`
                     : `Download failed for ${identity}. ${feedback.message ?? "Retry this result or choose another subtitle."}`}

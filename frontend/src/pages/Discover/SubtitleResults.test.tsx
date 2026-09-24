@@ -234,13 +234,13 @@ function handlers(
   });
 }
 
-/** Click Download, wait for the job to finish, then Save from the row. */
+/** Click Download; the finished job saves itself, with no second click. */
 async function downloadAndSave(
   user: ReturnType<typeof userEvent.setup>,
   scope = "forced",
 ) {
   await user.click(row(scope).getByRole("button", { name: "Download SRT" }));
-  await user.click(await row(scope).findByRole("button", { name: "Save SRT" }));
+  await row(scope).findByText("Saved");
 }
 
 describe("Discover attachments", () => {
@@ -257,7 +257,7 @@ describe("Discover attachments", () => {
     expect(save.mock.calls[0][0].size).toBe(forcedSrt.length);
     expect(save.mock.calls[0][1]).toBe("Breaking_Bad.S02E01.eng.forced.srt");
     expect(
-      await screen.findByText(/Download started for Breaking Bad S02 E01/),
+      await screen.findByText(/Saved to your device: Breaking Bad S02 E01/),
     ).toHaveTextContent(
       /eng.*Forced.*catalog-example.*Breaking.Bad.S02E01.forced/,
     );
@@ -267,13 +267,13 @@ describe("Discover attachments", () => {
     const { user, router } = renderDiscover();
     await search(user);
     await downloadAndSave(user);
-    await screen.findByText(/Download started for/);
+    await screen.findByText(/Saved to your device:/);
     await user.click(screen.getByRole("button", { name: "Change appearance" }));
     await user.click(screen.getByRole("link", { name: "Subtitle Hub" }));
     await act(async () => {
       await router.navigate(-1);
     });
-    expect(screen.getByText(/Download started for/)).toBeInTheDocument();
+    expect(screen.getByText(/Saved to your device:/)).toBeInTheDocument();
     expect(searches).toHaveLength(1);
     expect(requests).toHaveLength(1);
   });
@@ -391,7 +391,7 @@ describe("Discover attachments", () => {
       const { user } = renderDiscover();
       await search(user);
       await downloadAndSave(user);
-      await screen.findByText(/Download started for/);
+      await screen.findByText(/Saved to your device:/);
       if (field !== "Subtitle language")
         await user.click(
           screen.getByRole("button", { name: "Search options" }),
@@ -410,7 +410,7 @@ describe("Discover attachments", () => {
         await user.type(screen.getByRole("textbox", { name: field }), "2");
       }
       expect(
-        screen.queryByText(/Download started for/),
+        screen.queryByText(/Saved to your device:/),
       ).not.toBeInTheDocument();
       expect(
         screen.queryByRole("button", { name: "Download SRT" }),
@@ -463,7 +463,7 @@ describe("Discover attachments", () => {
       );
       expect(save).not.toHaveBeenCalled();
       expect(
-        screen.queryByText(/Download started for/),
+        screen.queryByText(/Saved to your device:/),
       ).not.toBeInTheDocument();
       expect(
         screen.queryByRole("button", { name: "Save SRT" }),
@@ -517,12 +517,19 @@ describe("Discover attachments", () => {
       );
       const { user } = renderDiscover();
       await search(user);
-      await downloadAndSave(user);
-      expect(await screen.findByText(/Download failed for/)).toHaveTextContent(
+      await user.click(row().getByRole("button", { name: "Download SRT" }));
+      // The automatic save failed, so the row falls back to Save and the
+      // notification says why.
+      const toast = await findJobToast("The subtitle was not saved");
+      expect(toast).toHaveTextContent(
         kind === "app shell"
-          ? /could not be saved/
+          ? /could not be saved automatically/
           : /no longer available\. Download it again/,
       );
+      expect(
+        await row().findByRole("button", { name: "Save SRT" }),
+      ).toBeEnabled();
+      expect(row().queryByText("Saved")).toBeNull();
       expect(save).not.toHaveBeenCalled();
     },
   );
@@ -533,7 +540,7 @@ describe("Discover download as a standard job", () => {
     return Math.max(...jobs.keys());
   }
 
-  it("follows the job through the jobs socket event: pending, then ready with Save in the row and in the notification", async () => {
+  it("saves the file by itself when the job completes: no Save button, one save, Saved in the row", async () => {
     server.use(...handlers({ outcome: () => ({ status: "running" }) }));
     const { user } = renderDiscover();
     await search(user);
@@ -554,37 +561,93 @@ describe("Discover download as a standard job", () => {
         expect.objectContaining({ job_id: jobId(), status: "running" }),
       ]),
     );
-    expect(screen.getByText(/Preparing download for/)).toBeInTheDocument();
-    expect(row().queryByRole("button", { name: "Save SRT" })).toBeNull();
-    setJob(jobId(), { status: "completed" });
-    emitJob(jobId());
-    expect(
-      await screen.findByText(/Ready to save Breaking Bad S02 E01/),
-    ).toBeInTheDocument();
-    expect(row().getByRole("button", { name: "Save SRT" })).toBeEnabled();
-    // The standard job notification, with the job's own action.
-    const toast = await findJobToast(`Download ${requests[0].result}`);
-    expect(within(toast).getByText("Ready to save")).toBeInTheDocument();
-    expect(within(toast).getByRole("button", { name: "Save" })).toBeEnabled();
-    // Nothing is fetched or saved without a click.
     expect(tickets).toEqual([]);
-    expect(save).not.toHaveBeenCalled();
-  });
-
-  it("saves from the notification by fetching the ticket, then saveBlobAs", async () => {
-    const { user } = renderDiscover();
-    await search(user);
-    await user.click(row().getByRole("button", { name: "Download SRT" }));
-    const toast = await findJobToast(`Download search-1-forced`);
-    await user.click(within(toast).getByRole("button", { name: "Save" }));
+    setJob(jobId(), { status: "completed" });
+    // The terminal event runs both the row and the generic job outcome.
+    emitJob(jobId());
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
     expect(tickets).toEqual([jobId()]);
     expect(save.mock.calls[0][0]).toBeInstanceOf(Blob);
     expect(save.mock.calls[0][0].size).toBe(forcedSrt.length);
     expect(save.mock.calls[0][1]).toBe("Breaking_Bad.S02E01.eng.forced.srt");
+    expect(await row().findByText("Saved")).toBeInTheDocument();
     expect(
-      await screen.findByText(/Download started for Breaking Bad S02 E01/),
+      screen.getByText(/Saved to your device: Breaking Bad S02 E01/),
     ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save SRT" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Save downloaded subtitle" }),
+    ).toBeNull();
+    // A short confirmation, and no "Ready to save" notification with Save.
+    const toast = await findJobToast("Breaking_Bad.S02E01.eng.forced.srt");
+    expect(within(toast).queryByRole("button", { name: "Save" })).toBeNull();
+    expect(screen.queryByText("Ready to save")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+  });
+
+  it("saves once when the completion is reported again", async () => {
+    const { user } = renderDiscover();
+    await search(user);
+    await user.click(row().getByRole("button", { name: "Download SRT" }));
+    await row().findByText("Saved");
+    // A repeated terminal event and a jobs refetch both report it again.
+    emitJob(jobId());
+    act(() =>
+      queryClient.setQueryData(
+        [QueryKeys.System, QueryKeys.Jobs],
+        [jobs.get(jobId())],
+      ),
+    );
+    await waitFor(() => expect(tickets).toHaveLength(1));
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("Ready to save")).toBeNull();
+  });
+
+  it("offers Save with a notification when the automatic save fails, and Save then works", async () => {
+    let refuse = true;
+    server.use(
+      ...handlers({
+        ticket: () => (refuse ? HttpResponse.error() : undefined),
+      }),
+    );
+    const { user } = renderDiscover();
+    await search(user);
+    await user.click(row().getByRole("button", { name: "Download SRT" }));
+    const toast = await findJobToast("The subtitle was not saved");
+    expect(toast).toHaveTextContent(/Use Save to try again/);
+    expect(screen.getByText(/Not saved yet: Breaking Bad S02 E01/));
+    expect(save).not.toHaveBeenCalled();
+    refuse = false;
+    await user.click(row().getByRole("button", { name: "Save SRT" }));
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    expect(tickets).toEqual([jobId(), jobId()]);
+    expect(await row().findByText("Saved")).toBeInTheDocument();
+    expect(row().queryByRole("button", { name: "Save SRT" })).toBeNull();
+  });
+
+  it("keeps Save in the notification and the drawer for a job this page did not start", async () => {
+    const { user } = renderDiscover();
+    await search(user);
+    // A download started earlier, then the page was left and reloaded.
+    await user.click(row().getByRole("button", { name: "Download SRT" }));
+    await row().findByText("Saved");
+    save.mockClear();
+    // Far from the harness's own ids, which keep counting up.
+    const other = 90000 + jobId();
+    jobs.set(other, {
+      ...jobs.get(jobId())!,
+      job_id: other,
+      job_name: "Download from an earlier visit",
+    });
+    setJob(other, { status: "completed" });
+    emitJob(other);
+    const toast = await findJobToast("Download from an earlier visit");
+    expect(within(toast).getByText("Ready to save")).toBeInTheDocument();
+    expect(save).not.toHaveBeenCalled();
+    await user.click(within(toast).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    expect(tickets.at(-1)).toBe(other);
+    jobs.delete(other);
   });
 
   it("shows the classified failure in the notification and the row, and Retry follows the retried job", async () => {
@@ -611,38 +674,10 @@ describe("Discover download as a standard job", () => {
     await user.click(within(toast).getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(jobId()).toBe(failed + 1));
     expect(jobs.get(jobId())?.retry_of).toBe(failed);
-    expect(
-      await screen.findByText(/Ready to save Breaking Bad S02 E01/),
-    ).toBeInTheDocument();
-    await user.click(row().getByRole("button", { name: "Save SRT" }));
+    // The retried job saves itself as well.
+    expect(await row().findByText("Saved")).toBeInTheDocument();
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
     expect(tickets).toEqual([jobId()]);
-  });
-
-  it("fails the row when Save from the notification finds the ticket gone", async () => {
-    server.use(
-      ...handlers({
-        ticket: () =>
-          HttpResponse.json(
-            {
-              message:
-                "This download is no longer available. Download it again from the results.",
-              reason: "ticket_expired",
-            },
-            { status: 404 },
-          ),
-      }),
-    );
-    const { user } = renderDiscover();
-    await search(user);
-    await user.click(row().getByRole("button", { name: "Download SRT" }));
-    const toast = await findJobToast(`Download search-1-forced`);
-    await user.click(within(toast).getByRole("button", { name: "Save" }));
-    expect(await screen.findByText(/Download failed for/)).toHaveTextContent(
-      /no longer available\. Download it again/,
-    );
-    expect(row().queryByRole("button", { name: "Save SRT" })).toBeNull();
-    expect(save).not.toHaveBeenCalled();
   });
 
   it("releases the row when its queued job is cancelled from the Jobs drawer", async () => {

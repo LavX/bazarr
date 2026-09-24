@@ -267,7 +267,6 @@ it("downloads the exact raw row and recovers 410 with the original query and lan
   const { user } = renderDiscover();
   await rawSearch(user);
   await user.click(screen.getByRole("button", { name: "Download SRT" }));
-  await user.click(await screen.findByRole("button", { name: "Save SRT" }));
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
   expect(save.mock.calls[0][0].size).toBe(srt.length);
   expect(save.mock.calls[0][1]).toBe(`${query}.en.forced.srt`);
@@ -275,7 +274,7 @@ it("downloads the exact raw row and recovers 410 with the original query and lan
     result: "raw-1-forced",
     search: "raw-1",
   });
-  expect(await screen.findByText(/Download started for/)).toHaveTextContent(
+  expect(await screen.findByText(/Saved to your device:/)).toHaveTextContent(
     `${query} (unverified release query) · eng`,
   );
   server.use(
@@ -317,8 +316,7 @@ it("preserves both mode inputs and retires incompatible results and feedback", a
   await user.click(screen.getByRole("button", { name: "Find subtitles" }));
   await screen.findByRole("heading", { name: `${query}.forced` });
   await user.click(screen.getByRole("button", { name: "Download SRT" }));
-  await user.click(await screen.findByRole("button", { name: "Save SRT" }));
-  await screen.findByText(/Download started for/);
+  await screen.findByText(/Saved to your device:/);
   await user.click(
     screen.getByRole("button", { name: "Return to identified title" }),
   );
@@ -327,7 +325,7 @@ it("preserves both mode inputs and retires incompatible results and feedback", a
   expect(
     screen.queryByRole("button", { name: "Download SRT" }),
   ).not.toBeInTheDocument();
-  expect(screen.queryByText(/Download started for/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/Saved to your device:/)).not.toBeInTheDocument();
   await openReleaseSearch(user);
   await screen.findByLabelText("Release name");
   expect(screen.getByLabelText("Release name")).toHaveValue(query);
@@ -344,8 +342,7 @@ it("keeps the active release draft and handles when accepted metadata reconciles
   expect(screen.getByLabelText("Release name")).toHaveValue(query);
   expect(screen.getByRole("button", { name: "Download SRT" })).toBeEnabled();
   await user.click(screen.getByRole("button", { name: "Download SRT" }));
-  await user.click(await screen.findByRole("button", { name: "Save SRT" }));
-  await screen.findByText(/Download started for/);
+  await screen.findByText(/Saved to your device:/);
   expect(searches).toHaveLength(1);
   await user.click(
     screen.getByRole("button", { name: "Return to identified title" }),
