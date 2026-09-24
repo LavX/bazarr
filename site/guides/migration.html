@@ -270,7 +270,7 @@ fi</code></pre>
 
       <p>The backup puts everything back as it was before the migration, including your old password, so there is nothing to reset. Changes you made in Bazarr+ after migrating do not come back with it.</p>
 
-      <p>If you did not keep a backup and want to revert, there are a few things to be aware of. The password hash in <code>config/config.yaml</code> under <code>auth.password</code> will be in PBKDF2 format, which upstream cannot read. Clear the password field to reset it. Additionally, the <code>series_scores</code> and <code>movie_scores</code> config sections are deleted by Bazarr+, <code>gemini_key</code> is migrated to a <code>gemini_keys</code> list, and the <code>analytics</code> section is removed.</p>
+      <p>If you did not keep a backup and want to revert, there are a few things to be aware of. The password hash in <code>config/config.yaml</code> inside your config directory (<code>./config/config/config.yaml</code> in the commands above) under <code>auth.password</code> will be in PBKDF2 format, which upstream cannot read. Clear the password field to reset it. Additionally, the <code>series_scores</code> and <code>movie_scores</code> config sections are deleted by Bazarr+, <code>gemini_key</code> is migrated to a <code>gemini_keys</code> list, and the <code>analytics</code> section is removed.</p>
 
       <h2 id="next-steps">Next steps</h2>
       <ul>

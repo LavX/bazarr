@@ -361,14 +361,17 @@ detect_database() {
 }
 
 # Runs pg_dump inside the database container as its superuser, so no password is put on
-# a command line here. A dump that fails or comes out empty is removed, not kept.
+# a command line here. A dump that fails or comes out empty is removed, not kept. The dump
+# holds secrets, so it is created 0600 (umask 077 in a subshell, so the rest of the script
+# keeps its umask).
 dump_postgres() {
   local compose="$1" service="$2" database="$3" file="$4"
   # The redirect runs as this user on purpose: the backup folder is this user's.
   # shellcheck disable=SC2024
-  if sudo docker compose -f "$compose" exec -T "$service" sh -c \
-       'PGPASSWORD="${POSTGRES_PASSWORD:-}" exec pg_dump --username="${POSTGRES_USER:-postgres}" --no-password --format=custom --dbname="$1"' \
-       sh "$database" > "$file" && [[ -s "$file" ]]; then
+  if ( umask 077
+       sudo docker compose -f "$compose" exec -T "$service" sh -c \
+         'PGPASSWORD="${POSTGRES_PASSWORD:-}" exec pg_dump --username="${POSTGRES_USER:-postgres}" --no-password --format=custom --dbname="$1"' \
+         sh "$database" > "$file" ) && [[ -s "$file" ]]; then
     return 0
   fi
   rm -f "$file"
@@ -402,7 +405,8 @@ do_backup() {
     confirm "Continue without a database backup?" \
       || { info "Nothing was upgraded or reinstalled. Back up the database, then run the installer again."; exit 0; }
   fi
-  mkdir -p "$backup" || fatal "Cannot create backup directory: $backup"
+  # 0700: the backup holds .env, config.yaml and possibly a database dump, all with secrets.
+  ( umask 077 && mkdir -p "$backup" ) || fatal "Cannot create backup directory: $backup"
   cp -a "$compose" "$backup/" || fatal "Could not back up docker-compose.yml. Nothing was changed."
   if [[ -f "$dir/.env" ]]; then
     cp -a "$dir/.env" "$backup/" || fatal "Could not back up .env. Nothing was changed."
@@ -801,7 +805,8 @@ ENC_KEY=""
 write_env "$INSTALL_DIR" "$PUID" "$PGID" "$TZ" "$API_KEY" "$ENC_KEY"
 success "Created .env (mode 600)"
 
-generate_config "$INSTALL_DIR"
+# ./config is mounted as /config, and Bazarr+ reads /config/config/config.yaml.
+generate_config "$INSTALL_DIR/config"
 
 generate_compose "$BAZARR_PORT" "$MOVIES_PATH" "$TV_PATH" "$TRANSLATOR" "$TRANSLATOR_PORT" "$FLARESOLVERR" \
   > docker-compose.yml
