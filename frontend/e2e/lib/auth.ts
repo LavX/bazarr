@@ -14,9 +14,15 @@ export function credentials(): { username: string; password: string } | null {
   return { username, password };
 }
 
-/** Logs in through the form when the app asks for it, and does nothing otherwise. */
+/**
+ * Logs in through the form when the app asks for it, and does nothing
+ * otherwise. It tries once: a wrong password fails here instead of being
+ * retried, because the instance locks the account after five failures.
+ */
 export async function loginIfAsked(page: Page): Promise<void> {
-  const password = page.getByLabel("Password");
+  // By role: the label matches the "Toggle password visibility" button too,
+  // and its required asterisk rules out an exact label match.
+  const password = page.getByRole("textbox", { name: "Password" });
   await page.goto("/");
   // The login form, or any screen the app opens on once no login is needed.
   await expect(password.or(page.getByRole("heading").first())).toBeVisible();
@@ -27,7 +33,7 @@ export async function loginIfAsked(page: Page): Promise<void> {
       "this instance asks for a login: set BAZARR_E2E_USER and BAZARR_E2E_PASSWORD",
     );
   }
-  await page.getByLabel("Username").fill(login.username);
+  await page.getByRole("textbox", { name: "Username" }).fill(login.username);
   await password.fill(login.password);
   await page.getByRole("button", { name: "Login" }).click();
   await expect(password).toBeHidden();

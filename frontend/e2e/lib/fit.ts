@@ -5,8 +5,14 @@
 import type { Page } from "@playwright/test";
 import { expect } from "@playwright/test";
 
+/**
+ * The window every spec runs in unless it sets its own: full HD minus browser
+ * chrome, the size the app is designed for.
+ */
+export const SUITE_VIEWPORT = { width: 1920, height: 940 };
+
 /** The window the wizard is designed to fit without scrolling. */
-export const WIZARD_VIEWPORT = { width: 1920, height: 940 };
+export const WIZARD_VIEWPORT = SUITE_VIEWPORT;
 
 interface FitReport {
   /** How far the document runs past the bottom of the window, in pixels. */

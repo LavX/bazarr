@@ -32,8 +32,14 @@ export async function openTitle(page: Page, query: string, title: string) {
 
 /** Picks the subtitle language on a title page. */
 export async function chooseLanguage(page: Page, language: string) {
-  await page.getByRole("combobox", { name: "Subtitle language" }).click();
-  await page.getByRole("option", { name: language, exact: true }).click();
+  const control = page.getByRole("combobox", { name: "Subtitle language" });
+  // The picker sits below the fold on a title page, and its dropdown opens
+  // where the control is, so bring the control up first.
+  await control.scrollIntoViewIfNeeded();
+  await control.click();
+  const option = page.getByRole("option", { name: language, exact: true });
+  await option.scrollIntoViewIfNeeded();
+  await option.click();
   await expect(
     page.getByRole("combobox", { name: "Subtitle language" }),
   ).toHaveValue(language);

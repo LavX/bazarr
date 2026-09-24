@@ -8,6 +8,7 @@
  * A spec is stateful when its describe block carries the @stateful tag.
  */
 import { defineConfig, devices } from "@playwright/test";
+import { SUITE_VIEWPORT } from "./e2e/lib/fit";
 
 const CI = !!process.env.CI;
 
@@ -30,6 +31,9 @@ export default defineConfig({
   ],
   use: {
     ...devices["Desktop Chrome"],
+    // The full HD window the app is designed for, minus browser chrome. A
+    // spec that needs another size sets its own with test.use.
+    viewport: SUITE_VIEWPORT,
     // Steps that guess from the browser, like the wizard's languages, guess
     // the same thing on every machine.
     locale: "en-US",

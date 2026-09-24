@@ -15,7 +15,9 @@
  * With BAZARR_E2E_URL set, both use that instance and no docker is involved.
  *
  * `baseURL` follows `bazarr`, so page.goto("/setup") just works, and `api` is
- * a request context that sends the API key on every call.
+ * a request context that sends the API key on every call. Against an instance
+ * with a login, every browser context starts with the session global setup
+ * signed in once for the run.
  */
 import type { BazarrInstance } from "@e2e/lib/container";
 import {
@@ -81,6 +83,10 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       };
     }
     await use(containerSlot.held.instance);
+  },
+
+  storageState: async ({ storageState }, use) => {
+    await use(process.env.BAZARR_E2E_STORAGE_STATE ?? storageState);
   },
 
   baseURL: async ({ bazarr }, use) => {
