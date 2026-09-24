@@ -116,7 +116,7 @@ export const whatsNew: Record<string, WhatsNewSlide[]> = {
     },
     {
       title: "Discover shows subtitles while the search is still running",
-      body: "A search across 36 providers used to show nothing until the last one answered, although the progress bar was already counting results. Rows now appear as each provider finishes, in the order they arrive, and you can download one while the rest are still working: on a real install the first rows landed at 6 seconds on a search that finished at 21. Providers are reported honestly too, so one that never got to run is no longer recorded as a timeout, and a failing site now backs off the way it does for a library search instead of being hit again every minute.",
+      body: "A search across dozens of providers used to show nothing until the last one answered, although the progress bar was already counting results. Rows now appear as each provider finishes, in the order they arrive, and you can download one while the rest are still working: on a real install the first rows landed at 6 seconds on a search that finished at 21. Providers are reported honestly too, so one that never got to run is no longer recorded as a timeout, and a failing site now backs off the way it does for a library search instead of being hit again every minute.",
       icon: faMagnifyingGlass,
       cta: { label: "Open Discover", to: "/discover" },
     },
@@ -133,7 +133,7 @@ export const whatsNew: Record<string, WhatsNewSlide[]> = {
     },
     {
       title: "The setup wizard can install the providers that need no account",
-      body: "A fresh install used to show 62 provider checkboxes with nothing to say which of them work without signing up for something. The Providers step now leads with one action that installs and enables every provider needing no account, no configuration and no helper service, and it names the count before you click: 36 on the catalog as it stands. The set is read off the catalog manifests rather than kept in a list, so it stays right as the catalog changes, and anything it leaves out is still one tick away in the same list.",
+      body: "A fresh install used to show a long list of provider checkboxes with nothing to say which of them work without signing up for something. The Providers step now leads with one action that installs and enables every provider needing no account, no configuration and no helper service, and it names the count before you click. The set is read off the catalog manifests rather than kept in a list, so it stays right as the catalog changes, and anything it leaves out is still one tick away in the same list.",
       icon: faStore,
       cta: { label: "Open Subtitle Hub", to: "/subtitle-hub" },
     },
@@ -145,7 +145,7 @@ export const whatsNew: Record<string, WhatsNewSlide[]> = {
     },
     {
       title: "Request a title in Seerr from Discover",
-      body: "If you run Overseerr, Jellyseerr or Seerr, a title page says what Seerr already knows and offers the matching action: request it, pick seasons, or nothing at all when it is already available or blocklisted. A series opens a season picker that keeps what Seerr holds, what you already own and what is left to request apart. Bazarr+ never approves anything: the request is made as the Seerr owner and approval stays in Seerr.",
+      body: "If you run Overseerr, Jellyseerr or Seerr, a title page says what Seerr already knows and offers the matching action: request it, pick seasons, or nothing at all when it is already available or blocklisted. A series opens a season picker that keeps what Seerr holds, what you already own and what is left to request apart. Bazarr+ never approves anything itself, but requests are made as the Seerr owner, which Seerr approves immediately, and the page says so beside the action.",
       icon: faPaperPlane,
       cta: { label: "Open Connections", to: "/settings/connections" },
     },
