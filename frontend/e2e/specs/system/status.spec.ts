@@ -1,13 +1,19 @@
 /* eslint-disable camelcase -- API bodies keep their transport field names. */
 /**
  * System > Status lists what this install actually runs. An integration that
- * is not set up has no row at all, not an empty or "not configured" one.
+ * is not set up has no row at all, not an empty or "not configured" one. The
+ * first test reads what is configured, so it holds on a fresh container (no
+ * rows) and on a real install alike.
  */
 import { expect, test } from "@e2e/fixtures";
 import { skipWhatsNew } from "@e2e/lib/whatsNew";
 import type { APIRequestContext, Page } from "@playwright/test";
 
-const ARR_ROWS = ["Sonarr Version", "Radarr Version", "Sportarr Version"];
+const ARR_KINDS = [
+  { kind: "sonarr", row: "Sonarr Version" },
+  { kind: "radarr", row: "Radarr Version" },
+  { kind: "sportarr", row: "Sportarr Version" },
+];
 const MEDIA_SERVER_ROW = /^(Plex|Jellyfin|Emby|Silo) Version/;
 
 async function openStatus(page: Page, bazarrVersion: string) {
@@ -32,17 +38,59 @@ test.beforeEach(async ({ page }) => {
   await skipWhatsNew(page);
 });
 
+/**
+ * The arr and media server rows the page should show, worked out from what
+ * the install has configured: a product switched on, an enabled instance of
+ * it, and for an arr the version it reported. A fresh container has none.
+ */
+async function expectedRows(api: APIRequestContext) {
+  const [settings, arrs, servers, status] = await Promise.all(
+    [
+      "/api/system/settings",
+      "/api/system/arr-instances",
+      "/api/system/media-server-instances",
+      "/api/system/status",
+    ].map(async (path) => {
+      const response = await api.get(path);
+      expect(response.ok(), path).toBe(true);
+      return response.json();
+    }),
+  );
+  const general = (settings as { general: Record<string, unknown> }).general;
+  const arrInstances = arrs as { kind: string; enabled: boolean }[];
+  const versions = (status as { data: Record<string, unknown> }).data;
+  const arrRows = ARR_KINDS.filter(
+    ({ kind }) =>
+      general[`use_${kind}`] === true &&
+      arrInstances.some((i) => i.kind === kind && i.enabled) &&
+      !!versions[`${kind}_version`],
+  ).map(({ row }) => row);
+  const mediaServers = (
+    servers as {
+      data: { kind: string; enabled: boolean; api_key_set: boolean }[];
+    }
+  ).data.filter(
+    (s) => s.enabled && s.api_key_set && general[`use_${s.kind}`] === true,
+  ).length;
+  return { arrRows, mediaServers };
+}
+
 test.describe("system status", { tag: ["@status"] }, () => {
-  test("an install without arr or media servers shows only Bazarr+ itself", async ({
+  test("arr and media server rows appear exactly for what is configured", async ({
     page,
     api,
   }) => {
+    const expected = await expectedRows(api);
     await openStatus(page, await bazarrVersion(api));
 
-    for (const row of ARR_ROWS) {
-      await expect(page.getByText(row, { exact: true })).toHaveCount(0);
+    for (const { row } of ARR_KINDS) {
+      await expect(page.getByText(row, { exact: true })).toHaveCount(
+        expected.arrRows.includes(row) ? 1 : 0,
+      );
     }
-    await expect(page.getByText(MEDIA_SERVER_ROW)).toHaveCount(0);
+    await expect(page.getByText(MEDIA_SERVER_ROW)).toHaveCount(
+      expected.mediaServers,
+    );
     await expect(page.getByText(/not configured/i)).toHaveCount(0);
   });
 });
@@ -83,7 +131,7 @@ test.describe(
       await expect(page.getByText("Unreachable", { exact: true })).toBeVisible({
         timeout: 20_000,
       });
-      for (const row of ARR_ROWS) {
+      for (const { row } of ARR_KINDS) {
         await expect(page.getByText(row, { exact: true })).toHaveCount(0);
       }
     });

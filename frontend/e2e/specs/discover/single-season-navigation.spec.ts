@@ -8,10 +8,10 @@ import { ensureRecommendedProviders } from "@e2e/lib/providers";
 
 test.describe(
   "Discover title navigation",
-  { tag: ["@discover", "@live"] },
+  { tag: ["@stateful", "@discover", "@live"] },
   () => {
-    // Nothing here searches a provider, but the install restarts the shared
-    // instance, so waiting for it keeps this spec off a restarting backend.
+    // Nothing here searches a provider, but Discover needs them installed.
+    // The install changes settings and restarts Bazarr, hence @stateful.
     test.beforeEach(async ({ api, bazarr }) => {
       await ensureRecommendedProviders(api, bazarr, test.info());
     });

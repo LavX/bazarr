@@ -115,8 +115,9 @@ kept in memory. It is never printed or written anywhere.
    an assertion, 10 s an action); give a slow step its own cap instead of
    raising them.
 5. For layout, `expectFitsViewport(page)` from `@e2e/lib/fit` fails when the
-   page scrolls or any scroll container hides content. Wizard specs use
-   `WIZARD_VIEWPORT` (1920x940).
+   page scrolls or any scroll container hides content. Every spec runs at
+   1920x940, full HD minus browser chrome (`SUITE_VIEWPORT`); a spec that
+   needs another size sets it with `test.use({ viewport })`.
 
 Helpers live in `frontend/e2e/lib/`: `container.ts` starts and stops
 instances, `wizard.ts` walks the onboarding steps, `auth.ts` logs in, and
@@ -129,17 +130,38 @@ example, arrives with English already selected.
 ## Pointing at an existing instance
 
 Set `BAZARR_E2E_URL` and no container is started; every spec runs against that
-instance instead. Stateful specs change it, so only point them at an instance
-you can reset.
+instance instead.
+
+| Variable              | Meaning                                                        |
+| --------------------- | -------------------------------------------------------------- |
+| `BAZARR_E2E_URL`      | The instance to test, for example `https://bazarr.example.lan` |
+| `BAZARR_E2E_API_KEY`  | Its API key. Required when authentication is on                |
+| `BAZARR_E2E_USER`     | The login username, for an instance with form authentication   |
+| `BAZARR_E2E_PASSWORD` | The login password, set together with `BAZARR_E2E_USER`        |
 
 ```sh
 BAZARR_E2E_URL=https://bazarr.example.lan \
 BAZARR_E2E_API_KEY=... \
-npm run e2e -- --grep @status
+BAZARR_E2E_USER=... \
+BAZARR_E2E_PASSWORD=... \
+npm run e2e -- --grep @status --grep-invert "@stateful|@live"
 ```
 
 Without `BAZARR_E2E_API_KEY` the key is read from the instance's page, which
-only works when authentication is off. With form authentication on, set
-`BAZARR_E2E_USER` and `BAZARR_E2E_PASSWORD` and call `loginIfAsked(page)` from
-`@e2e/lib/auth` before the first page. Keep these values in your shell or a
-secret store, never in a spec or a commit.
+only works when authentication is off.
+
+With `BAZARR_E2E_USER` set, global setup signs in through the login form once
+for the whole run and every browser context starts with that session, so specs
+need no login step of their own. It makes one attempt and fails the run on a
+wrong password instead of trying again, because the instance locks the account
+after five failures. Check the credentials before a second run.
+
+Against a real install, only specs tagged neither `@stateful` nor `@live` are
+safe: those specs only read, or clean up after themselves, and the Status spec
+expects exactly the arr and media server rows the instance has configured.
+`@stateful` specs change settings, add connections, install providers, restart
+Bazarr and run onboarding, so point them only at an instance you can throw
+away. `@live` specs need the real provider network, and every one of them is
+also `@stateful`. Add `--grep-invert "@stateful|@live"` to any run against an
+install you care about. Keep the credentials in your shell or a secret
+store, never in a spec or a commit.
