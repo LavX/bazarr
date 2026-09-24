@@ -1,5 +1,5 @@
 import { chromium } from "@playwright/test";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { credentials, loginIfAsked } from "./lib/auth";
@@ -25,8 +25,12 @@ export default async function globalSetup() {
       locale: "en-US",
     });
     await loginIfAsked(await context.newPage());
+    // Only the session cookie. The app writes to local storage as soon as it
+    // loads (What's New marks the release seen when it opens), and carrying
+    // that into every context would hide first-load behaviour from the specs.
     const path = join(runDir, "login.json");
-    await context.storageState({ path });
+    const { cookies } = await context.storageState();
+    await writeFile(path, JSON.stringify({ cookies, origins: [] }));
     process.env.BAZARR_E2E_STORAGE_STATE = path;
   } finally {
     await browser.close();
