@@ -105,6 +105,17 @@ npm test
 npm test -- Translator
 ```
 
+Before you open a pull request, run the checks CI will run, in parallel:
+
+```bash
+scripts/ci/run-local.sh                  # everything
+scripts/ci/run-local.sh --backend-only   # or --frontend-only, or --python 3.12
+```
+
+It needs Docker for a throwaway PostgreSQL. [docs/agents/ci.md](docs/agents/ci.md)
+describes the pipeline, the one check a pull request has to pass (`ci-ok`), and
+where a new test file has to be listed.
+
 When to include tests:
 - New features: add tests covering the core behavior
 - Bug fixes: add a test that reproduces the bug and verifies the fix
