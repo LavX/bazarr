@@ -269,3 +269,74 @@ def test_existing_database_upgrade_seeds_bounded_metadata_and_rollback(revision_
     with engine.connect() as connection:
         assert ownership_revision(connection) == previous
         assert connection.execute(sa.text("SELECT count(*) FROM subtitle_ownership_changes WHERE table_name='table_movies'")).scalar_one() == 0
+
+
+def test_publication_waits_for_an_install_in_progress_instead_of_refusing(
+    revision_library, monkeypatch
+):
+    """The publication boundary installs missing triggers one statement at a
+    time on the AUTOCOMMIT app session, so a second publication can read the
+    set half written. That is an install still running, not a drifted
+    definition: it has to wait for the install lock and then pass, instead of
+    refusing with "protection is unavailable"."""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event, RLock, current_thread
+    from sqlalchemy.orm import scoped_session, sessionmaker
+    from app import ownership_revision as revision
+
+    engine = revision_library
+    with engine.connect() as connection:
+        for table in revision.OWNER_TABLES:
+            if engine.dialect.name == "postgresql":
+                for name in ("ownership_revision", "ownership_revision_truncate"):
+                    connection.execute(sa.text(f'DROP TRIGGER {name} ON "{table}"'))
+            else:
+                for action in ("INSERT", "UPDATE", "DELETE"):
+                    name = revision._sqlite_trigger(table, action)[0]
+                    connection.execute(sa.text(f'DROP TRIGGER "{name}"'))
+
+    def installing():
+        return current_thread().name.startswith("installer")
+
+    partial = Event()  # the installer has committed only part of the set
+    queued = Event()  # the second publication reached the install lock
+
+    def pause_after_first_trigger(conn, cursor, statement, *args):
+        if installing() and "CREATE TRIGGER" in statement and not partial.is_set():
+            partial.set()
+            queued.wait(timeout=30)
+
+    class ObservedLock:
+        inner = RLock()
+
+        def __enter__(self):
+            if not installing():
+                queued.set()
+            self.inner.acquire()
+
+        def __exit__(self, *exc):
+            self.inner.release()
+
+    monkeypatch.setattr(revision, "_install_lock", ObservedLock())
+    sa.event.listen(engine, "after_cursor_execute", pause_after_first_trigger)
+    sessions = scoped_session(sessionmaker(bind=engine))
+
+    def publish():
+        try:
+            revision.ensure_ownership_protection(sessions())
+        finally:
+            sessions.remove()
+
+    try:
+        with ThreadPoolExecutor(1, thread_name_prefix="installer") as pool:
+            installer = pool.submit(publish)
+            assert partial.wait(timeout=30)
+            try:
+                publish()
+            finally:
+                queued.set()
+            installer.result(timeout=30)
+    finally:
+        sa.event.remove(engine, "after_cursor_execute", pause_after_first_trigger)
+    with Session(engine) as session:
+        revision.verify_ownership_protection(session)

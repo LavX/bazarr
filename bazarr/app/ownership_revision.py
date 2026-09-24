@@ -217,13 +217,19 @@ def ensure_ownership_protection(session):
     match is a definition this code did not write, and the snapshot it fed may
     already be wrong, so the publication refuses rather than overwriting the
     evidence.
+
+    That call is only made under the lock. The install below runs one
+    statement at a time on the caller's session, which is usually the app one
+    on an AUTOCOMMIT engine, so a publication on another thread can read the
+    set half written while it runs. Outside the lock a partial set is either a
+    foreign definition or an install still in progress, and refusing it there
+    turned the second of two concurrent publications into a spurious failure.
     """
     try:
         verify_ownership_protection(session)
         return
     except ValueError:
-        if ownership_triggers_present(session):
-            raise
+        pass
     with _install_lock:
         try:
             verify_ownership_protection(session)
