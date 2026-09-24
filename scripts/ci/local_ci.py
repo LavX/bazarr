@@ -10,8 +10,11 @@ and the per-file isolation loops are unrolled so their files run in parallel,
 each in its own pytest process and against its own database.
 
 The frontend runs the steps of the Frontend build and Frontend checks jobs as
-written, and the unit tests as one `vitest run --coverage`, which is the same
-tests and the same coverage floor the sharded CI jobs check after merging.
+written. The unit tests run the way CI runs them: every shard of the Frontend
+tests job writes its blob report, and the Frontend coverage step then merges
+the reports and checks the coverage floor, both as written in ci.yml. The shards
+write into the folder their job uploads and the coverage job downloads into,
+so a report that lands anywhere else fails here as it fails in CI.
 """
 
 import argparse
@@ -19,6 +22,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -48,7 +52,7 @@ class Task:
     env: dict = field(default_factory=dict)
     weight: int = 1
     needs_db: bool = False
-    after: str = ""
+    after: tuple = ()
     kind: str = "step"
     key: str = ""
     # Filled in while running.
@@ -108,6 +112,70 @@ def _is_setup(script: str) -> bool:
     return first.startswith(("sudo apt-get", "pip install -r", "npm install", "npm ci"))
 
 
+def _ui_path(path: str, frontend_dir: Path) -> Path:
+    return Path(path.replace("${{ env.UI_DIRECTORY }}", str(frontend_dir)))
+
+
+def _step(job: dict, predicate) -> dict:
+    return next(step for step in job.get("steps") or [] if predicate(step))
+
+
+def _runs_vitest(step: dict) -> bool:
+    return isinstance(step.get("run"), str) and "vitest" in step["run"]
+
+
+def _uses(action: str):
+    return lambda step: str(step.get("uses", "")).startswith(action + "@")
+
+
+def frontend_test_tasks(args, jobs: dict, frontend_dir: Path, work: Path) -> list:
+    """The Frontend tests shards and the Frontend coverage merge, as CI runs them.
+
+    Every shard runs the job's vitest step with its matrix value filled in, and
+    must leave a file in the folder the job uploads, as the upload's
+    `if-no-files-found: error` requires. The coverage step then runs as written,
+    after all of them, in the folder the coverage job downloads the reports to.
+    """
+    tests, coverage = jobs["frontend-tests"], jobs["frontend-coverage"]
+    upload = _step(tests, _uses("actions/upload-artifact"))
+    download = _step(coverage, _uses("actions/download-artifact"))
+    reports = _ui_path(upload["with"]["path"], frontend_dir)
+    if reports != _ui_path(download["with"]["path"], frontend_dir):
+        raise SystemExit("Frontend tests uploads its blob reports from a different folder "
+                         "than Frontend coverage downloads them to")
+    # Reports left by an earlier run must not stand in for a shard that fails
+    # to write one.
+    shutil.rmtree(reports, ignore_errors=True)
+
+    shard_step = _step(tests, _runs_vitest)
+    shards = [str(shard) for shard in tests["strategy"]["matrix"]["shard"]]
+    group = re.sub(r"\s*\$\{\{ matrix\.shard \}\}.*$", "", _job_name("frontend-tests", tests, args.python))
+    uploaded = (f'test -n "$(ls -A {shlex.quote(str(reports))} 2>/dev/null)" || '
+                f'{{ echo "No files were found with the provided path: {reports}"; exit 1; }}')
+    # The shards share the workers that one vitest run is given, so the tests
+    # load the machine no more than a single run would; three shards at full
+    # width each starved the slower tests past their timeouts.
+    workers = max(1, -(-args.vitest_workers // len(shards)))
+    tasks = []
+    for shard in shards:
+        name = shard_step.get("name", "step").replace("${{ matrix.shard }}", shard)
+        # A coverage folder of its own for each shard, because vitest empties
+        # that folder when it starts and the shards run side by side here.
+        script = (shard_step["run"].replace("${{ matrix.shard }}", shard)
+                  + f" --coverage.reportsDirectory={shlex.quote(str(work / f'coverage-{shard}'))}"
+                  + f" --maxWorkers={workers}\n" + uploaded)
+        tasks.append(Task(group, name, ["bash", "-e", "-c", script], cwd=frontend_dir,
+                          weight=workers, kind="vitest", key=f"{group}: {name}"))
+
+    merge_step = _step(coverage, _runs_vitest)
+    merge_group = _job_name("frontend-coverage", coverage, args.python)
+    name = merge_step.get("name", "step")
+    tasks.append(Task(merge_group, name, ["bash", "-e", "-c", merge_step["run"]],
+                      cwd=frontend_dir, after=tuple(task.key for task in tasks),
+                      key=f"{merge_group}: {name}"))
+    return tasks
+
+
 def _free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -136,13 +204,7 @@ def build_tasks(args, workflow: dict, work: Path) -> list:
         raise SystemExit(f"ci.yml has no step called {ui!r} any more; update {__file__}")
 
     if args.mode != "backend":
-        tasks.append(Task(
-            "Frontend tests and coverage",
-            "vitest run --coverage",
-            ["npx", "vitest", "run", "--coverage", f"--maxWorkers={args.vitest_workers}"],
-            cwd=frontend_dir, weight=args.vitest_workers, kind="vitest",
-            key="vitest",
-        ))
+        tasks.extend(frontend_test_tasks(args, jobs, frontend_dir, work))
 
     if args.mode != "frontend":
         venv_bin = str(Path(args.venv) / "bin")
@@ -169,16 +231,16 @@ def build_tasks(args, workflow: dict, work: Path) -> list:
                     env["BAZARR_SMOKE_PORT"] = str(_free_port())
                     env["BAZARR_SMOKE_CONFIG"] = str(work / "startup-config")
                     tasks.append(Task(group, name, ["bash", str(ROOT / ".github/scripts/build_test.sh")],
-                                      env=env, after=ui, key=f"{group}: {name}"))
+                                      env=env, after=(ui,), key=f"{group}: {name}"))
                 elif re.search(r"^\s*for\s", script, flags=re.MULTILINE):
                     files, template, reference = _unroll_loop(script)
                     for path in files:
                         argv = [path if token == reference else token for token in template]
                         tasks.append(Task(group, path, argv, env=env, needs_db=needs_db,
-                                          after=ui, kind="loop", key=path))
+                                          after=(ui,), kind="loop", key=path))
                 else:
                     tasks.append(Task(group, name, ["bash", "-e", "-c", script], env=env,
-                                      needs_db=needs_db, after=ui, key=f"{group}: {name}"))
+                                      needs_db=needs_db, after=(ui,), key=f"{group}: {name}"))
 
     if args.mode == "all":
         docs_env = {"PATH": os.environ.get("PATH", "")}
@@ -240,12 +302,12 @@ def run(tasks: list, args, logs: Path, history: dict) -> None:
         while pending or running:
             used = sum(task.weight for task in running)
             for task in list(pending):
-                if task.after and task.after in failed_prerequisite:
+                if failed_prerequisite.intersection(task.after):
                     pending.remove(task)
                     task.returncode = -1
                     task.log = None
                     continue
-                if task.after and task.after not in done:
+                if not done.issuperset(task.after):
                     continue
                 weight = min(task.weight, capacity)
                 if used + weight > capacity:
