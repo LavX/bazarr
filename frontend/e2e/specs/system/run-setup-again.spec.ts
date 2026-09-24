@@ -44,10 +44,6 @@ test.describe("run first-time setup", { tag: ["@wizard", "@stateful"] }, () => {
     page,
     bazarr,
   }) => {
-    // Known defect: the wizard keeps its step in this browser's storage, and
-    // Run first-time setup does not clear it, so it reopens on Sonarr. Remove
-    // this line once it lands on Welcome.
-    test.fail();
     await runSetupAgain(page);
     await page.getByRole("button", { name: "Get started" }).click();
     await page.getByRole("radio", { name: INTENT.library }).click();
@@ -61,5 +57,19 @@ test.describe("run first-time setup", { tag: ["@wizard", "@stateful"] }, () => {
     await expect(page).toHaveURL(/\/settings\/general$/);
 
     await runSetupAgain(page);
+  });
+
+  test("Leave setup after running it again lands on Discover", async ({
+    page,
+    api,
+  }) => {
+    // Leaving navigated before the settings read came back, so the landing
+    // page read the old unfinished flag and reopened the wizard.
+    await runSetupAgain(page);
+    await page.getByRole("button", { name: "Set up later" }).click();
+    const dialog = page.getByRole("dialog", { name: "Leave setup?" });
+    await dialog.getByRole("button", { name: "Leave setup" }).click();
+    await expect(page).toHaveURL(/\/discover$/);
+    expect(await setupComplete(api)).toBe(true);
   });
 });

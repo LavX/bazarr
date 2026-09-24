@@ -2,6 +2,7 @@ import { FunctionComponent, useState } from "react";
 import { useNavigate } from "react-router";
 import { Alert, Button, Stack } from "@mantine/core";
 import { useSettingsMutation } from "@/apis/hooks";
+import { clearPersistedOnboarding } from "@/pages/Setup/setupCompleteCache";
 
 /**
  * The way back into the first-run wizard.
@@ -25,7 +26,12 @@ const RunSetupAgain: FunctionComponent = () => {
     mutation.mutate(
       { "settings-general-setup_complete": false },
       {
-        onSuccess: () => navigate("/setup"),
+        onSuccess: () => {
+          // A step, intent or draft this browser kept from an earlier run
+          // would reopen the wizard there instead of at Welcome.
+          clearPersistedOnboarding();
+          navigate("/setup");
+        },
         onError: () =>
           setError(
             "Bazarr+ could not reopen setup. Nothing has changed. Check that Bazarr+ is reachable and try again.",
