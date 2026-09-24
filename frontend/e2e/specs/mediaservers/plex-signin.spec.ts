@@ -10,13 +10,22 @@ import type { Page } from "@playwright/test";
 
 test.use({ viewport: WIZARD_VIEWPORT });
 
-test.describe("Plex sign-in", { tag: ["@mediaservers"] }, () => {
+// Asking Plex for a PIN stores this instance's Plex client identifier, so the
+// spec gets a container of its own.
+test.describe("Plex sign-in", { tag: ["@stateful", "@mediaservers"] }, () => {
   test("Connect to Plex starts sign-in or says Plex is unreachable", async ({
     page,
   }) => {
     const errors: string[] = [];
     page.on("console", (message) => {
-      if (message.type() === "error") errors.push(message.text());
+      if (message.type() !== "error") return;
+      // An unreachable plex.tv answers the PIN request with a 503, which the
+      // page handles with its notification. Chromium still logs the failed
+      // load itself, and that line is the browser's, not the app's.
+      const handledPinFailure =
+        message.text().startsWith("Failed to load resource") &&
+        message.location().url.includes("/api/plex/oauth/pin");
+      if (!handledPinFailure) errors.push(message.text());
     });
     page.on("pageerror", (error) => errors.push(error.message));
     const popups: Page[] = [];
