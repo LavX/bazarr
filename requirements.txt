@@ -2,12 +2,12 @@ setuptools>=84.0.0
 
 # Bazarr runtime dependencies
 aiohttp>=3.14.3
-alembic==1.19.1
+alembic==1.20.0
 apprise==1.13.1
 apscheduler==3.11.3
 babelfish==0.6.1
 beautifulsoup4==4.15.0
-cachetools>=7.1.8
+cachetools>=7.2.0
 certifi==2026.7.22
 chardet==7.6.0
 charset-normalizer==3.5.1
@@ -32,7 +32,7 @@ ffsubsync==0.5.1
 autosubsync==1.0.1
 filetype==1.2.0
 Flask==3.1.3
-Flask-Compress==1.24
+Flask-Compress==1.25
 flask-cors==6.0.5
 flask-migrate==4.1.0
 flask-restx==1.3.2
@@ -44,9 +44,9 @@ guessit==4.4.0
 itsdangerous==2.2.0
 json_tricks==3.17.3
 knowit==0.6.1
-lxml>=6.1.1  # XXE fix in iterparse / ETCompatXMLParser
+lxml>=6.1.3  # XXE fix in iterparse / ETCompatXMLParser
 msgpack==1.2.2  # GHSA-6v7p-g79w-8964 fix. signalrcore 1.0.2 over-pins msgpack==1.1.2 in its metadata, so it is installed with --no-deps (see Dockerfile, .github/workflows/ci.yml, bazarr/app/requirements.py). Bazarr forces the JSON SignalR protocol, so msgpack's MessagePack path is never used, and 1.2.1 is runtime-compatible with signalrcore 1.0.2 (verified).
-numpy>=2.5.2,<2.6.0  # cap excludes entire 2.4.x line: it raised the x86-64 baseline to v2, crashing pre-2009 CPUs (SIGILL on import). 2.4.0 itself is also yanked for an unrelated BC bug.
+numpy>=2.5.3,<2.6.0  # cap excludes entire 2.4.x line: it raised the x86-64 baseline to v2, crashing pre-2009 CPUs (SIGILL on import). 2.4.0 itself is also yanked for an unrelated BC bug.
 Pillow>=12.3.0 --only-binary=Pillow
 plexapi>=4.18.2
 py7zr==1.1.3  # GHSA-q6rc-2cgv-63h7 arbitrary-file-write fix (latest)

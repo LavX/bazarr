@@ -57,7 +57,7 @@ def test_flask_compress_is_loaded_from_python_environment_not_custom_libs():
 
     assert not custom_flask_compress_dir.exists()
     assert not flask_compress_path.is_relative_to(custom_flask_compress_dir)
-    assert "Flask-Compress==1.24" in requirements
+    assert "Flask-Compress==1.25" in requirements
     assert "Flask-Compress" not in custom_versions
 
 
