@@ -192,8 +192,10 @@ def test_persisted_auth_cooldown_retains_known_cause(authenticated_client, provi
     monkeypatch.setattr(get_providers, "get_providers_sorted", lambda: [])
     get_providers.tp["discover_auth"] = ("AuthenticationError", dt.datetime.now() + dt.timedelta(hours=1), "authentication")
     response = post(authenticated_client, {"media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
-    assert response["coverage"]["providers"][0]["status"] == "authentication_required"
-    assert response["coverage"]["providers"][0]["retry_at"] is not None
+    outcome = response["coverage"]["providers"][0]
+    # Held back by the table, so not asked: cooling down, with the cause kept.
+    assert (outcome["status"], outcome["reason"]) == ("cooldown", "authentication_required")
+    assert outcome["retry_at"] is not None
     assert providers.videos == []
 
 
@@ -233,8 +235,8 @@ def test_corrected_hub_credentials_release_the_auth_throttle(authenticated_clien
     get_providers.tp["discover_busy"] = ("TooManyRequests", until, "12 hours")
 
     before = post(authenticated_client, {"media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json
-    assert {item["provider"]: item["status"] for item in before["coverage"]["providers"]} == {
-        "discover_auth": "authentication_required", "discover_busy": "cooldown"}
+    assert {item["provider"]: (item["status"], item["reason"]) for item in before["coverage"]["providers"]} == {
+        "discover_auth": ("cooldown", "authentication_required"), "discover_busy": ("cooldown", "rate_limited")}
 
     response = authenticated_client.patch(
         "/api/provider-hub/providers/discover_auth",
@@ -1578,3 +1580,59 @@ def test_a_cooldown_defers_to_a_longer_deadline_recorded_after_it(authenticated_
         "media_type": "movie", "imdb_id": "tt0133093", "language": "eng", "refresh": True}).json
     outcome = second["coverage"]["providers"][0]
     assert _retry_seconds(outcome) > 3600, "the stale cooldown shadowed the longer deadline"
+    # The later clock is the one keeping it out, so its cause is the one named.
+    assert (outcome["status"], outcome["reason"], outcome["elapsed_ms"]) == (
+        "cooldown", "download_limit_reached", 0)
+
+
+def test_a_provider_left_out_for_its_cooldown_is_not_reported_as_abandoned_again(
+        authenticated_client, providers, monkeypatch):
+    """A provider still searching when the deadline passed goes on a short
+    wait, and the next search does not ask it. That search copied the earlier
+    outcome, so the reader was told once more that the provider had been
+    waited on until the deadline, with the old duration beside it, by a search
+    that never called it."""
+    from compat import service
+    from subliminal_patch.core import ProviderSearchResult
+
+    providers.add("discover_slow")
+    asked = []
+
+    def search_title(video, languages, pool, names, on_outcome):
+        asked.append(list(names))
+        for name in names:
+            on_outcome(ProviderSearchResult(name, status="abandoned", reason="wall_timeout"), 40000)
+        return []
+
+    monkeypatch.setattr(service, "search_title", search_title)
+    payload = {"media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}
+    first = post(authenticated_client, payload).json["coverage"]["providers"][0]
+    assert (first["status"], first["elapsed_ms"]) == ("abandoned", 40000)
+
+    second = post(authenticated_client, {**payload, "refresh": True}).json["coverage"]["providers"][0]
+    assert asked == [["discover_slow"], []], "the cooling provider was asked again"
+    assert (second["status"], second["reason"], second["elapsed_ms"]) == ("cooldown", "wall_timeout", 0)
+    assert second["retry_at"] == first["retry_at"]
+
+
+@pytest.mark.parametrize("recorded,reason", [
+    ("ReadTimeout", "timeout"),
+    ("ServiceUnavailable", "unreachable"),
+    ("IPAddressBlocked", "automated_requests_blocked"),
+])
+def test_a_provider_the_throttle_table_holds_back_is_cooling_down(authenticated_client, providers,
+                                                                  monkeypatch, recorded, reason):
+    """Not asked this time, so not a timeout or an unreachable site either:
+    that describes a search that tried the provider. The recorded cause stays
+    as the reason and the table's deadline as the retry time."""
+    import datetime as dt
+    from app import get_providers
+
+    providers.add("discover_held")
+    monkeypatch.setattr(get_providers, "get_providers_sorted", lambda: [])
+    get_providers.tp["discover_held"] = (recorded, dt.datetime.now() + dt.timedelta(minutes=30), "30 minutes")
+    outcome = post(authenticated_client, {
+        "media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}).json["coverage"]["providers"][0]
+    assert (outcome["status"], outcome["reason"], outcome["elapsed_ms"]) == ("cooldown", reason, 0)
+    assert 1700 < _retry_seconds(outcome) < 1900
+    assert providers.videos == []

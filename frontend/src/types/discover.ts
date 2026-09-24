@@ -102,6 +102,11 @@ export type DiscoverProviderStatus =
   | "unverified"
   | "authentication_required"
   | "setup_required"
+  /**
+   * Waiting before it is asked again. Beside a finished search it was usually
+   * not asked at all, and `reason` names what happened on the search that put
+   * it on the wait.
+   */
   | "cooldown"
   | "unreachable"
   | "timeout"

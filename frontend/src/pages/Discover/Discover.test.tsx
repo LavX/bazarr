@@ -844,6 +844,60 @@ it("never describes a provider that was never asked as having timed out", async 
   expect(screen.getByText("Not finished in time (2)")).toBeInTheDocument();
 });
 
+it("reports a provider left out for its cooldown as cooling down, not out of time", async () => {
+  const full = snapshot();
+  server.use(
+    http.post("/api/discover/search", () =>
+      HttpResponse.json({
+        ...full,
+        status: "partial",
+        coverage: {
+          ...full.coverage,
+          complete: false,
+          configured_count: 3,
+          providers: [
+            ...full.coverage.providers,
+            {
+              provider: "was-slow",
+              status: "cooldown",
+              reason: "wall_timeout",
+              result_count: 0,
+              elapsed_ms: 0,
+              retry_at: "2026-09-08T10:05:00Z",
+            },
+            {
+              provider: "was-broken",
+              status: "cooldown",
+              reason: "error",
+              result_count: 0,
+              elapsed_ms: 0,
+              retry_at: "2026-09-08T10:05:00Z",
+            },
+          ],
+        },
+      }),
+    ),
+  );
+  const { user } = renderDiscover();
+  await selectTarget(user);
+  await user.click(screen.getByRole("button", { name: "Find subtitles" }));
+  await screen.findByText("The.Matrix.1999.1080p");
+  const summary = screen.getByText(/Search details/, { selector: "summary" });
+  expect(summary).toHaveTextContent("2 unavailable");
+  expect(summary).not.toHaveTextContent("out of time");
+  await user.click(summary);
+  expect(screen.getAllByText("Provider is cooling down")).toHaveLength(2);
+  expect(
+    screen.getByText("Did not finish in time on the last search"),
+  ).toBeInTheDocument();
+  expect(screen.getByText("Site error on the last search")).toBeInTheDocument();
+  expect(screen.getAllByText(/Retry after/)).toHaveLength(2);
+  expect(
+    screen.queryByText("Still searching when the search deadline passed"),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByText(/Not finished in time/)).not.toBeInTheDocument();
+});
+
 it("distinguishes successful empty, partial, failed and provider setup states", async () => {
   const full = snapshot();
   const responses = [

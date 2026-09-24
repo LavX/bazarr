@@ -390,7 +390,7 @@ def test_a_worker_that_blew_its_deadline_is_recorded_as_a_timeout(monkeypatch, t
     assert description == "1 hour"
     # And that is a cause Discover can name rather than a bare cooldown.
     from discover.search import _THROTTLE_CAUSE
-    assert _THROTTLE_CAUSE[recorded] == ("timeout", "timeout")
+    assert _THROTTLE_CAUSE[recorded] == "timeout"
 
 
 def test_a_provider_raised_timeout_from_a_worker_is_recorded_as_a_timeout(monkeypatch, tmp_path):

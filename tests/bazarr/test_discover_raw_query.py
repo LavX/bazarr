@@ -125,7 +125,10 @@ def test_raw_provider_failures_keep_context_and_retained_handle(authenticated_cl
     second = post(authenticated_client, {**RAW, "refresh": True}).json
     assert second["context"] == first["context"]
     assert second["results"] == [{**first["results"][0], "stale": True}]
-    assert {item["status"] for item in second["coverage"]["providers"]} == {"cooldown", "authentication_required"}
+    # The provider that refused its credentials is on its wait and was not
+    # asked again, so it is cooling down with that refusal as the reason.
+    assert {item["provider"]: (item["status"], item["reason"]) for item in second["coverage"]["providers"]} == {
+        "discover_raw": ("cooldown", "cooldown"), "discover_auth": ("cooldown", "authentication_required")}
 
 
 @pytest.mark.parametrize("query", ["Example.Show.S02E03E04", "Example.Show.E03", "Example.Show.103", "1080p.WEB-DL"])
