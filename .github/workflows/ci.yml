@@ -180,9 +180,14 @@ jobs:
         # The coverage floor is set for the whole src tree, which no single
         # shard reaches, so the thresholds are zeroed here and enforced once,
         # over the merged coverage, by Frontend coverage.
+        # The blob goes to a named file in .vitest-reports, the folder the
+        # upload below and the merge in Frontend coverage use. Vitest's default
+        # folder moved to .vitest/blob in version 5, which left the upload
+        # empty, so the path is spelled out rather than left to the default.
         run: >-
           npx vitest run --shard=${{ matrix.shard }}/3
           --reporter=blob --reporter=default
+          --outputFile.blob=.vitest-reports/blob-${{ matrix.shard }}.json
           --coverage --coverage.reporter=text-summary
           --coverage.thresholds.lines=0 --coverage.thresholds.statements=0
           --coverage.thresholds.functions=0 --coverage.thresholds.branches=0
@@ -223,7 +228,7 @@ jobs:
             echo "Expected 3 shard reports, found $count"
             exit 1
           fi
-          npx vitest run --merge-reports --coverage
+          npx vitest run --merge-reports=.vitest-reports --coverage
         working-directory: ${{ env.UI_DIRECTORY }}
 
   # The backend is split into seven jobs per Python version. They share their
