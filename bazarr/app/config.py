@@ -117,6 +117,34 @@ def migrate_upgrade_subtitle_toggles(settings, existing_config) -> bool:
     return True
 
 
+# Discover's search deadline. The default rose from 20 to 40 seconds, but every install
+# that ran before that has the old default saved, because startup writes every default
+# into config.yaml.
+OLD_DEFAULT_SEARCH_TIMEOUT_SECONDS = 20
+DEFAULT_SEARCH_TIMEOUT_SECONDS = 40
+
+
+def migrate_search_timeout_default(settings) -> bool:
+    """Move an existing config off the old 20 second search deadline, once.
+
+    A saved 20 cannot be told apart from a 20 the user typed, so the move runs a
+    single time and records ``compat_endpoint.search_timeout_migrated``. A user who
+    sets 20 again afterwards keeps it, and any other saved value is left alone. A new
+    install never needs this: the validator defaults give it 40 and the marker.
+    Returns True when the saved deadline was changed.
+    """
+    if settings.get('compat_endpoint.search_timeout_migrated') is True:
+        return False
+    settings['compat_endpoint.search_timeout_migrated'] = True
+    if settings.get('compat_endpoint.search_timeout_seconds') != OLD_DEFAULT_SEARCH_TIMEOUT_SECONDS:
+        return False
+    settings['compat_endpoint.search_timeout_seconds'] = DEFAULT_SEARCH_TIMEOUT_SECONDS
+    logging.info("Discover search deadline was the old %d second default; raised it to the new default of "
+                 "%d seconds. Change it under Distribution Hub > Settings > Global search timeout.",
+                 OLD_DEFAULT_SEARCH_TIMEOUT_SECONDS, DEFAULT_SEARCH_TIMEOUT_SECONDS)
+    return True
+
+
 ONE_HUNDRED_YEARS_IN_MINUTES = 52560000
 ONE_HUNDRED_YEARS_IN_HOURS = 876000
 
@@ -713,7 +741,11 @@ validators = [
     Validator('compat_endpoint.cache_ttl_partial_seconds',
               default=300, cast=int, gte=30, lte=3600),
     Validator('compat_endpoint.search_timeout_seconds',
-              default=40, cast=int, gte=5, lte=120),
+              default=DEFAULT_SEARCH_TIMEOUT_SECONDS, cast=int, gte=5, lte=120),
+    # Set once migrate_search_timeout_default has looked at an existing config. A new
+    # install starts with it set, since it already has the current default.
+    Validator('compat_endpoint.search_timeout_migrated',
+              default=True, is_type_of=bool),
     # per_provider_timeout is not a user-facing knob: it's derived as
     # 60% of the wall timeout inside _do_fanout. The log-label threshold
     # should scale with the wall, not be tuned independently.
@@ -819,6 +851,7 @@ if os.path.getsize(config_yaml_file) > 0:
                      "which every AI Subtitle Translator version serves.", stored_routing,
                      UPGRADED_PROVIDER_ROUTING)
     migrate_upgrade_subtitle_toggles(settings, existing_config=True)
+    migrate_search_timeout_default(settings)
 
 failed_validator = True
 while failed_validator:

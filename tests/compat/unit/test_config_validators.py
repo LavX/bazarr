@@ -104,3 +104,54 @@ def test_serve_local_subs_rejects_non_bool():
     s = _make_settings({"compat_endpoint": {"serve_local_subs": "yes please"}})
     with pytest.raises(ValidationError):
         s.validators.validate_all()
+
+
+# The search deadline default rose from 20 to 40 seconds. Startup writes every
+# default into config.yaml, so an existing install has the old 20 saved.
+
+def test_saved_old_default_search_timeout_moves_to_40_once():
+    from app.config import migrate_search_timeout_default
+
+    s = _make_settings({
+        "compat_endpoint": {"search_timeout_seconds": 20, "cache_ttl_seconds": 900},
+    })
+    assert migrate_search_timeout_default(s) is True
+    s.validators.validate_all()
+    assert s.compat_endpoint.search_timeout_seconds == 40
+    assert s.compat_endpoint.search_timeout_migrated is True
+    # The rest of the section is untouched.
+    assert s.compat_endpoint.cache_ttl_seconds == 900
+
+
+def test_search_timeout_set_to_20_after_the_move_is_kept():
+    from app.config import migrate_search_timeout_default
+
+    s = _make_settings({
+        "compat_endpoint": {"search_timeout_seconds": 20, "search_timeout_migrated": True},
+    })
+    assert migrate_search_timeout_default(s) is False
+    s.validators.validate_all()
+    assert s.compat_endpoint.search_timeout_seconds == 20
+    assert s.compat_endpoint.search_timeout_migrated is True
+
+
+def test_search_timeout_the_user_chose_is_kept():
+    from app.config import migrate_search_timeout_default
+
+    s = _make_settings({"compat_endpoint": {"search_timeout_seconds": 35}})
+    assert migrate_search_timeout_default(s) is False
+    s.validators.validate_all()
+    assert s.compat_endpoint.search_timeout_seconds == 35
+    assert s.compat_endpoint.search_timeout_migrated is True
+
+
+def test_fresh_install_gets_40_and_the_marker():
+    tmp_dir = tempfile.mkdtemp()
+    cfg_path = os.path.join(tmp_dir, "config.yaml")
+    open(cfg_path, "w").close()
+
+    s = Dynaconf(settings_file=cfg_path, core_loaders=["YAML"], apply_default_on_none=True)
+    s.validators.register(*_compat_validators())
+    s.validators.validate_all()
+    assert s.compat_endpoint.search_timeout_seconds == 40
+    assert s.compat_endpoint.search_timeout_migrated is True
