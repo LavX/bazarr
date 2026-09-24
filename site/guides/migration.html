@@ -118,36 +118,27 @@
       <p>The v2.4 additions are additive and non-destructive. Your existing settings, language profiles, providers, and the shared OpenSubtitles-compatible token all carry over. Schema migrations run automatically on first boot, and the old shared compat token is auto-seeded as an "Unlimited Default" key in the new Distribution Hub, so existing integrations keep authorizing without changes.</p>
 
       <h2 id="back-up-your-config">Back up your config</h2>
-      <p>Before making any changes, copy your entire config directory. This is the directory you mounted as <code>/config</code> in your existing Bazarr container.</p>
+      <p>Before making any changes, stop Bazarr and copy your entire config directory. This is the directory you mounted as <code>/config</code> in your existing Bazarr container. Stop it first: Bazarr writes to its SQLite database while it runs, and a copy taken in the middle of a write may not open later.</p>
 
       <div class="code">
         <div class="code-head">
           <span class="code-lang">Shell</span>
-          <button class="copy" data-copy="cp -r ./config ./config-backup-$(date +%Y%m%d)" aria-label="Copy backup command">Copy</button>
+          <button class="copy" data-copy-from="migration-backup-code" aria-label="Copy backup commands">Copy</button>
         </div>
-        <pre><code>cp -r ./config ./config-backup-$(date +%Y%m%d)</code></pre>
+        <pre id="migration-backup-code"><code>docker compose down &amp;&amp;
+cp -a ./config ./config-backup-$(date +%Y%m%d)</code></pre>
       </div>
 
-      <p>This gives you a timestamped backup you can restore from if anything goes wrong. The config directory contains your SQLite database (<code>db/bazarr.db</code>), settings, logs, and cached data.</p>
+      <p>The copy only runs if Bazarr stopped. If <code>docker compose down</code> reports an error, fix that first and run both lines again. This gives you a dated backup you can restore from if anything goes wrong. The config directory contains your SQLite database (<code>db/bazarr.db</code>), settings, logs, and cached data. Note the folder name, for example <code>config-backup-20260924</code>: the revert steps below ask for it.</p>
 
       <div class="note note-warning">
         <strong>Do not skip this step.</strong> While the migration is straightforward and non-destructive, having a backup means you can always go back.
       </div>
 
       <h2 id="container-swap-process">Container swap process</h2>
-      <p>The actual swap is just changing the Docker image name in your compose file.</p>
+      <p>Bazarr is still stopped from the backup step. The actual swap is just changing the Docker image name in your compose file.</p>
 
       <ol class="steps">
-        <li>
-          <strong>Stop the current container.</strong>
-          <div class="code" style="margin-top: 12px;">
-            <div class="code-head">
-              <span class="code-lang">Shell</span>
-              <button class="copy" data-copy="docker compose down" aria-label="Copy stop command">Copy</button>
-            </div>
-            <pre><code>docker compose down</code></pre>
-          </div>
-        </li>
         <li>
           <strong>Update the image in your <code>docker-compose.yml</code>.</strong> Change the image line from the upstream image to the Bazarr+ image:
           <div class="code" style="margin-top: 12px;">
@@ -247,18 +238,37 @@ image: ghcr.io/lavx/bazarr:latest</code></pre>
       <p>Upstream Bazarr stores passwords using MD5, which is insecure. On first login after the migration, Bazarr+ will transparently upgrade your password hash to PBKDF2 with 600,000 iterations. This happens automatically when you enter your existing password. No action needed on your part.</p>
 
       <div class="note">
-        <strong>Note:</strong> If you later revert to upstream Bazarr, you will need to reset your password because upstream cannot read the PBKDF2 hash. See the section below for details.
+        <strong>Note:</strong> If you later revert to upstream Bazarr by restoring the backup you made before migrating, your old password hash comes back with it and nothing needs resetting. Only a revert without that backup needs a password reset, because upstream cannot read the PBKDF2 hash. See the section below for details.
       </div>
 
       <h2 id="reverting-if-needed">Reverting if needed</h2>
       <p>If you want to switch back to upstream Bazarr for any reason:</p>
 
       <ol class="steps">
-        <li><strong>Stop Bazarr+.</strong> Run <code>docker compose down</code>.</li>
-        <li><strong>Restore your backup.</strong> Replace the current config directory with your backup: <code>rm -rf ./config && cp -r ./config-backup-* ./config</code></li>
+        <li>
+          <strong>Stop Bazarr+ and restore your backup.</strong> Run <code>ls -d ./config-backup-*</code> to list your backups and put the exact folder you made before migrating in <code>BACKUP</code>. The commands check that folder exists, stop Bazarr+, copy the backup next to your config, and only then swap it in. If Bazarr+ does not stop, nothing is copied or moved. Your current config is moved to <code>./config-bazarr-plus</code>, not deleted, and if any step fails the config you had stays where it is.
+          <div class="code" style="margin-top: 12px;">
+            <div class="code-head">
+              <span class="code-lang">Shell</span>
+              <button class="copy" data-copy-from="migration-restore-code" aria-label="Copy restore commands">Copy</button>
+            </div>
+            <pre id="migration-restore-code"><code>BACKUP=./config-backup-YYYYMMDD   # your backup folder's exact name
+if [ ! -d "$BACKUP" ]; then
+  echo "No backup folder at $BACKUP"
+elif docker compose down; then
+  cp -a "$BACKUP" ./config-restore &amp;&amp;
+  mv ./config ./config-bazarr-plus &amp;&amp;
+  mv ./config-restore ./config
+else
+  echo "Bazarr+ did not stop, so nothing was restored"
+fi</code></pre>
+          </div>
+        </li>
         <li><strong>Change the image back</strong> to the upstream image in your compose file.</li>
         <li><strong>Start it.</strong> Run <code>docker compose up -d</code>.</li>
       </ol>
+
+      <p>The backup puts everything back as it was before the migration, including your old password, so there is nothing to reset. Changes you made in Bazarr+ after migrating do not come back with it.</p>
 
       <p>If you did not keep a backup and want to revert, there are a few things to be aware of. The password hash in <code>config/config.yaml</code> under <code>auth.password</code> will be in PBKDF2 format, which upstream cannot read. Clear the password field to reset it. Additionally, the <code>series_scores</code> and <code>movie_scores</code> config sections are deleted by Bazarr+, <code>gemini_key</code> is migrated to a <code>gemini_keys</code> list, and the <code>analytics</code> section is removed.</p>
 
