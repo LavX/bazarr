@@ -74,7 +74,7 @@ tld==0.13.2
 tomlkit>=0.15.1
 tzlocal==5.4.4
 unidecode==1.4.0
-urllib3==2.7.0
+urllib3==2.8.0
 waitress==3.0.2
 webrtcvad-wheels>=2.0.14  # binary wheels for cp36..cp313; upstream webrtcvad is source-only and unmaintained since 2017
 werkzeug==3.1.8
