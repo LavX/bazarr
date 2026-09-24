@@ -35,7 +35,10 @@ from pathlib import Path
 if '-version' in sys.argv:
     os.execv({real!r}, [{real!r}, *sys.argv[1:]])
 child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
-Path({str(marker)!r}).write_text(json.dumps({{'probe': os.getpid(), 'descendant': child.pid, 'worker': os.getppid(), 'inherited_secret': 'SPORTARR_TEST_SECRET' in os.environ, 'inherited_pythonpath': 'PYTHONPATH' in os.environ, 'inherited_config': any(key in os.environ for key in ('POSTGRES_ENABLED', 'POSTGRES_PASSWORD', 'BAZARR_CONFIG_DIR', 'HTTP_PROXY')), 'cwd': os.getcwd()}}))
+# Written under another name and renamed, so the test never sees the marker
+# before its content: it waits for exists() and then parses the file.
+Path({str(marker) + '.part'!r}).write_text(json.dumps({{'probe': os.getpid(), 'descendant': child.pid, 'worker': os.getppid(), 'inherited_secret': 'SPORTARR_TEST_SECRET' in os.environ, 'inherited_pythonpath': 'PYTHONPATH' in os.environ, 'inherited_config': any(key in os.environ for key in ('POSTGRES_ENABLED', 'POSTGRES_PASSWORD', 'BAZARR_CONFIG_DIR', 'HTTP_PROXY')), 'cwd': os.getcwd()}}))
+os.replace({str(marker) + '.part'!r}, {str(marker)!r})
 try:
     deadline = time.monotonic() + 15
     while not Path({str(release)!r}).exists() and time.monotonic() < deadline:
@@ -422,7 +425,8 @@ def test_native_analysis_stall_cannot_strand_descendants(indexed_library, monkey
 import json, os, subprocess, sys, time
 from pathlib import Path
 child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
-Path({str(marker)!r}).write_text(json.dumps({{'analysis': os.getppid(), 'probe': os.getpid(), 'descendant': child.pid}}))
+Path({str(marker) + '.part'!r}).write_text(json.dumps({{'analysis': os.getppid(), 'probe': os.getpid(), 'descendant': child.pid}}))
+os.replace({str(marker) + '.part'!r}, {str(marker)!r})
 time.sleep(30)
 """
     (package / "api.py").write_text(f"""
