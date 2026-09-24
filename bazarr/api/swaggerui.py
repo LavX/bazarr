@@ -34,3 +34,10 @@ audio_language_model = {
         "code2": fields.String(),
         "code3": fields.String()
     }
+
+# What a route that queues its work answers with. Follow the job through
+# system/jobs or the jobs socket.
+job_queued_model = {
+        "job_id": fields.Integer(description="Id of the queued job. Can be null when an identical job was "
+                                             "already pending or running, so nothing new was queued."),
+    }

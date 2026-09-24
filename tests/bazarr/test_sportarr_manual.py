@@ -220,6 +220,7 @@ def test_manual_api_requires_owner_and_returns_refreshed_event(
         monkeypatch.setitem(sys.modules, name, package)
     for name, path in [
         ("utils", "utils.py"),
+        ("swaggerui", "swaggerui.py"),
         ("sports.leagues", "sports/leagues.py"),
         ("sports.subtitles", "sports/subtitles.py"),
     ]:
