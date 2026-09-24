@@ -5,3 +5,7 @@ coverage
 dev-dist
 dist
 node_modules
+
+# Playwright end-to-end output
+e2e-report/
+e2e-results/

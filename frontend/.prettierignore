@@ -2,3 +2,5 @@ build
 dist
 coverage
 public
+e2e-report
+e2e-results

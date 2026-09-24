@@ -84,6 +84,16 @@ export default tseslint.config(
   },
   {
     files: ["**/__tests__/**/*.[jt]s?(x)", "**/?(*.)+(spec|test).[jt]s?(x)"],
+    ignores: ["e2e/**"],
     ...testingLibrary.configs["flat/react"],
+  },
+  {
+    // Playwright, not React: fixtures take an empty object when they need no
+    // other fixture, and their `use` callback is not a React hook.
+    files: ["e2e/**/*.ts", "playwright.config.ts"],
+    rules: {
+      "no-empty-pattern": "off",
+      "react-hooks/rules-of-hooks": "off",
+    },
   },
 );
