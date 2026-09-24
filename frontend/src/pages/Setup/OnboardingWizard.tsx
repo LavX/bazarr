@@ -19,8 +19,10 @@ import {
 } from "@mantine/core";
 import { faCheck } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { useQueryClient } from "@tanstack/react-query";
 import { useSettingsMutation } from "@/apis/hooks";
 import { PHASE_LABELS, WIZARD_PHASES } from "./steps/types";
+import { settleSetupComplete } from "./setupCompleteCache";
 import { buildSteps } from "./steps";
 import {
   OnboardingIntentProvider,
@@ -58,6 +60,7 @@ const OnboardingWizardBody: FunctionComponent = () => {
   const navigate = useNavigate();
   const { stepKey } = useParams<{ stepKey?: string }>();
   const mutation = useSettingsMutation();
+  const client = useQueryClient();
   const [leaving, setLeaving] = useState(false);
   const [leaveError, setLeaveError] = useState<string | null>(null);
 
@@ -235,7 +238,8 @@ const OnboardingWizardBody: FunctionComponent = () => {
     mutation.mutate(
       { "settings-general-setup_complete": true },
       {
-        onSuccess: () => {
+        onSuccess: async () => {
+          await settleSetupComplete(client, true);
           left.current = true;
           reset();
           resetIntent();

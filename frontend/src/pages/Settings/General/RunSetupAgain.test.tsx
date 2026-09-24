@@ -62,6 +62,35 @@ describe("RunSetupAgain", () => {
     await waitFor(() => expect(navigate).toHaveBeenCalledWith("/setup"));
   });
 
+  it("forgets the step, intent and drafts a previous run left behind", async () => {
+    // A browser that still held a later step reopened the wizard there, so
+    // Run first-time setup did not start at Welcome.
+    const user = userEvent.setup();
+    localStorage.setItem("bazarr.onboarding.step", "sonarr");
+    localStorage.setItem("bazarr.onboarding.intent", "library");
+    localStorage.setItem("bazarr.onboarding.media-servers", "[]");
+    let storedAtNavigate: (string | null)[] = [];
+    navigate.mockImplementation(() => {
+      storedAtNavigate = ["step", "intent", "media-servers"].map((name) =>
+        localStorage.getItem(`bazarr.onboarding.${name}`),
+      );
+    });
+    mutate.mockImplementation(
+      (_input: unknown, opts?: { onSuccess?: () => void }) => {
+        opts?.onSuccess?.();
+      },
+    );
+
+    customRender(<RunSetupAgain />);
+
+    await user.click(
+      screen.getByRole("button", { name: /run first-time setup/i }),
+    );
+
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("/setup"));
+    expect(storedAtNavigate).toEqual([null, null, null]);
+  });
+
   it("says so when the flag cannot be cleared", async () => {
     const user = userEvent.setup();
     mutate.mockImplementation(

@@ -11,6 +11,7 @@ import {
 } from "@mantine/core";
 import { faCheck, faMinus } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   useArrInstances,
   useLanguageProfiles,
@@ -23,6 +24,7 @@ import type {
   MediaServerKind,
 } from "@/apis/raw/mediaServers";
 import { kindName } from "@/pages/Settings/MediaServers/kinds";
+import { settleSetupComplete } from "@/pages/Setup/setupCompleteCache";
 import StepLayout from "@/pages/Setup/StepLayout";
 import {
   clearPersistedIntent,
@@ -72,6 +74,7 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
   const navigate = useNavigate();
   const { intent } = useOnboardingIntent();
   const mutation = useSettingsMutation();
+  const client = useQueryClient();
   const [failed, setFailed] = useState(false);
 
   const { data: instances } = useArrInstances();
@@ -255,7 +258,8 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
     mutation.mutate(
       { "settings-general-setup_complete": true },
       {
-        onSuccess: () => {
+        onSuccess: async () => {
+          await settleSetupComplete(client, true);
           clearPersistedStep();
           clearPersistedIntent();
           clearPersistedSelection();
