@@ -57,6 +57,8 @@ frontend/node_modules/
 frontend/.env*
 frontend/*.log
 frontend/.eslintcache
+frontend/e2e-report/
+frontend/e2e-results/
 
 # Data directories (mounted at runtime)
 data/

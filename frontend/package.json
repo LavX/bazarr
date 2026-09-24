@@ -45,6 +45,7 @@
     "@fortawesome/free-regular-svg-icons": "^7.3.1",
     "@fortawesome/free-solid-svg-icons": "^7.3.1",
     "@fortawesome/react-fontawesome": "^3.5.0",
+    "@playwright/test": "1.63.0",
     "@tanstack/react-query-devtools": "^5.101.1",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.9.1",
@@ -90,9 +91,9 @@
   "scripts": {
     "build": "vite build",
     "build:ci": "vite build -m development",
-    "check": "eslint src",
-    "check:fix": "eslint src --fix",
-    "check:ts": "tsc --noEmit --incremental false",
+    "check": "eslint src e2e playwright.config.ts",
+    "check:fix": "eslint src e2e playwright.config.ts --fix",
+    "check:ts": "tsc --noEmit --incremental false && tsc -p e2e --noEmit --incremental false",
     "check:fmt": "prettier -c .",
     "coverage": "vitest run --coverage",
     "format": "prettier -w .",
@@ -101,7 +102,10 @@
     "preview": "vite preview",
     "start": "vite",
     "test": "vitest",
-    "test:ui": "vitest --ui"
+    "test:ui": "vitest --ui",
+    "e2e": "playwright test --grep-invert @live",
+    "e2e:live": "playwright test",
+    "e2e:ui": "playwright test --ui"
   },
   "browserslist": {
     "production": [
