@@ -274,32 +274,48 @@ check_existing() {
   [[ -f "$dir/docker-compose.yml" ]] || return 1
   printf "\n"
   info "Existing installation found in $dir"
-  printf "  ${BLD}[u]${RST} Upgrade (pull latest images, restart)\n" >&2
+  printf "  ${BLD}[u]${RST} Upgrade (back up, pull latest images, restart)\n" >&2
   printf "  ${BLD}[r]${RST} Reinstall (backup config, full setup)\n" >&2
   printf "  ${BLD}[q]${RST} Quit\n\n" >&2
   local choice
   printf "${BLD}Choice${RST}: " >&2; read -r choice </dev/tty
   case "${choice,,}" in
     u) do_upgrade "$dir"; exit 0 ;;
-    r) do_backup "$dir" ;;
+    r) do_backup "$dir"
+       run_with_spinner "Starting services again" sudo docker compose -f "$dir/docker-compose.yml" start \
+         || warn "Could not start the old services. Setup starts them again when it finishes." ;;
     *) info "Exiting."; exit 0 ;;
   esac
 }
 
+# Backs up docker-compose.yml, .env and ./config (the database and settings).
+# The services are stopped first so the SQLite database is not copied mid-write.
+# Any failed step ends the script before anything is upgraded or reinstalled.
 do_backup() {
   local dir="$1" ts; ts=$(date +%Y%m%d_%H%M%S)
-  local backup="${dir}/backup_${ts}"
-  mkdir -p "$backup"
-  cp -a "$dir/docker-compose.yml" "$backup/" 2>/dev/null
-  cp -a "$dir/.env" "$backup/" 2>/dev/null
-  success "Config backed up to $backup"
+  local backup="${dir}/backup_${ts}" compose="${dir}/docker-compose.yml"
+  mkdir -p "$backup" || fatal "Cannot create backup directory: $backup"
+  cp -a "$compose" "$backup/" || fatal "Could not back up docker-compose.yml. Nothing was changed."
+  if [[ -f "$dir/.env" ]]; then
+    cp -a "$dir/.env" "$backup/" || fatal "Could not back up .env. Nothing was changed."
+  fi
+  if [[ ! -d "$dir/config" ]]; then
+    warn "No ./config directory in $dir, so only docker-compose.yml and .env were backed up to $backup"
+    return 0
+  fi
+  run_with_spinner "Stopping services for the backup" sudo docker compose -f "$compose" stop \
+    || fatal "Could not stop the services, so ./config was not backed up. Nothing was changed."
+  run_with_spinner "Backing up ./config" sudo cp -a "$dir/config" "$backup/config" \
+    || fatal "Backing up ./config failed. Nothing was upgraded. Start the old install with: docker compose -f $compose start"
+  success "Backed up docker-compose.yml, .env and ./config to $backup"
 }
 
 do_upgrade() {
   local dir="$1"
-  do_backup "$dir"
-  cd "$dir"
+  cd "$dir" || fatal "Cannot enter $dir"
+  # Pull while the old version keeps running, so a failed pull changes nothing.
   run_with_spinner "Pulling latest images" sudo docker compose pull || fatal "Pull failed"
+  do_backup "$dir"
   run_with_spinner "Restarting services" sudo docker compose up -d || fatal "Restart failed"
   printf "\n"
   success "Upgrade complete."
