@@ -41,6 +41,34 @@ const skipLabels: Record<string, string> = {
   ["search_limit_reached"]: "This provider's search limit has been reached",
 };
 
+// A cooling-down provider is usually one this search did not ask at all. The
+// reason names what happened on the search that put it on the wait, which is
+// how the reader tells a slow site from a broken sign-in.
+const cooldownCauses: Record<string, string> = {
+  timeout: "Timed out on the last search",
+  ["wall_timeout"]: "Did not finish in time on the last search",
+  error: "Site error on the last search",
+  unreachable: "Could not be reached on the last search",
+  capacity: "Search capacity was busy on the last search",
+  ["authentication_required"]:
+    "Sign-in failed on the last search. Check the provider settings.",
+  ["setup_required"]:
+    "Setup was incomplete on the last search. Check the provider settings.",
+};
+
+function CooldownCause({ provider }: { provider: DiscoverProviderOutcome }) {
+  const reason = provider.reason ?? "";
+  const cause =
+    provider.status === "cooldown"
+      ? (cooldownCauses[reason] ?? skipLabels[reason])
+      : undefined;
+  return cause ? (
+    <Text size="sm" c="dimmed">
+      {cause}
+    </Text>
+  ) : null;
+}
+
 const languageNames = new Intl.DisplayNames(["en"], { type: "language" });
 function languageName(code: string) {
   try {
@@ -53,6 +81,9 @@ function outcomeLabel(
   provider: DiscoverProviderOutcome,
   context: DiscoverContext,
 ) {
+  // A wait, whatever caused it. The cause is shown beneath this line, not in
+  // place of it.
+  if (provider.status === "cooldown") return outcomeLabels.cooldown;
   const language = languageName(context.language);
   if (provider.reason === "unsupported_language")
     return `This provider does not offer ${language} subtitles.`;
@@ -128,6 +159,7 @@ export default function ProviderCoverage({
                   <div>
                     <Text fw={600}>{provider.provider}</Text>
                     <Text size="sm">{outcomeLabel(provider, context)}</Text>
+                    <CooldownCause provider={provider} />
                     {provider.supported_media?.length ? (
                       <Text size="sm" c="dimmed">
                         Searches{" "}

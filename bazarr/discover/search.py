@@ -53,18 +53,21 @@ _NO_COOLDOWN = {"skipped", "not_started"}
 # What the throttle table's recorded exception class means for the reader. The
 # table stores the original class name, so a rate limit and a download quota
 # arrive here distinguishable and are worth telling apart: one clears in
-# minutes, the other usually at the provider's own daily reset.
+# minutes, the other usually at the provider's own daily reset. This is only
+# the reason. A provider the table holds back is not asked at all, so its
+# status is always "cooldown": reporting it as a timeout or an unreachable
+# site says this search tried it, which it did not.
 _THROTTLE_CAUSE = {
-    "AuthenticationError": ("authentication_required", "authentication_required"),
-    "ConfigurationError": ("setup_required", "setup_required"),
-    "ServiceUnavailable": ("unreachable", "unreachable"),
-    "IPAddressBlocked": ("unreachable", "automated_requests_blocked"),
-    "ConnectTimeout": ("timeout", "timeout"),
-    "ReadTimeout": ("timeout", "timeout"),
-    "Timeout": ("timeout", "timeout"),
-    "TooManyRequests": ("cooldown", "rate_limited"),
-    "DownloadLimitExceeded": ("cooldown", "download_limit_reached"),
-    "SearchLimitReached": ("cooldown", "search_limit_reached"),
+    "AuthenticationError": "authentication_required",
+    "ConfigurationError": "setup_required",
+    "ServiceUnavailable": "unreachable",
+    "IPAddressBlocked": "automated_requests_blocked",
+    "ConnectTimeout": "timeout",
+    "ReadTimeout": "timeout",
+    "Timeout": "timeout",
+    "TooManyRequests": "rate_limited",
+    "DownloadLimitExceeded": "download_limit_reached",
+    "SearchLimitReached": "search_limit_reached",
 }
 
 # How long Discover waits before offering this provider again, by cause, when
@@ -346,6 +349,13 @@ def _coverage(pool, state, *, has_file=False):
             status, reason = "skipped", "requires_file"
         elif name in cooldowns and cooldowns[name][0] > now:
             until, prior = cooldowns[name]
+            # Not asked this time, so it is reported as cooling down, with what
+            # happened on the search that put it there as the reason. Copying
+            # the earlier outcome instead told the reader this search had
+            # waited on the provider until the deadline, or that it had just
+            # failed, with the old duration beside it, about a provider this
+            # search never called.
+            status, reason = "cooldown", prior["reason"]
             # The same longer-of-the-two rule _retry_delay applies, applied
             # again on the way out. A cooldown is fixed when the outcome is
             # recorded, but the throttle table can move afterwards: a provider
@@ -353,17 +363,18 @@ def _coverage(pool, state, *, has_file=False):
             # its call finishes and writes a real rate limit. Offering the
             # earlier of the two produces a retry that searches nothing,
             # because the provider stays out of get_providers_sorted() until
-            # the table's deadline.
+            # the table's deadline. The later clock is also the one keeping
+            # the provider out, so its cause is the one named.
             throttle = get_providers.tp.get(name)
-            if throttle and throttle[1]:
-                until = max(until, throttle[1].timestamp())
-            outcomes[name] = {**prior, "result_count": 0, "retry_at": _iso(until)}
-            continue
+            if throttle and throttle[1] and throttle[1].timestamp() > until:
+                until = throttle[1].timestamp()
+                reason = _THROTTLE_CAUSE.get(throttle[0], "provider_cooldown")
+            retry_at = _iso(until)
         elif name not in available or name in discarded:
             status, reason = "cooldown", "provider_cooldown"
             throttle = get_providers.tp.get(name)
             if throttle and throttle[1]:
-                status, reason = _THROTTLE_CAUSE.get(throttle[0], ("cooldown", "provider_cooldown"))
+                reason = _THROTTLE_CAUSE.get(throttle[0], "provider_cooldown")
                 retry_at = throttle[1].astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
         elif name not in pool.providers:
             status, reason = "setup_required", "provider_unavailable"
