@@ -427,6 +427,20 @@ class TestValidateParams:
             result = _validate_params()
             assert result == ('movie', 7)
 
+    def test_media_type_is_the_canonical_constant(self):
+        # A real request carries its own string object. Validation must hand
+        # back the MEDIA_TYPES entry instead, so nothing request-derived rides
+        # along in the tuple _resolve_or_abort may return.
+        request_value = ''.join(['spo', 'rts'])
+        assert request_value is not editor_module.MEDIA_TYPES[2]
+        mock_request = MagicMock()
+        mock_request.args.get = lambda key: {'mediaType': request_value, 'mediaId': '3'}.get(key)
+
+        with patch.object(editor_module, 'request', mock_request):
+            result = _validate_params()
+        assert result == ('sports', 3)
+        assert result[0] is editor_module.MEDIA_TYPES[2]
+
     def test_missing_media_type(self):
         mock_request = MagicMock()
         mock_request.args.get = lambda key: {'mediaId': '1'}.get(key)

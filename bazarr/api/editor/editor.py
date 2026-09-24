@@ -94,6 +94,9 @@ def _payload_arr_instance_id(data):
 # the sixth already understood it.
 MEDIA_TYPES = ('episode', 'movie', 'sports')
 MEDIA_TYPE_ERROR = 'mediaType must be one of "episode", "movie", "sports"'
+# Maps an accepted request value to the tuple's own string, so validation
+# hands back a constant and never the request's copy of it.
+_CANONICAL_MEDIA_TYPES = {media_type: media_type for media_type in MEDIA_TYPES}
 
 
 def _resolve_video_path(media_type, media_id, arr_instance_id=None):
@@ -258,10 +261,14 @@ def _validate_params():
 
     Returns (media_type, media_id) on success, or a (message, status_code) tuple on failure.
     """
-    media_type = request.args.get('mediaType')
+    # Keep the canonical constant, not the request string. _resolve_or_abort
+    # returns this tuple unchanged when it holds an error, and a static
+    # analyser cannot tell that branch from success, so a request string here
+    # reads as flowing into the ffprobe command line.
+    media_type = _CANONICAL_MEDIA_TYPES.get(request.args.get('mediaType'))
     media_id = request.args.get('mediaId')
 
-    if not media_type or media_type not in MEDIA_TYPES:
+    if media_type is None:
         return MEDIA_TYPE_ERROR, 400
     if not media_id:
         return 'mediaId is required', 400
