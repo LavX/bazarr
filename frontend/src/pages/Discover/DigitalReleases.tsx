@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router";
-import { ActionIcon, Alert, Anchor, Button, Text, Title } from "@mantine/core";
+import { useLocation, useNavigate } from "react-router";
+import { ActionIcon, Alert, Button, Text, Title } from "@mantine/core";
 import { useMediaQuery } from "@mantine/hooks";
 import {
   faArrowsRotate,
@@ -122,17 +122,16 @@ export default function DigitalReleases() {
         episode: "",
       });
   };
-  const setup =
-    !feed.settingsLoading &&
-    !feed.settingsError &&
-    (!feed.configured ||
-      data?.status === "unconfigured" ||
-      data?.status === "authentication_failed");
+  // Discover always runs on TMDB (the server falls back to its built-in key),
+  // so there is no setup state here: a feed TMDB could not answer is simply
+  // unavailable for now.
   const failed =
     feed.settingsError ||
     feed.isError ||
     expired ||
     data?.status === "unavailable" ||
+    data?.status === "unconfigured" ||
+    data?.status === "authentication_failed" ||
     (feed.isSuccess && !data);
   return (
     <section
@@ -165,41 +164,23 @@ export default function DigitalReleases() {
               });
             }}
           />
-          {feed.configured && (
-            <ActionIcon
-              id="discover-digital-refresh"
-              variant="subtle"
-              className={styles.refreshButton}
-              aria-label="Refresh digital releases"
-              title="Refresh digital releases"
-              loading={feed.isFetching}
-              onClick={() => void feed.refetch()}
-            >
-              <FontAwesomeIcon icon={faArrowsRotate} />
-            </ActionIcon>
-          )}
+          <ActionIcon
+            id="discover-digital-refresh"
+            variant="subtle"
+            className={styles.refreshButton}
+            aria-label="Refresh digital releases"
+            title="Refresh digital releases"
+            loading={feed.isFetching}
+            onClick={() => void feed.refetch()}
+          >
+            <FontAwesomeIcon icon={faArrowsRotate} />
+          </ActionIcon>
         </div>
       </div>
 
       <div role="status" aria-live="polite" className={styles.feedStatus}>
         {(feed.settingsLoading || feed.isFetching) && (
           <Text size="sm">Checking digital releases in {region}.</Text>
-        )}
-        {setup && (
-          <Alert color="yellow">
-            <Text size="sm">
-              {data?.status === "authentication_failed"
-                ? "TMDB rejected the key Discover is using."
-                : "Connect TMDB to browse regional digital releases."}
-            </Text>
-            <Anchor
-              component={Link}
-              to="/subtitle-hub?tab=my-providers#metadata"
-              className={styles.settingsLink}
-            >
-              Set up digital releases
-            </Anchor>
-          </Alert>
         )}
         {failed && (
           <Alert color="yellow">

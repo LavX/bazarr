@@ -221,7 +221,7 @@ beforeEach(() => {
   );
 });
 
-it("keeps metadata setup visible and requires explicit valid release query and language", async () => {
+it("never asks for TMDB setup and requires explicit valid release query and language", async () => {
   const { user } = renderDiscover();
   await user.click(screen.getByLabelText("Search"));
   await screen.findByRole("button", {
@@ -232,7 +232,11 @@ it("keeps metadata setup visible and requires explicit valid release query and l
   await openReleaseSearch(user);
   await screen.findByLabelText("Release name");
   expect(screen.getByText(/Advanced release-name search/)).toBeVisible();
-  expect(screen.getByText(/Set up TMDB/)).toBeVisible();
+  // Discover always has the built-in TMDB key, so even a settings payload
+  // that says TMDB is not configured never produces a setup prompt.
+  expect(
+    screen.queryByText(/Set up TMDB|Connect TMDB/),
+  ).not.toBeInTheDocument();
   expect(
     screen.getByText(/Title and episode identity.*unverified/),
   ).toBeVisible();

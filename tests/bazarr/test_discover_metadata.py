@@ -245,6 +245,79 @@ def test_no_stored_token_still_reaches_tmdb_with_the_built_in_key(authenticated_
     assert "Authorization" not in upstream.calls[0][1]["headers"]
 
 
+SAVED_KEY = "5ecafe00cafe00cafe00cafe00cafe00"
+BUILT_IN_KEY = "b0171b0171b0171b0171b0171b0171b0"
+
+
+@pytest.fixture
+def rejected_saved_key(upstream, monkeypatch):
+    """TMDB answers the reader's saved key with 401 and the built-in key normally."""
+    from app import tmdb
+    monkeypatch.setattr(tmdb, "builtin_api_key", lambda: BUILT_IN_KEY)
+    tracker = SimpleNamespace(sent=[], rejected={SAVED_KEY})
+    original = requests.Session.request
+
+    def request(session, method, url, **kwargs):
+        key = kwargs["params"]["api_key"]
+        tracker.sent.append(key)
+        upstream.status = 401 if key in tracker.rejected else 200
+        return original(session, method, url, **kwargs)
+
+    monkeypatch.setattr(requests.Session, "request", request)
+    return tracker
+
+
+def test_a_rejected_saved_key_falls_back_to_the_built_in_key(authenticated_client, rejected_saved_key):
+    """A reader's bad key must never take Discover down: browsing moves to the built-in key."""
+    first = get(authenticated_client, "search?q=Shogun&type=movie")
+    assert first.status_code == 200
+    assert first.json["data"]["status"] == "available"
+    assert first.json["data"]["items"][0]["source_id"] == "tmdb:movie:42"
+    assert rejected_saved_key.sent == [SAVED_KEY, BUILT_IN_KEY]
+    assert SAVED_KEY not in first.get_data(as_text=True)
+    # The rejection is remembered, so the saved key is not sent again.
+    details = get(authenticated_client, "movies/42")
+    assert details.json["data"]["item"]["imdb_id"] == "tt0080274"
+    status = get(authenticated_client, "status").json["data"]
+    assert status["status"] == "available"
+    assert status["override_rejected"] is True
+    assert rejected_saved_key.sent[2:] == [BUILT_IN_KEY, BUILT_IN_KEY]
+
+
+def test_a_working_saved_key_is_used_and_not_reported(authenticated_client, rejected_saved_key):
+    rejected_saved_key.rejected.clear()
+    assert get(authenticated_client, "search?q=Shogun&type=movie").json["data"]["status"] == "available"
+    assert rejected_saved_key.sent == [SAVED_KEY]
+    assert get(authenticated_client, "status").json["data"]["override_rejected"] is False
+
+
+def test_the_connection_check_reports_a_rejected_saved_key_without_falling_back(authenticated_client,
+                                                                                rejected_saved_key):
+    """The check exists to say whether this key works, so it answers for the key itself."""
+    check = authenticated_client.post("/api/discover/metadata/test", json={},
+                                      headers={"X-API-KEY": "metadata-test-key"}).json["data"]
+    assert check["status"] == "authentication_failed"
+    assert "built-in key" in check["message"]
+    assert rejected_saved_key.sent == [SAVED_KEY]
+    assert get(authenticated_client, "status").json["data"]["override_rejected"] is True
+    # The reader fixed the key at TMDB: a passing check clears the warning.
+    rejected_saved_key.rejected.clear()
+    check = authenticated_client.post("/api/discover/metadata/test", json={},
+                                      headers={"X-API-KEY": "metadata-test-key"}).json["data"]
+    assert check["status"] == "available"
+    assert get(authenticated_client, "status").json["data"]["override_rejected"] is False
+
+
+def test_a_rejected_draft_key_is_reported_and_never_replaced(authenticated_client, rejected_saved_key):
+    draft = "5ecafe77cafe77cafe77cafe77cafe77"
+    rejected_saved_key.rejected.add(draft)
+    check = authenticated_client.post("/api/discover/metadata/test", json={"token": draft},
+                                      headers={"X-API-KEY": "metadata-test-key"}).json["data"]
+    assert check["status"] == "authentication_failed"
+    assert rejected_saved_key.sent == [draft]
+    assert draft not in json.dumps(check)
+
+
 @pytest.mark.parametrize("stored", ["eyJhbGciOiJIUzI1NiJ9.payload.signature", "not-a-key",
                                     "5ecafe00cafe00cafe00cafe00cafe0", "  "])
 def test_a_stored_value_that_is_not_a_v3_key_falls_back_rather_than_failing(authenticated_client,

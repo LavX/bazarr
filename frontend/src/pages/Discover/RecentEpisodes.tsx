@@ -1,15 +1,7 @@
 /* eslint-disable camelcase -- API context retains source field names. */
 import { useEffect, useRef, useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router";
-import {
-  ActionIcon,
-  Alert,
-  Anchor,
-  Button,
-  Stack,
-  Text,
-  Title,
-} from "@mantine/core";
+import { useLocation, useNavigate } from "react-router";
+import { ActionIcon, Alert, Button, Stack, Text, Title } from "@mantine/core";
 import { useMediaQuery } from "@mantine/hooks";
 import {
   faArrowsRotate,
@@ -105,19 +97,18 @@ export default function RecentEpisodes() {
       episode: "",
     });
   };
-  const setup =
-    !feed.settingsLoading &&
-    !feed.settingsError &&
-    (!feed.configured ||
-      data?.status === "unconfigured" ||
-      data?.status === "authentication_failed");
+  // Discover always runs on TMDB (the server falls back to its built-in key),
+  // so there is no setup state here: a feed TMDB could not answer is simply
+  // unavailable for now.
   const failed =
     feed.settingsError ||
     feed.isError ||
     expired ||
     data?.status === "unavailable" ||
+    data?.status === "unconfigured" ||
+    data?.status === "authentication_failed" ||
     (feed.isSuccess && !data);
-  const items = expired || setup ? [] : (data?.items ?? []);
+  const items = expired ? [] : (data?.items ?? []);
   const returnedIndex = items.findIndex(
     (item) => browsing.focusId === `discover-recent-${item.source_id}`,
   );
@@ -138,21 +129,19 @@ export default function RecentEpisodes() {
             New episodes
           </Title>
         </div>
-        {feed.configured && (
-          <div className={styles.sectionTools}>
-            <ActionIcon
-              id="discover-recent-refresh"
-              variant="subtle"
-              className={styles.refreshButton}
-              loading={feed.isFetching}
-              onClick={() => void feed.refetch()}
-              aria-label="Refresh new episodes"
-              title="Refresh new episodes"
-            >
-              <FontAwesomeIcon icon={faArrowsRotate} />
-            </ActionIcon>
-          </div>
-        )}
+        <div className={styles.sectionTools}>
+          <ActionIcon
+            id="discover-recent-refresh"
+            variant="subtle"
+            className={styles.refreshButton}
+            loading={feed.isFetching}
+            onClick={() => void feed.refetch()}
+            aria-label="Refresh new episodes"
+            title="Refresh new episodes"
+          >
+            <FontAwesomeIcon icon={faArrowsRotate} />
+          </ActionIcon>
+        </div>
       </div>
       <Stack
         role="status"
@@ -162,22 +151,6 @@ export default function RecentEpisodes() {
       >
         {(feed.settingsLoading || feed.isFetching) && (
           <Text size="sm">Checking recent episodes.</Text>
-        )}
-        {setup && (
-          <Alert color="yellow">
-            <Text size="sm">
-              {data?.status === "authentication_failed"
-                ? "TMDB rejected the key Discover is using."
-                : "Connect TMDB to browse recent episodes."}
-            </Text>
-            <Anchor
-              component={Link}
-              to="/subtitle-hub?tab=my-providers#metadata"
-              className={styles.settingsLink}
-            >
-              Set up recent episodes
-            </Anchor>
-          </Alert>
         )}
         {failed && (
           <Alert color="yellow">

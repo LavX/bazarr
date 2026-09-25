@@ -309,6 +309,8 @@ export interface MetadataResponse {
   truncated?: boolean;
   status: MetadataStatus;
   configured: boolean;
+  /** Status only: TMDB rejected the saved key and browsing uses the built-in one. */
+  override_rejected?: boolean;
   revision: string;
   locale: string;
   message: string;

@@ -161,6 +161,21 @@ export function useDiscoverSummary() {
 
 export const METADATA_QUERY_KEY = [QueryKeys.Discover, "metadata"] as const;
 
+/**
+ * Whether a TMDB payload belongs to the configuration the settings describe.
+ *
+ * Discover always has TMDB: the server falls back to its built-in key, so no
+ * query here depends on a TMDB setting and nothing asks the reader to connect
+ * one. The queries wait only while the settings read is actually in flight,
+ * so the first request already carries the revision. The revision keeps a
+ * payload fetched for an older configuration off the page. When the settings
+ * carry none there is nothing to compare against, and the payload is shown
+ * rather than hidden.
+ */
+function currentRevision(payload: string | undefined, revision?: string) {
+  return revision === undefined || payload === revision;
+}
+
 export function normalizeTitleQuery(query: string) {
   return query
     .normalize("NFKD")
@@ -181,7 +196,6 @@ export function useDiscoverMetadata(
 ) {
   const settings = useSystemSettings();
   const revision = settings.data?.discover?.metadata_revision;
-  const configured = settings.data?.discover?.tmdb_configured ?? false;
   const scope = useQuery({
     queryKey: [
       ...METADATA_QUERY_KEY,
@@ -189,7 +203,7 @@ export function useDiscoverMetadata(
       settings.dataUpdatedAt,
     ],
     queryFn: ({ signal }) => api.discover.metadata("status", signal),
-    enabled: enabled && source !== "tmdb" && Boolean(revision),
+    enabled: enabled && !settings.isLoading && source !== "tmdb",
     staleTime: 300_000,
     gcTime: 60_000,
     retry: false,
@@ -221,9 +235,8 @@ export function useDiscoverMetadata(
       }),
     enabled:
       enabled &&
-      Boolean(revision) &&
-      (source === "local" ||
-        (source === "tmdb" ? configured : !scope.isPending)),
+      !settings.isLoading &&
+      (source === "local" || source === "tmdb" || !scope.isPending),
     staleTime: source === "local" ? 0 : 300_000,
     gcTime: 60_000,
     retry: false,
@@ -234,10 +247,9 @@ export function useDiscoverMetadata(
     data:
       source === "omdb" ||
       source === "local" ||
-      result.data?.revision === revision
+      currentRevision(result.data?.revision, revision)
         ? result.data
         : undefined,
-    configured,
     revision,
     settingsLoading: settings.isLoading,
     settingsError: settings.isError,
@@ -273,12 +285,11 @@ const feedRetryDelay = (attempt: number) => (attempt === 0 ? 1000 : 12000);
 export function useDiscoverTrending(mediaType: TrendingMediaType) {
   const settings = useSystemSettings();
   const revision = settings.data?.discover?.metadata_revision;
-  const configured = settings.data?.discover?.tmdb_configured ?? false;
   const result = useQuery({
     queryKey: [...METADATA_QUERY_KEY, revision, "trending", "week", mediaType],
     queryFn: ({ signal }) =>
       admittedFeed(api.discover.trending(mediaType, signal)),
-    enabled: Boolean(revision) && configured,
+    enabled: !settings.isLoading,
     staleTime: FEED_FRESH_MS,
     gcTime: FEED_FRESH_MS * 2,
     networkMode: "always",
@@ -288,12 +299,10 @@ export function useDiscoverTrending(mediaType: TrendingMediaType) {
   return {
     ...result,
     data:
-      configured &&
-      result.data?.revision === revision &&
+      currentRevision(result.data?.revision, revision) &&
       result.data?.media_type === mediaType
         ? result.data
         : undefined,
-    configured,
     settingsLoading: settings.isLoading,
     settingsError: settings.isError,
   };
@@ -302,7 +311,6 @@ export function useDiscoverTrending(mediaType: TrendingMediaType) {
 export function useDiscoverDigitalReleases(region: string) {
   const settings = useSystemSettings();
   const revision = settings.data?.discover?.metadata_revision;
-  const configured = settings.data?.discover?.tmdb_configured ?? false;
   const [today, setToday] = useState(() =>
     new Date().toISOString().slice(0, 10),
   );
@@ -329,7 +337,7 @@ export function useDiscoverDigitalReleases(region: string) {
     ],
     queryFn: ({ signal }) =>
       admittedFeed(api.discover.digitalReleases(region, signal)),
-    enabled: Boolean(revision) && configured,
+    enabled: !settings.isLoading,
     staleTime: FEED_FRESH_MS,
     gcTime: FEED_FRESH_MS * 2,
     networkMode: "always",
@@ -339,15 +347,13 @@ export function useDiscoverDigitalReleases(region: string) {
   return {
     ...result,
     data:
-      configured &&
-      result.data?.revision === revision &&
+      currentRevision(result.data?.revision, revision) &&
       result.data?.region === region &&
       result.data?.release_type === "digital" &&
       result.data?.window.start === start &&
       result.data?.window.end === today
         ? result.data
         : undefined,
-    configured,
     settingsLoading: settings.isLoading,
     settingsError: settings.isError,
   };
@@ -356,7 +362,6 @@ export function useDiscoverDigitalReleases(region: string) {
 export function useDiscoverRecentEpisodes() {
   const settings = useSystemSettings();
   const revision = settings.data?.discover?.metadata_revision;
-  const configured = settings.data?.discover?.tmdb_configured ?? false;
   const [today, setToday] = useState(() =>
     new Date().toISOString().slice(0, 10),
   );
@@ -381,7 +386,7 @@ export function useDiscoverRecentEpisodes() {
       today,
     ],
     queryFn: ({ signal }) => admittedFeed(api.discover.recentEpisodes(signal)),
-    enabled: Boolean(revision) && configured,
+    enabled: !settings.isLoading,
     staleTime: FEED_FRESH_MS,
     gcTime: FEED_FRESH_MS * 2,
     networkMode: "always",
@@ -391,8 +396,7 @@ export function useDiscoverRecentEpisodes() {
   return {
     ...result,
     data:
-      configured &&
-      result.data?.revision === revision &&
+      currentRevision(result.data?.revision, revision) &&
       result.data?.source === "tmdb" &&
       result.data?.scope === "trending_shows" &&
       result.data?.period === "week" &&
@@ -400,7 +404,6 @@ export function useDiscoverRecentEpisodes() {
       result.data?.window.end === today
         ? result.data
         : undefined,
-    configured,
     settingsLoading: settings.isLoading,
     settingsError: settings.isError,
   };

@@ -6,11 +6,10 @@ import {
   useRef,
   useState,
 } from "react";
-import { Link, useLocation, useNavigate } from "react-router";
+import { useLocation, useNavigate } from "react-router";
 import {
   ActionIcon,
   Alert,
-  Anchor,
   Button,
   Text,
   Title,
@@ -164,18 +163,17 @@ export default function Trending({
         episode: "",
       });
   };
+  // Discover always runs on TMDB (the server falls back to its built-in key),
+  // so there is no setup state here: a feed TMDB could not answer is simply
+  // unavailable for now.
   const failed =
     (feed.isSuccess && !data) ||
     feed.settingsError ||
     feed.isError ||
     expired ||
-    data?.status === "unavailable";
-  const setup =
-    !feed.settingsLoading &&
-    !feed.settingsError &&
-    (!feed.configured ||
-      data?.status === "unconfigured" ||
-      data?.status === "authentication_failed");
+    data?.status === "unavailable" ||
+    data?.status === "unconfigured" ||
+    data?.status === "authentication_failed";
   return (
     <>
       <section
@@ -335,46 +333,21 @@ export default function Trending({
             </Title>
           </div>
           <div className={styles.sectionTools}>
-            {feed.configured && (
-              <ActionIcon
-                variant="subtle"
-                className={styles.refreshButton}
-                loading={feed.isFetching}
-                onClick={() => void feed.refetch()}
-                aria-label="Refresh trending"
-                title="Refresh trending"
-              >
-                <FontAwesomeIcon icon={faArrowsRotate} />
-              </ActionIcon>
-            )}
+            <ActionIcon
+              variant="subtle"
+              className={styles.refreshButton}
+              loading={feed.isFetching}
+              onClick={() => void feed.refetch()}
+              aria-label="Refresh trending"
+              title="Refresh trending"
+            >
+              <FontAwesomeIcon icon={faArrowsRotate} />
+            </ActionIcon>
           </div>
         </div>
         <div role="status" aria-live="polite" className={styles.feedStatus}>
           {(feed.settingsLoading || feed.isFetching) && (
             <Text size="sm">Loading weekly trending titles.</Text>
-          )}
-          {setup && (
-            <Alert
-              color="yellow"
-              title={
-                data?.status === "authentication_failed"
-                  ? "TMDB access needs attention"
-                  : "Explore beyond your library"
-              }
-            >
-              <Text size="sm">
-                {data?.status === "authentication_failed"
-                  ? "TMDB rejected the key Discover is using."
-                  : "Connect TMDB for global films, series and artwork. Library connections are optional."}
-              </Text>
-              <Anchor
-                component={Link}
-                to="/subtitle-hub?tab=my-providers#metadata"
-                className={styles.settingsLink}
-              >
-                Set up Discover
-              </Anchor>
-            </Alert>
           )}
           {failed && (
             <Alert color="yellow">

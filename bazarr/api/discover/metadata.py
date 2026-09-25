@@ -13,6 +13,9 @@ class MetadataStatus(Resource):
     def get(self):
         result = metadata.connection_status()
         result["data"]["fallback_revision"] = metadata.omdb_configuration().revision
+        # Browsing has already moved to the built-in key when this is true; the
+        # key field in the Subtitle Hub is the one place that says so.
+        result["data"]["override_rejected"] = metadata.override_rejected()
         return result
 
 
@@ -26,7 +29,10 @@ class MetadataTest(Resource):
         try:
             if body.get("token") == "***":
                 return {"message": "Enter an optional TMDB override, or omit it to check the configured connection."}, 400
-            return metadata.connection_status(body.get("token"), use_saved="token" not in body)
+            # The check reports on the key itself, so it never falls back to the
+            # built-in key the way browsing does.
+            return metadata.connection_status(body.get("token"), use_saved="token" not in body,
+                                              fallback=False)
         except ValueError:
             return {"message": "Invalid TMDB access token."}, 400
 
