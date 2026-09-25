@@ -132,6 +132,9 @@ async function openKeySettings(router: ReturnType<typeof createMemoryRouter>) {
   await act(async () => {
     await router.navigate("/subtitle-hub?tab=my-providers#metadata");
   });
+  await waitFor(() =>
+    expect(screen.getByLabelText("TMDB API key")).toBeEnabled(),
+  );
 }
 
 async function renderSettings(fromDiscover = false) {
