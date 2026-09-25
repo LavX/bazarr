@@ -1,17 +1,51 @@
 # coding=utf-8
 
-import io
-import re
-
-from flask_restx import Resource, Namespace, fields, marshal
+from flask_restx import Resource, Namespace, reqparse, fields, marshal
 
 from app.config import settings
 from app.logger import empty_log
 
 from utilities.central import get_log_file_path
+from utilities.log_reader import (DEFAULT_LIMIT, LEVEL_CHOICES, MAX_LIMIT, CountCache, StoredFilter,
+                                  read_log_page)
 from ..utils import authenticate
 
 api_ns_system_logs = Namespace('System Logs', description='List log file entries or empty log file')
+
+# Shared by every request, so a refresh of the newest page counts only what was
+# appended since the last one.
+_log_counts = CountCache()
+
+
+def _limit(value):
+    number = int(value)
+    if number < 1:
+        raise ValueError('limit must be at least 1')
+    # Capped rather than refused: a client asking for more gets the most there is.
+    return min(number, MAX_LIMIT)
+
+
+_limit.__schema__ = {'type': 'integer', 'minimum': 1, 'maximum': MAX_LIMIT, 'default': DEFAULT_LIMIT}
+
+
+def _offset(value):
+    number = int(value)
+    if number < 0:
+        raise ValueError('offset cannot be negative')
+    return number
+
+
+_offset.__schema__ = {'type': 'integer', 'minimum': 0, 'default': 0}
+
+
+def _level(value):
+    name = str(value).strip().lower()
+    if name not in LEVEL_CHOICES:
+        raise ValueError(f'level must be one of {", ".join(LEVEL_CHOICES)}')
+    return name
+
+
+_level.__schema__ = {'type': 'string', 'enum': list(LEVEL_CHOICES)}
 
 
 @api_ns_system_logs.route('system/logs')
@@ -23,115 +57,55 @@ class SystemLogs(Resource):
         'exception': fields.String(),
     })
 
-    def handle_record(self, logs, multi_line_record):
-        # finalize the multi line record
-        if logs:
-            # update the exception of the last entry 
-            last_log = logs[-1]
-            last_log["exception"] += "\n".join(multi_line_record)
-        else:
-            # multiline record is first entry in log
-            last_log = dict()
-            last_log["type"] = "ERROR"
-            last_log["message"] = "See exception"
-            last_log["exception"] = "\n".join(multi_line_record)
-            logs.append(last_log)
+    get_filter_error_model = api_ns_system_logs.model('SystemLogsFilterError', {
+        'filter': fields.String(description='include or exclude'),
+        'pattern': fields.String(description='The stored pattern'),
+        'message': fields.String(description='Why the pattern cannot be applied'),
+    })
+
+    get_envelope_model = api_ns_system_logs.model('SystemLogsGetEnvelope', {
+        'data': fields.List(fields.Nested(get_response_model), description='Matching entries, newest first'),
+        'total': fields.Integer(description='How many entries match, across the whole file'),
+        'offset': fields.Integer(),
+        'limit': fields.Integer(description='The page size used, after the cap'),
+        'filter_errors': fields.List(fields.Nested(get_filter_error_model),
+                                     description='Stored filters that are not applied because they are invalid'),
+    })
+
+    get_request_parser = reqparse.RequestParser()
+    get_request_parser.add_argument('limit', type=_limit, required=False, default=DEFAULT_LIMIT,
+                                    help=f'Entries to return, newest first, at most {MAX_LIMIT}')
+    get_request_parser.add_argument('offset', type=_offset, required=False, default=0,
+                                    help='Matching entries to skip from the newest')
+    get_request_parser.add_argument('level', type=_level, required=False, default=None,
+                                    help='Minimum severity to return')
+    get_request_parser.add_argument('contains', type=str, required=False, default='',
+                                    help='Case-insensitive text the entry must contain')
 
     @authenticate
-    @api_ns_system_logs.doc(parser=None)
-    @api_ns_system_logs.response(200, 'Success')
+    @api_ns_system_logs.doc(parser=get_request_parser)
+    @api_ns_system_logs.response(200, 'Success', get_envelope_model)
+    @api_ns_system_logs.response(400, 'Invalid parameter')
     @api_ns_system_logs.response(401, 'Not Authenticated')
     def get(self):
-        """List log entries"""
-        logs = []
-        include = str(settings.log.include_filter)
-        exclude = str(settings.log.exclude_filter)
-        ignore_case = settings.log.ignore_case
-        regex = settings.log.use_regex
-        if regex:
-            # pre-compile regular expressions for better performance
-            if ignore_case:
-                flags = re.IGNORECASE
-            else:
-                flags = 0
-            if len(include) > 0:
-                try:
-                    include_compiled = re.compile(include, flags)
-                except Exception:
-                    include_compiled = None
-            if len(exclude) > 0:
-                try:
-                    exclude_compiled = re.compile(exclude, flags)
-                except Exception:
-                    exclude_compiled = None
-        elif ignore_case:
-            include = include.casefold()
-            exclude = exclude.casefold()
-
-        # regular expression to identify the start of a log record (timestamp-based)
-        record_start_pattern = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
-
-        with io.open(get_log_file_path(), encoding='UTF-8') as file:
-            raw_lines = file.read()
-            lines = raw_lines.split('|\n')
-            multi_line_record = []
-            for line in lines:
-                if line == '':
-                    continue
-                if ignore_case and not regex:
-                    compare_line = line.casefold()
-                else:
-                    compare_line = line
-                if len(include) > 0:
-                    if regex:
-                        if include_compiled is None:
-                            # if invalid re, keep the line
-                            keep = True
-                        else:
-                            keep = include_compiled.search(compare_line)
-                    else:
-                        keep = include in compare_line
-                    if not keep:
-                        continue
-                if len(exclude) > 0:
-                    if regex:
-                        if exclude_compiled is None:
-                            # if invalid re, keep the line
-                            skip = False
-                        else:
-                            skip = exclude_compiled.search(compare_line)
-                    else:
-                        skip = exclude in compare_line
-                    if skip:
-                        continue
-                # check if the line has a timestamp that matches the start of a new log record
-                if record_start_pattern.match(line):
-                    if multi_line_record:
-                        self.handle_record(logs, multi_line_record)
-                        # reset for the next multi-line record
-                        multi_line_record = []
-                    raw_message = line.split('|')
-                    raw_message_len = len(raw_message)
-                    if raw_message_len > 3:
-                        log = dict()
-                        log["timestamp"] = raw_message[0]
-                        log["type"] = raw_message[1].rstrip()
-                        log["message"] = raw_message[3]
-                        if raw_message_len > 4 and raw_message[4] != '\n':
-                            log['exception'] = raw_message[4].strip('\'').replace('  ', '\u2003\u2003')
-                        else:
-                            log['exception'] = None
-                        logs.append(log)
-                else:
-                    # accumulate lines that do not have new record header timestamps
-                    multi_line_record.append(line.strip())
-
-            if multi_line_record:
-                # finalize the multi line record and update the exception of the last entry 
-                self.handle_record(logs, multi_line_record)
-
-            logs.reverse()
-        return marshal(logs, self.get_response_model, envelope='data')
+        """List log entries, newest first, one page at a time"""
+        args = self.get_request_parser.parse_args()
+        # The stored filters still apply to every read, as they always have. A
+        # regex that does not compile is not applied, and is reported below.
+        stored = StoredFilter(include=str(settings.log.include_filter),
+                              exclude=str(settings.log.exclude_filter),
+                              ignore_case=settings.log.ignore_case,
+                              use_regex=settings.log.use_regex)
+        page = read_log_page(get_log_file_path(), limit=args['limit'], offset=args['offset'],
+                             level=args['level'], contains=args['contains'] or '', stored=stored,
+                             cache=_log_counts)
+        return {
+            'data': marshal(page.entries, self.get_response_model),
+            'total': page.total,
+            'offset': args['offset'],
+            'limit': args['limit'],
+            'filter_errors': stored.errors,
+        }
 
     @authenticate
     @api_ns_system_logs.doc(parser=None)

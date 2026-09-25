@@ -122,12 +122,37 @@ declare namespace System {
     retry: string;
   }
 
-  type LogType = "INFO" | "WARNING" | "ERROR" | "DEBUG";
+  type LogType = "INFO" | "WARNING" | "ERROR" | "DEBUG" | "CRITICAL";
 
   interface Log {
     type: System.LogType;
-    timestamp: string;
+    // Null only for lines ahead of the file's first record.
+    timestamp: string | null;
     message: string;
-    exception?: string;
+    exception?: string | null;
+  }
+
+  // The minimum severity GET system/logs accepts as its level parameter.
+  type LogLevel = "debug" | "info" | "warning" | "error" | "critical";
+
+  // A stored filter the server could not apply, so the log it returned is
+  // not filtered by it.
+  interface LogFilterError {
+    filter: "include" | "exclude";
+    pattern: string;
+    message: string;
+  }
+
+  interface LogPage extends DataWrapperWithTotal<Log> {
+    offset: number;
+    limit: number;
+    filter_errors: LogFilterError[];
+  }
+
+  interface LogQuery {
+    limit: number;
+    offset: number;
+    level?: LogLevel;
+    contains?: string;
   }
 }

@@ -1,0 +1,102 @@
+// The level and text filters sit under the toolbox, inset to line up with it.
+.filters {
+  margin: 0 12px 8px;
+}
+
+.level {
+  width: 200px;
+}
+
+.search {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.clear {
+  display: flex;
+  align-items: center;
+}
+
+.alert {
+  margin: 0 12px 8px;
+}
+
+// The shared table keeps a 700px minimum and scrolls sideways below it, which
+// on a phone hid the date, the detail button and most of every message. A log
+// line has to be readable where it is, so this table fits its container, long
+// lines such as request URLs wrap anywhere, and on a narrow screen each entry
+// stacks its message under its level and time.
+.logs {
+  :global(.mantine-Table-table) {
+    min-width: 0;
+  }
+
+  .message {
+    overflow-wrap: anywhere;
+  }
+
+  .date {
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  @include mantine.smaller-than(mantine.$mantine-breakpoint-sm) {
+    :global(.mantine-Table-table),
+    :global(.mantine-Table-tbody) {
+      display: block;
+    }
+
+    :global(.mantine-Table-thead) {
+      display: none;
+    }
+
+    :global(.mantine-Table-tr) {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      grid-template-areas:
+        "type date detail"
+        "message message message";
+      align-items: center;
+      // A grid row draws the border a table row in the separated model does
+      // not, with the shared rounded corners, so it becomes a plain divider.
+      border-radius: 0;
+      border-bottom: 1px solid var(--bz-border-divider);
+    }
+
+    :global(.mantine-Table-td) {
+      padding: 6px 12px;
+    }
+
+    :global(.mantine-Table-td):nth-child(1) {
+      grid-area: type;
+      padding-right: 0;
+    }
+
+    :global(.mantine-Table-td):nth-child(2) {
+      grid-area: message;
+      padding-top: 0;
+    }
+
+    :global(.mantine-Table-td):nth-child(3) {
+      grid-area: date;
+    }
+
+    :global(.mantine-Table-td):nth-child(4) {
+      grid-area: detail;
+    }
+
+    // Loading placeholders and the empty message are one cell across.
+    :global(.mantine-Table-td)[colspan] {
+      grid-area: auto;
+      grid-column: 1 / -1;
+    }
+  }
+}
+
+@include mantine.smaller-than(mantine.$mantine-breakpoint-sm) {
+  .level,
+  .search {
+    flex: 1 1 100%;
+    width: auto;
+  }
+}

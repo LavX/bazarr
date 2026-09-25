@@ -100,9 +100,14 @@ class SystemApi extends BaseApi {
     await this.post("/health");
   }
 
-  async logs() {
-    const response = await this.get<DataWrapper<System.Log[]>>("/logs");
-    return response.data;
+  // One page of the log, newest first, with the total that matches.
+  async logs(query: System.LogQuery) {
+    return this.get<System.LogPage>("/logs", {
+      limit: query.limit,
+      offset: query.offset,
+      level: query.level,
+      contains: query.contains || undefined,
+    });
   }
 
   async jobs(id?: number, status?: string) {

@@ -493,6 +493,7 @@ jobs:
             tests/bazarr/test_swagger_static.py \
             tests/bazarr/test_supervisor_proxy.py \
             tests/bazarr/test_supervisor_stages.py \
+            tests/bazarr/test_system_logs_api.py \
             tests/bazarr/test_tracemalloc_dumper.py \
             tests/bazarr/test_translate_job_media_name.py \
             tests/bazarr/test_translator_auth.py \
