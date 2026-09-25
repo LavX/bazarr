@@ -445,6 +445,41 @@ describe("ArrStep", () => {
     expect(onNext).not.toHaveBeenCalled();
   });
 
+  it("retries the switch from the saved panel instead of walking on", async () => {
+    // Once the new row is back in the list the step shows the saved panel,
+    // and Continue there advanced with the kind still switched off.
+    const user = userEvent.setup();
+    // eslint-disable-next-line camelcase
+    setGeneral({ use_sonarr: false });
+    createMutate.mockImplementation(
+      (_body: unknown, opts?: { onSuccess?: (data: unknown) => void }) => {
+        setInstances([{ ...created(1), enabled: true }]);
+        opts?.onSuccess?.(created(1));
+      },
+    );
+    settingsMutate.mockImplementationOnce(
+      (_body: unknown, opts?: { onError?: (error: unknown) => void }) => {
+        opts?.onError?.(new Error("nope"));
+      },
+    );
+
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await fillValidConnection(user);
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+    expect(
+      await screen.findByText(/could not turn it on/i),
+    ).toBeInTheDocument();
+    expect(onNext).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    expect(settingsMutate).toHaveBeenCalledTimes(2);
+    expect(createMutate).toHaveBeenCalledTimes(1);
+    expect(updateMutate).not.toHaveBeenCalled();
+    expect(onNext).toHaveBeenCalled();
+  });
+
   it("never creates a second row when the switch failed and the list lags", async () => {
     // The create invalidates the instances query, so this step normally flips
     // into its connected state on its own. A refetch that is slow, or one that
@@ -564,6 +599,21 @@ describe("ArrStep", () => {
         expect.anything(),
       );
       expect(onNext).toHaveBeenCalled();
+    });
+
+    it("is not called off while its switch is being written", () => {
+      // A row created a moment ago comes back before its switch lands.
+      setInstances([{ ...row, enabled: true }]);
+      // eslint-disable-next-line camelcase
+      setGeneral({ use_sonarr: false });
+      mockedUseSettingsMutation.mockReturnValue({
+        mutate: settingsMutate,
+        isPending: true,
+      } as unknown as ReturnType<typeof useSettingsMutation>);
+
+      customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+      expect(screen.queryByText(/switched off/i)).toBeNull();
     });
 
     it("stays on the step when the row cannot be turned back on", async () => {

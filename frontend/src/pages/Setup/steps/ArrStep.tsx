@@ -354,12 +354,16 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
             <Text size="sm">
               {existing.name} at {address}
             </Text>
-            {(!existing.enabled || kindKnownOff) && (
-              <Text size="sm">
-                It is switched off, so Bazarr+ does not sync it. Continue turns
-                it back on.
-              </Text>
-            )}
+            {/* Not while a write is in flight: a row created a moment ago
+                comes back before its switch lands, and was never off. */}
+            {(!existing.enabled || kindKnownOff) &&
+              !update.isPending &&
+              !settings.isPending && (
+                <Text size="sm">
+                  It is switched off, so Bazarr+ does not sync it. Continue
+                  turns it back on.
+                </Text>
+              )}
             {/* Wrong address, wrong key, wrong instance: without this the only
                 way back out of a typo was to finish the wizard and find
                 Settings, Connections. */}

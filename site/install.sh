@@ -368,7 +368,7 @@ detect_database() {
   mount=$(compose_config_mount "$config" "$svc")
   mount_type="${mount%%$'\t'*}"; CONFIG_DIR="${mount#*$'\t'}"
   if [[ -n "$mount" && "$mount_type" != bind ]]; then
-    fatal "Bazarr+ keeps /config in a Docker $mount_type${CONFIG_DIR:+ ($CONFIG_DIR)}, not a host directory, so this installer cannot back it up. Nothing was changed. Back it up yourself, then upgrade with: docker compose -f $dir/docker-compose.yml pull && docker compose -f $dir/docker-compose.yml up -d"
+    fatal "Bazarr+ keeps /config in a Docker $mount_type${CONFIG_DIR:+ ($CONFIG_DIR)}, not a host directory, so this installer cannot back it up. Your running containers were not changed. Back it up yourself, then upgrade with: docker compose -f $dir/docker-compose.yml pull && docker compose -f $dir/docker-compose.yml up -d"
   fi
   CONFIG_DIR="${CONFIG_DIR:-$dir/config}"
   yaml="$CONFIG_DIR/config/config.yaml"
