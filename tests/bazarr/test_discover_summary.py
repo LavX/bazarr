@@ -5,6 +5,7 @@ outstanding subtitle requirements. It must never write, never probe a provider
 or an indexer, and never turn an unavailable source into a confident zero.
 """
 import datetime as dt
+import logging
 import re
 import os
 import uuid
@@ -22,17 +23,20 @@ def summary_database(request, monkeypatch):
     from app import activity
     from app import database as db
     from discover import summary as summary_module
+    # AUTOCOMMIT on both backends, as app/database.py builds the real engine.
+    # A transactional test engine hid a PostgreSQL-only failure: a streamed
+    # read opens a named cursor, which PostgreSQL refuses outside a transaction.
     if request.param == "postgresql":
         url = os.environ.get("BAZARR_PG_TEST_URL")
         if not url:
             pytest.fail("Dedicated PostgreSQL test URL is required")
-        engine = sa.create_engine(url)
+        engine = sa.create_engine(url, isolation_level="AUTOCOMMIT")
         schema = "discover_summary_" + uuid.uuid4().hex
         with engine.begin() as connection:
             connection.execute(sa.text(f'CREATE SCHEMA "{schema}"'))
         engine = engine.execution_options(schema_translate_map={None: schema})
     else:
-        engine = sa.create_engine("sqlite://")
+        engine = sa.create_engine("sqlite://", isolation_level="AUTOCOMMIT")
         schema = None
     db.Base.metadata.create_all(engine)
     session = Session(engine)
@@ -1075,6 +1079,71 @@ def test_a_budget_breach_keeps_the_last_good_aggregate_as_stale(summary_database
     assert wanted["availability"] == "stale"
     assert wanted["requirements"] == 2
     assert "group_budget_exceeded" in wanted["qualifications"]
+
+
+def _autocommit(engine):
+    with engine.connect() as connection:
+        raw = connection.connection.dbapi_connection
+        return raw.isolation_level is None if engine.dialect.name == "sqlite" else raw.autocommit
+
+
+def test_outstanding_requirements_are_read_under_the_application_isolation_level(
+        summary_database, quiet_queue, caplog):
+    """The application engine runs in AUTOCOMMIT on both backends.
+
+    On PostgreSQL a streamed read declares a named server-side cursor, which
+    the server only accepts inside a transaction. Under AUTOCOMMIT every
+    summary request logged that error and reported outstanding requirements
+    as unknown. SQLite has no named cursors, so only PostgreSQL caught it.
+    """
+    from discover import summary as summary_module
+    assert _autocommit(summary_database.engine), \
+        "the fixture engine must match the application engine's AUTOCOMMIT mode"
+    session = summary_database.session
+    add_instance(session, 1)
+    add_show(session, 100, 1)
+    add_episode(session, 101, 100, 1, missing="['en', 'hu']")
+    add_movie(session, 200, 1, missing="['en']")
+    session.commit()
+
+    # Called directly, a failed read raises here instead of being cached as unknown.
+    direct = summary_module._wanted_component(summary_module._instances())
+    assert direct["episode_requirements"] == 2
+    assert direct["movie_requirements"] == 1
+
+    summary_module.reset_cache()
+    with caplog.at_level(logging.ERROR, logger="discover.summary"):
+        wanted = summary_module.get_summary()["wanted"]
+    assert not caplog.records, caplog.records[0].getMessage() if caplog.records else None
+    assert wanted["availability"] == "available"
+    assert wanted["requirements"] == 3
+    assert "source_unavailable" not in wanted["qualifications"]
+
+
+def test_the_group_budget_still_bounds_the_requirement_read(summary_database, quiet_queue,
+                                                            monkeypatch):
+    """The grouped read is bounded by a LIMIT, one row past the budget."""
+    from discover import summary as summary_module
+    session = summary_database.session
+    add_instance(session, 1)
+    add_show(session, 100, 1)
+    add_episode(session, 101, 100, 1, missing="['en']")
+    add_episode(session, 102, 100, 1, missing="['hu']", upstream=21, episode=2)
+    session.commit()
+
+    monkeypatch.setattr(summary_module, "WANTED_GROUP_BUDGET", 1)
+    wanted, statements = counted(summary_database.engine,
+                                 lambda: summary_module.get_summary()["wanted"])
+    assert wanted["availability"] == "unknown"
+    assert wanted["requirements"] is None
+    assert wanted["qualifications"] == ["group_budget_exceeded"]
+    grouped = [statement for statement in statements if "GROUP BY" in statement
+               and "missing_subtitles" in statement]
+    assert grouped and all("LIMIT" in statement for statement in grouped)
+
+    monkeypatch.setattr(summary_module, "WANTED_GROUP_BUDGET", 2)
+    summary_module.reset_cache()
+    assert summary_module.get_summary()["wanted"]["requirements"] == 2
 
 
 def test_inaccessible_rootfolder_groups_are_read_in_a_deterministic_order(summary_database,
