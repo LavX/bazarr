@@ -4,9 +4,12 @@ import { createMemoryRouter, RouterProvider } from "react-router";
 import { http, HttpResponse } from "msw";
 import { readFileSync } from "node:fs";
 import { beforeEach, expect, it, vi } from "vitest";
+import queryClient from "@/apis/queries";
+import { QueryKeys } from "@/apis/queries/keys";
 import { AllProviders } from "@/providers";
 import { act, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
+import { readableTime } from "./feedText";
 import LibraryHero from "./LibraryHero";
 
 const discoverStyles = readFileSync(
@@ -175,6 +178,14 @@ function render() {
       <RouterProvider router={router} />
     </AllProviders>,
   );
+}
+
+/** The status pill, found by the state it leads with. */
+async function idlePill() {
+  const lead = await screen.findByText("Subtitle jobs idle");
+  const pill = lead.closest("p");
+  if (!pill) throw new Error("The status line is not inside its pill");
+  return pill;
 }
 
 /** The figure standing under one stat's label, not merely somewhere near it. */
@@ -452,7 +463,8 @@ it("paints the status, schedule and jobs link in page ink when there is no artwo
   if (!panel) throw new Error("Library hero has no panel");
   expect(panel).toHaveAttribute("data-artwork", "false");
 
-  const status = await screen.findByText(/subtitle jobs idle · last fetched/i);
+  const status = await idlePill();
+  expect(status).toHaveTextContent(/subtitle jobs idle · last fetched/i);
   const schedule = screen.getByText("Next: Sync series in 12 minutes");
   const allJobs = screen.getByRole("link", { name: /all jobs/i });
   expect(panel).toContainElement(status);
@@ -515,6 +527,28 @@ it("says nothing about sports where Sportarr is not configured", async () => {
   expect(screen.queryByRole("link", { name: /sports event/i })).toBeNull();
 });
 
+it("stops counting sports once Sportarr is switched off", async () => {
+  sportarr = true;
+  sportsTotal = 3;
+  render();
+  expect(
+    await screen.findByRole("link", {
+      name: /3 sports events need subtitles/i,
+    }),
+  ).toBeInTheDocument();
+  sportarr = false;
+  await act(async () => {
+    await queryClient.invalidateQueries({
+      queryKey: [QueryKeys.System, QueryKeys.Settings],
+    });
+  });
+  // The count query stops, but its last answer stays cached, and the link
+  // would open a Wanted page the navigation no longer offers.
+  await waitFor(() =>
+    expect(screen.queryByRole("link", { name: /sports event/i })).toBeNull(),
+  );
+});
+
 it("drops a configured kind that has nothing left to do", async () => {
   sportarr = true;
   sportsTotal = 0;
@@ -553,14 +587,38 @@ it("says when it last did something rather than leading with an absence", async 
   served = summary({ arrivals: [arrival()] });
   render();
   // An idle install's most interesting status is the last thing it fetched.
-  expect(
-    await screen.findByText(/subtitle jobs idle · last fetched/i),
-  ).toBeInTheDocument();
+  expect(await idlePill()).toHaveTextContent(
+    /subtitle jobs idle · last fetched/i,
+  );
+});
+
+// jsdom has no layout, so it cannot show the time surviving a 400px panel.
+// What it can show is the structure that lets it: the time is an element of
+// its own, apart from the state. Folded back into one string with the state,
+// a narrow panel cuts the end of the sentence, which is the time.
+it("keeps the time it last fetched in an element of its own", async () => {
+  const fetched = arrival();
+  served = summary({ arrivals: [fetched] });
+  render();
+  const pill = await idlePill();
+  const when = await within(pill).findByText(readableTime(fetched.timestamp));
+  expect(when.tagName).toBe("TIME");
+  expect(when).toHaveAttribute("datetime", fetched.timestamp);
+
+  const lead = within(pill).getByText("Subtitle jobs idle");
+  expect(lead).not.toContainElement(when);
+  expect(when).not.toContainElement(lead);
+  // Split for layout only: the sentence read aloud is the one it always was.
+  expect(pill).toHaveTextContent(
+    `Subtitle jobs idle · last fetched ${readableTime(fetched.timestamp)}`,
+  );
 });
 
 it("still reports idle when it has never fetched anything", async () => {
   render();
-  expect(await screen.findByText("Subtitle jobs idle")).toBeInTheDocument();
+  const pill = await idlePill();
+  expect(pill).toHaveTextContent(/^Subtitle jobs idle$/);
+  expect(pill.querySelector("time")).toBeNull();
 });
 
 // A 200 is not a promise that the body is a summary. A reverse proxy's sign-in

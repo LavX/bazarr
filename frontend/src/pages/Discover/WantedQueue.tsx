@@ -34,6 +34,8 @@ type Group = {
   to: string;
   linkLabel: string;
   entries: Entry[];
+  /** This source could not be read, which is not the same as nothing missing. */
+  failed: boolean;
 };
 
 /**
@@ -95,6 +97,7 @@ export default function WantedQueue() {
       heading: "Episodes",
       to: "/wanted/series",
       linkLabel: "All missing episodes",
+      failed: wanted.failed.episodes,
       entries: wanted.episodes.slice(0, PER_GROUP).map((item) => ({
         // Local ids, not upstream ones. sonarrSeriesId and sonarrEpisodeId are
         // the owning Sonarr's own ids and stopped being globally unique when a
@@ -125,6 +128,7 @@ export default function WantedQueue() {
       heading: "Movies",
       to: "/wanted/movies",
       linkLabel: "All missing movies",
+      failed: wanted.failed.movies,
       entries: wanted.movies.slice(0, PER_GROUP).map((item) => ({
         // Local id, as above: radarrId is the owning Radarr's own id.
         key: `movie:${item.id}`,
@@ -149,6 +153,7 @@ export default function WantedQueue() {
       heading: "Sports",
       to: "/wanted/sports",
       linkLabel: "All missing sports",
+      failed: wanted.failed.sports,
       entries: wanted.sports.slice(0, PER_GROUP).map((item) => ({
         key: `sports:${item.id}`,
         title: item.title,
@@ -157,7 +162,7 @@ export default function WantedQueue() {
         missing: (item.missing_subtitles ?? []).map(languageFromCode),
       })),
     },
-  ].filter((group) => group.entries.length > 0);
+  ].filter((group) => group.failed || group.entries.length > 0);
 
   if (!wanted.connected) return null;
   if (!wanted.isPending && !wanted.isError && groups.length === 0) return null;
@@ -206,70 +211,78 @@ export default function WantedQueue() {
                   {group.linkLabel} <FontAwesomeIcon icon={faArrowRight} />
                 </Link>
               </div>
-              <ul className={styles.wantedList}>
-                {group.entries.map((entry) => (
-                  <li key={entry.key}>
-                    <Link to={entry.to} className={styles.wantedTitle}>
-                      <strong>{entry.title}</strong>
-                      {entry.detail && <span>{entry.detail}</span>}
-                    </Link>
-                    <span className={styles.wantedLanguages}>
-                      {entry.missing.map((language) =>
-                        entry.search === undefined ? (
-                          <span
-                            key={`${language.code2}:${language.hi}:${language.forced}`}
-                            className={styles.wantedLanguageBadge}
-                          >
-                            {language.name}
-                            {language.hi
-                              ? " (HI)"
-                              : language.forced
-                                ? " (Forced)"
-                                : ""}
-                          </span>
-                        ) : (
-                          <button
-                            type="button"
-                            key={`${language.code2}:${language.hi}:${language.forced}`}
-                            disabled={pending}
-                            // A bare language name says what is missing, not what
-                            // pressing it does, and the same control could as
-                            // easily be a filter or a badge. The verb is the
-                            // point; the media name keeps the accessible name
-                            // distinguishable from every other pill on the page.
-                            title={
-                              language.hi
-                                ? "Search for hearing impaired subtitles"
+              {group.failed ? (
+                // Said in its own group, so the kinds that answered still show
+                // and the queue does not read as complete without this one.
+                <p className={styles.wantedEmpty}>
+                  This list could not be read.
+                </p>
+              ) : (
+                <ul className={styles.wantedList}>
+                  {group.entries.map((entry) => (
+                    <li key={entry.key}>
+                      <Link to={entry.to} className={styles.wantedTitle}>
+                        <strong>{entry.title}</strong>
+                        {entry.detail && <span>{entry.detail}</span>}
+                      </Link>
+                      <span className={styles.wantedLanguages}>
+                        {entry.missing.map((language) =>
+                          entry.search === undefined ? (
+                            <span
+                              key={`${language.code2}:${language.hi}:${language.forced}`}
+                              className={styles.wantedLanguageBadge}
+                            >
+                              {language.name}
+                              {language.hi
+                                ? " (HI)"
                                 : language.forced
-                                  ? "Search for forced subtitles"
-                                  : undefined
-                            }
-                            aria-label={`Search providers for ${language.name}${
-                              language.hi
-                                ? " hearing impaired"
+                                  ? " (Forced)"
+                                  : ""}
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              key={`${language.code2}:${language.hi}:${language.forced}`}
+                              disabled={pending}
+                              // A bare language name says what is missing, not what
+                              // pressing it does, and the same control could as
+                              // easily be a filter or a badge. The verb is the
+                              // point; the media name keeps the accessible name
+                              // distinguishable from every other pill on the page.
+                              title={
+                                language.hi
+                                  ? "Search for hearing impaired subtitles"
+                                  : language.forced
+                                    ? "Search for forced subtitles"
+                                    : undefined
+                              }
+                              aria-label={`Search providers for ${language.name}${
+                                language.hi
+                                  ? " hearing impaired"
+                                  : language.forced
+                                    ? " forced"
+                                    : ""
+                              } subtitles for ${entry.title}`}
+                              onClick={() => void entry.search?.(language)}
+                            >
+                              <FontAwesomeIcon
+                                icon={faSearch}
+                                aria-hidden="true"
+                              />{" "}
+                              Search {language.name}
+                              {language.hi
+                                ? " (HI)"
                                 : language.forced
-                                  ? " forced"
-                                  : ""
-                            } subtitles for ${entry.title}`}
-                            onClick={() => void entry.search?.(language)}
-                          >
-                            <FontAwesomeIcon
-                              icon={faSearch}
-                              aria-hidden="true"
-                            />{" "}
-                            Search {language.name}
-                            {language.hi
-                              ? " (HI)"
-                              : language.forced
-                                ? " (Forced)"
-                                : ""}
-                          </button>
-                        ),
-                      )}
-                    </span>
-                  </li>
-                ))}
-              </ul>
+                                  ? " (Forced)"
+                                  : ""}
+                            </button>
+                          ),
+                        )}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </section>
           ))}
         </div>

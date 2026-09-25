@@ -19,6 +19,7 @@ import { QueryKeys } from "@/apis/queries/keys";
 const queryClientMock = vi.hoisted(() => ({
   getQueryData: vi.fn(),
   invalidateQueries: vi.fn(),
+  resetQueries: vi.fn(),
   setQueryData: vi.fn(),
 }));
 

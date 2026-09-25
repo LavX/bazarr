@@ -98,20 +98,28 @@ export default function MediaServerInstanceCard({
             >
               Edit
             </Button>
-            <Button
-              type="button"
-              size="xs"
-              variant="subtle"
-              color="red"
-              onClick={() => onDelete(instance)}
-            >
-              Delete
-            </Button>
+            {!instance.account_owned && (
+              <Button
+                type="button"
+                size="xs"
+                variant="subtle"
+                color="red"
+                onClick={() => onDelete(instance)}
+              >
+                Delete
+              </Button>
+            )}
           </Group>
         </Group>
         <Text size="sm" c="dimmed">
           Test checks access, not refresh permission.
         </Text>
+        {instance.account_owned && (
+          <Text size="sm" c="dimmed">
+            This instance belongs to your Plex account, which would recreate it
+            at the next restart. Disconnect from Plex to remove it.
+          </Text>
+        )}
         {update.isError && (
           <Alert color="red">
             Could not update this instance. Check its API key and path mappings

@@ -140,3 +140,35 @@ def test_zero_score_denominator_coalesces_on_postgres(pg_session, monkeypatch):
     alpha = next(p for p in body["byProvider"] if p["provider"] == "alpha")
     assert alpha["count"] == 2
     assert alpha["avgScorePct"] == 50.0
+
+
+def test_unscored_rows_are_neither_averaged_nor_bucketed_on_postgres(pg_session, monkeypatch):
+    from api.history import metrics
+
+    monkeypatch.setattr(metrics, "database", pg_session)
+    _episode(pg_session, provider="alpha", score=360, score_out_of=360)
+    _episode(pg_session, provider="alpha", score=None, score_out_of=None)
+    pg_session.flush()
+
+    body = _call(metrics)
+
+    alpha = next(p for p in body["byProvider"] if p["provider"] == "alpha")
+    assert alpha["count"] == 2
+    assert alpha["avgScorePct"] == 100.0
+    counts = {b["bucket"]: b["count"] for b in body["scoreHistogram"]}
+    assert counts[10] == 1
+    assert sum(counts.values()) == 1
+
+
+def test_language_variants_match_on_postgres(pg_session, monkeypatch):
+    from api.history import metrics
+
+    monkeypatch.setattr(metrics, "database", pg_session)
+    _episode(pg_session, language="en")
+    _episode(pg_session, language="en:hi")
+    _episode(pg_session, language="hu")
+    pg_session.flush()
+
+    body = _call(metrics, "?language=en")
+
+    assert body["totals"]["downloads"] == 2

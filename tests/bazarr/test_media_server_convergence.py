@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+from test_media_server_http import http_fixture as http_fixture
 from test_media_server_instances import payload
 
 HEADERS = {'X-API-KEY': 'synthetic-bazarr-key'}
@@ -430,36 +431,48 @@ def test_an_instance_keeps_its_options_and_toggles_across_a_save(schema_session)
 class _FakeSection:
     """Only what `plex_refresh_item` ever asked a section for."""
 
-    def __init__(self, title, guids, calls):
+    def __init__(self, title, guids, calls, refusal=None):
         self.title, self.type, self._guids, self._calls = title, 'movie', guids, calls
+        self._refusal = refusal
 
     # plexapi's own spelling, which the real sections answer to.
     def getGuid(self, guid):
+        from plexapi.exceptions import NotFound
+        if self._refusal is not None:
+            raise self._refusal
         if guid not in self._guids:
-            raise KeyError(guid)
+            raise NotFound(guid)
         return self._guids[guid]
 
     def update(self):
         self._calls.append(('section-update', self.title))
+        if self._refusal is not None:
+            raise self._refusal
 
 
 class _FakeItem:
-    def __init__(self, calls, name, episodes=None):
+    def __init__(self, calls, name, episodes=None, refusal=None):
         self._calls, self._name, self._episodes = calls, name, episodes or {}
+        self._refusal = refusal
 
     def refresh(self):
         self._calls.append(('item-refresh', self._name))
+        if self._refusal is not None:
+            raise self._refusal
 
     def episode(self, season, episode):
+        from plexapi.exceptions import NotFound
+        if (season, episode) not in self._episodes:
+            raise NotFound(f'S{season:02}E{episode:02}')
         return self._episodes[(season, episode)]
 
 
-def _plex_client(monkeypatch, sections, calls):
+def _plex_client(monkeypatch, sections, calls, **overrides):
     from types import SimpleNamespace
     from plex import operations, refresh
     monkeypatch.setattr(operations, 'plex_server_for', lambda *_args: SimpleNamespace(
         library=SimpleNamespace(section=lambda name: sections[name])))
-    return refresh.PlexRefreshClient(snapshot('plex'))
+    return refresh.PlexRefreshClient(snapshot('plex', **overrides))
 
 
 def test_plex_refreshes_the_item_the_imdb_guid_resolves(monkeypatch):
@@ -488,6 +501,52 @@ def test_plex_updates_the_section_when_the_guid_resolves_nothing(monkeypatch):
         assert client.refresh_by_provider_id('movie', metadata()) is None
         assert client.refresh_library('movie') == {'status': 'requested'}
     assert calls == [('section-update', 'Movies')]
+
+
+def _refusals():
+    import requests
+    from plexapi.exceptions import Unauthorized
+    return [(requests.exceptions.ConnectionError('refused'), 'connection_error'),
+            (requests.exceptions.ReadTimeout('slow'), 'timeout'),
+            (Unauthorized('(401) unauthorized'), 'unauthorized')]
+
+
+@pytest.mark.parametrize('refusal, code', _refusals())
+def test_a_plex_lookup_that_fails_is_not_reported_as_a_missing_item(monkeypatch, refusal, code):
+    """Only a lookup miss is "not in this section"; a dead server is itself."""
+    from media_servers.http import MediaServerError
+    calls = []
+    sections = {'Movies': _FakeSection('Movies', {}, calls, refusal=refusal)}
+    with _plex_client(monkeypatch, sections, calls) as client, pytest.raises(MediaServerError) as error:
+        client.refresh_by_provider_id('movie', metadata())
+    assert error.value.code == code
+
+
+@pytest.mark.parametrize('refusal, code', _refusals())
+def test_a_refused_item_refresh_fails_rather_than_falling_back_to_the_section(monkeypatch, refusal, code):
+    from media_servers.http import MediaServerError
+    calls = []
+    movie = _FakeItem(calls, 'Metropolis', refusal=refusal)
+    sections = {'Movies': _FakeSection('Movies', {'imdb://tt0017136': movie}, calls)}
+    with _plex_client(monkeypatch, sections, calls) as client, pytest.raises(MediaServerError) as error:
+        client.refresh_by_provider_id('movie', metadata())
+    assert error.value.code == code
+
+
+def test_one_failed_section_update_is_not_reported_as_requested(monkeypatch):
+    """The other sections are still asked, but the refresh stays pending."""
+    import requests
+    from media_servers.http import MediaServerError
+    calls = []
+    sections = {'Movies': _FakeSection('Movies', {}, calls,
+                                       refusal=requests.exceptions.ConnectionError('refused')),
+                'Films': _FakeSection('Films', {}, calls)}
+    options = {'movie_libraries': ['Movies', 'Films']}
+    with _plex_client(monkeypatch, sections, calls, options=options) as client, \
+            pytest.raises(MediaServerError) as error:
+        client.refresh_library('movie')
+    assert error.value.code == 'connection_error'
+    assert calls == [('section-update', 'Movies'), ('section-update', 'Films')]
 
 
 def test_plex_reports_nothing_requested_when_no_section_accepted_the_update(monkeypatch):
@@ -878,6 +937,76 @@ def test_a_scope_the_server_holds_no_library_for_is_not_a_failure(monkeypatch):
     client = _Rescanner('plex', answers={('movie',): {'status': 'requested'}})
     assert _rescan(monkeypatch, snapshot('plex'), client) == {'requested': 1, 'failed': 0}
     assert client.calls == [('movie',), ('episode',), ('sports',)]
+
+
+def test_a_destination_deleted_mid_rescan_is_not_asked_again(monkeypatch):
+    """Each scope checks the saved destination first, as the refresh worker does."""
+    from media_servers import dispatcher
+    from media_servers.http import MediaServerError
+
+    class Deleting(_Rescanner):
+        def refresh_library(self, *args, ensure_current=None, **_kwargs):
+            # Every real client runs the guard before it sends a request.
+            if ensure_current:
+                ensure_current()
+            self.calls.append(args)
+            dispatcher.get_native_configuration().delete(IDS['plex'])
+            return {'status': 'requested'}
+
+    client = Deleting('plex')
+    with pytest.raises(MediaServerError) as error:
+        _rescan(monkeypatch, snapshot('plex'), client)
+    assert error.value.code == 'configuration_changed'
+    assert client.calls == [('movie',)]
+
+
+def test_an_emby_root_is_scanned_once_not_again_for_sports(monkeypatch, http_fixture):
+    """Emby's sports request matches any library holding the root, typed or not."""
+    from urllib.parse import urlsplit
+    from emby.client import EmbyClient
+    folders = [{'Name': 'Movies', 'ItemId': '3', 'CollectionType': 'movies', 'Locations': ['/media/movies']},
+               {'Name': 'TV', 'ItemId': '19', 'CollectionType': 'tvshows', 'Locations': ['/media/series']}]
+    base, records = http_fixture([(200, folders, {}), (204, b'', {}), (200, folders, {}),
+                                  (200, folders, {}), (204, b'', {})])
+    snap = replace(snapshot('jellyfin'), id='0e3b8c1a-3333-4b0a-9c3d-0a1b2c3d4e5f', kind='emby',
+                   name='Emby', url=base, options_json='{}',
+                   path_mappings=((('local_path', '/movies'), ('remote_path', '/media/movies')),))
+    assert _rescan(monkeypatch, snap, EmbyClient(base, 'synthetic-key'))['failed'] == 0
+    posts = [urlsplit(record['path']).path for record in records if record['method'] == 'POST']
+    assert posts == ['/Items/3/Refresh']
+
+
+def test_a_full_rescan_clears_the_overflow_it_covers(monkeypatch):
+    """The overflow warning says to refresh the libraries, so doing that clears it.
+
+    A mutation dropped while the rescan runs may have missed the scans it had
+    already sent, so one of those keeps the warning.
+    """
+    from media_servers import dispatcher
+    snap = snapshot('plex')
+    workers = dispatcher.RefreshDispatcher(dispatcher.NativeConfiguration(settings(), snapshots=[snap]))
+    monkeypatch.setattr(dispatcher, '_dispatcher', workers)
+    workers._server(snap.id).dropped = 3
+    assert workers.status(snap.id)['error_code'] == 'queue_overflow'
+
+    class DroppingMeanwhile(_Rescanner):
+        def refresh_library(self, *args, **kwargs):
+            workers.servers[snap.id].dropped += 1
+            return super().refresh_library(*args, **kwargs)
+
+    _rescan(monkeypatch, snap, DroppingMeanwhile('plex'))
+    assert workers.status(snap.id)['error_code'] == 'queue_overflow'
+
+    # A library the server refused was not rescanned, so its drops are not covered.
+    from media_servers.http import MediaServerError
+    refusing = _Rescanner('plex', answers={('movie',): MediaServerError('server_error'),
+                                           ('episode',): {'status': 'requested'},
+                                           ('sports',): {'status': 'requested'}})
+    assert _rescan(monkeypatch, snap, refusing) == {'requested': 2, 'failed': 1}
+    assert workers.status(snap.id)['error_code'] == 'queue_overflow'
+
+    _rescan(monkeypatch, snap, _Rescanner('plex'))
+    assert workers.status(snap.id)['error_code'] is None
 
 
 def test_one_refused_scope_does_not_stop_the_rest(monkeypatch):

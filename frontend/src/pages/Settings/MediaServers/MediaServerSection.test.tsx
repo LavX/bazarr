@@ -221,6 +221,29 @@ it.each(["emby", "silo"] as const)(
   },
 );
 
+it("offers no delete for the Plex account's own card and says how to remove it", async () => {
+  // A deleted account row came back at the next restart, rebuilt from the
+  // signed-in account, so the only removal that lasts is disconnecting.
+  setup("plex", true, [
+    instance("plex", { account_owned: true, path_mappings: [] }),
+    instance("plex", { id: secondId, name: "Attic", path_mappings: [] }),
+  ]);
+  const owned = within(
+    await screen.findByRole("region", { name: "Living room" }),
+  );
+  const added = within(screen.getByRole("region", { name: "Attic" }));
+  expect(
+    owned.queryByRole("button", { name: "Delete" }),
+  ).not.toBeInTheDocument();
+  expect(
+    owned.getByText(/Disconnect from Plex to remove it/),
+  ).toBeInTheDocument();
+  expect(added.getByRole("button", { name: "Delete" })).toBeInTheDocument();
+  expect(
+    added.queryByText(/Disconnect from Plex to remove it/),
+  ).not.toBeInTheDocument();
+});
+
 it("shows safe Test failures, resets on edits and disables probes when clearing a saved key", async () => {
   setup("emby");
   server.use(

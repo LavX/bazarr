@@ -9,6 +9,7 @@ from app.database import database
 from app.jobs_queue import jobs_queue
 from sportarr import library
 from sportarr.sync.leagues import require_sportarr
+from sportarr.workflows import require_sports_enabled
 from ..utils import authenticate
 from sportarr.errors import SportsNotFound
 
@@ -210,6 +211,7 @@ class SportsLeagueEventSync(Resource):
     def post(self, league_id):
         try:
             owner = _owner(_body().get('arr_instance_id'))
+            require_sports_enabled()
             if library.get_league(database, league_id, owner) is None:
                 raise SportsNotFound('Sports league not found for this owner')
         except SportsNotFound as exc:
@@ -227,6 +229,7 @@ class SportsLeagueSync(Resource):
     def post(self):
         try:
             owner = _owner(_body().get('arr_instance_id'))
+            require_sports_enabled()
             require_sportarr(database, owner)
         except SportsNotFound as exc:
             return {'message': str(exc)}, 404

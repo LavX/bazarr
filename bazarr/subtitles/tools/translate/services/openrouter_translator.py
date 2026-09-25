@@ -235,6 +235,16 @@ def build_provider_config():
     return build_routing_config()[1]
 
 
+def _cancel_remote_job(remote_job_id, base_url):
+    if not remote_job_id or not base_url:
+        return
+    try:
+        requests.delete(f'{base_url.rstrip("/")}/api/v1/jobs/{remote_job_id}',
+                        headers=get_translator_auth_headers(), timeout=10)
+    except requests.exceptions.RequestException:
+        logger.debug('Could not cancel AI Subtitle Translator job %s', remote_job_id)
+
+
 class OpenRouterTranslatorService:
     """
     Translates subtitles using external AI Subtitle Translator service.
@@ -433,6 +443,7 @@ class OpenRouterTranslatorService:
         TranslationServiceError with a user-readable reason on any failure.
         """
         self.remote_job_id = None
+        base_url = ''
         try:
             check_cancelled(self.cancel)
             model, provider = build_routing_config()
@@ -493,7 +504,12 @@ class OpenRouterTranslatorService:
             # Poll for completion
             return self._poll_job(base_url, job_id, len(lines_payload), bazarr_job_id=bazarr_job_id)
 
-        except (JobCancelled, TranslationServiceError):
+        except JobCancelled:
+            # Stop ends the sidecar's job too. Left running, it keeps spending
+            # model tokens on a result nothing is going to collect.
+            _cancel_remote_job(self.remote_job_id, base_url)
+            raise
+        except TranslationServiceError:
             raise
         except ProviderRoutingError as error:
             # The refusal names what the user has to change, so it is the reason.
@@ -507,6 +523,9 @@ class OpenRouterTranslatorService:
             logger.error('AI Subtitle Translator connection error')
             raise TranslationServiceError('Cannot connect to the AI Subtitle Translator service.') from error
         except Exception as e:
+            # A Sportarr owner switched off mid-poll stops it here, and so does
+            # anything else that abandons the poll, so the sidecar job goes too.
+            _cancel_remote_job(self.remote_job_id, base_url)
             logger.error(f'AI Subtitle Translator error: {str(e)}')  # noqa: G004
             raise TranslationServiceError(f'AI translation failed: {e}') from e
 

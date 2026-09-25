@@ -571,6 +571,7 @@ const MovieView: FunctionComponent = () => {
         onSelectionChanged={setSelections}
         selectionToolbar={selectionToolbar}
         profileToolbar={profileToolbar}
+        itemNoun={{ one: "movie", other: "movies" }}
       ></ItemView>
     </Container>
   );
