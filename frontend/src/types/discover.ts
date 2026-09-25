@@ -614,7 +614,7 @@ export interface DiscoverArrival {
   languages?: string[];
   poster_url?: string | null;
   backdrop_url?: string | null;
-  kind: "episode" | "movie" | "translation";
+  kind: "episode" | "movie" | "sports" | "translation";
   event_id: string;
   status: "success";
   action: number | null;

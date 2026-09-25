@@ -511,14 +511,16 @@ export function useWantedPreview(limit: number) {
   // optional Sportarr call, blanked the whole section including the kinds that
   // had already answered.
   const connected = [series, movies, sports].filter((query) => query.isEnabled);
+  // Switching an integration off stops its query but keeps its last answer in
+  // the cache, so each source is read only while it is still enabled.
   return {
-    episodes: series.data?.data ?? [],
-    movies: movies.data?.data ?? [],
-    sports: sports.data ?? [],
+    episodes: series.isEnabled ? (series.data?.data ?? []) : [],
+    movies: movies.isEnabled ? (movies.data?.data ?? []) : [],
+    sports: sports.isEnabled ? (sports.data ?? []) : [],
     failed: {
-      episodes: series.isError,
-      movies: movies.isError,
-      sports: sports.isError,
+      episodes: series.isEnabled && series.isError,
+      movies: movies.isEnabled && movies.isError,
+      sports: sports.isEnabled && sports.isError,
     },
     // Judged over the sources that are actually configured, and only when all
     // of them agree. A disabled source is not evidence of anything: counting
