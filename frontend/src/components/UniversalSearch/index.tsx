@@ -245,11 +245,11 @@ export default function UniversalSearch() {
   const source = normalized && results.data ? results.data : status.data;
   const fallbackAvailable =
     status.settingsError ||
-    (!status.settingsLoading && !status.configured) ||
     status.isError ||
     results.isError ||
     additional?.isError ||
     source?.status === "unavailable" ||
+    source?.status === "unconfigured" ||
     source?.status === "authentication_failed" ||
     (Boolean(normalized) &&
       !items.length &&
@@ -535,15 +535,6 @@ export default function UniversalSearch() {
                   You can open IMDb subtitle search below.
                 </Alert>
               )}
-              {!status.settingsLoading &&
-                !status.settingsError &&
-                !status.configured && (
-                  <Alert color="yellow">
-                    Set up TMDB in the Subtitle Hub to browse movies beyond your
-                    library. IMDb subtitle search and your local library remain
-                    available.
-                  </Alert>
-                )}
               {source &&
                 ["authentication_failed", "unavailable"].includes(
                   source.status,
@@ -555,7 +546,6 @@ export default function UniversalSearch() {
                 </Alert>
               )}
               {Boolean(normalized) &&
-                status.configured &&
                 normalized === debounced &&
                 results.isFetching && (
                   <Text>Searching {shows ? "show" : "movie"} titles.</Text>
@@ -664,6 +654,7 @@ export default function UniversalSearch() {
               results.isError ||
               additional?.isError ||
               source?.status === "unavailable" ||
+              source?.status === "authentication_failed" ||
               additional?.data?.status === "unavailable") && (
               <Button
                 variant="light"
@@ -677,18 +668,10 @@ export default function UniversalSearch() {
                 Retry metadata
               </Button>
             )}
-            {source?.status === "authentication_failed" && (
-              <Anchor
-                id="discover-metadata-setup"
-                c="var(--discover-link)"
-                component={Link}
-                to="/subtitle-hub?tab=my-providers#metadata"
-                py="sm"
-                onClick={() => saveReturn("discover-metadata-setup")}
-              >
-                Check the TMDB key
-              </Anchor>
-            )}
+            {/* No link to the TMDB key from here: the server falls back to
+                its built-in key, so Discover never asks the reader to fix
+                TMDB. A rejected saved key is reported next to its field in
+                the Subtitle Hub instead. */}
             {source?.primary &&
               source.source !== "tmdb" &&
               (["unavailable", "authentication_failed"].includes(

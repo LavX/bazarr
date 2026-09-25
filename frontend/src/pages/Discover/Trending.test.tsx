@@ -444,10 +444,16 @@ it.each(["empty", "unavailable", "authentication_failed", "cached"] as const)(
       );
     }
     if (value === "authentication_failed") {
+      // The server falls back to its built-in key, so a rejection that still
+      // arrives is an outage with a retry, never a prompt to set up TMDB.
+      expect(
+        await screen.findByText(/Weekly trending is temporarily unavailable/),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/Connect TMDB|Set up/)).not.toBeInTheDocument();
       await user.click(
-        await screen.findByRole("link", { name: "Set up Discover" }),
+        screen.getByRole("button", { name: "Refresh trending" }),
       );
-      expect(router.state.location.pathname).toBe("/subtitle-hub");
+      expect(router.state.location.pathname).toBe("/discover");
     }
     if (value === "cached")
       expect(
@@ -457,15 +463,40 @@ it.each(["empty", "unavailable", "authentication_failed", "cached"] as const)(
   },
 );
 
-it("does not request trending when metadata is unconfigured", async () => {
-  configured = false;
-  browse();
-  expect(
-    await screen.findByRole("link", { name: "Set up Discover" }),
-  ).toHaveAttribute("href", "/subtitle-hub?tab=my-providers#metadata");
-  expect(requests).toEqual([]);
-  expect(searches).toEqual([]);
-});
+it.each([
+  { case: "a false TMDB flag", omit: false },
+  { case: "no Discover settings at all", omit: true },
+])(
+  "still requests and shows trending with $case, never asking to set up TMDB",
+  async ({ omit }) => {
+    // Discover always has the built-in key. Settings that say otherwise, or
+    // say nothing, once put a "Connect TMDB" card over every global feed and
+    // held the feeds back so they could never recover on their own.
+    configured = false;
+    if (omit)
+      server.use(
+        http.get("/api/system/settings", () =>
+          HttpResponse.json({
+            general: { theme: "auto", use_sonarr: false, use_radarr: false },
+          }),
+        ),
+      );
+    browse();
+    expect(
+      await screen.findByRole("button", { name: "Explore Northern Light" }),
+    ).toBeVisible();
+    expect(requests).toEqual(["all"]);
+    expect(
+      screen.getByRole("button", { name: "Refresh trending" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByText(
+        /Connect TMDB|Set up Discover|Explore beyond your library/,
+      ),
+    ).not.toBeInTheDocument();
+    expect(searches).toEqual([]);
+  },
+);
 
 it("rejects a response for obsolete configuration or another filter", async () => {
   server.use(

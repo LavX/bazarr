@@ -353,10 +353,15 @@ it.each([
   );
   if (status === "empty")
     await section.findByText(/No recent digital releases found in US/);
-  if (status === "unavailable" || status === "expired")
+  // The server falls back to its built-in key, so a rejection that still
+  // reaches the page is an outage, never a prompt to set anything up.
+  if (
+    status === "unavailable" ||
+    status === "expired" ||
+    status === "authentication_failed"
+  )
     await section.findByText(/Digital releases are temporarily unavailable/);
-  if (status === "authentication_failed")
-    await section.findByText(/TMDB rejected/);
+  expect(section.queryByText(/Connect TMDB|Set up/)).not.toBeInTheDocument();
   if (status === "partial") {
     expect(
       section.queryByText(/Digital release source and freshness/),
@@ -436,25 +441,31 @@ it("retains region while metadata configuration rotates and rejects the old revi
   expect(searches).toEqual([]);
 });
 
-it("does not request regional metadata when TMDB is unconfigured", async () => {
-  server.use(
-    http.get("/api/system/settings", () =>
-      HttpResponse.json({
-        general: { theme: "auto" },
-        discover: {
-          tmdb_configured: false,
-          metadata_revision: "no-token",
-          locale: "en-US",
-        },
-      }),
-    ),
-  );
-  browse();
-  await screen.findByRole("heading", { name: "Recent digital releases" });
-  await screen.findByText("Connect TMDB to browse regional digital releases.");
-  expect(regions).toEqual([]);
-  expect(searches).toEqual([]);
-});
+it.each([
+  { case: "a false TMDB flag", discover: { tmdb_configured: false } },
+  { case: "no Discover settings at all", discover: undefined },
+])(
+  "still browses regional releases with $case, never asking to set up TMDB",
+  async ({ discover }) => {
+    // Discover always has the built-in key. A settings payload that says
+    // otherwise, or says nothing, must neither hold the feed back nor put a
+    // setup prompt in its place.
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: { theme: "auto" },
+          ...(discover ? { discover } : {}),
+        }),
+      ),
+    );
+    browse();
+    await screen.findByRole("heading", { name: "Recent digital releases" });
+    await screen.findByRole("button", { name: /Digital North US/ });
+    expect(regions).toEqual(["US"]);
+    expect(screen.queryByText(/Connect TMDB|Set up/)).not.toBeInTheDocument();
+    expect(searches).toEqual([]);
+  },
+);
 
 it("does not attach a previous digital date when the same movie is opened from trending", async () => {
   server.use(

@@ -5,6 +5,7 @@ import test_discover_metadata as metadata_fixtures
 upstream = metadata_fixtures.upstream
 authenticated_client = metadata_fixtures.authenticated_client
 retrieval_database = metadata_fixtures.retrieval_database
+rejected_saved_key = metadata_fixtures.rejected_saved_key
 
 
 def get(client, query="media_type=all"):
@@ -121,6 +122,16 @@ def test_unconfigured_empty_and_authentication_failure_remain_distinct(authentic
     # and the rejection is what the feed actually reports.
     settings.discover.tmdb_access_token = "5ecafeddcafeddcafeddcafeddcafedd"
     assert get(authenticated_client).json["status"] == "authentication_failed"
+
+
+def test_a_rejected_saved_key_never_takes_the_feed_down(authenticated_client, upstream, rejected_saved_key):
+    """Discover always has the built-in key, so a rejected override still fills the feed."""
+    upstream.payload = payload
+    result = get(authenticated_client).json
+    assert result["status"] == "live"
+    assert [row["source_id"] for row in result["items"]] == ["tmdb:movie:42", "tmdb:show:42"]
+    assert rejected_saved_key.sent.count(metadata_fixtures.SAVED_KEY) == 1
+    assert metadata_fixtures.BUILT_IN_KEY in rejected_saved_key.sent
 
 
 def test_cache_scope_includes_filter_locale_and_configuration(authenticated_client, upstream):

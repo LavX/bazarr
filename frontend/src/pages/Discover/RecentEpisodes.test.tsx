@@ -414,16 +414,51 @@ it.each(["empty", "unavailable", "authentication_failed", "cached", "expired"])(
     browse();
     if (status === "empty")
       await screen.findByText(/No qualifying episodes were found/);
-    if (status === "unavailable" || status === "expired")
+    // The server falls back to its built-in key, so a rejection that still
+    // arrives is an outage with a retry, never a prompt to set up TMDB.
+    if (
+      status === "unavailable" ||
+      status === "expired" ||
+      status === "authentication_failed"
+    )
       await screen.findByText(/New episodes are temporarily unavailable/);
-    if (status === "authentication_failed")
-      await screen.findByText(/TMDB rejected the key Discover is using/);
+    expect(screen.queryByText(/Connect TMDB|Set up/)).not.toBeInTheDocument();
     if (status === "cached")
       await screen.findByText(/Some source checks are unavailable/);
     if (status !== "cached")
       expect(
         screen.queryByRole("button", { name: /Northern Light.*Home/ }),
       ).not.toBeInTheDocument();
+    expect(searches).toEqual([]);
+  },
+);
+
+it.each([
+  { case: "a false TMDB flag", discover: { tmdb_configured: false } },
+  { case: "no Discover settings at all", discover: undefined },
+])(
+  "still lists new episodes with $case, never asking to set up TMDB",
+  async ({ discover }) => {
+    let calls = 0;
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: { theme: "auto", use_sonarr: false, use_radarr: false },
+          ...(discover ? { discover } : {}),
+        }),
+      ),
+      http.get("/api/discover/feeds/recent-episodes", () => {
+        calls += 1;
+        return HttpResponse.json(feed());
+      }),
+    );
+    browse();
+    await screen.findByRole("button", { name: /Northern Light.*Home/ });
+    expect(calls).toBe(1);
+    expect(
+      screen.getByRole("button", { name: "Refresh new episodes" }),
+    ).toBeVisible();
+    expect(screen.queryByText(/Connect TMDB|Set up/)).not.toBeInTheDocument();
     expect(searches).toEqual([]);
   },
 );
