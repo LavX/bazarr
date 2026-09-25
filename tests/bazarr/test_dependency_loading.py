@@ -242,7 +242,7 @@ def test_startup_requirements_probe_uses_security_patched_dependency_versions():
     expected_versions = {
         "cryptography": ("cryptography", ">=50.0.1"),
         "dynaconf": ("dynaconf", "==3.3.5"),
-        "urllib3": ("urllib3", "==2.7.0"),
+        "urllib3": ("urllib3", "==2.8.0"),
     }
 
     for module, (distribution, spec) in expected_versions.items():

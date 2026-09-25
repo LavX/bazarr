@@ -154,10 +154,13 @@ def frontend_test_tasks(args, jobs: dict, frontend_dir: Path, work: Path) -> lis
                 f'{{ echo "No files were found with the provided path: {reports}"; exit 1; }}')
     # The shards share the workers that one vitest run is given, so the tests
     # load the machine no more than a single run would; three shards at full
-    # width each starved the slower tests past their timeouts.
-    workers = max(1, -(-args.vitest_workers // len(shards)))
+    # width each starved the slower tests past their timeouts. The first shards
+    # take the remainder, so the total is the budget. A budget smaller than the
+    # number of shards still gives each shard one worker, and so goes over.
+    base, extra = divmod(args.vitest_workers, len(shards))
     tasks = []
-    for shard in shards:
+    for index, shard in enumerate(shards):
+        workers = max(1, base + (index < extra))
         name = shard_step.get("name", "step").replace("${{ matrix.shard }}", shard)
         # A coverage folder of its own for each shard, because vitest empties
         # that folder when it starts and the shards run side by side here.
