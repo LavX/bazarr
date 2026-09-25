@@ -1,6 +1,11 @@
 import { useMemo } from "react";
 import { showNotification } from "@mantine/notifications";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { isAxiosError } from "axios";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
@@ -185,12 +190,44 @@ export function useServerSearch(query: string, enabled: boolean) {
   });
 }
 
-export function useSystemLogs() {
+export interface SystemLogsPage {
+  page: number;
+  pageSize: number;
+  level?: System.LogLevel;
+  contains?: string;
+  baselineTotal?: number;
+}
+
+// One page of the log at a time. Pages count back from the newest entry, so
+// only the newest page refreshes itself: it is a small read of the end of the
+// file. An older page is read against the total paging started from, so the
+// lines that arrive meanwhile do not shift its rows under the reader. The
+// Refresh button still refreshes whatever is shown.
+export function useSystemLogs({
+  page,
+  pageSize,
+  level,
+  contains,
+  baselineTotal,
+}: SystemLogsPage) {
+  const newest = page === 0;
   return useQuery({
-    queryKey: [QueryKeys.System, QueryKeys.Logs],
-    queryFn: () => api.system.logs(),
-    refetchOnWindowFocus: "always",
-    refetchInterval: 1000 * 60,
+    queryKey: [
+      QueryKeys.System,
+      QueryKeys.Logs,
+      { page, pageSize, level, contains, baselineTotal },
+    ],
+    queryFn: () =>
+      api.system.logs({
+        limit: pageSize,
+        offset: page * pageSize,
+        level,
+        contains,
+        baselineTotal,
+      }),
+    placeholderData: keepPreviousData,
+    refetchOnWindowFocus: newest ? "always" : false,
+    refetchInterval: newest ? 1000 * 60 : false,
     staleTime: 1000 * 10,
   });
 }
