@@ -224,11 +224,18 @@ def _extract_peaks(video_path, audio_track, duration, job_id):
     # what was read so far is not a waveform.
     if job_id is not None and _job_cancelled(job_id):
         raise JobCancelled(f'Generating the waveform for {os.path.basename(video_path)} was cancelled.')
-    if process.returncode not in (0, None):
+    # An ffmpeg that read part of a damaged track and then failed leaves peaks
+    # that stop short of the duration, so it fails the job like one that read
+    # nothing, and nothing is cached.
+    failed = process.returncode not in (0, None)
+    if failed:
         logger.error('ffmpeg peaks generation failed: %s', stderr_out)
-    if not peaks:
-        if stderr_out:
+    if failed or not peaks:
+        if stderr_out.strip():
             raise JobFailed(f'ffmpeg could not read audio track {audio_track + 1}: {stderr_out.strip()}')
+        if failed:
+            raise JobFailed(f'ffmpeg stopped with exit code {process.returncode} while reading audio track '
+                            f'{audio_track + 1}.')
         raise JobFailed(f'No audio data found in {os.path.basename(video_path)}.')
     return peaks
 

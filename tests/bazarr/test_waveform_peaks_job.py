@@ -290,3 +290,32 @@ def test_peaks_read_from_a_file_replaced_mid_job_are_not_cached(queue, monkeypat
 
     assert waveform_peaks.read_cached_peaks(str(video), 0) is None
     assert not os.path.isdir(waveform_peaks.PEAKS_CACHE_DIR) or not os.listdir(waveform_peaks.PEAKS_CACHE_DIR)
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='uses a POSIX shell script as ffmpeg')
+def test_an_ffmpeg_that_fails_part_way_fails_the_job_and_caches_nothing(queue, monkeypatch, tmp_path):
+    """Only an ffmpeg that produced nothing failed the job. One that read part
+    of a damaged track and then exited with an error had its partial peaks
+    cached and served, a truncated waveform against the full duration."""
+    from utilities import binaries
+
+    failing = tmp_path / 'failing_ffmpeg.py'
+    # Ten peaks, then an error and a non-zero exit.
+    failing.write_text('import sys\n'
+                       'sys.stdout.buffer.write(bytes(3200))\n'
+                       'sys.stdout.buffer.flush()\n'
+                       'sys.stderr.write("Error while decoding stream #0:1: Invalid data found\\n")\n'
+                       'sys.exit(1)\n')
+    fake = tmp_path / 'ffmpeg'
+    fake.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{failing}" "$@"\n')
+    fake.chmod(0o755)
+    monkeypatch.setattr(binaries, 'get_binary', lambda name: str(fake))
+    monkeypatch.setattr(waveform_peaks, '_duration', lambda path: 60.0)
+    video = tmp_path / 'film.mkv'
+    video.write_bytes(b'a damaged film')
+
+    with pytest.raises(waveform_peaks.JobFailed, match='Error while decoding stream'):
+        waveform_peaks.generate_waveform_peaks(str(video), 0)
+
+    assert waveform_peaks.read_cached_peaks(str(video), 0) is None
+    assert not os.path.isdir(waveform_peaks.PEAKS_CACHE_DIR) or not os.listdir(waveform_peaks.PEAKS_CACHE_DIR)
