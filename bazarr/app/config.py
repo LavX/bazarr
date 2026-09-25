@@ -408,8 +408,9 @@ validators = [
     Validator('sonarr.port', must_exist=True, default=8989, is_type_of=int, gte=1, lte=65535),
     Validator('sonarr.base_url', must_exist=True, default='/', is_type_of=str),
     Validator('sonarr.ssl', must_exist=True, default=False, is_type_of=bool),
-    Validator('sonarr.http_timeout', must_exist=True, default=60, is_type_of=int,
-              is_in=[60, 120, 180, 240, 300, 600]),
+    # Mirrored from the default arr instance, which accepts any whole number of
+    # seconds from 1 up. A narrower rule here rejected every settings save.
+    Validator('sonarr.http_timeout', must_exist=True, default=60, is_type_of=int, gte=1),
     Validator('sonarr.apikey', must_exist=True, default='', is_type_of=str),
     Validator('sonarr.full_update', must_exist=True, default='Daily', is_type_of=str,
               is_in=['Manually', 'Daily', 'Weekly']),
@@ -433,8 +434,7 @@ validators = [
     Validator('radarr.port', must_exist=True, default=7878, is_type_of=int, gte=1, lte=65535),
     Validator('radarr.base_url', must_exist=True, default='/', is_type_of=str),
     Validator('radarr.ssl', must_exist=True, default=False, is_type_of=bool),
-    Validator('radarr.http_timeout', must_exist=True, default=60, is_type_of=int,
-              is_in=[60, 120, 180, 240, 300, 600]),
+    Validator('radarr.http_timeout', must_exist=True, default=60, is_type_of=int, gte=1),
     Validator('radarr.apikey', must_exist=True, default='', is_type_of=str),
     Validator('radarr.full_update', must_exist=True, default='Daily', is_type_of=str,
               is_in=['Manually', 'Daily', 'Weekly']),

@@ -4,7 +4,6 @@ import logging
 import time
 import threading
 
-from requests.exceptions import ConnectionError
 from app.signalrcore_compat import build_signalr_connection, patch_signalrcore_stop
 from collections import deque
 from time import sleep
@@ -170,7 +169,11 @@ class SonarrSignalrClient:
         while not _signalr_connection_active(self.connection):
             try:
                 started = self.connection.start()
-            except ConnectionError:
+            except OSError:
+                # signalrcore negotiates over urllib, so an arr that is down
+                # raises URLError, not requests' ConnectionError. Both are
+                # OSError subclasses; catching only the latter killed the feed
+                # thread for good when the arr was down at startup.
                 time.sleep(5)
                 continue
             if not started and not _signalr_connection_active(self.connection):
@@ -272,7 +275,8 @@ class RadarrSignalrClient:
         while not _signalr_connection_active(self.connection):
             try:
                 started = self.connection.start()
-            except ConnectionError:
+            except OSError:
+                # URLError from signalrcore's urllib negotiate, as for Sonarr.
                 time.sleep(5)
                 continue
             if not started and not _signalr_connection_active(self.connection):
