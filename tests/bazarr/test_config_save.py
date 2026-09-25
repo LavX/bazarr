@@ -208,6 +208,42 @@ def test_save_settings_invalidates_the_compat_cache_for_a_score_modifier(monkeyp
         config.settings.general.provider_score_modifiers = previous
 
 
+def test_save_settings_invalidates_the_compat_cache_for_the_ai_translated_penalty(monkeypatch):
+    """The AI-translated penalty is projected into the same cached scores as a
+    provider modifier, so an edit to it has to retire the cache too."""
+    from app import config
+
+    invalidations = []
+
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.database",
+        SimpleNamespace(
+            database=SimpleNamespace(execute=lambda _statement: None),
+            update=lambda _model: _FakeUpdate(),
+            System=object,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "compat.cache",
+        SimpleNamespace(invalidate_all=lambda: invalidations.append(
+            config.settings.general.ai_translated_score_penalty)),
+    )
+
+    previous = config.settings.general.ai_translated_score_penalty
+    try:
+        config.save_settings([("settings-general-ai_translated_score_penalty", ["30"])])
+
+        assert config.settings.general.ai_translated_score_penalty == 30
+        assert invalidations == [30]
+    finally:
+        config.settings.general.ai_translated_score_penalty = previous
+
+
 def test_save_settings_leaves_the_compat_cache_alone_for_an_unrelated_setting(monkeypatch):
     from app import config
 
@@ -907,3 +943,43 @@ def test_hub_local_availability_refreshes_recording_schedule_after_save(monkeypa
     monkeypatch.setitem(sys.modules, 'app.event_handler', SimpleNamespace(event_stream=lambda **kwargs: None))
     config.save_settings([(f'settings-compat_endpoint-{key}', [True])])
     assert calls == [True]
+
+
+@pytest.mark.parametrize("outcome", ["saved", "invalid", "unwritable"])
+def test_a_missing_subtitles_input_queues_the_recalculation_only_once_saved(monkeypatch, outcome):
+    """A refused save changed nothing, so it must not start a library-wide pass.
+
+    The recalculation used to be queued while the submitted values were still
+    being applied, before validation and before the write, so a save refused
+    for another field or by a full disk still recomputed every library.
+    """
+    from app import config
+    from subtitles.indexer import missing_refresh
+
+    queued = []
+    monkeypatch.setattr(missing_refresh, "queue_missing_subtitles_recalculation",
+                        lambda *a, **kw: queued.append(True))
+    monkeypatch.setattr(config, "write_config", lambda: outcome != "unwritable")
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+
+    def validate():
+        if outcome == "invalid":
+            raise ValidationError("synthetic invalid value")
+
+    monkeypatch.setattr(config.settings.validators, "validate", validate)
+    monkeypatch.setattr(config, "restore_persisted_settings", lambda: None)
+    monkeypatch.setattr(config.settings.general, "use_embedded_subs", True)
+    monkeypatch.setattr(config.settings.general, "use_sportarr", False)
+    monkeypatch.setitem(sys.modules, "app.database", SimpleNamespace(
+        database=SimpleNamespace(execute=lambda _statement: None),
+        update=lambda _model: _FakeUpdate(), System=object,
+    ))
+
+    items = [("settings-general-use_embedded_subs", ["false"])]
+    if outcome == "saved":
+        config.save_settings(items)
+        assert queued == [True]
+    else:
+        with pytest.raises(ValidationError):
+            config.save_settings(items)
+        assert queued == [], "a refused save queued a library-wide recalculation"

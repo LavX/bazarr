@@ -89,6 +89,30 @@ def test_declined_movie_request_re_enables_the_action():
     assert result["request"]["status"] == "declined" and result["requestable"] is True
 
 
+def test_failed_movie_request_keeps_the_action_closed():
+    # Unlike a declined one, a failed request still blocks a new one: Seerr
+    # answers 409 until the request is retried there.
+    from seerr.operations import normalize_media
+    body = {"id": 550, "mediaInfo": {"status": 1, "status4k": 1, "seasons": [],
+                                     "requests": [{"id": 9, "status": 4, "is4k": False, "seasons": []}]}}
+    result = normalize_media("movie", 550, 200, body, _cap(), "http://s")
+    assert result["request"]["status"] == "failed" and result["requestable"] is False
+
+
+def test_failed_show_request_keeps_its_seasons_requested():
+    # Seerr drops a season held by a failed request from any new request, so
+    # offering it would only come back as nothing to request.
+    from seerr.operations import normalize_media
+    body = {"id": 1399, "mediaInfo": {"status": 1, "status4k": 1, "seasons": [],
+                                      "requests": [{"id": 3, "status": 4, "is4k": False,
+                                                    "seasons": [{"seasonNumber": 1, "status": 4}]},
+                                                   {"id": 4, "status": 3, "is4k": False,
+                                                    "seasons": [{"seasonNumber": 2, "status": 3}]}]}}
+    result = normalize_media("tv", 1399, 200, body, _cap(), "http://s")
+    assert {s["number"]: s["state"] for s in result["seasons"]} == {1: "requested"}
+    assert result["requestable"] is True
+
+
 def test_show_partially_available_keeps_remaining_seasons_requestable():
     from seerr.operations import normalize_media
     body = {"id": 1399, "mediaInfo": {"status": 4, "status4k": 1,

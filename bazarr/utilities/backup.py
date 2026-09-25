@@ -16,7 +16,8 @@ from app.get_args import args
 from app.config import settings
 from app.event_handler import event_stream
 from app.jobs_queue import jobs_queue
-from utilities.central import restart_bazarr
+from literals import EXIT_RESTORE_ERROR
+from utilities.central import restart_bazarr, stop_bazarr
 
 _BACKUP_FILENAME_RE = re.compile(r'^bazarr_backup_v[\w.\-]+\.zip$')
 
@@ -405,8 +406,12 @@ def backup_to_zip(job_id=None, wait_for_completion=False):
     # carrying the configuration alone reads as a backup in the list and is
     # refused on the way back in, which the operator discovers on the day they
     # need it.
+    #
+    # The staging file is named after the job: a scheduled and a manual backup
+    # are separate jobs that can run at the same time, and with one shared name
+    # each could overwrite or delete the file the other was about to archive.
     if _postgres_enabled():
-        database_backup_file = os.path.join(get_backup_path(), 'bazarr_temp.dump')
+        database_backup_file = os.path.join(get_backup_path(), f'bazarr_temp_{job_id}.dump')
         logging.debug(f'Database will be dumped with pg_dump to: {database_backup_file}')  # noqa: G004
 
         try:
@@ -418,7 +423,7 @@ def backup_to_zip(job_id=None, wait_for_completion=False):
     else:
         database_src_file = os.path.join(args.config_dir, 'db', 'bazarr.db')
         logging.debug(f'Database file path to backup is: {database_src_file}')  # noqa: G004
-        database_backup_file = os.path.join(get_backup_path(), 'bazarr_temp.db')
+        database_backup_file = os.path.join(get_backup_path(), f'bazarr_temp_{job_id}.db')
 
         try:
             _copy_sqlite_database(database_src_file, database_backup_file)
@@ -466,7 +471,30 @@ def _restore_database(restore_database_path, dest_database_path):
         _delete_file(f'{dest_database_path}{suffix}')
 
 
+def _refuse_start_after_failed_restore(failed_dump_path):
+    """Stop the start while a dump that pg_restore failed on is still parked.
+
+    That file is the only sign left that the database may be half restored:
+    the configuration beside it is gone, so without this check the next start
+    finds nothing to restore and runs on the damaged database.
+    """
+    logging.critical('An earlier restore of the PostgreSQL database failed partway, so the database '
+                     'may be partially restored, and Bazarr will not start on it. The dump that was '
+                     'being restored is kept at %s. To retry the restore from Bazarr, extract the '
+                     'backup archive it came from (in %s) into %s, delete %s, and start Bazarr. To '
+                     'restore the database yourself instead, run pg_restore --clean --if-exists '
+                     '--no-owner --dbname <database> %s, then delete that file and start Bazarr.',
+                     failed_dump_path, get_backup_path(), get_restore_path(), failed_dump_path,
+                     failed_dump_path)
+    stop_bazarr(EXIT_RESTORE_ERROR)
+
+
 def restore_from_backup():
+    failed_dump_path = os.path.join(get_restore_path(), POSTGRES_FAILED_ARCHIVE_NAME)
+    if os.path.isfile(failed_dump_path):
+        _refuse_start_after_failed_restore(failed_dump_path)
+        return False
+
     if os.path.isfile(os.path.join(get_restore_path(), 'config.yaml')):
         restore_config_path = os.path.join(get_restore_path(), 'config.yaml')
         dest_config_path = os.path.join(args.config_dir, 'config', 'config.yaml')
@@ -519,8 +547,9 @@ def restore_from_backup():
             # pg_restore drops the existing objects before it loads the new
             # ones and there is no transaction around that, so a failure
             # partway leaves the database in neither state. Saying "nothing was
-            # changed" here would be a lie the operator acts on.
-            failed_dump_path = os.path.join(get_restore_path(), POSTGRES_FAILED_ARCHIVE_NAME)
+            # changed" here would be a lie the operator acts on, and so would
+            # carrying on with the start: this runs at boot, and every step after
+            # it would use that database.
             try:
                 os.replace(restore_database_path, failed_dump_path)
             except OSError:
@@ -532,9 +561,10 @@ def restore_from_backup():
                 logging.exception('Restoring the PostgreSQL database failed partway. pg_restore drops '
                                   'the existing objects before it loads the new ones and cannot undo '
                                   'that, so this database may now be partially restored and must not be '
-                                  'used until it has been restored again or rebuilt. Bazarr will not '
-                                  'restart. The extracted dump has been kept at %s and the backup '
-                                  'archive it came from is still in %s, so the restore can be retried.',
+                                  'used until it has been restored again or rebuilt. Bazarr is stopping '
+                                  'and will not start while %s exists. The extracted dump has been '
+                                  'kept there and the backup archive it came from is still in %s, so '
+                                  'the restore can be retried.',
                                   failed_dump_path, get_backup_path())
                 _delete_file(restore_config_path)
             else:
@@ -545,10 +575,11 @@ def restore_from_backup():
                 logging.exception('Restoring the PostgreSQL database failed partway. pg_restore drops '
                                   'the existing objects before it loads the new ones and cannot undo '
                                   'that, so this database may now be partially restored and must not be '
-                                  'used until it has been restored again or rebuilt. Bazarr will not '
-                                  'restart. The extracted dump could not be moved aside either, so the '
+                                  'used until it has been restored again or rebuilt. Bazarr is '
+                                  'stopping. The extracted dump could not be moved aside either, so the '
                                   'whole extracted backup has been left in %s and the next start will '
                                   'try this restore again.', get_restore_path())
+            stop_bazarr(EXIT_RESTORE_ERROR)
         elif _postgres_enabled():
             # Nothing reached pg_restore, so the database is exactly as it was.
             logging.exception('The restore was refused before pg_restore was started, so the database '
@@ -567,11 +598,16 @@ def restore_from_backup():
     try:
         os.replace(staged_config_path, dest_config_path)
     except OSError:
-        logging.exception('The database was restored but the configuration could not be put in place, '
-                          'so Bazarr will not restart. The restored database is complete; the '
-                          'configuration is the one that was already here.')
-        _delete_file(staged_config_path)
+        # The database is the restored one now, so going on with the start
+        # would run it with the configuration it was never paired with. The
+        # staged copy is kept, because it is the one file the operator needs.
+        logging.exception('The database was restored but the configuration could not be put in place. '
+                          'Bazarr is stopping so it does not run the restored database with the '
+                          'configuration that was already here. The configuration from the backup is '
+                          'kept at %s: copy it over %s, then start Bazarr again.',
+                          staged_config_path, dest_config_path)
         _clear_restore_directory()
+        stop_bazarr(EXIT_RESTORE_ERROR)
         return False
 
     _clear_restore_directory()
@@ -615,6 +651,14 @@ def prepare_restore(filename):
             else:
                 logging.error('Backup archive %s does not contain the database for this instance, so it '
                               'cannot be restored.', filename)
+            success = False
+
+        if success and not any(os.path.isfile(os.path.join(get_restore_path(), name))
+                               for name in ('config.yaml', 'config.ini')):
+            # The same reason: the start that applies it refuses an archive
+            # without a configuration as partial and restores nothing.
+            logging.error('Backup archive %s does not contain the configuration (config.yaml or '
+                          'config.ini), so it cannot be restored.', filename)
             success = False
 
     if not success:

@@ -379,7 +379,7 @@ export default function Trending({
           {failed && (
             <Alert color="yellow">
               {feed.settingsError
-                ? "Discover settings could not be loaded. Reload this page to retry."
+                ? "Discover setup could not be loaded. Reload this page to retry."
                 : "Weekly trending is temporarily unavailable. Retry with Refresh trending."}
             </Alert>
           )}
