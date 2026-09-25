@@ -406,7 +406,10 @@ def _fetch(key, flight, record, result_id, search_id, authority, deadline):
                         else classify_failure(error))
     finally:
         with _lock:
-            _inflight.pop(key, None)
+            # A flight retired at its deadline may have been replaced by a new
+            # one for the same result, which this late return must not remove.
+            if _inflight.get(key) is flight:
+                del _inflight[key]
             flight.ready.set()
 
 
@@ -428,6 +431,14 @@ def _artifact(result_id, search_id, authority, wait_seconds=None):
             artifact = cached[1]
             flight = None
         else:
+            # A provider download with no socket timeout can block for good.
+            # Once every waiter's deadline has passed nobody is left to answer,
+            # so the flight gives up its slot. Kept, four of them left every
+            # later preview and download busy until a restart.
+            now = time.monotonic()
+            for stale_key, stale in list(_inflight.items()):
+                if stale.deadline <= now:
+                    del _inflight[stale_key]
             flight = _inflight.get(key)
             if flight is not None:
                 flight.deadline = max(flight.deadline, deadline)
