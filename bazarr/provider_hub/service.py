@@ -48,6 +48,10 @@ class ProviderHubInstallError(RuntimeError):
     """Raised when a Provider Hub install could not be staged."""
 
 
+class ProviderHubStopped(Exception):
+    """Stop was pressed, and the action ended at a step boundary with nothing recorded."""
+
+
 SECRET_PLACEHOLDER = "********"
 _VERSION_TOKEN_RE = re.compile(r"\d+|[A-Za-z]+")
 _SEMVER_RE = re.compile(
@@ -638,10 +642,15 @@ def _normalize_catalog_manifest(manifest: dict[str, Any], source: dict[str, Any]
     return normalized
 
 
-def refresh_catalog(source_ids: set[str] | None = None) -> dict[str, Any]:
+def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict[str, Any]:
     """Refresh catalog sources. When ``source_ids`` is given, only those source ids
     are fetched (e.g. the startup migration refreshes only the official source so an
-    unrelated slow/broken third-party source can't delay boot); otherwise all are."""
+    unrelated slow/broken third-party source can't delay boot); otherwise all are.
+
+    ``checkpoint(message)`` runs before each source is fetched and raises
+    ProviderHubStopped when the job was stopped. The whole refresh is one state
+    write, so a stop leaves the catalog exactly as it was.
+    """
     with record_job("refresh_catalog", target_kind="system") as job:
         def refresh(state: dict[str, Any]) -> dict[str, Any]:
             now = utcnow_iso()
@@ -656,6 +665,8 @@ def refresh_catalog(source_ids: set[str] | None = None) -> dict[str, Any]:
                     continue
                 if source_ids is not None and source.get("id") not in source_ids:
                     continue
+                if checkpoint is not None:
+                    checkpoint(f"Fetching {source.get('name') or source.get('id') or 'a catalog source'}")
                 sources_count += 1
                 source["last_attempted_at"] = now
                 try:
@@ -1394,6 +1405,7 @@ def _stage_validated(
     bundle_stager,
     catalog_url: str | None = None,
     install_timeout: float | None = None,
+    checkpoint=None,
 ) -> dict[str, Any]:
     """Shared install core: stage the bundle, build the venv, smoke-test, record.
 
@@ -1402,7 +1414,14 @@ def _stage_validated(
     set, is a single wall-clock budget for the whole stage (bundle fetch + venv
     build) shared via ``deadline``, so the startup auto-install can't run past it;
     ``None`` (manual installs) leaves it unbounded.
+
+    ``checkpoint(message)`` runs before each step and raises ProviderHubStopped
+    when the job was stopped. A stop records nothing, so a fresh install leaves no
+    row and an update leaves the active version as it was, and it removes the
+    bundle and venv this run staged. Recording is the last step it can stop.
     """
+    step = checkpoint or (lambda message: None)
+    staged = []
     state = load_state()
     existing = (state.get("installations") or {}).get(validated.provider_id)
     existing_version = (
@@ -1422,11 +1441,20 @@ def _stage_validated(
     ) as job:
         try:
             deadline = None if install_timeout is None else time.monotonic() + max(0.0, install_timeout)
+            step("Downloading the provider")
             bundle_path = bundle_stager(validated, deadline)
+            staged.append(bundle_path)
+            step("Installing the provider's dependencies")
             install_remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
             env_path = PluginEnvironment(provider_hub_dir()).install(validated, timeout=install_remaining)
+            staged.append(env_path)
             staged_python_path = python_executable(env_path)
+            step("Checking that the provider starts")
             _smoke_validate_worker(validated, bundle_path, staged_python_path)
+            step("Recording the installation")
+        except ProviderHubStopped:
+            _discard_stopped_install(staged, existing)
+            raise
         except Exception as error:
             install_error = error
 
@@ -1473,7 +1501,25 @@ def _stage_validated(
         return _redact_installation(installation)
 
 
-def stage_install(manifest: dict[str, Any], install_timeout: float | None = None) -> dict[str, Any]:
+def _discard_stopped_install(paths, existing) -> None:
+    """Remove the bundle and venv a stopped install staged, unless they are in use.
+
+    Both live at paths keyed by the version, so reinstalling the version that is
+    already active or staged lands on that installation's own files, which stay.
+    """
+    existing = existing if isinstance(existing, dict) else {}
+    in_use = {existing.get(key) for key in ("active_path", "staged_path", "python_path", "staged_python_path")}
+    in_use.discard(None)
+    for path in paths:
+        # A bundle is recorded by its directory, a venv by its interpreter.
+        if {str(path), str(python_executable(path))} & in_use:
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def stage_install(
+    manifest: dict[str, Any], install_timeout: float | None = None, checkpoint=None,
+) -> dict[str, Any]:
     state = load_state()
     source_trusted = _catalog_manifest_trusted(manifest, state) if isinstance(manifest, dict) else False
     origin, source_id = _install_origin(manifest, state) if isinstance(manifest, dict) else ("local", None)
@@ -1494,10 +1540,11 @@ def stage_install(manifest: dict[str, Any], install_timeout: float | None = None
         _fetch_bundle,
         catalog_url=catalog_url,
         install_timeout=install_timeout,
+        checkpoint=checkpoint,
     )
 
 
-def stage_install_local(archive_bytes: bytes) -> dict[str, Any]:
+def stage_install_local(archive_bytes: bytes, checkpoint=None) -> dict[str, Any]:
     """Install a Provider Hub provider from an uploaded .zip package.
 
     A local package has no catalog vouching for it, so it is always recorded as
@@ -1528,6 +1575,7 @@ def stage_install_local(archive_bytes: bytes) -> dict[str, Any]:
             origin="local",
             source_id=None,
             bundle_stager=lambda candidate, deadline=None: _stage_local_bundle(candidate, bundle_root),
+            checkpoint=checkpoint,
         )
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
@@ -1787,7 +1835,7 @@ def _latest_catalog_manifest(state: dict[str, Any], provider_id: str, active_ver
     return max(candidates, key=lambda item: item[0])[1]
 
 
-def apply_update(provider_id: str) -> dict[str, Any] | None:
+def apply_update(provider_id: str, checkpoint=None) -> dict[str, Any] | None:
     provider = get_provider(provider_id, redact=False)
     if not provider:
         return None
@@ -1822,7 +1870,7 @@ def apply_update(provider_id: str) -> dict[str, Any] | None:
             )
         return _redact_installation(provider)
     try:
-        return stage_install(manifest)
+        return stage_install(manifest, checkpoint=checkpoint)
     except ProviderHubInstallError:
         return get_provider(provider_id)
 
