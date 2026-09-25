@@ -27,6 +27,10 @@ import {
 } from "@/pages/Settings/MediaServers/kinds";
 import LibraryPickers from "@/pages/Settings/MediaServers/LibraryPickers";
 import PathMappings from "@/pages/Settings/MediaServers/PathMappings";
+import {
+  connectionTestKey,
+  recordConnectionTest,
+} from "@/pages/Setup/connectionTests";
 import StepLayout from "@/pages/Setup/StepLayout";
 import type { WizardStepProps } from "@/pages/Setup/steps/types";
 import type { MediaServerDraft } from "@/pages/Setup/useOnboardingSelection";
@@ -197,13 +201,28 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
       return;
     }
     setFailure(null);
+    // Saving does not wait for a Test, so Finish is told what the Test said
+    // about these exact values. The hook resets whenever a connection field
+    // changes, so a verdict here is about what is on screen.
+    const tested =
+      test.isSuccess && test.data.success
+        ? "passed"
+        : test.isError || test.isSuccess
+          ? "failed"
+          : "untested";
     updateDraft(draft.draftId, { submitting: true });
-    void submit([draft], (outcome) =>
+    void submit([draft], (outcome) => {
       // The row exists from here on, whatever the master switch write does
       // next, so a remount mid-save finds a draft that knows not to write it
       // again.
-      updateDraft(draft.draftId, { savedInstanceId: outcome.instanceId ?? "" }),
-    ).then((result) => {
+      updateDraft(draft.draftId, { savedInstanceId: outcome.instanceId ?? "" });
+      if (outcome.instanceId) {
+        recordConnectionTest(
+          connectionTestKey("media-server", outcome.instanceId),
+          tested,
+        );
+      }
+    }).then((result) => {
       updateDraft(draft.draftId, { submitting: false });
       const found = result.errors[draft.draftId];
       if (found) {

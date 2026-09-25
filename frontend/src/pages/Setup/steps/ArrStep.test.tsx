@@ -7,6 +7,7 @@ import {
   useSettingsMutation,
   useTestArrInstanceConnection,
 } from "@/apis/hooks";
+import { readConnectionTests } from "@/pages/Setup/connectionTests";
 import { customRender, screen, waitFor } from "@/tests";
 import ArrStep from "./ArrStep";
 
@@ -85,6 +86,7 @@ async function fillValidConnection(user: ReturnType<typeof userEvent.setup>) {
 describe("ArrStep", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
     setInstances([]);
     setTestState({});
     mockedUseCreateArrInstance.mockReturnValue({
@@ -265,6 +267,50 @@ describe("ArrStep", () => {
       expect.anything(),
     );
     expect(onNext).toHaveBeenCalled();
+  });
+
+  // Saving does not wait for a Test, so Finish has to be told whether one
+  // passed. It used to call every saved row connected, a wrong key included.
+  it("tells Finish a row saved without a Test was never tested", async () => {
+    const user = userEvent.setup();
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await fillValidConnection(user);
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    await waitFor(() => expect(onNext).toHaveBeenCalled());
+    expect(readConnectionTests()).toEqual({ "arr:1": "untested" });
+  });
+
+  it("tells Finish when the Test passed against the saved values", async () => {
+    const user = userEvent.setup();
+    setTestState({
+      data: { ok: true, app_name: "Sonarr", version: "4.0.0" },
+      isSuccess: true,
+    });
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await fillValidConnection(user);
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    await waitFor(() => expect(onNext).toHaveBeenCalled());
+    expect(readConnectionTests()).toEqual({ "arr:1": "passed" });
+  });
+
+  it("still saves after a failed Test, and tells Finish it failed", async () => {
+    const user = userEvent.setup();
+    setTestState({
+      data: { ok: false, message: "Unauthorized" },
+      isSuccess: true,
+    });
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await fillValidConnection(user);
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    await waitFor(() => expect(onNext).toHaveBeenCalled());
+    expect(readConnectionTests()).toEqual({ "arr:1": "failed" });
   });
 
   // The wizard never asked which instance should be the default, so it must

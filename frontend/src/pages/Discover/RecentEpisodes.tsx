@@ -182,7 +182,7 @@ export default function RecentEpisodes() {
         {failed && (
           <Alert color="yellow">
             {feed.settingsError
-              ? "Discover settings could not be loaded. Reload this page to retry."
+              ? "Discover setup could not be loaded. Reload this page to retry."
               : "New episodes are temporarily unavailable. Retry with Refresh new episodes."}
           </Alert>
         )}

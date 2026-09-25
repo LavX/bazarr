@@ -315,8 +315,9 @@ describe("Sportarr Connections", () => {
       ["Base URL", "/league-proxy/"],
       ["Timeout", "45"],
     ]) {
-      await user.clear(dialog.getByRole("textbox", { name }));
-      await user.paste(value);
+      const field = dialog.getByRole("textbox", { name });
+      await user.clear(field);
+      await user.type(field, value);
     }
     await user.click(dialog.getByRole("switch", { name: "Use SSL" }));
     await user.click(
