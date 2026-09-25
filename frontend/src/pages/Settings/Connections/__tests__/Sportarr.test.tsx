@@ -122,7 +122,9 @@ describe("Sportarr Connections", () => {
   });
 
   it("creates Sportarr with its default port and the complete connection body", async () => {
-    const user = userEvent.setup();
+    // Typing into the add form is slow on a loaded runner, so the keystrokes
+    // skip user-event's timer between them.
+    const user = userEvent.setup({ delay: null });
     const createdSportarr = makeInstance({
       id: 42,
       kind: "sportarr",
@@ -254,14 +256,19 @@ describe("Sportarr Connections", () => {
   });
 
   it("edits and tests with the stored key without sending it or changing kind", async () => {
-    const user = userEvent.setup();
+    // The whole edit, Test, save and reopen flow runs here, and on a loaded
+    // runner it went past the 20s default. The values are as short as the
+    // checks allow (20 keystrokes, down from 45) and user-event no longer
+    // waits on a timer between them, but with the CPU oversubscribed the test
+    // still took 10 to 15s against 2.6s idle, so it also gets a longer limit.
+    const user = userEvent.setup({ delay: null });
     const editedSportarr = {
       ...sportarr,
-      name: "Sports server",
-      display_name: "Sports server",
-      ip: "sports.local",
+      name: "Arena",
+      display_name: "Arena",
+      ip: "arena",
       port: 1967,
-      base_url: "/league-proxy",
+      base_url: "/lp",
       ssl: true,
       verify_ssl: true,
       http_timeout: 45,
@@ -309,10 +316,11 @@ describe("Sportarr Connections", () => {
     );
 
     for (const [name, value] of [
-      ["Name", "Sports server"],
-      ["Address", "sports.local"],
+      ["Name", "Arena"],
+      ["Address", "arena"],
       ["Port", "1967"],
-      ["Base URL", "/league-proxy/"],
+      // The trailing slash is typed so the save can be seen dropping it.
+      ["Base URL", "/lp/"],
       ["Timeout", "45"],
     ]) {
       const field = dialog.getByRole("textbox", { name });
@@ -328,9 +336,9 @@ describe("Sportarr Connections", () => {
       await dialog.findByText("Connected to Sportarr"),
     ).toBeInTheDocument();
     expect(testBody).toEqual({
-      ip: "sports.local",
+      ip: "arena",
       port: 1967,
-      base_url: "/league-proxy",
+      base_url: "/lp",
       ssl: true,
       verify_ssl: true,
       http_timeout: 45,
@@ -340,10 +348,10 @@ describe("Sportarr Connections", () => {
     await user.click(dialog.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(updateBody).toEqual({
-      name: "Sports server",
-      ip: "sports.local",
+      name: "Arena",
+      ip: "arena",
       port: 1967,
-      base_url: "/league-proxy",
+      base_url: "/lp",
       ssl: true,
       verify_ssl: true,
       http_timeout: 45,
@@ -359,18 +367,16 @@ describe("Sportarr Connections", () => {
     expect(updateBody).not.toHaveProperty("api_key");
     expect(updateBody).not.toHaveProperty("clear_api_key");
     expect(updateBody).not.toHaveProperty("kind");
-    expect(await screen.findByText("Sports server")).toBeInTheDocument();
+    expect(await screen.findByText("Arena")).toBeInTheDocument();
     expect(
-      within(cardNamed("Sports server")).getByText(
-        "https://sports.local:1967/league-proxy",
-      ),
+      within(cardNamed("Arena")).getByText("https://arena:1967/lp"),
     ).toBeInTheDocument();
     expect(screen.queryByText("(Main Sportarr)")).toBeNull();
     await user.click(
-      within(cardNamed("Sports server")).getByRole("button", { name: "Edit" }),
+      within(cardNamed("Arena")).getByRole("button", { name: "Edit" }),
     );
     const reopened = within(
-      await screen.findByRole("dialog", { name: "Edit Sports server" }),
+      await screen.findByRole("dialog", { name: "Edit Arena" }),
     );
     await waitFor(() =>
       expect(
@@ -384,14 +390,14 @@ describe("Sportarr Connections", () => {
     ).toBeChecked();
     expect(reopened.queryByRole("radio", { name: "Sportarr" })).toBeNull();
     expect(reopened.getByRole("textbox", { name: "Name" })).toHaveValue(
-      "Sports server",
+      "Arena",
     );
     expect(reopened.getByRole("textbox", { name: "Address" })).toHaveValue(
-      "sports.local",
+      "arena",
     );
     expect(reopened.getByRole("textbox", { name: "Port" })).toHaveValue("1967");
     expect(reopened.getByRole("textbox", { name: "Base URL" })).toHaveValue(
-      "league-proxy",
+      "lp",
     );
     expect(reopened.getByRole("textbox", { name: "Timeout" })).toHaveValue(
       "45",
@@ -400,7 +406,7 @@ describe("Sportarr Connections", () => {
     expect(
       reopened.getByRole("switch", { name: "Verify certificate" }),
     ).toBeChecked();
-  });
+  }, 40_000);
 
   it("shows a wrong stored-key error after a card test without sending a key", async () => {
     const user = userEvent.setup();
