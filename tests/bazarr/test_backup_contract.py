@@ -21,6 +21,9 @@ import pytest
 
 import utilities.backup as backup_module
 
+# Taken before the fixture swaps it out, for the tests about the check itself.
+_REAL_REACHABILITY_CHECK = backup_module._check_postgres_reachable
+
 
 def _write_fake_tool(directory, name, exit_code=0, writes_output=False, stderr=''):
     """Put an executable on PATH that records how it was called.
@@ -105,6 +108,9 @@ def backup_env(monkeypatch, tmp_path):
     stops = []
     monkeypatch.setattr(backup_module, 'stop_bazarr', lambda code: stops.append(code), raising=False)
     monkeypatch.setitem(sys.modules, 'app.server', SimpleNamespace(webserver=None))
+    # There is no server behind the fake client tools. The tests that are about
+    # the connection check put the real one back.
+    monkeypatch.setattr(backup_module, '_check_postgres_reachable', lambda connection: None)
 
     tools_dir = tmp_path / 'bin'
     tools_dir.mkdir()
@@ -941,3 +947,136 @@ def test_restore_api_failure_is_still_500_and_does_not_schedule_restart(backup_e
     assert body == 'Error while restoring backup. Check logs.'
     assert scheduled == []
     assert backup_env.restarts == []
+
+
+# ---------------------------------------------- POSTGRES_URL query options
+
+TLS_URL = ('postgresql://url_user:url_password@url.host:6543/url_database'
+           '?sslmode=verify-full&sslcert=/certs/client.crt&sslkey=/certs/client.key'
+           '&sslrootcert=/certs/root.crt')
+
+
+def _enable_postgresql_by_url(backup_env, monkeypatch, url=TLS_URL):
+    postgresql = backup_env.settings.postgresql
+    monkeypatch.setattr(postgresql, 'enabled', True)
+    for key in ('host', 'port', 'database', 'username', 'password'):
+        monkeypatch.setattr(postgresql, key, '')
+    monkeypatch.setattr(postgresql, 'url', url)
+
+
+def _argv_line(log_path):
+    return open(log_path, encoding='utf-8').read().splitlines()[0]
+
+
+@pytest.mark.parametrize('tool', ['pg_dump', 'pg_restore'])
+def test_the_client_tools_keep_the_url_query_options(backup_env, monkeypatch, tool):
+    """Five separate fields dropped every query option: client certificates
+    failed and verify-full quietly became unverified TLS."""
+    _enable_postgresql_by_url(backup_env, monkeypatch)
+    log_path = _write_fake_tool(str(backup_env.tools_dir), tool, writes_output=tool == 'pg_dump')
+
+    if tool == 'pg_dump':
+        backup_env.module.backup_to_zip(job_id=1)
+    else:
+        _stage_restore(backup_env, 'bazarr_postgres.dump')
+        assert backup_env.module.restore_from_backup() is True
+
+    argv = _argv_line(log_path)
+    for option in ("sslmode='verify-full'", "sslcert='/certs/client.crt'", "sslkey='/certs/client.key'",
+                   "sslrootcert='/certs/root.crt'", "host='url.host'", "port='6543'",
+                   "dbname='url_database'", "user='url_user'"):
+        assert option in argv
+    assert '--no-password' in argv
+    assert 'url_password' not in argv
+    assert 'PGPASSWORD url_password' in open(log_path, encoding='utf-8').read()
+
+
+def test_a_password_in_the_url_query_stays_off_the_command_line(backup_env, monkeypatch):
+    _enable_postgresql_by_url(backup_env, monkeypatch,
+                              'postgresql://url.host/url_database?sslmode=require&password=query_secret')
+    log_path = _write_fake_tool(str(backup_env.tools_dir), 'pg_dump', writes_output=True)
+
+    backup_env.module.backup_to_zip(job_id=1)
+
+    assert 'query_secret' not in _argv_line(log_path)
+    assert 'PGPASSWORD query_secret' in open(log_path, encoding='utf-8').read()
+
+
+def test_the_five_field_connection_is_passed_as_before(backup_env, monkeypatch):
+    _enable_postgresql(backup_env, monkeypatch)
+    log_path = _write_fake_tool(str(backup_env.tools_dir), 'pg_dump', writes_output=True)
+
+    backup_env.module.backup_to_zip(job_id=1)
+
+    argv = _argv_line(log_path)
+    assert argv.endswith('--host db.internal --port 5433 --username bazarr_user --no-password '
+                         '--dbname bazarr')
+    assert 'sekrit' not in argv
+
+
+class _Refused(Exception):
+    pass
+
+
+def _driver(opened, refuse=False):
+    class _Connection:
+        def close(self):
+            pass
+
+    def connect(conninfo, **arguments):
+        opened.append((conninfo, arguments))
+        if refuse:
+            raise _Refused('connection to server at "url.host", port 6543 failed: Connection refused\n')
+        return _Connection()
+    return SimpleNamespace(connect=connect)
+
+
+def test_an_unreachable_database_leaves_the_restore_for_the_next_start(backup_env, monkeypatch, caplog):
+    """pg_restore that cannot connect exits non-zero like one that failed
+    partway, and was reported as a half-restored database that stopped every
+    start, although nothing had touched it."""
+    _enable_postgresql_by_url(backup_env, monkeypatch)
+    monkeypatch.setattr(backup_env.module, '_check_postgres_reachable', _REAL_REACHABILITY_CHECK)
+    opened = []
+    monkeypatch.setitem(sys.modules, 'psycopg2', _driver(opened, refuse=True))
+    log_path = _write_fake_tool(str(backup_env.tools_dir), 'pg_restore')
+    _stage_restore(backup_env, 'bazarr_postgres.dump')
+
+    with caplog.at_level('ERROR'):
+        assert backup_env.module.restore_from_backup() is False
+
+    # The check used the settings pg_restore would have had, password apart.
+    (conninfo, arguments), = opened
+    assert "sslmode='verify-full'" in conninfo and "sslcert='/certs/client.crt'" in conninfo
+    assert 'url_password' not in conninfo and arguments['password'] == 'url_password'
+
+    assert not os.path.exists(log_path), 'pg_restore ran'
+    assert backup_env.stops == []
+    assert backup_env.restarts == []
+    assert 'could not be reached' in caplog.text
+    assert 'nothing was changed' in caplog.text
+    assert MID_RESTORE_WORDING not in caplog.text
+    assert sorted(os.listdir(backup_env.restore_dir)) == ['bazarr_postgres.dump', 'config.yaml']
+    assert (backup_env.config_dir / 'config' / 'config.yaml').read_text(encoding='utf-8') == \
+        'general:\n  port: 6767\n'
+    assert not (backup_env.config_dir / 'config' / 'config.yaml.restore').exists()
+
+
+def test_a_reachable_database_that_fails_mid_restore_still_stops_the_start(backup_env, monkeypatch, caplog):
+    from literals import EXIT_RESTORE_ERROR
+
+    _enable_postgresql_by_url(backup_env, monkeypatch)
+    monkeypatch.setattr(backup_env.module, '_check_postgres_reachable', _REAL_REACHABILITY_CHECK)
+    opened = []
+    monkeypatch.setitem(sys.modules, 'psycopg2', _driver(opened))
+    _write_fake_tool(str(backup_env.tools_dir), 'pg_restore', exit_code=1,
+                     stderr='pg_restore: error: could not execute query: ERROR:  out of shared memory')
+    _stage_restore(backup_env, 'bazarr_postgres.dump')
+
+    with caplog.at_level('ERROR'):
+        assert backup_env.module.restore_from_backup() is False
+
+    assert len(opened) == 1
+    assert backup_env.stops == [EXIT_RESTORE_ERROR]
+    assert MID_RESTORE_WORDING in caplog.text
+    assert (backup_env.restore_dir / 'bazarr_postgres.dump.failed').is_file()

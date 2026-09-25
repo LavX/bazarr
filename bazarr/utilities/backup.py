@@ -67,6 +67,15 @@ class PostgresRestoreStartedError(BackupError):
     pass
 
 
+class PostgresUnreachableError(BackupError):
+    """The database refused a connection, so pg_restore was never started.
+
+    Nothing was changed, and the same restore can succeed once the database
+    answers, so the staged files are kept for the next start.
+    """
+    pass
+
+
 def _postgres_enabled():
     """Whether this instance runs on PostgreSQL, the way app.database decides it.
 
@@ -95,6 +104,9 @@ def _postgres_connection_settings():
         'database': os.getenv('POSTGRES_DATABASE', settings.postgresql.database),
         'username': os.getenv('POSTGRES_USERNAME', settings.postgresql.username),
         'password': os.getenv('POSTGRES_PASSWORD', settings.postgresql.password),
+        # libpq options from the URL's query string, such as sslmode, sslcert
+        # or service. The application's own connection uses them.
+        'options': {},
     }
 
     postgres_url = os.getenv('POSTGRES_URL', settings.postgresql.url)
@@ -111,8 +123,27 @@ def _postgres_connection_settings():
                            ('password', parsed_url.password)):
             if not connection[key]:
                 connection[key] = value
+        options = {key: ','.join(value) if isinstance(value, tuple) else value
+                   for key, value in parsed_url.query.items()}
+        # A password in the query goes the way of every other password, through
+        # PGPASSWORD, never onto the command line.
+        query_password = options.pop('password', None)
+        if not connection['password']:
+            connection['password'] = query_password
+        connection['options'] = options
 
     return connection
+
+
+def _postgres_conninfo(connection):
+    """A libpq connection string for the connection, without the password."""
+    parameters = {'host': connection['host'], 'port': connection['port'],
+                  'dbname': connection['database'], 'user': connection['username']}
+    # The query wins, as it does for the application's own connection.
+    parameters.update(connection['options'])
+    return ' '.join(
+        "{}='{}'".format(key, str(value).replace('\\', '\\\\').replace("'", "\\'"))
+        for key, value in parameters.items() if value not in (None, ''))
 
 
 def _postgres_connection_arguments(connection):
@@ -121,6 +152,10 @@ def _postgres_connection_arguments(connection):
     --no-password is what keeps a missing or wrong password a failure instead
     of a client tool blocking forever on a prompt nobody can answer.
     """
+    if connection['options']:
+        # Five separate fields would drop the URL's query options, and with
+        # them client certificates, verify-full and service entries.
+        return ['--no-password', '--dbname', _postgres_conninfo(connection)]
     arguments = []
     if connection['host']:
         arguments += ['--host', str(connection['host'])]
@@ -220,6 +255,30 @@ def _postgres_server_major(connection):
         return None
 
 
+def _check_postgres_reachable(connection):
+    """Raise PostgresUnreachableError unless the database takes a connection.
+
+    Uses the settings pg_restore gets. pg_restore exits non-zero when it cannot
+    connect, the same as when it fails partway, and only the second one can
+    have changed the database.
+    """
+    try:
+        try:
+            import psycopg2 as driver
+        except ImportError:
+            import psycopg as driver
+    except ImportError:
+        return
+    arguments = {'connect_timeout': 10}
+    if connection['password']:
+        arguments['password'] = str(connection['password'])
+    try:
+        driver.connect(_postgres_conninfo(connection), **arguments).close()
+    except Exception as error:
+        raise PostgresUnreachableError(
+            f'The PostgreSQL database could not be reached: {str(error).strip()}') from error
+
+
 def _dump_postgres_database(dest_path):
     """Write a pg_dump custom-format archive of the configured database."""
     pg_dump = shutil.which('pg_dump')
@@ -246,6 +305,7 @@ def _restore_postgres_database(dump_path):
     connection = _postgres_connection_settings()
     if not connection['database']:
         raise BackupError('No PostgreSQL database name is configured, so there is nothing to restore into.')
+    _check_postgres_reachable(connection)
 
     # --clean --if-exists drops what is already there first, --no-owner keeps
     # the restore working when the backup was taken as a different role. No
@@ -551,6 +611,13 @@ def restore_from_backup():
         _restore_database(restore_database_path, dest_database_path)
     except (BackupError, OSError, shutil.Error) as error:
         _delete_file(staged_config_path)
+        if isinstance(error, PostgresUnreachableError):
+            # Kept rather than cleared: the database is exactly as it was, and
+            # this restore can still go through once it answers.
+            logging.error('%s. The restore did not start, so the database was not touched and nothing '
+                          'was changed. The extracted backup stays in %s and the restore is tried again '
+                          'at the next start.', error, get_restore_path())
+            return False
         if isinstance(error, PostgresRestoreStartedError):
             # pg_restore drops the existing objects before it loads the new
             # ones and there is no transaction around that, so a failure
