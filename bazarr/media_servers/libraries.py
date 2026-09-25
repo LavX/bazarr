@@ -31,16 +31,17 @@ def supports_library_refresh(kind):
 def _requests(snapshot):
     """Every (call description) this destination can be asked to rescan.
 
-    Yields callables taking the client, so the walk below stays the same shape
-    for a kind that addresses libraries by handle and one that addresses them by
-    a path it maps into.
+    Yields callables taking the client and the rung's ``ensure_current`` and
+    ``coalesce`` keywords, so the walk below stays the same shape for a kind that
+    addresses libraries by handle and one that addresses them by a path it maps
+    into.
     """
     kind = snapshot.kind
     if kind in LIBRARY_KEYS:
         for media_type in _MEDIA_TYPES:
             if snapshot.libraries(media_type):
-                yield media_type, (lambda client, media_type=media_type:
-                                   client.refresh_library(media_type))
+                yield media_type, (lambda client, media_type=media_type, **guards:
+                                   client.refresh_library(media_type, **guards))
         return
     if kind == 'silo':
         seen = set()
@@ -49,8 +50,8 @@ def _requests(snapshot):
             if not library_id or library_id in seen:
                 continue
             seen.add(library_id)
-            yield library_id, (lambda client, library_id=library_id:
-                               client.refresh_library(library_id))
+            yield library_id, (lambda client, library_id=library_id, **guards:
+                               client.refresh_library(library_id, **guards))
         return
     # Emby resolves the library from a path, so its scoping is the remote roots
     # its mappings point at, asked once per media type the root can hold.
@@ -61,8 +62,8 @@ def _requests(snapshot):
         except MediaServerError:
             continue
         for media_type in _MEDIA_TYPES:
-            yield f'{media_type}:{remote}', (lambda client, media_type=media_type, remote=remote:
-                                             client.refresh_library(media_type, remote))
+            yield f'{media_type}:{remote}', (lambda client, media_type=media_type, remote=remote, **guards:
+                                             client.refresh_library(media_type, remote, **guards))
 
 
 def refresh_libraries(instance_id):
@@ -72,9 +73,9 @@ def refresh_libraries(instance_id):
     nothing for one scope is that scope holding no such library, not a failure,
     so it is skipped and the rest still run.
     """
-    from .dispatcher import _client, get_native_configuration
+    from .dispatcher import _client, _coalescer, get_native_configuration, running_dispatcher
     configuration = get_native_configuration()
-    _revision, snapshot, _changing = configuration.read(instance_id)
+    revision, snapshot, _changing = configuration.read(instance_id)
     if not supports_library_refresh(snapshot.kind):
         raise MediaServerError('invalid_kind')
     if not snapshot.enabled:
@@ -84,19 +85,37 @@ def refresh_libraries(instance_id):
     scopes = list(_requests(snapshot))
     if not scopes:
         raise MediaServerError('library_missing')
+
+    def guard():
+        # An edit, a switch-off or a delete while this walks its scopes stops it
+        # before the next request, as it stops the refresh worker.
+        configuration.ensure_current(instance_id, revision)
+
+    # One scan per library for the whole run. Emby's sports request matches any
+    # library holding the root, so the movie or TV library its typed request had
+    # just scanned was scanned a second time.
+    coalesce = _coalescer({}, 0)
+    workers = running_dispatcher()
+    dropped = workers.dropped(instance_id) if workers else 0
     requested = 0
+    complete = True
     with _client(snapshot.kind, snapshot) as client:
         for scope, call in scopes:
             try:
-                if call(client) is not None:
+                if call(client, ensure_current=guard, coalesce=coalesce) is not None:
                     requested += 1
             except MediaServerError:
                 raise
             except Exception:
+                complete = False
                 logging.debug('BAZARR could not rescan %s on a media server destination',
                               scope, exc_info=True)
     if not requested:
         # Every scope answered nothing, so the server holds no library the
         # instance is pointed at. Saying so beats reporting a scan that ran.
         raise MediaServerError('library_missing')
+    if complete and workers:
+        # Every library the destination is scoped to was just asked to rescan,
+        # which covers the mutations the full queue dropped before this began.
+        workers.covered(instance_id, dropped)
     return requested
