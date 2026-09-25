@@ -22,6 +22,109 @@ from ..utils import authenticate
 api_ns_system_settings = Namespace('systemSettings', description='System settings API endpoint')
 
 
+def _write_settings_rows(enabled_languages, profiles, notifications):
+    """Write the database part of a settings save, once its configuration is saved."""
+    if len(enabled_languages) != 0:
+        database.execute(
+            update(TableSettingsLanguages)
+            .values(enabled=0))
+        for code in enabled_languages:
+            database.execute(
+                update(TableSettingsLanguages)
+                .values(enabled=1)
+                .where(TableSettingsLanguages.code2 == code))
+        event_stream("languages")
+
+    deleted_profile_ids = []
+    if profiles is not None:
+        existing_ids = database.execute(
+            select(TableLanguagesProfiles.profileId))\
+            .all()
+        existing = [x.profileId for x in existing_ids]
+        for item in profiles:
+            combine_rule = item.get('combine')
+            combine_value = json.dumps(combine_rule) if combine_rule else None
+            # A client may omit the optional per-language keys, and the
+            # migration that adds them runs at startup only. Storing the
+            # item as sent left every indexing pass raising KeyError on it
+            # until the next restart, so fill them in here instead.
+            normalize_profile_items(item['items'])
+            if item['profileId'] in existing:
+                # Update existing profiles
+                database.execute(
+                    update(TableLanguagesProfiles)
+                    .values(
+                        name=item['name'],
+                        cutoff=item['cutoff'] if item['cutoff'] not in None_Keys else None,
+                        items=json.dumps(item['items']),
+                        mustContain=str(item['mustContain']),
+                        mustNotContain=str(item['mustNotContain']),
+                        originalFormat=int(item['originalFormat']) if item['originalFormat'] not in None_Keys else
+                        None,
+                        tag=item['tag'] if 'tag' in item else None,
+                        combine=combine_value,
+                    )
+                    .where(TableLanguagesProfiles.profileId == item['profileId']))
+                existing.remove(item['profileId'])
+            else:
+                # Add new profiles
+                database.execute(
+                    insert(TableLanguagesProfiles)
+                    .values(
+                        profileId=item['profileId'],
+                        name=item['name'],
+                        cutoff=item['cutoff'] if item['cutoff'] not in None_Keys else None,
+                        items=json.dumps(item['items']),
+                        mustContain=str(item['mustContain']),
+                        mustNotContain=str(item['mustNotContain']),
+                        originalFormat=int(item['originalFormat']) if item['originalFormat'] not in None_Keys else
+                        None,
+                        tag=item['tag'] if 'tag' in item else None,
+                        combine=combine_value,
+                    ))
+        for profileId in existing:
+            # Remove deleted profiles
+            database.execute(
+                delete(TableLanguagesProfiles)
+                .where(TableLanguagesProfiles.profileId == profileId))
+        deleted_profile_ids = list(existing)
+
+        # invalidate cache
+        update_profile_id_list.invalidate()
+
+        event_stream("languages")
+
+    # Update Notification
+    for item in notifications:
+        database.execute(
+            update(TableSettingsNotifier).values(
+                enabled=int(item['enabled'] is True),
+                url=item['url'])
+            .where(TableSettingsNotifier.name == item['name']))
+
+    # Every stored reference to a profile that was just deleted. The
+    # editor allocates a new id as max(existing) + 1, so deleting the
+    # highest-numbered profile and adding another reuses that id, and a
+    # reference left behind would point at an unrelated profile that
+    # does exist, which no validation downstream can catch.
+    #
+    # After save_settings, not before: this reads the configuration, and
+    # a user who picks a replacement default and deletes the old profile
+    # in the same Apply has the replacement only in the request. Running
+    # first would see the profile being replaced, switch the default off,
+    # and the untouched enable checkbox is not in the form to turn it
+    # back on.
+    forget_deleted_language_profiles(deleted_profile_ids)
+
+    # Recalculated by a queued job, not here: a library-wide pass inside the
+    # request is what made the save slow enough for a proxy to time it out
+    # and report a save that went through as "Save failed". After the
+    # settings, so the job reads the arr toggles this same save may have
+    # changed. The response does not wait for it.
+    if profiles is not None:
+        queue_missing_subtitles_recalculation()
+
+
 @api_ns_system_settings.hide
 @api_ns_system_settings.route('system/settings')
 class SystemSettings(Resource):
@@ -48,118 +151,35 @@ class SystemSettings(Resource):
             validate_metadata_settings(list(zip(request.form.keys(), request.form.listvalues())))
         except ValidationError as error:
             return error.message, 406
-        deleted_profile_ids = []
-        profiles_changed = False
+        # Everything the request writes to the database is read and checked
+        # here and written only once the configuration is on disk. The rows
+        # used to go first, and they are not in any transaction the save can
+        # undo, so a save refused for its configuration still kept its
+        # languages, profiles and notifiers while the user was told it failed.
         enabled_languages = request.form.getlist('languages-enabled')
-        if len(enabled_languages) != 0:
-            database.execute(
-                update(TableSettingsLanguages)
-                .values(enabled=0))
-            for code in enabled_languages:
-                database.execute(
-                    update(TableSettingsLanguages)
-                    .values(enabled=1)
-                    .where(TableSettingsLanguages.code2 == code))
-            event_stream("languages")
-
         languages_profiles = request.form.get('languages-profiles')
-        if languages_profiles:
-            existing_ids = database.execute(
-                select(TableLanguagesProfiles.profileId))\
-                .all()
-            existing = [x.profileId for x in existing_ids]
-            for item in json.loads(languages_profiles):
-                # Validate the combine rule at save time and reject it, instead of
-                # storing an invalid rule that get_combine_rule then silently drops
-                # (returns None), leaving the profile looking configured while
-                # auto-combine never runs.
-                combine_rule = item.get('combine')
-                if combine_rule:
-                    try:
-                        validate_combine_rule(combine_rule, item.get('items') or [])
-                    except CombineRuleError as error:
-                        return f"Invalid combine rule for profile '{item.get('name')}': {error}", 400
-                combine_value = json.dumps(combine_rule) if combine_rule else None
-                # A client may omit the optional per-language keys, and the
-                # migration that adds them runs at startup only. Storing the
-                # item as sent left every indexing pass raising KeyError on it
-                # until the next restart, so fill them in here instead.
-                normalize_profile_items(item['items'])
-                if item['profileId'] in existing:
-                    # Update existing profiles
-                    database.execute(
-                        update(TableLanguagesProfiles)
-                        .values(
-                            name=item['name'],
-                            cutoff=item['cutoff'] if item['cutoff'] not in None_Keys else None,
-                            items=json.dumps(item['items']),
-                            mustContain=str(item['mustContain']),
-                            mustNotContain=str(item['mustNotContain']),
-                            originalFormat=int(item['originalFormat']) if item['originalFormat'] not in None_Keys else
-                            None,
-                            tag=item['tag'] if 'tag' in item else None,
-                            combine=combine_value,
-                        )
-                        .where(TableLanguagesProfiles.profileId == item['profileId']))
-                    existing.remove(item['profileId'])
-                else:
-                    # Add new profiles
-                    database.execute(
-                        insert(TableLanguagesProfiles)
-                        .values(
-                            profileId=item['profileId'],
-                            name=item['name'],
-                            cutoff=item['cutoff'] if item['cutoff'] not in None_Keys else None,
-                            items=json.dumps(item['items']),
-                            mustContain=str(item['mustContain']),
-                            mustNotContain=str(item['mustNotContain']),
-                            originalFormat=int(item['originalFormat']) if item['originalFormat'] not in None_Keys else
-                            None,
-                            tag=item['tag'] if 'tag' in item else None,
-                            combine=combine_value,
-                        ))
-            for profileId in existing:
-                # Remove deleted profiles
-                database.execute(
-                    delete(TableLanguagesProfiles)
-                    .where(TableLanguagesProfiles.profileId == profileId))
-            # Cleared below, once the submitted settings have been applied.
-            deleted_profile_ids = list(existing)
+        profiles = json.loads(languages_profiles) if languages_profiles else None
+        for item in profiles or []:
+            # Validate the combine rule at save time and reject it, instead of
+            # storing an invalid rule that get_combine_rule then silently drops
+            # (returns None), leaving the profile looking configured while
+            # auto-combine never runs.
+            combine_rule = item.get('combine')
+            if combine_rule:
+                try:
+                    validate_combine_rule(combine_rule, item.get('items') or [])
+                except CombineRuleError as error:
+                    return f"Invalid combine rule for profile '{item.get('name')}': {error}", 400
+        notifications = [json.loads(item) for item in request.form.getlist('notifications-providers')]
 
-
-            # invalidate cache
-            update_profile_id_list.invalidate()
-
-            event_stream("languages")
-
-            # Recalculated by a queued job once the settings below are saved,
-            # not here: a library-wide pass inside this request is what made
-            # the save slow enough for a proxy to time it out and report a
-            # save that went through as "Save failed".
-            profiles_changed = True
-
-        # Update Notification
-        notifications = request.form.getlist('notifications-providers')
-        for item in notifications:
-            item = json.loads(item)
-            database.execute(
-                update(TableSettingsNotifier).values(
-                    enabled=int(item['enabled'] is True),
-                    url=item['url'])
-                .where(TableSettingsNotifier.name == item['name']))
-
-        saved = False
         try:
             try:
                 save_settings(zip(request.form.keys(), request.form.listvalues()))
-                saved = True
-            finally:
-                # The profile rows above are already written whatever the rest
-                # of the save does, so what is missing follows them even when
-                # it fails. A save that succeeds queues it below instead, once
-                # the references to deleted profiles are cleared.
-                if profiles_changed and not saved:
-                    queue_missing_subtitles_recalculation()
+            except MetadataFollowupError:
+                # The configuration did reach the disk; only the refresh after
+                # it failed. Its rows follow it as they do for any saved change.
+                _write_settings_rows(enabled_languages, profiles, notifications)
+                raise
         except MetadataPersistenceError:
             return "Metadata settings could not be saved. Try again.", 503
         except MetadataFollowupError:
@@ -169,23 +189,7 @@ class SystemSettings(Resource):
             event_stream("settings")
             return e.message, 406
         else:
-            # Every stored reference to a profile that was just deleted. The
-            # editor allocates a new id as max(existing) + 1, so deleting the
-            # highest-numbered profile and adding another reuses that id, and a
-            # reference left behind would point at an unrelated profile that
-            # does exist, which no validation downstream can catch.
-            #
-            # After save_settings, not before: this reads the configuration, and
-            # a user who picks a replacement default and deletes the old profile
-            # in the same Apply has the replacement only in the request. Running
-            # first would see the profile being replaced, switch the default off,
-            # and the untouched enable checkbox is not in the form to turn it
-            # back on.
-            forget_deleted_language_profiles(deleted_profile_ids)
-            # After the settings, so the job reads the arr toggles this same
-            # save may have changed. The response does not wait for it.
-            if profiles_changed:
-                queue_missing_subtitles_recalculation()
+            _write_settings_rows(enabled_languages, profiles, notifications)
             event_stream("settings")
             return '', 204
 

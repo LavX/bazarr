@@ -4915,3 +4915,108 @@ def test_installs_keep_every_enabled_provider_sequentially_and_in_parallel(tmp_p
     # Order is not a contract once threads are in play, membership is.
     assert sorted(result["in_memory"]) == sorted(provider_ids + threaded_ids)
     assert sorted(result["on_disk"]) == sorted(provider_ids + threaded_ids)
+
+
+# ---------------------------------------------------------------------------
+# enabled_providers that cannot be saved
+#
+# write_config() answers a full or read-only volume with False rather than an
+# exception, and that answer was ignored: installs, enable and disable, and
+# removals all reported success and changed the live list while the file kept
+# the old one, so a restart undid them.
+# ---------------------------------------------------------------------------
+
+def test_enabled_providers_that_cannot_be_saved_are_put_back(monkeypatch):
+    from app import config
+    from provider_hub import service
+
+    monkeypatch.setattr(config.settings.general, "enabled_providers", ["alpha"])
+    monkeypatch.setattr(config, "write_config", lambda: False)
+
+    assert service._set_bazarr_provider_enabled("beta", True) is False
+    assert list(config.settings.general.enabled_providers) == ["alpha"]
+    assert service._set_bazarr_provider_enabled("alpha", False) is False
+    assert list(config.settings.general.enabled_providers) == ["alpha"]
+    # A list that already holds the requested state needs no write, and is not a failure.
+    assert service._set_bazarr_provider_enabled("alpha", True) is True
+
+
+def _installed_examplehub(tmp_path, monkeypatch):
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+    state = load_state()
+    state["installations"]["examplehub"] = {
+        "provider_id": "examplehub",
+        "name": "Example",
+        "active_version": "1.0.0",
+        "state": "active",
+        "pending_restart": False,
+        "enabled": True,
+        "config": {},
+        "manifest": {"provider_id": "examplehub", "version": "1.0.0"},
+    }
+    save_state(state)
+
+
+def test_an_update_whose_enabled_state_cannot_be_saved_changes_nothing(tmp_path, monkeypatch):
+    from flask import Flask
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    _installed_examplehub(tmp_path, monkeypatch)
+    monkeypatch.setattr(service, "_set_bazarr_provider_enabled", lambda provider_id, enabled: False)
+    monkeypatch.setattr(service, "_forget_credential_throttle", lambda provider_id: None)
+
+    with pytest.raises(service.ProviderHubSettingsError):
+        service.update_provider("examplehub", enabled=False, config={"api_key": "new"})
+
+    stored = load_state()["installations"]["examplehub"]
+    assert stored["enabled"] is True
+    assert stored["config"] == {}
+
+    # The API reports it as a failure, not as the updated provider.
+    import api.provider_hub.provider_hub as hub_api
+    app = Flask(__name__)
+    with app.test_request_context("/api/provider-hub/providers/examplehub", method="PATCH",
+                                  json={"enabled": False}):
+        body, status = hub_api.ProviderHubProvider.patch.__wrapped__(
+            hub_api.ProviderHubProvider(), "examplehub")
+    assert status == 500
+    assert "could not be saved" in body
+
+
+def test_a_removal_whose_disable_cannot_be_saved_leaves_the_provider_installed(tmp_path, monkeypatch):
+    from app.jobs_queue import JobFailed
+    from provider_hub import jobs as hub_jobs, service
+    from provider_hub.state import load_state
+
+    _installed_examplehub(tmp_path, monkeypatch)
+    monkeypatch.setattr(service, "_set_bazarr_provider_enabled", lambda provider_id, enabled: False)
+
+    with pytest.raises(JobFailed, match="could not be saved"):
+        hub_jobs.uninstall_provider("examplehub", "Example")
+
+    stored = load_state()["installations"]["examplehub"]
+    assert stored["state"] == "active"
+    assert stored["pending_restart"] is False
+
+
+def test_a_first_install_that_cannot_be_enabled_is_reported_as_failed(tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.service import stage_install_local
+
+    provider_content = b"class LocalProvider: pass\n"
+    file_payloads = {"provider.py": provider_content}
+    manifest = _manifest(provider_id="locallyinstalled", name="Locally Installed",
+                         provider_content=provider_content, dependencies={"requirements": []})
+    package = _provider_zip(manifest, file_payloads)
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(json.dumps({"installations": {}, "jobs": []}), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    _patch_local_install_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(service, "_set_bazarr_provider_enabled", lambda provider_id, enabled: False)
+
+    with pytest.raises(service.ProviderHubSettingsError, match="could not be enabled"):
+        stage_install_local(package)

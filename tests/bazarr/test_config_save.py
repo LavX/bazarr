@@ -943,3 +943,43 @@ def test_hub_local_availability_refreshes_recording_schedule_after_save(monkeypa
     monkeypatch.setitem(sys.modules, 'app.event_handler', SimpleNamespace(event_stream=lambda **kwargs: None))
     config.save_settings([(f'settings-compat_endpoint-{key}', [True])])
     assert calls == [True]
+
+
+@pytest.mark.parametrize("outcome", ["saved", "invalid", "unwritable"])
+def test_a_missing_subtitles_input_queues_the_recalculation_only_once_saved(monkeypatch, outcome):
+    """A refused save changed nothing, so it must not start a library-wide pass.
+
+    The recalculation used to be queued while the submitted values were still
+    being applied, before validation and before the write, so a save refused
+    for another field or by a full disk still recomputed every library.
+    """
+    from app import config
+    from subtitles.indexer import missing_refresh
+
+    queued = []
+    monkeypatch.setattr(missing_refresh, "queue_missing_subtitles_recalculation",
+                        lambda *a, **kw: queued.append(True))
+    monkeypatch.setattr(config, "write_config", lambda: outcome != "unwritable")
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+
+    def validate():
+        if outcome == "invalid":
+            raise ValidationError("synthetic invalid value")
+
+    monkeypatch.setattr(config.settings.validators, "validate", validate)
+    monkeypatch.setattr(config, "restore_persisted_settings", lambda: None)
+    monkeypatch.setattr(config.settings.general, "use_embedded_subs", True)
+    monkeypatch.setattr(config.settings.general, "use_sportarr", False)
+    monkeypatch.setitem(sys.modules, "app.database", SimpleNamespace(
+        database=SimpleNamespace(execute=lambda _statement: None),
+        update=lambda _model: _FakeUpdate(), System=object,
+    ))
+
+    items = [("settings-general-use_embedded_subs", ["false"])]
+    if outcome == "saved":
+        config.save_settings(items)
+        assert queued == [True]
+    else:
+        with pytest.raises(ValidationError):
+            config.save_settings(items)
+        assert queued == [], "a refused save queued a library-wide recalculation"
