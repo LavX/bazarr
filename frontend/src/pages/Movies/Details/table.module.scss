@@ -15,6 +15,17 @@
 .fixedCell {
   width: 1%;
   white-space: nowrap;
+
+  // Mantine's Badge clips its own text: the root is `width: fit-content` with
+  // `overflow: hidden`, and the label (`.mantine-Badge-label`) adds
+  // `text-overflow: ellipsis`. Inside these content-sized cells that collapses
+  // the badge to a stub even when the row has free horizontal space, so the
+  // Language and Score values render as "ENGLIS…" / "10…". Size the badge to
+  // its content so these columns always show the full value.
+  :global(.mantine-Badge-root) {
+    width: max-content;
+    max-width: none;
+  }
 }
 
 // Subtitle Path column: take whatever width is left and truncate the path.
