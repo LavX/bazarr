@@ -5,10 +5,10 @@ import operator
 
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
 from functools import reduce
-from sqlalchemy import case, func
+from sqlalchemy import case, func, or_
 
-from app.database import (TableBlacklist, TableBlacklistMovie, TableHistory, TableHistoryMovie,
-                          TableHistorySports, database, select)
+from app.database import (TableBlacklist, TableBlacklistMovie, TableBlacklistSports, TableHistory,
+                          TableHistoryMovie, TableHistorySports, database, select)
 from subliminal_patch.score import MAX_SCORES
 
 from ..utils import authenticate
@@ -65,6 +65,18 @@ def _bucket_expression(percent):
         for bucket in range(SCORE_BUCKETS - 1, 0, -1)
     )
     return case(*branches, else_=0)
+
+
+def language_matches(column, code):
+    """The selected language and its variants.
+
+    The language selector offers base codes only, because
+    /system/languages?history=true strips the suffix, while history and
+    blacklist rows store ``en:hi`` or ``en:forced``. Exact equality dropped
+    every variant row from the figures for its language.
+    """
+    return or_(column == code, column.like(f'{code}:%'))
+
 
 class _Source:
     """One history table plus the filter clause selected for it."""
@@ -176,7 +188,7 @@ class HistoryMetrics(Resource):
             _Source(TableHistory, EPISODE_MAX, 'series', TableBlacklist),
             _Source(TableHistoryMovie, MOVIE_MAX, 'movies', TableBlacklistMovie),
             # Sports history stores MAX_SCORES['movie'] as its denominator.
-            _Source(TableHistorySports, MOVIE_MAX, 'sports'),
+            _Source(TableHistorySports, MOVIE_MAX, 'sports', TableBlacklistSports),
         ]
 
         for source in sources:
@@ -189,7 +201,7 @@ class HistoryMetrics(Resource):
             if provider != 'All':
                 source.clauses.append(table.provider == provider)
             if language != 'All':
-                source.clauses.append(table.language == language)
+                source.clauses.append(language_matches(table.language, language))
 
         totals = {'downloads': 0, 'series': 0, 'movies': 0, 'sports': 0}
         per_provider = {}
@@ -208,17 +220,21 @@ class HistoryMetrics(Resource):
 
             # Provider leaderboard. The percentage is normalised per table, so
             # a perfect episode (360/360) and a perfect movie (180/180) both
-            # read as 100% instead of averaging to a meaningless 270.
+            # read as 100% instead of averaging to a meaningless 270. AVG skips
+            # a NULL score, so each table's average is weighted by its scored
+            # rows, not by every row it counted.
             for row in database.execute(
                     select(table.provider,
                            func.count().label('count'),
+                           func.count(source.percent).label('scored'),
                            func.avg(source.percent).label('avg_pct'))
                     .where(source.where)
                     .group_by(table.provider)).all():
-                bucket = per_provider.setdefault(row.provider, {'count': 0, 'weighted': 0.0})
+                bucket = per_provider.setdefault(row.provider, {'count': 0, 'scored': 0, 'weighted': 0.0})
                 bucket['count'] += row.count
-                if row.avg_pct is not None:
-                    bucket['weighted'] += float(row.avg_pct) * row.count
+                if row.scored:
+                    bucket['scored'] += row.scored
+                    bucket['weighted'] += float(row.avg_pct) * row.scored
 
             for row in database.execute(
                     select(table.language, func.count().label('count'))
@@ -241,10 +257,12 @@ class HistoryMetrics(Resource):
                 day = row.day if isinstance(row.day, str) else row.day.strftime('%Y-%m-%d')
                 per_day[day] = per_day.get(day, 0) + row.count
 
+            # A NULL score is unmeasured, not a 0% match: every comparison in
+            # the CASE is unknown, so it would fall through to bucket 0.
             bucket_expr = _bucket_expression(source.percent)
             for row in database.execute(
                     select(bucket_expr.label('bucket'), func.count().label('count'))
-                    .where(source.where)
+                    .where(source.where, table.score.is_not(None))
                     .group_by(bucket_expr)).all():
                 if row.bucket is None:
                     continue
@@ -254,27 +272,40 @@ class HistoryMetrics(Resource):
         # Blacklist rate per provider: the numerator is every blacklisted
         # subtitle from that provider in the window, the denominator is every
         # download from it. Matching pairs row by row is not the question.
+        #
+        # An exclusion does not record which kind of download it undid, so
+        # with one action selected the numerator would still hold every
+        # action's exclusions. The rate is reported as unavailable then.
+        reliability_available = action == 'All'
         blacklisted = {}
-        for table in (TableBlacklist, TableBlacklistMovie):
-            for row in database.execute(
-                    select(table.provider, func.count().label('count'))
-                    .where(table.timestamp.between(past, now))
-                    .group_by(table.provider)).all():
-                if row.provider is None:
-                    continue
-                blacklisted[row.provider] = blacklisted.get(row.provider, 0) + row.count
+        if reliability_available:
+            for source in sources:
+                table = source.blacklist
+                clauses = [table.timestamp.between(past, now)]
+                if language != 'All':
+                    clauses.append(language_matches(table.language, language))
+                for row in database.execute(
+                        select(table.provider, func.count().label('count'))
+                        .where(*clauses)
+                        .group_by(table.provider)).all():
+                    if row.provider is None:
+                        continue
+                    blacklisted[row.provider] = blacklisted.get(row.provider, 0) + row.count
 
         by_provider = []
-        reliability = []
+        reliability = [] if reliability_available else None
         for name, stats in per_provider.items():
             if name is None:
                 continue
             count = stats['count']
+            scored = stats['scored']
             by_provider.append({
                 'provider': name,
                 'count': count,
-                'avgScorePct': round(stats['weighted'] / count, 1) if count else None,
+                'avgScorePct': round(stats['weighted'] / scored, 1) if scored else None,
             })
+            if reliability is None:
+                continue
             blocked = blacklisted.get(name, 0)
             reliability.append({
                 'provider': name,
@@ -284,7 +315,8 @@ class HistoryMetrics(Resource):
             })
 
         by_provider.sort(key=lambda row: (-row['count'], row['provider']))
-        reliability.sort(key=lambda row: (-row['ratePct'], row['provider']))
+        if reliability is not None:
+            reliability.sort(key=lambda row: (-row['ratePct'], row['provider']))
 
         peak_date, peak_count = (None, 0)
         if per_day:

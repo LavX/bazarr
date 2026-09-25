@@ -19,6 +19,13 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       key: "connect",
       any: () => {
         resetJobNotifications();
+        // Job ids restart with the backend too, so a finished row cached
+        // before the restart can carry the id of the next new job and settle
+        // its waiter before that job has run. Drop the list and read it again.
+        void queryClient.resetQueries({
+          queryKey: [QueryKeys.System, QueryKeys.Jobs],
+          exact: true,
+        });
         setOnlineStatus(true);
       },
     },

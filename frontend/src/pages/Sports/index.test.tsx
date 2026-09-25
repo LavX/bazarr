@@ -343,6 +343,70 @@ describe("sports library", () => {
       ).toBeNull(),
     );
   });
+  // The first filter keystroke switches the leagues query to fetch every row,
+  // and until that answers the query client hands back the page it had as
+  // placeholder data. A count taken over that page said "1 of 60" for a
+  // search that matches two, and the status region read it out.
+  it("does not count a filter over the page standing in for the library", async () => {
+    let release: () => void = () => undefined;
+    const fullList = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const leagues = Array.from({ length: 60 }, (_, index) => ({
+      id: 100 + index,
+      arr_instance_id: 42,
+      sportarrLeagueId: index,
+      title:
+        index === 3
+          ? "Northern Cup"
+          : index === 55
+            ? "Southern Cup"
+            : `League ${index}`,
+      sport: "Football",
+      monitored: true,
+      tags: [],
+      audio_language: [],
+      eventCount: 1,
+      eventFileCount: 1,
+      profileId: null,
+    }));
+    server.use(
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([sportarr]),
+      ),
+      http.get("/api/sports/leagues", async ({ request }) => {
+        const url = new URL(request.url);
+        const length = Number(url.searchParams.get("length"));
+        if (length < 0) {
+          await fullList;
+          return HttpResponse.json({ data: leagues, total: leagues.length });
+        }
+        const start = Number(url.searchParams.get("start"));
+        return HttpResponse.json({
+          data: leagues.slice(start, start + length),
+          total: leagues.length,
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    customRender(<Sports />);
+    await screen.findByRole(
+      "link",
+      { name: "Northern Cup" },
+      { timeout: 8000 },
+    );
+    expect(await screen.findAllByText("60 leagues")).not.toHaveLength(0);
+
+    await user.type(screen.getByPlaceholderText("Search by title..."), "cup");
+    // One cup is on the page standing in for the library; the other is not.
+    expect(screen.queryAllByText(/ of 60 leagues$/)).toHaveLength(0);
+
+    await act(async () => {
+      release();
+    });
+    expect(await screen.findAllByText("2 of 60 leagues")).not.toHaveLength(0);
+    expect(screen.queryAllByText("1 of 60 leagues")).toHaveLength(0);
+  });
   it.each(["include", "exclude"] as const)(
     "filters owned league audio by %s after catalogue load and update",
     async (mode) => {

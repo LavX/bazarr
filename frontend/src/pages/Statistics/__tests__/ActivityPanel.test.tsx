@@ -98,6 +98,33 @@ describe("Statistics > ActivityPanel", () => {
     expect(await screen.findByText(/nothing yet/i)).toBeInTheDocument();
   });
 
+  it("keeps retained sports downloads in the split after Sportarr is turned off", async () => {
+    // The totals still count sports history after the integration is off, so
+    // the split under them has to name it or it no longer adds up.
+    mock({ totals: { downloads: 10, series: 5, movies: 3, sports: 2 } });
+    render();
+
+    expect(
+      await screen.findByText(/5 series \/ 3 movies \/ 2 sports/),
+    ).toBeInTheDocument();
+  });
+
+  it("says the totals failed to load instead of reporting zero downloads", async () => {
+    server.use(
+      http.get(
+        "/api/history/metrics",
+        () => new HttpResponse(null, { status: 500 }),
+      ),
+    );
+    render();
+
+    expect(
+      await screen.findByText(/download totals could not be loaded/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Downloads")).not.toBeInTheDocument();
+    expect(screen.queryByText(/nothing yet/i)).not.toBeInTheDocument();
+  });
+
   it("warns that removing media retroactively deletes its history", async () => {
     // The history FKs are ON DELETE CASCADE, so older bars genuinely shrink
     // when media leaves Sonarr or Radarr. The chart has to say so.

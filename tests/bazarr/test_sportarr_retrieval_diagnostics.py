@@ -105,7 +105,7 @@ def test_the_download_route_queues_a_job_and_answers_at_once(queued):
 def test_the_download_job_fails_with_the_reason_it_was_given(download_job, reason):
     from app.jobs_queue import JobFailed
 
-    def fails(*args):
+    def fails(*args, **kwargs):
         raise OSError(reason)
 
     with pytest.raises(JobFailed) as failure:
@@ -183,7 +183,7 @@ def test_a_published_download_is_not_reported_as_a_failure(monkeypatch, download
         raise RuntimeError("event vanished after publication")
 
     monkeypatch.setattr(library, "get_event", gone)
-    assert download_job(lambda *args: SimpleNamespace(publication=publication)) == {
+    assert download_job(lambda *args, **kwargs: SimpleNamespace(publication=publication)) == {
         "event": None, "publication": publication}
 
 
