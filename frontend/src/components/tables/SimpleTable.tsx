@@ -17,6 +17,7 @@ export type SimpleTableProps<T extends object> = Omit<
   tableStyles?: TableStyleProps<T>;
   onRowSelectionChanged?: (selectedRows: Row<T>[]) => void;
   onAllRowsExpandedChanged?: (isAllRowsExpanded: boolean) => void;
+  className?: string;
 };
 
 export default function SimpleTable<T extends object>(
@@ -27,6 +28,7 @@ export default function SimpleTable<T extends object>(
     tableStyles,
     onRowSelectionChanged,
     onAllRowsExpandedChanged,
+    className,
     ...options
   } = props;
 
@@ -61,5 +63,11 @@ export default function SimpleTable<T extends object>(
     onAllRowsExpandedChanged?.(isAllRowsExpanded);
   }, [onAllRowsExpandedChanged, isAllRowsExpanded]);
 
-  return <BaseTable tableStyles={tableStyles} instance={instance}></BaseTable>;
+  return (
+    <BaseTable
+      tableStyles={tableStyles}
+      instance={instance}
+      className={className}
+    ></BaseTable>
+  );
 }

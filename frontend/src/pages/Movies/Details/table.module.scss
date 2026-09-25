@@ -1,0 +1,32 @@
+// Column sizing for the movie subtitles table.
+//
+// Every column except "Subtitle Path" must always show its full content, so
+// those cells size to their content and never wrap or truncate. The Subtitle
+// Path column is the only flexible one: it absorbs the remaining width and
+// truncates with an ellipsis when space is tight.
+.table {
+  width: 100%;
+}
+
+// Compact columns (Language, Score, Provider, Status, actions): keep them at
+// their content width. `width: 1%` makes them claim as little space as
+// possible while `white-space: nowrap` keeps that content on a single line, so
+// the browser never shrinks them below their natural size.
+.fixedCell {
+  width: 1%;
+  white-space: nowrap;
+}
+
+// Subtitle Path column: take whatever width is left and truncate the path.
+.pathCell {
+  width: auto;
+  max-width: 0;
+
+  :global(.table-primary) {
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
