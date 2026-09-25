@@ -5,7 +5,7 @@ from flask_restx import Resource, Namespace, reqparse, fields, marshal
 from operator import itemgetter
 
 from app.config import settings, write_config
-from app.database import TableHistory, TableHistoryMovie, database, select
+from app.database import TableHistory, TableHistoryMovie, TableHistorySports, database, select
 from app.get_providers import list_throttled_providers, reset_throttled_providers
 
 from ..utils import authenticate, False_Keys
@@ -41,6 +41,15 @@ class Providers(Resource):
             providers += database.execute(
                 select(TableHistoryMovie.provider)
                 .where(TableHistoryMovie.provider and TableHistoryMovie.provider != "manual")
+                .distinct())\
+                .all()
+            # The statistics provider filter is built from this list, and the
+            # metrics it filters include sports history. Without this arm a
+            # provider that only ever delivered sports subtitles could not be
+            # selected.
+            providers += database.execute(
+                select(TableHistorySports.provider)
+                .where(TableHistorySports.provider != "manual")
                 .distinct())\
                 .all()
             providers_list = [x.provider for x in providers]

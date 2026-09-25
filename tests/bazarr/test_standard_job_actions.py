@@ -741,6 +741,36 @@ def test_a_sports_download_that_publishes_completes(queue, monkeypatch):
     assert {"type": "sports", "action": "update", "payload": 61} in events
 
 
+def test_stop_reaches_a_running_sports_download(queue, monkeypatch):
+    """The job never handed the download a cancel signal, so Stop only set a
+    flag nothing read and the download went on to publish."""
+    from sportarr import manual_jobs, workflows
+    from sportarr import subtitles as sports_subtitles
+    from sportarr.connection import check_cancelled
+
+    monkeypatch.setattr(manual_jobs, "database",
+                        SimpleNamespace(get=lambda *a, **k: SimpleNamespace(title="Final")))
+    monkeypatch.setattr(manual_jobs, "event_stream", lambda **kwargs: None)
+    monkeypatch.setattr(workflows, "jobs_queue", queue)
+
+    def download(event_id, candidate, arr_instance_id=None, *, cancel=None):
+        # Stop is pressed while the provider download runs, and the download
+        # checks for it the way validate_candidate and get_video do.
+        [running] = queue.jobs_running_queue
+        queue.cancel_running_job(running.job_id)
+        check_cancelled(cancel)
+        return SimpleNamespace(publication={"published": True})
+
+    monkeypatch.setattr(sports_subtitles, "manual_download_sports", download)
+    manual_jobs.sports_manually_download_subtitle(61, {"subtitle": "cached"}, 1)
+    job = run_next(queue)
+
+    assert job["status"] == "completed"
+    assert job["progress_message"] == "Cancelled by user"
+    assert job["job_name"] == "Manually downloading Subtitles for Final"
+    assert job["job_returned_value"] is None
+
+
 def test_a_sports_download_published_with_warnings_says_so_on_its_job(queue, monkeypatch):
     from sportarr import library, manual_jobs
     from sportarr import subtitles as sports_subtitles

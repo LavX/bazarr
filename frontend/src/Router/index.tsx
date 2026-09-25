@@ -163,6 +163,12 @@ export function useRoutes(): CustomRouteObject[] {
                 hidden: !radarr,
                 element: <MoviesHistoryView></MoviesHistoryView>,
               },
+              {
+                // Statistics lived here through 2.6, so old bookmarks point at it.
+                path: "stats",
+                hidden: true,
+                element: <Navigate to="/system/statistics" replace />,
+              },
             ],
           },
           {

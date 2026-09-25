@@ -14,6 +14,7 @@ import logging
 import os
 import struct
 import subprocess
+import tempfile
 
 from app.get_args import args
 from app.jobs_queue import JobFailed, jobs_queue
@@ -36,11 +37,17 @@ PROGRESS_EVERY_PEAKS = PEAKS_PER_SECOND * 60
 
 
 def peaks_cache_file(video_path, audio_track):
-    """Where the peaks for this file and track live. A changed file gets a new name."""
+    """Where the peaks for this file and track live. A changed file gets a new name.
+
+    Whole seconds were not enough: a replacement written within the same second,
+    or copied with its modification time kept, reused the old name and was served
+    the old file's peaks. The nanosecond time and the size together tell them apart.
+    """
     stat = os.stat(video_path)
     path_hash = hashlib.md5(video_path.encode()).hexdigest()
     track_suffix = f'_t{audio_track}' if audio_track > 0 else ''
-    return os.path.join(PEAKS_CACHE_DIR, f'{path_hash}_{int(stat.st_mtime)}{track_suffix}.json')
+    return os.path.join(PEAKS_CACHE_DIR,
+                        f'{path_hash}_{stat.st_mtime_ns}_{stat.st_size}{track_suffix}.json')
 
 
 def read_cached_peaks(video_path, audio_track):
@@ -106,12 +113,26 @@ def request_peaks(video_path, audio_track):
                                      {'video_path': video_path, 'audio_track': audio_track},
                                      is_progress=True, progress_max=100)
         if job_id:
-            # The editor is open and waiting on this, so it does not queue behind
-            # a library scan. A job that is already running is left as it is.
-            jobs_queue.force_start_pending_job(job_id)
+            _start_in_waveform_lane(job_id)
             return 'queued', job_id
         # The matching job finished between the two looks: its cache is there now.
     return 'queued', None
+
+
+def _start_in_waveform_lane(job_id):
+    """Start ``job_id`` now, unless another waveform is already running.
+
+    The editor is open and waiting on this, so it does not queue behind a
+    library scan. Force-starting skips the concurrent jobs limit, though, so
+    only one waveform at a time may do it; the next one waits in the normal
+    queue instead of starting another ffmpeg beside the first. A job that is
+    already running is left as it is.
+    """
+    with jobs_queue._queue_lock:
+        if any(job.module == PEAKS_MODULE and job.func == PEAKS_FUNC
+               for job in jobs_queue.jobs_running_queue):
+            return False
+        return jobs_queue.force_start_pending_job(job_id)
 
 
 def _duration(video_path):
@@ -145,30 +166,35 @@ def _extract_peaks(video_path, audio_track, duration, job_id):
            '-f', 'f32le', '-v', 'error', 'pipe:1']
 
     peaks = []
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    try:
-        while True:
-            data = process.stdout.read(chunk_bytes)
-            if not data:
-                break
-            n = len(data) // 4
-            if n == 0:
-                break
-            chunk = struct.unpack(f'<{n}f', data[:n * 4])
-            peaks.append(round(max(chunk, key=abs), 4))
-            if len(peaks) % PROGRESS_EVERY_PEAKS == 0 and duration > 0:
-                # Also the cancellation point: a cancelled job raises here.
-                done = min(99, int(len(peaks) / PEAKS_PER_SECOND / duration * 100))
-                jobs_queue.update_job_progress(job_id=job_id, progress_value=done, progress_max=100,
-                                               progress_message='Reading the audio track')
-        process.wait(timeout=10)
-        stderr_out = process.stderr.read().decode(errors='replace')[:500]
-    except subprocess.TimeoutExpired:
-        stderr_out = ''
-    finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
+    # stderr goes to a file, not a pipe. Only stdout is read while ffmpeg runs,
+    # so a damaged track that wrote more errors than a pipe holds blocked ffmpeg
+    # on stderr and this loop on stdout, and the job could not even be stopped.
+    with tempfile.TemporaryFile() as stderr_file:
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=stderr_file)
+        try:
+            while True:
+                data = process.stdout.read(chunk_bytes)
+                if not data:
+                    break
+                n = len(data) // 4
+                if n == 0:
+                    break
+                chunk = struct.unpack(f'<{n}f', data[:n * 4])
+                peaks.append(round(max(chunk, key=abs), 4))
+                if len(peaks) % PROGRESS_EVERY_PEAKS == 0 and duration > 0:
+                    # Also the cancellation point: a cancelled job raises here.
+                    done = min(99, int(len(peaks) / PEAKS_PER_SECOND / duration * 100))
+                    jobs_queue.update_job_progress(job_id=job_id, progress_value=done, progress_max=100,
+                                                   progress_message='Reading the audio track')
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+        stderr_file.seek(0)
+        stderr_out = stderr_file.read(500).decode(errors='replace')
 
     if process.returncode not in (0, None):
         logger.error('ffmpeg peaks generation failed: %s', stderr_out)
