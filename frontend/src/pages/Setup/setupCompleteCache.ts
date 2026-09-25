@@ -1,5 +1,6 @@
 import type { QueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
+import { clearPersistedConnectionTests } from "./connectionTests";
 import { clearPersistedIntent } from "./useOnboardingIntent";
 import { clearPersistedSelection } from "./useOnboardingSelection";
 import { clearPersistedStep } from "./useWizardStep";
@@ -29,9 +30,13 @@ export async function settleSetupComplete(
   await client.invalidateQueries({ queryKey });
 }
 
-/** Forgets the wizard's stored step, intent and media server drafts. */
+/**
+ * Forgets the wizard's stored step, intent, media server drafts and connection
+ * test results.
+ */
 export function clearPersistedOnboarding() {
   clearPersistedStep();
   clearPersistedIntent();
   clearPersistedSelection();
+  clearPersistedConnectionTests();
 }

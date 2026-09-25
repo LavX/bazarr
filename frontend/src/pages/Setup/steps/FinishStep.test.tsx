@@ -7,14 +7,29 @@ import {
   useSettingsMutation,
   useSystemSettings,
 } from "@/apis/hooks";
+import {
+  ConnectionTest,
+  recordConnectionTest,
+} from "@/pages/Setup/connectionTests";
 import { customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import FinishStep from "./FinishStep";
 
 // The recap reads the media server rows, not the master switches. Staging them
 // per kind is what proves a connected Emby is named instead of being reported
-// as "Plex skipped, Jellyfin skipped".
-function setMediaServers(rows: Record<string, string[]>, off: string[] = []) {
+// as "Plex skipped, Jellyfin skipped". Each row is recorded as having passed
+// its Test unless a test says otherwise, because only then may the recap call
+// it connected.
+function setMediaServers(
+  rows: Record<string, string[]>,
+  off: string[] = [],
+  tested: ConnectionTest = "passed",
+) {
+  for (const [kind, names] of Object.entries(rows)) {
+    names.forEach((_name, index) =>
+      recordConnectionTest(`media-server:${kind}-${index}`, tested),
+    );
+  }
   server.use(
     http.get("/api/system/media-server-instances", ({ request }) => {
       const kind = new URL(request.url).searchParams.get("kind") ?? "";
@@ -358,6 +373,76 @@ describe("FinishStep", () => {
     ).toBeInTheDocument();
     // Still no line about a step this reader was never shown.
     expect(screen.queryByText(/sonarr/i)).not.toBeInTheDocument();
+  });
+
+  // Saving never waited for a Test, so a wrong address or key came out of the
+  // wizard reported as "Sonarr connected".
+  it("calls an arr connected only when a Test passed against it", () => {
+    localStorage.setItem("bazarr.onboarding.intent", "library");
+    setArrInstances([
+      { id: 1, kind: "sonarr", name: "Main Sonarr" },
+      { id: 2, kind: "radarr", name: "Main Radarr" },
+      { id: 3, kind: "sportarr", name: "Main Sportarr" },
+    ]);
+    recordConnectionTest("arr:1", "passed");
+    recordConnectionTest("arr:2", "failed");
+
+    customRender(<FinishStep onNext={vi.fn()} />);
+
+    expect(
+      screen.getByText("Sonarr connected (1 instance)"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Radarr saved (1 instance), but the connection test failed",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Sportarr saved (1 instance), connection not tested"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/radarr connected/i)).toBeNull();
+    expect(screen.queryByText(/sportarr connected/i)).toBeNull();
+  });
+
+  it("calls a media server connected only when a Test passed against it", async () => {
+    setMediaServers({ silo: ["Silo"], emby: ["Emby"] }, [], "untested");
+    recordConnectionTest("media-server:emby-0", "failed");
+
+    customRender(<FinishStep onNext={vi.fn()} />);
+
+    expect(
+      await screen.findByText("Silo saved (1 server), connection not tested"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Emby saved (1 server), but the connection test failed"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/silo connected/i)).toBeNull();
+    expect(screen.queryByText(/emby connected/i)).toBeNull();
+  });
+
+  it("forgets the connection test results on the way out", async () => {
+    const user = userEvent.setup();
+    recordConnectionTest("arr:1", "passed");
+    expect(
+      localStorage.getItem("bazarr.onboarding.connection-tests"),
+    ).not.toBeNull();
+    let onSuccess: (() => void) | undefined;
+    mutate.mockImplementation(
+      (_input: unknown, opts?: { onSuccess?: () => void }) => {
+        onSuccess = opts?.onSuccess;
+      },
+    );
+
+    customRender(<FinishStep onNext={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: /finish/i }));
+    onSuccess?.();
+
+    await waitFor(() =>
+      expect(
+        localStorage.getItem("bazarr.onboarding.connection-tests"),
+      ).toBeNull(),
+    );
   });
 
   it("tells a Discover reader who connected nothing that nothing refreshes", async () => {

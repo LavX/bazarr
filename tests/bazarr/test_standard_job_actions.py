@@ -288,7 +288,7 @@ def test_the_toggle_hook_queues_instead_of_recalculating(recalculation, monkeypa
     missing_refresh, calls = recalculation
     source = __import__("inspect").getsource(config._save_settings)
     hook = source[source.index("if use_embedded_subs_changed or undefined_audio_track_default_changed"):]
-    hook = hook[:hook.index("if undefined_subtitles_track_default_changed")]
+    hook = hook[:hook.index("if clear_disabled_provider_hub_statuses")]
     assert "queue_missing_subtitles_recalculation()" in hook
     assert "list_missing_subtitles" not in hook
 

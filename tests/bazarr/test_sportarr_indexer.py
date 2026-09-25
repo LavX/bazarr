@@ -954,14 +954,17 @@ def test_global_embedded_setting_refreshes_sports_missing(indexed_library, monke
     monkeypatch.setattr(config.settings.general, 'use_sportarr', master_enabled)
     config.save_settings([("settings-general-use_embedded_subs", ["false"])])
     # The missing-subtitles recalculation is queued, not run inside the save,
-    # and it is the job that honours the Sportarr master toggle.
-    assert queued[0]["func"] == "recalculate_missing_subtitles"
+    # and it is the job that honours the Sportarr master toggle. It is queued
+    # once the save is written, so after the rescan the save queued on the way.
+    recalculation = queued[-1]
+    assert recalculation["func"] == "recalculate_missing_subtitles"
     assert row(session, 61).missing_subtitles == "[]"
     from subtitles.indexer import missing_refresh
 
-    missing_refresh.recalculate_missing_subtitles(**queued[0]["kwargs"], job_id=1)
+    missing_refresh.recalculate_missing_subtitles(**recalculation["kwargs"], job_id=1)
     if master_enabled:
-        assert queued[1]["func"] == "sports_full_scan_subtitles"
+        assert [entry["func"] for entry in queued] == ["sports_full_scan_subtitles",
+                                                       "recalculate_missing_subtitles"]
         assert row(session, 61).missing_subtitles == "['fr']"
     else:
         assert [entry["func"] for entry in queued] == ["recalculate_missing_subtitles"]
