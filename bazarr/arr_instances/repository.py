@@ -14,6 +14,7 @@ from datetime import datetime
 from sqlalchemy import select
 
 from app.database import TableArrInstances
+from media_servers.repository import atomic
 
 from .media_defaults import read_media_defaults
 from .subtitle_settings import read_subtitle_settings
@@ -113,12 +114,13 @@ class ArrInstanceRepository:
 
         encrypted_key = encrypt_secret(api_key or "")
 
-        # The demote + insert is one SAVEPOINT so a failed insert (e.g. a
+        # The demote + insert is one unit so a failed insert (e.g. a
         # stable_key conflict) cannot strand the kind with a demoted-but-not-
         # replaced default. The engine runs in AUTOCOMMIT, so session.rollback()
-        # cannot undo the already-committed demote - but begin_nested() issues a
-        # real SAVEPOINT whose rollback does.
-        with self._session.begin_nested():
+        # cannot undo the already-committed demote. atomic() opens a real
+        # transaction first when there is none, because PostgreSQL rejects a
+        # bare SAVEPOINT outside one, and nests when the caller has one.
+        with atomic(self._session):
             if is_default_i and existing_default is not None:
                 existing_default.is_default = 0
                 self._session.flush()
@@ -198,7 +200,7 @@ class ArrInstanceRepository:
         # One SAVEPOINT so a conflict mid-election can't strand the kind with zero
         # defaults (session.rollback() is a no-op under the AUTOCOMMIT engine).
         if enabled is not _UNSET or is_default is not _UNSET:
-            with self._session.begin_nested():
+            with atomic(self._session):
                 if enabled is not _UNSET:
                     row.enabled = 1 if enabled else 0
                     if not row.enabled:
@@ -256,7 +258,7 @@ class ArrInstanceRepository:
         # SAVEPOINT: the demote then promote is two statements; a failure between
         # them must not leave the kind with no default (rollback is a no-op under
         # the AUTOCOMMIT engine, but a SAVEPOINT rolls back).
-        with self._session.begin_nested():
+        with atomic(self._session):
             self._promote_default(row)
         return row
 
@@ -297,7 +299,7 @@ class ArrInstanceRepository:
         kind = row.kind
         # SAVEPOINT: delete + re-elect a default is multi-step; keep it atomic so
         # a mid-step failure can't leave the kind defaultless under AUTOCOMMIT.
-        with self._session.begin_nested():
+        with atomic(self._session):
             self._session.delete(row)
             self._session.flush()
             self._reconcile_default(kind, demoted_id=instance_id)
