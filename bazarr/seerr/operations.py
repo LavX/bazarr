@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 
 _STATUS = {1: "unknown", 2: "pending", 3: "processing", 4: "partially_available", 5: "available"}
 _REQUEST_STATUS = {1: "pending", 2: "approved", 3: "declined", 4: "failed", 5: "completed"}
+# Failed stays open on purpose: Seerr refuses a new movie request (409) and
+# drops the seasons of a show request while a failed one exists, and offers
+# its own Retry instead. Only declined and completed requests free the title.
 _OPEN_REQUEST = {"pending", "approved", "failed"}
 
 ADMIN, REQUEST, REQUEST_4K = 2, 32, 1024

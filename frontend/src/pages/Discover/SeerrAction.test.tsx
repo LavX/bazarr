@@ -194,6 +194,25 @@ describe("SeerrAction", () => {
     ).toBeEnabled();
   });
 
+  // Seerr refuses a new request while a failed one exists and offers its own
+  // Retry, so the action stays closed and the link to Seerr stays open.
+  it("keeps the action closed after a failed request and links into Seerr", () => {
+    answer({
+      ...base,
+      status: "unknown",
+      requestable: false,
+      request: { id: 1, status: "failed", is4k: false, seasons: [] },
+    });
+    render(<SeerrAction title={movie as never} inLibrary={false} />);
+    expect(
+      screen.queryByRole("button", { name: "Request in Seerr" }),
+    ).toBeNull();
+    expect(screen.getByRole("link", { name: /Open in Seerr/ })).toHaveAttribute(
+      "href",
+      "http://s/movie/550",
+    );
+  });
+
   it("distinguishes unreachable from a rejected key", () => {
     answer({ configured: true, error_code: "unreachable" });
     const { unmount } = render(
