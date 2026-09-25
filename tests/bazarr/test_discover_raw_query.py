@@ -105,6 +105,7 @@ def test_modes_queries_and_languages_cannot_share_cached_results(authenticated_c
 
 
 def test_raw_provider_failures_keep_context_and_retained_handle(authenticated_client, providers, monkeypatch):
+    from datetime import datetime
     from provider_hub.protocol import candidate_from_worker
     from subliminal_patch.exceptions import APIThrottled
     from subliminal.exceptions import AuthenticationError
@@ -124,7 +125,11 @@ def test_raw_provider_failures_keep_context_and_retained_handle(authenticated_cl
     monkeypatch.setattr(providers.pool["discover_raw"], "list_subtitles", throttled)
     second = post(authenticated_client, {**RAW, "refresh": True}).json
     assert second["context"] == first["context"]
-    assert second["results"] == [{**first["results"][0], "stale": True}]
+    # A retained handle is renewed, so only its expiry may move, and only later.
+    assert second["results"] == [{**first["results"][0], "stale": True,
+                                  "expires_at": second["results"][0]["expires_at"]}]
+    assert (datetime.fromisoformat(second["results"][0]["expires_at"])
+            >= datetime.fromisoformat(first["results"][0]["expires_at"]))
     # The provider that refused its credentials is on its wait and was not
     # asked again, so it is cooling down with that refusal as the reason.
     assert {item["provider"]: (item["status"], item["reason"]) for item in second["coverage"]["providers"]} == {

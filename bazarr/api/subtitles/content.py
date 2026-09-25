@@ -446,8 +446,14 @@ def resolve_subtitle_path(media_type, media_id, language_code, arr_instance_id=N
 
     # Build a dict of allowed full paths keyed by basename. Dict.get returns a
     # value sourced from trusted data (filesystem walk of DB-derived dirs).
+    # The directory the resolved subtitle is in goes first: with a subtitle
+    # folder configured, a stale file of the same name beside the video would
+    # otherwise stand in for the one the lookup above selected.
+    roots = (trusted_media_dir, trusted_target_dir)
+    if trusted_target_dir and os.path.realpath(os.path.dirname(subtitle_path)) == trusted_target_dir:
+        roots = (trusted_target_dir, trusted_media_dir)
     subtitle_index: dict[str, str] = {}
-    for root in (trusted_media_dir, trusted_target_dir):
+    for root in roots:
         if root and os.path.isdir(root):
             try:
                 for name in os.listdir(root):

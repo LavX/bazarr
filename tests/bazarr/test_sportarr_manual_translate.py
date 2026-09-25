@@ -13,6 +13,15 @@ from types import SimpleNamespace
 import pytest
 
 
+@pytest.fixture
+def use_sportarr(monkeypatch):
+    """Only the tests that build an operation: importing the API with the
+    switch on also starts the Sports scheduler, which needs a database."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings.general, 'use_sportarr', True)
+
+
 def test_the_route_binds_an_operation_and_drops_the_media_metadata():
     import inspect
 
@@ -40,7 +49,7 @@ def test_the_operation_binds_its_target():
     assert "target != operation.target" in guard
 
 
-def test_a_target_the_profile_does_not_want_is_refused_with_a_reason(monkeypatch):
+def test_a_target_the_profile_does_not_want_is_refused_with_a_reason(use_sportarr, monkeypatch):
     """A sports subtitle is only ever written for a language its profile asks
     for and does not yet have: the owned publication boundary is defined in
     those terms. Refusing here beats accepting and dropping it inside a job."""
@@ -58,7 +67,7 @@ def test_a_target_the_profile_does_not_want_is_refused_with_a_reason(monkeypatch
         profile_hooks.manual_translation_operation(1, 2, '/sports/race.hu.srt', 'de')
 
 
-def test_a_wanted_target_binds(monkeypatch):
+def test_a_wanted_target_binds(use_sportarr, monkeypatch):
     from sportarr import profile_hooks
 
     bound = {}
@@ -86,7 +95,7 @@ def test_a_wanted_target_binds(monkeypatch):
     assert bound['source_language'] == 'hu'
 
 
-def test_the_hi_and_forced_variants_are_distinct_targets(monkeypatch):
+def test_the_hi_and_forced_variants_are_distinct_targets(use_sportarr, monkeypatch):
     """A forced English file is a different subtitle from the plain one, and
     the profile tracks them separately, so the target has to carry the
     modifier or a forced request would bind the plain language's slot."""
@@ -112,3 +121,19 @@ def test_the_hi_and_forced_variants_are_distinct_targets(monkeypatch):
     profile_hooks.manual_translation_operation(1, 2, '/s.hu.srt', 'en', forced=True)
     profile_hooks.manual_translation_operation(1, 2, '/s.hu.srt', 'en', hi=True)
     assert seen == ['en:forced', 'en:hi']
+
+
+def test_a_manual_translation_is_refused_while_use_sportarr_is_off(monkeypatch):
+    """Turning the switch off leaves the instance row enabled. A stale page or
+    a direct request must still not start a sports translation."""
+    from app.config import settings
+    from sportarr import profile_hooks
+
+    def unreachable(*args, **kwargs):
+        raise AssertionError('resolved the event with Use Sportarr off')
+
+    monkeypatch.setattr(settings.general, 'use_sportarr', False)
+    monkeypatch.setattr('sportarr.identity.resolve_event_in_session', unreachable)
+
+    with pytest.raises(ValueError, match='Sportarr is turned off'):
+        profile_hooks.manual_translation_operation(1, 2, '/sports/race.hu.srt', 'de')

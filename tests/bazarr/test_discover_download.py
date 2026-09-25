@@ -498,7 +498,7 @@ def test_download_is_a_standard_job_and_the_file_is_fetched_by_ticket(authentica
     # The standard completion action, which the notification and the drawer offer.
     assert listed["action"] == {"kind": "discover.save", "label": "Save", "ticket": job_id,
                                 "filename": "Breaking.Bad.S02E01.forced.discover_download.en.forced.srt"}
-    assert listed["error"] is None and listed["retryable"] is True
+    assert listed["error"] is None and listed["retryable"] is True and listed["stopped"] is False
     # The terminal socket event carries the same outcome.
     assert job_events[-1]["payload"] == {"job_id": job_id, "status": "completed", "progress_value": None,
                                          "error": None, "action": listed["action"]}
@@ -690,3 +690,27 @@ def test_stop_during_the_fetch_cancels_instead_of_offering_save(authenticated_cl
     assert job["action"] is None
     assert authenticated_client.get("/api/discover/download", query_string={"job": job["job_id"]},
                                     headers=HEADERS).status_code == 404
+    # Completed alone reads as done, so the jobs API also says it was stopped.
+    listed = authenticated_client.get("/api/system/jobs", query_string={"id": job["job_id"]},
+                                      headers=HEADERS).json["data"][0]
+    assert listed["status"] == "completed" and listed["stopped"] is True
+
+
+def test_a_stop_after_the_file_is_kept_still_finishes_and_is_not_reported_stopped(
+        authenticated_client, choices, monkeypatch):
+    """Stop only flags a job. Past the point it is honoured, the job finishes."""
+    from app.jobs_queue import jobs_queue
+    from discover import download
+    row = post(authenticated_client, CONTEXT).json["results"][0]
+    queued = enqueue(authenticated_client, row)
+    kept = download._store_ticket
+
+    def keep_then_stop(job_id, scope, artifact):
+        kept(job_id, scope, artifact)
+        jobs_queue.cancel_running_job(job_id)
+
+    monkeypatch.setattr(download, "_store_ticket", keep_then_stop)
+    assert run_queued_job(queued.json["job_id"])["progress_message"] == "Ready to save"
+    listed = authenticated_client.get("/api/system/jobs", query_string={"id": queued.json["job_id"]},
+                                      headers=HEADERS).json["data"][0]
+    assert listed["action"]["kind"] == "discover.save" and listed["stopped"] is False

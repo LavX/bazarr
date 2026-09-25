@@ -381,7 +381,7 @@ def _copy_statement(media_type, imdb, season, episode, local_id=None, owner=None
             Movie.sceneName, Movie.format, Movie.resolution, Movie.video_codec,
             Movie.audio_codec, Movie.file_size, Movie.movie_file_id.label("file_id"),
             Movie.updated_at_timestamp,
-        ).where(func.lower(func.trim(Movie.imdbId)) == imdb)
+        ).where(func.lower(func.trim(Movie.imdbId)) == imdb, _live("movie"))
     else:
         table = Episode
         statement = select(
@@ -398,6 +398,9 @@ def _copy_statement(media_type, imdb, season, episode, local_id=None, owner=None
             # episode row owned by another.
             or_(Episode.arr_instance_id == Show.arr_instance_id,
                 and_(Episode.arr_instance_id.is_(None), Show.arr_instance_id.is_(None))),
+            # The pairing above gives the episode its show's owner, so the
+            # show's library scope covers the episode too.
+            _live("show"),
         )
     if local_id is not None:
         statement = statement.where(table.id == local_id)
@@ -443,7 +446,8 @@ def _owning_titles(connection, media_type, imdb):
     from app.database import TableShows as Show
     table = Movie if media_type == "movie" else Show
     return connection.execute(select(func.count(table.id))
-                              .where(func.lower(func.trim(table.imdbId)) == imdb)).scalar() or 0
+                              .where(func.lower(func.trim(table.imdbId)) == imdb,
+                                     _live("movie" if media_type == "movie" else "show"))).scalar() or 0
 
 
 def copy_options(target):
@@ -550,8 +554,9 @@ def resolve_copy(copy_id, target):
     copy_invalid for a malformed identity or one naming the wrong media kind;
     owner_unknown for an identity that names no owning instance; copy_missing
     when no row matches that local id and owner within this confirmed target,
-    which is what a deleted row, a reused local id and a row that now belongs to
-    another title all reduce to; instance_missing when the owning arr_instances
+    which is what a deleted row, a reused local id, a row that now belongs to
+    another title and a row of an integration switched off or an instance
+    disabled since all reduce to; instance_missing when the owning arr_instances
     row is gone; no_stored_path when the row records no file; and
     copy_unavailable when the mapped path cannot be stat-ed or is not a regular
     file. Every one of them asks for a new choice instead of quietly searching a
