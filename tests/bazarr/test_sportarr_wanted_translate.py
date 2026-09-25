@@ -76,7 +76,7 @@ def test_no_history_row_proceeds_with_the_translation():
     from sportarr import profile_hooks
 
     source = inspect.getsource(profile_hooks._source_score_below_threshold)
-    assert "if not record or not record.score:\n        return False" in source
+    assert "if record is None:\n        return False" in source
 
 
 def test_a_deleted_translation_can_be_requeued():

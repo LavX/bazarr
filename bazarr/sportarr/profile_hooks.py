@@ -293,7 +293,9 @@ def manual_translation_operation(event_id, arr_instance_id, source_path, to_lang
     """
     from subtitles.language_profiles import profile_item_language_code
     from sportarr.identity import resolve_event_in_session
+    from sportarr.workflows import require_sports_enabled
 
+    require_sports_enabled()
     context = resolve_event_in_session(database, event_id, arr_instance_id)
     operation = capture_profile_operation(
         context, candidate_signature(context), source=source_path, cancel=cancel
@@ -454,6 +456,8 @@ def _source_score_below_threshold(context, source_lang):
     No history row means the subtitle was placed by hand or predates history
     tracking. The series path treats that as exactly at threshold and proceeds
     rather than silently falling back to a provider search, so this does too.
+    A stored score of 0 is a real score, not a missing row, and is held to the
+    threshold like any other.
     """
     from app.database import TableHistorySports
 
@@ -466,7 +470,7 @@ def _source_score_below_threshold(context, source_lang):
         .order_by(TableHistorySports.timestamp.desc())
         .limit(1)
     ).first()
-    if not record or not record.score:
+    if record is None:
         return False
     from subtitles.utils import MAX_SCORES
 

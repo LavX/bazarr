@@ -1377,6 +1377,34 @@ def test_sports_editor_validates_actual_source_with_configured_subfolder(
     assert (folder / '2/event.de.forced.srt').is_file()
 
 
+def test_sports_editor_keeps_the_indexed_subfolder_file_over_a_stale_namesake(
+    sports_editor_publication, monkeypatch
+):
+    """The index lists the copy in the configured folder. A leftover file of
+    the same name beside the recording must not be the one that is edited."""
+    from app.config import settings
+    from app.database import TableSportsEvents
+
+    content, session, folder, _ = sports_editor_publication
+    monkeypatch.setattr(settings.general, 'subfolder', 'relative')
+    monkeypatch.setattr(settings.general, 'subfolder_custom', 'subs')
+    destination = folder / '1/subs'
+    destination.mkdir()
+    stale = folder / '1/event.en.hi.srt'
+    current = destination / stale.name
+    stale.rename(current)
+    stale.write_bytes(b'1\n00:00:00,000 --> 00:00:01,000\nStale leftover.\n')
+    session.execute(sa.update(TableSportsEvents).where(TableSportsEvents.id == 61)
+                    .values(subtitles="[['en:hi', '/sports/subs/event.en.hi.srt']]"))
+    session.commit()
+
+    status, _ = _put_sports_editor(content)
+
+    assert status == 204
+    assert b'Edited sporting event.' in current.read_bytes()
+    assert stale.read_bytes() == b'1\n00:00:00,000 --> 00:00:01,000\nStale leftover.\n'
+
+
 def test_sports_editor_mutation_preserves_obsolete_sync_bytes(sports_editor_publication):
     content, _, folder, _ = sports_editor_publication
     output = folder / '1/event.en.hi.ffsubsync.srt'
