@@ -744,6 +744,37 @@ def test_wanted_scan_still_translates_an_episode_with_no_provider_file(
 
     assert len(queued) == 1, "the translated file is gone, so translate again"
 
+def test_wanted_scan_holds_a_zero_score_movie_source_to_the_threshold(
+        upgrade_db, monkeypatch, tmp_path):
+    """A stored score of 0 is a real score, not a missing history row, so it
+    has to fail a positive minimum source score instead of passing it."""
+    wanted, queued = _wanted_movie_env(upgrade_db, monkeypatch)
+    _wanted_movie_base(upgrade_db, tmp_path, (
+        f'[["en", "{tmp_path / "roofman.mkv.en.srt"}", 999],'
+        f' ["nl:hi", "{tmp_path / "roofman.mkv.nl.hi.srt"}", 1234]]'))
+    upgrade_db.execute(TableHistoryMovie.__table__.update()
+                       .where(TableHistoryMovie.id == 100).values(score=0))
+
+    movie = upgrade_db.execute(
+        TableMovies.__table__.select().where(TableMovies.id == 30)).first()
+    wanted._wanted_movie(movie, [])
+
+    assert queued == [], "a 0% source is below the 90% threshold"
+
+
+def test_wanted_scan_holds_a_zero_score_episode_source_to_the_threshold(
+        upgrade_db, monkeypatch, tmp_path):
+    wanted, queued = _wanted_episode_env(upgrade_db, monkeypatch)
+    _wanted_episode_base(upgrade_db, tmp_path, (
+        f'[["en", "{tmp_path / "s01e01.mkv.en.srt"}", 999],'
+        f' ["nl:hi", "{tmp_path / "s01e01.mkv.nl.hi.srt"}", 1234]]'))
+    upgrade_db.execute(TableHistory.__table__.update()
+                       .where(TableHistory.id == 200).values(score=0))
+
+    wanted.wanted_download_subtitles(20)
+
+    assert queued == [], "a 0% source is below the 90% threshold"
+
 # --------------------------------------------------------------------------
 # Which indexed file counts as covering the language. This decides whether the
 # scan stays quiet, so it has to agree with how list_missing_subtitles reads the

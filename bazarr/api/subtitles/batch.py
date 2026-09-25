@@ -161,6 +161,9 @@ def get_upgradable_media_ids():
         _ai_translated_subtitles_are_upgrade_candidates,
     )
     minimum_timestamp, query_actions = get_queries_condition_parameters()
+    # With a valid AI translated penalty the upgrade jobs take an AI translated
+    # row whatever its score, so the markers have to as well.
+    allow_high_score_ai = _ai_translated_subtitles_are_upgrade_candidates()
 
     # Movies: only consider the latest eligible history row per (video_path, language)
     max_movie_ts = select(
@@ -172,6 +175,12 @@ def get_upgradable_media_ids():
     ).group_by(
         TableHistoryMovie.video_path, TableHistoryMovie.language
     ).distinct().subquery()
+    movie_score_conditions = [
+        and_(TableHistoryMovie.score.is_(None), TableHistoryMovie.action == 6),
+        TableHistoryMovie.score < TableHistoryMovie.score_out_of - 3,
+    ]
+    if allow_high_score_ai:
+        movie_score_conditions.append(TableHistoryMovie.ai_translated.is_(True))
 
     movie_results = database.execute(
         select(TableHistoryMovie.radarrId, TableHistoryMovie.arr_instance_id)
@@ -188,10 +197,7 @@ def get_upgradable_media_ids():
         .where(and_(
             TableHistoryMovie.action.in_(query_actions),
             TableHistoryMovie.timestamp > minimum_timestamp,
-            or_(
-                and_(TableHistoryMovie.score.is_(None), TableHistoryMovie.action == 6),
-                TableHistoryMovie.score < TableHistoryMovie.score_out_of - 3
-            )
+            or_(*movie_score_conditions),
         ))
     ).all()
     movie_ids = [r.radarrId for r in movie_results]
@@ -210,6 +216,12 @@ def get_upgradable_media_ids():
     ).group_by(
         TableHistory.video_path, TableHistory.language
     ).distinct().subquery()
+    episode_score_conditions = [
+        and_(TableHistory.score.is_(None), TableHistory.action == 6),
+        TableHistory.score < TableHistory.score_out_of - 3,
+    ]
+    if allow_high_score_ai:
+        episode_score_conditions.append(TableHistory.ai_translated.is_(True))
 
     series_results = database.execute(
         select(TableHistory.sonarrSeriesId, TableHistory.arr_instance_id)
@@ -226,10 +238,7 @@ def get_upgradable_media_ids():
         .where(and_(
             TableHistory.action.in_(query_actions),
             TableHistory.timestamp > minimum_timestamp,
-            or_(
-                and_(TableHistory.score.is_(None), TableHistory.action == 6),
-                TableHistory.score < TableHistory.score_out_of - 3
-            )
+            or_(*episode_score_conditions),
         ))
     ).all()
     series_ids = [r.sonarrSeriesId for r in series_results]
@@ -240,13 +249,12 @@ def get_upgradable_media_ids():
 
     # Sports, keyed on the league the way series are keyed on the show: the
     # library page marks a league, and its rows are events. Same latest-row
-    # logic, restricted to enabled sportarr owners. The score rule is the one
-    # the sports upgrade job applies, AI translated exception included.
+    # logic, restricted to enabled sportarr owners, and the same score rule.
     sports_score_condition = (
         func.coalesce(TableHistorySports.score, 0)
         < func.coalesce(TableHistorySports.score_out_of, 180) - 3
     )
-    if _ai_translated_subtitles_are_upgrade_candidates():
+    if allow_high_score_ai:
         sports_score_condition = or_(sports_score_condition,
                                      TableHistorySports.ai_translated.is_(True))
     latest_sports = select(

@@ -67,7 +67,7 @@ def _wanted_movie(movie, providers_list, job_id=None):
                         arr_instance_id,
                     )
                 ).first()
-                if history and history.score:
+                if history is not None:
                     source_score_pct = round((history.score / MAX_SCORES['movie']) * 100, 1)
                 else:
                     # No history record — subtitle may have been manually placed or
