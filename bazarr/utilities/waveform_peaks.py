@@ -15,9 +15,10 @@ import os
 import struct
 import subprocess
 import tempfile
+import threading
 
 from app.get_args import args
-from app.jobs_queue import JobFailed, jobs_queue
+from app.jobs_queue import JobCancelled, JobFailed, jobs_queue
 from utilities.job_dedupe import enqueue_or_existing
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,8 @@ SAMPLE_RATE = 800
 PEAKS_PER_SECOND = 10
 # Report progress once per this many peaks, i.e. per minute of audio.
 PROGRESS_EVERY_PEAKS = PEAKS_PER_SECOND * 60
+# How often a running ffmpeg is checked for a Stop, in seconds.
+CANCEL_POLL_SECONDS = 0.5
 
 
 def peaks_cache_file(video_path, audio_track):
@@ -135,6 +138,22 @@ def _start_in_waveform_lane(job_id):
         return jobs_queue.force_start_pending_job(job_id)
 
 
+def _job_cancelled(job_id):
+    return any(job.job_id == job_id and job.cancelled for job in list(jobs_queue.jobs_running_queue))
+
+
+def _kill_when_cancelled(process, job_id, finished):
+    """Kill ``process`` once the job is cancelled, until ``finished`` is set.
+
+    The read loop only sees a Stop between reads, and an ffmpeg stuck on a
+    damaged file or a stalled mount never hands it another one.
+    """
+    while not finished.wait(CANCEL_POLL_SECONDS):
+        if _job_cancelled(job_id):
+            process.kill()
+            return
+
+
 def _duration(video_path):
     from utilities.binaries import get_binary
     try:
@@ -171,6 +190,10 @@ def _extract_peaks(video_path, audio_track, duration, job_id):
     # on stderr and this loop on stdout, and the job could not even be stopped.
     with tempfile.TemporaryFile() as stderr_file:
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=stderr_file)
+        finished = threading.Event()
+        if job_id is not None:
+            threading.Thread(target=_kill_when_cancelled, args=(process, job_id, finished),
+                             daemon=True).start()
         try:
             while True:
                 data = process.stdout.read(chunk_bytes)
@@ -190,17 +213,29 @@ def _extract_peaks(video_path, audio_track, duration, job_id):
         except subprocess.TimeoutExpired:
             pass
         finally:
+            finished.set()
             if process.poll() is None:
                 process.kill()
                 process.wait()
         stderr_file.seek(0)
         stderr_out = stderr_file.read(500).decode(errors='replace')
 
-    if process.returncode not in (0, None):
+    # A Stop that killed ffmpeg ends the read like the end of the file does, so
+    # what was read so far is not a waveform.
+    if job_id is not None and _job_cancelled(job_id):
+        raise JobCancelled(f'Generating the waveform for {os.path.basename(video_path)} was cancelled.')
+    # An ffmpeg that read part of a damaged track and then failed leaves peaks
+    # that stop short of the duration, so it fails the job like one that read
+    # nothing, and nothing is cached.
+    failed = process.returncode not in (0, None)
+    if failed:
         logger.error('ffmpeg peaks generation failed: %s', stderr_out)
-    if not peaks:
-        if stderr_out:
+    if failed or not peaks:
+        if stderr_out.strip():
             raise JobFailed(f'ffmpeg could not read audio track {audio_track + 1}: {stderr_out.strip()}')
+        if failed:
+            raise JobFailed(f'ffmpeg stopped with exit code {process.returncode} while reading audio track '
+                            f'{audio_track + 1}.')
         raise JobFailed(f'No audio data found in {os.path.basename(video_path)}.')
     return peaks
 
@@ -214,14 +249,23 @@ def generate_waveform_peaks(video_path, audio_track, job_id=None):
 
     jobs_queue.update_job_progress(job_id=job_id, progress_value=0, progress_max=100,
                                    progress_message='Reading the audio track')
+    # Named for the file as it was before ffprobe and ffmpeg read it. A file
+    # replaced while they ran gets a new name, and these peaks are not its.
+    cache_file = peaks_cache_file(video_path, audio_track)
     duration = _duration(video_path)
     peaks = _extract_peaks(video_path, audio_track, duration, job_id)
+    try:
+        unchanged = peaks_cache_file(video_path, audio_track) == cache_file
+    except OSError:
+        unchanged = False
+    if not unchanged:
+        raise JobFailed(f'{os.path.basename(video_path)} changed while its waveform was being read. '
+                        'Open it again to read the new file.')
 
     max_abs = max(abs(p) for p in peaks)
     if max_abs > 0:
         peaks = [round(p / max_abs, 4) for p in peaks]
 
-    cache_file = peaks_cache_file(video_path, audio_track)
     temporary = f'{cache_file}.{job_id or 0}.tmp'
     try:
         os.makedirs(PEAKS_CACHE_DIR, exist_ok=True)

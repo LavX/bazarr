@@ -21,7 +21,7 @@ import pytest
 
 ROOT = os.path.realpath(os.path.join(os.path.dirname(__file__), '..', '..'))
 
-FUNCTIONS = ('compose_services', 'compose_bazarr_service', 'compose_env', 'compose_config_source',
+FUNCTIONS = ('compose_services', 'compose_bazarr_service', 'compose_env', 'compose_config_mount',
              'config_postgres_value', 'detect_database', 'dump_postgres', 'restart_and_fail',
              'do_backup')
 
@@ -97,16 +97,21 @@ def install(tmp_path):
     rendered = tmp_path / 'rendered.yml'
     log = tmp_path / 'docker.log'
 
-    def run(config_text):
+    def run(config_text, succeed=True):
         rendered.write_text(config_text, encoding='utf-8')
         program = (_functions() + STUBS + 'do_backup "$1"\n'
                    'printf "CONFIG_DIR=%s\\nDB_ENGINE=%s\\n" "$CONFIG_DIR" "$DB_ENGINE"\n')
         result = subprocess.run(['bash', '-c', program, 'bash', str(install_dir)], capture_output=True,
                                 text=True, timeout=60,
                                 env=dict(os.environ, FAKE_COMPOSE_CONFIG=str(rendered), FAKE_LOG=str(log)))
+        backups = [path for path in install_dir.iterdir() if path.name.startswith('backup_')]
+        docker_log = log.read_text(encoding='utf-8') if log.exists() else ''
+        if not succeed:
+            assert result.returncode != 0, f'do_backup went ahead:\n{result.stdout}\n{result.stderr}'
+            return result.stdout, backups, docker_log
         assert result.returncode == 0, f'do_backup failed:\n{result.stdout}\n{result.stderr}'
-        [backup] = [path for path in install_dir.iterdir() if path.name.startswith('backup_')]
-        return result.stdout, backup, log.read_text(encoding='utf-8') if log.exists() else ''
+        [backup] = backups
+        return result.stdout, backup, docker_log
 
     return install_dir, run
 
@@ -167,3 +172,24 @@ def test_without_a_config_bind_mount_the_backup_falls_back_to_the_config_directo
 
     assert f'CONFIG_DIR={install_dir}/config' in output
     assert (backup / 'config' / 'db' / 'bazarr.db').is_file()
+
+
+@pytest.mark.parametrize('leftover_config_dir', [False, True])
+def test_a_named_config_volume_stops_before_anything_is_stopped_or_copied(install, leftover_config_dir):
+    # With /config in a named volume there is no host directory to copy. The backup used to
+    # fall back to ./config: it warned and went on when that was missing, and copied a stale
+    # ./config left next to the compose file when it was not, either way reporting success.
+    install_dir, run = install
+    if leftover_config_dir:
+        _config_tree(install_dir / 'config', 'general:\n  port: 6767\n')
+    rendered = _rendered_config('/unused').replace(
+        '      - type: bind\n        source: /unused\n        target: /config\n        bind: {}\n',
+        '      - type: volume\n        source: bazarr-config\n        target: /config\n        volume: {}\n')
+    assert 'type: volume\n        source: bazarr-config\n        target: /config' in rendered
+
+    output, backups, docker_log = run(rendered, succeed=False)
+
+    assert 'FATAL' in output and 'bazarr-config' in output
+    assert 'SUCCESS' not in output
+    assert backups == []
+    assert docker_log == ''
