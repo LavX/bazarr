@@ -166,10 +166,11 @@ def _is_owner_contention(exc):
     cause behind retry wording and then repeats it for as long as the retry
     budget lasts.
 
-    Both spellings of the SQLSTATE are read. psycopg 3, which this project
-    installs, exposes it as ``sqlstate``; psycopg 2 called it ``pgcode``.
-    Reading only one of them silently classifies every real lock refusal as a
-    fault, because the attribute is simply absent on the other driver.
+    Both spellings of the SQLSTATE are read. psycopg 2, which the image
+    ships, calls it ``pgcode``; psycopg 3, which the tests run on, exposes it
+    as ``sqlstate``. Reading only one of them silently classifies every real
+    lock refusal as a fault, because the attribute is simply absent on the
+    other driver.
     """
     original = getattr(exc, 'orig', None)
     state = getattr(original, 'sqlstate', None) or getattr(original, 'pgcode', None)
