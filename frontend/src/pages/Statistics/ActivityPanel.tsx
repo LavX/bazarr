@@ -1,5 +1,5 @@
 import { FunctionComponent, useMemo } from "react";
-import { SimpleGrid, Stack, useMantineTheme } from "@mantine/core";
+import { Alert, SimpleGrid, Stack, useMantineTheme } from "@mantine/core";
 import { merge } from "lodash";
 import {
   Bar,
@@ -30,6 +30,9 @@ const ActivityPanel: FunctionComponent<Props> = ({ filters }) => {
   const metrics = useHistoryMetrics(timeFrame, action, provider, lang);
   const { data } = stats;
   const totals = metrics.data?.totals;
+  // Sports history outlives the integration, and the totals keep counting it
+  // after Sportarr is turned off, so the split and the chart follow the data.
+  const showSports = sportsEnabled || (totals?.sports ?? 0) > 0;
 
   const convertedData = useMemo(() => {
     if (!data) return [];
@@ -49,34 +52,40 @@ const ActivityPanel: FunctionComponent<Props> = ({ filters }) => {
 
   return (
     <Stack gap="lg">
-      <SimpleGrid cols={{ base: 1, xs: 2, lg: 4 }}>
-        <StatTile
-          label="Downloads"
-          value={totals?.downloads ?? 0}
-          hint={
-            totals
-              ? `${totals.series} series / ${totals.movies} movies${
-                  sportsEnabled ? ` / ${totals.sports} sports` : ""
-                }`
-              : undefined
-          }
-        />
-        <StatTile
-          label="Per day"
-          value={totals?.dailyAverage ?? 0}
-          hint="average across the window"
-        />
-        <StatTile
-          label="Busiest day"
-          value={totals?.peakCount ?? 0}
-          hint={totals?.peakDate ?? "nothing yet"}
-        />
-        <StatTile
-          label="Arrived automatically"
-          value={`${totals?.automaticPct ?? 0}%`}
-          hint="no one had to search"
-        />
-      </SimpleGrid>
+      {metrics.isError ? (
+        <Alert color="red" title="Download totals could not be loaded">
+          Reload this page to retry.
+        </Alert>
+      ) : (
+        <SimpleGrid cols={{ base: 1, xs: 2, lg: 4 }}>
+          <StatTile
+            label="Downloads"
+            value={totals?.downloads ?? 0}
+            hint={
+              totals
+                ? `${totals.series} series / ${totals.movies} movies${
+                    showSports ? ` / ${totals.sports} sports` : ""
+                  }`
+                : undefined
+            }
+          />
+          <StatTile
+            label="Per day"
+            value={totals?.dailyAverage ?? 0}
+            hint="average across the window"
+          />
+          <StatTile
+            label="Busiest day"
+            value={totals?.peakCount ?? 0}
+            hint={totals?.peakDate ?? "nothing yet"}
+          />
+          <StatTile
+            label="Arrived automatically"
+            value={`${totals?.automaticPct ?? 0}%`}
+            hint="no one had to search"
+          />
+        </SimpleGrid>
+      )}
 
       <PanelCard
         title="Subtitles downloaded per day"
@@ -101,7 +110,7 @@ const ActivityPanel: FunctionComponent<Props> = ({ filters }) => {
                   dataKey="movies"
                   fill={theme.colors.yellow[4]}
                 />
-                {sportsEnabled && (
+                {showSports && (
                   <Bar
                     name="Sports"
                     dataKey="sports"

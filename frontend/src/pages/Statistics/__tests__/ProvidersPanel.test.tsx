@@ -92,6 +92,25 @@ describe("Statistics > ProvidersPanel", () => {
     ).toBeInTheDocument();
   });
 
+  it("says the blacklist rate needs every action instead of showing none", async () => {
+    // The endpoint answers null with an action filter set: an exclusion does
+    // not record which kind of download it undid.
+    mock({
+      byProvider: [{ provider: "alpha", count: 3, avgScorePct: 90 }],
+      providerReliability: null,
+    });
+    customRender(
+      <ProvidersPanel filters={{ ...defaultStatisticsFilters, action: 2 }} />,
+    );
+
+    expect(
+      await screen.findByText(/clear the action filter/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/no downloads to rate yet/i),
+    ).not.toBeInTheDocument();
+  });
+
   it("says so when nothing was downloaded in the window", async () => {
     render();
 

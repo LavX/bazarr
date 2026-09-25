@@ -11,6 +11,7 @@ from functools import reduce
 from app.database import TableHistory, TableHistoryMovie, TableHistorySports, database, select
 
 from ..utils import authenticate
+from .metrics import language_matches
 
 api_ns_history_stats = Namespace('History Statistics', description='Get history statistics')
 
@@ -96,9 +97,10 @@ class HistoryStats(Resource):
             history_where_clauses_sports.append((TableHistorySports.provider == provider))
 
         if language != 'All':
-            history_where_clauses.append((TableHistory.language == language))
-            history_where_clauses_movie.append((TableHistoryMovie.language == language))
-            history_where_clauses_sports.append((TableHistorySports.language == language))
+            # The same variant match as the metrics tiles above this chart.
+            history_where_clauses.append(language_matches(TableHistory.language, language))
+            history_where_clauses_movie.append(language_matches(TableHistoryMovie.language, language))
+            history_where_clauses_sports.append(language_matches(TableHistorySports.language, language))
 
         history_where_clause = reduce(operator.and_, history_where_clauses)
         history_where_clause_movie = reduce(operator.and_, history_where_clauses_movie)

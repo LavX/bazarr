@@ -63,8 +63,11 @@ def workflow_library(manual_library, monkeypatch):
     )
     from sportarr import automatic, history, workflows
     from app import database as db
+    from app.config import settings
 
     service, session, folder = manual_library
+    # A configured install: queueing sports work refuses while Use Sportarr is off.
+    monkeypatch.setattr(settings.general, "use_sportarr", True)
     monkeypatch.setattr(history, "notify", lambda *args: None)
     monkeypatch.setattr(workflows, "jobs_queue", private_queue(monkeypatch))
     for module in (automatic, history, workflows):
@@ -1056,6 +1059,92 @@ def test_cancel_disabled_jobs_cancels_a_queued_sync_job(workflow_library, monkey
     )
     workflows.cancel_disabled_jobs(set())
     assert removed == [41] and cancelled == [42]
+
+
+def test_cancel_disabled_jobs_removes_and_stops_manual_downloads(workflow_library, monkeypatch):
+    """A manual download publishes like the other sports jobs, but the
+    canceller did not know its module, so a download queued before Sportarr
+    was switched off still ran and published afterwards."""
+    _, _, workflows, _, _, _ = workflow_library
+    removed, cancelled = [], []
+    manual = {"module": "sportarr.manual_jobs", "func": "sports_manually_download_subtitle"}
+    monkeypatch.setattr(
+        workflows.jobs_queue,
+        "list_jobs_from_queue",
+        lambda **kwargs: [
+            manual | {"kwargs": {"event_id": 61, "arr_instance_id": 9}, "status": "pending", "job_id": 41},
+            manual | {"kwargs": {"event_id": 62, "arr_instance_id": 9}, "status": "running", "job_id": 42},
+        ],
+    )
+    monkeypatch.setattr(
+        workflows.jobs_queue,
+        "remove_job_from_pending_queue",
+        lambda job_id: removed.append(job_id),
+    )
+    monkeypatch.setattr(
+        workflows.jobs_queue, "cancel_running_job", lambda job_id: cancelled.append(job_id)
+    )
+    workflows.cancel_disabled_jobs(set())
+    assert removed == [41] and cancelled == [42]
+
+
+@pytest.mark.parametrize(
+    "queue_work",
+    [
+        lambda workflows: workflows.automatic_search_sports(61, 1),
+        lambda workflows: workflows.wanted_search_missing_subtitles_sports(arr_instance_id=1),
+        lambda workflows: workflows.sports_download_subtitles(51, 1),
+        lambda workflows: workflows.upgrade_sports_subtitles(arr_instance_id=1),
+        lambda workflows: workflows.blacklist_sports_subtitle(1, 1),
+    ],
+    ids=["automatic", "wanted", "league", "upgrade", "blacklist"],
+)
+def test_no_sports_search_is_queued_while_sportarr_is_switched_off(
+    workflow_library, monkeypatch, queue_work
+):
+    """The instance row stays enabled when Use Sportarr is turned off, so a
+    stale Sports tab or a direct POST still queued searches that reached the
+    providers and published."""
+    from app.config import settings
+
+    _, _, workflows, _, _, _ = workflow_library
+    monkeypatch.setattr(settings.general, "use_sportarr", False)
+    monkeypatch.setattr(settings.general, "upgrade_subs", True)
+    with pytest.raises(ValueError, match="Sportarr is turned off"):
+        queue_work(workflows)
+    assert not workflows.jobs_queue.jobs_pending_queue
+
+
+def test_a_stop_after_one_language_published_keeps_that_download(workflow_library, monkeypatch):
+    """An event missing two languages published the first, then Stop arrived
+    before the second. search_event raised before returning, so the job
+    reported no result although the subtitle and its history were committed."""
+    from app import database as db
+    from app.database import TableHistorySports
+
+    automatic, _, workflows, _, session, folder = workflow_library
+    items = json.loads(session.execute(sa.select(db.TableLanguagesProfiles.items)).scalar_one())
+    session.execute(sa.update(db.TableLanguagesProfiles).values(
+        items=json.dumps(items + [dict(items[0], id=2, language="fr")])))
+    db.update_profile_id_list.invalidate()
+    job_id = workflows.automatic_search_sports(61, 1)
+    queue = workflows.jobs_queue
+    job = queue.jobs_pending_queue.popleft()
+    queue.jobs_running_queue.append(job)
+    original_save = automatic.save_sports_subtitle
+
+    def save_then_stop(*args, **kwargs):
+        saved = original_save(*args, **kwargs)
+        job.cancelled = True
+        return saved
+
+    monkeypatch.setattr(automatic, "save_sports_subtitle", save_then_stop)
+    assert queue._run_job(job)
+    assert job.status == "completed" and job.cancelled
+    [outcome] = workflows.sports_job_status(session, job_id, 1)["result"]["data"]
+    assert outcome["downloads"] == 1 and outcome["cancelled"] is True
+    assert (folder / "1/event.en.srt").exists()
+    assert len(session.execute(sa.select(TableHistorySports)).all()) == 1
 
 
 def test_the_rescan_request_targets_the_untargeted_route_through_the_transport():

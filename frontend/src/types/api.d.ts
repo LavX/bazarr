@@ -318,7 +318,8 @@ declare namespace History {
   type Metrics = {
     totals: MetricsTotals;
     byProvider: MetricsProvider[];
-    providerReliability: MetricsReliability[];
+    /** Null with an action filter set: an exclusion does not record which kind of download it undid. */
+    providerReliability: MetricsReliability[] | null;
     byLanguage: MetricsLanguage[];
     byAction: MetricsAction[];
     scoreHistogram: MetricsBucket[];
