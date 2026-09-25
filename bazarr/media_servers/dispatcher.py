@@ -93,7 +93,9 @@ class _ServerState:
     worker: Thread | None = None
     state: str = "idle"
     error_code: str | None = None
-    overflow: bool = False
+    # Mutations refused because the queue was full. Only a full library rescan
+    # that started after them covers them, and it clears this.
+    dropped: int = 0
     # How much scannable work this destination has been handed. A library scan
     # covers what was published before it, and nothing after it.
     publications: int = 0
@@ -278,7 +280,7 @@ class RefreshDispatcher:
                     target = state.targets[key] = _Target(event)
                     state.publications += 1
                 else:
-                    state.overflow = True
+                    state.dropped += 1
                     continue
                 if unsupported:
                     target.unsupported_event = target.unsupported_event or event
@@ -497,7 +499,7 @@ class RefreshDispatcher:
                 status = "unconfirmed"
                 error = "configuration_changed" if changing else "connection_disabled"
             return {"pending": len(state.targets), "state": status,
-                    "error_code": "queue_overflow" if state.overflow else error}
+                    "error_code": "queue_overflow" if state.dropped else error}
 
     def retry(self, server):
         with self.condition:
@@ -521,6 +523,22 @@ class RefreshDispatcher:
             state.publications += 1
             self._start(server, state)
             return len(state.targets)
+
+    def dropped(self, server):
+        with self.condition:
+            state = self.servers.get(server)
+            return state.dropped if state is not None else 0
+
+    def covered(self, server, dropped):
+        """A full rescan that started after ``dropped`` drops has covered them.
+
+        A mutation dropped while it ran may have missed a scan it had already
+        submitted, so the warning stays when any arrived in the meantime.
+        """
+        with self.condition:
+            state = self.servers.get(server)
+            if state is not None and state.dropped == dropped:
+                state.dropped = 0
 
     def wait_idle(self, timeout, *, server=None):
         with self.condition:
@@ -552,6 +570,12 @@ def _get_dispatcher():
     with _singleton_lock:
         if _dispatcher is None:
             _dispatcher = RefreshDispatcher(get_native_configuration())
+        return _dispatcher
+
+
+def running_dispatcher():
+    """The refresh workers, if anything has started them; never starts them."""
+    with _singleton_lock:
         return _dispatcher
 
 
