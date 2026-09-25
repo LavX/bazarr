@@ -893,12 +893,25 @@ def test_one_refused_scope_does_not_stop_the_rest(monkeypatch):
 
 def test_a_run_the_server_refused_everywhere_fails_with_its_reason(monkeypatch):
     from media_servers.http import MediaServerError
-    client = _Rescanner('plex', answers={('movie',): MediaServerError('unauthorized'),
-                                         ('episode',): MediaServerError('server_error')})
+    client = _Rescanner('plex', answers={('movie',): MediaServerError('server_error'),
+                                         ('episode',): MediaServerError('not_found')})
     with pytest.raises(MediaServerError) as error:
         _rescan(monkeypatch, snapshot('plex'), client)
-    assert error.value.code == 'unauthorized'
+    assert error.value.code == 'server_error'
     assert client.calls == [('movie',), ('episode',), ('sports',)]
+
+
+@pytest.mark.parametrize('code', ['timeout', 'connection_error', 'unauthorized'])
+def test_a_server_that_cannot_be_reached_stops_the_run_at_once(monkeypatch, code):
+    """Every other scope would wait out the same timeout or meet the same
+    refusal, so the button would spin for each of them to say the same thing."""
+    from media_servers.http import MediaServerError
+    client = _Rescanner('plex', answers={('movie',): MediaServerError(code),
+                                         ('episode',): {'status': 'requested'}})
+    with pytest.raises(MediaServerError) as error:
+        _rescan(monkeypatch, snapshot('plex'), client)
+    assert error.value.code == code
+    assert client.calls == [('movie',)]
 
 
 # --- The real OAuth handlers, against a faked Plex ---------------------------

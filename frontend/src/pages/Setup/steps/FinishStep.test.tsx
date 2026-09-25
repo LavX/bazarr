@@ -423,6 +423,9 @@ describe("FinishStep", () => {
   it("forgets the connection test results on the way out", async () => {
     const user = userEvent.setup();
     recordConnectionTest("arr:1", "passed");
+    expect(
+      localStorage.getItem("bazarr.onboarding.connection-tests"),
+    ).not.toBeNull();
     let onSuccess: (() => void) | undefined;
     mutate.mockImplementation(
       (_input: unknown, opts?: { onSuccess?: () => void }) => {

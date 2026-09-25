@@ -30,9 +30,9 @@ KNOWN_FILE_REASONS = frozenset({
 def _file_failure(exc, lead, advice):
     """The 409 for an OSError on a sports file, with the reason and no path.
 
-    Any other OSError came from the filesystem, and its text names the local
-    path it was raised on. The operating system's sentence for its errno says
-    why without it.
+    Any other OSError came from the filesystem or has not been reviewed, and
+    its text may name the local path it was raised on. The operating system's
+    sentence for its errno says why without it.
     """
     reason = str(exc)
     if reason in KNOWN_FILE_REASONS:

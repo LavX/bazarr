@@ -183,7 +183,7 @@ it("says how many libraries the server refused to rescan", async () => {
   );
   expect(
     await screen.findByText(
-      "Asked the server to rescan 2 libraries. 1 could not be rescanned. The log names it.",
+      "Asked the server to rescan 2 libraries. 1 could not be rescanned. See the log for details.",
     ),
   ).toBeInTheDocument();
 });

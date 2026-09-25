@@ -23,6 +23,12 @@ from .paths import _media_path
 # series library everywhere, and is scoped separately on the kinds that have it.
 _MEDIA_TYPES = ('movie', 'episode', 'sports')
 
+# Refusals that are about the server rather than one scope. Every other scope
+# would fail the same way, each after waiting out its own timeout, so the run
+# stops at the first of these.
+_SERVER_WIDE = frozenset({'connection_error', 'timeout', 'tls_error', 'unauthorized',
+                          'forbidden', 'missing_credentials'})
+
 
 def supports_library_refresh(kind):
     return resolution.LIBRARY in KIND_STEPS.get(kind, ())
@@ -72,7 +78,8 @@ def refresh_libraries(instance_id):
     A rung that answers nothing for one scope is that scope holding no such
     library, not a failure, so it is skipped and the rest still run. A scope the
     server refuses does not stop the rest either: it is counted, and the run
-    fails only when nothing was accepted.
+    fails only when nothing was accepted. A server that cannot be reached, or
+    will not accept the credentials, stops the run at once.
     """
     from .dispatcher import _client, get_native_configuration
     configuration = get_native_configuration()
@@ -94,6 +101,8 @@ def refresh_libraries(instance_id):
                 if call(client) is not None:
                     requested += 1
             except MediaServerError as error:
+                if error.code in _SERVER_WIDE:
+                    raise
                 logging.warning('BAZARR could not rescan %s on a media server destination: %s',
                                 scope, error.code)
                 refused.append(error)
