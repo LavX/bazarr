@@ -16,6 +16,30 @@ from sportarr.errors import SportsNotFound
 
 api_ns_sports_events = Namespace('Sports Events', description='Owned playable sports files')
 
+# The sentences the sports indexer and its analysis worker raise as an OSError
+# on purpose (TimeoutError is one too). Each is a bare literal naming the stage
+# that failed, so a 409 repeats it as it is. test_sportarr_retrieval_diagnostics
+# keeps this set and those raises in step.
+KNOWN_FILE_REASONS = frozenset({
+    'Could not analyze sports video',
+    'Invalid sports analysis result',
+    'Sports video analysis timed out',
+})
+
+
+def _file_failure(exc, lead, advice):
+    """The 409 for an OSError on a sports file, with the reason and no path.
+
+    Any other OSError came from the filesystem, and its text names the local
+    path it was raised on. The operating system's sentence for its errno says
+    why without it.
+    """
+    reason = str(exc)
+    if reason in KNOWN_FILE_REASONS:
+        return {'message': reason}, 409
+    if isinstance(exc.errno, int) and exc.errno > 0:
+        return {'message': f'{lead}: {os.strerror(exc.errno)}. {advice}'}, 409
+    return {'message': f'{lead}. {advice}'}, 409
 
 
 def _indexed_subtitle(context, path, mapped_subtitle):
@@ -89,8 +113,8 @@ class SportsEventSubtitles(Resource):
             return {'message': str(exc)}, 404
         except ValueError as exc:
             return {'message': str(exc)}, 400
-        except OSError:
-            return {'message': 'Could not index this sports file. Check its accessibility and try again.'}, 409
+        except OSError as exc:
+            return _file_failure(exc, 'Could not index this sports file', 'Check its accessibility and try again.')
 
     @authenticate
     def delete(self, event_id):
@@ -168,11 +192,11 @@ class SportsEventSubtitles(Resource):
             return '', 204
         except SportsNotFound as exc:
             return {'message': str(exc)}, 404
-        except OSError:
+        except OSError as exc:
             # Reading the recording is how the operation pins it, and Sportarr
             # can have taken the file away before Bazarr re-synced. The index
             # POST above answers the same way rather than with a 500.
-            return {'message': 'Could not read this sports file. Path mapping or accessibility issue?'}, 409
+            return _file_failure(exc, 'Could not read this sports file', 'Path mapping or accessibility issue?')
         except ValueError as exc:
             # Anything that refuses from here on refuses because the event or
             # its recording moved underneath the request.
