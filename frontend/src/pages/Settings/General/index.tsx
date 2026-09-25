@@ -31,6 +31,7 @@ import { useBaseInput } from "@/pages/Settings/utilities/hooks";
 import { useSettings } from "@/pages/Settings/utilities/SettingsProvider";
 import { Environment, toggleState } from "@/utilities";
 import ExternalWebhookSelector from "./ExternalWebhookSelector";
+import LogFiles from "./LogFiles";
 import {
   branchOptions,
   cookieSecureOptions,
@@ -446,6 +447,7 @@ const SettingsGeneralView: FunctionComponent = () => {
           label="Ignore Case"
           settingKey="settings-log-ignore_case"
         ></Check>
+        <LogFiles />
       </Section>
       <Section header="Backups">
         <File
