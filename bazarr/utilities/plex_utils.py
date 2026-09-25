@@ -2,7 +2,7 @@
 
 import logging
 import requests
-from app.config import settings, get_ssl_verify
+from app.config import settings
 
 
 def get_plex_libraries_with_paths():
@@ -25,12 +25,15 @@ def get_plex_libraries_with_paths():
         if not decrypted_token or not server_url:
             return {'movie_paths': [], 'series_paths': []}
         
+        from plex.operations import plex_account_verify_ssl
+        verify = plex_account_verify_ssl()
+
         # Get library sections
         response = requests.get(
             f"{server_url}/library/sections",
             headers={'X-Plex-Token': decrypted_token, 'Accept': 'application/json'},
             timeout=5,
-            verify=get_ssl_verify('plex')
+            verify=verify
         )
         
         if response.status_code != 200:
@@ -50,7 +53,7 @@ def get_plex_libraries_with_paths():
             section_key = section.get('key')
             
             if section_type in ['movie', 'show']:
-                locations = _get_library_locations(server_url, section_key, decrypted_token)
+                locations = _get_library_locations(server_url, section_key, decrypted_token, verify)
                 if section_type == 'movie':
                     movie_paths.extend(locations)
                 elif section_type == 'show':
@@ -66,14 +69,14 @@ def get_plex_libraries_with_paths():
         return {'movie_paths': [], 'series_paths': []}
 
 
-def _get_library_locations(server_url, section_key, token):
+def _get_library_locations(server_url, section_key, token, verify):
     """Get the locations for a specific Plex library section."""
     try:
         response = requests.get(
             f"{server_url}/library/sections/{section_key}",
             headers={'X-Plex-Token': token, 'Accept': 'application/json'},
             timeout=5,
-            verify=get_ssl_verify('plex')
+            verify=verify
         )
         
         if response.status_code == 200:

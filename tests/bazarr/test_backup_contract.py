@@ -713,6 +713,64 @@ def test_unknown_server_parameters_alone_are_a_warning_not_a_failure(backup_env,
     assert 'Client major version is 17, server major version is 16' in caplog.text
 
 
+class _ServerConnection:
+    """Just enough of a driver connection to answer the server version."""
+
+    closed = False
+
+    def __init__(self, version):
+        self.server_version = version
+        self.info = SimpleNamespace(server_version=version)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.close()
+
+    def close(self):
+        self.closed = True
+
+
+def _fake_driver(version, opened):
+    def connect(**arguments):
+        opened.append((arguments, _ServerConnection(version)))
+        return opened[-1][1]
+    return SimpleNamespace(connect=connect)
+
+
+def test_the_server_version_is_read_with_psycopg2_which_the_image_ships(backup_env, monkeypatch):
+    """Only psycopg 2 is installed in the image, so importing psycopg 3 alone
+    worded every restore warning with an unknown server version."""
+    _enable_postgresql(backup_env, monkeypatch)
+    opened = []
+    monkeypatch.setitem(sys.modules, 'psycopg2', _fake_driver(160004, opened))
+    monkeypatch.setitem(sys.modules, 'psycopg', None)
+
+    connection = backup_env.module._postgres_connection_settings()
+    assert backup_env.module._postgres_server_major(connection) == '16'
+
+    (arguments, server), = opened
+    assert arguments == {'host': 'db.internal', 'port': 5433, 'dbname': 'bazarr',
+                         'user': 'bazarr_user', 'password': 'sekrit', 'connect_timeout': 5}
+    # Leaving a psycopg 2 connection's with-block does not close it.
+    assert server.closed is True
+
+
+def test_without_psycopg2_the_server_version_is_read_with_psycopg_3(backup_env, monkeypatch):
+    _enable_postgresql(backup_env, monkeypatch)
+    opened = []
+    monkeypatch.setitem(sys.modules, 'psycopg2', None)
+    monkeypatch.setitem(sys.modules, 'psycopg', _fake_driver(170002, opened))
+
+    connection = backup_env.module._postgres_connection_settings()
+    assert backup_env.module._postgres_server_major(connection) == '17'
+    assert [server.closed for _, server in opened] == [True]
+
+    monkeypatch.setitem(sys.modules, 'psycopg', None)
+    assert backup_env.module._postgres_server_major(connection) is None
+
+
 def test_an_unknown_parameter_mixed_with_a_real_error_is_still_a_failure(backup_env, monkeypatch):
     _enable_postgresql(backup_env, monkeypatch)
     _write_fake_tool(str(backup_env.tools_dir), 'pg_restore', exit_code=1, stderr=MIXED_ERROR_STDERR)

@@ -50,6 +50,20 @@ def _call(resource_name, event_id, body):
         return resource.post.__wrapped__(resource(), event_id)
 
 
+@pytest.fixture(autouse=True)
+def sports_on(monkeypatch):
+    """Use Sportarr is on, as it is wherever these routes are reachable.
+
+    Imported first: importing the API builds the scheduler, which reads the
+    Sportarr instances from a database these tests do not have while the
+    switch is on.
+    """
+    import api.sports.subtitles  # noqa: F401
+    from app.config import settings
+
+    monkeypatch.setattr(settings.general, "use_sportarr", True)
+
+
 def search(**body):
     return _call("SportsSearch", 61, body)
 
@@ -99,6 +113,39 @@ def queued(monkeypatch):
 def test_the_download_route_queues_a_job_and_answers_at_once(queued):
     assert download(arr_instance_id=1, candidate={"subtitle": "cached"}) == ({"job_id": 5}, 202)
     assert queued == [(61, {"subtitle": "cached"}, 1)]
+
+
+def test_manual_search_download_and_upload_refuse_while_use_sportarr_is_off(monkeypatch, queued):
+    """Turning the switch off leaves the instance row enabled, so a stale tab
+    could still search providers, queue a download or publish an upload."""
+    from io import BytesIO
+
+    from flask import Flask
+
+    from api.sports import subtitles as api_mod
+    from app.config import settings
+    from subtitles import upload
+
+    searched, uploaded = [], []
+    monkeypatch.setattr(api_mod, "manual_search_sports", lambda *args: searched.append(args) or [])
+    monkeypatch.setattr(upload, "manual_upload_subtitle", lambda **kwargs: uploaded.append(kwargs))
+    monkeypatch.setattr(settings.general, "use_sportarr", False)
+    off = ({"message": "Sportarr is turned off. Turn on Use Sportarr in Settings first."}, 400)
+
+    assert search(arr_instance_id=1, language="en") == off
+    assert download(arr_instance_id=1, candidate={"subtitle": "cached"}) == off
+    resource = api_mod.SportsEventSubtitleUpload
+    with Flask(__name__).test_request_context(
+        "/sports/events/61/subtitles/upload", method="POST",
+        data={"arr_instance_id": "1", "language": "en",
+              "file": (BytesIO(b"1\n00:00:00,000 --> 00:00:01,000\nHello\n"), "event.en.srt")},
+    ):
+        assert resource.post.__wrapped__(resource(), 61) == off
+    assert searched == [] and queued == [] and uploaded == []
+
+    monkeypatch.setattr(settings.general, "use_sportarr", True)
+    assert search(arr_instance_id=1, language="en") == ({"data": []}, 200)
+    assert download(arr_instance_id=1, candidate={"subtitle": "cached"}) == ({"job_id": 5}, 202)
 
 
 @pytest.mark.parametrize("reason", KNOWN_REASONS + (SPORTS_FALLBACK_REASON,))

@@ -195,19 +195,27 @@ def _postgres_server_major(connection):
 
     Best effort and only used to word a warning, so every failure here is
     answered with None rather than an exception.
+
+    The image ships psycopg 2 (postgres-requirements.txt) and the test
+    environment installs psycopg 3, so whichever is present answers.
     """
     try:
-        import psycopg
-    except ImportError:
-        return None
-    try:
-        with psycopg.connect(host=connection['host'] or None,
-                             port=int(connection['port']) if connection['port'] else None,
-                             dbname=connection['database'],
-                             user=connection['username'] or None,
-                             password=str(connection['password']) if connection['password'] else None,
-                             connect_timeout=5) as server_connection:
-            return str(server_connection.info.server_version // 10000)
+        arguments = dict(host=connection['host'] or None,
+                         port=int(connection['port']) if connection['port'] else None,
+                         dbname=connection['database'],
+                         user=connection['username'] or None,
+                         password=str(connection['password']) if connection['password'] else None,
+                         connect_timeout=5)
+        try:
+            import psycopg2
+        except ImportError:
+            import psycopg
+            with psycopg.connect(**arguments) as server_connection:
+                return str(server_connection.info.server_version // 10000)
+        # A psycopg 2 connection used as a context manager ends the transaction
+        # and stays open, so it is closed explicitly.
+        with closing(psycopg2.connect(**arguments)) as server_connection:
+            return str(server_connection.server_version // 10000)
     except Exception:
         return None
 

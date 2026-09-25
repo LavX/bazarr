@@ -31,7 +31,7 @@ def _validate_state_token(state: str, stored_state: str) -> bool:
     if not state or not stored_state:
         return False
     return _secrets.compare_digest(state, stored_state)
-from app.config import get_ssl_verify  # noqa: E402
+from plex.operations import plex_account_verify_ssl  # noqa: E402
 from app.config import settings, write_config  # noqa: E402
 from utilities.security_guards import is_trusted_plex_target  # noqa: E402
 from app.logger import logger  # noqa: E402
@@ -211,7 +211,7 @@ def refresh_token(token):
         raise PlexConnectionError(f"Failed to refresh token with Plex.tv: {str(e)}")  # noqa: F405
 
 
-def test_plex_connection(uri, token):
+def test_plex_connection(uri, token, verify):
     if not uri or not token:
         return False, None
 
@@ -228,7 +228,7 @@ def test_plex_connection(uri, token):
             f"{uri}/identity",
             headers=headers,
             timeout=3,
-            verify=get_ssl_verify('plex')
+            verify=verify
         )
         latency_ms = int((time.time() - start_time) * 1000)
 
@@ -514,6 +514,9 @@ class PlexServers(Resource):
             else:
                 raise PlexConnectionError(f"Unexpected response format: {content_type}")  # noqa: F405
 
+            # Read once here rather than in the worker threads below, which
+            # would each open a database session of their own.
+            verify = plex_account_verify_ssl()
             servers = []
             for device in resources_data:
                 if isinstance(device, dict) and device.get('provides') == 'server' and device.get('owned'):
@@ -533,7 +536,7 @@ class PlexServers(Resource):
                     # Test all connections in parallel using threads
                     if connection_candidates:
                         def test_connection_wrapper(conn_data):
-                            available, latency = test_plex_connection(conn_data['uri'], decrypted_token)
+                            available, latency = test_plex_connection(conn_data['uri'], decrypted_token, verify)
                             if available:
                                 conn_data['available'] = True
                                 conn_data['latency'] = latency
@@ -608,6 +611,7 @@ class PlexLibraries(Resource):
                 return {'data': []}
 
             logger.debug(f"Fetching Plex libraries for server: {settings.plex.get('server_name', 'Unknown')}")
+            verify = plex_account_verify_ssl()
             
             headers = {
                 'X-Plex-Token': decrypted_token,
@@ -627,7 +631,7 @@ class PlexLibraries(Resource):
                         f"{server_url}/library/sections",
                         headers=headers,
                         timeout=10,
-                        verify=get_ssl_verify('plex')
+                        verify=verify
                     )
 
                     if lib_response.status_code in (401, 403):
@@ -693,7 +697,7 @@ class PlexLibraries(Resource):
                             f"{successful_server_url}/library/sections/{section_key}/all",
                             headers={'X-Plex-Token': decrypted_token, 'Accept': 'application/json'},
                             timeout=5,
-                            verify=get_ssl_verify('plex')
+                            verify=verify
                         )
                         
                         actual_count = 0
@@ -721,7 +725,8 @@ class PlexLibraries(Resource):
                         'uuid': section.get('uuid', ''),
                         'updatedAt': int(section.get('updatedAt', 0)),
                         'createdAt': int(section.get('createdAt', 0)),
-                        'locations': _get_library_locations(successful_server_url, section_key, decrypted_token)
+                        'locations': _get_library_locations(successful_server_url, section_key, decrypted_token,
+                                                        verify)
                     })
 
             logger.debug(f"Successfully retrieved {len(libraries)} movie/show libraries from Plex")
@@ -873,7 +878,7 @@ class PlexTestConnection(Resource):
                 f"{uri}/identity",
                 headers=headers,
                 timeout=3,
-                verify=get_ssl_verify('plex')
+                verify=plex_account_verify_ssl()
             )
 
             if response.status_code == 200:
