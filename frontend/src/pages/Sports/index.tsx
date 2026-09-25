@@ -592,6 +592,7 @@ const Sports: FunctionComponent = () => {
         onSelectionChanged={setSelections}
         selectionToolbar={selectionToolbar}
         profileToolbar={profileToolbar}
+        itemNoun={{ one: "league", other: "leagues" }}
       ></ItemView>
     </Container>
   );

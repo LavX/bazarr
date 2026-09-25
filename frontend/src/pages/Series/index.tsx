@@ -598,6 +598,7 @@ const SeriesView: FunctionComponent = () => {
         onSelectionChanged={setSelections}
         selectionToolbar={selectionToolbar}
         profileToolbar={profileToolbar}
+        itemNoun={{ one: "series", other: "series" }}
       ></ItemView>
     </Container>
   );

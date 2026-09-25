@@ -29,6 +29,7 @@ import { ColumnDef, Row } from "@tanstack/react-table";
 import { useAudioLanguages } from "@/apis/hooks";
 import { UsePaginationQueryResult } from "@/apis/queries/hooks";
 import { QueryPageTable, Toolbox } from "@/components";
+import styles from "./ItemView.module.scss";
 
 interface Props<T extends Item.Base = Item.Base> {
   query: UsePaginationQueryResult<T>;
@@ -48,7 +49,11 @@ interface Props<T extends Item.Base = Item.Base> {
   onSelectionChanged?: (selections: T[]) => void;
   selectionToolbar?: ReactNode;
   profileToolbar?: ReactNode;
+  // What one row is, for the count the band leads with ("312 series").
+  itemNoun?: { one: string; other: string };
 }
+
+const ITEMS = { one: "item", other: "items" };
 
 function ItemView<T extends Item.Base>({
   query,
@@ -66,6 +71,7 @@ function ItemView<T extends Item.Base>({
   onSelectionChanged,
   selectionToolbar,
   profileToolbar,
+  itemNoun = ITEMS,
 }: Props<T>) {
   const showInstanceFilter =
     onInstanceValuesChange !== undefined &&
@@ -216,14 +222,97 @@ function ItemView<T extends Item.Base>({
     onExcludeLanguagesChange !== undefined ||
     showInstanceFilter;
 
+  // The band's left side is never empty. While rows are selected it holds the
+  // batch tools; otherwise it says how many rows there are and which filters
+  // are narrowing them. The filters used to render as a second band under
+  // this one, beside a left half that held nothing at all.
+  const holdsActions = Boolean(selectionToolbar || profileToolbar);
+
+  const { totalCount, fetchAll } = query.paginationStatus;
+  const rows = query.data?.data;
+  // Only a whole-library read can say how many rows a filter kept. Every
+  // caller fetches all rows while a filter is active, since the filter runs
+  // over query.data, but a page of them would give a confident wrong count,
+  // so that case says nothing rather than something false.
+  const shownCount = useMemo(() => {
+    if (!hasActiveFilter || !rows || !fetchAll) return null;
+    return rows.filter(dataFilter).length;
+  }, [hasActiveFilter, rows, fetchAll, dataFilter]);
+
+  let countLabel = "";
+  if (rows !== undefined && (!hasActiveFilter || shownCount !== null)) {
+    const noun = totalCount === 1 ? itemNoun.one : itemNoun.other;
+    const total = totalCount.toLocaleString();
+    countLabel =
+      shownCount === null
+        ? `${total} ${noun}`
+        : `${shownCount.toLocaleString()} of ${total} ${noun}`;
+  }
+
   return (
     <Stack gap={0}>
-      <Toolbox>
-        <Group gap="xs">
-          {selectionToolbar ? <Box>{selectionToolbar}</Box> : null}
-          {profileToolbar ? <Box>{profileToolbar}</Box> : null}
-        </Group>
-        <Group gap="xs">
+      <Toolbox
+        className={styles.band}
+        data-holds={holdsActions ? "actions" : "summary"}
+      >
+        {holdsActions ? (
+          <Group gap="xs" role="group" aria-label="Batch actions">
+            {selectionToolbar ? <Box>{selectionToolbar}</Box> : null}
+            {profileToolbar ? <Box>{profileToolbar}</Box> : null}
+          </Group>
+        ) : (
+          // A live region, so a screen reader hears the count change as the
+          // search narrows the table, which a sighted reader sees happen.
+          <Text size="sm" fw={500} role="status" className={styles.count}>
+            {countLabel}
+          </Text>
+        )}
+        {!holdsActions && activeFilterChips.length > 0 && (
+          <Group gap={8} className={styles.filters}>
+            <Text size="xs" c="var(--bz-text-tertiary)" fw={500}>
+              Active filters:
+            </Text>
+            {activeFilterChips.map((chip) => (
+              <Badge
+                key={chip.key}
+                color={chip.color}
+                variant="light"
+                size="sm"
+                rightSection={
+                  <UnstyledButton
+                    onClick={chip.onRemove}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      cursor: "pointer",
+                      marginLeft: 2,
+                    }}
+                    aria-label={`Remove filter: ${chip.label}`}
+                  >
+                    <FontAwesomeIcon icon={faTimes} size="xs" />
+                  </UnstyledButton>
+                }
+                styles={{
+                  root: {
+                    paddingRight: 6,
+                  },
+                }}
+              >
+                {chip.label}
+              </Badge>
+            ))}
+            <Divider orientation="vertical" />
+            <UnstyledButton onClick={clearAllFilters}>
+              <Group gap={4}>
+                <FontAwesomeIcon icon={faEraser} size="xs" opacity={0.6} />
+                <Text size="xs" c="var(--bz-text-tertiary)" td="underline">
+                  Clear all
+                </Text>
+              </Group>
+            </UnstyledButton>
+          </Group>
+        )}
+        <Group gap="xs" className={styles.controls}>
           {hasAnyFilterControl && (
             <Tooltip
               label={filtersOpen ? "Hide filters" : "Show filters"}
@@ -270,7 +359,7 @@ function ItemView<T extends Item.Base>({
               value={searchValue}
               onChange={(e) => onSearchChange(e.currentTarget.value)}
               size="sm"
-              w={220}
+              className={styles.search}
               styles={{
                 input: {
                   transition: "border-color 150ms ease",
@@ -280,61 +369,6 @@ function ItemView<T extends Item.Base>({
           )}
         </Group>
       </Toolbox>
-
-      {/* Active filter pills */}
-      {activeFilterChips.length > 0 && (
-        <Box
-          px="md"
-          py={8}
-          style={{
-            borderBottom: "1px solid var(--bz-border-divider)",
-          }}
-        >
-          <Group gap={8}>
-            <Text size="xs" c="var(--bz-text-tertiary)" fw={500}>
-              Active filters:
-            </Text>
-            {activeFilterChips.map((chip) => (
-              <Badge
-                key={chip.key}
-                color={chip.color}
-                variant="light"
-                size="sm"
-                rightSection={
-                  <UnstyledButton
-                    onClick={chip.onRemove}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      cursor: "pointer",
-                      marginLeft: 2,
-                    }}
-                    aria-label={`Remove filter: ${chip.label}`}
-                  >
-                    <FontAwesomeIcon icon={faTimes} size="xs" />
-                  </UnstyledButton>
-                }
-                styles={{
-                  root: {
-                    paddingRight: 6,
-                  },
-                }}
-              >
-                {chip.label}
-              </Badge>
-            ))}
-            <Divider orientation="vertical" />
-            <UnstyledButton onClick={clearAllFilters}>
-              <Group gap={4}>
-                <FontAwesomeIcon icon={faEraser} size="xs" opacity={0.6} />
-                <Text size="xs" c="var(--bz-text-tertiary)" td="underline">
-                  Clear all
-                </Text>
-              </Group>
-            </UnstyledButton>
-          </Group>
-        </Box>
-      )}
 
       {/* Collapsible filter panel */}
       <Collapse expanded={filtersOpen}>
