@@ -1882,6 +1882,34 @@ def test_ai_sports_upgrade_candidates_ignore_score_ceiling_only_for_valid_penalt
     assert {row["id"] for row in workflows.upgrade_rows(session)} == legacy
 
 
+@pytest.mark.parametrize("penalty,marked", [(10, True), (0, False)])
+def test_sports_upgrade_marker_includes_a_high_score_ai_row_like_the_job(
+    workflow_library, monkeypatch, batch_api, penalty, marked
+):
+    """With a valid AI penalty the upgrade job takes an AI translated provider
+    row whatever its score, so the league has to carry the marker too."""
+    from app.config import settings
+    from app.database import TableHistorySports
+
+    automatic, _, workflows, _, session, _ = workflow_library
+    batch = batch_api
+    monkeypatch.setattr(batch, "database", session)
+    monkeypatch.setattr(settings.general, "use_sportarr", True)
+    monkeypatch.setattr(settings.general, "upgrade_subs", True)
+    monkeypatch.setattr(settings.general, "days_to_upgrade_subs", 30)
+    monkeypatch.setattr(settings.general, "ai_translated_score_penalty", penalty, raising=False)
+    assert automatic.search_event(61, 1)["downloads"] == 1
+    session.execute(
+        sa.update(TableHistorySports).values(score=179, score_out_of=180, ai_translated=True)
+    )
+    session.flush()
+
+    job_rows = [row["id"] for row in workflows.upgrade_rows(session, 1)]
+    assert bool(job_rows) is marked
+    keys = batch.get_upgradable_media_ids()["sportsKeys"]
+    assert keys == ([{"sportsLeagueId": 51, "arr_instance_id": 1}] if marked else [])
+
+
 def test_sportarr_ai_upgrade_requires_human_result_to_beat_hash_inflated_score(
     workflow_library, monkeypatch
 ):

@@ -315,3 +315,22 @@ def test_in_place_mod_uses_its_current_folder_when_new_outputs_are_ambiguous(spo
     assert run_toolbox(endpoint, monkeypatch, action='remove_tags') == ('', 204)
     assert '<i>' not in source.read_text()
     assert sibling.read_bytes() == original
+
+
+def test_a_sports_mod_is_refused_while_use_sportarr_is_off(sports_toolbox, monkeypatch):
+    """The instance row stays enabled when Use Sportarr is turned off, so the
+    owner still resolves. A mod queued from a stale page must not rewrite the
+    sports subtitle once the switch is off."""
+    from app.config import settings
+
+    endpoint, _session, folder = sports_toolbox
+    source = folder / '1' / 'event.en.hi.srt'
+    original = source.read_bytes()
+    monkeypatch.setattr(settings.general, 'use_sportarr', False)
+
+    outcome = run_toolbox(endpoint, monkeypatch, action='remove_HI')
+
+    assert outcome[1] == 409
+    assert 'Sportarr is turned off' in outcome[0]
+    assert source.read_bytes() == original
+    assert not (folder / '1' / 'event.en.srt').exists()

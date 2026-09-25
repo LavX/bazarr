@@ -451,3 +451,37 @@ def test_a_vanished_recording_is_a_conflict_not_a_crash(indexed_library, monkeyp
     # The reason, without the local path it was raised on.
     assert 'no such file or directory' in body['message'].lower()
     assert str(folder) not in body['message']
+
+
+def test_a_deletion_is_refused_while_use_sportarr_is_off(indexed_library, monkeypatch):  # noqa: F811
+    """Turning Use Sportarr off leaves the instance row enabled, so the owner
+    still resolves. A stale page or a direct request must not remove a sports
+    subtitle once the switch is off."""
+    from flask import Flask
+    from api.sports import events
+    from app.config import settings
+    from app.database import TableHistorySports
+    from sportarr import history
+    from sportarr import subtitles as sports_subtitles
+
+    session, folder = indexed_library
+    _index(session, 61, [['en:hi', '/sports/event.en.hi.srt', 42]])
+    monkeypatch.setattr(events, 'database', session)
+    monkeypatch.setattr(history, 'database', session)
+    monkeypatch.setattr(sports_subtitles, 'database', session)
+    monkeypatch.setattr(settings.general, 'use_plex', False)
+    monkeypatch.setattr(settings.general, 'use_jellyfin', False)
+    monkeypatch.setattr(settings.general, 'use_sportarr', False)
+    subtitle = folder / '1/event.en.hi.srt'
+    assert subtitle.exists()
+
+    with Flask(__name__).test_request_context(
+        '/sports/events/61/subtitles', method='DELETE',
+        json={'arr_instance_id': 1, 'language': 'en:hi', 'path': '/sports/event.en.hi.srt'},
+    ):
+        body, status = events.SportsEventSubtitles.delete.__wrapped__(events.SportsEventSubtitles(), 61)
+
+    assert status == 409, body
+    assert 'Sportarr is turned off' in body['message']
+    assert subtitle.exists()
+    assert session.execute(sa.select(TableHistorySports)).scalars().all() == []

@@ -26,6 +26,9 @@ def indexed_library(migration_engine, monkeypatch, tmp_path):  # noqa: F811
         monkeypatch.setattr(module, "database", session)
     db.update_profile_id_list.invalidate()
     monkeypatch.setattr(events, "notify", lambda *a: None)
+    # A Sports library in use: the manual file operations refuse to run while
+    # Use Sportarr is off, and the setting defaults to off.
+    monkeypatch.setattr(settings.general, "use_sportarr", True)
     monkeypatch.setattr(settings.general, "use_embedded_subs", True)
     monkeypatch.setattr(settings.general, "embedded_subtitles_parser", "ffprobe")
     monkeypatch.setattr(settings.general, "subfolder", "current")
