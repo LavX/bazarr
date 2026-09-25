@@ -5,7 +5,7 @@ from flask_restx import Namespace, Resource, reqparse
 from api.utils import authenticate
 from provider_hub import jobs as hub_jobs
 from provider_hub import service
-from provider_hub.service import CatalogSourceError
+from provider_hub.service import CatalogSourceError, ProviderHubSettingsError
 
 
 api_ns_provider_hub = Namespace('Provider Hub', description='Provider Hub catalog and installation lifecycle')
@@ -103,6 +103,7 @@ class ProviderHubProvider(Resource):
     @api_ns_provider_hub.response(200, 'Success')
     @api_ns_provider_hub.response(401, 'Not Authenticated')
     @api_ns_provider_hub.response(404, 'Provider not found')
+    @api_ns_provider_hub.response(500, 'The change could not be saved')
     def patch(self, provider_id):
         payload = request.json or {}
         try:
@@ -113,6 +114,8 @@ class ProviderHubProvider(Resource):
             )
         except ValueError as error:
             return str(error), 400
+        except ProviderHubSettingsError as error:
+            return str(error), 500
         if not provider:
             return 'Provider not found', 404
         return provider

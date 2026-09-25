@@ -100,6 +100,10 @@ def backup_env(monkeypatch, tmp_path):
 
     restarts = []
     monkeypatch.setattr(backup_module, 'restart_bazarr', lambda: restarts.append(True))
+    # stop_bazarr ends the process; record the exit code instead. raising=False
+    # so a module that never stops the start fails the assertions, not the setup.
+    stops = []
+    monkeypatch.setattr(backup_module, 'stop_bazarr', lambda code: stops.append(code), raising=False)
     monkeypatch.setitem(sys.modules, 'app.server', SimpleNamespace(webserver=None))
 
     tools_dir = tmp_path / 'bin'
@@ -112,7 +116,7 @@ def backup_env(monkeypatch, tmp_path):
         monkeypatch.delenv(variable, raising=False)
 
     return SimpleNamespace(module=backup_module, settings=settings, config_dir=config_dir,
-                           tools_dir=tools_dir, restarts=restarts, original_path=original_path,
+                           tools_dir=tools_dir, restarts=restarts, stops=stops, original_path=original_path,
                            backup_dir=config_dir / 'backup', restore_dir=config_dir / 'restore')
 
 
@@ -186,6 +190,38 @@ def test_backup_api_reports_the_failure(backup_env, monkeypatch):
 
     assert status == 500
     assert 'backup' in body.lower()
+
+
+def test_overlapping_postgres_backups_do_not_share_a_staging_file(backup_env, monkeypatch):
+    """A scheduled and a manual backup are separate jobs and can run together.
+
+    The second one here starts and finishes while the first is still dumping,
+    which is the overlap the queue allows. With one shared staging file the
+    second overwrote the first one's dump and then deleted it, and the first
+    failed to archive a file that was no longer there.
+    """
+    _enable_postgresql(backup_env, monkeypatch)
+    dumped = []
+
+    def fake_dump(dest_path):
+        job = len(dumped) + 1
+        dumped.append(dest_path)
+        with open(dest_path, 'w', encoding='utf-8') as handle:
+            handle.write(f'dump-{job}')
+        if job == 1:
+            backup_env.module.backup_to_zip(job_id=2)
+
+    monkeypatch.setattr(backup_env.module, '_dump_postgres_database', fake_dump)
+
+    assert backup_env.module.backup_to_zip(job_id=1) is True
+
+    assert len(set(dumped)) == 2, f'both jobs staged into {dumped}'
+    contents = set()
+    for name in _archives(backup_env):
+        with zipfile.ZipFile(backup_env.backup_dir / name) as archive:
+            contents.add(archive.read('bazarr_postgres.dump').decode())
+    assert 'dump-1' in contents
+    assert [p for p in os.listdir(backup_env.backup_dir) if not p.endswith('.zip')] == []
 
 
 def test_postgres_backup_writes_no_archive_when_pg_dump_fails(backup_env, monkeypatch):
@@ -320,6 +356,7 @@ def test_sqlite_restore_replaces_config_and_database(backup_env, monkeypatch):
     assert backup_env.module.restore_from_backup() is True
 
     assert backup_env.restarts == [True]
+    assert backup_env.stops == []
     assert _read_marker_database(backup_env.config_dir / 'db' / 'bazarr.db') == 'restored'
     assert os.listdir(backup_env.restore_dir) == []
 
@@ -357,6 +394,40 @@ def test_prepare_restore_does_not_restart_on_an_archive_without_the_database(bac
     assert os.listdir(backup_env.restore_dir) == []
 
 
+@pytest.mark.parametrize('engine,database_name', [('sqlite', 'bazarr.db'),
+                                                  ('postgresql', 'bazarr_postgres.dump')])
+def test_prepare_restore_refuses_an_archive_without_the_configuration(backup_env, monkeypatch, caplog,
+                                                                      engine, database_name):
+    if engine == 'postgresql':
+        _enable_postgresql(backup_env, monkeypatch)
+    else:
+        monkeypatch.setattr(backup_env.settings.postgresql, 'enabled', False)
+    archive = backup_env.backup_dir / 'bazarr_backup_v1.2.3_2026.09.16_10.00.03.zip'
+    with zipfile.ZipFile(archive, 'w') as zip_file:
+        zip_file.writestr(database_name, 'database-bytes')
+
+    with caplog.at_level('ERROR'):
+        assert backup_env.module.prepare_restore(archive.name) is False
+
+    assert backup_env.restarts == []
+    assert 'does not contain the configuration' in caplog.text
+    # Nothing is left for the next start to pick up.
+    assert os.listdir(backup_env.restore_dir) == []
+
+
+def test_restore_api_refuses_an_archive_without_the_configuration(backup_env, monkeypatch):
+    monkeypatch.setattr(backup_env.settings.postgresql, 'enabled', False)
+    archive = backup_env.backup_dir / 'bazarr_backup_v1.2.3_2026.09.16_10.00.04.zip'
+    with zipfile.ZipFile(archive, 'w') as zip_file:
+        zip_file.writestr('bazarr.db', 'database-bytes')
+    scheduled = _capture_timers(monkeypatch)
+
+    body, status = _call_restore_patch(backup_env, monkeypatch, archive.name)
+
+    assert status == 500
+    assert scheduled == [], 'a restart was scheduled for a restore the next start refuses'
+
+
 PRE_LAUNCH_WORDING = 'refused before pg_restore was started'
 MID_RESTORE_WORDING = 'partially restored'
 
@@ -375,6 +446,8 @@ def test_pg_restore_missing_from_path_does_not_claim_the_database_may_be_corrupt
     assert MID_RESTORE_WORDING not in caplog.text
     assert 'pg_restore was not found on PATH' in caplog.text
     assert os.listdir(backup_env.restore_dir) == []
+    # The database was never touched, so the start carries on.
+    assert backup_env.stops == []
 
 
 def test_no_configured_database_does_not_claim_the_database_may_be_corrupt(backup_env, monkeypatch, caplog):
@@ -476,6 +549,108 @@ def test_a_failing_sqlite_restore_still_says_the_database_was_left_alone(backup_
     assert 'partially restored' not in caplog.text
     assert 'pg_restore' not in caplog.text
     assert os.listdir(backup_env.restore_dir) == []
+    # Nothing it did needs repairing, so the start goes on as it always has.
+    assert backup_env.stops == []
+
+
+# The restore runs at boot. When it leaves a database nothing may run on, the
+# boot has to end there, and the next one too while the damage is unrepaired:
+# returning False used to let init carry on and start Bazarr on it.
+
+@pytest.mark.parametrize('dump_can_be_moved', [True, False], ids=['moved-aside', 'left-in-place'])
+def test_a_pg_restore_that_fails_partway_stops_the_start(backup_env, monkeypatch, caplog, dump_can_be_moved):
+    from literals import EXIT_RESTORE_ERROR
+
+    _enable_postgresql(backup_env, monkeypatch)
+    _write_fake_tool(str(backup_env.tools_dir), 'pg_restore', exit_code=1,
+                     stderr='pg_restore: error: connection to server failed')
+    _stage_restore(backup_env, 'bazarr_postgres.dump')
+    if not dump_can_be_moved:
+        real_replace = backup_env.module.os.replace
+
+        def failing_replace(source, destination):
+            if str(destination).endswith('.failed'):
+                raise OSError('read-only file system')
+            return real_replace(source, destination)
+
+        monkeypatch.setattr(backup_env.module.os, 'replace', failing_replace)
+
+    with caplog.at_level('ERROR'):
+        assert backup_env.module.restore_from_backup() is False
+
+    assert backup_env.stops == [EXIT_RESTORE_ERROR]
+    assert EXIT_RESTORE_ERROR != 0
+    assert backup_env.restarts == []
+    assert 'Bazarr is stopping' in caplog.text
+
+
+def test_the_start_after_a_partial_pg_restore_is_refused_too(backup_env, monkeypatch, caplog):
+    from literals import EXIT_RESTORE_ERROR
+
+    _enable_postgresql(backup_env, monkeypatch)
+    log_path = _write_fake_tool(str(backup_env.tools_dir), 'pg_restore', exit_code=1,
+                                stderr='pg_restore: error: connection to server failed')
+    _stage_restore(backup_env, 'bazarr_postgres.dump')
+    assert backup_env.module.restore_from_backup() is False
+    kept = backup_env.restore_dir / 'bazarr_postgres.dump.failed'
+    assert kept.is_file()
+    runs = open(log_path, encoding='utf-8').read().count('ARGV')
+    backup_env.stops.clear()
+    caplog.clear()
+
+    # The next start: nothing is staged any more, only the parked dump.
+    with caplog.at_level('CRITICAL'):
+        assert backup_env.module.restore_from_backup() is False
+
+    assert backup_env.stops == [EXIT_RESTORE_ERROR]
+    assert open(log_path, encoding='utf-8').read().count('ARGV') == runs, 'pg_restore ran again'
+    assert kept.is_file(), 'the dump the message points at is gone'
+    # The message says exactly how to get out of it.
+    assert str(kept) in caplog.text
+    assert f'into {backup_env.restore_dir}' in caplog.text
+    assert str(backup_env.backup_dir) in caplog.text
+    assert 'pg_restore --clean --if-exists --no-owner' in caplog.text
+
+
+@pytest.mark.parametrize('engine', ['sqlite', 'postgresql'])
+def test_a_configuration_that_cannot_be_put_in_place_stops_the_start(backup_env, monkeypatch, caplog, engine):
+    from literals import EXIT_RESTORE_ERROR
+
+    if engine == 'postgresql':
+        _enable_postgresql(backup_env, monkeypatch)
+        _write_fake_tool(str(backup_env.tools_dir), 'pg_restore')
+        _stage_restore(backup_env, 'bazarr_postgres.dump')
+    else:
+        monkeypatch.setattr(backup_env.settings.postgresql, 'enabled', False)
+        _stage_restore(backup_env, 'bazarr.db')
+    dest_config = backup_env.config_dir / 'config' / 'config.yaml'
+    real_replace = backup_env.module.os.replace
+
+    def failing_replace(source, destination):
+        if str(destination) == str(dest_config):
+            raise OSError('device or resource busy')
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(backup_env.module.os, 'replace', failing_replace)
+
+    with caplog.at_level('ERROR'):
+        assert backup_env.module.restore_from_backup() is False
+
+    assert backup_env.stops == [EXIT_RESTORE_ERROR]
+    assert backup_env.restarts == []
+    # The configuration from the backup is kept for the operator to put in place.
+    staged = backup_env.config_dir / 'config' / 'config.yaml.restore'
+    assert staged.read_text(encoding='utf-8') == 'general:\n  port: 7000\n'
+    assert f'kept at {staged}: copy it over {dest_config}' in caplog.text
+
+
+def test_a_start_with_nothing_to_restore_goes_on(backup_env, monkeypatch):
+    _enable_postgresql(backup_env, monkeypatch)
+
+    assert backup_env.module.restore_from_backup() is False
+
+    assert backup_env.stops == []
+    assert backup_env.restarts == []
 
 
 def test_postgres_enabled_through_the_environment_is_not_backed_up_as_sqlite(backup_env, monkeypatch):
