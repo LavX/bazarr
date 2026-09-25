@@ -814,7 +814,8 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
                       sixteen more rows than the window has, and the source
                       name it usually carries is the same for all of them.
                       What it does say is on the row, for a pointer and for
-                      the search box, and in full in Settings, Providers. */}
+                      the search box, and in full in Subtitle Hub, My
+                      Providers. */}
                   <Checkbox
                     className={styles.entry}
                     label={choice.name}

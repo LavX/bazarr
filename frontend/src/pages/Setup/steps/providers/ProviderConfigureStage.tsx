@@ -45,8 +45,8 @@ const IDENTITY_KEY = /user|email|login|account/i;
 // required fields, secret credentials, and the account name that goes with a
 // secret. Advanced toggles (forced-only, FPS, FlareSolverr, delays,
 // AI-translation flags, ...) stay hidden here and remain available later in
-// Settings > Providers, so the step does not become an overwhelming wall of
-// inputs.
+// Subtitle Hub > My Providers, so the step does not become an overwhelming
+// wall of inputs.
 function essentialFields(fields: ConfigField[]): ConfigField[] {
   const hasSecret = fields.some((field) => field.type === "password");
   return fields.filter(
