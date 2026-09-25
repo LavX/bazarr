@@ -7,6 +7,7 @@ import { createDefaultReducer } from "@/modules/socketio/reducer";
 import {
   JOB_FALLBACK_POLL_MS,
   JobFailedError,
+  JobStoppedError,
   UNKNOWN_JOB_OUTCOME,
   waitForJob,
 } from "./jobs";
@@ -73,6 +74,22 @@ describe("waitForJob", () => {
     await expect(waitForJob(client, 1)).rejects.toThrow(
       "Could not install X: offline",
     );
+  });
+
+  it("rejects a job that was stopped instead of resolving it", async () => {
+    // The queue records a stopped job as completed, so only the flag says it
+    // did not finish. Resolved, the wizard counted a stopped install as staged.
+    const waiting = waitForJob(client, 6);
+    client.setQueryData(JOBS_KEY, [
+      job(6, "completed", {
+        stopped: true,
+        // eslint-disable-next-line camelcase
+        progress_message: "Cancelled by user",
+      }),
+    ]);
+
+    await expect(waiting).rejects.toBeInstanceOf(JobStoppedError);
+    await expect(waitForJob(client, 6)).rejects.toThrow("Job 6 was stopped");
   });
 
   it("reads the reason from the job's error, not its progress message", async () => {

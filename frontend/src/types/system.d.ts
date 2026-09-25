@@ -30,6 +30,8 @@ declare namespace System {
     error?: JobError | null;
     /** What the user can do with a finished job, set by the job. */
     action?: JobAction | null;
+    /** The job ended at Stop instead of finishing. It still reads as completed. */
+    stopped?: boolean;
     /** Whether a failed job may be queued again with its original arguments. */
     retryable?: boolean;
     /** The failed job this one retries. */

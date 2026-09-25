@@ -108,6 +108,9 @@ class Job:
     :type retryable: bool
     :ivar retry_of: The id of the failed job this one retries, or None.
     :type retry_of: int, optional
+    :ivar stopped: Whether the job ended at Stop instead of finishing. It is still recorded as completed.
+        ``cancelled`` only records that Stop was pressed, and a job past its last checkpoint finishes anyway.
+    :type stopped: bool
     """
     def __init__(self, job_id: int, job_name: str, module: str, func: str, args: list = None, kwargs: dict = None,
                  is_progress: bool = False, is_signalr: bool = False, progress_max: int = 0, job_returned_value=None,
@@ -131,6 +134,7 @@ class Job:
         self.retryable = retryable
         self.retry_of = retry_of
         self.cancelled = False
+        self.stopped = False
         # Observation only. ``last_run_time`` is overwritten at creation, start
         # and terminal state, so it cannot tell those three apart; these can.
         # They never take part in equality, scheduling or execution.
@@ -856,6 +860,7 @@ class JobsQueue:
         except JobCancelled:
             logging.info(f"Job {job.job_name} ({job.job_id}) was cancelled by user")  # noqa: G004
             job.status = 'completed'
+            job.stopped = True
             job.progress_message = "Cancelled by user"
             job.last_run_time = datetime.now(timezone.utc)
             job.observed_finished_at = datetime.now(timezone.utc)
