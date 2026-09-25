@@ -42,11 +42,17 @@ def _sections(server, names):
     """Each configured section that exists, in the order the user listed them."""
     for name in names:
         try:
-            yield name, server.library.section(name)
-        except Exception:
+            section = server.library.section(name)
+        except NotFound:
             # A renamed or removed section is not this publication's failure;
             # the remaining sections and the rungs below still apply.
             logger.debug('Plex section %r is not available for a refresh', name)
+            continue
+        except Exception as error:
+            # Looking the name up can reach the server, and a server that has
+            # stopped answering is not a section that went away.
+            raise _refusal(error) from None
+        yield name, section
 
 
 class PlexRefreshClient:

@@ -5002,6 +5002,55 @@ def test_a_removal_whose_disable_cannot_be_saved_leaves_the_provider_installed(t
     assert stored["pending_restart"] is False
 
 
+def test_a_removal_whose_staging_cannot_be_saved_keeps_the_provider_enabled(tmp_path, monkeypatch):
+    """The disable is saved before the removal is staged. When the Hub state
+    then cannot be written, the provider is still installed and active, so the
+    disable has to be put back or it stays switched off after a restart."""
+    from app import config
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    _installed_examplehub(tmp_path, monkeypatch)
+    monkeypatch.setattr(config.settings.general, "enabled_providers", ["examplehub"])
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    original = service.mutate_state
+
+    def full_volume(mutator, *args, **kwargs):
+        if mutator.__name__ == "remove_or_stage":
+            raise OSError("No space left on device")
+        return original(mutator, *args, **kwargs)
+
+    monkeypatch.setattr(service, "mutate_state", full_volume)
+
+    with pytest.raises(OSError):
+        service.remove_installation("examplehub")
+
+    assert list(config.settings.general.enabled_providers) == ["examplehub"]
+    assert load_state()["installations"]["examplehub"]["state"] == "active"
+
+
+def test_a_failed_removal_does_not_enable_a_provider_that_was_off(tmp_path, monkeypatch):
+    from app import config
+    from provider_hub import service
+
+    _installed_examplehub(tmp_path, monkeypatch)
+    monkeypatch.setattr(config.settings.general, "enabled_providers", ["other"])
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    original = service.mutate_state
+
+    def full_volume(mutator, *args, **kwargs):
+        if mutator.__name__ == "remove_or_stage":
+            raise OSError("No space left on device")
+        return original(mutator, *args, **kwargs)
+
+    monkeypatch.setattr(service, "mutate_state", full_volume)
+
+    with pytest.raises(OSError):
+        service.remove_installation("examplehub")
+
+    assert list(config.settings.general.enabled_providers) == ["other"]
+
+
 def test_a_first_install_that_cannot_be_enabled_is_reported_as_failed(tmp_path, monkeypatch):
     from provider_hub import service
     from provider_hub.service import stage_install_local

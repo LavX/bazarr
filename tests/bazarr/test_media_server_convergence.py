@@ -82,13 +82,13 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         route = urlsplit(self.path)
         self.server.calls.append(('POST', route.path, parse_qs(route.query)))
-        self._respond(None, 204)
+        self._respond(None, self.server.refusals.get(route.path, 204))
 
 
 @pytest.fixture
 def jellyfin_server():
     server = ThreadingHTTPServer(('127.0.0.1', 0), _Handler)
-    server.calls, server.items, server.episodes = [], {}, []
+    server.calls, server.items, server.episodes, server.refusals = [], {}, [], {}
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     server.url = f'http://127.0.0.1:{server.server_address[1]}'
@@ -310,6 +310,38 @@ def test_jellyfin_never_asks_the_title_rung_without_a_year(jellyfin_server):
     assert jellyfin_server.calls == []
 
 
+def _posts(server):
+    return [path for method, path, _query in server.calls if method == 'POST']
+
+
+def test_a_refused_jellyfin_library_does_not_stop_the_libraries_after_it(jellyfin_server):
+    """A stale saved library id used to end the walk, so a valid library listed
+    after it never saw a subtitle. Every library is asked, and the refusal is
+    still reported, so the refresh is not called requested while one was not."""
+    from media_servers.http import MediaServerError
+    from jellyfin.refresh import JellyfinRefreshClient
+    stale = '11' * 16
+    jellyfin_server.refusals[f'/Items/{stale}/Refresh'] = 404
+    snap = snapshot('jellyfin', jellyfin_server.url, options={'movie_library_ids': [stale, MOVIE_LIBRARY]})
+    with JellyfinRefreshClient(snap) as client, pytest.raises(MediaServerError) as error:
+        client.refresh_library('movie')
+    assert error.value.code == 'not_found'
+    assert _posts(jellyfin_server) == [f'/Items/{stale}/Refresh', f'/Items/{MOVIE_LIBRARY}/Refresh']
+
+
+def test_a_jellyfin_server_that_refuses_the_credential_stops_at_the_first_library(jellyfin_server):
+    """A refusal about the server, not the library, would meet every library the same way."""
+    from media_servers.http import MediaServerError
+    from jellyfin.refresh import JellyfinRefreshClient
+    first = '11' * 16
+    jellyfin_server.refusals[f'/Items/{first}/Refresh'] = 401
+    snap = snapshot('jellyfin', jellyfin_server.url, options={'movie_library_ids': [first, MOVIE_LIBRARY]})
+    with JellyfinRefreshClient(snap) as client, pytest.raises(MediaServerError) as error:
+        client.refresh_library('movie')
+    assert error.value.code == 'unauthorized'
+    assert _posts(jellyfin_server) == [f'/Items/{first}/Refresh']
+
+
 @pytest.mark.parametrize('media_type,kwargs,expected', [
     ('movies', {'radarr_id': 30}, 'movie'),
     ('series', {'sonarr_series_id': 5, 'sonarr_episode_id': 9}, 'episode'),
@@ -467,11 +499,21 @@ class _FakeItem:
         return self._episodes[(season, episode)]
 
 
-def _plex_client(monkeypatch, sections, calls, **overrides):
+def _plex_client(monkeypatch, sections, calls, *, lookup_refusal=None, **overrides):
     from types import SimpleNamespace
+    from plexapi.exceptions import NotFound
     from plex import operations, refresh
+
+    def section(name):
+        # plexapi's own answer for a title the server has no section for.
+        if lookup_refusal is not None:
+            raise lookup_refusal
+        if name not in sections:
+            raise NotFound(f'Invalid library section: {name}')
+        return sections[name]
+
     monkeypatch.setattr(operations, 'plex_server_for', lambda *_args: SimpleNamespace(
-        library=SimpleNamespace(section=lambda name: sections[name])))
+        library=SimpleNamespace(section=section)))
     return refresh.PlexRefreshClient(snapshot('plex', **overrides))
 
 
@@ -520,6 +562,23 @@ def test_a_plex_lookup_that_fails_is_not_reported_as_a_missing_item(monkeypatch,
     with _plex_client(monkeypatch, sections, calls) as client, pytest.raises(MediaServerError) as error:
         client.refresh_by_provider_id('movie', metadata())
     assert error.value.code == code
+
+
+@pytest.mark.parametrize('refusal, code', _refusals())
+@pytest.mark.parametrize('rung', [lambda client: client.refresh_by_provider_id('movie', metadata()),
+                                  lambda client: client.refresh_library('movie')],
+                         ids=['provider_id', 'library'])
+def test_a_plex_section_lookup_that_fails_is_not_a_missing_section(monkeypatch, refusal, code, rung):
+    """Resolving the section name can reach the server too. A dead server or an
+    expired token there is itself, not a renamed section, or every rung comes
+    back empty and the destination reads as item_missing."""
+    from media_servers.http import MediaServerError
+    calls = []
+    with _plex_client(monkeypatch, {}, calls, lookup_refusal=refusal) as client, \
+            pytest.raises(MediaServerError) as error:
+        rung(client)
+    assert error.value.code == code
+    assert calls == []
 
 
 @pytest.mark.parametrize('refusal, code', _refusals())
@@ -724,6 +783,45 @@ def test_a_newly_recorded_owner_id_is_written_to_disk(schema_session):
     # A reconcile that changes nothing does not rewrite the config.
     sync_plex_instance(schema_session, config, persist=lambda: writes.append(True))
     assert writes == [True]
+
+
+@pytest.mark.parametrize('outcome', [False, OSError('read-only file system')],
+                         ids=['write_config_false', 'write_raises'])
+def test_a_plex_owner_that_cannot_be_saved_leaves_no_row_behind(schema_session, outcome):
+    """The recorded id is the only way back to the account's row after a
+    restart, and it is never guessed. A row whose id never reached disk would be
+    orphaned there, and every startup would create another one beside it."""
+    from media_servers.plex_account import sync_plex_instance
+    from media_servers.repository import MediaServerInstanceRepository
+    repo = MediaServerInstanceRepository(schema_session)
+    config = plex_settings(auth_method='oauth', token='token',
+                           server_url='https://plex.example:32400')
+
+    def persist():
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    assert sync_plex_instance(schema_session, config, persist=persist) is None
+    assert repo.list('plex') == []
+    assert config.plex.instance_id == ''
+
+    # Once the config can be written, the next change binds a row as usual.
+    row = sync_plex_instance(schema_session, config, persist=lambda: True)
+    assert [item.id for item in repo.list('plex')] == [row.id]
+    assert config.plex.instance_id == row.id
+
+
+def test_the_startup_import_creates_no_plex_row_it_cannot_record(schema_session, monkeypatch):
+    from app import config as app_config
+    from media_servers.backfill import backfill_instances
+    from media_servers.repository import MediaServerInstanceRepository
+    monkeypatch.setattr(app_config, 'write_config', lambda: False)
+    config = plex_settings(auth_method='oauth', token='token',
+                           server_url='https://plex.example:32400')
+    assert backfill_instances(schema_session, config)['plex']['error_code'] == 'migration_failed'
+    assert MediaServerInstanceRepository(schema_session).list('plex') == []
+    assert config.plex.instance_id == ''
 
 
 def test_switching_auth_method_replaces_the_credential_on_the_row(schema_session):
@@ -1061,6 +1159,9 @@ def plex_account_api(schema_session, monkeypatch):
     monkeypatch.setattr(app_config, 'settings', config)
     monkeypatch.setattr(oauth, 'settings', config)
     monkeypatch.setattr(oauth, 'write_config', lambda: None)
+    # The destination layer records the row's owner through its own import of
+    # write_config, and the real one cannot save this stand-in settings object.
+    monkeypatch.setattr(app_config, 'write_config', lambda: True)
     monkeypatch.setattr(app_database, 'database', schema_session)
     monkeypatch.setattr(oauth, 'validate_plex_token',
                         lambda token: {'id': 7, 'username': 'someone', 'email': 'a@b.example'})

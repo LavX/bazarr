@@ -114,13 +114,27 @@ def _coalescer(scanned, publications):
     That errs towards one scan too many rather than one too few, which is the
     side to err on: a suppressed scan the file needed would never be asked for
     again.
+
+    A library is recorded when its scan is about to be asked for, before the
+    server has answered. A request that then fails covered nothing, so the
+    caller calls ``forget`` and the next target asks for its own scan.
     """
+    recorded = []
+
     def already_requested(library):
         key = str(library)
         if scanned.get(key) == publications:
             return True
         scanned[key] = publications
+        recorded.append(key)
         return False
+
+    def forget():
+        for key in recorded:
+            scanned.pop(key, None)
+        recorded.clear()
+
+    already_requested.forget = forget
     return already_requested
 
 
@@ -443,11 +457,12 @@ class RefreshDispatcher:
                 target.ready = False
                 target.error_code = None
                 state.state = "pending"
+            coalesce = _coalescer(scanned, publications)
             try:
-                result = self._refresh(server, revision, snapshot, event,
-                                       _coalescer(scanned, publications))
+                result = self._refresh(server, revision, snapshot, event, coalesce)
                 error_code = None
             except Exception as error:
+                coalesce.forget()
                 # Classified by the code, not the class: see _refusal_code.
                 code = _refusal_code(error)
                 result = "unconfirmed"
