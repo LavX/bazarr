@@ -25,6 +25,10 @@ CACHE_MAX_ENTRIES = 64
 CACHE_MAX_BYTES = 16 * 1024 * 1024
 SUBTITLE_MAX_BYTES = 2 * 1024 * 1024
 FETCH_MAX_CONCURRENT = 4
+# Provider calls still alive, counting the ones whose waiters all gave up. A
+# call past its deadline gives its FETCH_MAX_CONCURRENT slot back, but its
+# thread runs on until the provider returns, so this is what bounds threads.
+FETCH_MAX_THREADS = 16
 FETCH_WAIT_SECONDS = 12
 # A download job is not holding a request open, so it can give a slow provider
 # longer than a preview can.
@@ -109,7 +113,7 @@ class _Artifact:
     filename: str
 
 
-@dataclass
+@dataclass(eq=False)
 class _Flight:
     ready: Event = field(default_factory=Event)
     artifact: _Artifact | None = None
@@ -122,6 +126,8 @@ class _Flight:
 
 _cache: OrderedDict = OrderedDict()
 _inflight: dict = {}
+# Flights retired at their deadline whose provider call has not returned yet.
+_abandoned: set = set()
 _lock = Lock()
 _cache_bytes = 0
 
@@ -410,6 +416,7 @@ def _fetch(key, flight, record, result_id, search_id, authority, deadline):
             # one for the same result, which this late return must not remove.
             if _inflight.get(key) is flight:
                 del _inflight[key]
+            _abandoned.discard(flight)
             flight.ready.set()
 
 
@@ -434,16 +441,19 @@ def _artifact(result_id, search_id, authority, wait_seconds=None):
             # A provider download with no socket timeout can block for good.
             # Once every waiter's deadline has passed nobody is left to answer,
             # so the flight gives up its slot. Kept, four of them left every
-            # later preview and download busy until a restart.
+            # later preview and download busy until a restart. Its thread is
+            # still running, though, so it stays counted until it returns.
             now = time.monotonic()
             for stale_key, stale in list(_inflight.items()):
                 if stale.deadline <= now:
                     del _inflight[stale_key]
+                    _abandoned.add(stale)
             flight = _inflight.get(key)
             if flight is not None:
                 flight.deadline = max(flight.deadline, deadline)
             else:
-                if len(_inflight) >= FETCH_MAX_CONCURRENT:
+                if (len(_inflight) >= FETCH_MAX_CONCURRENT
+                        or len(_inflight) + len(_abandoned) >= FETCH_MAX_THREADS):
                     raise TimeoutError("Subtitle retrieval busy")
                 flight = _Flight(deadline=deadline)
                 _inflight[key] = flight

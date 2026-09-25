@@ -366,6 +366,46 @@ def test_a_hung_provider_call_gives_its_slot_back_at_its_deadline(authenticated_
     assert calls == ['full', 'forced', 'full']
 
 
+def test_abandoned_provider_calls_stay_counted_until_they_return(authenticated_client, choices, providers, monkeypatch):
+    """A slot given back at its deadline must not let retries start calls without end.
+
+    The abandoned call is still running on its thread. Forgotten with its
+    slot, every retry past the deadline started another one, so
+    FETCH_MAX_CONCURRENT no longer bounded the provider calls actually alive.
+    """
+    import time
+    from discover import download
+    rows = post(authenticated_client, fixtures.CONTEXT).json['results']
+    unhang = Event()
+    calls = []
+
+    def fetch(subtitle):
+        calls.append(subtitle.worker_id)
+        unhang.wait(5)
+        subtitle.content = LITERAL
+
+    monkeypatch.setattr(providers.pool['discover_download'], 'download_subtitle', fetch)
+    monkeypatch.setattr(download, 'FETCH_MAX_CONCURRENT', 1)
+    monkeypatch.setattr(download, 'FETCH_MAX_THREADS', 2)
+    monkeypatch.setattr(download, 'FETCH_WAIT_SECONDS', 0.05)
+    try:
+        for _ in range(4):
+            assert preview(authenticated_client, rows[0]).status_code == 502
+        deadline = time.monotonic() + 2
+        while len(calls) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.2)
+        assert calls == ['full', 'full']
+    finally:
+        unhang.set()
+    # Their room comes back as the abandoned calls return.
+    deadline = time.monotonic() + 2
+    while (download._inflight or download._abandoned) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    monkeypatch.setattr(download, 'FETCH_WAIT_SECONDS', 5)
+    assert preview(authenticated_client, rows[1]).status_code == 200
+
+
 @pytest.mark.parametrize('during', ['rotation', 'expiry'])
 def test_coalesced_waiters_recheck_authority_and_exact_expiry(authenticated_client, choices, providers, monkeypatch, during):
     from app.config import settings
