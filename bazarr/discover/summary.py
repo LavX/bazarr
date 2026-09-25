@@ -37,7 +37,6 @@ ARRIVAL_DISPLAY_LIMIT = 4
 ACTIVITY_SAMPLE_LIMIT = 5
 ROOTFOLDER_GROUP_LIMIT = 10
 WANTED_GROUP_BUDGET = 5000
-WANTED_CHUNK = 500
 WANTED_CACHE_SECONDS = 10
 MAX_REQUIREMENT_BLOB = 4000
 MAX_REQUIREMENT_TOKENS = 200
@@ -193,30 +192,30 @@ def _wanted_kind(connection, kind, qualifications):
             TableShows, TableEpisodes.series_id == TableShows.id)
     else:
         statement = statement.select_from(TableMovies)
+    # One row past the budget is enough to know it was breached. A LIMIT bounds
+    # the read without a streamed result: streaming opens a named cursor on
+    # PostgreSQL, which the AUTOCOMMIT application engine cannot hold.
     statement = (statement.where(and_(*_wanted_predicate(kind)))
-                 .group_by(table.arr_instance_id, table.missing_subtitles))
+                 .group_by(table.arr_instance_id, table.missing_subtitles)
+                 .limit(WANTED_GROUP_BUDGET + 1))
 
     requirements = 0
     media = 0
     unknown_media = 0
     by_owner = {}
-    groups = 0
-    result = connection.execute(statement.execution_options(yield_per=WANTED_CHUNK))
-    for chunk in result.partitions(WANTED_CHUNK):
-        for owner, blob, rows in chunk:
-            groups += 1
-            if groups > WANTED_GROUP_BUDGET:
-                result.close()
-                raise _AggregateBudgetExceeded(kind)
-            media += rows
-            count, qualification = _parse_requirements(blob)
-            if qualification:
-                qualifications.add(qualification)
-            if count is None:
-                unknown_media += rows
-                continue
-            requirements += count * rows
-            by_owner[owner] = by_owner.get(owner, 0) + count * rows
+    groups = connection.execute(statement).all()
+    if len(groups) > WANTED_GROUP_BUDGET:
+        raise _AggregateBudgetExceeded(kind)
+    for owner, blob, rows in groups:
+        media += rows
+        count, qualification = _parse_requirements(blob)
+        if qualification:
+            qualifications.add(qualification)
+        if count is None:
+            unknown_media += rows
+            continue
+        requirements += count * rows
+        by_owner[owner] = by_owner.get(owner, 0) + count * rows
 
     # Eligible media whose requirement list has never been computed. The manual
     # provider API reindexes that case; a status read must not, so it is
