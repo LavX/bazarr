@@ -317,13 +317,14 @@ compose_env() {
     e && $1 == key ":" { $1 = ""; sub(/^ +/, ""); gsub(/^"|"$/, ""); print; exit }'
 }
 
-# The host directory the Bazarr+ service bind-mounts at /config. Printed empty when there
-# is none. `docker compose config` writes every mount out in long form, with ${CONFIG_PATH}
-# filled in and a relative path made absolute, so this is the directory the container uses.
-compose_config_source() {
+# The type and source, tab-separated, of what the Bazarr+ service mounts at /config. Printed
+# empty when there is none. `docker compose config` writes every mount out in long form, with
+# ${CONFIG_PATH} filled in and a relative path made absolute, so a bind source is the
+# directory the container uses.
+compose_config_mount() {
   printf '%s\n' "$1" | awk -v svc="$2" '
     function flush() {
-      if (!done && type == "bind" && target == "/config" && source != "") { print source; done = 1 }
+      if (!done && target == "/config" && type != "") { print type "\t" source; done = 1 }
       type = ""; source = ""; target = ""
     }
     /^services:/ { s = 1; next }
@@ -355,14 +356,21 @@ config_postgres_value() {
 # Sets DB_ENGINE to sqlite, postgres (DB_SERVICE in this compose stack holds DB_NAME) or
 # external (a PostgreSQL server outside the stack, which this script cannot back up).
 # Also sets CONFIG_DIR, the host directory mounted at /config: ./config unless the compose
-# file mounts another one, as CONFIG_PATH in the reference compose file does.
+# file mounts another one, as CONFIG_PATH in the reference compose file does. A /config that
+# is not a host directory, such as a named volume, ends the script: there is nothing here to
+# copy, and falling back to ./config would back up the wrong folder or none at all.
 detect_database() {
-  local dir="$1" config svc enabled host database url rest yaml
+  local dir="$1" config svc enabled host database url rest yaml mount mount_type
   DB_ENGINE=sqlite; DB_SERVICE=""; DB_NAME=""; DB_OTHER_SERVICES=()
   config=$(sudo docker compose -f "$dir/docker-compose.yml" config 2>/dev/null) \
     || fatal "Could not read $dir/docker-compose.yml. Nothing was changed."
   svc=$(compose_bazarr_service "$config"); svc="${svc:-bazarr}"
-  CONFIG_DIR=$(compose_config_source "$config" "$svc"); CONFIG_DIR="${CONFIG_DIR:-$dir/config}"
+  mount=$(compose_config_mount "$config" "$svc")
+  mount_type="${mount%%$'\t'*}"; CONFIG_DIR="${mount#*$'\t'}"
+  if [[ -n "$mount" && "$mount_type" != bind ]]; then
+    fatal "Bazarr+ keeps /config in a Docker $mount_type${CONFIG_DIR:+ ($CONFIG_DIR)}, not a host directory, so this installer cannot back it up. Nothing was changed. Back it up yourself, then upgrade with: docker compose -f $dir/docker-compose.yml pull && docker compose -f $dir/docker-compose.yml up -d"
+  fi
+  CONFIG_DIR="${CONFIG_DIR:-$dir/config}"
   yaml="$CONFIG_DIR/config/config.yaml"
   enabled=$(compose_env "$config" "$svc" POSTGRES_ENABLED)
   [[ -n "$enabled" ]] || enabled=$(config_postgres_value "$yaml" enabled)
