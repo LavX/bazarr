@@ -403,7 +403,7 @@ export default function TitleDetails({
       {details.data?.status === "authentication_failed" && (
         <Alert color="yellow">
           {source.toUpperCase()} rejected the key Discover is using. Check it in
-          settings.
+          the Subtitle Hub.
         </Alert>
       )}
       {movie && !movie.imdb_id && (

@@ -142,9 +142,12 @@ def resolve_for_request(
                                         TableArrInstances.is_default.desc(), TableArrInstances.stable_key,
                                         TableSportsEvents.id)
         selected = None
-        # Stream indexed candidates in priority order, stopping at the first
+        # Walk indexed candidates in priority order, stopping at the first
         # available recording. No whole-library disk walk or request hashing.
-        for indexed in database.execute(query_rows.execution_options(yield_per=50)):
+        # Only rows matching this hash or filename come back, so the result is
+        # not streamed: that opens a named cursor on PostgreSQL, which the
+        # AUTOCOMMIT application engine cannot hold.
+        for indexed in database.execute(query_rows):
             if indexed.stamp is None:
                 continue
             candidate = resolve_event_in_session(database, indexed.id, indexed.owner_id)

@@ -448,3 +448,6 @@ def test_a_vanished_recording_is_a_conflict_not_a_crash(indexed_library, monkeyp
 
     assert status == 409, body
     assert 'sports file' in body['message'].lower()
+    # The reason, without the local path it was raised on.
+    assert 'no such file or directory' in body['message'].lower()
+    assert str(folder) not in body['message']

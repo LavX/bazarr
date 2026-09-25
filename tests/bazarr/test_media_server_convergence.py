@@ -821,7 +821,10 @@ class _Rescanner:
         self.calls.append(args)
         if self.answers is None:
             return {'status': 'requested'}
-        return self.answers.get(args, None)
+        answer = self.answers.get(args, None)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
 
 
 def _rescan(monkeypatch, snap, client):
@@ -841,14 +844,14 @@ def _rescan(monkeypatch, snap, client):
 def test_refreshing_libraries_asks_for_every_configured_type(monkeypatch, kind):
     """The button retry never was: it scans without anything being queued."""
     client = _Rescanner(kind)
-    assert _rescan(monkeypatch, snapshot(kind), client) == 3
+    assert _rescan(monkeypatch, snapshot(kind), client) == {'requested': 3, 'failed': 0}
     assert client.calls == [('movie',), ('episode',), ('sports',)]
 
 
 def test_refreshing_libraries_skips_a_type_with_nothing_chosen(monkeypatch):
     keys = {'movie_library_ids': [MOVIE_LIBRARY]}
     client = _Rescanner('jellyfin')
-    assert _rescan(monkeypatch, snapshot('jellyfin', options=keys), client) == 1
+    assert _rescan(monkeypatch, snapshot('jellyfin', options=keys), client) == {'requested': 1, 'failed': 0}
     assert client.calls == [('movie',)]
 
 
@@ -873,8 +876,42 @@ def test_refreshing_libraries_refuses_a_destination_that_is_switched_off(monkeyp
 def test_a_scope_the_server_holds_no_library_for_is_not_a_failure(monkeypatch):
     """A rung that answers nothing is that library missing, not a broken scan."""
     client = _Rescanner('plex', answers={('movie',): {'status': 'requested'}})
-    assert _rescan(monkeypatch, snapshot('plex'), client) == 1
+    assert _rescan(monkeypatch, snapshot('plex'), client) == {'requested': 1, 'failed': 0}
     assert client.calls == [('movie',), ('episode',), ('sports',)]
+
+
+def test_one_refused_scope_does_not_stop_the_rest(monkeypatch):
+    """A scope the server refuses used to abort the whole run, so the
+    libraries after it were never asked. It is counted and the rest still run."""
+    from media_servers.http import MediaServerError
+    client = _Rescanner('plex', answers={('movie',): MediaServerError('server_error'),
+                                         ('episode',): {'status': 'requested'},
+                                         ('sports',): {'status': 'requested'}})
+    assert _rescan(monkeypatch, snapshot('plex'), client) == {'requested': 2, 'failed': 1}
+    assert client.calls == [('movie',), ('episode',), ('sports',)]
+
+
+def test_a_run_the_server_refused_everywhere_fails_with_its_reason(monkeypatch):
+    from media_servers.http import MediaServerError
+    client = _Rescanner('plex', answers={('movie',): MediaServerError('server_error'),
+                                         ('episode',): MediaServerError('not_found')})
+    with pytest.raises(MediaServerError) as error:
+        _rescan(monkeypatch, snapshot('plex'), client)
+    assert error.value.code == 'server_error'
+    assert client.calls == [('movie',), ('episode',), ('sports',)]
+
+
+@pytest.mark.parametrize('code', ['timeout', 'connection_error', 'unauthorized'])
+def test_a_server_that_cannot_be_reached_stops_the_run_at_once(monkeypatch, code):
+    """Every other scope would wait out the same timeout or meet the same
+    refusal, so the button would spin for each of them to say the same thing."""
+    from media_servers.http import MediaServerError
+    client = _Rescanner('plex', answers={('movie',): MediaServerError(code),
+                                         ('episode',): {'status': 'requested'}})
+    with pytest.raises(MediaServerError) as error:
+        _rescan(monkeypatch, snapshot('plex'), client)
+    assert error.value.code == code
+    assert client.calls == [('movie',)]
 
 
 # --- The real OAuth handlers, against a faked Plex ---------------------------
