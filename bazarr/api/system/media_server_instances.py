@@ -98,7 +98,7 @@ class MediaServerInstanceLibraryRefresh(Resource):
         if status != 200:
             return body, status
         try:
-            return {'requested': refresh_libraries(instance_id)}, 200
+            return refresh_libraries(instance_id), 200
         except MediaServerError as error:
             return {'requested': 0, 'error_code': error.code}, 400
         except Exception:

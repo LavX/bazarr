@@ -1,0 +1,89 @@
+// The toolbar band above the Series, Movies and Sports tables.
+//
+// Two rows. The head always holds something on its left: the batch tools
+// while rows are selected, and otherwise how many rows there are. The active
+// filters take a row of their own under it whenever there are any, in both
+// states. So selecting a row changes what the head says and nothing else:
+// the band keeps its height and the table does not move under the pointer.
+//
+// The attribute raises the specificity above the shared band's small-screen
+// rule, which holds everything on one row with nowrap !important.
+.band[data-holds] {
+  flex-wrap: wrap !important;
+  row-gap: 8px;
+}
+
+.band {
+  .head {
+    display: flex;
+    flex: 1 1 100%;
+    align-items: center;
+    gap: var(--mantine-spacing-md);
+    min-width: 0;
+  }
+
+  .count {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--bz-text-secondary);
+  }
+
+  .controls {
+    flex: none;
+    flex-wrap: nowrap;
+    margin-left: auto;
+  }
+
+  // A width in the stylesheet rather than a style prop: an inline width is
+  // what the controls group measures as its narrowest, so a phone could never
+  // shrink the field below 220px.
+  .search {
+    width: 220px;
+  }
+
+  .filters {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  @include mantine.smaller-than(mantine.$mantine-breakpoint-sm) {
+    // The head stays one row. The count keeps its own width and the controls
+    // take what is left, so the search field gives up width first, down to a
+    // usable 120px, and only then does the count elide. A zero basis is what
+    // does it: shrinking both in proportion took a fraction of a pixel from
+    // the count, which was enough to show its ellipsis. The count changes
+    // with every keystroke, so letting it push the controls onto a row of
+    // their own moved the field being typed into.
+    .controls {
+      flex: 1 1 0;
+      justify-content: flex-end;
+    }
+
+    .search {
+      width: auto;
+      flex: 0 1 220px;
+      min-width: 120px;
+    }
+
+    // The batch tools are wider than any phone. The head is one row that
+    // scrolls sideways, which is what the shared band asks for below this
+    // width, but its groups used to shrink to their narrowest and stack
+    // their buttons in a column instead: one selected row made the band
+    // 280px tall and pushed the table off the screen.
+    &[data-holds="actions"] .head {
+      overflow-x: auto;
+      scrollbar-width: none;
+
+      > * {
+        flex-shrink: 0;
+      }
+
+      :global(.mantine-Group-root) {
+        flex-wrap: nowrap;
+      }
+    }
+  }
+}

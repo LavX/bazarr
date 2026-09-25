@@ -105,7 +105,7 @@ def test_the_download_route_queues_a_job_and_answers_at_once(queued):
 def test_the_download_job_fails_with_the_reason_it_was_given(download_job, reason):
     from app.jobs_queue import JobFailed
 
-    def fails(*args):
+    def fails(*args, **kwargs):
         raise OSError(reason)
 
     with pytest.raises(JobFailed) as failure:
@@ -114,6 +114,18 @@ def test_the_download_job_fails_with_the_reason_it_was_given(download_job, reaso
     # The queue files the reason as job.error, which the drawer shows. The
     # progress message carries progress only.
     assert download_job.progress == []
+
+
+def test_the_search_route_repeats_the_reason_it_was_given(monkeypatch):
+    from api.sports import subtitles as api_mod
+
+    def fails(*args):
+        raise OSError("All providers are throttled")
+
+    monkeypatch.setattr(api_mod, "manual_search_sports", fails)
+    body, status = search(arr_instance_id=1, language="en")
+    assert status == 409
+    assert body == {"message": "All providers are throttled"}
 
 
 def test_a_reasonless_failure_still_says_something(monkeypatch, download_job):
@@ -171,7 +183,7 @@ def test_a_published_download_is_not_reported_as_a_failure(monkeypatch, download
         raise RuntimeError("event vanished after publication")
 
     monkeypatch.setattr(library, "get_event", gone)
-    assert download_job(lambda *args: SimpleNamespace(publication=publication)) == {
+    assert download_job(lambda *args, **kwargs: SimpleNamespace(publication=publication)) == {
         "event": None, "publication": publication}
 
 
@@ -229,3 +241,109 @@ def test_the_sports_layer_attaches_a_reason_without_interpolating_it():
             f"sportarr/subtitles.py:{node.lineno} builds the reason by interpolation, "
             "which reaches the 409 body"
         )
+
+
+# The index and delete routes in api/sports/events.py answered every OSError
+# with a constant, so a recording that had gone and an analysis that timed out
+# read the same. A raw filesystem error carries the local path in its text, so
+# the route repeats only the sentences the sports layer raises on purpose, and
+# the operating system's sentence for any other errno.
+SECRET_PATH = "/srv/private/Formula.1.2026.R14.mkv"
+INDEX_FALLBACK = "Could not index this sports file. Check its accessibility and try again."
+READ_FALLBACK = "Could not read this sports file. Path mapping or accessibility issue?"
+
+
+def _index(monkeypatch, error):
+    from flask import Flask
+
+    from api.sports import events
+    from subtitles.indexer import sports
+
+    def fails(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(sports, "store_subtitles_sports", fails)
+    with Flask(__name__).test_request_context(
+        "/sports/events/61/subtitles", method="POST", json={"arr_instance_id": 1}
+    ):
+        return events.SportsEventSubtitles.post.__wrapped__(events.SportsEventSubtitles(), 61)
+
+
+def _delete(monkeypatch, error):
+    from flask import Flask
+
+    from api.sports import events
+    from sportarr import subtitles as sports_subtitles
+
+    def fails(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(sports_subtitles, "sports_manual_operation", fails)
+    with Flask(__name__).test_request_context(
+        "/sports/events/61/subtitles", method="DELETE",
+        json={"arr_instance_id": 1, "language": "en", "path": "/sports/event.en.srt"},
+    ):
+        return events.SportsEventSubtitles.delete.__wrapped__(events.SportsEventSubtitles(), 61)
+
+
+@pytest.mark.parametrize("reason", sorted({
+    "Could not analyze sports video",
+    "Invalid sports analysis result",
+}))
+def test_the_index_route_repeats_the_reason_it_was_given(monkeypatch, reason):
+    assert _index(monkeypatch, OSError(reason)) == ({"message": reason}, 409)
+
+
+def test_the_index_route_says_the_analysis_timed_out(monkeypatch):
+    # TimeoutError is an OSError, and the analysis raises it with a sentence.
+    assert _index(monkeypatch, TimeoutError("Sports video analysis timed out")) == (
+        {"message": "Sports video analysis timed out"}, 409)
+
+
+@pytest.mark.parametrize("call,lead,advice", [
+    (_index, "Could not index this sports file", "Check its accessibility and try again."),
+    (_delete, "Could not read this sports file", "Path mapping or accessibility issue?"),
+])
+def test_a_filesystem_error_gives_its_reason_without_its_path(monkeypatch, call, lead, advice):
+    import errno
+    import os
+
+    error = FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), SECRET_PATH)
+    body, status = call(monkeypatch, error)
+    assert status == 409
+    assert body == {"message": f"{lead}: {os.strerror(errno.ENOENT)}. {advice}"}
+    assert SECRET_PATH not in body["message"]
+
+
+@pytest.mark.parametrize("call,fallback", [(_index, INDEX_FALLBACK), (_delete, READ_FALLBACK)])
+def test_an_unrecorded_sentence_is_not_repeated(monkeypatch, call, fallback):
+    """Only the recorded sentences are repeated. An OSError raised with any
+    other text, a path included, answers the constant."""
+    assert call(monkeypatch, OSError(f"cannot open {SECRET_PATH}")) == ({"message": fallback}, 409)
+    assert call(monkeypatch, OSError()) == ({"message": fallback}, 409)
+
+
+def test_the_recorded_file_reasons_are_the_ones_the_indexer_raises():
+    """KNOWN_FILE_REASONS is repeated verbatim, so it has to be exactly the
+    literal sentences the index path raises: a new one is recorded on purpose
+    or falls back, and none of them can interpolate a path."""
+    from api.sports.events import KNOWN_FILE_REASONS
+
+    raised, interpolated = set(), []
+    for relative_path, names in (
+        ("bazarr/subtitles/indexer/sports.py", {"_metadata"}),
+        ("bazarr/sportarr/analysis.py", {"parse_video_metadata"}),
+    ):
+        for function in _functions(_module_tree(relative_path), names):
+            for node in ast.walk(function):
+                if not (isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
+                        and getattr(node.exc.func, "id", None) in ("OSError", "TimeoutError")):
+                    continue
+                for arg in node.exc.args:
+                    if isinstance(arg, ast.JoinedStr):
+                        interpolated.append(f"{relative_path}:{node.lineno}")
+                    elif isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                        raised.add(arg.value)
+
+    assert interpolated == [], f"an interpolated reason would reach the 409 body: {interpolated}"
+    assert raised == set(KNOWN_FILE_REASONS)

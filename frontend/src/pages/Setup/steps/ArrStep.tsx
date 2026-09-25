@@ -22,6 +22,10 @@ import type {
   ArrInstanceCreate,
   ArrInstanceTest,
 } from "@/apis/raw/arrInstances";
+import {
+  connectionTestKey,
+  recordConnectionTest,
+} from "@/pages/Setup/connectionTests";
 import StepLayout from "@/pages/Setup/StepLayout";
 import { useStepDraft } from "@/pages/Setup/useStepDrafts";
 import type { WizardStepProps } from "./types";
@@ -212,6 +216,14 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
       return;
     }
     setSaveError(null);
+    // Saving does not wait for a Test, so Finish is told what the Test said
+    // about these exact values. The hook drops its verdict whenever a
+    // connection field changes, so a result here is about what is on screen.
+    const tested = test.data
+      ? test.data.ok
+        ? "passed"
+        : "failed"
+      : "untested";
     const body: ArrInstanceCreate = {
       kind,
       name: name.trim(),
@@ -225,6 +237,7 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
     create.mutate(body, {
       onSuccess: (created) => {
         setCreatedId(created.id);
+        recordConnectionTest(connectionTestKey("arr", created.id), tested);
         activate();
       },
       onError: (error) =>

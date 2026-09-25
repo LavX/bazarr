@@ -32,7 +32,7 @@ const ProvidersPanel: FunctionComponent<Props> = ({ filters }) => {
   );
   const metrics = query.data;
   const leaderboard = metrics?.byProvider ?? [];
-  const reliability = metrics?.providerReliability ?? [];
+  const reliability = metrics?.providerReliability;
 
   // Height scales with the row count so ten providers do not squash into the
   // same box as two.
@@ -129,7 +129,13 @@ const ProvidersPanel: FunctionComponent<Props> = ({ filters }) => {
           title="Blacklist rate"
           caveat="Share of this provider's downloads that you later blacklisted. A provider high on both charts is the one to turn off."
         >
-          {reliability.length === 0 ? (
+          {reliability === null ? (
+            <Text size="sm" c="dimmed">
+              Clear the action filter to see this rate. An exclusion does not
+              record which kind of download it undid, so the rate cannot be
+              split by action.
+            </Text>
+          ) : !reliability?.length ? (
             <Text size="sm" c="dimmed">
               No downloads to rate yet.
             </Text>

@@ -115,6 +115,45 @@ describe("Statistics > TranslatorPanel", () => {
     ).toBeInTheDocument();
   });
 
+  it("keeps the queue but does not report zero cost when only the job list fails", async () => {
+    server.use(
+      http.get("/api/translator/status", () => HttpResponse.json(status)),
+      http.get("/api/translator/jobs", () => HttpResponse.error()),
+    );
+    customRender(<TranslatorPanel />);
+
+    expect(
+      await screen.findByText(/recent jobs could not be loaded/i),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("4")).toBeInTheDocument();
+    expect(screen.queryByText("$0.0000")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/no translation jobs recorded/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the job figures but does not report an empty queue when only the status fails", async () => {
+    server.use(
+      http.get("/api/translator/status", () => HttpResponse.error()),
+      http.get("/api/translator/jobs", () =>
+        HttpResponse.json({
+          jobs: [job({ totalCost: 1 })],
+          total: 1,
+          processing: 0,
+          queued: 0,
+        }),
+      ),
+    );
+    customRender(<TranslatorPanel />);
+
+    expect(
+      await screen.findByText(/queue status could not be loaded/i),
+    ).toBeInTheDocument();
+    expect((await screen.findAllByText("$1.0000")).length).toBeGreaterThan(0);
+    expect(screen.queryByText("Queued")).not.toBeInTheDocument();
+    expect(screen.queryByText("Processing")).not.toBeInTheDocument();
+  });
+
   it("says so when the sidecar is reachable but has run nothing", async () => {
     customRender(<TranslatorPanel />);
 

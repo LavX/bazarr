@@ -1,7 +1,9 @@
 import { QueryClient } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
+import { createDefaultReducer } from "@/modules/socketio/reducer";
 import {
   JOB_FALLBACK_POLL_MS,
   JobFailedError,
@@ -114,6 +116,27 @@ describe("waitForJob", () => {
     await outcome;
     // One request for everything waiting, not one per job.
     expect(mockedJobs).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not settle a reused id on the row a restarted backend left behind", async () => {
+    // Job ids restart at 1 with the backend, so the finished job 1 of the
+    // previous run is still cached when the socket connects again.
+    queryClient.setQueryData(JOBS_KEY, [job(1, "completed")]);
+    createDefaultReducer()
+      .find((reducer) => reducer.key === "connect")
+      ?.any?.();
+
+    let settled = false;
+    const waiting = waitForJob(queryClient, 1).then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    // The new run's job 1 finishing is what settles it.
+    queryClient.setQueryData(JOBS_KEY, [job(1, "completed")]);
+    await waiting;
+    expect(settled).toBe(true);
   });
 
   it("does not report a job the backend no longer lists as a success", async () => {

@@ -535,7 +535,7 @@ def test_real_settings_followup_failure_preserves_saved_metadata_and_retires_old
     }, headers={"X-API-KEY": "metadata-test-key"})
     assert response.status_code == 503
     assert response.json == {"code": "discover_settings_refresh_failed",
-                             "message": "Discover settings were saved, but application refresh failed. Reload settings before retrying."}
+                             "message": "Metadata settings were saved, but application refresh failed. Reload settings before retrying."}
     status = get(authenticated_client, "status").json["data"]
     assert status["status"] == "available"
     assert status["revision"] != old["revision"]

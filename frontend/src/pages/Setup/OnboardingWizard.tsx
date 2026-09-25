@@ -22,6 +22,7 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSettingsMutation } from "@/apis/hooks";
 import { PHASE_LABELS, WIZARD_PHASES } from "./steps/types";
+import { clearPersistedConnectionTests } from "./connectionTests";
 import { settleSetupComplete } from "./setupCompleteCache";
 import { buildSteps } from "./steps";
 import {
@@ -250,6 +251,7 @@ const OnboardingWizardBody: FunctionComponent = () => {
           // commit, so the effect need not run, and the skipped drafts would
           // still be there to restore on the next visit to setup.
           clearPersistedSelection();
+          clearPersistedConnectionTests();
           setLeaving(false);
           // The Redirector picks routing back up once setup is marked complete.
           navigate("/");
