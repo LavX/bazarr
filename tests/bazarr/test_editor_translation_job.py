@@ -46,7 +46,6 @@ def sidecar(monkeypatch):
         monkeypatch.setattr(openrouter_translator.settings.translator, key, value)
     openrouter_translator.reset_sidecar_version_cache()
     monkeypatch.setattr(openrouter_translator, 'get_translator_auth_headers', lambda: {})
-    monkeypatch.setattr(editor, 'get_translator_auth_headers', lambda: {})
     monkeypatch.setattr(openrouter_translator.time, 'sleep', lambda seconds: None)
     calls = SimpleNamespace(posts=[], deletes=[], polls=[])
 
@@ -62,7 +61,8 @@ def sidecar(monkeypatch):
 
     monkeypatch.setattr(openrouter_translator.requests, 'post', post)
     monkeypatch.setattr(openrouter_translator.requests, 'get', get)
-    monkeypatch.setattr(editor.requests, 'delete', lambda url, **kwargs: calls.deletes.append(url))
+    monkeypatch.setattr(openrouter_translator.requests, 'delete',
+                        lambda url, **kwargs: calls.deletes.append(url))
     return calls
 
 

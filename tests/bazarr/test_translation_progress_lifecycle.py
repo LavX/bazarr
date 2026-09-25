@@ -40,10 +40,14 @@ def lifecycle(tmp_path, monkeypatch):
         return response({'jobId': 'sidecar-job'})
 
     monkeypatch.setattr(module.requests, 'post', post)
+    deletes = []
+    monkeypatch.setattr(module.requests, 'delete', lambda url, **kwargs: deletes.append(url))
+    monkeypatch.setattr(module.settings.translator, 'openrouter_url', 'http://sidecar:8765')
     clock = SimpleNamespace(now=0)
     monkeypatch.setattr(module.time, 'monotonic', lambda: clock.now)
     monkeypatch.setattr(module.time, 'sleep', lambda seconds: setattr(clock, 'now', clock.now + seconds))
-    return SimpleNamespace(service=service, events=events, payloads=payloads, clock=clock, progress=progress)
+    return SimpleNamespace(service=service, events=events, payloads=payloads, clock=clock, progress=progress,
+                           deletes=deletes)
 
 
 def response(payload):
@@ -155,6 +159,48 @@ def test_real_host_queue_cancellation_propagates(lifecycle, monkeypatch):
 
     assert not Path(lifecycle.service.dest_srt_file).exists()
     assert_no_legacy_channels(lifecycle.events)
+
+
+def test_stopping_a_library_translation_cancels_the_sidecar_job(lifecycle, monkeypatch):
+    """Stop ends the remote job as well, or it keeps spending paid model tokens.
+
+    Only the editor used to send the cancellation, so a library or sports
+    translation stopped from Jobs left the sidecar translating a result nothing
+    would ever collect.
+    """
+    queue = module.jobs_queue
+    monkeypatch.setattr(queue, 'update_job_progress', type(queue).update_job_progress.__get__(queue))
+    job = SimpleNamespace(job_id=41, job_name='Fixture translation', cancelled=False)
+    monkeypatch.setattr(queue, 'jobs_running_queue', [job])
+
+    def get(*args, **kwargs):
+        # The user presses Stop while the sidecar is still working.
+        job.cancelled = True
+        return response({'status': 'processing', 'progress': 10, 'message': 'Batch 1 of 4'})
+
+    monkeypatch.setattr(module.requests, 'get', get)
+
+    with pytest.raises(module.JobCancelled):
+        lifecycle.service.translate(job_id=41)
+
+    assert lifecycle.deletes == ['http://sidecar:8765/api/v1/jobs/sidecar-job']
+
+
+def test_a_sports_owner_switched_off_mid_poll_cancels_the_sidecar_job(lifecycle, monkeypatch):
+    """The Sportarr stop signal abandons the poll the same way Stop does."""
+    signal = SimpleNamespace(stopped=False)
+    lifecycle.service.cancel = SimpleNamespace(is_set=lambda: signal.stopped)
+
+    def get(*args, **kwargs):
+        signal.stopped = True
+        return response({'status': 'processing', 'progress': 10, 'message': 'Batch 1 of 4'})
+
+    monkeypatch.setattr(module.requests, 'get', get)
+
+    with pytest.raises(module.TranslationServiceError, match='Sportarr synchronization stopped'):
+        lifecycle.service.translate(job_id=41)
+
+    assert lifecycle.deletes == ['http://sidecar:8765/api/v1/jobs/sidecar-job']
 
 
 @pytest.mark.parametrize('host_id', [None, 41])
