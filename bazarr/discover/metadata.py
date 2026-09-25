@@ -241,7 +241,7 @@ def _request(config, path, params=None):
 _MESSAGES = {
     "unconfigured": "TMDB metadata is unavailable in this build. IMDb subtitle search remains available.",
     "available": "TMDB is available.",
-    "authentication_failed": "TMDB rejected the key in use. Check the key in Discover settings, or clear it to use the built-in one.",
+    "authentication_failed": "TMDB rejected the key in use. Check the TMDB key under Subtitle Hub > My Providers, or clear it to use the built-in one.",
     "unavailable": "TMDB is temporarily unavailable. Try again shortly.",
     "cached": "Showing cached TMDB metadata with its original fetch time.",
 }

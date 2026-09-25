@@ -161,10 +161,10 @@ class SystemSettings(Resource):
                 if profiles_changed and not saved:
                     queue_missing_subtitles_recalculation()
         except MetadataPersistenceError:
-            return "Discover settings could not be saved. Try again.", 503
+            return "Metadata settings could not be saved. Try again.", 503
         except MetadataFollowupError:
             return {"code": "discover_settings_refresh_failed",
-                    "message": "Discover settings were saved, but application refresh failed. Reload settings before retrying."}, 503
+                    "message": "Metadata settings were saved, but application refresh failed. Reload settings before retrying."}, 503
         except ValidationError as e:
             event_stream("settings")
             return e.message, 406
