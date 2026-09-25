@@ -59,6 +59,8 @@ export type MediaServerInstance = {
   refresh_movies: boolean;
   refresh_episodes: boolean;
   options: MediaServerOptions;
+  /** The signed-in Plex account's own row, removed by disconnecting from Plex. */
+  account_owned?: boolean;
 };
 export type MediaServerUpdate = Partial<
   Pick<
@@ -180,6 +182,7 @@ function safeInstance(row: MediaServerInstance): MediaServerInstance {
     refresh_movies: row.refresh_movies,
     refresh_episodes: row.refresh_episodes,
     options: row.options,
+    ...(row.account_owned === true ? { account_owned: true } : {}),
   };
 }
 

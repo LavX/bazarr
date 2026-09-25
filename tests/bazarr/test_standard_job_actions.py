@@ -448,8 +448,8 @@ def test_install_job_success_returns_the_installation(queue, monkeypatch):
     from provider_hub import jobs as hub_jobs
     from provider_hub import service
 
-    monkeypatch.setattr(service, "stage_install", lambda manifest: {"provider_id": "examplehub",
-                                                                     "state": "staged"})
+    monkeypatch.setattr(service, "stage_install", lambda manifest, **_: {"provider_id": "examplehub",
+                                                                          "state": "staged"})
     hub_jobs.queue_install({"provider_id": "examplehub", "name": "Example"})
     job = run_next(queue)
 
@@ -461,7 +461,7 @@ def test_install_job_failure_names_the_provider_and_the_reason(queue, monkeypatc
     from provider_hub import jobs as hub_jobs
     from provider_hub import service
 
-    def mismatch(manifest):
+    def mismatch(manifest, **_):
         raise service.ProviderHubInstallError("bundle hash mismatch for provider.py")
 
     monkeypatch.setattr(service, "stage_install", mismatch)
@@ -514,8 +514,8 @@ def test_update_is_queued_and_fails_with_the_recorded_error(queue, hub_state, mo
     assert job.job_name == "Updating provider Example"
 
     monkeypatch.setattr(service, "apply_update",
-                        lambda provider_id: {"provider_id": provider_id,
-                                             "last_error": "No update manifest is available"})
+                        lambda provider_id, **_: {"provider_id": provider_id,
+                                                  "last_error": "No update manifest is available"})
     result = run_next(queue)
     assert result["status"] == "failed"
     assert result["error"]["message"] == "Could not update Example: No update manifest is available"
@@ -529,7 +529,7 @@ def test_catalog_refresh_is_queued_and_fails_with_the_source_reason(queue, monke
     assert status == 202 and body == {"job_id": job.job_id}
     assert job.job_name == "Refreshing provider catalog"
 
-    monkeypatch.setattr(service, "refresh_catalog", lambda: {"sources": 1, "entries": 0})
+    monkeypatch.setattr(service, "refresh_catalog", lambda **_: {"sources": 1, "entries": 0})
     monkeypatch.setattr(service, "load_state", lambda: {"catalog_sources": {
         "official": {"name": "Official", "last_error": "GitHub answered 503"}}})
     result = run_next(queue)
@@ -542,12 +542,147 @@ def test_catalog_refresh_job_that_works_completes(queue, monkeypatch):
     from provider_hub import jobs as hub_jobs
     from provider_hub import service
 
-    monkeypatch.setattr(service, "refresh_catalog", lambda: {"sources": 1, "entries": 3})
+    monkeypatch.setattr(service, "refresh_catalog", lambda **_: {"sources": 1, "entries": 3})
     monkeypatch.setattr(service, "load_state", lambda: {"catalog_sources": {
         "official": {"name": "Official", "last_error": None}}})
     hub_jobs.queue_catalog_refresh()
 
     assert run_next(queue)["status"] == "completed"
+
+
+# Stop on a running Provider Hub job takes effect between its steps, and a
+# stopped job leaves nothing half installed.
+
+def press_stop(queue):
+    for job in queue.jobs_running_queue:
+        job.cancelled = True
+
+
+@pytest.fixture
+def hub_install(tmp_path, monkeypatch, queue):
+    """The real install core, with GitHub, the venv build and the smoke test faked.
+
+    ``stop_at`` names the step during which the user presses Stop.
+    """
+    import os
+    from pathlib import Path
+    from test_provider_hub import _FakeResponse, _manifest
+
+    hub_dir = tmp_path / "provider_hub"
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(hub_dir / "state.json"))
+    content = b"class ExampleProvider: pass\n"
+    control = SimpleNamespace(stop_at=None, hub_dir=hub_dir, environments=[],
+                              manifest=lambda version: _manifest(
+                                  version=version, file_payloads={"provider.py": content},
+                                  dependencies={"requirements": []}))
+
+    def step(name):
+        if control.stop_at == name:
+            press_stop(queue)
+
+    def fake_get(url, timeout):
+        step("download")
+        return _FakeResponse(content=content)
+
+    class FakeEnvironment:
+        def __init__(self, root):
+            self.root = Path(root)
+
+        def install(self, validated, timeout=None):
+            env_path = self.root / "envs" / validated.provider_id / validated.version / "test"
+            python_path = env_path / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            python_path.parent.mkdir(parents=True, exist_ok=True)
+            python_path.write_text("", encoding="utf-8")
+            control.environments.append(env_path)
+            step("dependencies")
+            return env_path
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    monkeypatch.setattr("provider_hub.service.PluginEnvironment", FakeEnvironment)
+    monkeypatch.setattr("provider_hub.service._smoke_validate_worker",
+                        lambda manifest, bundle_path, python_path: step("smoke"))
+    monkeypatch.setattr("provider_hub.service._set_bazarr_provider_enabled", lambda *args: True)
+    return control
+
+
+def bundle_files(hub_install, version):
+    return list((hub_install.hub_dir / "bundles" / "examplehub" / version).rglob("provider.py"))
+
+
+def assert_stopped(job):
+    assert job["status"] == "completed"
+    assert job["progress_message"] == "Cancelled by user"
+
+
+def test_stopping_an_install_records_no_provider_and_removes_what_it_staged(queue, hub_install):
+    from provider_hub import jobs as hub_jobs
+    from provider_hub.service import load_state
+
+    hub_install.stop_at = "download"
+    hub_jobs.queue_install(hub_install.manifest("1.0.0"))
+    assert_stopped(run_next(queue))
+
+    assert "examplehub" not in load_state()["installations"]
+    # Stopped before the dependency build, and the downloaded bundle is gone.
+    assert hub_install.environments == []
+    assert bundle_files(hub_install, "1.0.0") == []
+
+
+def test_stopping_an_update_keeps_the_active_version_untouched(queue, hub_install):
+    from provider_hub import jobs as hub_jobs
+    from provider_hub.service import activate_staged_installations, load_state, stage_install
+
+    stage_install(hub_install.manifest("1.0.0"))
+    assert activate_staged_installations() == ["examplehub"]
+    active = load_state()["installations"]["examplehub"]
+    assert active["active_version"] == "1.0.0"
+    hub_install.stop_at = "smoke"
+    hub_jobs.queue_install(hub_install.manifest("1.1.0"))
+    assert_stopped(run_next(queue))
+
+    assert load_state()["installations"]["examplehub"] == active
+    [first_env, second_env] = hub_install.environments
+    assert first_env.exists() and bundle_files(hub_install, "1.0.0")
+    assert not second_env.exists() and bundle_files(hub_install, "1.1.0") == []
+
+
+def test_stopping_a_catalog_refresh_leaves_the_catalog_as_it_was(queue, tmp_path, monkeypatch):
+    from provider_hub import jobs as hub_jobs
+    from provider_hub import service
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "state.json"))
+    state = load_state()
+    state["catalog_sources"]["extra"] = {
+        "id": "extra", "name": "Extra", "type": "github", "enabled": True,
+        "url": "https://github.com/owner/extra/blob/main/catalog.json"}
+    save_state(state)
+    before = load_state()
+
+    def fetch(url, override_ref=None):
+        press_stop(queue)
+        return {"providers": [{"provider_id": "examplehub", "version": "1.0.0"}]}, "c" * 40
+
+    monkeypatch.setattr(service, "_fetch_github_catalog", fetch)
+    hub_jobs.queue_catalog_refresh()
+    assert_stopped(run_next(queue))
+
+    after = load_state()
+    assert after["catalog_entries"] == before["catalog_entries"] == {}
+    assert after["catalog_sources"] == before["catalog_sources"]
+
+
+def test_an_uninstall_stopped_before_it_ran_keeps_the_provider(queue, hub_state):
+    from provider_hub import jobs as hub_jobs
+    from provider_hub.service import load_state
+
+    hub_jobs.queue_uninstall("examplehub", "Example")
+    job = queue._reserve_next_job()
+    job.cancelled = True
+    queue._run_job(job)
+
+    assert_stopped(queue.list_jobs_from_queue(job_id=job.job_id)[0])
+    assert load_state()["installations"]["examplehub"]["state"] == "active"
 
 
 # ---------------------------------------------------------------------------

@@ -63,6 +63,19 @@ def account_credential(section):
     return value if isinstance(value, str) else ''
 
 
+def owns_row(settings, instance_id):
+    """Whether this is the row the signed-in Plex account would rebuild.
+
+    The startup import recreates the account's row whenever the account has a
+    credential and an address, so deleting it only lasts until the next restart.
+    Disconnecting from Plex clears the credential, and after that it deletes
+    like any other row.
+    """
+    saved = getattr(settings.plex, 'instance_id', '') or ''
+    return (bool(saved) and saved == instance_id
+            and bool(account_credential(settings.plex)) and bool(account_url(settings.plex)))
+
+
 def _seed(settings):
     """The refresh scoping the account panel held, for a row being created."""
     from .backfill import _legacy_values

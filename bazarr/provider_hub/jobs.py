@@ -11,7 +11,7 @@ provider's name and the reason, which is what marks the job failed.
 """
 
 from app.job_errors import reason_of
-from app.jobs_queue import JobFailed, jobs_queue
+from app.jobs_queue import JobCancelled, JobFailed, jobs_queue
 
 from . import service
 
@@ -36,6 +36,22 @@ def _existing_job_id(func, kwargs):
         if job_kwargs == kwargs:
             return job.job_id
     return None
+
+
+def _checkpoint(job_id):
+    """Report a step on the job, and stop there when Stop was pressed.
+
+    The queue only honours Stop when a job reports progress, and these jobs never
+    did, so a stopped install carried on through the download, the dependency
+    build and the smoke test. The service calls this between its steps, where
+    stopping leaves nothing half installed.
+    """
+    def checkpoint(message):
+        try:
+            jobs_queue.update_job_progress(job_id=job_id, progress_message=message)
+        except JobCancelled as error:
+            raise service.ProviderHubStopped(str(error)) from error
+    return checkpoint
 
 
 def _enqueue(label, func, kwargs):
@@ -74,7 +90,9 @@ def queue_catalog_refresh():
 def install_provider(manifest, job_id=None):
     name = _manifest_name(manifest)
     try:
-        return service.stage_install(manifest)
+        return service.stage_install(manifest, checkpoint=_checkpoint(job_id))
+    except service.ProviderHubStopped as stopped:
+        raise JobCancelled(str(stopped)) from stopped
     except Exception as error:
         raise JobFailed(f"Could not install {name}: {reason_of(error)}") from error
 
@@ -82,7 +100,9 @@ def install_provider(manifest, job_id=None):
 def install_local_provider(archive_bytes, filename=None, job_id=None):
     label = filename or "the uploaded package"
     try:
-        installation = service.stage_install_local(archive_bytes)
+        installation = service.stage_install_local(archive_bytes, checkpoint=_checkpoint(job_id))
+    except service.ProviderHubStopped as stopped:
+        raise JobCancelled(str(stopped)) from stopped
     except Exception as error:
         raise JobFailed(f"Could not install {label}: {reason_of(error)}") from error
     name = None
@@ -95,6 +115,8 @@ def install_local_provider(archive_bytes, filename=None, job_id=None):
 
 def uninstall_provider(provider_id, name=None, job_id=None):
     label = name or provider_id
+    # The removal is a single state write, so the only place to stop is before it.
+    jobs_queue.update_job_progress(job_id=job_id, progress_message=f"Removing {label}")
     try:
         removed = service.remove_installation(provider_id)
     except Exception as error:
@@ -113,7 +135,9 @@ def update_provider(provider_id, name=None, job_id=None):
         # always been accepted and ignored.
         return service.get_provider(provider_id)
     try:
-        result = service.apply_update(provider_id)
+        result = service.apply_update(provider_id, checkpoint=_checkpoint(job_id))
+    except service.ProviderHubStopped as stopped:
+        raise JobCancelled(str(stopped)) from stopped
     except Exception as error:
         raise JobFailed(f"Could not update {label}: {reason_of(error)}") from error
     # apply_update reports its failures on the installation rather than by
@@ -128,7 +152,9 @@ def update_provider(provider_id, name=None, job_id=None):
 
 def refresh_catalog(job_id=None):
     try:
-        result = service.refresh_catalog()
+        result = service.refresh_catalog(checkpoint=_checkpoint(job_id))
+    except service.ProviderHubStopped as stopped:
+        raise JobCancelled(str(stopped)) from stopped
     except Exception as error:
         raise JobFailed(f"Could not refresh the provider catalog: {reason_of(error)}") from error
     # A source that could not be fetched is recorded on the source and the
