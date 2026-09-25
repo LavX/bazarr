@@ -16,7 +16,9 @@ import {
   useCreateArrInstance,
   useDeleteArrInstance,
   useSettingsMutation,
+  useSystemSettings,
   useTestArrInstanceConnection,
+  useUpdateArrInstance,
 } from "@/apis/hooks";
 import type {
   ArrInstanceCreate,
@@ -69,7 +71,8 @@ interface FieldErrors {
  * field set with bespoke inputs (the modal is not reused here). Tests the typed
  * connection, then on Continue creates the instance, flips use_<kind> on, and
  * advances. Idempotent: if an instance of this kind already exists, it shows the
- * saved row and Continue advances without creating a duplicate.
+ * saved row and Continue advances without creating a duplicate, turning the row
+ * and use_<kind> back on first when either was switched off since.
  *
  * Every arr kind is optional, including Sonarr: Bazarr+ runs with no instance
  * at all. Skipping is the shell's job, so there is no skip control here.
@@ -87,9 +90,19 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
   const { data: instances } = useArrInstances();
   const create = useCreateArrInstance();
   const remove = useDeleteArrInstance();
+  const update = useUpdateArrInstance();
   const settings = useSettingsMutation();
+  const { data: systemSettings } = useSystemSettings();
 
-  const existing = (instances ?? []).find((i) => i.kind === kind) ?? null;
+  // An enabled row first: with one of the kind on and another off, the one
+  // that is on is the connection, and Continue has nothing to turn back on.
+  const ofKind = (instances ?? []).filter((i) => i.kind === kind);
+  const existing = ofKind.find((i) => i.enabled) ?? ofKind[0] ?? null;
+  // A rerun of setup can find the saved row, or the kind's master switch,
+  // turned off since. Either one alone stops the sync. Unknown until the
+  // settings answer, and Continue writes the switch rather than assume it.
+  const kindOn = systemSettings?.general?.[`use_${kind}`] === true;
+  const kindKnownOff = systemSettings?.general !== undefined && !kindOn;
 
   // Parked on the wizard rather than in this component: the shell remounts a
   // step whenever the cursor moves, so going back one screen to re-read a
@@ -205,6 +218,27 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
 
   const handleContinue = () => {
     if (existing) {
+      setSaveError(null);
+      if (!existing.enabled) {
+        update.mutate(
+          { id: existing.id, body: { enabled: true } },
+          {
+            onSuccess: () => activate(),
+            onError: (error) =>
+              setSaveError(
+                getArrInstanceErrorMessage(
+                  error,
+                  `Bazarr+ could not turn ${existing.name} back on. Open Settings, Connections after setup and enable it there.`,
+                ),
+              ),
+          },
+        );
+        return;
+      }
+      if (!kindOn) {
+        activate();
+        return;
+      }
       onNext();
       return;
     }
@@ -303,7 +337,12 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
                 </Button>
               )}
             </Group>
-            <Button onClick={handleContinue}>Continue</Button>
+            <Button
+              onClick={handleContinue}
+              loading={update.isPending || settings.isPending}
+            >
+              Continue
+            </Button>
           </Group>
         }
       >
@@ -315,6 +354,16 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
             <Text size="sm">
               {existing.name} at {address}
             </Text>
+            {/* Not while a write is in flight: a row created a moment ago
+                comes back before its switch lands, and was never off. */}
+            {(!existing.enabled || kindKnownOff) &&
+              !update.isPending &&
+              !settings.isPending && (
+                <Text size="sm">
+                  It is switched off, so Bazarr+ does not sync it. Continue
+                  turns it back on.
+                </Text>
+              )}
             {/* Wrong address, wrong key, wrong instance: without this the only
                 way back out of a typo was to finish the wizard and find
                 Settings, Connections. */}
