@@ -154,3 +154,47 @@ def test_pg_status_page_reads_only_destinations_in_use(pg_session):
     assert 0 < entry.pop('refresh_in') <= versions.CACHE_SECONDS
     assert entry == {'id': live.id, 'kind': 'emby', 'name': 'On',
                      'state': 'connected', 'version': '4.8.11.0'}
+
+
+def _plex_rows(pg_engine):
+    """Plex rows as a fresh connection sees them: only what really committed."""
+    with pg_engine.connect() as connection:
+        return connection.exec_driver_sql(
+            "SELECT id FROM media_server_instances WHERE kind = 'plex'").scalars().all()
+
+
+@pytest.mark.parametrize('outcome', [False, OSError('read-only file system')],
+                         ids=['write_config_false', 'write_raises'])
+def test_pg_a_plex_owner_that_cannot_be_saved_leaves_no_row_behind(pg_session, pg_engine, outcome):
+    """The row the account just created is deleted again when its owner id
+    cannot be written. sync_plex_instance swallows any error, a failed delete
+    included, so only the committed rows can show the delete really ran."""
+    from test_media_server_convergence import plex_settings
+    from media_servers.plex_account import sync_plex_instance
+    config = plex_settings(auth_method='oauth', token='token',
+                           server_url='https://plex.example:32400')
+
+    def persist():
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    assert sync_plex_instance(pg_session, config, persist=persist) is None
+    assert _plex_rows(pg_engine) == []
+    assert config.plex.instance_id == ''
+
+    row = sync_plex_instance(pg_session, config, persist=lambda: True)
+    assert _plex_rows(pg_engine) == [row.id]
+    assert config.plex.instance_id == row.id
+
+
+def test_pg_the_startup_import_creates_no_plex_row_it_cannot_record(pg_session, pg_engine, monkeypatch):
+    from test_media_server_convergence import plex_settings
+    from app import config as app_config
+    from media_servers.backfill import backfill_instances
+    monkeypatch.setattr(app_config, 'write_config', lambda: False)
+    config = plex_settings(auth_method='oauth', token='token',
+                           server_url='https://plex.example:32400')
+    assert backfill_instances(pg_session, config)['plex']['error_code'] == 'migration_failed'
+    assert _plex_rows(pg_engine) == []
+    assert config.plex.instance_id == ''
