@@ -12,8 +12,12 @@ let submitted: FormData[] = [];
 beforeEach(() => {
   submitted = [];
   server.use(
+    // A real settings answer always carries general; the client refuses one without it.
     http.get("/api/system/settings", () =>
-      HttpResponse.json({ log: { max_file_size_mb: 32, backup_count: 7 } }),
+      HttpResponse.json({
+        general: { theme: "auto" },
+        log: { max_file_size_mb: 32, backup_count: 7 },
+      }),
     ),
     http.get("/api/system/status", () => HttpResponse.json({ data: {} })),
     http.post("/api/system/settings", async ({ request }) => {
