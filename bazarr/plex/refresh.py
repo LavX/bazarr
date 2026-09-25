@@ -9,10 +9,33 @@ itself, so it declares no path rung and needs no path mappings.
 
 import logging
 
+import requests
+from plexapi.exceptions import BadRequest, NotFound, Unauthorized
+
 from media_servers import resolution
 from media_servers.http import MediaServerError
 
 logger = logging.getLogger(__name__)
+
+
+def _refusal(error):
+    """A Plex failure in the shared vocabulary, so the status names the real cause.
+
+    Only a lookup miss means "not in this section". Anything else, an expired
+    token or a server that stopped answering, has to reach the dispatcher as
+    itself rather than as item_missing, which points the user at the library.
+    """
+    if isinstance(error, MediaServerError):
+        return error
+    if isinstance(error, Unauthorized):
+        return MediaServerError('unauthorized')
+    if isinstance(error, requests.exceptions.SSLError):
+        return MediaServerError('tls_error')
+    if isinstance(error, requests.exceptions.Timeout):
+        return MediaServerError('timeout')
+    if isinstance(error, (BadRequest, NotFound)):
+        return MediaServerError('request_rejected')
+    return MediaServerError('connection_error')
 
 
 def _sections(server, names):
@@ -73,10 +96,17 @@ class PlexRefreshClient:
                 item = section.getGuid(f'imdb://{metadata.imdb_id}')
                 if media_type != 'movie':
                     item = item.episode(season=metadata.season, episode=metadata.episode)
-                item.refresh()
-            except Exception:
+            except NotFound:
                 logger.debug('Plex section %r holds no item for this publication', name)
                 continue
+            except Exception as error:
+                raise _refusal(error) from None
+            try:
+                item.refresh()
+            except Exception as error:
+                # The item exists, so a refused refresh is a failure, not a miss
+                # that should fall through to rescanning the whole section.
+                raise _refusal(error) from None
             if ensure_current:
                 ensure_current()
             return {'status': 'requested'}
@@ -88,6 +118,7 @@ class PlexRefreshClient:
         if not names:
             return None
         updated = False
+        failure = None
         for name, section in _sections(self.server, names):
             if coalesce is not None and coalesce(name):
                 updated = True
@@ -96,12 +127,17 @@ class PlexRefreshClient:
                 ensure_current()
             try:
                 section.update()
-            except Exception:
+            except Exception as error:
                 logger.debug('Plex section %r refused a library update', name)
+                # The rest are still asked, but the refresh is not reported as
+                # requested while one section never was.
+                failure = failure or _refusal(error)
                 continue
             updated = True
         if ensure_current:
             ensure_current()
+        if failure is not None:
+            raise failure
         # Nothing was asked of Plex at all, so this rung did not answer and the
         # walk reports the publication as unresolved rather than as requested.
         return {'status': 'requested'} if updated else None

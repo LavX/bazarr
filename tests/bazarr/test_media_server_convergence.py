@@ -431,36 +431,48 @@ def test_an_instance_keeps_its_options_and_toggles_across_a_save(schema_session)
 class _FakeSection:
     """Only what `plex_refresh_item` ever asked a section for."""
 
-    def __init__(self, title, guids, calls):
+    def __init__(self, title, guids, calls, refusal=None):
         self.title, self.type, self._guids, self._calls = title, 'movie', guids, calls
+        self._refusal = refusal
 
     # plexapi's own spelling, which the real sections answer to.
     def getGuid(self, guid):
+        from plexapi.exceptions import NotFound
+        if self._refusal is not None:
+            raise self._refusal
         if guid not in self._guids:
-            raise KeyError(guid)
+            raise NotFound(guid)
         return self._guids[guid]
 
     def update(self):
         self._calls.append(('section-update', self.title))
+        if self._refusal is not None:
+            raise self._refusal
 
 
 class _FakeItem:
-    def __init__(self, calls, name, episodes=None):
+    def __init__(self, calls, name, episodes=None, refusal=None):
         self._calls, self._name, self._episodes = calls, name, episodes or {}
+        self._refusal = refusal
 
     def refresh(self):
         self._calls.append(('item-refresh', self._name))
+        if self._refusal is not None:
+            raise self._refusal
 
     def episode(self, season, episode):
+        from plexapi.exceptions import NotFound
+        if (season, episode) not in self._episodes:
+            raise NotFound(f'S{season:02}E{episode:02}')
         return self._episodes[(season, episode)]
 
 
-def _plex_client(monkeypatch, sections, calls):
+def _plex_client(monkeypatch, sections, calls, **overrides):
     from types import SimpleNamespace
     from plex import operations, refresh
     monkeypatch.setattr(operations, 'plex_server_for', lambda *_args: SimpleNamespace(
         library=SimpleNamespace(section=lambda name: sections[name])))
-    return refresh.PlexRefreshClient(snapshot('plex'))
+    return refresh.PlexRefreshClient(snapshot('plex', **overrides))
 
 
 def test_plex_refreshes_the_item_the_imdb_guid_resolves(monkeypatch):
@@ -489,6 +501,52 @@ def test_plex_updates_the_section_when_the_guid_resolves_nothing(monkeypatch):
         assert client.refresh_by_provider_id('movie', metadata()) is None
         assert client.refresh_library('movie') == {'status': 'requested'}
     assert calls == [('section-update', 'Movies')]
+
+
+def _refusals():
+    import requests
+    from plexapi.exceptions import Unauthorized
+    return [(requests.exceptions.ConnectionError('refused'), 'connection_error'),
+            (requests.exceptions.ReadTimeout('slow'), 'timeout'),
+            (Unauthorized('(401) unauthorized'), 'unauthorized')]
+
+
+@pytest.mark.parametrize('refusal, code', _refusals())
+def test_a_plex_lookup_that_fails_is_not_reported_as_a_missing_item(monkeypatch, refusal, code):
+    """Only a lookup miss is "not in this section"; a dead server is itself."""
+    from media_servers.http import MediaServerError
+    calls = []
+    sections = {'Movies': _FakeSection('Movies', {}, calls, refusal=refusal)}
+    with _plex_client(monkeypatch, sections, calls) as client, pytest.raises(MediaServerError) as error:
+        client.refresh_by_provider_id('movie', metadata())
+    assert error.value.code == code
+
+
+@pytest.mark.parametrize('refusal, code', _refusals())
+def test_a_refused_item_refresh_fails_rather_than_falling_back_to_the_section(monkeypatch, refusal, code):
+    from media_servers.http import MediaServerError
+    calls = []
+    movie = _FakeItem(calls, 'Metropolis', refusal=refusal)
+    sections = {'Movies': _FakeSection('Movies', {'imdb://tt0017136': movie}, calls)}
+    with _plex_client(monkeypatch, sections, calls) as client, pytest.raises(MediaServerError) as error:
+        client.refresh_by_provider_id('movie', metadata())
+    assert error.value.code == code
+
+
+def test_one_failed_section_update_is_not_reported_as_requested(monkeypatch):
+    """The other sections are still asked, but the refresh stays pending."""
+    import requests
+    from media_servers.http import MediaServerError
+    calls = []
+    sections = {'Movies': _FakeSection('Movies', {}, calls,
+                                       refusal=requests.exceptions.ConnectionError('refused')),
+                'Films': _FakeSection('Films', {}, calls)}
+    options = {'movie_libraries': ['Movies', 'Films']}
+    with _plex_client(monkeypatch, sections, calls, options=options) as client, \
+            pytest.raises(MediaServerError) as error:
+        client.refresh_library('movie')
+    assert error.value.code == 'connection_error'
+    assert calls == [('section-update', 'Movies'), ('section-update', 'Films')]
 
 
 def test_plex_reports_nothing_requested_when_no_section_accepted_the_update(monkeypatch):
