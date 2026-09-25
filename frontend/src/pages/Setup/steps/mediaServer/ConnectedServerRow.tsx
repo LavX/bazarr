@@ -15,8 +15,8 @@ import { readMediaServerTest } from "@/pages/Setup/connectionTests";
 // What a row that refreshes is called. It says what Finish will say: saving
 // proves the values were written, and only a passing Test proves they connect.
 // The card's footer counts these rows as saved, so the badge names only the
-// Test. Anything longer than "Connected" pushed Disconnect off its own label
-// on a phone.
+// Test. Finish's longer wording pushed Disconnect off its own label on a
+// phone.
 const SAVED_LABEL = {
   passed: "Connected",
   failed: "Test failed",
@@ -73,10 +73,8 @@ const ConnectedServerRow: FC<Props> = ({
   const remove = useDeleteMediaServerInstance(kind, instance.id);
   const logout = usePlexLogoutMutation();
   const settings = useSettingsMutation();
-  const label =
-    instance.enabled && kindEnabled
-      ? SAVED_LABEL[readMediaServerTest(kind, instance.id)]
-      : "Turned off";
+  const refreshes = instance.enabled && kindEnabled;
+  const tested = readMediaServerTest(kind, instance.id);
 
   // mutateAsync with an explicit then and catch, not mutate with callbacks.
   // TanStack drops a mutate call's own onSuccess and onError once the component
@@ -149,8 +147,11 @@ const ConnectedServerRow: FC<Props> = ({
               connected told them setup was done when the dispatcher would
               never use it. The kind's master switch counts the same way: the
               dispatcher reads it before it reads any row. */}
-          <Badge color={label === "Connected" ? "green" : "gray"} size="sm">
-            {label}
+          <Badge
+            color={refreshes && tested === "passed" ? "green" : "gray"}
+            size="sm"
+          >
+            {refreshes ? SAVED_LABEL[tested] : "Turned off"}
           </Badge>
         </Group>
         {!confirming && (

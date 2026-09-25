@@ -136,9 +136,9 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
 
   // What the reader has lined up for one kind, in the card's own words. Four
   // numbers, because they mean different things: a connected server is a row
-  // that refreshes and passed its Test, a saved one refreshes but no Test has
-  // passed against it, a stalled one is a row the switch is keeping quiet, and
-  // a pending one is a tick that has written nothing yet.
+  // that refreshes and passed its Test, a saved one is switched on but no Test
+  // has passed against it, a stalled one is a row the switch is keeping quiet,
+  // and a pending one is a tick that has written nothing yet.
   const summarise = (
     live: number,
     saved: number,
