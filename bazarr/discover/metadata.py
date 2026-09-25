@@ -32,6 +32,12 @@ _transport_lock = threading.Lock()
 _session = None
 _current = None
 _cooldowns = LockedLRU(maxsize=32)
+# The revision whose saved reader key TMDB rejected. Discover does not stop
+# working because of a bad key: its requests go out on the built-in key instead,
+# and only the key field in the Subtitle Hub says the saved key is not in use.
+# A new stored key gets a new revision, so it is tried again without anything
+# having to clear this.
+_rejected_revision = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +75,12 @@ def configuration():
             _current = Configuration(token, locale, uuid.uuid4().hex)
             _cache.invalidate(hard=True)
         return _current
+
+
+def override_rejected(config=None):
+    """Whether TMDB rejected the reader's saved key, so Discover runs on the built-in one."""
+    config = config or configuration()
+    return _rejected_revision is not None and _rejected_revision == config.revision and reader_token_stored()
 
 
 def reader_token_stored():
@@ -187,7 +199,31 @@ def _transport():
         return _session
 
 
-def _request(config, path, params=None):
+def _request(config, path, params=None, *, fallback=True):
+    """Call TMDB with the effective key, falling back to the built-in key.
+
+    A reader's own key that TMDB rejects must not take Discover down with it.
+    The request is repeated on the built-in key and the rejection is remembered
+    for this revision, so later requests skip the doomed attempt. The connection
+    check passes fallback=False: it exists to say whether this key works.
+    """
+    from app.tmdb import builtin_api_key
+    global _rejected_revision
+    builtin = builtin_api_key()
+    if not fallback or not config.token or config.token == builtin:
+        return _send(config, config.token, path, params)
+    if _rejected_revision == config.revision:
+        return _send(config, builtin, path, params)
+    try:
+        return _send(config, config.token, path, params)
+    except UpstreamFailure as error:
+        if error.status != "authentication_failed":
+            raise
+    _rejected_revision = config.revision
+    return _send(config, builtin, path, params)
+
+
+def _send(config, token, path, params=None):
     if time.monotonic() < _cooldowns.get(config.revision, 0):
         raise UpstreamFailure()
     try:
@@ -197,7 +233,7 @@ def _request(config, path, params=None):
         session = _transport()
         # v3 authentication: the key is a query parameter, never a header and
         # never part of the cache key or the revision.
-        with session.get(API_ROOT + path, params={**(params or {}), "api_key": config.token},
+        with session.get(API_ROOT + path, params={**(params or {}), "api_key": token},
                          headers={"Accept": "application/json"},
                          timeout=(3.05, 8), allow_redirects=False, stream=True) as response:
             if response.status_code in (401, 403):
@@ -225,11 +261,11 @@ def _request(config, path, params=None):
                 if len(content) > MAX_RESPONSE_BYTES or time.monotonic() > deadline:
                     raise UpstreamFailure()
             # Never serialize a response that echoed the bearer credential.
-            if config.token and config.token.encode() in content:
+            if token and token.encode() in content:
                 raise UpstreamFailure()
             result = json.loads(content)
             if (not isinstance(result, dict)
-                    or (config.token and _contains_credential(result, config.token))):
+                    or (token and _contains_credential(result, token))):
                 raise UpstreamFailure()
             return result
     except UpstreamFailure:
@@ -241,7 +277,7 @@ def _request(config, path, params=None):
 _MESSAGES = {
     "unconfigured": "TMDB metadata is unavailable in this build. IMDb subtitle search remains available.",
     "available": "TMDB is available.",
-    "authentication_failed": "TMDB rejected the key in use. Check the TMDB key under Subtitle Hub > My Providers, or clear it to use the built-in one.",
+    "authentication_failed": "TMDB did not accept the built-in key. Try again later.",
     "unavailable": "TMDB is temporarily unavailable. Try again shortly.",
     "cached": "Showing cached TMDB metadata with its original fetch time.",
 }
@@ -254,8 +290,9 @@ def _envelope(config, status, *, fetched_at=None, checked_at=None, message=None,
                      "fetched_at": fetched_at, **payload}}
 
 
-def connection_status(candidate=None, *, use_saved=True):
-    from app.tmdb import is_v3_key
+def connection_status(candidate=None, *, use_saved=True, fallback=True):
+    from app.tmdb import builtin_api_key, is_v3_key
+    global _rejected_revision
     config = configuration()
     if not use_saved:
         draft = validate_token(candidate)
@@ -270,15 +307,24 @@ def connection_status(candidate=None, *, use_saved=True):
     if not config.token:
         return _envelope(config, "unconfigured")
     checked = _now()
+    override = config.token != builtin_api_key()
     try:
-        if _request(config, "/authentication").get("success") is not True:
+        if _request(config, "/authentication", fallback=fallback).get("success") is not True:
             raise UpstreamFailure()
         status = "available"
     except UpstreamFailure as error:
         status = error.status
     if use_saved and configuration().revision != config.revision:
         return _envelope(configuration(), "unavailable")
-    return _envelope(config, status, checked_at=checked)
+    if not (override and not fallback):
+        return _envelope(config, status, checked_at=checked)
+    if use_saved and status == "available" and _rejected_revision == config.revision:
+        _rejected_revision = None
+    elif use_saved and status == "authentication_failed":
+        _rejected_revision = config.revision
+    return _envelope(config, status, checked_at=checked,
+                     message="TMDB rejected this key, so Discover keeps using the built-in key. "
+                             "Replace this key or remove it." if status == "authentication_failed" else None)
 
 
 def _require_dependency_validity(valid_until):
@@ -923,7 +969,7 @@ def _omdb_browse(operation, loader, empty):
     finally:
         if acquired:
             lock.release()
-    message = {"unconfigured": "Configure OMDB or TMDB for global title identities.",
+    message = {"unconfigured": "Configure OMDB for global title identities.",
                "available": "OMDB title identities are available.",
                "cached": "Showing cached OMDB metadata with its original fetch time.",
                "authentication_failed": "OMDB rejected the configured API key.",
