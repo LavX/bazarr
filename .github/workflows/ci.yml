@@ -581,7 +581,8 @@ jobs:
             tests/bazarr/test_indexer_path_mapping_owner.py \
             tests/bazarr/test_anilist_index.py \
             tests/bazarr/test_package_info_location.py \
-            tests/bazarr/test_translate_owner_threading.py ; do
+            tests/bazarr/test_translate_owner_threading.py \
+            tests/bazarr/test_sports_library_lookup_pg.py ; do
             echo "::group::$f"
             pytest "$f" -p no:cacheprovider -q
             echo "::endgroup::"
