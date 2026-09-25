@@ -1,3 +1,5 @@
+from urllib.error import URLError
+
 from app import signalr_client
 
 
@@ -20,6 +22,47 @@ class _FakeConnection:
         self.starts += 1
         self.transport = _FakeTransport(1)
         return True
+
+
+class _RefusedOnceConnection(_FakeConnection):
+    """signalrcore negotiates over urllib, so an arr that is down raises
+    URLError rather than requests' ConnectionError."""
+
+    def start(self):
+        if self.starts == 0:
+            self.starts += 1
+            raise URLError(ConnectionRefusedError(111, "Connection refused"))
+        return super().start()
+
+
+def test_sonarr_signalr_start_retries_when_the_arr_refuses_the_connection(monkeypatch):
+    connection = _RefusedOnceConnection()
+    client = signalr_client.SonarrSignalrClient()
+    sleep_calls = []
+
+    monkeypatch.setattr(signalr_client.get_sonarr_info, "version", lambda: "4.0.0")
+    monkeypatch.setattr(signalr_client.get_sonarr_info, "supports_signalr_core", lambda: True)
+    monkeypatch.setattr(signalr_client.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+    monkeypatch.setattr(client, "configure", lambda: setattr(client, "connection", connection))
+
+    client.start()
+
+    assert sleep_calls == [5]
+    assert connection.starts == 2
+
+
+def test_radarr_signalr_start_retries_when_the_arr_refuses_the_connection(monkeypatch):
+    connection = _RefusedOnceConnection()
+    client = signalr_client.RadarrSignalrClient()
+    sleep_calls = []
+
+    monkeypatch.setattr(signalr_client.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+    monkeypatch.setattr(client, "configure", lambda: setattr(client, "connection", connection))
+
+    client.start()
+
+    assert sleep_calls == [5]
+    assert connection.starts == 2
 
 
 def test_sonarr_signalr_start_handles_missing_transport_before_first_start(monkeypatch):
