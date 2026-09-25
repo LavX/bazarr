@@ -126,6 +126,17 @@ beforeEach(() => {
   );
 });
 
+// Discover never links to the TMDB key, since it always has the built-in one,
+// so the reader reaches the key field through the Subtitle Hub itself.
+async function openKeySettings(router: ReturnType<typeof createMemoryRouter>) {
+  await act(async () => {
+    await router.navigate("/subtitle-hub?tab=my-providers#metadata");
+  });
+  await waitFor(() =>
+    expect(screen.getByLabelText("TMDB API key")).toBeEnabled(),
+  );
+}
+
 async function renderSettings(fromDiscover = false) {
   const router = createMemoryRouter(
     [
@@ -305,9 +316,7 @@ it("preserves the real return route, query and focus through Keep editing, a fai
   );
   const { user, router } = await renderSettings(true);
   await user.type(screen.getByLabelText("Search"), "Shogun");
-  await user.click(
-    await screen.findByRole("link", { name: "Check the TMDB key" }),
-  );
+  await openKeySettings(router);
   await user.type(
     await screen.findByLabelText("TMDB API key"),
     "pending-private",
@@ -339,11 +348,6 @@ it("preserves the real return route, query and focus through Keep editing, a fai
     "?view=movies#browsing",
   );
   expect(await screen.findByLabelText("Search")).toHaveValue("Shogun");
-  await waitFor(() =>
-    expect(
-      screen.getByRole("link", { name: "Check the TMDB key" }),
-    ).toHaveFocus(),
-  );
 });
 
 it("discards a replacement through the real modal without saving and returns with browsing intact", async () => {
@@ -356,9 +360,7 @@ it("discards a replacement through the real modal without saving and returns wit
   );
   const { user, router } = await renderSettings(true);
   await user.type(screen.getByLabelText("Search"), "Shogun");
-  await user.click(
-    await screen.findByRole("link", { name: "Check the TMDB key" }),
-  );
+  await openKeySettings(router);
   await user.type(
     await screen.findByLabelText("TMDB API key"),
     "abandoned-private",
@@ -372,9 +374,7 @@ it("discards a replacement through the real modal without saving and returns wit
   await waitFor(() => expect(router.state.location.pathname).toBe("/discover"));
   expect(await screen.findByLabelText("Search")).toHaveValue("Shogun");
   expect(saves).toEqual([]);
-  await user.click(
-    await screen.findByRole("link", { name: "Check the TMDB key" }),
-  );
+  await openKeySettings(router);
   expect(await screen.findByLabelText("TMDB API key")).toHaveValue("");
 });
 
@@ -464,9 +464,7 @@ it.each(["retry", "leave", "ordinary save", "failed retry"])(
     );
     const { user, router } = await renderSettings(true);
     await user.type(screen.getByLabelText("Search"), "Shogun");
-    await user.click(
-      await screen.findByRole("link", { name: "Check the TMDB key" }),
-    );
+    await openKeySettings(router);
     await user.type(
       await screen.findByLabelText("TMDB API key"),
       "saved-private-replacement",
@@ -568,3 +566,29 @@ it("offers removal only to a reader who actually saved a key", async () => {
     screen.queryByRole("button", { name: "Remove saved key" }),
   ).not.toBeInTheDocument();
 });
+
+it.each([true, false])(
+  "says next to the key field whether TMDB rejected the saved key (%s)",
+  async (rejected) => {
+    // Browsing never stops on a rejected key: the server moves Discover to the
+    // built-in key, and this field is the one place that reports it.
+    let asked = 0;
+    server.use(
+      http.get("/api/discover/metadata/status", () => {
+        asked += 1;
+        return HttpResponse.json({
+          data: { ...connection, override_rejected: rejected },
+        });
+      }),
+    );
+    await renderSettings();
+    await waitFor(() => expect(asked).toBeGreaterThan(0));
+    const warning =
+      /TMDB rejected your saved key, so Discover is using the built-in key/;
+    if (rejected) expect(await screen.findByText(warning)).toBeVisible();
+    else
+      await waitFor(() =>
+        expect(screen.queryByText(warning)).not.toBeInTheDocument(),
+      );
+  },
+);

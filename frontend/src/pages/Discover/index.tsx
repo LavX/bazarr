@@ -697,20 +697,12 @@ export default function Discover() {
           )}
           {releaseMode ? (
             <Stack gap="sm" mb={24}>
-              {!metadata.configured && (
-                <Alert color="yellow">
-                  Set up TMDB in the Subtitle Hub to explore global titles.
-                  Release-name search remains available.
-                </Alert>
-              )}
-              {metadata.data?.status === "authentication_failed" && (
-                <Alert color="yellow">
-                  TMDB rejected the key Discover is using. Check it in the
-                  Subtitle Hub.
-                </Alert>
-              )}
+              {/* Discover always has TMDB through the built-in key, so there
+                  is nothing to set up here, only a service that may be down. */}
               {(metadata.isError ||
-                metadata.data?.status === "unavailable") && (
+                metadata.data?.status === "unavailable" ||
+                metadata.data?.status === "unconfigured" ||
+                metadata.data?.status === "authentication_failed") && (
                 <Alert color="yellow">
                   Global metadata is temporarily unavailable. Release-name
                   search remains available.
