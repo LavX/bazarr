@@ -244,6 +244,47 @@ it("offers no delete for the Plex account's own card and says how to remove it",
   ).not.toBeInTheDocument();
 });
 
+it("disconnects the Plex account from its own card, which can then be deleted", async () => {
+  // The account panel offers Disconnect only to an OAuth sign-in, so an
+  // account on a legacy API key had no way to remove this card.
+  let signedOut = false;
+  setup("plex", true, [
+    instance("plex", { account_owned: true, path_mappings: [] }),
+  ]);
+  server.use(
+    http.post("/api/plex/oauth/logout", () => {
+      signedOut = true;
+      return HttpResponse.json({ success: true });
+    }),
+    http.get("/api/system/media-server-instances", () =>
+      HttpResponse.json({
+        data: [
+          instance("plex", {
+            path_mappings: [],
+            ...(signedOut
+              ? { enabled: false, api_key_set: false }
+              : { account_owned: true }),
+          }),
+        ],
+      }),
+    ),
+  );
+  const card = within(
+    await screen.findByRole("region", { name: "Living room" }),
+  );
+  await userEvent.click(card.getByRole("button", { name: "Disconnect" }));
+  expect(
+    await card.findByRole("button", { name: "Delete" }),
+  ).toBeInTheDocument();
+  expect(signedOut).toBe(true);
+  expect(
+    card.queryByRole("button", { name: "Disconnect" }),
+  ).not.toBeInTheDocument();
+  expect(
+    card.queryByText(/Disconnect from Plex to remove it/),
+  ).not.toBeInTheDocument();
+});
+
 it("shows safe Test failures, resets on edits and disables probes when clearing a saved key", async () => {
   setup("emby");
   server.use(

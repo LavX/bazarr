@@ -13,6 +13,7 @@ import {
   useMediaServerTest,
   useSaveMediaServerInstance,
 } from "@/apis/hooks/mediaServers";
+import { usePlexLogoutMutation } from "@/apis/hooks/plex";
 import type { MediaServerInstance } from "@/apis/raw/mediaServers";
 import MediaServerRefreshStatus from "./MediaServerRefreshStatus";
 import styles from "@/pages/Settings/Connections/Connections.module.scss";
@@ -38,6 +39,10 @@ export default function MediaServerInstanceCard({
     instance.id,
   );
   const test = useMediaServerTest(instance.kind, {}, instance.id);
+  // The account panel offers Disconnect only to an OAuth sign-in, so an
+  // account on a legacy API key or token had no way to clear the credential
+  // that keeps this card from being deleted.
+  const disconnect = usePlexLogoutMutation();
   const { reset } = test;
   useEffect(() => reset(), [instance, reset]);
   return (
@@ -98,7 +103,18 @@ export default function MediaServerInstanceCard({
             >
               Edit
             </Button>
-            {!instance.account_owned && (
+            {instance.account_owned ? (
+              <Button
+                type="button"
+                size="xs"
+                variant="subtle"
+                color="red"
+                loading={disconnect.isPending}
+                onClick={() => disconnect.mutate()}
+              >
+                Disconnect
+              </Button>
+            ) : (
               <Button
                 type="button"
                 size="xs"
@@ -119,6 +135,9 @@ export default function MediaServerInstanceCard({
             This instance belongs to your Plex account, which would recreate it
             at the next restart. Disconnect from Plex to remove it.
           </Text>
+        )}
+        {disconnect.isError && (
+          <Alert color="red">Could not disconnect from Plex. Try again.</Alert>
         )}
         {update.isError && (
           <Alert color="red">

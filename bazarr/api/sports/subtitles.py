@@ -13,6 +13,7 @@ from subliminal_patch.core import SUBTITLE_EXTENSIONS
 from sportarr.identity import resolve_event_in_session
 from sportarr.manual_jobs import sports_manually_download_subtitle
 from sportarr.subtitles import manual_search_sports
+from sportarr.workflows import require_sports_enabled
 from .leagues import _body, _optional_owner, _owner
 from ..swaggerui import job_queued_model
 from ..utils import authenticate
@@ -70,6 +71,7 @@ class SportsSearch(Resource):
     def post(self, event_id):
         try:
             body = _body()
+            require_sports_enabled()
             results = manual_search_sports(
                 event_id,
                 body.get("language"),
@@ -105,6 +107,7 @@ class SportsDownload(Resource):
         try:
             body = _body()
             owner = _owner(body.get("arr_instance_id"))
+            require_sports_enabled()
             candidate = body.get("candidate")
             if not isinstance(candidate, dict) or not isinstance(candidate.get("subtitle"), str):
                 raise ValueError("A cached subtitle result is required")
@@ -266,6 +269,7 @@ class SportsEventSubtitleUpload(Resource):
 
         try:
             owner = _optional_owner(args.get('arr_instance_id'))
+            require_sports_enabled()
             context = resolve_event_in_session(database, event_id, owner)
         except SportsNotFound as exc:
             return {'message': str(exc)}, 404

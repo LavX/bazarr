@@ -1195,7 +1195,7 @@ def test_listing_plex_servers_does_not_rewrite_the_selected_connection(plex_acco
 
     writes = []
     monkeypatch.setattr(oauth, 'write_config', lambda: writes.append(True))
-    monkeypatch.setattr(oauth, 'test_plex_connection', lambda uri, token: (
+    monkeypatch.setattr(oauth, 'test_plex_connection', lambda uri, token, verify: (
         True, 5 if uri == lan_url else 50))
 
     class _Resources:
@@ -1305,6 +1305,29 @@ def test_saving_a_key_after_a_sign_out_switches_the_destination_back_on(plex_acc
     assert bool(repo.get(row.id).enabled) is True
     assert config.general.use_plex is True
     assert repo.get_decrypted_api_key(row.id) == 'second-key'
+
+
+def test_an_api_key_account_signs_out_before_its_card_deletes(plex_account_api, schema_session,
+                                                              monkeypatch):
+    """An API-key account has no OAuth sign-in to disconnect in the account
+    panel. The card's own Disconnect runs this same sign-out, which clears the
+    key, and only then does the delete go through."""
+    from media_servers import dispatcher, service
+    from media_servers.plex_account import sync_plex_instance
+    from media_servers.repository import MediaServerInstanceRepository
+    client, config = plex_account_api
+    monkeypatch.setattr(dispatcher, '_configuration', dispatcher.NativeConfiguration(settings()))
+    config.plex.ip = 'plex.example'
+    config.plex.apikey = 'legacy-key'
+    row = sync_plex_instance(schema_session, config)
+    assert service.get_instance(schema_session, row.id)[0]['account_owned'] is True
+    assert service.delete_instance(schema_session, row.id) == ({'error_code': 'account_owned'}, 409)
+
+    assert client.post('/api/plex/oauth/logout', headers=HEADERS, json={}).status_code == 200
+    assert config.plex.apikey == ''
+    assert service.get_instance(schema_session, row.id)[0]['account_owned'] is False
+    assert service.delete_instance(schema_session, row.id) == (None, 204)
+    assert MediaServerInstanceRepository(schema_session).list('plex') == []
 
 
 def test_the_account_never_binds_a_row_it_did_not_create(schema_session):
