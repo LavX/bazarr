@@ -4805,18 +4805,49 @@
   font-weight: 600;
   letter-spacing: 0.01em;
   max-width: 100%;
+  // The pill is itself a flex item of .heroTop, and a flex item will not
+  // shrink below its content width unless told to. Without this the pill
+  // stayed as wide as its whole sentence and ran out of the panel, so nothing
+  // inside it ever had to wrap or elide and the panel's edge cut the text.
+  min-width: 0;
   svg {
     width: 12px;
     flex: 0 0 auto;
   }
-  // The truncation lives on the label, not on the pill. On the pill it did
-  // nothing, because the thing being clipped was an anonymous flex item.
-  // min-width: 0 is what lets a flex item shrink below its content width.
+  // A wrapping row of two parts. When both fit they share a line; when they
+  // do not, the time moves to a line of its own rather than being cut.
+  // overflow: hidden is what removes the separator in that case: it sits in
+  // the gap to the left of the time, which is outside this box once the time
+  // starts a line.
   .heroStatusText {
+    display: flex;
+    flex-wrap: wrap;
+    column-gap: 0.75em;
+    min-width: 0;
+    overflow: hidden;
+  }
+  // A job name can be longer than any phone, and there the ellipsis is the
+  // right answer: the name is still recognisable from its start.
+  .heroStatusLead {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .heroStatusWhen {
+    position: relative;
+    max-width: 100%;
+    // At 320px even the second line can be too long. It wraps between "last
+    // fetched" and the time before it would ever cut the time itself.
+    time {
+      white-space: nowrap;
+    }
+  }
+  .heroStatusSeparator {
+    position: absolute;
+    right: 100%;
+    width: 0.75em;
+    text-align: center;
   }
   &[data-tone="quiet"] svg {
     color: #6fd48b;
