@@ -236,6 +236,7 @@ def test_manual_api_requires_owner_and_returns_refreshed_event(
     Api(app).add_namespace(routes.api_ns_sports_subtitles, path="/api")
     from app.config import settings
 
+    monkeypatch.setattr(settings.general, "use_sportarr", True)
     client = app.test_client()
     headers = {"X-API-KEY": settings.auth.apikey}
     assert (
