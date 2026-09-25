@@ -169,6 +169,25 @@ it.each(["jellyfin", "plex"] as const)(
   },
 );
 
+it("says how many libraries the server refused to rescan", async () => {
+  // One refused scope used to abort the run; now the rest are still asked and
+  // the refusal is reported beside them.
+  setup("plex");
+  server.use(
+    http.post(`${item}/refresh-libraries`, () =>
+      HttpResponse.json({ requested: 2, failed: 1 }),
+    ),
+  );
+  await userEvent.click(
+    await screen.findByRole("button", { name: "Refresh libraries" }),
+  );
+  expect(
+    await screen.findByText(
+      "Asked the server to rescan 2 libraries. 1 could not be rescanned. The log names it.",
+    ),
+  ).toBeInTheDocument();
+});
+
 it("names a blocked one-time import instead of blaming the connection", async () => {
   setup("jellyfin");
   server.use(

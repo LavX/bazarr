@@ -68,9 +68,11 @@ def _requests(snapshot):
 def refresh_libraries(instance_id):
     """Ask one saved destination to rescan everything it is scoped to.
 
-    Returns how many library scans the server accepted. A rung that answers
-    nothing for one scope is that scope holding no such library, not a failure,
-    so it is skipped and the rest still run.
+    Returns how many library scans the server accepted and how many it refused.
+    A rung that answers nothing for one scope is that scope holding no such
+    library, not a failure, so it is skipped and the rest still run. A scope the
+    server refuses does not stop the rest either: it is counted, and the run
+    fails only when nothing was accepted.
     """
     from .dispatcher import _client, get_native_configuration
     configuration = get_native_configuration()
@@ -85,18 +87,23 @@ def refresh_libraries(instance_id):
     if not scopes:
         raise MediaServerError('library_missing')
     requested = 0
+    refused = []
     with _client(snapshot.kind, snapshot) as client:
         for scope, call in scopes:
             try:
                 if call(client) is not None:
                     requested += 1
-            except MediaServerError:
-                raise
+            except MediaServerError as error:
+                logging.warning('BAZARR could not rescan %s on a media server destination: %s',
+                                scope, error.code)
+                refused.append(error)
             except Exception:
                 logging.debug('BAZARR could not rescan %s on a media server destination',
                               scope, exc_info=True)
     if not requested:
+        if refused:
+            raise refused[0]
         # Every scope answered nothing, so the server holds no library the
         # instance is pointed at. Saying so beats reporting a scan that ran.
         raise MediaServerError('library_missing')
-    return requested
+    return {'requested': requested, 'failed': len(refused)}
