@@ -467,6 +467,26 @@ def test_emptying_the_log_again_with_nothing_new_keeps_the_real_days(monkeypatch
     assert "record after the clicks" in newest
 
 
+def test_emptying_the_log_keeps_it_when_the_roll_aside_fails(monkeypatch, tmp_path):
+    """Emptying rolls the file aside first so its records survive. When that roll
+    fails, truncating would delete the only copy, so the file is kept and the
+    request fails instead."""
+    record_logger = logging.getLogger("rotation-test")
+    with _configured(monkeypatch, tmp_path, debug=False):
+        record_logger.info("record that must survive")
+
+        def refuse(source, dest):
+            raise PermissionError("directory refuses renames")
+
+        monkeypatch.setattr(logger_module.fh, "rotate", refuse)
+        with pytest.raises(OSError, match="not emptied"):
+            empty_log()
+        live = (tmp_path / "bazarr.log").read_text(encoding="utf-8")
+
+    assert "record that must survive" in live
+    assert "BAZARR Log file emptied" not in live
+
+
 @pytest.fixture
 def budapest_time():
     """Local time with DST, for the path bazarr runs (the other tests use UTC)."""

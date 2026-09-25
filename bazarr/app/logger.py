@@ -323,7 +323,9 @@ def empty_log():
     handler = fh
     handler.acquire()
     try:
-        handler.roll_before_emptying()
+        if not handler.roll_before_emptying():
+            # Truncating now would delete the only copy of those records.
+            raise OSError(f'{handler.baseFilename} could not be rolled aside, so it was not emptied')
         empty_file(get_log_file_path())
         logging.info('BAZARR Log file emptied')
         handler.note_emptied()
@@ -377,6 +379,7 @@ class SizeAndTimeRotatingFileHandler(TimedRotatingFileHandler):
         # Size of the live file right after empty_log() wrote its note, while
         # nothing else has been written; None once anything has rolled.
         self._emptied_size = None
+        self._roll_failed = False
         base_name = os.path.basename(self.baseFilename)
         self._rolled_name = re.compile(re.escape(base_name) + r'\.(\d{4}-\d{2}-\d{2})(?:\.([1-9]\d*))?',
                                        re.ASCII)
@@ -469,14 +472,16 @@ class SizeAndTimeRotatingFileHandler(TimedRotatingFileHandler):
 
         A file holding only the note the previous empty_log() wrote has nothing worth
         a backup slot, and rolling it on every click would push a real day out each
-        time.
+        time. False when the roll failed and the records are still only in the live
+        file, which must then not be emptied.
         """
         if self._emptied_size is not None and self._live_size() == self._emptied_size:
             if self.stream:
                 self.stream.close()
                 self.stream = None
-            return
+            return True
         self.doRollover()
+        return not self._roll_failed
 
     def note_emptied(self):
         self._emptied_size = self._live_size()
@@ -489,6 +494,7 @@ class SizeAndTimeRotatingFileHandler(TimedRotatingFileHandler):
 
     def doRollover(self):
         now = self._now()
+        self._roll_failed = False
         if self.stream:
             self.stream.close()
             self.stream = None
@@ -499,6 +505,7 @@ class SizeAndTimeRotatingFileHandler(TimedRotatingFileHandler):
             try:
                 self.rotate(self.baseFilename, self._next_rolled_name())
             except OSError as error:
+                self._roll_failed = True
                 self._retry_size = self._live_size() + self.maxBytes
                 self._report_failure(error)
             else:
