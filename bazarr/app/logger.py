@@ -1,19 +1,26 @@
 # coding=utf-8
 
 import os
-import sys
 import logging
 import re
 import platform
+import sys
+import time
 import warnings
 
 from logging.handlers import TimedRotatingFileHandler
+from literals import (LOG_BACKUP_COUNT_DEFAULT, LOG_BACKUP_COUNT_MAX, LOG_BACKUP_COUNT_MIN,
+                      LOG_MAX_FILE_SIZE_MB_DEFAULT, LOG_MAX_FILE_SIZE_MB_MAX, LOG_MAX_FILE_SIZE_MB_MIN)
 from utilities.central import get_log_file_path
 
 from .config import settings
 
 
 logger = logging.getLogger()
+
+# The file handler configure_logging installs, kept so the log can be emptied and
+# its rotation limits changed without rebuilding the handlers.
+fh = None
 
 
 class FileHandlerFormatter(logging.Formatter):
@@ -233,12 +240,9 @@ def configure_logging(debug=False):
 
     # File Logging
     global fh
-    if sys.version_info >= (3, 9):
-        fh = PatchedTimedRotatingFileHandler(get_log_file_path(), when="midnight",
-                                             interval=1, backupCount=7, delay=True, encoding='utf-8')
-    else:
-        fh = TimedRotatingFileHandler(get_log_file_path(), when="midnight", interval=1,
-                                      backupCount=7, delay=True, encoding='utf-8')
+    max_bytes, backup_count = log_rotation_limits()
+    fh = SizeAndTimeRotatingFileHandler(get_log_file_path(), maxBytes=max_bytes, backupCount=backup_count,
+                                        delay=True, encoding='utf-8')
     f = FileHandlerFormatter('%(asctime)s|%(levelname)-8s|%(name)-32s|%(message)s|',
                              '%Y-%m-%d %H:%M:%S')
     fh.setFormatter(f)
@@ -263,63 +267,247 @@ def configure_logging(debug=False):
     logging.getLogger("stevedore.extension").setLevel(logging.CRITICAL)
     logging.getLogger("plexapi").setLevel(logging.ERROR)
 
+def _bounded_setting(key, default, lowest, highest):
+    """An integer setting held inside its bounds, or its default when unreadable.
+
+    The validators in config.py already refuse a value outside the bounds, so this
+    only matters for a value that reached the settings some other way. The log
+    folder's ceiling is the point of these two settings, and a bad value must not
+    be the thing that removes it.
+    """
+    value = settings.get(key, default)
+    if isinstance(value, bool):
+        return default
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return default
+    return min(max(value, lowest), highest)
+
+
+def log_rotation_limits():
+    """(max bytes of the live file, rolled files to keep), from log.* settings."""
+    max_file_size_mb = _bounded_setting('log.max_file_size_mb', LOG_MAX_FILE_SIZE_MB_DEFAULT,
+                                        LOG_MAX_FILE_SIZE_MB_MIN, LOG_MAX_FILE_SIZE_MB_MAX)
+    backup_count = _bounded_setting('log.backup_count', LOG_BACKUP_COUNT_DEFAULT,
+                                    LOG_BACKUP_COUNT_MIN, LOG_BACKUP_COUNT_MAX)
+    return max_file_size_mb * 1024 * 1024, backup_count
+
+
+def apply_log_rotation_settings():
+    """Give the live file handler the current log.max_file_size_mb and log.backup_count.
+
+    A smaller size takes effect at the next record, a smaller count at the next roll.
+    """
+    handler = fh
+    if handler is None:
+        return
+    max_bytes, backup_count = log_rotation_limits()
+    handler.acquire()
+    try:
+        handler.maxBytes = max_bytes
+        handler.backupCount = backup_count
+    finally:
+        handler.release()
+
+
 def empty_file(filename):
     # Open the log file in write mode to clear its contents
     with open(filename, 'w'):
         pass  # Just opening and closing the file will clear it
 
 def empty_log():
-    fh.doRollover()
-    empty_file(get_log_file_path())
-    logging.info('BAZARR Log file emptied')
+    # Under the handler's lock throughout, including the note, so no other thread's
+    # record lands between the roll, the truncation and the note, and the file the
+    # note leaves behind can be recognised by the next empty.
+    handler = fh
+    handler.acquire()
+    try:
+        handler.roll_before_emptying()
+        empty_file(get_log_file_path())
+        logging.info('BAZARR Log file emptied')
+        handler.note_emptied()
+    finally:
+        handler.release()
 
 
-class PatchedTimedRotatingFileHandler(TimedRotatingFileHandler):
-    # This super classed version of logging.TimedRotatingFileHandler is required to fix a bug in earlier version of
-    # Python 3.9, 3.10 and 3.11 where log rotation isn't working as expected and do not delete backup log files.
+class SizeAndTimeRotatingFileHandler(TimedRotatingFileHandler):
+    """Roll the live log at midnight, or earlier once it reaches maxBytes.
 
-    def __init__(self, filename, when='h', interval=1, backupCount=0, encoding=None, delay=False, utc=False,
-                 atTime=None, errors=None):
-        super(PatchedTimedRotatingFileHandler, self).__init__(filename, when, interval, backupCount, encoding, delay, utc,
-                                                              atTime, errors)
+    The standard library has no handler that does both, and TimedRotatingFileHandler
+    cannot simply be given a size check. It names a rolled file after the day the file
+    covers, so a second roll on the same day computes the same name, and depending on
+    the Python version it then either deletes the earlier file or stops rolling until
+    the next restart.
+
+    Naming: the first roll of a day is `bazarr.log.YYYY-MM-DD`, the name every midnight
+    roll has always had, and each further roll that day is `bazarr.log.YYYY-MM-DD.N`,
+    with N one higher than any already present. No roll overwrites or removes another,
+    and a day that never reaches the size limit keeps exactly the one file it had
+    before. The day is the one the file's records began in, as it always was.
+
+    Pruning: the date and N together order every file this handler writes, oldest
+    first, so the newest backupCount are kept by that order. A name the handler could
+    not have produced, such as a compressed copy or another program's file, is neither
+    counted nor deleted.
+
+    The size check is made before a record is written, so the live file can pass
+    maxBytes by at most one record. That keeps the check to a tell() rather than
+    formatting every record twice. A size roll leaves the midnight deadline where it
+    is, and every name is taken from that deadline, so neither a DST change nor a
+    clock that steps back mid-day can give a file an earlier day than the one it
+    covers, which pruning would then delete first.
+
+    A roll that fails, such as a rename refused by a read-only folder or a file held
+    open elsewhere, keeps logging into the live file, says so once on stderr, and is
+    tried again at the next midnight or once the file has grown by another maxBytes.
+    """
+
+    clock = staticmethod(time.time)
+
+    def __init__(self, filename, maxBytes=0, backupCount=0, encoding=None, delay=False, utc=False,
+                 errors=None):
+        super().__init__(filename, when='midnight', interval=1, backupCount=backupCount,
+                         encoding=encoding, delay=delay, utc=utc, errors=errors)
+        self.maxBytes = maxBytes
+        # Size the live file must reach before a size roll is tried again after a
+        # failed one; 0 when the last roll did not fail.
+        self._retry_size = 0
+        self._failure_reported = False
+        # Size of the live file right after empty_log() wrote its note, while
+        # nothing else has been written; None once anything has rolled.
+        self._emptied_size = None
+        base_name = os.path.basename(self.baseFilename)
+        self._rolled_name = re.compile(re.escape(base_name) + r'\.(\d{4}-\d{2}-\d{2})(?:\.([1-9]\d*))?',
+                                       re.ASCII)
+
+    def _now(self):
+        return int(self.clock())
+
+    def _over_size(self):
+        if self.maxBytes <= 0:
+            return False
+        if self.stream is None:
+            # delay=True leaves the file unopened until the first record.
+            self.stream = self._open()
+        try:
+            return self.stream.tell() >= max(self.maxBytes, self._retry_size)
+        except (OSError, ValueError):
+            # Not seekable, so not a regular file: nothing to measure or roll.
+            return False
+
+    def shouldRollover(self, record):
+        now = self._now()
+        if now < self.rolloverAt and not self._over_size():
+            return False
+        # Never roll anything but a regular file, such as a log path pointed at a
+        # device. A file that is missing is still rolled, which reopens it.
+        if os.path.exists(self.baseFilename) and not os.path.isfile(self.baseFilename):
+            self.rolloverAt = self.computeRollover(now)
+            return False
+        return True
+
+    def _day_of_current_file(self):
+        """The day the live file's records began in.
+
+        rolloverAt is the next local midnight as computeRollover works it out, DST
+        included, and only a midnight roll moves it, so the second before it falls
+        on the live file's day whenever and however often the file rolls on size.
+        """
+        last_second = self.rolloverAt - 1
+        return time.strftime(self.suffix, time.gmtime(last_second) if self.utc else time.localtime(last_second))
+
+    def _matching_names(self):
+        directory = os.path.dirname(self.baseFilename)
+        for file_name in os.listdir(directory):
+            match = self._rolled_name.fullmatch(file_name)
+            if match:
+                yield match.group(1), int(match.group(2) or 0), os.path.join(directory, file_name)
+
+    def rolled_files(self):
+        """Every file this handler has rolled, as (day, number, path), oldest first."""
+        return sorted(entry for entry in self._matching_names() if os.path.isfile(entry[2]))
+
+    def _next_rolled_name(self):
+        day = self._day_of_current_file()
+        # Any entry holding a name counts, not only regular files: a directory in
+        # the way would otherwise refuse the same rename on every roll.
+        numbers = [number for rolled_day, number, _ in self._matching_names() if rolled_day == day]
+        name = f'{self.baseFilename}.{day}'
+        if numbers:
+            name = f'{name}.{max(numbers) + 1}'
+        return name
 
     def getFilesToDelete(self):
-        """
-        Determine the files to delete when rolling over.
-        More specific than the earlier method, which just used glob.glob().
-        """
-        dirName, baseName = os.path.split(self.baseFilename)
-        fileNames = os.listdir(dirName)
-        result = []
-        # See bpo-44753: Don't use the extension when computing the prefix.
-        n, e = os.path.splitext(baseName)
-        prefix = f'{n}.'
-        plen = len(prefix)
-        for fileName in fileNames:
-            if self.namer is None:
-                # Our files will always start with baseName
-                if not fileName.startswith(baseName):
-                    continue
-            else:
-                # Our files could be just about anything after custom naming, but
-                # likely candidates are of the form
-                # foo.log.DATETIME_SUFFIX or foo.DATETIME_SUFFIX.log
-                if (not fileName.startswith(baseName) and fileName.endswith(e) and
-                        len(fileName) > (plen + 1) and not fileName[plen+1].isdigit()):
-                    continue
+        rolled = self.rolled_files()
+        excess = len(rolled) - self.backupCount
+        if self.backupCount <= 0 or excess <= 0:
+            return []
+        return [path for _, _, path in rolled[:excess]]
 
-            if fileName[:plen] == prefix:
-                suffix = fileName[plen:]
-                # See bpo-45628: The date/time suffix could be anywhere in the
-                # filename
-                parts = suffix.split('.')
-                for part in parts:
-                    if self.extMatch.match(part):
-                        result.append(os.path.join(dirName, fileName))
-                        break
-        if len(result) < self.backupCount:
-            result = []
-        else:
-            result.sort()
-            result = result[:len(result) - self.backupCount]
-        return result
+    def _prune(self):
+        try:
+            stale = self.getFilesToDelete()
+        except OSError:
+            return
+        for path in stale:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    def _report_failure(self, error):
+        # stderr rather than a log record: logging from here would re-enter the roll.
+        if not self._failure_reported:
+            self._failure_reported = True
+            sys.stderr.write(f'Bazarr could not roll {self.baseFilename} ({error}). Logging continues in that '
+                             f'file, and the roll is tried again at midnight or after another '
+                             f'{self.maxBytes} bytes.\n')
+
+    def roll_before_emptying(self):
+        """Roll the live file so emptying it keeps its records, unless it holds nothing new.
+
+        A file holding only the note the previous empty_log() wrote has nothing worth
+        a backup slot, and rolling it on every click would push a real day out each
+        time.
+        """
+        if self._emptied_size is not None and self._live_size() == self._emptied_size:
+            if self.stream:
+                self.stream.close()
+                self.stream = None
+            return
+        self.doRollover()
+
+    def note_emptied(self):
+        self._emptied_size = self._live_size()
+
+    def _live_size(self):
+        try:
+            return os.path.getsize(self.baseFilename)
+        except OSError:
+            return 0
+
+    def doRollover(self):
+        now = self._now()
+        if self.stream:
+            self.stream.close()
+            self.stream = None
+        # An empty file has nothing worth keeping, and rolling it would spend a
+        # backup slot, pushing the oldest real day out, on nothing.
+        if os.path.isfile(self.baseFilename) and os.path.getsize(self.baseFilename) > 0:
+            # A failure to roll must not cost the record that asked for the roll.
+            try:
+                self.rotate(self.baseFilename, self._next_rolled_name())
+            except OSError as error:
+                self._retry_size = self._live_size() + self.maxBytes
+                self._report_failure(error)
+            else:
+                self._retry_size = 0
+                self._failure_reported = False
+                self._emptied_size = None
+                self._prune()
+        if not self.delay:
+            self.stream = self._open()
+        # Only midnight moves the deadline; see the class docstring.
+        if now >= self.rolloverAt:
+            self.rolloverAt = self.computeRollover(now)

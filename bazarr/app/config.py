@@ -18,7 +18,8 @@ import platform
 
 from urllib.parse import quote_plus
 from utilities.binaries import BinaryNotFound, get_binary
-from literals import EXIT_VALIDATION_ERROR
+from literals import (EXIT_VALIDATION_ERROR, LOG_BACKUP_COUNT_DEFAULT, LOG_BACKUP_COUNT_MAX, LOG_BACKUP_COUNT_MIN,
+                      LOG_MAX_FILE_SIZE_MB_DEFAULT, LOG_MAX_FILE_SIZE_MB_MAX, LOG_MAX_FILE_SIZE_MB_MIN)
 from utilities.central import stop_bazarr
 from subliminal.cache import region
 from dynaconf import Dynaconf, Validator as OriginalValidator
@@ -49,6 +50,11 @@ def validate_ip_address(ip_string):
         return True
     except ValueError:
         return False
+
+def is_not_bool(value):
+    # is_type_of=int accepts True and False, and a form value of 'true' is saved as True.
+    return not isinstance(value, bool)
+
 
 def validate_tags(tags):
     if not tags:
@@ -324,6 +330,14 @@ validators = [
     # lift. Empty by default: socketio.server and apscheduler at DEBUG are most
     # of a debug-mode log, so asking for them back is opt-in.
     Validator('log.verbose_loggers', must_exist=True, default=[], is_type_of=list),
+    # The log folder's ceiling is max_file_size_mb * (backup_count + 1): the
+    # live file rolls at midnight or at this size, whichever comes first, and
+    # this many rolled files are kept. A backup count of 0 would mean "never
+    # delete" to the handler, so the floor is 1.
+    Validator('log.max_file_size_mb', must_exist=True, default=LOG_MAX_FILE_SIZE_MB_DEFAULT, is_type_of=int,
+              gte=LOG_MAX_FILE_SIZE_MB_MIN, lte=LOG_MAX_FILE_SIZE_MB_MAX, condition=is_not_bool),
+    Validator('log.backup_count', must_exist=True, default=LOG_BACKUP_COUNT_DEFAULT, is_type_of=int,
+              gte=LOG_BACKUP_COUNT_MIN, lte=LOG_BACKUP_COUNT_MAX, condition=is_not_bool),
 
     # auth section
     Validator('auth.apikey', must_exist=True, default=hexlify(os.urandom(16)).decode(), is_type_of=str),
@@ -1384,6 +1398,7 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
     ]
     _require_provider_order_for_custom_routing(settings_items)
     configure_debug = False
+    configure_log_rotation = False
     configure_captcha = False
     update_schedule = False
     sonarr_changed = False
@@ -1497,6 +1512,9 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
 
         if key == 'settings-general-debug':
             configure_debug = True
+
+        if key in ('settings-log-max_file_size_mb', 'settings-log-backup_count'):
+            configure_log_rotation = True
 
         if key == 'settings-general-hi_extension':
             os.environ["SZ_HI_EXTENSION"] = value or ""
@@ -1830,6 +1848,12 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
         if configure_debug:
             from .logger import configure_logging
             configure_logging(settings.general.debug or args.debug)
+
+        if configure_log_rotation:
+            # In place on the live handler, so the new ceiling holds from the
+            # next record rather than from the next restart.
+            from .logger import apply_log_rotation_settings
+            apply_log_rotation_settings()
 
         if configure_captcha:
             configure_captcha_func()

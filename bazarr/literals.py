@@ -21,6 +21,15 @@ FILE_LOG = 'bazarr.log'
 FILE_RESTART = 'bazarr.restart'
 FILE_STOP = 'bazarr.stop'
 
+# log rotation: defaults and inclusive bounds of log.max_file_size_mb and
+# log.backup_count, shared by the settings validators and the file handler
+LOG_MAX_FILE_SIZE_MB_DEFAULT = 32
+LOG_MAX_FILE_SIZE_MB_MIN = 1
+LOG_MAX_FILE_SIZE_MB_MAX = 1024
+LOG_BACKUP_COUNT_DEFAULT = 7
+LOG_BACKUP_COUNT_MIN = 1
+LOG_BACKUP_COUNT_MAX = 100
+
 # bazarr exit codes
 EXIT_NORMAL = 0
 EXIT_INTERRUPT = -100
