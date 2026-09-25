@@ -23,6 +23,7 @@ import SyncOutputCompareModal from "@/components/modals/SyncOutputCompareModal";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
 import SimpleTable from "@/components/tables/SimpleTable";
 import { filterSubtitleBy, toPython } from "@/utilities";
+import { basename } from "@/utilities/files";
 import { useProfileItemsToLanguages } from "@/utilities/languages";
 import {
   buildSubtitleLanguageKey,
@@ -592,7 +593,21 @@ const Table: FunctionComponent<Props> = ({
               </Text>
             );
           } else {
-            return <Text {...props}>{path}</Text>;
+            // Real file rows: show only the file name and reveal the full path
+            // in a hover tooltip. The .pathCell ellipsis still handles very long
+            // file names.
+            return (
+              <Tooltip
+                label={path}
+                multiline
+                w={480}
+                maw="90vw"
+                style={{ overflowWrap: "anywhere" }}
+                events={{ hover: true, focus: false, touch: true }}
+              >
+                <Text {...props}>{basename(path!)}</Text>
+              </Tooltip>
+            );
           }
         },
       },
