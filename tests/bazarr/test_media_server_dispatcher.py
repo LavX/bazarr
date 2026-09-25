@@ -385,6 +385,53 @@ def test_one_library_scan_covers_every_target_the_pass_already_held(dispatch, ki
     assert dispatcher.status(IDS[kind]) == {'pending': 0, 'state': 'requested', 'error_code': None}
 
 
+def test_a_library_scan_the_server_refused_does_not_cover_the_next_target():
+    """The coalescer recorded a library as scanned before the request was sent.
+    When that request failed, the next target in the same drain skipped its own
+    scan, reported requested and left the queue, though no scan was accepted."""
+    from media_servers import resolution
+    from media_servers.dispatcher import NativeConfiguration, RefreshDispatcher
+    from media_servers.http import MediaServerError
+    settings = native_settings()
+    silo = [snapshot for snapshot in native_snapshots(settings) if snapshot.kind == 'silo']
+    submitted = []
+
+    class Client:
+        REFRESH_STEPS = (resolution.LIBRARY,)
+
+        def __init__(self, *_args):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def get_libraries(self):
+            return [{"id": "7", "type": "movies", "paths": ["/media"]}]
+
+        def refresh_library(self, library_id, *, ensure_current, coalesce=None):
+            ensure_current()
+            if coalesce is not None and coalesce(library_id):
+                return {"status": "requested"}
+            submitted.append(library_id)
+            if len(submitted) == 1:
+                raise MediaServerError("request_rejected")
+            return {"status": "requested"}
+
+    dispatcher = RefreshDispatcher(NativeConfiguration(settings, snapshots=silo), client_factory=Client,
+                                   metadata_factory=lambda _event: None)
+    with dispatcher.condition:
+        for number in range(2):
+            dispatcher.notify(movie_event(video_path=f'/movies/{number}.mkv',
+                                          subtitle_path=f'/movies/{number}.en.srt'))
+    assert dispatcher.wait_idle(10)
+    assert submitted == ['7', '7'], 'the second target has to ask for its own scan'
+    assert dispatcher.status(IDS['silo']) == {
+        'pending': 1, 'state': 'unconfirmed', 'error_code': 'request_rejected'}
+
+
 def test_a_publication_that_arrived_after_a_scan_is_not_counted_as_covered(dispatch):
     """A recursive scan covers the files that were there when it was submitted.
     A subtitle written after that gets its own, or it waits for a scan nobody

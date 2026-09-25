@@ -112,8 +112,9 @@ def _reconcile_plex(session, settings):
 
     An account with nothing configured is not a failure: there is simply no
     destination yet, and the kind is stamped so its rows are dispatched. A
-    database error is, and leaves it unstamped and therefore blocked, which is
-    the same rule the other three follow.
+    database error is, and so is a new row whose owner id the config could not
+    save. Either leaves it unstamped and therefore blocked, which is the same
+    rule the other three follow.
     """
     from .plex_account import apply_plex_account
     try:
@@ -136,4 +137,4 @@ def _stamp_once(session, kind):
 def _persist():
     """Write the config, so a recorded owner id survives the restart."""
     from app.config import write_config
-    write_config()
+    return write_config()
