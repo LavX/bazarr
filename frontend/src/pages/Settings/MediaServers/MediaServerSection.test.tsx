@@ -273,6 +273,10 @@ it("disconnects the Plex account from its own card, which can then be deleted", 
     await screen.findByRole("region", { name: "Living room" }),
   );
   await userEvent.click(card.getByRole("button", { name: "Disconnect" }));
+  const confirm = within(
+    await screen.findByRole("dialog", { name: "Disconnect from Plex" }),
+  );
+  await userEvent.click(confirm.getByRole("button", { name: "Disconnect" }));
   expect(
     await card.findByRole("button", { name: "Delete" }),
   ).toBeInTheDocument();
@@ -283,6 +287,44 @@ it("disconnects the Plex account from its own card, which can then be deleted", 
   expect(
     card.queryByText(/Disconnect from Plex to remove it/),
   ).not.toBeInTheDocument();
+});
+
+it("asks before the account card signs out of Plex, and Cancel keeps it", async () => {
+  // Signing out turns use_plex off, which stops refreshes to every Plex
+  // server, the hand-added ones too. The button ran it on the first click.
+  let signedOut = false;
+  setup("plex", true, [
+    instance("plex", { account_owned: true, path_mappings: [] }),
+  ]);
+  server.use(
+    http.post("/api/plex/oauth/logout", () => {
+      signedOut = true;
+      return HttpResponse.json({ success: true });
+    }),
+  );
+  const card = within(
+    await screen.findByRole("region", { name: "Living room" }),
+  );
+  await userEvent.click(card.getByRole("button", { name: "Disconnect" }));
+
+  const dialog = await screen.findByRole("dialog", {
+    name: "Disconnect from Plex",
+  });
+  expect(
+    within(dialog).getByText(
+      "This signs you out of Plex and turns off Plex integration, which also stops refreshes to any Plex server you added by hand.",
+    ),
+  ).toBeInTheDocument();
+  expect(signedOut).toBe(false);
+
+  await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("dialog", { name: "Disconnect from Plex" }),
+    ).not.toBeInTheDocument(),
+  );
+  expect(signedOut).toBe(false);
+  expect(card.getByRole("button", { name: "Disconnect" })).toBeInTheDocument();
 });
 
 it("shows safe Test failures, resets on edits and disables probes when clearing a saved key", async () => {

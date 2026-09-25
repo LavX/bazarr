@@ -42,6 +42,22 @@ export function readConnectionTests(): Record<string, ConnectionTest> {
   }
 }
 
+/** What the Test said about one row. A row with no record reads as untested. */
+export function readConnectionTest(key: string): ConnectionTest {
+  return readConnectionTests()[key] ?? "untested";
+}
+
+/**
+ * What the Test said about a media server row. Plex has no Test in the wizard:
+ * its row comes from signing in and picking one of the account's servers, so
+ * it counts as passed, the same as on Finish.
+ */
+export function readMediaServerTest(kind: string, id: string): ConnectionTest {
+  return kind === "plex"
+    ? "passed"
+    : readConnectionTest(connectionTestKey("media-server", id));
+}
+
 export function recordConnectionTest(key: string, result: ConnectionTest) {
   writeOnboardingValue(
     STORAGE_NAME,

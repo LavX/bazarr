@@ -4,6 +4,7 @@ import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useSettingsMutation } from "@/apis/hooks";
 import type { MediaServerKind } from "@/apis/raw/mediaServers";
+import { recordConnectionTest } from "@/pages/Setup/connectionTests";
 import { OnboardingSelectionProvider } from "@/pages/Setup/useOnboardingSelection";
 import { customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
@@ -486,6 +487,26 @@ describe("MediaServerStep", () => {
     expect(
       screen.getByRole("button", { name: /^disconnect$/i }),
     ).toBeInTheDocument();
+  });
+
+  // Back lands on this picker, and its footer counted every saved server as
+  // connected while Finish said the Test failed or never ran.
+  it("counts a server as connected only once its Test passed", async () => {
+    setInstances({
+      emby: [row("emby", "Living room", "row-1")],
+      jellyfin: [
+        row("jellyfin", "Attic", "jf-1"),
+        row("jellyfin", "Den", "jf-2"),
+      ],
+    });
+    recordConnectionTest("media-server:jf-1", "passed");
+    recordConnectionTest("media-server:jf-2", "failed");
+    withSelection(<MediaServerStep onNext={onNext} />);
+
+    expect(await screen.findByText("1 saved")).toBeInTheDocument();
+    expect(await screen.findByText("1 connected, 1 saved")).toBeInTheDocument();
+    expect(screen.getByText("Not tested")).toBeInTheDocument();
+    expect(screen.getByText("Test failed")).toBeInTheDocument();
   });
 
   it("Disconnect asks first, then deletes the row and clears the switch", async () => {

@@ -203,7 +203,9 @@ describe("media server selection", () => {
     ).toBeInTheDocument();
   });
 
-  it("saves a server, flips one switch, and shows it connected on the picker", async () => {
+  // Saving never waits for a Test, so Back used to call a server saved with a
+  // wrong key "Connected" while Finish said the connection was not tested.
+  it("saves a server, flips one switch, and shows it saved on the picker", async () => {
     const user = userEvent.setup();
     customRender(<OnboardingWizardView />);
 
@@ -234,13 +236,47 @@ describe("media server selection", () => {
 
     await user.click(screen.getByRole("button", { name: /^back$/i }));
     await screen.findByRole("heading", { name: /^media servers$/i });
-    expect(await screen.findByText(/^connected$/i)).toBeInTheDocument();
+    expect(await screen.findByText("Not tested")).toBeInTheDocument();
+    expect(screen.getByText("1 saved")).toBeInTheDocument();
+    expect(screen.queryByText(/^connected$/i)).toBeNull();
     const checkbox = screen.getByRole("checkbox", { name: /^Jellyfin$/ });
     await waitFor(() => expect(checkbox).toBeChecked());
     expect(checkbox).toBeDisabled();
     expect(
       screen.getByRole("button", { name: /^disconnect$/i }),
     ).toBeInTheDocument();
+  });
+
+  it("calls a server connected on the picker once its Test passed", async () => {
+    server.use(
+      http.post("/api/system/media-server-instances/probe", () =>
+        HttpResponse.json({ success: true, server_name: "Attic" }),
+      ),
+    );
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+
+    await screen.findByRole("heading", { name: /^media servers$/i });
+    await user.click(screen.getByRole("checkbox", { name: /^Jellyfin$/ }));
+    await user.click(screen.getByRole("button", { name: /set up 1 server/i }));
+    await screen.findByRole("heading", { name: /^jellyfin$/i });
+
+    await user.type(
+      screen.getByLabelText(/server url/i),
+      "http://10.0.0.9:8096",
+    );
+    await user.type(screen.getByLabelText(/api key/i), "jelly-key");
+    await user.click(screen.getByRole("button", { name: "Test" }));
+    await screen.findByText(/connected to attic/i);
+    await user.click(screen.getByRole("button", { name: /connect jellyfin/i }));
+
+    expect(
+      await screen.findByRole("heading", { name: /^seerr$/i }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^back$/i }));
+    await screen.findByRole("heading", { name: /^media servers$/i });
+    expect(await screen.findByText(/^connected$/i)).toBeInTheDocument();
+    expect(screen.getByText("1 connected")).toBeInTheDocument();
   });
 
   it("names a refused save instead of advancing as if it landed", async () => {

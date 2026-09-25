@@ -8,6 +8,7 @@ import type {
   MediaServerInstance,
   MediaServerKind,
 } from "@/apis/raw/mediaServers";
+import { recordConnectionTest } from "@/pages/Setup/connectionTests";
 import { customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import ConnectedServerRow from "./ConnectedServerRow";
@@ -51,6 +52,59 @@ async function disconnect(user: ReturnType<typeof userEvent.setup>) {
 describe("ConnectedServerRow", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
+  });
+
+  // Back lands on this row, and it called every saved server "Connected"
+  // while Finish, one screen on, said the Test failed or never ran. Both read
+  // the same record now.
+  it.each([
+    ["passed", "Connected"],
+    ["failed", "Test failed"],
+    ["untested", "Not tested"],
+  ] as const)(
+    "says what Finish will say about a server whose Test %s",
+    (tested, label) => {
+      recordConnectionTest("media-server:emby-1", tested);
+
+      customRender(
+        <ConnectedServerRow
+          instance={row("emby", "Living room", "emby-1")}
+          kind="emby"
+          last
+          onDisconnected={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByText(label)).toBeInTheDocument();
+    },
+  );
+
+  it("does not call a server connected when no Test was recorded", () => {
+    customRender(
+      <ConnectedServerRow
+        instance={row("jellyfin", "Attic", "jf-1")}
+        kind="jellyfin"
+        last
+        onDisconnected={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Not tested")).toBeInTheDocument();
+    expect(screen.queryByText("Connected")).toBeNull();
+  });
+
+  it("keeps calling Plex connected, since the wizard has no Test for it", () => {
+    customRender(
+      <ConnectedServerRow
+        instance={row("plex", "Plex", "plex-1")}
+        kind="plex"
+        last
+        onDisconnected={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Connected")).toBeInTheDocument();
   });
 
   it("says so when the switch the Plex sign-out cleared cannot be put back", async () => {

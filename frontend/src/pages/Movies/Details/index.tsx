@@ -185,7 +185,7 @@ const MovieDetailView: FunctionComponent = () => {
           active={profile !== undefined}
           onDrop={onDrop}
         />
-        <Toolbox>
+        <Toolbox wrapOnPhone>
           <Group gap="xs">
             <Toolbox.Button
               icon={faSync}

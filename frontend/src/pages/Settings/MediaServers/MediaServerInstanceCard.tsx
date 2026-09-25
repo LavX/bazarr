@@ -15,6 +15,7 @@ import {
 } from "@/apis/hooks/mediaServers";
 import { usePlexLogoutMutation } from "@/apis/hooks/plex";
 import type { MediaServerInstance } from "@/apis/raw/mediaServers";
+import { useModals } from "@/modules/modals";
 import MediaServerRefreshStatus from "./MediaServerRefreshStatus";
 import styles from "@/pages/Settings/Connections/Connections.module.scss";
 
@@ -43,6 +44,22 @@ export default function MediaServerInstanceCard({
   // account on a legacy API key or token had no way to clear the credential
   // that keeps this card from being deleted.
   const disconnect = usePlexLogoutMutation();
+  const modals = useModals();
+  // Signing out also turns use_plex off, which silences every Plex server,
+  // including the ones added by hand, so it asks first.
+  const confirmDisconnect = () =>
+    modals.openConfirmModal({
+      title: "Disconnect from Plex",
+      children: (
+        <Text size="sm">
+          This signs you out of Plex and turns off Plex integration, which also
+          stops refreshes to any Plex server you added by hand.
+        </Text>
+      ),
+      labels: { confirm: "Disconnect", cancel: "Cancel" },
+      confirmProps: { color: "red" },
+      onConfirm: () => disconnect.mutate(),
+    });
   const { reset } = test;
   useEffect(() => reset(), [instance, reset]);
   return (
@@ -110,7 +127,7 @@ export default function MediaServerInstanceCard({
                 variant="subtle"
                 color="red"
                 loading={disconnect.isPending}
-                onClick={() => disconnect.mutate()}
+                onClick={confirmDisconnect}
               >
                 Disconnect
               </Button>

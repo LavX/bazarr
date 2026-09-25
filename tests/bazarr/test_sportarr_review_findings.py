@@ -797,10 +797,11 @@ def _operational(orig):
     return OperationalError('SQL', {}, orig)
 
 
-# psycopg 3, which this project installs, spells it sqlstate; psycopg 2 called
-# it pgcode. Both are parametrized because reading only one of them classifies
-# every real lock refusal on the other driver as a database fault, which is a
-# silent failure: the attribute is absent rather than wrong.
+# psycopg 2, which the image ships, calls it pgcode; psycopg 3, which the CI
+# Postgres suites install, spells it sqlstate. Both are parametrized because
+# reading only one of them classifies every real lock refusal on the other
+# driver as a database fault, which is a silent failure: the attribute is
+# absent rather than wrong.
 @pytest.mark.parametrize('attribute', ['sqlstate', 'pgcode'])
 @pytest.mark.parametrize('state,contention', [
     ('55P03', True),    # NOWAIT lock this boundary asked for and could not take
