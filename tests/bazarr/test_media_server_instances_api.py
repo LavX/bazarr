@@ -268,9 +268,9 @@ def test_refresh_libraries_is_authenticated_and_reports_what_it_asked_for(instan
     assert instance_api.post(path).status_code == 401
     assert instance_api.post(ROOT + '/1/refresh-libraries', headers=HEADERS).status_code == 404
 
-    monkeypatch.setattr(libraries, 'refresh_libraries', lambda instance_id: 4)
+    monkeypatch.setattr(libraries, 'refresh_libraries', lambda instance_id: {'requested': 4, 'failed': 1})
     response = instance_api.post(path, headers=HEADERS)
-    assert response.status_code == 200 and response.json == {'requested': 4}
+    assert response.status_code == 200 and response.json == {'requested': 4, 'failed': 1}
 
     def refuse(_instance_id):
         raise MediaServerError('library_missing')

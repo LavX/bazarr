@@ -56,7 +56,9 @@ configure_captcha_func()
 configure_logging(settings.general.debug or args.debug)
 import logging  # noqa: E402
 
-# restore backup if required
+# restore backup if required. A restore that leaves the database unfit to run
+# on (pg_restore failing partway, or the restored configuration not going in)
+# stops the start from inside, and so does a dump parked by an earlier failure.
 restore_from_backup()
 
 

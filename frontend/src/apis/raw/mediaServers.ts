@@ -340,10 +340,14 @@ class MediaServersApi extends BaseApi {
     return safeRequest(async () => {
       const { data } = await this.postRaw<{
         requested: number;
+        failed?: number;
         error_code?: string;
       }>(`${itemPath(id)}/refresh-libraries`, {});
       if (!data || !Number.isInteger(data.requested)) throw new Error();
-      return { requested: data.requested };
+      return {
+        requested: data.requested,
+        failed: Number.isInteger(data.failed) ? (data.failed as number) : 0,
+      };
     }, "Could not refresh libraries");
   }
 

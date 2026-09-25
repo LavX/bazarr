@@ -52,6 +52,13 @@ class ProviderHubStopped(Exception):
     """Stop was pressed, and the action ended at a step boundary with nothing recorded."""
 
 
+class ProviderHubSettingsError(RuntimeError):
+    """Raised when Bazarr's enabled_providers could not be saved for a Provider Hub action."""
+
+
+ENABLED_PROVIDERS_NOT_SAVED = "the enabled providers list could not be saved to the configuration file"
+
+
 SECRET_PLACEHOLDER = "********"
 _VERSION_TOKEN_RE = re.compile(r"\d+|[A-Za-z]+")
 _SEMVER_RE = re.compile(
@@ -86,8 +93,11 @@ def _bazarr_enabled_providers() -> list[str]:
 def _set_bazarr_provider_enabled(provider_id: str, enabled: bool) -> bool:
     """Add ``provider_id`` to (or remove it from) Bazarr's enabled_providers.
 
-    Returns True when the on-disk config changed. Logs and swallows
-    failures so a hub action never aborts on a settings hiccup.
+    Returns True when the list holds the requested state on disk, whether
+    this call changed it or it already did. Returns False when the change
+    could not be saved, with the live list put back as it was: a change that
+    reached no file would make the provider look enabled, or removed, until
+    the next restart quietly undid it. Callers report that as a failure.
 
     The read, the edit and the write are one critical section. Installing
     several providers at once reaches this from several threads: the venv
@@ -99,10 +109,15 @@ def _set_bazarr_provider_enabled(provider_id: str, enabled: bool) -> bool:
     vanishes. CONFIG_LOCK is reentrant, so the write_config below still
     takes it on the same thread.
     """
+    import logging
+
     try:
         from app.config import settings, write_config
         from discover.metadata import CONFIG_LOCK
     except Exception:
+        logging.getLogger(__name__).exception(
+            "Failed to sync enabled_providers for %s", provider_id
+        )
         return False
     with CONFIG_LOCK:
         current = list(_bazarr_enabled_providers())
@@ -111,17 +126,20 @@ def _set_bazarr_provider_enabled(provider_id: str, enabled: bool) -> bool:
         elif not enabled and provider_id in current:
             current = [item for item in current if item != provider_id]
         else:
-            return False
+            return True
+        previous = settings.general.enabled_providers
         try:
             settings.general.enabled_providers = current
-            write_config()
-            return True
+            saved = write_config()
         except Exception:
-            import logging
             logging.getLogger(__name__).exception(
                 "Failed to sync enabled_providers for %s", provider_id
             )
+            saved = False
+        if saved is not True:
+            settings.general.enabled_providers = previous
             return False
+        return True
 
 
 def utcnow_iso() -> str:
@@ -855,7 +873,13 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
 
         if enabled is not None:
             provider["enabled"] = bool(enabled)
-            _set_bazarr_provider_enabled(provider_id, bool(enabled))
+            if not _set_bazarr_provider_enabled(provider_id, bool(enabled)):
+                # Raised inside the mutation, so the Hub state is not saved
+                # either and the whole update is refused, configuration included.
+                raise ProviderHubSettingsError(
+                    f"Could not {'enable' if enabled else 'disable'} {provider_id}: "
+                    f"{ENABLED_PROVIDERS_NOT_SAVED}"
+                )
 
         if config is not None:
             secret_fields = _manifest_secret_fields(provider)
@@ -1486,10 +1510,15 @@ def _stage_validated(
             return dict(installation)
 
         installation = mutate_state(record_staged_install)
-        if not is_update:
+        if not is_update and not _set_bazarr_provider_enabled(validated.provider_id, True):
             # First install: opt the provider into Bazarr's enabled_providers so
             # the new plugin is search-eligible without a separate UI toggle.
-            _set_bazarr_provider_enabled(validated.provider_id, True)
+            # When that cannot be saved the install is staged but disabled,
+            # and saying so beats reporting a provider that will not search.
+            raise ProviderHubSettingsError(
+                f"it was staged but could not be enabled: {ENABLED_PROVIDERS_NOT_SAVED}. "
+                "Enable it once the configuration can be written"
+            )
         if is_update:
             message = (
                 f"Staged update {existing_version} -> {validated.version} "
@@ -1711,6 +1740,12 @@ def remove_installation(provider_id: str) -> bool:
         target_name=target_name,
         from_version=active_version,
     ) as job:
+        # Disabled first: once the removal is staged, a list that still names
+        # the provider after the restart would bring it back, and a failure
+        # here leaves nothing changed.
+        if not _set_bazarr_provider_enabled(provider_id, False):
+            raise ProviderHubSettingsError(ENABLED_PROVIDERS_NOT_SAVED)
+
         def remove_or_stage(state: dict[str, Any]) -> str:
             installations = state.setdefault("installations", {})
             item = installations.get(provider_id)
@@ -1732,7 +1767,6 @@ def remove_installation(provider_id: str) -> bool:
         if result == "missing":
             job.update(message=f"Plugin '{target_name}' not found")
             return False
-        _set_bazarr_provider_enabled(provider_id, False)
         from . import runtime_status
         runtime_status.clear(provider_id)
         if result == "removed_pending":

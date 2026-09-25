@@ -204,7 +204,7 @@ export default function DigitalReleases() {
         {failed && (
           <Alert color="yellow">
             {feed.settingsError
-              ? "Discover settings could not be loaded. Reload this page to retry."
+              ? "Discover setup could not be loaded. Reload this page to retry."
               : "Digital releases are temporarily unavailable. Retry with Refresh digital releases."}
           </Alert>
         )}

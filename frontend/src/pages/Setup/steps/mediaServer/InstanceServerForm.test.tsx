@@ -4,6 +4,7 @@ import { FC, useEffect, useRef } from "react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { readConnectionTests } from "@/pages/Setup/connectionTests";
 import { OnboardingSelectionProvider } from "@/pages/Setup/useOnboardingSelection";
 import { useOnboardingSelection } from "@/pages/Setup/useOnboardingSelection";
 import { customRender, screen, waitFor } from "@/tests";
@@ -32,12 +33,16 @@ const Harness: FC = () => {
   return <InstanceServerForm draft={draft} onNext={onNext} onBack={vi.fn()} />;
 };
 
-function stageBackend() {
+function stageBackend(probeSucceeds = true) {
   const asked: string[] = [];
   const created: Record<string, unknown>[] = [];
   server.use(
     http.post("/api/system/media-server-instances/probe", () =>
-      HttpResponse.json({ success: true, server_name: "Attic" }),
+      HttpResponse.json(
+        probeSucceeds
+          ? { success: true, server_name: "Attic" }
+          : { success: false, error_code: "unauthorized" },
+      ),
     ),
     http.post(
       "/api/system/media-server-instances/probe-libraries",
@@ -145,5 +150,46 @@ describe("InstanceServerForm", () => {
     await waitFor(() => expect(created).toHaveLength(1));
     expect(created[0].url).toBe("http://a.example2");
     expect(created[0].options).toEqual({});
+  });
+
+  // Saving does not wait for a Test, so Finish has to be told whether one
+  // passed. It used to call every saved server connected, a wrong key too.
+  async function connect(test: boolean) {
+    const user = userEvent.setup();
+    customRender(
+      <OnboardingSelectionProvider>
+        <Harness />
+      </OnboardingSelectionProvider>,
+    );
+    await user.type(
+      await screen.findByLabelText("Server URL"),
+      "http://a.example",
+    );
+    await user.type(screen.getByLabelText("API Key"), "key-a");
+    if (test) {
+      await user.click(screen.getByRole("button", { name: "Test" }));
+      await screen.findByText(/Connected to Attic|Connection test failed/);
+    }
+    await user.click(screen.getByRole("button", { name: /connect jellyfin/i }));
+    await waitFor(() => expect(onNext).toHaveBeenCalled());
+  }
+
+  it("tells Finish a server saved without a Test was never tested", async () => {
+    stageBackend();
+    await connect(false);
+    expect(readConnectionTests()).toEqual({ "media-server:row-1": "untested" });
+  });
+
+  it("tells Finish when the Test passed against the saved values", async () => {
+    stageBackend();
+    await connect(true);
+    expect(readConnectionTests()).toEqual({ "media-server:row-1": "passed" });
+  });
+
+  it("still saves after a failed Test, and tells Finish it failed", async () => {
+    const { created } = stageBackend(false);
+    await connect(true);
+    expect(created).toHaveLength(1);
+    expect(readConnectionTests()).toEqual({ "media-server:row-1": "failed" });
   });
 });
