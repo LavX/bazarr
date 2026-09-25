@@ -23,15 +23,21 @@ def sports_manually_download_subtitle(event_id, candidate, arr_instance_id=None,
     if not job_id:
         return jobs_queue.add_job_from_function("Manually downloading Subtitles", is_progress=False)
 
-    from app.jobs_queue import JobFailed
+    from app.jobs_queue import JobCancelled, JobFailed
     from sportarr import library
     from sportarr.subtitles import manual_download_sports
+    from sportarr.workflows import SportsJobSignal
 
     row = database.get(TableSportsEvents, event_id)
     title = getattr(row, "title", None) or f"sports event {event_id}"
     jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Manually downloading Subtitles for {title}")
     try:
-        result = manual_download_sports(event_id, candidate, arr_instance_id)
+        # The job's own signal, so Stop reaches the download and its
+        # publication instead of only flagging a job that never looks.
+        result = manual_download_sports(event_id, candidate, arr_instance_id,
+                                        cancel=SportsJobSignal(arr_instance_id, job_id))
+    except JobCancelled:
+        raise
     except Exception as error:
         # manual_download_subtitle answers with the failing stage as a
         # sentence and the sports layer re-raises it as the exception's
