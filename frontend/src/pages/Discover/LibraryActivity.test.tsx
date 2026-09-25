@@ -129,3 +129,34 @@ it("renders a summary that arrived without its arrivals status or onboarding", a
     await screen.findByText("Library activity is temporarily unavailable."),
   ).toBeInTheDocument();
 });
+
+it("links a sports arrival to its league on the instance that owns it", async () => {
+  served = summary({
+    arrivals: [
+      {
+        kind: "sports",
+        event_id: "sports:1",
+        status: "success",
+        action: 1,
+        title: "Italian Grand Prix",
+        poster_url: null,
+        backdrop_url: null,
+        library_id: 10,
+        season: 2026,
+        episode: 14,
+        episode_title: null,
+        language: "hu",
+        languages: ["hu"],
+        provider: "example",
+        arr_instance_id: 3,
+        instance_name: "Sports",
+        timestamp: "2026-09-01T11:59:00+00:00",
+      },
+    ],
+  });
+  render();
+  // Read as a series, it linked to a show page that has nothing to do with it.
+  expect(
+    await screen.findByRole("link", { name: /Italian Grand Prix/ }),
+  ).toHaveAttribute("href", "/sports/10?instance=3");
+});

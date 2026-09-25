@@ -77,6 +77,18 @@ def no_external_status(monkeypatch):
     monkeypatch.setattr(get_providers, "tp", {}, raising=False)
 
 
+@pytest.fixture
+def libraries_on(monkeypatch):
+    """Sonarr and Radarr switched on.
+
+    Their rows count only while the integration is on and an enabled instance
+    owns them, so a case about what those rows add up to has to say so.
+    """
+    from app.config import settings
+    monkeypatch.setattr(settings.general, "use_sonarr", True)
+    monkeypatch.setattr(settings.general, "use_radarr", True)
+
+
 def add_instance(session, instance_id, kind="sonarr", name="Main", enabled=1, is_default=1):
     from app.database import TableArrInstances
     session.add(TableArrInstances(id=instance_id, kind=kind, stable_key=f"{kind}-{instance_id}",
@@ -184,13 +196,15 @@ def _started_signalr(sonarr_connected=False, radarr_connected=False, extras=()):
         _radarr_signalr_clients=[])
 
 
-def test_summary_reports_running_queued_wanted_and_successful_arrivals(summary_database, quiet_queue):
+def test_summary_reports_running_queued_wanted_and_successful_arrivals(summary_database, quiet_queue,
+                                                                        libraries_on):
     from discover.summary import get_summary, QUERY_BUDGET
     session = summary_database.session
     add_instance(session, 1)
+    add_instance(session, 2, kind="radarr", name="Films")
     add_show(session, 100, 1)
     add_episode(session, 101, 100, 1, missing="['en', 'hu:forced']")
-    add_movie(session, 200, 1, missing="['de']")
+    add_movie(session, 200, 2, missing="['de']")
     add_episode_history(session, 1, 1, 101, 100, 1, language="en")
     session.commit()
 
@@ -219,14 +233,15 @@ def test_summary_reports_running_queued_wanted_and_successful_arrivals(summary_d
     assert summary["state"] == "busy"
 
 
-def test_wanted_counts_required_languages_not_titles(summary_database, quiet_queue):
+def test_wanted_counts_required_languages_not_titles(summary_database, quiet_queue, libraries_on):
     from discover.summary import get_summary
     session = summary_database.session
     add_instance(session, 1)
+    add_instance(session, 2, kind="radarr", name="Films")
     add_show(session, 100, 1)
     add_episode(session, 101, 100, 1, missing="['en', 'hu:forced', 'de:hi']")
     add_episode(session, 102, 100, 1, missing="[]", upstream=21, episode=2)
-    add_movie(session, 200, 1, missing="['en']")
+    add_movie(session, 200, 2, missing="['en']")
     session.commit()
 
     wanted = get_summary()["wanted"]
@@ -238,15 +253,17 @@ def test_wanted_counts_required_languages_not_titles(summary_database, quiet_que
     assert wanted["availability"] == "available"
 
 
-def test_wanted_qualifies_uncomputed_and_malformed_demand(summary_database, quiet_queue):
+def test_wanted_qualifies_uncomputed_and_malformed_demand(summary_database, quiet_queue,
+                                                         libraries_on):
     from discover.summary import get_summary
     session = summary_database.session
     add_instance(session, 1)
+    add_instance(session, 2, kind="radarr", name="Films")
     add_show(session, 100, 1)
     add_episode(session, 101, 100, 1, missing="['en']")
     add_episode(session, 102, 100, 1, missing=None, upstream=21, episode=2)
-    add_movie(session, 200, 1, missing="{'en': 1}")
-    add_movie(session, 201, 1, missing="['en', 'en']", upstream=31, title="Duplicated")
+    add_movie(session, 200, 2, missing="{'en': 1}")
+    add_movie(session, 201, 2, missing="['en', 'en']", upstream=31, title="Duplicated")
     session.commit()
 
     wanted = get_summary()["wanted"]
@@ -259,7 +276,7 @@ def test_wanted_qualifies_uncomputed_and_malformed_demand(summary_database, quie
 
 
 def test_wanted_applies_existing_exclusions_and_reports_owners(summary_database, quiet_queue,
-                                                               monkeypatch):
+                                                               monkeypatch, libraries_on):
     from app.config import settings
     from discover.summary import get_summary
     session = summary_database.session
@@ -512,7 +529,7 @@ def test_library_counts_keep_rows_that_predate_the_instance_migration(summary_da
 
 
 def test_media_items_and_language_requirements_are_published_separately(
-        summary_database, quiet_queue):
+        summary_database, quiet_queue, libraries_on):
     """One item needing two languages is one item and two requirements.
 
     Publishing only the requirement total let a reader be told "176 episodes"
@@ -521,10 +538,11 @@ def test_media_items_and_language_requirements_are_published_separately(
     from discover.summary import get_summary
     session = summary_database.session
     add_instance(session, 1, name="Main")
+    add_instance(session, 2, kind="radarr", name="Films")
     add_show(session, 100, 1)
     add_episode(session, 101, 100, 1, missing="['en', 'hu']")
     add_episode(session, 102, 100, 1, upstream=21, missing="['en']")
-    add_movie(session, 200, 1, missing="['en', 'hu', 'de']")
+    add_movie(session, 200, 2, missing="['en', 'hu', 'de']")
     session.commit()
 
     wanted = get_summary()["wanted"]
@@ -544,6 +562,130 @@ def test_sports_are_absent_not_zero_when_sportarr_is_off(summary_database, quiet
     library = get_summary()["library"]
     assert library["availability"] == "available"
     assert "sports_events" not in library and "sports_leagues" not in library
+
+
+def add_sports_event(session, owner, league_id, event_id, title="Italian Grand Prix"):
+    """One league and one event under it, owned by one Sportarr instance."""
+    from app.database import TableSportsEvents, TableSportsLeagues
+    session.add(TableSportsLeagues(id=league_id, arr_instance_id=owner, sportarrLeagueId=league_id,
+                                   title="Formula 1"))
+    session.flush()
+    session.add(TableSportsEvents(id=event_id, arr_instance_id=owner, league_id=league_id,
+                                  sportarrEventId=event_id, file_id=event_id, season=2026,
+                                  episode=14, path=f"/sports/{event_id}.mkv", title=title))
+    session.flush()
+
+
+def add_sports_history(session, history_id, action, event_id, league_id, owner, language="hu",
+                       minutes=1):
+    from app.database import TableHistorySports
+    session.add(TableHistorySports(id=history_id, arr_instance_id=owner, league_id=league_id,
+                                   event_id=event_id, action=action, description="Downloaded",
+                                   language=language, provider="example",
+                                   timestamp=EPOCH - dt.timedelta(minutes=minutes)))
+    session.flush()
+
+
+def test_sports_totals_follow_enabled_owners_and_join_the_fetched_total(summary_database,
+                                                                        quiet_queue, monkeypatch):
+    """A disabled Sportarr keeps its rows, and a sports download is a fetch."""
+    from app.config import settings
+    from discover.summary import get_summary
+    monkeypatch.setattr(settings.general, "use_sportarr", True)
+    session = summary_database.session
+    add_instance(session, 1, kind="sportarr", name="Sports")
+    add_instance(session, 2, kind="sportarr", name="Retired", enabled=0, is_default=0)
+    add_sports_event(session, 1, 10, 11)
+    add_sports_event(session, 2, 20, 21)
+    add_sports_history(session, 1, 1, 11, 10, 1)
+    # An upload is the reader's subtitle, not one this install went and found.
+    add_sports_history(session, 2, 4, 11, 10, 1)
+    session.commit()
+
+    library = get_summary()["library"]
+    assert (library["sports_leagues"], library["sports_events"]) == (1, 1)
+    assert library["subtitles_fetched"] == 1
+
+
+def test_a_sports_download_is_a_recent_arrival(summary_database, quiet_queue, monkeypatch):
+    """The feed read episode and movie history only, so a sports library stayed empty."""
+    from app.config import settings
+    from discover.summary import QUERY_BUDGET, get_summary
+    monkeypatch.setattr(settings.general, "use_sportarr", True)
+    session = summary_database.session
+    add_instance(session, 1, kind="sportarr", name="Sports")
+    add_instance(session, 2, kind="sportarr", name="Retired", enabled=0, is_default=0)
+    add_sports_event(session, 1, 10, 11)
+    add_sports_event(session, 2, 20, 21, title="Retired event")
+    add_sports_history(session, 1, 1, 11, 10, 1, language="hu", minutes=2)
+    add_sports_history(session, 2, 3, 11, 10, 1, language="en", minutes=3)
+    add_sports_history(session, 3, 1, 21, 20, 2, minutes=1)
+    session.commit()
+
+    summary, statements = counted(summary_database.engine, get_summary)
+    assert len(statements) <= QUERY_BUDGET
+    assert [(item["kind"], item["title"]) for item in summary["arrivals"]] == [
+        ("sports", "Italian Grand Prix")]
+    arrival = summary["arrivals"][0]
+    assert arrival["library_id"] == 10 and arrival["arr_instance_id"] == 1
+    assert (arrival["season"], arrival["episode"]) == (2026, 14)
+    assert arrival["languages"] == ["hu", "en"]
+    assert arrival["instance_name"] == "Sports"
+
+
+def test_wanted_counts_only_what_a_live_integration_owns(summary_database, quiet_queue,
+                                                         monkeypatch):
+    """With Sonarr off the hero still said episodes need subtitles.
+
+    It linked to a Wanted page the navigation hides, and a disabled Radarr's
+    films were counted the same way.
+    """
+    from app.config import settings
+    from discover.summary import get_summary
+    monkeypatch.setattr(settings.general, "use_sonarr", False)
+    monkeypatch.setattr(settings.general, "use_radarr", True)
+    session = summary_database.session
+    add_instance(session, 1, name="Main")
+    add_instance(session, 2, kind="radarr", name="Films")
+    add_instance(session, 3, kind="radarr", name="Retired", enabled=0, is_default=0)
+    add_show(session, 100, 1)
+    add_episode(session, 101, 100, 1, missing="['en']")
+    add_episode(session, 102, 100, 1, missing=None, upstream=21, episode=2)
+    add_movie(session, 200, 2, missing="['en']")
+    add_movie(session, 300, 3, missing="['en', 'hu']", upstream=31)
+    add_movie(session, 301, 3, missing=None, upstream=32)
+    session.commit()
+
+    wanted = get_summary()["wanted"]
+    assert (wanted["episode_media_count"], wanted["movie_media_count"]) == (0, 1)
+    assert wanted["requirements"] == 1
+    assert wanted["unknown_media_count"] == 0 and wanted["complete"] is True
+    assert [item["arr_instance_id"] for item in wanted["by_instance"]] == [2]
+
+
+def test_a_retired_instance_raises_no_path_warning(summary_database, quiet_queue, monkeypatch):
+    """Its last recorded root-folder check kept Discover degraded for good."""
+    from app.config import settings
+    from app.database import TableMoviesRootfolder, TableShowsRootfolder
+    from discover.summary import get_summary
+    monkeypatch.setattr(settings.general, "use_sonarr", True)
+    monkeypatch.setattr(settings.general, "use_radarr", False)
+    session = summary_database.session
+    add_instance(session, 1, name="Main")
+    add_instance(session, 2, name="Retired", enabled=0, is_default=0)
+    add_instance(session, 3, kind="radarr", name="Films")
+    session.add(TableShowsRootfolder(local_rootfolder_id=1, arr_instance_id=2,
+                                     upstream_rootfolder_id=1, id=1, accessible=0,
+                                     error="No such directory", path="/retired"))
+    session.add(TableMoviesRootfolder(local_rootfolder_id=1, arr_instance_id=3,
+                                      upstream_rootfolder_id=1, id=1, accessible=0,
+                                      error="No such directory", path="/films"))
+    session.commit()
+
+    summary = get_summary()
+    assert [item for item in summary["attention"]["items"]
+            if item["capability"] == "library_paths"] == []
+    assert summary["state"] == "quiet"
 
 
 def test_a_library_that_cannot_be_counted_never_reports_zero(summary_database, quiet_queue,
@@ -711,7 +853,7 @@ def test_an_unavailable_component_stays_unknown_and_isolates_the_rest(summary_da
 
 
 def test_a_stale_cached_aggregate_keeps_its_own_observation_time(summary_database, quiet_queue,
-                                                                 monkeypatch):
+                                                                 monkeypatch, libraries_on):
     from discover import summary as summary_module
     session = summary_database.session
     add_instance(session, 1)
@@ -878,7 +1020,8 @@ def test_late_and_out_of_order_observations_never_downgrade_fresher_data(summary
 
 
 def test_summary_endpoint_is_authenticated_and_independent_of_metadata(summary_database,
-                                                                       quiet_queue, monkeypatch):
+                                                                       quiet_queue, monkeypatch,
+                                                                       libraries_on):
     from app.config import settings
     from discover.summary import get_summary
     monkeypatch.setattr(settings.discover, "tmdb_access_token", "")
@@ -1056,7 +1199,7 @@ def test_a_half_resolved_history_row_is_not_an_exact_arrival(summary_database, q
 
 
 def test_a_budget_breach_keeps_the_last_good_aggregate_as_stale(summary_database, quiet_queue,
-                                                               monkeypatch):
+                                                               monkeypatch, libraries_on):
     """T11-M2. A transient breach must not discard a good reading."""
     from discover import summary as summary_module
     session = summary_database.session
@@ -1088,7 +1231,7 @@ def _autocommit(engine):
 
 
 def test_outstanding_requirements_are_read_under_the_application_isolation_level(
-        summary_database, quiet_queue, caplog):
+        summary_database, quiet_queue, caplog, libraries_on):
     """The application engine runs in AUTOCOMMIT on both backends.
 
     On PostgreSQL a streamed read declares a named server-side cursor, which
@@ -1101,9 +1244,10 @@ def test_outstanding_requirements_are_read_under_the_application_isolation_level
         "the fixture engine must match the application engine's AUTOCOMMIT mode"
     session = summary_database.session
     add_instance(session, 1)
+    add_instance(session, 2, kind="radarr", name="Films")
     add_show(session, 100, 1)
     add_episode(session, 101, 100, 1, missing="['en', 'hu']")
-    add_movie(session, 200, 1, missing="['en']")
+    add_movie(session, 200, 2, missing="['en']")
     session.commit()
 
     # Called directly, a failed read raises here instead of being cached as unknown.
@@ -1121,7 +1265,7 @@ def test_outstanding_requirements_are_read_under_the_application_isolation_level
 
 
 def test_the_group_budget_still_bounds_the_requirement_read(summary_database, quiet_queue,
-                                                            monkeypatch):
+                                                            monkeypatch, libraries_on):
     """The grouped read is bounded by a LIMIT, one row past the budget."""
     from discover import summary as summary_module
     session = summary_database.session
@@ -1148,7 +1292,8 @@ def test_the_group_budget_still_bounds_the_requirement_read(summary_database, qu
 
 def test_inaccessible_rootfolder_groups_are_read_in_a_deterministic_order(summary_database,
                                                                           quiet_queue,
-                                                                          monkeypatch):
+                                                                          monkeypatch,
+                                                                          libraries_on):
     """T11-M4. A bounded read without an order leaves the engine to choose."""
     from app.database import TableShowsRootfolder
     from discover import summary as summary_module
@@ -1166,10 +1311,11 @@ def test_inaccessible_rootfolder_groups_are_read_in_a_deterministic_order(summar
     # returned owners alone cannot prove the bound is deterministic. The
     # statement itself can: a LIMIT without an ORDER BY leaves the choice of
     # surviving rows to the engine, and that is what has to be absent.
+    instances = summary_module._instances()
     with summary_module._connection() as connection:
         groups, statements = counted(
             summary_database.engine,
-            lambda: summary_module._inaccessible_rootfolders(connection))
+            lambda: summary_module._inaccessible_rootfolders(connection, instances))
     assert [group["arr_instance_id"] for group in groups] == [1, 2, 3]
     assert len(statements) == 2
     for statement in statements:

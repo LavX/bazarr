@@ -1,10 +1,13 @@
 /* eslint-disable camelcase -- API fixture fields keep their transport names. */
 import { createMemoryRouter, RouterProvider } from "react-router";
+import { act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, expect, it } from "vitest";
+import queryClient from "@/apis/queries";
+import { QueryKeys } from "@/apis/queries/keys";
 import { AllProviders } from "@/providers";
-import { rawRender, screen, waitFor } from "@/tests";
+import { rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import WantedQueue from "./WantedQueue";
 
@@ -313,7 +316,45 @@ it("keeps the kinds that answered when another source fails", async () => {
     await screen.findByRole("heading", { name: "Episodes" }),
   ).toBeInTheDocument();
   expect(screen.getByText("Northern Light")).toBeInTheDocument();
-  expect(screen.queryByText(/could not be read/i)).toBeNull();
+  expect(screen.queryByText("The wanted list could not be read.")).toBeNull();
+  // Nor may the queue pass for complete: the films that could not be read are
+  // said to be unread, in their own group.
+  expect(
+    within(screen.getByRole("region", { name: "Movies" })).getByText(
+      "This list could not be read.",
+    ),
+  ).toBeInTheDocument();
+});
+
+it("stays on the page when the only source with rows fails", async () => {
+  episodes = [];
+  server.use(
+    http.get(
+      "/api/movies/wanted",
+      () => new HttpResponse(null, { status: 500 }),
+    ),
+  );
+  render();
+  // An empty Sonarr beside an unreadable Radarr is not "nothing missing".
+  expect(
+    await screen.findByText("This list could not be read."),
+  ).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Movies" })).toBeInTheDocument();
+});
+
+it("drops a library's rows once it is switched off", async () => {
+  render();
+  expect(await screen.findByText("Child of God")).toBeInTheDocument();
+  connections = { ...connections, use_radarr: false };
+  await act(async () => {
+    await queryClient.invalidateQueries({
+      queryKey: [QueryKeys.System, QueryKeys.Settings],
+    });
+  });
+  // The query stops, but its last answer stays cached.
+  await waitFor(() => expect(screen.queryByText("Child of God")).toBeNull());
+  expect(screen.queryByRole("heading", { name: "Movies" })).toBeNull();
+  expect(screen.getByText("Northern Light")).toBeInTheDocument();
 });
 
 it("adds a sports group only where Sportarr is configured", async () => {
