@@ -338,12 +338,14 @@ def upgradable_history_ids(session, history_ids):
     from subtitles.upgrade import (
         get_queries_condition_parameters,
         _language_still_desired,
+        _ai_translated_subtitles_are_upgrade_candidates,
     )
     from sportarr.identity import resolve_event_in_session
 
     if not settings.general.upgrade_subs or not history_ids:
         return set()
     minimum_timestamp, actions = get_queries_condition_parameters()
+    allow_high_score_ai = _ai_translated_subtitles_are_upgrade_candidates()
     rows = session.execute(
         select(TableHistorySports)
         .join(TableArrInstances,
@@ -361,12 +363,17 @@ def upgradable_history_ids(session, history_ids):
     for row in rows:
         if latest.get((row.arr_instance_id, row.event_id, row.language)) != row.id:
             continue
-        if (row.action not in actions
-                or not row.timestamp
-                or row.timestamp <= minimum_timestamp
-                or (row.score is None and row.action != 6)
-                or (row.score or 0) >= (row.score_out_of or 180) - 3
-                or not row.artifact):
+        if (
+            row.action not in actions
+            or not row.timestamp
+            or row.timestamp <= minimum_timestamp
+            or (row.score is None and row.action != 6)
+            or (
+                (row.score or 0) >= (row.score_out_of or 180) - 3
+                and not (allow_high_score_ai and row.ai_translated is True)
+            )
+            or not row.artifact
+        ):
             continue
         try:
             context = resolve_event_in_session(session, row.event_id, row.arr_instance_id)
@@ -384,6 +391,7 @@ def upgrade_rows(session, arr_instance_id=None, job_id=None, *, event_ids=None, 
     from subtitles.upgrade import (
         get_queries_condition_parameters,
         _language_still_desired,
+        _ai_translated_subtitles_are_upgrade_candidates,
     )
     from sportarr.artifacts import capture_artifact
     from sportarr.subtitles import candidate_signature
@@ -391,6 +399,7 @@ def upgrade_rows(session, arr_instance_id=None, job_id=None, *, event_ids=None, 
 
     if not settings.general.upgrade_subs:
         return []
+    allow_high_score_ai = _ai_translated_subtitles_are_upgrade_candidates()
     if arr_instance_id is not None:
         require_sportarr(session, arr_instance_id)
     minimum_timestamp, actions = get_queries_condition_parameters()
@@ -425,7 +434,10 @@ def upgrade_rows(session, arr_instance_id=None, job_id=None, *, event_ids=None, 
             or not row.timestamp
             or row.timestamp <= minimum_timestamp
             or (row.score is None and row.action != 6)
-            or (row.score or 0) >= (row.score_out_of or 180) - 3
+            or (
+                (row.score or 0) >= (row.score_out_of or 180) - 3
+                and not (allow_high_score_ai and row.ai_translated is True)
+            )
             or not row.artifact
         ):
             continue

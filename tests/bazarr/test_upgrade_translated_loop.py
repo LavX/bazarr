@@ -153,8 +153,8 @@ class _FakeProvider:
     """A provider that keeps serving one listing, the way OpenSubtitles did.
 
     The shipped search only accepts a listing whose raw score reaches the
-    minimum the caller set, and the download path raises that minimum to
-    ``int(forced_minimum_score) + 1`` (subtitles/download.py). The bar the
+    minimum the caller set. The upgrade path raises the stored score once before
+    passing ``forced_minimum_score`` to subtitles/download.py. The bar the
     upgrade hands down is therefore the whole question: answer with the listing
     whenever it reaches the bar, and a repeat pass that fetches it is real.
     """
@@ -165,7 +165,7 @@ class _FakeProvider:
         self.bars = []
 
     def __call__(self, *args, **kwargs):
-        bar = int(kwargs.get("forced_minimum_score") or 0) + 1
+        bar = int(kwargs.get("forced_minimum_score") or 0)
         self.bars.append(bar)
         if self.listing_score < bar:
             return []
@@ -286,7 +286,7 @@ def test_the_same_listing_is_not_downloaded_twice_for_a_movie(upgrade_db, monkey
 
     upgrade.upgrade_movies_subtitles(job_id="job-1")
 
-    assert provider.bars == [TRANSLATED_SCORE + 2], \
+    assert provider.bars == [TRANSLATED_SCORE + 1], \
         "the translation is the baseline and the search runs against it"
     assert len(notifications) == 1, "the first replacement is the user visible event"
 
@@ -300,7 +300,7 @@ def test_the_same_listing_is_not_downloaded_twice_for_a_movie(upgrade_db, monkey
     upgrade.upgrade_movies_subtitles(job_id="job-1")
 
     assert notifications == [], "the same listing must not be downloaded again"
-    assert provider.bars[1:] == [LISTING_SCORE + 2], \
+    assert provider.bars[1:] == [LISTING_SCORE + 1], \
         "the provider row is the baseline now, and its bar is above the listing"
 
 
@@ -372,6 +372,196 @@ def test_a_replaced_translation_is_not_the_episode_upgrade_baseline(upgrade_db):
     )
 
     assert get_upgradable_episode_subtitles() == {202: None}
+
+
+@pytest.mark.parametrize("media", ["episode", "movie"])
+@pytest.mark.parametrize(
+    "ai_translated,score_offset,expected",
+    [
+        (True, 1, True),
+        (True, 0, True),
+        (True, -42, True),
+        (False, 1, False),
+        (None, 1, False),
+    ],
+)
+def test_ai_provider_row_inside_upgrade_window_is_an_upgrade_candidate(
+        upgrade_db, media, ai_translated, score_offset, expected, monkeypatch):
+    """With a positive penalty, AI rows remain candidates at and above max."""
+    from subtitles import upgrade
+
+    monkeypatch.setattr(upgrade.settings.general, "ai_translated_score_penalty", 1, raising=False)
+    from subtitles.upgrade import (
+        get_upgradable_episode_subtitles,
+        get_upgradable_movies_subtitles,
+    )
+
+    now = datetime.now()
+    if media == "movie":
+        _seed_movie(upgrade_db, '[["nl", "/movies/roofman/roofman.mkv.nl.srt", 4321]]')
+        _movie_row(
+            upgrade_db, id=301, action=1, language="nl", provider="subdl",
+            score=MOVIE_MAX_SCORE - score_offset, timestamp=now,
+            subtitles_path="/movies/roofman/roofman.mkv.nl.srt",
+            description="Dutch subtitles downloaded from subdl.",
+            ai_translated=ai_translated,
+        )
+        selected = get_upgradable_movies_subtitles()
+    else:
+        _seed_episode(upgrade_db)
+        _episode_row(
+            upgrade_db, id=302, action=1, language="nl", provider="subdl",
+            score=360 - score_offset, timestamp=now,
+            subtitles_path="/series/show/s01e01.mkv.nl.srt",
+            description="Dutch subtitles downloaded from subdl.",
+            ai_translated=ai_translated,
+        )
+        selected = get_upgradable_episode_subtitles()
+
+    assert (bool(selected), set(selected)) == ((expected, {301 if media == "movie" else 302})
+                                                if expected else (False, set()))
+
+
+def _seed_provider_upgrade_candidate(db, media, score, ai_translated=True, timestamp=None):
+    timestamp = timestamp or datetime.now()
+    if media == "movie":
+        candidate_id = 303
+        _seed_movie(db, '[["nl", "/movies/roofman/roofman.mkv.nl.srt", 4321]]')
+        _movie_row(
+            db, id=candidate_id, action=1, language="nl", provider="subdl",
+            score=score, timestamp=timestamp,
+            subtitles_path="/movies/roofman/roofman.mkv.nl.srt",
+            description="Dutch subtitles downloaded from subdl.",
+            ai_translated=ai_translated,
+        )
+    else:
+        candidate_id = 304
+        _seed_episode(db)
+        _episode_row(
+            db, id=candidate_id, action=1, language="nl", provider="subdl",
+            score=score, timestamp=timestamp,
+            subtitles_path="/series/show/s01e01.mkv.nl.srt",
+            description="Dutch subtitles downloaded from subdl.",
+            ai_translated=ai_translated,
+        )
+    return candidate_id
+
+
+def _selected_upgrade_candidates(media):
+    from subtitles.upgrade import (
+        get_upgradable_episode_subtitles,
+        get_upgradable_movies_subtitles,
+    )
+
+    return (get_upgradable_movies_subtitles() if media == "movie"
+            else get_upgradable_episode_subtitles())
+
+
+@pytest.mark.parametrize("media", ["episode", "movie"])
+@pytest.mark.parametrize("score_offset", [1, 0, -42])
+def test_high_score_ai_provider_rows_keep_legacy_exclusion_when_penalty_is_zero(
+        upgrade_db, monkeypatch, media, score_offset):
+    from subtitles import upgrade
+
+    monkeypatch.setattr(upgrade.settings.general, "ai_translated_score_penalty", 0, raising=False)
+    score_out_of = MOVIE_MAX_SCORE if media == "movie" else 360
+    _seed_provider_upgrade_candidate(
+        upgrade_db, media, score=score_out_of - score_offset, ai_translated=True)
+
+    assert _selected_upgrade_candidates(media) == {}
+
+
+@pytest.mark.parametrize("media", ["episode", "movie"])
+@pytest.mark.parametrize("penalty", [None, "10", True, -1, 101, "missing"])
+def test_invalid_or_missing_ai_penalty_keeps_legacy_score_filter(
+        upgrade_db, monkeypatch, media, penalty):
+    from subtitles import upgrade
+
+    if penalty == "missing":
+        monkeypatch.delattr(upgrade.settings.general, "ai_translated_score_penalty", raising=False)
+    else:
+        monkeypatch.setattr(upgrade.settings.general, "ai_translated_score_penalty", penalty, raising=False)
+    score_out_of = MOVIE_MAX_SCORE if media == "movie" else 360
+    _seed_provider_upgrade_candidate(
+        upgrade_db, media, score=score_out_of - 1, ai_translated=True)
+
+    assert _selected_upgrade_candidates(media) == {}
+
+
+@pytest.mark.parametrize("media", ["episode", "movie"])
+def test_ai_candidate_becomes_eligible_when_penalty_changes_from_zero(
+        upgrade_db, monkeypatch, media):
+    from subtitles import upgrade
+
+    general_settings = upgrade.settings.general
+    monkeypatch.setattr(general_settings, "ai_translated_score_penalty", 0, raising=False)
+    score_out_of = MOVIE_MAX_SCORE if media == "movie" else 360
+    candidate_id = _seed_provider_upgrade_candidate(
+        upgrade_db, media, score=score_out_of, ai_translated=True)
+
+    assert _selected_upgrade_candidates(media) == {}
+
+    general_settings.ai_translated_score_penalty = 1
+    assert _selected_upgrade_candidates(media) == {candidate_id: None}
+
+
+@pytest.mark.parametrize("media", ["episode", "movie"])
+def test_ai_candidate_remains_inside_the_existing_upgrade_time_window(
+        upgrade_db, monkeypatch, media):
+    from subtitles import upgrade
+
+    monkeypatch.setattr(upgrade.settings.general, "ai_translated_score_penalty", 1, raising=False)
+    score_out_of = MOVIE_MAX_SCORE if media == "movie" else 360
+    _seed_provider_upgrade_candidate(
+        upgrade_db, media, score=score_out_of + 42, ai_translated=True,
+        timestamp=datetime.now() - timedelta(days=366))
+
+    assert _selected_upgrade_candidates(media) == {}
+
+
+@pytest.mark.parametrize("media", ["episode", "movie"])
+def test_human_subtitle_must_beat_hash_inflated_ai_history_score(
+        upgrade_db, monkeypatch, media):
+    """A selected AI row keeps its stored score as the replacement floor."""
+    from subtitles import upgrade
+
+    monkeypatch.setattr(upgrade.settings.general, "ai_translated_score_penalty", 1, raising=False)
+    score_out_of = MOVIE_MAX_SCORE if media == "movie" else 360
+    ai_score = score_out_of + 42
+    _seed_provider_upgrade_candidate(upgrade_db, media, score=ai_score)
+
+    path = ("/movies/roofman/roofman.mkv" if media == "movie"
+            else "/series/show/s01e01.mkv")
+    listing = _listing_result(path)
+    listing.score = ai_score + 1
+    provider = _FakeProvider(listing, listing_score=ai_score)
+    monkeypatch.setattr(upgrade, "generate_subtitles", provider)
+    notifications = []
+
+    if media == "movie":
+        run_upgrade = upgrade.upgrade_movies_subtitles
+        monkeypatch.setattr(
+            upgrade, "send_notifications_movie", lambda *a, **k: notifications.append(a))
+    else:
+        run_upgrade = upgrade.upgrade_episodes_subtitles
+        monkeypatch.setattr(upgrade, "history_log", lambda *a, **k: None)
+        monkeypatch.setattr(
+            upgrade, "send_notifications", lambda *a, **k: notifications.append(a))
+
+    run_upgrade(job_id="job-1")
+
+    assert notifications == [], "a human subtitle tied with the stored AI score must not replace it"
+
+    # The first raw score above the stored integer score is accepted.
+    provider.listing_score = ai_score + 1
+    run_upgrade(job_id="job-1")
+
+    assert len(notifications) == 1, "a human subtitle above the stored AI score must replace it"
+
+    provider.listing_score = ai_score + 2
+    run_upgrade(job_id="job-1")
+
+    assert len(notifications) == 2, "higher human scores must remain eligible"
 
 
 # --------------------------------------------------------------------------
@@ -620,7 +810,7 @@ def test_the_same_listing_is_not_downloaded_twice_for_an_episode(upgrade_db, mon
 
     upgrade.upgrade_episodes_subtitles(job_id="job-1")
 
-    assert provider.bars == [182], "the translation is the baseline"
+    assert provider.bars == [EPISODE_TRANSLATED_SCORE + 1], "the translation is the baseline"
     assert len(notifications) == 1
 
     _episode_row(
@@ -640,5 +830,5 @@ def test_the_same_listing_is_not_downloaded_twice_for_an_episode(upgrade_db, mon
     upgrade.upgrade_episodes_subtitles(job_id="job-1")
 
     assert notifications == [], "the same listing must not be downloaded again"
-    assert provider.bars[1:] == [EPISODE_LISTING_SCORE + 2], \
+    assert provider.bars[1:] == [EPISODE_LISTING_SCORE + 1], \
         "the provider row is the baseline now, and its bar is above the listing"

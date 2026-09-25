@@ -22,6 +22,7 @@ import {
   CollapseBox,
   Layout,
   Message,
+  Number,
   Password,
   Selector,
   Text,
@@ -201,6 +202,16 @@ const EnabledProvidersSection: FunctionComponent<{
         minimum score is found. When disabled, all providers are queried
         simultaneously and the best result is selected.
       </Message>
+      <Number
+        label="AI-translated subtitle penalty (%)"
+        settingKey="settings-general-ai_translated_score_penalty"
+        description="Percentage points taken off the score of AI-translated subtitles, so a human subtitle of similar quality wins. 0 turns it off. A penalty can push AI translations below your minimum score; they are then only downloaded from manual search."
+        min={0}
+        max={100}
+        step={1}
+        clampBehavior="strict"
+        allowDecimal={false}
+      />
       {isEmpty && (
         <Stack gap="xs" align="flex-start" py="xs">
           <MantineText fw={600}>No providers enabled</MantineText>

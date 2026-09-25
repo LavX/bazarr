@@ -5,7 +5,7 @@ import { http, HttpResponse } from "msw";
 import { beforeEach, expect, it } from "vitest";
 import queryClient from "@/apis/queries";
 import { AllProviders } from "@/providers";
-import { rawRender, screen } from "@/tests";
+import { rawRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import SettingsProvidersView from ".";
 
@@ -51,4 +51,45 @@ it("opens the marketplace tab from the link every time it is followed", async ()
   expect(
     await screen.findByRole("tab", { name: /Marketplace/, selected: true }),
   ).toBeInTheDocument();
+});
+
+it("saves the AI subtitle penalty as a bounded integer setting", async () => {
+  const submitted: FormData[] = [];
+  server.use(
+    http.get("/api/system/settings", () =>
+      HttpResponse.json({
+        general: {
+          theme: "auto",
+          enabled_providers: [],
+          ai_translated_score_penalty: 0,
+        },
+      }),
+    ),
+    http.post("/api/system/settings", async ({ request }) => {
+      submitted.push(await request.formData());
+      return new HttpResponse(null, { status: 204 });
+    }),
+  );
+  const router = createMemoryRouter(
+    [{ path: "/subtitle-hub", element: <SettingsProvidersView /> }],
+    { initialEntries: ["/subtitle-hub"] },
+  );
+  rawRender(
+    <AllProviders>
+      <RouterProvider router={router} />
+    </AllProviders>,
+  );
+  const user = userEvent.setup();
+  const input = await screen.findByLabelText(
+    "AI-translated subtitle penalty (%)",
+  );
+  await user.clear(input);
+  await user.type(input, "10");
+  await user.click(
+    await screen.findByRole("button", { name: /Save 1 pending change/ }),
+  );
+  await waitFor(() => expect(submitted).toHaveLength(1));
+  expect(submitted[0].get("settings-general-ai_translated_score_penalty")).toBe(
+    "10",
+  );
 });

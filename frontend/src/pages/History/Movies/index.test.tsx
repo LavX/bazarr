@@ -22,6 +22,7 @@ const mockMovieHistory = {
       upgradable: true,
       blacklisted: false,
       provider: "opensubtitlescom",
+      ai_translated: true,
       subs_id: "123",
       subtitles_path: "/path/to/subtitles.srt",
     },
@@ -63,6 +64,7 @@ describe("History Movies", () => {
 
     expect(screen.getByText("Name")).toBeInTheDocument();
     expect(screen.getByText("Language")).toBeInTheDocument();
+    expect(screen.getByLabelText("AI-translated")).toHaveTextContent("AI");
     expect(screen.getByText("Score")).toBeInTheDocument();
     expect(screen.getByText("Match")).toBeInTheDocument();
     expect(screen.getByText("Date")).toBeInTheDocument();

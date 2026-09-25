@@ -32,6 +32,15 @@ export interface ProviderHubCatalog {
   entries: ProviderHubCatalogEntry[];
 }
 
+export interface ProviderHubRuntimeStatus {
+  entitled: boolean | null;
+  exhausted: boolean | null;
+  remaining: number | null;
+  limit: number | null;
+  reset_at: string | null;
+  reported_at: string;
+}
+
 export interface ProviderHubInstallation {
   provider_id: string;
   name?: string;
@@ -45,6 +54,7 @@ export interface ProviderHubInstallation {
   python_path?: string | null;
   staged_python_path?: string | null;
   last_error?: string | null;
+  runtime_status?: ProviderHubRuntimeStatus;
   installed_at?: string | null;
   activated_at?: string | null;
   manifest?: ProviderHubManifest;

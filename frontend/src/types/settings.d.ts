@@ -107,6 +107,7 @@ declare namespace Settings {
     provider_priorities?: string;
     provider_languages?: Record<string, string[]> | string;
     provider_score_modifiers?: Record<string, number> | string;
+    ai_translated_score_penalty?: number;
     wanted_search_frequency: number;
     wanted_search_frequency_movie: number;
     wanted_search_frequency_sports: number;

@@ -40,6 +40,7 @@ const record = {
   action: 1,
   score: 100,
   score_out_of: 180,
+  ai_translated: true,
 };
 
 it("filters history and cancels, reopens, then excludes only the selected owner", async () => {
@@ -76,6 +77,7 @@ it("filters history and cancels, reopens, then excludes only the selected owner"
   );
   customRender(<SportsHistoryView />);
   await screen.findByText("Final", undefined, { timeout: 8000 });
+  expect(screen.getByLabelText("AI-translated")).toHaveTextContent("AI");
   await user.type(screen.getByRole("textbox", { name: "Language" }), "en");
   await waitFor(() => expect(filtered).toBe(true));
   await user.click(screen.getByRole("button", { name: "Exclude" }));

@@ -108,6 +108,9 @@ export function useSettingsMutation(retryingMetadataRefresh = false) {
       void client.invalidateQueries({
         queryKey: [QueryKeys.System],
       });
+      void client.invalidateQueries({
+        queryKey: [QueryKeys.ProviderHub],
+      });
 
       void client.invalidateQueries({
         queryKey: [QueryKeys.Series],
@@ -152,6 +155,9 @@ export function useSettingsMutation(retryingMetadataRefresh = false) {
         retireMetadata(changes, retryingMetadataRefresh);
         void client.invalidateQueries({
           queryKey: [QueryKeys.System, QueryKeys.Settings],
+        });
+        void client.invalidateQueries({
+          queryKey: [QueryKeys.ProviderHub],
         });
         showNotification(
           notification.error(

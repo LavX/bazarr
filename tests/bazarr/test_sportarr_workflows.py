@@ -1691,3 +1691,173 @@ def test_an_older_history_row_is_not_flagged_upgradable(workflow_library, monkey
 
     assert workflows.upgradable_history_ids(session, [older.id, newer.id]) == set()
     assert [row['id'] for row in workflows.upgrade_rows(session)] == []
+
+
+def test_ai_sports_upgrade_candidates_ignore_score_ceiling_only_for_valid_penalty(
+    workflow_library, monkeypatch
+):
+    from datetime import datetime, timedelta
+
+    from app import database as db
+    from app.config import settings
+    from app.database import TableHistorySports, TableLanguagesProfiles
+
+    automatic, _, workflows, _, session, _ = workflow_library
+    monkeypatch.setattr(settings.general, "upgrade_subs", True)
+    monkeypatch.setattr(settings.general, "days_to_upgrade_subs", 30)
+    assert automatic.search_event(61, 1)["downloads"] == 1
+    original = session.execute(sa.select(TableHistorySports)).scalar_one()
+
+    languages = ["en", "de", "fr", "pb", "zh", "zt"]
+    session.execute(
+        sa.update(TableLanguagesProfiles)
+        .where(TableLanguagesProfiles.profileId == 1)
+        .values(
+            items=json.dumps(
+                [
+                    {
+                        "id": index,
+                        "language": language,
+                        "forced": "False",
+                        "hi": "False",
+                        "audio_exclude": "False",
+                        "audio_only_include": "False",
+                    }
+                    for index, language in enumerate(languages, 1)
+                ]
+            )
+        )
+    )
+    db.update_profile_id_list.invalidate()
+
+    cases = [
+        ("en", 179, True, datetime.now()),
+        ("de", 180, True, datetime.now()),
+        ("fr", 222, True, datetime.now()),
+        ("pb", 179, False, datetime.now()),
+        ("zh", 179, None, datetime.now()),
+        ("zt", 176, False, datetime.now()),
+        ("en:hi", 176, None, datetime.now()),
+        ("fr:hi", 222, True, datetime.now() - timedelta(days=31)),
+        ("de:hi", 176, True, datetime.now()),
+        ("pb:hi", 177, True, datetime.now()),
+    ]
+    values = original.to_dict()
+    values.pop("id")
+    history_rows = []
+    for language, score, ai_translated, timestamp in cases:
+        row_values = values | {
+            "language": language,
+            "score": score,
+            "score_out_of": 180,
+            "ai_translated": ai_translated,
+            "timestamp": timestamp,
+        }
+        if language == original.language:
+            session.execute(
+                sa.update(TableHistorySports)
+                .where(TableHistorySports.id == original.id)
+                .values(**row_values)
+            )
+            history_rows.append(original)
+        else:
+            history_rows.append(TableHistorySports(**row_values))
+    session.add_all([row for row in history_rows if row.id is None])
+    session.flush()
+    ids = {row.id for row in history_rows}
+    expected = {
+        row.id
+        for row, (_, score, ai_translated, timestamp) in zip(history_rows, cases)
+        if timestamp > datetime.now() - timedelta(days=30)
+        and (score < 177 or ai_translated is True)
+    }
+    assert expected == {history_rows[index].id for index in (0, 1, 2, 5, 6, 8, 9)}
+
+    for penalty in (1, 100):
+        monkeypatch.setattr(
+            settings.general, "ai_translated_score_penalty", penalty, raising=False
+        )
+        assert workflows.upgradable_history_ids(session, ids) == expected
+        assert {row["id"] for row in workflows.upgrade_rows(session)} == expected
+
+    legacy = {history_rows[index].id for index in (5, 6, 8)}
+    for penalty in (0, None, True, "10", -1, 101):
+        monkeypatch.setattr(
+            settings.general, "ai_translated_score_penalty", penalty, raising=False
+        )
+        assert workflows.upgradable_history_ids(session, ids) == legacy
+        assert {row["id"] for row in workflows.upgrade_rows(session)} == legacy
+
+    monkeypatch.delattr(settings.general, "ai_translated_score_penalty", raising=False)
+    assert workflows.upgradable_history_ids(session, ids) == legacy
+    assert {row["id"] for row in workflows.upgrade_rows(session)} == legacy
+
+
+def test_sportarr_ai_upgrade_requires_human_result_to_beat_hash_inflated_score(
+    workflow_library, monkeypatch
+):
+    from app.config import settings
+    from app.database import TableHistorySports
+
+    automatic, _, workflows, service, session, folder = workflow_library
+    monkeypatch.setattr(settings.general, "upgrade_subs", True)
+    monkeypatch.setattr(settings.general, "upgrade_manual", True)
+    monkeypatch.setattr(settings.general, "upgrade_translated", False)
+    monkeypatch.setattr(settings.general, "days_to_upgrade_subs", 30)
+    monkeypatch.setattr(
+        settings.general, "ai_translated_score_penalty", 1, raising=False
+    )
+
+    candidate = service.manual_search_sports(61, "en", arr_instance_id=1)[0]
+    service.manual_download_sports(61, candidate, arr_instance_id=1)
+    original = session.execute(sa.select(TableHistorySports)).scalar_one()
+    hash_inflated_score = 222
+    session.execute(
+        sa.update(TableHistorySports)
+        .where(TableHistorySports.id == original.id)
+        .values(score=hash_inflated_score, score_out_of=180, ai_translated=True)
+    )
+    session.expire_all()
+    original = session.get(TableHistorySports, original.id)
+    original_file = (folder / "1/event.en.srt").read_bytes()
+
+    real_provider_result = automatic._provider_result
+    replacement_score = {"value": hash_inflated_score}
+
+    def provider_result(
+        video, languages, pool, minimum, profile, cancel, candidate_sink=None
+    ):
+        selected = real_provider_result(
+            video, languages, pool, 0, profile, cancel, candidate_sink
+        )
+        if not selected:
+            return []
+        selected[0].score = replacement_score["value"]
+        return selected if replacement_score["value"] >= minimum else []
+
+    monkeypatch.setattr(automatic, "_provider_result", provider_result)
+
+    tied = workflows.upgrade_sports_subtitles(job_id="sportarr-tie", arr_instance_id=1)
+    assert tied["data"][0]["downloads"] == 0
+    session.expire_all()
+    rows = session.execute(sa.select(TableHistorySports)).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].score == hash_inflated_score
+    assert rows[0].ai_translated is True
+    assert (folder / "1/event.en.srt").read_bytes() == original_file
+
+    replacement_score["value"] = hash_inflated_score + 1
+    beaten = workflows.upgrade_sports_subtitles(
+        job_id="sportarr-beat", arr_instance_id=1
+    )
+    assert beaten["data"][0]["downloads"] == 1
+    session.expire_all()
+    rows = (
+        session.execute(sa.select(TableHistorySports).order_by(TableHistorySports.id))
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 2
+    assert rows[-1].action == 3
+    assert rows[-1].upgradedFromId == rows[0].id
+    assert rows[-1].score == hash_inflated_score + 1

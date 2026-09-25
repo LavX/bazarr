@@ -466,6 +466,12 @@ def parse_language_string(language_string):
     return [language, is_forced, is_hi]
 
 
+def _ai_translated_subtitles_are_upgrade_candidates():
+    """Only enable the score-independent AI candidate rule for a valid penalty."""
+    penalty = getattr(settings.general, 'ai_translated_score_penalty', 0)
+    return type(penalty) is int and 0 < penalty <= 100
+
+
 def get_upgradable_episode_subtitles(history_id_list=None):
     if not settings.general.upgrade_subs:
         # return an empty set of rows
@@ -494,8 +500,12 @@ def get_upgradable_episode_subtitles(history_id_list=None):
 
     upgradable_episodes_conditions = [(TableHistory.action.in_(query_actions)),
                                       (TableHistory.timestamp > minimum_timestamp),
-                                      or_(and_(TableHistory.score.is_(None), TableHistory.action == 6),
-                                      (TableHistory.score < TableHistory.score_out_of - 3))]
+                                      ]
+    episode_score_conditions = [and_(TableHistory.score.is_(None), TableHistory.action == 6),
+                                (TableHistory.score < TableHistory.score_out_of - 3)]
+    if _ai_translated_subtitles_are_upgrade_candidates():
+        episode_score_conditions.append(TableHistory.ai_translated.is_(True))
+    upgradable_episodes_conditions.append(or_(*episode_score_conditions))
     upgradable_episodes_conditions += get_exclusion_clause('series')
     subtitles_to_upgrade = database.execute(
         select(TableHistory.id,
@@ -583,8 +593,12 @@ def get_upgradable_movies_subtitles(history_id_list=None):
 
     upgradable_movies_conditions = [(TableHistoryMovie.action.in_(query_actions)),
                                     (TableHistoryMovie.timestamp > minimum_timestamp),
-                                    or_(and_(TableHistoryMovie.score.is_(None), TableHistoryMovie.action == 6),
-                                    (TableHistoryMovie.score < TableHistoryMovie.score_out_of - 3))]
+                                    ]
+    movie_score_conditions = [and_(TableHistoryMovie.score.is_(None), TableHistoryMovie.action == 6),
+                              (TableHistoryMovie.score < TableHistoryMovie.score_out_of - 3)]
+    if _ai_translated_subtitles_are_upgrade_candidates():
+        movie_score_conditions.append(TableHistoryMovie.ai_translated.is_(True))
+    upgradable_movies_conditions.append(or_(*movie_score_conditions))
     upgradable_movies_conditions += get_exclusion_clause('movie')
     subtitles_to_upgrade = database.execute(
         select(TableHistoryMovie.id,

@@ -19,7 +19,9 @@ describe("History Series", () => {
               episode_number: "S05E07",
               episodeTitle: "Pilot",
               language: { code2: "en", name: "English" },
-              action: "download",
+              action: 1,
+              provider: "subdl",
+              ai_translated: true,
               timestamp: "2023-05-10",
               parsed_timestamp: "May 10, 2023",
               sonarrSeriesId: 123,
@@ -46,6 +48,7 @@ describe("History Series", () => {
     });
 
     expect(screen.getByText("S05E07")).toBeInTheDocument();
+    expect(screen.getByLabelText("AI-translated")).toHaveTextContent("AI");
     expect(screen.getByRole("link", { name: "Breaking Bad" })).toHaveAttribute(
       "href",
       "/series/789",

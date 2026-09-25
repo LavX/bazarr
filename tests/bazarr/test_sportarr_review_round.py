@@ -672,11 +672,16 @@ def test_sports_history_sends_parsed_criteria_not_stored_reprs(schema_session):
     sports route used to pass the raw Python-repr columns through, and the
     mapper hardcoded empty arrays, so the data was discarded at the boundary."""
     _sports_history(schema_session)
+    from app.database import TableHistorySports
+    schema_session.get(TableHistorySports, 1).ai_translated = True
+    schema_session.flush()
 
     from sportarr import history
 
     result = history.list_records(schema_session, "history", include_embedded=True)
     downloaded = next(item for item in result["data"] if item["action"] == 1)
+    assert downloaded["ai_translated"] is True
+    assert next(item for item in result["data"] if item["action"] == 7)["ai_translated"] is False
     assert downloaded["matches"] == ["title", "year"]
     assert downloaded["dont_matches"] == ["release_group"]
     assert "matched" not in downloaded and "not_matched" not in downloaded

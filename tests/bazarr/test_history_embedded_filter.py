@@ -236,6 +236,8 @@ def test_history_exposes_event_identity_and_precise_timestamp(media_type, schema
     rows = schema_session.execute(select(model)).scalars().all()
     for row in rows:
         row.timestamp = timestamp
+        if row.action == 1:
+            row.ai_translated = True
     schema_session.flush()
 
     result = get_history("?id=1&length=-1&include_embedded=true")
@@ -243,6 +245,8 @@ def test_history_exposes_event_identity_and_precise_timestamp(media_type, schema
     assert [item["history_id"] for item in result["data"]] == sorted(
         [row.id for row in rows], reverse=True)
     assert {item["id"] for item in result["data"]} == {1}
+    assert [item["ai_translated"] for item in result["data"] if item["action"] == 1] == [True]
+    assert all(item["ai_translated"] is False for item in result["data"] if item["action"] == 7)
     assert {item["timestamp_iso"] for item in result["data"]} == {"2026-09-13T12:00:00.123456"}
     assert {item["timestamp"] for item in result["data"]} == {"pretty"}
     assert {item["parsed_timestamp"] for item in result["data"]} == {timestamp.strftime("%x %X")}

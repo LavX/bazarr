@@ -386,7 +386,14 @@ def get_provider_score_modifier(provider_name):
 # endpoint builds its own ComputeScore to project scores for external clients,
 # and that surface has to agree with the rest. staticmethod keeps it a plain
 # function rather than binding self over the provider name.
+def get_ai_translated_score_penalty():
+    """Read the configured integer percentage-point penalty for each score."""
+    value = getattr(settings.general, 'ai_translated_score_penalty', 0)
+    return value if type(value) is int and 0 <= value <= 100 else 0
+
+
 ComputeScore.modifier = staticmethod(get_provider_score_modifier)
+ComputeScore.ai_translated_penalty = staticmethod(get_ai_translated_score_penalty)
 
 
 _FFPROBE_BINARY = get_binary("ffprobe")

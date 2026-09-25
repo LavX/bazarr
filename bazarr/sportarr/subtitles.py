@@ -335,6 +335,7 @@ def sports_history(
         video_path=result.path,
         language=result.language_code,
         provider=result.provider,
+        ai_translated=(getattr(result, 'ai_translated', False) is True) if action in (1, 2, 3) else None,
         score=result.score,
         score_out_of=MAX_SCORES["movie"],
         subs_id=result.subs_id,

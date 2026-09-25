@@ -19,6 +19,8 @@ export function useProviderHubProviders() {
   return useQuery({
     queryKey: providerHubKey,
     queryFn: () => api.providerHub.providers(),
+    refetchOnMount: "always",
+    refetchInterval: 10_000,
   });
 }
 

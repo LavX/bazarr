@@ -37,7 +37,11 @@ def test_startup_and_applied_owned_upgrade_preserve_legacy_history(
     assert {
         c["name"]
         for c in sa.inspect(migration_engine).get_columns("table_history_sports")
-    } == set(db.TableHistorySports.__table__.c.keys())
+    } == (
+        set(db.TableHistorySports.__table__.c.keys())
+        # The applied-upgrade case stops before the later AI provenance revision.
+        - ({"ai_translated"} if not fresh else set())
+    )
     with migration_engine.connect() as conn:
         conn.execute(
             sa.insert(db.TableArrInstances).values(

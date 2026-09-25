@@ -250,6 +250,7 @@ declare namespace History {
     MonitoredType &
     Partial<ItemHistoryType> & {
       action: number;
+      ai_translated?: boolean;
       blacklisted: boolean;
       score?: string;
       subs_id?: string;

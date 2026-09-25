@@ -105,6 +105,7 @@ export interface SportsRecord {
   provider: string | null;
   subs_id: string | null;
   action?: number;
+  ai_translated?: boolean;
   description?: string;
   score?: number | null;
   score_out_of?: number | null;
