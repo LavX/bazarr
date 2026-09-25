@@ -55,7 +55,7 @@ Bazarr+ uses its own versioning starting at v2.0.0, unrelated to upstream versio
 - Bazarr+ uses independent versioning starting at v2.0.0, unrelated to upstream version numbers
 - Config changes made by Bazarr+ are not backwards-compatible with upstream Bazarr, so switching back requires restoring your backup
 - Schema migrations run automatically on first boot; existing settings, profiles, providers, and any shared API token carry over
-- Provider Hub is additive. Existing providers keep working, and installed plugin providers can be enabled under Settings > Providers after restart
+- Provider Hub is additive. Existing providers keep working, and installed plugin providers can be enabled under Subtitle Hub > My Providers after restart
 - The OpenSubtitles-compatible endpoint is now managed from the Distribution Hub. If you used the old Settings > External Integration page, your shared token is preserved as a Distribution Hub key and that route now redirects to the Distribution Hub
 - Recommended: test with a copy of your config before committing to the switch
 - See the [migration guide](https://lavx.github.io/bazarr/guides/) for the full walkthrough
@@ -298,11 +298,11 @@ A fresh install used to drop you on the General settings page with no direction.
 - **One way to skip**: the wizard shell owns skippability, so there is one control and one label everywhere, and the Providers step can be skipped even when the catalog is unreachable.
 - **Every provider you picked is installed**: picking several providers used to install only the first, silently. Each selection is attempted now, per-provider outcomes are rendered with the backend's own failure message, and the failed subset is retryable in place without re-installing what worked.
 - **Survives the provider restart**: installing providers stages new code that needs a restart to load. The wizard restarts Bazarr+ after a visible countdown, shows a clear status with a manual reload escape hatch, waits for the backend to come back, and resumes on the provider configure step.
-- **Just the essentials**: the configure step shows only the credentials a provider needs to start working; the full set of advanced options stays in Settings > Providers.
+- **Just the essentials**: the configure step shows only the credentials a provider needs to start working; the full set of advanced options stays in Subtitle Hub > My Providers.
 - **Out of your way**: it marks setup complete on finish or skip, so it never appears again, and the upgrade "What's New" dialog stays out of the wizard's way. A reader who chose the no-library path lands on Discover.
 
 ### Provider Hub
-Bazarr+ turns subtitle providers into installable plugins. Provider Hub lives under Settings > Providers and adds Marketplace, Updates, Sources, My Providers, and Activity views to the provider settings area.
+Bazarr+ turns subtitle providers into installable plugins. Provider Hub lives in the Subtitle Hub, with My Providers, Marketplace, Updates and Activity tabs, and catalog sources under **Manage sources** on the Marketplace.
 
 Provider Hub supports the official [LavX/bazarr-provider-catalog](https://github.com/LavX/bazarr-provider-catalog) source plus additional GitHub catalog sources for community providers. The catalog repository includes SDK tooling for provider authors.
 
@@ -346,7 +346,7 @@ FlareSolverr is strongly recommended. Run a FlareSolverr container and set its `
 ### Provider Priority
 Upstream Bazarr queries all subtitle providers simultaneously and picks the highest-scored result. There's no way to prefer one provider over another. This has been [requested for 6 years](https://bazarr.featureupvote.com/suggestions/112323/provider-prioritization) (62 votes), but upstream rejected it as "won't happen," calling it a "major rework" that "would take months of development."
 
-Bazarr+ solves it with a **Provider Priority toggle** in Settings > Providers. When enabled, providers are queried sequentially in the order you've arranged them. If a provider returns subtitles meeting the minimum score, Bazarr+ stops searching and uses those results. Your preferred providers (curated community sites, specialized language sources) always get first shot. When disabled, the original behavior is preserved: all providers queried simultaneously, best score wins.
+Bazarr+ solves it with a **Provider Priority toggle** in Subtitle Hub > My Providers. When enabled, providers are queried sequentially in the order you've arranged them. If a provider returns subtitles meeting the minimum score, Bazarr+ stops searching and uses those results. Your preferred providers (curated community sites, specialized language sources) always get first shot. When disabled, the original behavior is preserved: all providers queried simultaneously, best score wins.
 
 ### AI Subtitle Translation via OpenRouter
 Upstream has Google Translate, Gemini, and Lingarr. Bazarr+ adds **OpenRouter** as a fourth translator engine, giving access to 300+ LLMs (Claude, Gemini, GPT, LLaMA, Grok, and more) plus any custom model ID from openrouter.ai. It runs as a separate microservice with an async job queue supporting 1-5 concurrent jobs and 1-8 parallel batches. That is what ships today; next on the v2 line it moves in-process, as a library with a model catalog and a per-profile engine choice instead of a sidecar container ([Roadmap](#roadmap)). Features include:
@@ -560,7 +560,7 @@ docker compose up -d
 | `PGID` | `1000` | Group ID for file permissions |
 | `TZ` | `UTC` | Timezone (e.g., `Europe/Budapest`) |
 
-The OpenSubtitles.org plugin no longer uses environment variables. Configure its FlareSolverr URL in the plugin settings UI (Settings > Providers), not via Bazarr+ env vars.
+The OpenSubtitles.org plugin no longer uses environment variables. Configure its FlareSolverr URL in the plugin settings UI (Subtitle Hub > My Providers), not via Bazarr+ env vars.
 
 ### Volumes
 
@@ -648,7 +648,7 @@ curl -s -X POST http://localhost:8191/v1 \
 docker logs flaresolverr
 ```
 
-Then confirm the plugin's **FlareSolverr URL** in Settings > Providers: `http://flaresolverr:8191/v1` when Bazarr+ and FlareSolverr share a Docker network, or `http://localhost:8191/v1` if Bazarr+ runs with host networking. A `Name or service not known` error means the `flaresolverr` hostname can't be resolved, which is what happens under host networking; switch the URL to `localhost`. If `localhost` then gives a connection error, FlareSolverr's port isn't reachable on the host: publish `8191:8191` on the FlareSolverr service or run it with host networking too.
+Then confirm the plugin's **FlareSolverr URL** in Subtitle Hub > My Providers: `http://flaresolverr:8191/v1` when Bazarr+ and FlareSolverr share a Docker network, or `http://localhost:8191/v1` if Bazarr+ runs with host networking. A `Name or service not known` error means the `flaresolverr` hostname can't be resolved, which is what happens under host networking; switch the URL to `localhost`. If `localhost` then gives a connection error, FlareSolverr's port isn't reachable on the host: publish `8191:8191` on the FlareSolverr service or run it with host networking too.
 
 ### Common Issues
 
@@ -656,7 +656,7 @@ Then confirm the plugin's **FlareSolverr URL** in Settings > Providers: `http://
 |-------|----------|
 | Cloudflare challenge errors | Ensure FlareSolverr is running and the plugin's FlareSolverr URL is set |
 | "No subtitles found" | Check IMDB ID is correct, try different language |
-| Provider not showing | Install and enable it from the Provider Hub Marketplace under Settings > Providers |
+| Provider not showing | Install it from Subtitle Hub > Marketplace, then enable it under Subtitle Hub > My Providers |
 | Wrong file permissions | Check PUID/PGID match your user |
 
 </details>
