@@ -122,6 +122,8 @@ declare namespace Settings {
     exclude_filter: string;
     ignore_case: boolean;
     use_regex: boolean;
+    max_file_size_mb: number;
+    backup_count: number;
   }
 
   interface Proxy {
