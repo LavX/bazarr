@@ -94,6 +94,79 @@ def test_save_settings_resets_compat_pool_for_dynamic_provider_hub_config(monkey
         config.settings.unset(provider_id.upper())
 
 
+def test_provider_hub_settings_saves_clear_runtime_quota(monkeypatch):
+    from app import config
+    from provider_hub import runtime_status
+
+    provider_id = "examplehub"
+    previous_enabled = list(config.settings.general.enabled_providers)
+    executed = []
+    reset_calls = []
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.database",
+        SimpleNamespace(
+            database=SimpleNamespace(execute=lambda statement: executed.append(statement)),
+            update=lambda _model: _FakeUpdate(),
+            System=object,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "compat.service",
+        SimpleNamespace(reset_compat_pool=lambda: reset_calls.append("pool")),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "provider_hub.state",
+        SimpleNamespace(
+            active_installations=lambda: [],
+            load_state=lambda: {
+                "installations": {
+                    provider_id: {
+                        "provider_id": provider_id,
+                        "active_version": "0.1.5",
+                        "state": "staged",
+                        "pending_restart": True,
+                    }
+                }
+            },
+        ),
+    )
+
+    runtime_status.clear()
+    config.settings.general.enabled_providers = [provider_id]
+    try:
+        runtime_status.consume(provider_id, [
+            {"type": "translation_quota", "remaining": 10},
+        ])
+        first_generation = runtime_status.generation(provider_id)
+        config.save_settings([
+            (f"settings-{provider_id}-api_key", ["replacement"]),
+        ])
+        assert runtime_status.get(provider_id) is None
+        assert runtime_status.generation(provider_id) == first_generation + 1
+
+        runtime_status.consume(provider_id, [
+            {"type": "translation_quota", "remaining": 9},
+        ])
+        second_generation = runtime_status.generation(provider_id)
+        config.save_settings([
+            ("settings-general-enabled_providers", ["otherhub"]),
+        ])
+        assert runtime_status.get(provider_id) is None
+        assert runtime_status.generation(provider_id) == second_generation + 1
+        assert reset_calls == ["pool", "pool"]
+        assert len(executed) == 2
+    finally:
+        runtime_status.clear()
+        config.settings.general.enabled_providers = previous_enabled
+        config.settings.unset(provider_id.upper())
+
+
 def test_save_settings_invalidates_the_compat_cache_for_a_score_modifier(monkeypatch):
     """A cached compat envelope carries the projected scores with it, so an
     edited modifier would leave external clients on the old numbers for the

@@ -32,6 +32,7 @@ import {
   InstanceBadge,
   SportsJobFeedback,
 } from "@/components/bazarr";
+import HistoryProvider from "@/components/bazarr/HistoryProvider";
 import Language from "@/components/bazarr/Language";
 import StateIcon from "@/components/StateIcon";
 import TextPopover from "@/components/TextPopover";
@@ -144,6 +145,13 @@ const SportsHistoryView: FunctionComponent = () => {
       {
         header: "Provider",
         accessorKey: "provider",
+        cell: ({ row: { original } }) => (
+          <HistoryProvider
+            provider={original.provider}
+            aiTranslated={original.ai_translated}
+            action={original.action}
+          />
+        ),
       },
       {
         header: "Score",

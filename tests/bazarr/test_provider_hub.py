@@ -4501,6 +4501,36 @@ def test_get_matches_without_release_info_returns_only_worker_matches():
     assert candidate.get_matches(movie) == {"title"}
 
 
+@pytest.mark.parametrize("flag, expected", [
+    (True, True), (False, False), ("true", False), (1, False), (None, False),
+])
+def test_candidate_ai_translation_requires_literal_true(flag, expected):
+    from provider_hub.protocol import candidate_from_worker
+
+    payload = {
+        "id": "sub-1", "language": {"alpha3": "eng"},
+        "provider_payload": {"provider": "examplehub"},
+        "display": {"ai_translated": True},
+    }
+    if flag is not None:
+        payload["ai_translated"] = flag
+    candidate = candidate_from_worker("examplehub", payload)
+    assert candidate.ai_translated is expected
+
+
+def test_candidate_language_round_trips_script_and_country():
+    from provider_hub.protocol import candidate_from_worker, language_to_payload
+
+    language = Language("zho", "TW", script="Hant")
+    candidate = candidate_from_worker("examplehub", {
+        "id": "sub-1",
+        "language": language_to_payload(language),
+        "provider_payload": {"provider": "examplehub"},
+    })
+    assert candidate.language.script == language.script
+    assert candidate.language.country == language.country
+
+
 def test_get_matches_swallows_release_update_errors(monkeypatch):
     # A malformed release string must never break scoring for a candidate: if the
     # release-based match update raises, get_matches falls back to the worker matches.

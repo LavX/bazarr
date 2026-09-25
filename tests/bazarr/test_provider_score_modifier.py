@@ -109,6 +109,25 @@ def test_a_provider_without_a_modifier_scores_exactly_as_before(scorer, episode_
     assert after == before
 
 
+def test_ai_penalty_stacks_with_provider_modifier_once(monkeypatch, episode_video):
+    from app.config import settings
+    from app.get_providers import get_provider_score_modifier
+    from subliminal_patch.score import ComputeScore, MAX_SCORES
+
+    monkeypatch.setattr(settings.general, 'provider_score_modifiers', {'examplehub': 5}, raising=False)
+    monkeypatch.setattr(settings.general, 'ai_translated_score_penalty', 10, raising=False)
+    scorer = ComputeScore()
+    scorer.modifier = get_provider_score_modifier
+    subtitle = _Subtitle('examplehub')
+    matches = {'series', 'season', 'episode'}
+    human = scorer(set(matches), subtitle, episode_video)[0]
+    subtitle.ai_translated = True
+    ai = scorer(set(matches), subtitle, episode_video)[0]
+    raw = 160 + 30 + 30
+    assert human == raw + round(5 * MAX_SCORES['episode'] / 100)
+    assert ai == raw + round(-5 * MAX_SCORES['episode'] / 100)
+
+
 def test_the_modifier_lifts_the_score_of_the_provider_it_names(scorer, episode_video):
     from subliminal_patch.score import MAX_SCORES
 
@@ -144,6 +163,23 @@ def test_the_score_without_hash_carries_the_modifier_too(scorer, episode_video):
     _, modified = scorer(set(matches), subtitle, episode_video)
 
     assert modified > plain
+
+
+def test_ai_penalty_adjusts_hash_score_and_without_hash_once(scorer, episode_video):
+    from subliminal_patch.score import MAX_SCORES, apply_score_modifier
+
+    subtitle = _Subtitle('examplehub')
+    subtitle.ai_translated = True
+    subtitle.hash_verifiable = True
+    scorer.modifier = lambda provider: 5
+    scorer.ai_translated_penalty = lambda: 10
+    score, without_hash = scorer(
+        {'hash', 'series', 'season', 'episode', 'source'},
+        subtitle, episode_video,
+    )
+    maximum = MAX_SCORES['episode']
+    assert score == apply_score_modifier(359, maximum, -5)
+    assert without_hash == apply_score_modifier(245, maximum, -5)
 
 
 def test_a_modifier_that_raises_does_not_take_the_search_down(scorer, episode_video):
@@ -312,3 +348,22 @@ def test_the_setting_reader_bounds_a_value_beyond_the_percentage_scale(monkeypat
 
     assert get_provider_score_modifier('whisperai') == 100
     assert get_provider_score_modifier('subdl') == -100
+
+
+@pytest.mark.parametrize("bad", ["10", 10.0, True, -1, 101, float("nan"), float("inf")])
+def test_ai_penalty_reader_rejects_invalid_values(monkeypatch, bad):
+    from app.config import settings
+    from app.get_providers import get_ai_translated_score_penalty
+
+    monkeypatch.setattr(settings.general, "ai_translated_score_penalty", bad, raising=False)
+    assert get_ai_translated_score_penalty() == 0
+
+
+def test_ai_penalty_reader_accepts_integer_and_reads_fresh(monkeypatch):
+    from app.config import settings
+    from app.get_providers import get_ai_translated_score_penalty
+
+    monkeypatch.setattr(settings.general, "ai_translated_score_penalty", 10, raising=False)
+    assert get_ai_translated_score_penalty() == 10
+    monkeypatch.setattr(settings.general, "ai_translated_score_penalty", 100, raising=False)
+    assert get_ai_translated_score_penalty() == 100

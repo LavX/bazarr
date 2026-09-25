@@ -74,6 +74,38 @@ def _retry_after(error):
     return min(86400.0, value)
 
 
+def _drain_events(provider):
+    try:
+        drain = getattr(provider, "drain_events", None)
+        if drain is None:
+            return []
+        reported = drain()
+        if not isinstance(reported, list):
+            return []
+        events = []
+        encoded_size = 2
+        for event in reported:
+            if len(events) == 8:
+                break
+            if not isinstance(event, dict):
+                continue
+            try:
+                encoded = json.dumps(event, separators=(",", ":"), allow_nan=False)
+                decoded = json.loads(encoded)
+            except Exception:
+                print(traceback.format_exc(), file=sys.stderr, flush=True)
+                continue
+            event_size = len(encoded.encode("utf-8")) + (1 if events else 0)
+            if encoded_size + event_size > 4096:
+                continue
+            events.append(decoded)
+            encoded_size += event_size
+        return events
+    except Exception:
+        print(traceback.format_exc(), file=sys.stderr, flush=True)
+        return []
+
+
 def _handle(provider, op, payload):
     if op == "health":
         return {"initialized": True}
@@ -123,6 +155,7 @@ def _handle(provider, op, payload):
 def main():
     provider, _manifest = _load_provider()
     for line in sys.stdin:
+        request = None
         try:
             request = json.loads(line)
             response = {
@@ -130,13 +163,15 @@ def main():
                 "id": request.get("id"),
                 "ok": True,
                 "payload": _handle(provider, request.get("op"), request.get("payload") or {}),
-                "events": [],
+                "events": _drain_events(provider) if request.get("op") in ("search", "download") else [],
             }
         except Exception as error:
             print(traceback.format_exc(), file=sys.stderr, flush=True)
+            if isinstance(request, dict) and request.get("op") in ("search", "download"):
+                _drain_events(provider)
             response = {
                 "abi": ABI,
-                "id": locals().get("request", {}).get("id") if isinstance(locals().get("request"), dict) else None,
+                "id": request.get("id") if isinstance(request, dict) else None,
                 "ok": False,
                 "error": {
                     "code": "provider",
@@ -153,7 +188,7 @@ def main():
             }
         sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
         sys.stdout.flush()
-        if response.get("ok") and locals().get("request", {}).get("op") == "shutdown":
+        if response.get("ok") and isinstance(request, dict) and request.get("op") == "shutdown":
             break
 
 

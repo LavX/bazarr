@@ -125,6 +125,8 @@ def list_records(
         .limit(limit)
     ):
         item = row.to_dict()
+        if kind == "history":
+            item["ai_translated"] = row.ai_translated is True
         item.pop("artifact", None)
         # The parsed criteria lists, in the shape the episodes and movies
         # history endpoints send. The raw stored repr strings used to go out

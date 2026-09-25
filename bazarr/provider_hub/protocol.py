@@ -53,6 +53,7 @@ class HubWorkerSubtitle(Subtitle):
         self.score = None
         self.score_without_hash = None
         self.score_out_of = None
+        self.ai_translated = False
 
     # The worker sends a lean set of identifier matches, so the download scorer
     # must recompute against the video instead of reusing it: see get_matches.
@@ -120,10 +121,13 @@ def language_from_payload(payload: dict[str, Any]):
         raise WorkerProtocolError("language.alpha3 is required")
 
     country = payload.get("country_alpha2")
+    script = payload.get("script")
     kwargs = {
         "hi": bool(payload.get("hi", False)),
         "forced": bool(payload.get("forced", False)),
     }
+    if isinstance(script, str) and re.fullmatch(r"[A-Za-z]{4}", script):
+        kwargs["script"] = script.title()
     return Language(str(alpha3), country, **kwargs)
 
 
@@ -217,6 +221,7 @@ _RESERVED_DISPLAY_ATTRS = frozenset({
     "foreign_only",
     "hash_verifiable",
     "hearing_impaired_verifiable",
+    "ai_translated",
 })
 
 
@@ -252,6 +257,7 @@ def candidate_from_worker(provider_name: str, payload: dict[str, Any]) -> HubWor
     subtitle.score_out_of = payload.get("score_out_of")
     subtitle.hash_verifiable = bool(payload.get("hash_verifiable", False))
     subtitle.hearing_impaired_verifiable = bool(payload.get("hearing_impaired_verifiable", False))
+    subtitle.ai_translated = payload.get("ai_translated") is True
 
     # Preserve reported facts separately from the legacy flags, whose defaults
     # collapse missing information to false. These stay inside the host.

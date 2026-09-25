@@ -22,7 +22,8 @@ def test_sports_schema_upgrade_fresh_constraints_and_safe_downgrade(
             table.to_metadata(metadata)
     if "table_history_sports" in metadata.tables:
         history = metadata.tables["table_history_sports"]
-        history._columns.remove(history.c.artifact)
+        for column in (history.c.artifact, history.c.ai_translated):
+            history._columns.remove(column)
     metadata.create_all(engine)
     _run(engine, "stamp", "c9e4a6b2d701")
     _run(engine, "upgrade", REVISION)
@@ -31,7 +32,11 @@ def test_sports_schema_upgrade_fresh_constraints_and_safe_downgrade(
     for name in SPORTS:
         assert {c["name"] for c in sa.inspect(engine).get_columns(name)} == (
             set(Base.metadata.tables[name].c.keys())
-            - ({"artifact"} if name == "table_history_sports" else set())
+            - (
+                {"artifact", "ai_translated"}
+                if name == "table_history_sports"
+                else set()
+            )
         )
         assert {
             i["name"]

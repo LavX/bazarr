@@ -82,7 +82,7 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                 pool.provider_progress_callback = _on_provider
 
             if forced_minimum_score:
-                min_score = int(forced_minimum_score) + 1
+                min_score = int(forced_minimum_score)
 
             # Languages whose subtitle was downloaded. Their recorded release-type
             # mismatch is cleared once the file is actually on disk, not before:

@@ -10,7 +10,7 @@ import flask_migrate
 from dogpile.cache import make_region
 from datetime import datetime
 
-from sqlalchemy import event, create_engine, inspect, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, UniqueConstraint, Index, Integer, LargeBinary, Text, func, text, BigInteger
+from sqlalchemy import event, create_engine, inspect, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, UniqueConstraint, Index, Integer, LargeBinary, Text, Boolean, func, text, BigInteger
 # importing here to be indirectly imported in other modules later
 from sqlalchemy import update, delete, select, func  # noqa: F401, F811
 from sqlalchemy.orm import scoped_session, sessionmaker, mapped_column, close_all_sessions, declarative_base
@@ -478,6 +478,7 @@ class TableHistory(Base):
     description = mapped_column(Text, nullable=False)
     language = mapped_column(Text)
     provider = mapped_column(Text)
+    ai_translated = mapped_column(Boolean, nullable=True)
     score = mapped_column(Integer)
     score_out_of = mapped_column(Integer, nullable=True)
     # Indexed via the composite ix_history_instance_upstream_* above (matching
@@ -514,6 +515,7 @@ class TableHistoryMovie(Base):
     description = mapped_column(Text, nullable=False)
     language = mapped_column(Text)
     provider = mapped_column(Text)
+    ai_translated = mapped_column(Boolean, nullable=True)
     # Indexed via the composite ix_history_movie_instance_upstream above.
     radarrId = mapped_column(Integer)
     score = mapped_column(Integer)
@@ -846,6 +848,7 @@ class TableHistorySports(Base):
     event_id = mapped_column(Integer, nullable=False)
     language = mapped_column(Text)
     provider = mapped_column(Text)
+    ai_translated = mapped_column(Boolean, nullable=True)
     subs_id = mapped_column(Text)
     timestamp = mapped_column(DateTime, default=datetime.now)
     action = mapped_column(Integer)

@@ -18,6 +18,7 @@ import type {
 import { AntiCaptchaBadge } from "@/pages/Settings/Providers/hub/components/AntiCaptchaBadge";
 import { FlareSolverrBadge } from "@/pages/Settings/Providers/hub/components/FlareSolverrBadge";
 import { ProviderStatusBadge } from "@/pages/Settings/Providers/hub/components/StatusBadge";
+import { TranslationQuotaLine } from "@/pages/Settings/Providers/hub/components/TranslationQuotaLine";
 import { TrustBadge } from "@/pages/Settings/Providers/hub/components/TrustBadge";
 import {
   parseManifest,
@@ -257,6 +258,7 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
       {description && (
         <div className={styles.hubCardDescription}>{description}</div>
       )}
+      <TranslationQuotaLine status={installed?.runtime_status} />
       <div className={styles.hubCardChips}>
         <Badge size="xs" variant="outline" color="gray">
           {AUTH_LABEL[auth]}

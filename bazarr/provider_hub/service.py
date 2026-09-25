@@ -864,6 +864,9 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
         return None
     if config is not None:
         _forget_credential_throttle(provider_id)
+    if config is not None or enabled is not None:
+        from . import runtime_status
+        runtime_status.clear(provider_id)
     return _redact_installation(provider)
 
 
@@ -885,17 +888,25 @@ def runtime_provider_configs() -> dict[str, dict[str, Any]]:
 
 
 def list_providers(redact: bool = True) -> list[dict[str, Any]]:
+    from . import runtime_status
+
     state = load_state()
-    providers = [
-        _with_origin(provider, state) if isinstance(provider, dict) else provider
-        for provider in (state.get("installations") or {}).values()
-    ]
-    if not redact:
-        return providers
-    return [
-        _redact_installation(provider) if isinstance(provider, dict) else provider
-        for provider in providers
-    ]
+    enabled_provider_ids = set(_bazarr_enabled_providers())
+    providers = []
+    for provider in (state.get("installations") or {}).values():
+        if not isinstance(provider, dict):
+            providers.append(provider)
+            continue
+        item = dict(_with_origin(provider, state))
+        status = runtime_status.get(item.get("provider_id"))
+        status_is_current = (
+            item.get("provider_id") in enabled_provider_ids
+            and item.get("state") != "removed"
+        )
+        if status is not None and status_is_current:
+            item["runtime_status"] = status
+        providers.append(_redact_installation(item) if redact else item)
+    return providers
 
 
 def get_provider(provider_id: str, redact: bool = True) -> dict[str, Any] | None:
@@ -1674,6 +1685,8 @@ def remove_installation(provider_id: str) -> bool:
             job.update(message=f"Plugin '{target_name}' not found")
             return False
         _set_bazarr_provider_enabled(provider_id, False)
+        from . import runtime_status
+        runtime_status.clear(provider_id)
         if result == "removed_pending":
             job.update(message=f"Removed pending install of '{target_name}'")
             return True

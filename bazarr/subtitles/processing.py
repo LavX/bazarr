@@ -32,7 +32,8 @@ from .tools.subsync_engines import subtitle_write_locks
 
 class ProcessSubtitlesResult:
     def __init__(self, message, reversed_path, downloaded_language_code2, downloaded_provider, score, forced,
-                 subtitle_id, reversed_subtitles_path, hearing_impaired, matched=None, not_matched=None):
+                 subtitle_id, reversed_subtitles_path, hearing_impaired, matched=None, not_matched=None,
+                 ai_translated=None):
         self.message = message
         self.path = reversed_path
         self.provider = downloaded_provider
@@ -41,6 +42,7 @@ class ProcessSubtitlesResult:
         self.subs_path = reversed_subtitles_path
         self.matched = matched
         self.not_matched = not_matched
+        self.ai_translated = ai_translated if type(ai_translated) is bool else None
 
         if hearing_impaired:
             self.language_code = f"{downloaded_language_code2}:hi"
@@ -312,7 +314,8 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         action = "downloaded"
 
     percent_score = round(subtitle.score * 100 / max_score, 2)
-    message = (f"{downloaded_language}{modifier_string} subtitles {action} from {downloaded_provider} with a score of "
+    ai_label = " AI-translated" if getattr(subtitle, "ai_translated", False) is True else ""
+    message = (f"{downloaded_language}{modifier_string}{ai_label} subtitles {action} from {downloaded_provider} with a score of "
                f"{percent_score}%.")
 
     sync_checker = _defaul_sync_checker
@@ -508,7 +511,8 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                                   reversed_subtitles_path=reversed_subtitles_path,
                                   hearing_impaired=subtitle.language.hi,
                                   matched=list(subtitle.matches or []),
-                                  not_matched=_get_not_matched(subtitle, media_type)),
+                                  not_matched=_get_not_matched(subtitle, media_type),
+                                  ai_translated=getattr(subtitle, 'ai_translated', False) is True),
 
 
 def _get_not_matched(subtitle, media_type):

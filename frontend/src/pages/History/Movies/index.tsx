@@ -12,6 +12,7 @@ import { ColumnDef } from "@tanstack/react-table";
 import { useMovieAddBlacklist, useMovieHistoryPagination } from "@/apis/hooks";
 import { MutateAction } from "@/components/async";
 import { HistoryIcon } from "@/components/bazarr";
+import HistoryProvider from "@/components/bazarr/HistoryProvider";
 import Language from "@/components/bazarr/Language";
 import StateIcon from "@/components/StateIcon";
 import TextPopover from "@/components/TextPopover";
@@ -58,6 +59,17 @@ const MoviesHistoryView: FunctionComponent = () => {
             return null;
           }
         },
+      },
+      {
+        header: "Provider",
+        accessorKey: "provider",
+        cell: ({ row: { original } }) => (
+          <HistoryProvider
+            provider={original.provider}
+            aiTranslated={original.ai_translated}
+            action={original.action}
+          />
+        ),
       },
       {
         header: "Score",

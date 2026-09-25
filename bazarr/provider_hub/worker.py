@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from . import WORKER_ABI_VERSION
+from . import runtime_status
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +119,9 @@ class WorkerResult:
     ok: bool
     payload: dict[str, Any]
     events: list[dict[str, Any]]
+    status_generation: int | None = None
+    status_configuration_generation: int | None = None
+    worker_started: bool = False
 
 
 # Every started worker registers here so idle ones can be reclaimed. A weak set,
@@ -175,10 +179,12 @@ class ProviderWorkerClient:
         command: list[str],
         cwd: str | os.PathLike[str] | None = None,
         env: dict[str, str] | None = None,
+        provider_id: str | None = None,
     ):
         self.command = command
         self.cwd = str(cwd) if cwd else None
         self.env = env
+        self.provider_id = provider_id if isinstance(provider_id, str) and provider_id else None
         self.process: subprocess.Popen | None = None
         # monotonic timestamp of the last request, read by reap_idle_workers
         self.last_used: float = time.monotonic()
@@ -187,9 +193,9 @@ class ProviderWorkerClient:
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
 
-    def start(self) -> None:
+    def start(self) -> bool:
         if self.process and self.process.poll() is None:
-            return
+            return False
 
         env = {
             "PATH": os.environ.get("PATH", ""),
@@ -229,6 +235,10 @@ class ProviderWorkerClient:
 
         with _live_clients_lock:
             _live_clients.add(self)
+        provider_id = getattr(self, "provider_id", None)
+        if provider_id is not None:
+            runtime_status.worker_started(provider_id)
+        return True
 
     @staticmethod
     def _enqueue_stdout(process: subprocess.Popen, stdout_queue: queue.Queue[Any]) -> None:
@@ -500,7 +510,18 @@ class ProviderWorkerClient:
             # outside it, the sweep can acquire the lock after start() returns,
             # read the old timestamp, and kill the worker this request is
             # about to write to.
-            self.start()
+            worker_started = self.start() is True
+            provider_id = getattr(self, "provider_id", None)
+            status_generation = (
+                runtime_status.generation(provider_id)
+                if provider_id is not None
+                else None
+            )
+            status_configuration_generation = (
+                runtime_status.configuration_generation(provider_id)
+                if provider_id is not None
+                else None
+            )
             self.last_used = time.monotonic()
             if self.process is None or self.process.stdin is None or self.process.stdout is None:
                 raise WorkerError("worker process did not start")
@@ -541,7 +562,14 @@ class ProviderWorkerClient:
             raise WorkerError("worker payload must be an object")
         if not isinstance(events, list):
             events = []
-        return WorkerResult(ok=True, payload=payload, events=events)
+        return WorkerResult(
+            ok=True,
+            payload=payload,
+            events=events,
+            status_generation=status_generation,
+            status_configuration_generation=status_configuration_generation,
+            worker_started=worker_started,
+        )
 
 
 def worker_command(python_exe: str | os.PathLike[str], runner: str | os.PathLike[str]) -> list[str]:

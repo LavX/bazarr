@@ -272,6 +272,7 @@ validators = [
     Validator('general.provider_priorities', must_exist=True, default={}, is_type_of=dict),
     Validator('general.provider_languages', must_exist=True, default={}, is_type_of=dict),
     Validator('general.provider_score_modifiers', must_exist=True, default={}, is_type_of=dict),
+    Validator('general.ai_translated_score_penalty', must_exist=True, default=0, is_type_of=int, gte=0, lte=100),
     Validator('general.use_provider_priority', must_exist=True, default=True, is_type_of=bool),
     Validator('general.enabled_integrations', must_exist=True, default=[], is_type_of=list),
     Validator('general.multithreading', must_exist=True, default=True, is_type_of=bool),
@@ -1167,10 +1168,20 @@ def _settings_value(parent, keys):
 def _active_provider_hub_provider_ids():
     try:
         state_module = sys.modules.get("provider_hub.state")
-        if state_module is not None and hasattr(state_module, "active_installations"):
-            active_installations = state_module.active_installations
-        else:
-            from provider_hub.state import active_installations
+        if state_module is None:
+            from provider_hub import state as state_module
+        load_state = getattr(state_module, "load_state", None)
+        if callable(load_state):
+            state = load_state()
+            return {
+                str(item.get("provider_id") or provider_id)
+                for provider_id, item in (state.get("installations") or {}).items()
+                if isinstance(item, dict)
+                and item.get("active_version")
+                and item.get("state") != "removed"
+            }
+
+        active_installations = getattr(state_module, "active_installations")
         return {
             str(provider_id)
             for provider_id in (
@@ -1395,6 +1406,8 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
     reset_compat_pool = False
     invalidate_compat_cache = False
     active_provider_hub_provider_ids = None
+    provider_hub_status_clears = set()
+    clear_disabled_provider_hub_statuses = False
 
     # Subzero Mods
     update_subzero = False
@@ -1607,7 +1620,8 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             if value != settings.subsource.apikey:
                 reset_providers = True
 
-        if key == 'settings-general-provider_score_modifiers':
+        if key in ('settings-general-provider_score_modifiers',
+                   'settings-general-ai_translated_score_penalty'):
             # A cached compat envelope carries the projected scores in it, so
             # an edited modifier would leave external clients on the old
             # numbers until the entry expires, up to a day later.
@@ -1620,12 +1634,15 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             # provider_languages changes affect per-provider exclusions
             # which alter compat cache keys and provider pool behavior.
             reset_compat_pool = True
+            if key == 'settings-general-enabled_providers':
+                clear_disabled_provider_hub_statuses = True
 
         if settings_keys[0] == 'settings' and len(settings_keys) >= 3:
             if active_provider_hub_provider_ids is None:
                 active_provider_hub_provider_ids = _active_provider_hub_provider_ids()
             if settings_keys[1] in active_provider_hub_provider_ids:
                 reset_compat_pool = True
+                provider_hub_status_clears.add(settings_keys[1])
 
         if key in ('settings-compat_endpoint-enabled', 'settings-compat_endpoint-serve_local_subs'):
             update_schedule = True
@@ -1771,6 +1788,32 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             # covers every save rather than only those.
             restore_persisted_settings()
             raise ValidationError('Unable to save settings to disk')
+
+        if clear_disabled_provider_hub_statuses:
+            if active_provider_hub_provider_ids is None:
+                active_provider_hub_provider_ids = _active_provider_hub_provider_ids()
+            configured = getattr(settings.general, 'enabled_providers', [])
+            if isinstance(configured, str):
+                enabled_provider_ids = {
+                    item.strip().strip("'\"")
+                    for item in configured.strip().strip('[]').split(',')
+                    if item.strip()
+                }
+            elif isinstance(configured, (list, tuple, set)):
+                enabled_provider_ids = {str(item) for item in configured}
+            else:
+                enabled_provider_ids = set()
+            provider_hub_status_clears.update(
+                active_provider_hub_provider_ids - enabled_provider_ids)
+
+        if provider_hub_status_clears:
+            try:
+                from provider_hub import runtime_status
+                for provider_id in provider_hub_status_clears:
+                    runtime_status.clear(provider_id)
+            except Exception:
+                logging.exception('Unable to clear stale Provider Hub runtime status')
+
         if native_configuration is not None:
             native_configuration.publish_masters(settings)
 
