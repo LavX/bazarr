@@ -45,6 +45,8 @@ class SystemJobs(Resource):
         # are the only parts of its outcome that are sent.
         'error': fields.Raw(),
         'action': fields.Raw(),
+        # Stop leaves a job completed, so this is what says it did not finish.
+        'stopped': fields.Boolean(),
         'retryable': fields.Boolean(),
         'retry_of': fields.Integer(),
     })

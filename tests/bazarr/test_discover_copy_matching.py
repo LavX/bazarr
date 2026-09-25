@@ -30,9 +30,13 @@ SRT = b"1\n00:00:01,000 --> 00:00:02,000\nChosen copy dialogue\n\n"
 @pytest.fixture(params=["sqlite", "postgresql"])
 def copy_database(request, monkeypatch):
     """A disposable library on both engines, with the ORM session and the Core
-    engine pointed at the same throwaway data."""
+    engine pointed at the same throwaway data. Both integrations are on, as
+    they are for anyone whose library has these rows."""
     from app import database as db
+    from app.config import settings
 
+    monkeypatch.setattr(settings.general, "use_radarr", True)
+    monkeypatch.setattr(settings.general, "use_sonarr", True)
     cleanup = None
     schema = "discover_" + uuid.uuid4().hex
     if request.param == "postgresql":
@@ -604,6 +608,42 @@ def test_copy_matching_never_writes_rows_or_settings(
             for table in db.Base.metadata.sorted_tables} == before
     assert json.dumps(settings.as_dict(), sort_keys=True, default=str) == settings_before
     assert os.path.getsize(path) == 11 * 1024 * 1024
+
+
+@pytest.mark.parametrize("retired", ["integration_off", "instance_disabled"])
+def test_a_retired_integration_neither_offers_nor_resolves_its_copies(
+    authenticated_client, providers, copy_database, hashing, catalog_provider, tmp_path, monkeypatch, retired,
+):
+    """Rows outlive Radarr being switched off and their instance being disabled.
+
+    The rest of Discover already stops treating them as the library. The exact
+    copy offer did not, so a title screen left open across the change still
+    offered the retired copy, and choosing it searched providers against its
+    file.
+    """
+    from app.database import TableArrInstances
+    _, session = copy_database
+    add_instance(session, 1, "Radarr HD")
+    add_instance(session, 2, "Radarr 4K")
+    add_movie(session, 5, 1, media_file(tmp_path / "hd", "matrix.hd.mkv", b"HD"))
+    add_movie(session, 8, 2, media_file(tmp_path / "uhd", "matrix.uhd.mkv", b"UHD"))
+    session.commit()
+    offered = copies(authenticated_client, media_type="movie", imdb_id="tt0133093").json
+    assert [item["local_id"] for item in offered["items"]] == [5, 8]
+    assert offered["owning_titles"] == 2
+    if retired == "integration_off":
+        monkeypatch.setattr(hashing.general, "use_radarr", False)
+        remaining = []
+    else:
+        session.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 2).values(enabled=0))
+        session.commit()
+        remaining = [5]
+    now = copies(authenticated_client, media_type="movie", imdb_id="tt0133093").json
+    assert [item["local_id"] for item in now["items"]] == remaining
+    assert now["owning_titles"] == len(remaining)
+    rejected = post(authenticated_client, {**MOVIE, "copy_id": offered["items"][1]["copy_id"]})
+    assert rejected.status_code == 409
+    assert providers.videos == []
 
 
 def test_unowned_rows_are_disclosed_but_never_selectable(

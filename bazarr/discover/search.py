@@ -632,12 +632,17 @@ def search(request: SearchRequest, on_progress=None) -> dict:
             rows.append({**existing[1], "expires_at": _iso(renewed)} if renewed is not None
                         else _result(sub, video, context, search_id, checked, ttl, parsed))
         # Failed refreshes retain usable rows only for providers that failed.
-        # Successful empty searches replace their earlier results.
+        # Successful empty searches replace their earlier results. A retained
+        # handle is renewed like a live one: this snapshot offers it for its
+        # whole lifetime, and one that was about to expire would otherwise do
+        # so while the snapshot still names it.
         if previous_exists:
-            rows.extend({**row, "stale": True} for row in previous["results"]
-                        if row["provider"] in outcomes
-                        and outcomes[row["provider"]]["status"] not in _COMPLETE | {"skipped"}
-                        and resolve_result(row["id"]) is not None)
+            for row in previous["results"]:
+                if (row["provider"] in outcomes
+                        and outcomes[row["provider"]]["status"] not in _COMPLETE | {"skipped"}):
+                    renewed = renew_result(row["id"], ttl)
+                    if renewed is not None:
+                        rows.append({**row, "stale": True, "expires_at": _iso(renewed)})
         completed = sum(item["status"] in _COMPLETE for item in outcomes.values())
         # Only a provider that was actually asked and did not answer counts as
         # a failure. Skips, unmet setup and calls that never started are all

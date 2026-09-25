@@ -25,6 +25,10 @@ CACHE_MAX_ENTRIES = 64
 CACHE_MAX_BYTES = 16 * 1024 * 1024
 SUBTITLE_MAX_BYTES = 2 * 1024 * 1024
 FETCH_MAX_CONCURRENT = 4
+# Provider calls still alive, counting the ones whose waiters all gave up. A
+# call past its deadline gives its FETCH_MAX_CONCURRENT slot back, but its
+# thread runs on until the provider returns, so this is what bounds threads.
+FETCH_MAX_THREADS = 16
 FETCH_WAIT_SECONDS = 12
 # A download job is not holding a request open, so it can give a slow provider
 # longer than a preview can.
@@ -109,7 +113,7 @@ class _Artifact:
     filename: str
 
 
-@dataclass
+@dataclass(eq=False)
 class _Flight:
     ready: Event = field(default_factory=Event)
     artifact: _Artifact | None = None
@@ -122,6 +126,8 @@ class _Flight:
 
 _cache: OrderedDict = OrderedDict()
 _inflight: dict = {}
+# Flights retired at their deadline whose provider call has not returned yet.
+_abandoned: set = set()
 _lock = Lock()
 _cache_bytes = 0
 
@@ -151,6 +157,23 @@ def _evict(key):
     global _cache_bytes
     entry = _cache.pop(key)
     _cache_bytes -= len(entry[1].content)
+
+
+def _make_room(size, *, ticket):
+    """Evict, oldest first, until ``size`` more bytes fit, and say whether they do.
+
+    A finished download's file waits up to TICKET_TTL_SECONDS for Save, while
+    every other entry is a short-lived copy that can be fetched again, so those
+    go first. Only a new ticket may evict an older one.
+    """
+    while _cache and (len(_cache) >= CACHE_MAX_ENTRIES or _cache_bytes + size > CACHE_MAX_BYTES):
+        victim = next((key for key in _cache if key[1] != "job"), None)
+        if victim is None:
+            if not ticket:
+                return False
+            victim = next(iter(_cache))
+        _evict(victim)
+    return len(_cache) < CACHE_MAX_ENTRIES and _cache_bytes + size <= CACHE_MAX_BYTES
 
 
 def _prune(scope):
@@ -391,9 +414,7 @@ def _fetch(key, flight, record, result_id, search_id, authority, deadline):
             if time.monotonic() >= max(deadline, flight.deadline):
                 raise TimeoutError("Subtitle retrieval timed out")
             _prune(authority.scope)
-            while _cache and (len(_cache) >= CACHE_MAX_ENTRIES or _cache_bytes + len(artifact.content) > CACHE_MAX_BYTES):
-                _evict(next(iter(_cache)))
-            if len(artifact.content) <= CACHE_MAX_BYTES:
+            if _make_room(len(artifact.content), ticket=False):
                 _cache[key] = (min(time.monotonic() + CACHE_TTL_SECONDS,
                                    time.monotonic() + current["expires_at"] - time.time()), artifact)
                 _cache_bytes += len(artifact.content)
@@ -410,6 +431,7 @@ def _fetch(key, flight, record, result_id, search_id, authority, deadline):
             # one for the same result, which this late return must not remove.
             if _inflight.get(key) is flight:
                 del _inflight[key]
+            _abandoned.discard(flight)
             flight.ready.set()
 
 
@@ -434,16 +456,19 @@ def _artifact(result_id, search_id, authority, wait_seconds=None):
             # A provider download with no socket timeout can block for good.
             # Once every waiter's deadline has passed nobody is left to answer,
             # so the flight gives up its slot. Kept, four of them left every
-            # later preview and download busy until a restart.
+            # later preview and download busy until a restart. Its thread is
+            # still running, though, so it stays counted until it returns.
             now = time.monotonic()
             for stale_key, stale in list(_inflight.items()):
                 if stale.deadline <= now:
                     del _inflight[stale_key]
+                    _abandoned.add(stale)
             flight = _inflight.get(key)
             if flight is not None:
                 flight.deadline = max(flight.deadline, deadline)
             else:
-                if len(_inflight) >= FETCH_MAX_CONCURRENT:
+                if (len(_inflight) >= FETCH_MAX_CONCURRENT
+                        or len(_inflight) + len(_abandoned) >= FETCH_MAX_THREADS):
                     raise TimeoutError("Subtitle retrieval busy")
                 flight = _Flight(deadline=deadline)
                 _inflight[key] = flight
@@ -533,8 +558,7 @@ def _store_ticket(job_id, scope, artifact):
         _prune(scope)
         if key in _cache:
             _evict(key)
-        while _cache and (len(_cache) >= CACHE_MAX_ENTRIES or _cache_bytes + len(artifact.content) > CACHE_MAX_BYTES):
-            _evict(next(iter(_cache)))
+        _make_room(len(artifact.content), ticket=True)
         _cache[key] = (time.monotonic() + TICKET_TTL_SECONDS, artifact)
         _cache_bytes += len(artifact.content)
 
