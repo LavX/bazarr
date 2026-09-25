@@ -8,6 +8,7 @@ from app.config import settings
 from app.database import (TableArrInstances, TableEpisodes, TableHistory, TableHistoryMovie,
                           TableHistorySports, TableMovies, TableSportsEvents, database, select)
 from app.jobs_queue import jobs_queue
+from sportarr.workflows import require_sports_enabled
 from subtitles.mass_operations import mass_batch_operation, VALID_ACTIONS  # noqa: F401
 from ..utils import authenticate
 
@@ -105,6 +106,21 @@ class BatchOperation(Resource):
         if not items:
             return {'error': 'No valid items after sanitization'}, 400
 
+        # Use Sportarr off leaves the instance rows enabled, so the Sports
+        # pages could still queue work here. The sports rows are dropped and
+        # the rest of the batch runs; a batch of only sports rows is refused
+        # the way the sports routes refuse.
+        skipped, errors = 0, []
+        try:
+            require_sports_enabled()
+        except ValueError as exc:
+            kept = [item for item in items if item['type'] not in ('sports', 'sportsLeague')]
+            if not kept:
+                return {'error': str(exc)}, 400
+            if len(kept) < len(items):
+                skipped, errors = len(items) - len(kept), [str(exc)]
+            items = kept
+
         MAX_BATCH_SIZE = 10000
 
         if len(items) > MAX_BATCH_SIZE:
@@ -127,7 +143,7 @@ class BatchOperation(Resource):
             is_progress=True,
         )
 
-        return {'queued': len(items), 'skipped': 0, 'errors': [], 'job_id': job_id}, 200
+        return {'queued': len(items), 'skipped': skipped, 'errors': errors, 'job_id': job_id}, 200
 
 
 def get_upgradable_media_ids():

@@ -10,6 +10,7 @@ import {
 } from "@/apis/hooks/plex";
 import { QueryKeys } from "@/apis/queries/keys";
 import { PLEX_AUTH_CONFIG } from "@/constants/plex";
+import { useModals } from "@/modules/modals";
 import styles from "@/pages/Settings/Plex/AuthSection.module.scss";
 
 const AuthSection = () => {
@@ -24,6 +25,7 @@ const AuthSection = () => {
   const [pin, setPin] = useState<Plex.Pin | null>(null);
   const authWindowRef = useRef<Window | null>(null);
   const queryClient = useQueryClient();
+  const modals = useModals();
 
   const isPolling = !!pin?.pinId;
 
@@ -110,17 +112,31 @@ const AuthSection = () => {
     }
   };
 
-  const handleLogout = () => {
-    logout(undefined, {
-      onSuccess: () => {
-        notifications.show({
-          title: "Disconnected from Plex",
-          message: "All settings related to Plex were removed",
-          color: "green",
-        });
-      },
+  // Signing out also turns use_plex off, which silences every Plex server,
+  // including the ones added by hand, so it asks first, as the account card's
+  // Disconnect does.
+  const handleLogout = () =>
+    modals.openConfirmModal({
+      title: "Disconnect from Plex",
+      children: (
+        <Text size="sm">
+          This signs you out of Plex and turns off Plex integration, which also
+          stops refreshes to any Plex server you added by hand.
+        </Text>
+      ),
+      labels: { confirm: "Disconnect", cancel: "Cancel" },
+      confirmProps: { color: "red" },
+      onConfirm: () =>
+        logout(undefined, {
+          onSuccess: () => {
+            notifications.show({
+              title: "Disconnected from Plex",
+              message: "All settings related to Plex were removed",
+              color: "green",
+            });
+          },
+        }),
     });
-  };
 
   const handleCancelAuth = () => {
     setPin(null);

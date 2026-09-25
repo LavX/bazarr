@@ -2,7 +2,7 @@
 
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { customRender, screen, waitFor } from "@/tests";
+import { customRender, screen, waitFor, within } from "@/tests";
 import AuthSection from "./AuthSection";
 
 // Every case below drives the same button. What changes is what the pin
@@ -10,6 +10,8 @@ import AuthSection from "./AuthSection";
 // unhandled rejection that left the button looking inert.
 const createPin = vi.fn();
 const notify = vi.fn();
+const logout = vi.fn();
+let auth: Record<string, unknown> = { valid: false, auth_method: null };
 
 // Only `notifications.show` is replaced. The module also exports the
 // <Notifications /> component that the shared test providers render, so a bare
@@ -21,13 +23,13 @@ vi.mock("@mantine/notifications", async (importOriginal) => ({
 
 vi.mock("@/apis/hooks/plex", () => ({
   usePlexAuthValidationQuery: () => ({
-    data: { valid: false, auth_method: null },
+    data: auth,
     isLoading: false,
     error: null,
     refetch: vi.fn(),
   }),
   usePlexPinMutation: () => ({ mutateAsync: createPin }),
-  usePlexLogoutMutation: () => ({ mutate: vi.fn(), isPending: false }),
+  usePlexLogoutMutation: () => ({ mutate: logout, isPending: false }),
   usePlexPinCheckQuery: () => ({ data: undefined }),
 }));
 
@@ -41,6 +43,8 @@ describe("Plex AuthSection", () => {
   beforeEach(() => {
     createPin.mockReset();
     notify.mockReset();
+    logout.mockReset();
+    auth = { valid: false, auth_method: null };
     vi.spyOn(window, "open").mockReturnValue({} as Window);
   });
 
@@ -117,5 +121,48 @@ describe("Plex AuthSection", () => {
       ),
     );
     expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("asks before signing out of Plex, and only Disconnect signs out", async () => {
+    // Signing out turns use_plex off, which stops refreshes to every Plex
+    // server, the hand-added ones too. This button ran it on the first
+    // click, while the account card's Disconnect already asked.
+    auth = {
+      valid: true,
+      auth_method: "oauth",
+      username: "reader",
+      email: "reader@example.com",
+    };
+    const user = userEvent.setup();
+    customRender(<AuthSection />);
+    const signOut = screen.getByRole("button", {
+      name: "Disconnect from Plex",
+    });
+
+    await user.click(signOut);
+    const dialog = await screen.findByRole("dialog", {
+      name: "Disconnect from Plex",
+    });
+    expect(
+      within(dialog).getByText(
+        "This signs you out of Plex and turns off Plex integration, which also stops refreshes to any Plex server you added by hand.",
+      ),
+    ).toBeInTheDocument();
+    expect(logout).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Disconnect from Plex" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(logout).not.toHaveBeenCalled();
+
+    await user.click(signOut);
+    const again = await screen.findByRole("dialog", {
+      name: "Disconnect from Plex",
+    });
+    await user.click(within(again).getByRole("button", { name: "Disconnect" }));
+    await waitFor(() => expect(logout).toHaveBeenCalledTimes(1));
   });
 });

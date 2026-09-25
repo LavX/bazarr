@@ -90,3 +90,44 @@ def test_the_league_route_queues_one_combine_job():
     source = inspect.getsource(subtitles.SportsLeagueSubtitlesCombine)
     assert 'func="combine_league_subtitles"' in source
     assert 'try_combine_for_video' not in source
+
+
+def test_both_combine_routes_refuse_while_use_sportarr_is_off(monkeypatch):
+    """Turning the switch off leaves the instance rows enabled, so Combine on
+    the Sports page still built and published a composition. With the switch
+    on, the same request goes on to resolve the event or league."""
+    from flask import Flask
+
+    from api.sports import subtitles as api_mod
+    from app.config import settings
+    from app.jobs_queue import jobs_queue
+    from sportarr import identity
+    from sportarr.errors import SportsNotFound
+
+    resolved, queued = [], []
+
+    def not_found(*args, **kwargs):
+        resolved.append(args)
+        raise SportsNotFound('Sports event not found for this owner')
+
+    monkeypatch.setattr(identity, 'resolve_event_in_session', not_found)
+    monkeypatch.setattr(api_mod, '_league_owner', not_found)
+    monkeypatch.setattr(jobs_queue, 'feed_jobs_pending_queue', lambda **kwargs: queued.append(kwargs))
+
+    def post(resource, item_id):
+        with Flask(__name__).test_request_context(
+                f'/sports/{item_id}/subtitles/combine', method='POST', json={'arr_instance_id': 1}):
+            return resource.post.__wrapped__(resource(), item_id)
+
+    routes = [(api_mod.SportsEventSubtitlesCombine, 61), (api_mod.SportsLeagueSubtitlesCombine, 51)]
+
+    monkeypatch.setattr(settings.general, 'use_sportarr', False)
+    off = ({'message': 'Sportarr is turned off. Turn on Use Sportarr in Settings first.'}, 400)
+    for resource, item_id in routes:
+        assert post(resource, item_id) == off
+    assert resolved == [] and queued == []
+
+    monkeypatch.setattr(settings.general, 'use_sportarr', True)
+    for resource, item_id in routes:
+        assert post(resource, item_id)[1] == 404
+    assert len(resolved) == 2 and queued == []
