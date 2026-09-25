@@ -146,6 +146,27 @@ def _instance_name(instances, instance_id):
     return entry["instance_name"] if entry else None
 
 
+def _owned(table, kind, instances):
+    """Rows that belong to a live integration, as a WHERE clause.
+
+    Rows survive an integration being switched off and an instance being
+    disabled, so every read here that stands for "your library" has to say
+    which rows are still the reader's. The integration being off is the whole
+    answer: none of its rows count. Otherwise a row counts when an enabled
+    instance of that kind owns it.
+    """
+    from app.config import settings
+    if not getattr(getattr(settings, "general", None), f"use_{kind}", False):
+        return false()
+    owners = [owner for owner, entry in instances.items()
+              if entry["enabled"] and entry["kind"] == kind]
+    # A row from before the multi-instance migration carries no owner and
+    # belongs to the default instance. Matching only the owner list would
+    # quietly drop every one of them.
+    orphan = table.arr_instance_id.is_(None)
+    return or_(orphan, table.arr_instance_id.in_(owners)) if owners else orphan
+
+
 # ------------------------------------------------------------------ wanted
 
 
@@ -182,9 +203,13 @@ def _wanted_predicate(kind):
     return conditions
 
 
-def _wanted_kind(connection, kind, qualifications):
+def _wanted_kind(connection, kind, qualifications, instances):
     from app.database import TableEpisodes, TableMovies, TableShows
     table = TableEpisodes if kind == "episode" else TableMovies
+    # A switched-off integration and a disabled instance keep their rows.
+    # Counted, they told the reader that episodes needed subtitles and linked
+    # to a Wanted page the navigation hides.
+    live = _owned(table, "sonarr" if kind == "episode" else "radarr", instances)
     statement = select(table.arr_instance_id, table.missing_subtitles,
                        func.count().label("media_rows"))
     if kind == "episode":
@@ -195,7 +220,7 @@ def _wanted_kind(connection, kind, qualifications):
     # One row past the budget is enough to know it was breached. A LIMIT bounds
     # the read without a streamed result: streaming opens a named cursor on
     # PostgreSQL, which the AUTOCOMMIT application engine cannot hold.
-    statement = (statement.where(and_(*_wanted_predicate(kind)))
+    statement = (statement.where(and_(*_wanted_predicate(kind), live))
                  .group_by(table.arr_instance_id, table.missing_subtitles)
                  .limit(WANTED_GROUP_BUDGET + 1))
 
@@ -225,7 +250,7 @@ def _wanted_kind(connection, kind, qualifications):
     if kind == "episode":
         uncomputed = uncomputed.join(TableShows, TableEpisodes.series_id == TableShows.id)
     conditions = [or_(table.missing_subtitles.is_(None), table.missing_subtitles == ""),
-                  profile_owner.is_not(None)]
+                  profile_owner.is_not(None), live]
     from app.database import get_exclusion_clause
     conditions += get_exclusion_clause("series" if kind == "episode" else "movie")
     unknown_media += connection.execute(uncomputed.where(and_(*conditions))).scalar() or 0
@@ -240,9 +265,9 @@ def _wanted_component(instances):
     qualifications = set()
     with _connection() as connection:
         episodes, episode_media, episode_unknown, episode_owners = _wanted_kind(
-            connection, "episode", qualifications)
+            connection, "episode", qualifications, instances)
         movies, movie_media, movie_unknown, movie_owners = _wanted_kind(
-            connection, "movie", qualifications)
+            connection, "movie", qualifications, instances)
 
     unknown_media = episode_unknown + movie_unknown
     if unknown_media:
@@ -532,38 +557,19 @@ def _library_component(instances):
     one where it changes what a reader would do, and adding two grouped reads
     here to restate the shape of the library would cost more than it tells.
     """
-    from app.config import settings
     from app.database import TableEpisodes, TableHistory, TableHistoryMovie, TableMovies, TableShows
 
     def count(table, where=None):
         statement = select(func.count()).select_from(table)
         return (statement if where is None else statement.where(where)).scalar_subquery()
 
-    # Rows survive an integration being switched off and an instance being
-    # disabled, so counting the tables flat would show a Radarr-only install a
-    # series count and fold a disabled Sonarr's shows into the total the reader
-    # is told they have. Restrict to the instances that are actually live, the
-    # way every other read of these tables does.
-    general = getattr(settings, "general", None)
-    enabled_owners = {owner for owner, entry in instances.items() if entry["enabled"]}
-
-    def owned(table, kind):
-        # The integration being off is the whole answer: its rows survive being
-        # switched off, and a Radarr-only install should not be shown a series
-        # count built from them.
-        if not getattr(general, f"use_{kind}", False):
-            return false()
-        owners = [owner for owner in enabled_owners if instances[owner]["kind"] == kind]
-        # A row from before the multi-instance migration carries no owner and
-        # belongs to the default instance. Matching only the owner list would
-        # quietly drop every one of them from the count.
-        orphan = table.arr_instance_id.is_(None)
-        return or_(orphan, table.arr_instance_id.in_(owners)) if owners else orphan
-
+    # Counting the tables flat would show a Radarr-only install a series count
+    # and fold a disabled Sonarr's shows into the total the reader is told they
+    # have, so only live owners count.
     columns = [
-        count(TableShows, owned(TableShows, "sonarr")).label("series"),
-        count(TableMovies, owned(TableMovies, "radarr")).label("movies"),
-        count(TableEpisodes, owned(TableEpisodes, "sonarr")).label("episodes"),
+        count(TableShows, _owned(TableShows, "sonarr", instances)).label("series"),
+        count(TableMovies, _owned(TableMovies, "radarr", instances)).label("movies"),
+        count(TableEpisodes, _owned(TableEpisodes, "sonarr", instances)).label("episodes"),
         # What this Bazarr went and found. Upgrades and manual downloads count
         # because the install did the work; an upload does not, because the
         # reader did, and "subtitles fetched" would be crediting it wrongly.
@@ -578,11 +584,12 @@ def _library_component(instances):
         # sports table took series, movies, episodes and the fetched count down
         # with it, and this module promises that one failed source leaves the
         # others intact.
-        sports = _sports_counts(connection, count)
+        sports = _sports_counts(connection, count, instances)
 
     component = {"availability": "available", "observed_at": _iso(_now()), "complete": True,
                  "series": row.series, "movies": row.movies, "episodes": row.episodes,
-                 "subtitles_fetched": row.episode_subtitles + row.movie_subtitles}
+                 "subtitles_fetched": (row.episode_subtitles + row.movie_subtitles
+                                       + sports.pop("sports_subtitles", 0))}
     # Absent rather than zero: an install with no Sportarr has no sports, and a
     # "0 sports" tile would invite a reader to go looking for a feature they
     # have not turned on.
@@ -591,7 +598,7 @@ def _library_component(instances):
     return component
 
 
-def _sports_counts(connection, count):
+def _sports_counts(connection, count, instances):
     """Sports counts, only where Sportarr is both present and switched on.
 
     Sportarr is optional and its tables only exist where it shipped, so this
@@ -605,18 +612,27 @@ def _sports_counts(connection, count):
     if not getattr(getattr(settings, "general", None), "use_sportarr", False):
         return {}
     try:
-        from app.database import TableSportsEvents, TableSportsLeagues
+        from app.database import TableHistorySports, TableSportsEvents, TableSportsLeagues
     except ImportError:
         return {}
     try:
         row = connection.execute(select(
-            count(TableSportsLeagues).label("sports_leagues"),
-            count(TableSportsEvents).label("sports_events"),
+            # A disabled instance keeps its leagues and events, the same as a
+            # disabled Sonarr keeps its shows.
+            count(TableSportsLeagues, _owned(TableSportsLeagues, "sportarr", instances))
+            .label("sports_leagues"),
+            count(TableSportsEvents, _owned(TableSportsEvents, "sportarr", instances))
+            .label("sports_events"),
+            # Folded into the all-time fetched total, on the same terms as the
+            # episode and movie history.
+            count(TableHistorySports, TableHistorySports.action.in_(FETCHED_ACTIONS))
+            .label("sports_subtitles"),
         )).one()
     except Exception:
         logger.exception("Discover summary could not count the sports library")
         return {}
-    return {"sports_leagues": row.sports_leagues, "sports_events": row.sports_events}
+    return {"sports_leagues": row.sports_leagues, "sports_events": row.sports_events,
+            "sports_subtitles": row.sports_subtitles}
 
 
 def _unknown_library():
@@ -770,11 +786,57 @@ def _observed_translation_arrivals(instances):
     return arrivals
 
 
+def _sports_history_candidates(connection, instances):
+    """Sports downloads, on the same terms as the sports counts.
+
+    Only where Sportarr is switched on and its models are in this build, and a
+    failed read contributes nothing rather than taking the episode and movie
+    arrivals down with it. History rows cascade with their event, so the joins
+    are inner and every row carries an exact identity.
+    """
+    from app.config import settings
+    if not getattr(getattr(settings, "general", None), "use_sportarr", False):
+        return []
+    try:
+        from app.database import TableHistorySports, TableSportsEvents, TableSportsLeagues
+    except ImportError:
+        return []
+    history, event, league = TableHistorySports, TableSportsEvents, TableSportsLeagues
+    statement = (select(history.id, history.action, history.language, history.provider,
+                        history.timestamp, history.arr_instance_id, event.season, event.episode,
+                        event.title.label("event_title"), league.id.label("league_id"))
+                 .select_from(history)
+                 .join(event, and_(history.event_id == event.id,
+                                   history.arr_instance_id == event.arr_instance_id))
+                 .join(league, and_(event.league_id == league.id,
+                                    event.arr_instance_id == league.arr_instance_id))
+                 .where(history.action.in_(ARRIVAL_ACTIONS),
+                        _owned(history, "sportarr", instances))
+                 .order_by(history.timestamp.desc(), history.id.desc())
+                 .limit(HISTORY_CANDIDATE_LIMIT))
+    try:
+        rows = connection.execute(statement).all()
+    except Exception:
+        logger.exception("Discover summary could not read sports history")
+        return []
+    return [{
+        "kind": "sports", "event_id": f"sports:{row.id}", "status": "success",
+        "action": row.action, "title": row.event_title,
+        "poster_url": None, "backdrop_url": None, "library_id": row.league_id,
+        "season": row.season, "episode": row.episode, "episode_title": None,
+        "language": row.language, "provider": row.provider,
+        "arr_instance_id": row.arr_instance_id,
+        "instance_name": _instance_name(instances, row.arr_instance_id),
+        "timestamp": _iso_local(row.timestamp), "_sort": row.timestamp,
+    } for row in rows]
+
+
 def _arrivals(instances):
     qualifications = set()
     with _connection() as connection:
         candidates = _history_candidates(connection, "episode", instances, qualifications)
         candidates += _history_candidates(connection, "movie", instances, qualifications)
+        candidates += _sports_history_candidates(connection, instances)
     candidates += _observed_translation_arrivals(instances)
     candidates.sort(key=lambda item: item["_sort"], reverse=True)
     candidates = _merge_by_media(candidates)
@@ -867,14 +929,16 @@ def _live_feed_observations():
     return clients
 
 
-def _inaccessible_rootfolders(connection):
+def _inaccessible_rootfolders(connection, instances):
     from app.database import TableMoviesRootfolder, TableShowsRootfolder
     groups = []
-    for table in (TableShowsRootfolder, TableMoviesRootfolder):
+    for table, kind in ((TableShowsRootfolder, "sonarr"), (TableMoviesRootfolder, "radarr")):
         rows = connection.execute(
             select(table.arr_instance_id, func.count().label("folders"),
                    func.min(table.path).label("example"))
-            .where(table.accessible == 0)
+            # A retired instance's last recorded check is not something to fix,
+            # and warning about it kept Discover degraded for good.
+            .where(table.accessible == 0, _owned(table, kind, instances))
             .group_by(table.arr_instance_id)
             # Without an order the engine chooses which owners survive the
             # bound, and SQLite and PostgreSQL need not choose the same ones.
@@ -968,7 +1032,7 @@ def _attention(instances):
             })
 
     with _connection() as connection:
-        for group in _inaccessible_rootfolders(connection):
+        for group in _inaccessible_rootfolders(connection, instances):
             owner = group["arr_instance_id"]
             name = _instance_name(instances, owner) or "an unnamed instance"
             folders = group["folders"]
