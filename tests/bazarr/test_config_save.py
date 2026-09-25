@@ -208,6 +208,42 @@ def test_save_settings_invalidates_the_compat_cache_for_a_score_modifier(monkeyp
         config.settings.general.provider_score_modifiers = previous
 
 
+def test_save_settings_invalidates_the_compat_cache_for_the_ai_translated_penalty(monkeypatch):
+    """The AI-translated penalty is projected into the same cached scores as a
+    provider modifier, so an edit to it has to retire the cache too."""
+    from app import config
+
+    invalidations = []
+
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config.settings.validators, "validate", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.database",
+        SimpleNamespace(
+            database=SimpleNamespace(execute=lambda _statement: None),
+            update=lambda _model: _FakeUpdate(),
+            System=object,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "compat.cache",
+        SimpleNamespace(invalidate_all=lambda: invalidations.append(
+            config.settings.general.ai_translated_score_penalty)),
+    )
+
+    previous = config.settings.general.ai_translated_score_penalty
+    try:
+        config.save_settings([("settings-general-ai_translated_score_penalty", ["30"])])
+
+        assert config.settings.general.ai_translated_score_penalty == 30
+        assert invalidations == [30]
+    finally:
+        config.settings.general.ai_translated_score_penalty = previous
+
+
 def test_save_settings_leaves_the_compat_cache_alone_for_an_unrelated_setting(monkeypatch):
     from app import config
 

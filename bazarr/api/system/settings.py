@@ -181,10 +181,10 @@ class SystemSettings(Resource):
                 _write_settings_rows(enabled_languages, profiles, notifications)
                 raise
         except MetadataPersistenceError:
-            return "Discover settings could not be saved. Try again.", 503
+            return "Metadata settings could not be saved. Try again.", 503
         except MetadataFollowupError:
             return {"code": "discover_settings_refresh_failed",
-                    "message": "Discover settings were saved, but application refresh failed. Reload settings before retrying."}, 503
+                    "message": "Metadata settings were saved, but application refresh failed. Reload settings before retrying."}, 503
         except ValidationError as e:
             event_stream("settings")
             return e.message, 406

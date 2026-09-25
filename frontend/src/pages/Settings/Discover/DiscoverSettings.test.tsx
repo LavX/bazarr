@@ -455,7 +455,7 @@ it.each(["retry", "leave", "ordinary save", "failed retry"])(
               {
                 code: "discover_settings_refresh_failed",
                 message:
-                  "Discover settings were saved, but application refresh failed. Reload settings before retrying.",
+                  "Metadata settings were saved, but application refresh failed. Reload settings before retrying.",
               },
               { status: 503 },
             )

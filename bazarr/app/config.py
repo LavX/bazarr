@@ -949,7 +949,7 @@ def _write_config(*, strict_metadata=False):
               merge=False)
     except Exception as error:
         if strict_metadata:
-            raise MetadataPersistenceError("Discover settings could not be saved. Try again.") from None
+            raise MetadataPersistenceError("Metadata settings could not be saved. Try again.") from None
         logging.exception(f"Exception raised while trying to save temporary settings file: {error}")  # noqa: G004
         return False
     else:
@@ -957,7 +957,7 @@ def _write_config(*, strict_metadata=False):
             move(config_yaml_file + '.tmp', config_yaml_file)
         except Exception as error:
             if strict_metadata:
-                raise MetadataPersistenceError("Discover settings could not be saved. Try again.") from None
+                raise MetadataPersistenceError("Metadata settings could not be saved. Try again.") from None
             logging.exception(f"Exception raised while trying to overwrite settings file with temporary settings "  # noqa: G004
                               f"file: {error}")
             return False
@@ -1356,7 +1356,7 @@ def save_settings(settings_items):
         except Exception:
             if persisted:
                 raise MetadataFollowupError(
-                    "Discover settings were saved, but application refresh failed. Reload settings before retrying."
+                    "Metadata settings were saved, but application refresh failed. Reload settings before retrying."
                 ) from None
             settings.set("discover", previous)
             settings.set("general.metadata_language", previous_language)
@@ -1766,7 +1766,7 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
                 saved = write_config(strict_metadata=True)
             except Exception:
                 restore_persisted_settings()
-                raise MetadataPersistenceError("Discover settings could not be saved. Try again.") from None
+                raise MetadataPersistenceError("Metadata settings could not be saved. Try again.") from None
         else:
             saved = write_config()
 

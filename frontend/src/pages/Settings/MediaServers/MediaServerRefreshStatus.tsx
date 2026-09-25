@@ -161,6 +161,8 @@ export default function MediaServerRefreshStatus({
         <Alert color="gray">
           Asked the server to rescan {rescan.data.requested}{" "}
           {rescan.data.requested === 1 ? "library" : "libraries"}.
+          {rescan.data.failed > 0 &&
+            ` ${rescan.data.failed} could not be rescanned. See the log for details.`}
         </Alert>
       )}
       {rescan.isError && (
