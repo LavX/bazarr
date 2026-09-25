@@ -159,6 +159,23 @@ def _evict(key):
     _cache_bytes -= len(entry[1].content)
 
 
+def _make_room(size, *, ticket):
+    """Evict, oldest first, until ``size`` more bytes fit, and say whether they do.
+
+    A finished download's file waits up to TICKET_TTL_SECONDS for Save, while
+    every other entry is a short-lived copy that can be fetched again, so those
+    go first. Only a new ticket may evict an older one.
+    """
+    while _cache and (len(_cache) >= CACHE_MAX_ENTRIES or _cache_bytes + size > CACHE_MAX_BYTES):
+        victim = next((key for key in _cache if key[1] != "job"), None)
+        if victim is None:
+            if not ticket:
+                return False
+            victim = next(iter(_cache))
+        _evict(victim)
+    return len(_cache) < CACHE_MAX_ENTRIES and _cache_bytes + size <= CACHE_MAX_BYTES
+
+
 def _prune(scope):
     now = time.monotonic()
     for key, (expiry, _) in list(_cache.items()):
@@ -397,9 +414,7 @@ def _fetch(key, flight, record, result_id, search_id, authority, deadline):
             if time.monotonic() >= max(deadline, flight.deadline):
                 raise TimeoutError("Subtitle retrieval timed out")
             _prune(authority.scope)
-            while _cache and (len(_cache) >= CACHE_MAX_ENTRIES or _cache_bytes + len(artifact.content) > CACHE_MAX_BYTES):
-                _evict(next(iter(_cache)))
-            if len(artifact.content) <= CACHE_MAX_BYTES:
+            if _make_room(len(artifact.content), ticket=False):
                 _cache[key] = (min(time.monotonic() + CACHE_TTL_SECONDS,
                                    time.monotonic() + current["expires_at"] - time.time()), artifact)
                 _cache_bytes += len(artifact.content)
@@ -543,8 +558,7 @@ def _store_ticket(job_id, scope, artifact):
         _prune(scope)
         if key in _cache:
             _evict(key)
-        while _cache and (len(_cache) >= CACHE_MAX_ENTRIES or _cache_bytes + len(artifact.content) > CACHE_MAX_BYTES):
-            _evict(next(iter(_cache)))
+        _make_room(len(artifact.content), ticket=True)
         _cache[key] = (time.monotonic() + TICKET_TTL_SECONDS, artifact)
         _cache_bytes += len(artifact.content)
 
