@@ -8,6 +8,8 @@ import {
   Stack,
   Text,
 } from "@mantine/core";
+import { useQuery } from "@tanstack/react-query";
+import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { useIsLoading } from "@/contexts";
 import {
@@ -24,11 +26,24 @@ export default function TmdbIntegration() {
   const saving = useIsLoading();
   const form = useFormValues();
   const { setValue } = useFormActions();
-  const configured = settings?.discover?.tmdb_configured ?? false;
+  // The built-in key makes metadata available on every install, so only an
+  // explicit false from the server says otherwise.
+  const configured = settings?.discover?.tmdb_configured !== false;
   // Metadata being available is the built-in key's doing, so it is not evidence
   // that the reader has anything saved. Only a saved key can be removed.
   const tokenStored = settings?.discover?.tmdb_token_stored ?? false;
   const revision = settings?.discover?.metadata_revision;
+  // A saved key TMDB rejects never stops Discover: the server moves browsing
+  // to the built-in key. This field is the one place that says so. The key is
+  // outside the metadata namespace, which a save retires wholesale.
+  const keyStatus = useQuery({
+    queryKey: [QueryKeys.Discover, "tmdb-key-status", revision],
+    queryFn: ({ signal }) => api.discover.metadata("status", signal),
+    enabled: tokenStored,
+    staleTime: 0,
+    retry: false,
+  });
+  const rejected = tokenStored && keyStatus.data?.override_rejected === true;
   const draft = form.values.settings[tokenKey] as string | undefined;
   const [check, setCheck] = useState<MetadataResponse | null>(null);
   const [checking, setChecking] = useState(false);
@@ -60,6 +75,8 @@ export default function TmdbIntegration() {
     try {
       const response = await api.discover.testMetadata(draft, attempt.signal);
       if (!attempt.signal.aborted) setCheck(response);
+      // Checking the saved key is also what clears or records its rejection.
+      if (draft === undefined && tokenStored) void keyStatus.refetch();
     } catch {
       if (!attempt.signal.aborted) setFailed(true);
     } finally {
@@ -92,6 +109,12 @@ export default function TmdbIntegration() {
           else clearDraft();
         }}
       />
+      {rejected && draft === undefined && (
+        <Alert color="yellow">
+          TMDB rejected your saved key, so Discover is using the built-in key.
+          Replace the key or remove it.
+        </Alert>
+      )}
       <Group>
         <Button
           disabled={saving}

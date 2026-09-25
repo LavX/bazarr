@@ -382,12 +382,6 @@ export default function TitleDetails({
           {kind === "show" ? "Loading show details." : "Loading movie details."}
         </Text>
       )}
-      {!details.configured && (
-        <Alert color="yellow">
-          Set up TMDB in the Subtitle Hub to load global title details. IMDb
-          subtitle search remains available in Search options.
-        </Alert>
-      )}
       {(details.isError ||
         details.data?.status === "unavailable" ||
         details.data?.failure_reason) && (

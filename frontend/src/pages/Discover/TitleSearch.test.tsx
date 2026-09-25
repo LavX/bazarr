@@ -282,7 +282,11 @@ it("keeps explicit IMDb retrieval usable without metadata setup", async () => {
   const { user } = browse();
   await user.click(screen.getByLabelText("Search"));
   await user.type(screen.getByLabelText("Search"), "S");
-  await screen.findByText(/Set up TMDB in the Subtitle Hub/);
+  // Discover always has the built-in TMDB key, so a false flag in the
+  // settings never turns into a setup prompt.
+  expect(
+    screen.queryByText(/Set up TMDB|Connect TMDB/),
+  ).not.toBeInTheDocument();
   await user.clear(screen.getByLabelText("Search"));
   expect(screen.queryByLabelText("IMDb ID")).not.toBeInTheDocument();
   await user.type(screen.getByLabelText("Search"), "Shogun");
@@ -353,7 +357,9 @@ it("preserves the selected subtitle identity when metadata credentials are remov
     ),
   );
   await queryClient.refetchQueries({ queryKey: [QueryKeys.System] });
-  await screen.findByText(/Set up TMDB in the Subtitle Hub to load/);
+  expect(
+    screen.queryByText(/Set up TMDB|Connect TMDB/),
+  ).not.toBeInTheDocument();
   expect(screen.getByLabelText("IMDb ID")).toHaveValue("tt0080274");
   expect(screen.getByRole("button", { name: "Find subtitles" })).toBeEnabled();
 });
