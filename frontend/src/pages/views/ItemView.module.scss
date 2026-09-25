@@ -1,70 +1,82 @@
 // The toolbar band above the Series, Movies and Sports tables.
 //
-// Its left side always holds something: the batch tools while rows are
-// selected, and otherwise how many rows there are and which filters are
-// narrowing them. Both fit the same 36px row, so ticking the first checkbox
-// swaps what the band says without moving the table under the pointer.
+// Two rows. The head always holds something on its left: the batch tools
+// while rows are selected, and otherwise how many rows there are. The active
+// filters take a row of their own under it whenever there are any, in both
+// states. So selecting a row changes what the head says and nothing else:
+// the band keeps its height and the table does not move under the pointer.
+//
+// The attribute raises the specificity above the shared band's small-screen
+// rule, which holds everything on one row with nowrap !important.
+.band[data-holds] {
+  flex-wrap: wrap !important;
+  row-gap: 8px;
+}
+
 .band {
+  .head {
+    display: flex;
+    flex: 1 1 100%;
+    align-items: center;
+    gap: var(--mantine-spacing-md);
+    min-width: 0;
+  }
+
   .count {
-    flex: none;
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--bz-text-secondary);
   }
 
-  // Takes whatever the count and the controls leave, and wraps its chips
-  // inside that space, so a long filter never pushes the search field onto a
-  // row of its own.
-  .filters {
-    flex: 1 1 0;
-    min-width: 0;
-  }
-
   .controls {
     flex: none;
+    flex-wrap: nowrap;
     margin-left: auto;
   }
 
   // A width in the stylesheet rather than a style prop: an inline width is
   // what the controls group measures as its narrowest, so a phone could never
-  // shrink the field below 220px and the count lost its row instead.
+  // shrink the field below 220px.
   .search {
     width: 220px;
   }
 
+  .filters {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
   @include mantine.smaller-than(mantine.$mantine-breakpoint-sm) {
-    // A phone has no room for the chips beside the search field, so they
-    // take a second row inside the band, under it. The search field gives up
-    // width before the count does, and the two stay on one row.
-    &[data-holds="summary"] {
-      flex-wrap: wrap !important;
-
-      .filters {
-        order: 1;
-        flex-basis: 100%;
-      }
-
-      // A zero basis, so the row breaks on how narrow the controls can get
-      // rather than on the full 220px search field. They wrap under the count
-      // only once the search would drop below a usable 120px.
-      .controls {
-        flex: 1 1 0;
-        flex-wrap: nowrap;
-        justify-content: flex-end;
-      }
-
-      .search {
-        width: auto;
-        flex: 0 1 220px;
-        min-width: 120px;
-      }
+    // The head stays one row. The count keeps its own width and the controls
+    // take what is left, so the search field gives up width first, down to a
+    // usable 120px, and only then does the count elide. A zero basis is what
+    // does it: shrinking both in proportion took a fraction of a pixel from
+    // the count, which was enough to show its ellipsis. The count changes
+    // with every keystroke, so letting it push the controls onto a row of
+    // their own moved the field being typed into.
+    .controls {
+      flex: 1 1 0;
+      justify-content: flex-end;
     }
 
-    // The batch tools are wider than any phone. The band is one row that
+    .search {
+      width: auto;
+      flex: 0 1 220px;
+      min-width: 120px;
+    }
+
+    // The batch tools are wider than any phone. The head is one row that
     // scrolls sideways, which is what the shared band asks for below this
     // width, but its groups used to shrink to their narrowest and stack
     // their buttons in a column instead: one selected row made the band
     // 280px tall and pushed the table off the screen.
-    &[data-holds="actions"] {
+    &[data-holds="actions"] .head {
+      overflow-x: auto;
+      scrollbar-width: none;
+
       > * {
         flex-shrink: 0;
       }

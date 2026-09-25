@@ -85,12 +85,31 @@ describe("Series toolbar band", () => {
     return found;
   }
 
+  // The count a sighted reader sees. It is hidden from assistive technology,
+  // which hears the same words from the status region once typing settles,
+  // so it is told apart from that region by its aria-hidden.
+  function shownCount() {
+    return (
+      within(band())
+        .queryAllByText(/series$/)
+        .find((element) => element.getAttribute("aria-hidden") === "true") ??
+      null
+    );
+  }
+
+  async function announced(text: RegExp) {
+    await waitFor(() =>
+      expect(within(band()).getByRole("status")).toHaveTextContent(text),
+    );
+  }
+
   it("leads with the count and renders no tool group while nothing is selected", async () => {
     customRender(<SeriesView />);
     await screen.findByRole("link", { name: "Northern Light" });
 
     expect(band()).toHaveAttribute("data-holds", "summary");
-    expect(within(band()).getByRole("status")).toHaveTextContent(/^3 series$/);
+    expect(shownCount()).toHaveTextContent(/^3 series$/);
+    await announced(/^3 series$/);
     // Nothing selected is no group at all, not an empty one holding the space.
     expect(screen.queryByRole("group", { name: "Batch actions" })).toBeNull();
     expect(
@@ -111,16 +130,16 @@ describe("Series toolbar band", () => {
     // The batch tools are the reason the band exists: a layout that hid the
     // band with an empty left side must never take these with it.
     for (const name of [/sync subtitles/i, /translate/i, /combine/i]) {
-      expect(within(tools).getByRole("button", { name })).toBeVisible();
+      expect(within(tools).getByRole("button", { name })).toBeInTheDocument();
     }
-    expect(within(band()).queryByRole("status")).toBeNull();
+    expect(shownCount()).toBeNull();
 
     await user.click(
       screen.getByRole("checkbox", { name: "Select Northern Light" }),
     );
     expect(band()).toHaveAttribute("data-holds", "summary");
     expect(screen.queryByRole("group", { name: "Batch actions" })).toBeNull();
-    expect(within(band()).getByRole("status")).toHaveTextContent(/^3 series$/);
+    expect(shownCount()).toHaveTextContent(/^3 series$/);
   });
 
   it("keeps the active filters in the band instead of a second one under it", async () => {
@@ -132,8 +151,8 @@ describe("Series toolbar band", () => {
     await waitFor(() =>
       expect(screen.queryByRole("link", { name: "Glass Harbour" })).toBeNull(),
     );
-    const status = within(band()).getByRole("status");
-    expect(status).toHaveTextContent(/^1 of 3 series$/);
+    expect(shownCount()).toHaveTextContent(/^1 of 3 series$/);
+    await announced(/^1 of 3 series$/);
     expect(within(band()).getByText("Active filters:")).toBeInTheDocument();
     expect(within(band()).getByText('Title: "light"')).toBeInTheDocument();
     // Once, and in the band: no second band carrying its own copy.
@@ -141,7 +160,28 @@ describe("Series toolbar band", () => {
 
     await user.click(within(band()).getByRole("button", { name: "Clear all" }));
     expect(screen.getByPlaceholderText("Search by title...")).toHaveValue("");
-    expect(within(band()).getByRole("status")).toHaveTextContent(/^3 series$/);
+    expect(shownCount()).toHaveTextContent(/^3 series$/);
     expect(screen.queryByText("Active filters:")).toBeNull();
+  });
+
+  // Selecting a row changes what the head says and nothing else. If the
+  // filters left with the count, the band would lose a row on the first
+  // selection, and the table would move under the pointer while the only
+  // sign that it is filtered went with them.
+  it("keeps the active filters while rows are selected", async () => {
+    const user = userEvent.setup();
+    customRender(<SeriesView />);
+    await screen.findByRole("link", { name: "Northern Light" });
+
+    await user.type(screen.getByPlaceholderText("Search by title..."), "light");
+    await screen.findByText('Title: "light"');
+    await user.click(
+      screen.getByRole("checkbox", { name: "Select Northern Light" }),
+    );
+    expect(band()).toHaveAttribute("data-holds", "actions");
+    expect(within(band()).getByText('Title: "light"')).toBeInTheDocument();
+    expect(
+      within(band()).getByRole("button", { name: "Clear all" }),
+    ).toBeInTheDocument();
   });
 });

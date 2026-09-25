@@ -58,6 +58,8 @@ describe("Movies page", () => {
       .getByPlaceholderText("Search by title...")
       .closest("[data-holds]");
     if (!(band instanceof HTMLElement)) throw new Error("No toolbar band");
-    expect(within(band).getByRole("status")).toHaveTextContent(/^1 movie$/);
+    await waitFor(() =>
+      expect(within(band).getByRole("status")).toHaveTextContent(/^1 movie$/),
+    );
   });
 });
