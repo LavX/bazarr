@@ -104,6 +104,11 @@ export const usePlexLogoutMutation = () => {
       void queryClient.invalidateQueries({
         queryKey: [QueryKeys.System],
       });
+      // Signing out switches the account's destination row off and lets it be
+      // deleted, so its card has to be read again.
+      void queryClient.invalidateQueries({
+        queryKey: mediaServerInstancesKey("plex"),
+      });
     },
   });
 };

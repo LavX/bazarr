@@ -17,6 +17,9 @@ def library_database(request, monkeypatch):
     monkeypatch.setattr(tmdb, "builtin_api_key", lambda: "")
     monkeypatch.setattr(settings.discover, "tmdb_access_token", "")
     monkeypatch.setattr(omdb, "_resolve_omdb_apikey", lambda: None)
+    # Local rows are the reader's library only while their integration is on.
+    monkeypatch.setattr(settings.general, "use_sonarr", True)
+    monkeypatch.setattr(settings.general, "use_radarr", True)
     if request.param == "postgresql":
         url = os.environ.get("BAZARR_PG_TEST_URL")
         if not url:
@@ -304,3 +307,34 @@ def test_ownership_lists_seasons_with_a_local_episode(library_database):
                                   "imdb_id": "tt0303461", "title": "Firefly", "year": 2002}])
     assert items[0]["ownership"]["seasons_owned"] == [1, 3]
     assert items[0]["ownership"]["episode_count"] == 3
+
+
+def test_rows_of_a_disabled_instance_or_a_switched_off_integration_are_not_local(
+        library_database, monkeypatch):
+    """Rows outlive the instance and the integration that owned them.
+
+    Matched anyway, a retired row labelled the title as in the library, linked
+    to it and held back a Seerr request for a copy the reader no longer has.
+    """
+    from app.config import settings
+    from app.database import TableArrInstances, TableShows
+    from discover.library import attach_local_copies, local_candidates
+    _, session = library_database
+    for instance_id, kind, enabled in [(1, "radarr", 1), (2, "radarr", 0), (3, "sonarr", 1)]:
+        session.add(TableArrInstances(id=instance_id, kind=kind, stable_key=f"{kind}-{instance_id}",
+                                      name=f"Instance {instance_id}", enabled=enabled,
+                                      is_default=int(enabled), port=7878))
+    session.flush()
+    add_movie(session, 5, 1)
+    add_movie(session, 8, 2)
+    session.add(TableShows(id=5, arr_instance_id=3, sonarrSeriesId=7, imdbId="tt0000043",
+                           title="Example", path="/private/show"))
+    session.commit()
+    monkeypatch.setattr(settings.general, "use_sonarr", False)
+
+    items = local_candidates("Example")["items"]
+    assert [(item["media_type"], [copy["local_id"] for copy in item["copies"]])
+            for item in items] == [("movie", [5])]
+    catalog = attach_local_copies([{"media_type": "movie", "source": "tmdb", "id": 42,
+                                    "tmdb_id": 42, "imdb_id": "tt0000042", "title": "Example"}])
+    assert [copy["local_id"] for copy in catalog[0]["copies"]] == [5]

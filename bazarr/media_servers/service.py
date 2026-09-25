@@ -6,15 +6,22 @@ from .instances import VALID_KINDS, validate_fields
 from .repository import MediaServerInstanceRepository, atomic, to_safe_dict
 
 
+def _shown(row):
+    """The row as the API shows it, including whether the Plex account owns it."""
+    from app.config import settings
+    from .plex_account import owns_row
+    return {**to_safe_dict(row), 'account_owned': owns_row(settings, row.id)}
+
+
 def list_instances(session, kind=None):
     if kind is not None and kind not in VALID_KINDS:
         return {'error_code': 'invalid_kind'}, 400
-    return {'data': [to_safe_dict(row) for row in MediaServerInstanceRepository(session).list(kind)]}, 200
+    return {'data': [_shown(row) for row in MediaServerInstanceRepository(session).list(kind)]}, 200
 
 
 def get_instance(session, instance_id):
     row = MediaServerInstanceRepository(session).get(instance_id)
-    return (to_safe_dict(row), 200) if row else ({'error_code': 'not_found'}, 404)
+    return (_shown(row), 200) if row else ({'error_code': 'not_found'}, 404)
 
 
 def _write(session, operation, instance_id=None, body=None):
@@ -42,7 +49,7 @@ def _write(session, operation, instance_id=None, body=None):
                     if not repo.delete(instance_id):
                         return {'error_code': 'not_found'}, 404
                 snapshot = repo.snapshot(instance_id, settings) if operation != 'delete' else None
-                result = to_safe_dict(row) if snapshot else None
+                result = _shown(row) if snapshot else None
             if snapshot:
                 configuration.publish(snapshot)
             else:
@@ -65,6 +72,12 @@ def update_instance(session, instance_id, body):
 
 
 def delete_instance(session, instance_id):
+    from app.config import settings
+    from .plex_account import owns_row
+    if owns_row(settings, instance_id):
+        # The next startup would rebuild it from the signed-in account, so it is
+        # removed by disconnecting from Plex rather than by a delete.
+        return {'error_code': 'account_owned'}, 409
     return _write(session, 'delete', instance_id)
 
 

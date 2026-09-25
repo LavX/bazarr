@@ -293,8 +293,10 @@ def test_fetch_waits_and_slots_are_bounded_without_late_cache_publication(authen
         subtitle.content = LITERAL
 
     monkeypatch.setattr(providers.pool['discover_download'], 'download_subtitle', fetch)
-    monkeypatch.setattr(download, 'FETCH_WAIT_SECONDS', 0.08)
-    monkeypatch.setattr(download, 'JOB_WAIT_SECONDS', 0.08)
+    # Long enough that the busy check and the join both land while the first
+    # fetch still has a waiter: a flight past its deadline gives its slot up.
+    monkeypatch.setattr(download, 'FETCH_WAIT_SECONDS', 0.5)
+    monkeypatch.setattr(download, 'JOB_WAIT_SECONDS', 0.5)
     monkeypatch.setattr(download, 'FETCH_MAX_CONCURRENT', 1)
     with ThreadPoolExecutor(2) as executor:
         first = executor.submit(preview, authenticated_client.application.test_client(), rows[0])
@@ -303,9 +305,9 @@ def test_fetch_waits_and_slots_are_bounded_without_late_cache_publication(authen
             assert preview(authenticated_client, rows[1]).status_code == 502
             started = time.monotonic()
             second = executor.submit(fixtures.get, authenticated_client.application.test_client(), rows[0])
-            assert first.result(timeout=1).status_code == 502
-            assert second.result(timeout=1).status_code == 502
-            assert time.monotonic() - started < 1
+            assert first.result(timeout=2).status_code == 502
+            assert second.result(timeout=2).status_code == 502
+            assert time.monotonic() - started < 2
         finally:
             release.set()
     deadline = time.monotonic() + 2
@@ -316,6 +318,52 @@ def test_fetch_waits_and_slots_are_bounded_without_late_cache_publication(authen
     assert not any(key[1] == rows[0]['id'] for key in download._cache)
     assert preview(authenticated_client, rows[0]).status_code == 200
     assert calls == ['full', 'full']
+
+
+def test_a_hung_provider_call_gives_its_slot_back_at_its_deadline(authenticated_client, choices, providers, monkeypatch):
+    """A provider download without a socket timeout can block for good.
+
+    Its waiters give up at their deadline and its admission slot has to go with
+    them. Kept, FETCH_MAX_CONCURRENT such calls left every later preview and
+    download busy until a restart.
+    """
+    from discover import download
+    rows = post(authenticated_client, fixtures.CONTEXT).json['results']
+    hung, unhang, retrying, finish = Event(), Event(), Event(), Event()
+    calls = []
+
+    def fetch(subtitle):
+        calls.append(subtitle.worker_id)
+        if len(calls) == 1:
+            hung.set()
+            unhang.wait(5)
+        elif len(calls) == 3:
+            retrying.set()
+            finish.wait(5)
+        subtitle.content = LITERAL
+
+    monkeypatch.setattr(providers.pool['discover_download'], 'download_subtitle', fetch)
+    monkeypatch.setattr(download, 'FETCH_MAX_CONCURRENT', 1)
+    with ThreadPoolExecutor(1) as executor:
+        try:
+            monkeypatch.setattr(download, 'FETCH_WAIT_SECONDS', 0.1)
+            assert preview(authenticated_client, rows[0]).status_code == 502
+            assert hung.wait(2)
+            abandoned = next(iter(download._inflight.values()))
+            monkeypatch.setattr(download, 'FETCH_WAIT_SECONDS', 5)
+            assert preview(authenticated_client, rows[1]).status_code == 200
+            # A retry of the hung result starts a fetch of its own, and the hung
+            # call returning late must not unregister it.
+            retry = executor.submit(fixtures.get, authenticated_client.application.test_client(), rows[0])
+            assert retrying.wait(2)
+            unhang.set()
+            assert abandoned.ready.wait(2)
+            assert len(download._inflight) == 1
+        finally:
+            unhang.set()
+            finish.set()
+        assert retry.result(timeout=5).data == LITERAL
+    assert calls == ['full', 'forced', 'full']
 
 
 @pytest.mark.parametrize('during', ['rotation', 'expiry'])

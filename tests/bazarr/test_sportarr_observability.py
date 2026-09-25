@@ -187,3 +187,32 @@ def test_the_version_comes_from_the_default_instance_not_a_scalar():
     source = inspect.getsource(info.GetSportarrInfo.version)
     assert "get_default('sportarr')" in source
     assert "settings.sportarr.apikey" not in source
+
+
+def test_a_failed_sportarr_version_probe_is_cached_until_it_expires(monkeypatch):
+    """The cache rejected "unknown", so while Sportarr was down every System
+    Status load waited out the instance's HTTP timeout again. A hit was also
+    written back, which would have kept a cached failure alive forever."""
+    from types import SimpleNamespace
+
+    from dogpile.cache import make_region
+
+    from arr_instances import resolution
+    from sportarr import info
+
+    region = make_region().configure('dogpile.cache.memory')
+    monkeypatch.setattr(info, 'region', region)
+    monkeypatch.setattr(info.settings.general, 'use_sportarr', True)
+    monkeypatch.setattr(info.ArrInstanceRepository, 'get_default',
+                        lambda self, kind: SimpleNamespace(id=1))
+    probes = []
+    monkeypatch.setattr(resolution, 'client_for_instance', lambda *args, **kwargs: SimpleNamespace(
+        test_connection=lambda: probes.append(True) or {'ok': False}))
+
+    assert info.get_sportarr_info.version() == 'unknown'
+    writes = []
+    monkeypatch.setattr(region, 'set', lambda *args, **kwargs: writes.append(args))
+    assert info.get_sportarr_info.version() == 'unknown'
+
+    assert len(probes) == 1
+    assert writes == []

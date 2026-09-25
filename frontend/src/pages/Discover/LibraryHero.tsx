@@ -61,6 +61,8 @@ type Status = {
   tone: "busy" | "quiet" | "attention" | "unknown";
   icon: typeof faSpinner;
   line: string;
+  /** When an idle install last fetched something, as the server sent it. */
+  fetchedAt?: string;
 };
 
 const UNREADABLE: Status = {
@@ -125,9 +127,8 @@ function describe(
   return {
     tone: "quiet",
     icon: faCircleCheck,
-    line: last?.timestamp
-      ? `Subtitle jobs idle · last fetched ${readableTime(last.timestamp)}`
-      : "Subtitle jobs idle",
+    line: "Subtitle jobs idle",
+    fetchedAt: last?.timestamp ?? undefined,
   };
 }
 
@@ -194,7 +195,8 @@ export default function LibraryHero() {
     {
       // Sportarr counts itself, so this is absent rather than zero wherever it
       // is switched off or not in this build, and the action never appears.
-      count: sportsWanted.data ?? 0,
+      // Switched off, the cache still holds its last count.
+      count: sportsWanted.isEnabled ? (sportsWanted.data ?? 0) : 0,
       to: "/wanted/sports",
       label: (count: number) =>
         `${count} sports event${count === 1 ? " needs" : "s need"} subtitles`,
@@ -257,11 +259,27 @@ export default function LibraryHero() {
                 aria-hidden="true"
                 spin={status.tone === "busy"}
               />
-              {/* The label is its own element because the pill is a flex row,
-                  and a bare text node in one becomes an anonymous flex item:
-                  text-overflow cannot reach it, so the sentence clipped
-                  mid-word with no ellipsis at 400px instead of eliding. */}
-              <span className={styles.heroStatusText}>{status.line}</span>
+              {/* The state and the time it last fetched are separate elements
+                  because they are worth different things to a reader. At 400px
+                  the whole sentence does not fit, and cutting its end cut the
+                  time, which is the one part anybody opens this panel to read.
+                  So the time drops to a second line whole instead, and only
+                  the state (or a long job name) is ever elided. */}
+              <span className={styles.heroStatusText}>
+                <span className={styles.heroStatusLead}>{status.line}</span>
+                {status.fetchedAt && (
+                  <>
+                    {" "}
+                    <span className={styles.heroStatusWhen}>
+                      <span className={styles.heroStatusSeparator}>·</span> last
+                      fetched{" "}
+                      <time dateTime={status.fetchedAt}>
+                        {readableTime(status.fetchedAt)}
+                      </time>
+                    </span>
+                  </>
+                )}
+              </span>
             </p>
           </div>
           <div className={styles.heroStats}>

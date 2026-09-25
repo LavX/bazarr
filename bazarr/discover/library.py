@@ -6,7 +6,7 @@ import os
 import re
 import stat
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, false, func, or_, select
 
 CANDIDATE_LIMIT = 12
 SHORTLIST_LIMIT = 48
@@ -99,6 +99,25 @@ def _model(kind):
     return TableMovies if kind == "movie" else TableShows
 
 
+def _live(kind):
+    """The rows of this kind that are still the reader's library.
+
+    Rows outlive the integration being switched off and their instance being
+    disabled. Matched anyway, a retired row labelled a title as in the library,
+    linked to it and held back a Seerr request for a copy the reader no longer
+    has. This is the scope the Discover library totals use: nothing while the
+    integration is off, and no row a disabled instance owns. An instance that
+    still owns rows cannot be deleted, so every other owner is an enabled one.
+    """
+    from app.config import settings
+    from app.database import TableArrInstances
+    table = _model(kind)
+    if not getattr(settings.general, "use_radarr" if kind == "movie" else "use_sonarr", False):
+        return false()
+    disabled = select(TableArrInstances.id).where(TableArrInstances.enabled == 0)
+    return or_(table.arr_instance_id.is_(None), table.arr_instance_id.not_in(disabled))
+
+
 def _columns(kind):
     table = _model(kind)
     external = table.tmdbId if kind == "movie" else table.tvdbId
@@ -176,7 +195,8 @@ def _expand(connection, items, *, merge=False):
             continue
         seed_ids = {copy["local_id"] for item in selected for copy in item.get("copies", [])}
         order = (case((table.id.in_(seed_ids), 0), else_=1), table.id) if seed_ids else (table.id,)
-        rows = connection.execute(select(*_columns(kind)).where(or_(*predicates)).order_by(*order).limit(COPY_LIMIT + 1)).all()
+        rows = connection.execute(select(*_columns(kind)).where(or_(*predicates), _live(kind))
+                                  .order_by(*order).limit(COPY_LIMIT + 1)).all()
         projected = [_project(row, kind) for row in rows[:COPY_LIMIT]]
         truncated = len(rows) > COPY_LIMIT
         evidence = selected + projected
@@ -236,7 +256,8 @@ def _candidate_titles(query, media_type, limit, catalog_items):
         for kind in ((media_type,) if media_type else ("movie", "show")):
             table = _model(kind)
             rows = connection.execute(select(*_columns(kind)).where(
-                func.lower(func.coalesce(table.title, "")).like("%" + escaped + "%", escape="\\"))
+                func.lower(func.coalesce(table.title, "")).like("%" + escaped + "%", escape="\\"),
+                _live(kind))
                 .order_by(table.id).limit(SHORTLIST_LIMIT + 1)).all()
             truncated |= len(rows) > SHORTLIST_LIMIT
             items.extend(_project(row, kind) for row in rows[:SHORTLIST_LIMIT])

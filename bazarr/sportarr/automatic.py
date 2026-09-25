@@ -206,155 +206,165 @@ def search_event(
             "downloads": 0,
         }
     downloads = 0
-    for code in languages:
-        check_cancelled(cancel)
-        if candidate_signature(context) != signature:
-            raise ValueError("Sports file changed before automatic search")
-        reason = eligibility(database, context)
-        if reason:
-            return {"status": "skipped", "message": reason, "downloads": downloads}
-        # Re-check cutoff after each publication, including another job's indexing.
-        if wanted:
-            row = database.get(TableSportsEvents, event_id, populate_existing=True)
-            if code not in _missing(
-                context.profile_id,
-                ast.literal_eval(row.subtitles or "[]"),
-                row.audio_language,
-                row.failedAttempts,
-            ):
-                continue
-        # Translate before searching, the way the series and movies wanted
-        # scans do. Sports only ever translated from a fresh download, so an
-        # event whose source subtitle came off disk never got its translation
-        # and was re-searched by every wanted scan forever.
-        if wanted:
-            from sportarr.profile_hooks import translate_from_existing
-
-            try:
-                if translate_from_existing(context, code, cancel=cancel):
-                    downloads += 1
+    try:
+        for code in languages:
+            check_cancelled(cancel)
+            if candidate_signature(context) != signature:
+                raise ValueError("Sports file changed before automatic search")
+            reason = eligibility(database, context)
+            if reason:
+                return {"status": "skipped", "message": reason, "downloads": downloads}
+            # Re-check cutoff after each publication, including another job's indexing.
+            if wanted:
+                row = database.get(TableSportsEvents, event_id, populate_existing=True)
+                if code not in _missing(
+                    context.profile_id,
+                    ast.literal_eval(row.subtitles or "[]"),
+                    row.audio_language,
+                    row.failedAttempts,
+                ):
                     continue
-            except JobCancelled:
-                raise
-            except Exception:
-                logging.exception(
-                    "BAZARR sports auto-translate failed for %s, falling back to "
-                    "a provider search", code,
-                )
-        language_set = _get_language_obj(
-            [
-                (
-                    code.split(":")[0],
-                    str(code.endswith(":hi")),
-                    str(code.endswith(":forced")),
-                )
-            ]
-        )
-        pool = _init_pool("sports", context.profile_id, context=context)
-        if not pool.providers:
-            pool.terminate()
-            return {
-                "status": "no_result",
-                "message": "No providers are available",
-                "downloads": downloads,
-            }
-        try:
-            video = get_video(
-                context.mapped_path,
-                row.title,
-                row.sceneName or "None",
-                providers=pool.providers,
-                media_type="sports",
-                context=context,
-                cancel=cancel,
-            )
-        except BaseException:
-            pool.terminate()
-            raise
-        if not video:
-            pool.terminate()
-            raise OSError("Could not analyze sports video")
-        candidate_sink = []
-        selected = _provider_result(
-            video, language_set, pool, threshold, profile, cancel,
-            candidate_sink=candidate_sink,
-        )
-        if not selected and language is None and upgraded_from_id is None:
-            # Series and movies report this from generate_subtitles, which the
-            # sports path bypasses, so the "subtitles exist but only for another
-            # release" diagnosis was unavailable for sports. Only on a plain
-            # wanted search: an upgrade or a forced minimum rejects candidates
-            # by construction, so reporting there would be pure noise.
-            from subtitles.mismatch import report_release_type_mismatch
+            # Translate before searching, the way the series and movies wanted
+            # scans do. Sports only ever translated from a fresh download, so an
+            # event whose source subtitle came off disk never got its translation
+            # and was re-searched by every wanted scan forever.
+            if wanted:
+                from sportarr.profile_hooks import translate_from_existing
 
-            try:
-                report_release_type_mismatch(
-                    video, "sports", code, candidate_sink, int(threshold),
-                    arr_instance_id=context.arr_instance_id,
-                )
-            except Exception:
-                # A report must never cost the user a search.
-                logging.exception(
-                    "BAZARR Error checking for a release type mismatch for "
-                    "sports event %s", context.event_id,
-                )
-        for subtitle in selected:
-            candidate = bind_candidate(context, subtitle, signature)
-            if eligibility(database, context):
-                raise ValueError("Sports search eligibility changed before publication")
-            audio = get_audio_profile_languages(row.audio_language)
-            from sportarr.artifacts import ReplacementDestinationChanged
-
-            try:
-                saved = save_sports_subtitle(
-                    video,
-                    subtitle,
-                    candidate,
-                    audio[0]["name"] if audio else "None",
-                    is_manual=False,
-                    is_upgrade=minimum_score is not None,
-                    upgraded_from_id=upgraded_from_id,
-                    job_id=job_id,
-                    cancel=cancel,
-                    previous_artifact=previous_artifact,
-                    replacement_state=replacement_state,
-                )
-            except ReplacementDestinationChanged as exc:
-                return {
-                    "status": "skipped",
-                    "message": str(exc),
-                    "downloads": downloads,
-                }
-            downloads += int(saved.publication["published"])
-            if saved.publication["status"] == "published_with_warnings":
-                return {
-                    "status": "published_with_warnings",
-                    "message": saved.publication["message"],
-                    "downloads": downloads,
-                    "publication": saved.publication,
-                    "cancelled": saved.publication["cancelled"],
-                }
-        if not selected and adaptive:
-            from sportarr.db import sports_transaction
-
-            with sports_transaction(database) as session:
-                validate_context(context, session)
-                if candidate_signature(context, session) != signature:
-                    raise ValueError("Sports file changed during automatic search")
-                current = session.execute(
-                    select(TableSportsEvents)
-                    .where(
-                        TableSportsEvents.id == event_id,
-                        TableSportsEvents.arr_instance_id == arr_instance_id,
+                try:
+                    if translate_from_existing(context, code, cancel=cancel):
+                        downloads += 1
+                        continue
+                except JobCancelled:
+                    raise
+                except Exception:
+                    logging.exception(
+                        "BAZARR sports auto-translate failed for %s, falling back to "
+                        "a provider search", code,
                     )
-                    .with_for_update()
-                    .execution_options(populate_existing=True)
-                ).scalar_one()
-                check_cancelled(cancel)
-                current.failedAttempts = updateFailedAttempts(
-                    code, current.failedAttempts
+            language_set = _get_language_obj(
+                [
+                    (
+                        code.split(":")[0],
+                        str(code.endswith(":hi")),
+                        str(code.endswith(":forced")),
+                    )
+                ]
+            )
+            pool = _init_pool("sports", context.profile_id, context=context)
+            if not pool.providers:
+                pool.terminate()
+                return {
+                    "status": "no_result",
+                    "message": "No providers are available",
+                    "downloads": downloads,
+                }
+            try:
+                video = get_video(
+                    context.mapped_path,
+                    row.title,
+                    row.sceneName or "None",
+                    providers=pool.providers,
+                    media_type="sports",
+                    context=context,
+                    cancel=cancel,
                 )
-                session.flush()
+            except BaseException:
+                pool.terminate()
+                raise
+            if not video:
+                pool.terminate()
+                raise OSError("Could not analyze sports video")
+            candidate_sink = []
+            selected = _provider_result(
+                video, language_set, pool, threshold, profile, cancel,
+                candidate_sink=candidate_sink,
+            )
+            if not selected and language is None and upgraded_from_id is None:
+                # Series and movies report this from generate_subtitles, which the
+                # sports path bypasses, so the "subtitles exist but only for another
+                # release" diagnosis was unavailable for sports. Only on a plain
+                # wanted search: an upgrade or a forced minimum rejects candidates
+                # by construction, so reporting there would be pure noise.
+                from subtitles.mismatch import report_release_type_mismatch
+
+                try:
+                    report_release_type_mismatch(
+                        video, "sports", code, candidate_sink, int(threshold),
+                        arr_instance_id=context.arr_instance_id,
+                    )
+                except Exception:
+                    # A report must never cost the user a search.
+                    logging.exception(
+                        "BAZARR Error checking for a release type mismatch for "
+                        "sports event %s", context.event_id,
+                    )
+            for subtitle in selected:
+                candidate = bind_candidate(context, subtitle, signature)
+                if eligibility(database, context):
+                    raise ValueError("Sports search eligibility changed before publication")
+                audio = get_audio_profile_languages(row.audio_language)
+                from sportarr.artifacts import ReplacementDestinationChanged
+
+                try:
+                    saved = save_sports_subtitle(
+                        video,
+                        subtitle,
+                        candidate,
+                        audio[0]["name"] if audio else "None",
+                        is_manual=False,
+                        is_upgrade=minimum_score is not None,
+                        upgraded_from_id=upgraded_from_id,
+                        job_id=job_id,
+                        cancel=cancel,
+                        previous_artifact=previous_artifact,
+                        replacement_state=replacement_state,
+                    )
+                except ReplacementDestinationChanged as exc:
+                    return {
+                        "status": "skipped",
+                        "message": str(exc),
+                        "downloads": downloads,
+                    }
+                downloads += int(saved.publication["published"])
+                if saved.publication["status"] == "published_with_warnings":
+                    return {
+                        "status": "published_with_warnings",
+                        "message": saved.publication["message"],
+                        "downloads": downloads,
+                        "publication": saved.publication,
+                        "cancelled": saved.publication["cancelled"],
+                    }
+            if not selected and adaptive:
+                from sportarr.db import sports_transaction
+
+                with sports_transaction(database) as session:
+                    validate_context(context, session)
+                    if candidate_signature(context, session) != signature:
+                        raise ValueError("Sports file changed during automatic search")
+                    current = session.execute(
+                        select(TableSportsEvents)
+                        .where(
+                            TableSportsEvents.id == event_id,
+                            TableSportsEvents.arr_instance_id == arr_instance_id,
+                        )
+                        .with_for_update()
+                        .execution_options(populate_existing=True)
+                    ).scalar_one()
+                    check_cancelled(cancel)
+                    current.failedAttempts = updateFailedAttempts(
+                        code, current.failedAttempts
+                    )
+                    session.flush()
+    except JobCancelled:
+        # Stopped after an earlier language was already published. That
+        # subtitle and its history row are committed, so report them instead
+        # of letting the cancellation drop this event from the job's result.
+        if not downloads:
+            raise
+        message = f"Downloaded {downloads} sports subtitle(s) before the search was stopped"
+        logging.info("%s for sports event %s, owner %s", message, event_id, arr_instance_id)
+        return {"status": "downloaded", "message": message, "downloads": downloads, "cancelled": True}
     message = (
         f"Downloaded {downloads} sports subtitle(s)"
         if downloads

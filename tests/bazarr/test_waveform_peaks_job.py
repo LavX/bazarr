@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 from flask import Flask
@@ -82,6 +83,70 @@ def test_a_running_job_is_followed_rather_than_repeated(queue, tmp_path):
 
     assert waveform_peaks.request_peaks(str(video), 0) == ('queued', job_id)
     assert len(queue.list_jobs_from_queue()) == 1
+
+
+def test_only_one_waveform_jumps_the_queue_at_a_time(queue, tmp_path):
+    """Force-starting skips the concurrent jobs limit, so every uncached editor
+    page used to start another full-file ffmpeg. One waveform may jump the
+    queue; the next waits for the normal consumer."""
+    first, second = tmp_path / 'first.mkv', tmp_path / 'second.mkv'
+    for video in (first, second):
+        video.write_bytes(b'x')
+    # Other running work does not hold the lane: the editor is waiting.
+    queue.jobs_running_queue.append(jobs_queue_module.Job(
+        job_id=99, job_name='Index Sports Subtitles', module='sportarr.scheduler', func='scan',
+        kwargs={}))
+    _, running_id = waveform_peaks.request_peaks(str(first), 0)
+    assert queue.started == [running_id]
+    queue.jobs_running_queue.append(queue.jobs_pending_queue.popleft())
+
+    _, waiting_id = waveform_peaks.request_peaks(str(second), 0)
+
+    assert queue.started == [running_id]
+    assert [job.job_id for job in queue.jobs_pending_queue] == [waiting_id]
+
+
+def test_a_replaced_file_in_the_same_second_gets_its_own_cache_entry(queue, tmp_path):
+    """The key held the modification time in whole seconds, so a replacement
+    written within the same second, or copied with its time kept, was served
+    the old file's peaks."""
+    video = tmp_path / 'film.mkv'
+    video.write_bytes(b'old film')
+    os.utime(video, ns=(1_000_250_000_000, 1_000_250_000_000))
+    original = waveform_peaks.peaks_cache_file(str(video), 0)
+
+    os.utime(video, ns=(1_000_750_000_000, 1_000_750_000_000))
+    later_in_that_second = waveform_peaks.peaks_cache_file(str(video), 0)
+    video.write_bytes(b'a new film')
+    os.utime(video, ns=(1_000_250_000_000, 1_000_250_000_000))
+    same_time_other_size = waveform_peaks.peaks_cache_file(str(video), 0)
+
+    assert len({original, later_in_that_second, same_time_other_size}) == 3
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='uses a POSIX shell script as ffmpeg')
+def test_ffmpeg_errors_beyond_a_pipe_buffer_do_not_stall_the_job(monkeypatch, tmp_path):
+    """stderr was a pipe read only after stdout closed. A damaged track that
+    wrote more errors than the pipe holds blocked ffmpeg on stderr while the
+    job blocked on stdout, forever and past any Stop."""
+    from utilities import binaries
+
+    noisy = tmp_path / 'noisy_ffmpeg.py'
+    # A megabyte of errors first, then ten peaks of silence. The alarm ends a
+    # stalled run on its own, so a regression fails instead of hanging.
+    noisy.write_text('import signal, sys\n'
+                     'signal.alarm(5)\n'
+                     'sys.stderr.write("x" * 1024 * 1024)\n'
+                     'sys.stderr.flush()\n'
+                     'sys.stdout.buffer.write(bytes(3200))\n')
+    fake = tmp_path / 'ffmpeg'
+    fake.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{noisy}" "$@"\n')
+    fake.chmod(0o755)
+    monkeypatch.setattr(binaries, 'get_binary', lambda name: str(fake))
+
+    peaks = waveform_peaks._extract_peaks(str(tmp_path / 'film.mkv'), 0, 1.0, None)
+
+    assert len(peaks) == 10
 
 
 @needs_ffmpeg

@@ -9,21 +9,15 @@ translation sends, mirrors the service's progress onto the job, and leaves the
 translated lines as the job's returned value for the editor to pick up.
 """
 
-import logging
 import threading
 import time
 from collections import OrderedDict
-
-import requests
 
 from app import activity
 from app.jobs_queue import jobs_queue, JobCancelled
 from utilities.job_dedupe import enqueue_or_existing
 
-from .services.auth import get_translator_auth_headers
 from .services.openrouter_translator import OpenRouterTranslatorService
-
-logger = logging.getLogger(__name__)
 
 EDITOR_TRANSLATION_MODULE = 'subtitles.tools.translate.editor'
 EDITOR_TRANSLATION_FUNC = 'translate_editor_lines'
@@ -91,16 +85,6 @@ def enqueue_editor_translation(lines, source_language, target_language, title=''
                                is_progress=True, progress_max=100)
 
 
-def _cancel_remote_job(remote_job_id, base_url):
-    if not remote_job_id or not base_url:
-        return
-    try:
-        requests.delete(f'{base_url.rstrip("/")}/api/v1/jobs/{remote_job_id}',
-                        headers=get_translator_auth_headers(), timeout=10)
-    except requests.exceptions.RequestException:
-        logger.debug('Could not cancel AI Subtitle Translator job %s', remote_job_id)
-
-
 def _rename(job_id, replacement):
     name = jobs_queue.get_job_name(job_id)
     if name and name.startswith('Translating'):
@@ -115,8 +99,6 @@ def translate_editor_lines(lines, positions, source_language, target_language, t
     Raises with the service's reason when nothing usable comes back, so the job is
     recorded as failed.
     """
-    from app.config import settings
-
     activity.register(activity.activity_id_for_job(job_id), operation='translation', scope_kind='editor',
                       title=title or None, language=target_language or None,
                       source_language=source_language or None)
@@ -131,7 +113,7 @@ def translate_editor_lines(lines, positions, source_language, target_language, t
         translated = service.submit_content(lines, source_language, target_language, title,
                                             bazarr_job_id=job_id, mediaType=media_type)
     except JobCancelled:
-        _cancel_remote_job(service.remote_job_id, settings.translator.openrouter_url)
+        # submit_content has already cancelled the sidecar's job.
         raise
     except Exception:
         # A TranslationServiceError is a JobFailed, so its reason becomes the
