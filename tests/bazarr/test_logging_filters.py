@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from dynaconf.validator import ValidationError
 
 from app.config import settings
@@ -624,27 +625,44 @@ def test_an_unusable_rotation_setting_stays_inside_the_bounds(monkeypatch, key, 
     assert log_rotation_limits()[expected_index] == expected
 
 
+def _rotation_validator(name):
+    return next(v for v in config.validators if v.names == (name,))
+
+
+def _validated(tmp_path, name, value):
+    """Run one rotation validator over a config holding `value`, in a Dynaconf of its own.
+
+    Not over the live settings: a failed validate() leaves the live object holding
+    the refused value in a section monkeypatch can no longer reach to put back.
+    """
+    from dynaconf import Dynaconf
+
+    section, key = name.split(".")
+    stored = tmp_path / "config.yaml"
+    stored.write_text(yaml.safe_dump({section: {key: value}}), encoding="utf-8")
+    loaded = Dynaconf(settings_files=[str(stored)], core_loaders=["YAML"])
+    _rotation_validator(name).validate(loaded)
+    return loaded
+
+
 @pytest.mark.parametrize("name,default,lowest,highest", [
     ("log.max_file_size_mb", 32, 1, 1024),
     ("log.backup_count", 7, 1, 100),
 ])
-def test_the_rotation_validators_hold_their_default_and_bounds(monkeypatch, name, default, lowest, highest):
-    validator = next(v for v in config.validators if v.names == (name,))
+def test_the_rotation_validators_hold_their_default_and_bounds(tmp_path, name, default, lowest, highest):
+    validator = _rotation_validator(name)
     assert validator.default == default
     assert validator.must_exist is True
     assert validator.operations.get("gte") == lowest
     assert validator.operations.get("lte") == highest
     assert isinstance(settings.get(name), int)
 
-    key = name.split(".")[1]
     for accepted in (lowest, default, highest):
-        monkeypatch.setattr(settings.log, key, accepted)
-        validator.validate(settings)
+        assert _validated(tmp_path, name, accepted).get(name) == accepted
     # True passes is_type_of=int, and a form value of "true" is saved as True.
     for refused in (lowest - 1, highest + 1, "12", 12.5, True):
-        monkeypatch.setattr(settings.log, key, refused)
         with pytest.raises(ValidationError):
-            validator.validate(settings)
+            _validated(tmp_path, name, refused)
 
 
 def test_a_config_written_before_the_rotation_settings_gets_their_defaults(tmp_path):
@@ -653,9 +671,8 @@ def test_a_config_written_before_the_rotation_settings_gets_their_defaults(tmp_p
     old_config = tmp_path / "config.yaml"
     old_config.write_text("log:\n  include_filter: ''\n", encoding="utf-8")
     loaded = Dynaconf(settings_files=[str(old_config)], core_loaders=["YAML"])
-    loaded.validators.register(*(v for v in config.validators
-                                 if v.names in (("log.max_file_size_mb",), ("log.backup_count",))))
-    loaded.validators.validate()
+    for name in ("log.max_file_size_mb", "log.backup_count"):
+        _rotation_validator(name).validate(loaded)
 
     assert loaded.log.max_file_size_mb == 32
     assert loaded.log.backup_count == 7
