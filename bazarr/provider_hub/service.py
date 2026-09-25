@@ -1743,6 +1743,7 @@ def remove_installation(provider_id: str) -> bool:
         # Disabled first: once the removal is staged, a list that still names
         # the provider after the restart would bring it back, and a failure
         # here leaves nothing changed.
+        was_enabled = provider_id in _bazarr_enabled_providers()
         if not _set_bazarr_provider_enabled(provider_id, False):
             raise ProviderHubSettingsError(ENABLED_PROVIDERS_NOT_SAVED)
 
@@ -1763,7 +1764,14 @@ def remove_installation(provider_id: str) -> bool:
             item["last_error"] = None
             return "staged"
 
-        result = mutate_state(remove_or_stage)
+        try:
+            result = mutate_state(remove_or_stage)
+        except Exception:
+            # Nothing was staged, so the provider is still installed and has to
+            # stay enabled as it was rather than silently switched off.
+            if was_enabled:
+                _set_bazarr_provider_enabled(provider_id, True)
+            raise
         if result == "missing":
             job.update(message=f"Plugin '{target_name}' not found")
             return False

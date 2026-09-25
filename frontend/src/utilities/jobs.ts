@@ -30,6 +30,18 @@ export class JobFailedError extends Error {
   }
 }
 
+// A job that ended at Stop is recorded as completed and flagged as stopped.
+// It did not finish, so it is not reported as done.
+export class JobStoppedError extends Error {
+  readonly jobId: number;
+
+  constructor(job: JobRecord) {
+    super(`${job.job_name || "The job"} was stopped`);
+    this.name = "JobStoppedError";
+    this.jobId = job.job_id;
+  }
+}
+
 // The reason the job failed with, as the queue records it for the drawer
 // and the failure toast.
 function failureMessage(job: JobRecord): string {
@@ -59,6 +71,8 @@ function settle(jobId: number, job: JobRecord | undefined) {
   for (const waiter of list) {
     if (job?.status === "failed") {
       waiter.reject(new JobFailedError(job));
+    } else if (job?.stopped) {
+      waiter.reject(new JobStoppedError(job));
     } else {
       waiter.resolve(job);
     }
@@ -145,8 +159,9 @@ function pollOnce() {
 /**
  * Resolves with the job once it completed, rejects with a JobFailedError
  * carrying the job's reason once it failed, or once the backend stops
- * reporting it at all. A null id, which the backend
- * answers when it could not queue anything to follow, resolves at once.
+ * reporting it at all, and rejects with a JobStoppedError once it ended at
+ * Stop. A null id, which the backend answers when it could not queue anything
+ * to follow, resolves at once.
  */
 export function waitForJob(
   client: QueryClient,

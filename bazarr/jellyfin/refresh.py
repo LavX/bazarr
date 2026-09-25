@@ -13,6 +13,7 @@ from urllib3.exceptions import ReadTimeoutError
 
 from media_servers import resolution
 from media_servers.http import MediaServerError
+from media_servers.libraries import _SERVER_WIDE
 
 # Jellyfin refreshes a movie item, a series item or an episode item the same
 # way. Which one an identity rung resolves is all that differs.
@@ -173,16 +174,29 @@ class JellyfinRefreshClient:
 
         A Jellyfin library is an item, so refreshing it is the same call. The
         coalescer keeps one drain from asking the same library once per file.
+
+        A library the server refuses, most often a saved id it no longer has,
+        does not stop the ones after it, but the refresh is not reported as
+        requested while one of them was not. A refusal about the server rather
+        than the library would meet every library the same way, so it stops.
         """
         libraries = self._libraries(media_type)
         if not libraries:
             return None
+        failure = None
         for library_id in libraries:
             if coalesce is not None and coalesce(library_id):
                 continue
             if ensure_current:
                 ensure_current()
-            translated(self.client.refresh_item, library_id)
+            try:
+                translated(self.client.refresh_item, library_id)
+            except MediaServerError as error:
+                if error.code in _SERVER_WIDE:
+                    raise
+                failure = failure or error
         if ensure_current:
             ensure_current()
+        if failure is not None:
+            raise failure
         return {'status': 'requested'}

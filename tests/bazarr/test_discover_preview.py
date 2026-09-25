@@ -279,6 +279,35 @@ def test_bounded_cache_eviction_refetches_exact_result(authenticated_client, cho
         assert download._cache_bytes <= download.CACHE_MAX_BYTES
 
 
+@pytest.mark.parametrize('bound', ['entries', 'bytes'])
+def test_previews_never_evict_a_finished_download_waiting_for_save(authenticated_client, choices, monkeypatch, bound):
+    """A finished download keeps its file for TICKET_TTL_SECONDS, waiting for Save.
+
+    Previews share the cache with it, and evicting the oldest entry whatever
+    it was let a few large previews drop the file while the job still offered
+    Save, which then answered that the download had expired.
+    """
+    from discover import download
+    with download._lock:
+        download._cache.clear()
+        download._cache_bytes = 0
+    rows = post(authenticated_client, fixtures.CONTEXT).json['results']
+    if bound == 'entries':
+        monkeypatch.setattr(download, 'CACHE_MAX_ENTRIES', 1)
+    else:
+        monkeypatch.setattr(download, 'CACHE_MAX_BYTES', max(len(fixtures.FULL_SRT), len(fixtures.FORCED_SRT)))
+    queued = fixtures.enqueue(authenticated_client, rows[0])
+    assert fixtures.run_queued_job(queued.json['job_id'])['status'] == 'completed'
+    assert preview(authenticated_client, rows[1]).status_code == 200
+    saved = authenticated_client.get('/api/discover/download', query_string={'job': queued.json['job_id']},
+                                     headers=fixtures.HEADERS)
+    assert saved.status_code == 200 and saved.data == fixtures.FULL_SRT
+    with download._lock:
+        assert len(download._cache) <= download.CACHE_MAX_ENTRIES
+        assert download._cache_bytes == sum(len(entry[1].content) for entry in download._cache.values())
+        assert download._cache_bytes <= download.CACHE_MAX_BYTES
+
+
 def test_fetch_waits_and_slots_are_bounded_without_late_cache_publication(authenticated_client, choices, providers, monkeypatch):
     import time
     from discover import download
@@ -364,6 +393,46 @@ def test_a_hung_provider_call_gives_its_slot_back_at_its_deadline(authenticated_
             finish.set()
         assert retry.result(timeout=5).data == LITERAL
     assert calls == ['full', 'forced', 'full']
+
+
+def test_abandoned_provider_calls_stay_counted_until_they_return(authenticated_client, choices, providers, monkeypatch):
+    """A slot given back at its deadline must not let retries start calls without end.
+
+    The abandoned call is still running on its thread. Forgotten with its
+    slot, every retry past the deadline started another one, so
+    FETCH_MAX_CONCURRENT no longer bounded the provider calls actually alive.
+    """
+    import time
+    from discover import download
+    rows = post(authenticated_client, fixtures.CONTEXT).json['results']
+    unhang = Event()
+    calls = []
+
+    def fetch(subtitle):
+        calls.append(subtitle.worker_id)
+        unhang.wait(5)
+        subtitle.content = LITERAL
+
+    monkeypatch.setattr(providers.pool['discover_download'], 'download_subtitle', fetch)
+    monkeypatch.setattr(download, 'FETCH_MAX_CONCURRENT', 1)
+    monkeypatch.setattr(download, 'FETCH_MAX_THREADS', 2)
+    monkeypatch.setattr(download, 'FETCH_WAIT_SECONDS', 0.05)
+    try:
+        for _ in range(4):
+            assert preview(authenticated_client, rows[0]).status_code == 502
+        deadline = time.monotonic() + 2
+        while len(calls) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.2)
+        assert calls == ['full', 'full']
+    finally:
+        unhang.set()
+    # Their room comes back as the abandoned calls return.
+    deadline = time.monotonic() + 2
+    while (download._inflight or download._abandoned) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    monkeypatch.setattr(download, 'FETCH_WAIT_SECONDS', 5)
+    assert preview(authenticated_client, rows[1]).status_code == 200
 
 
 @pytest.mark.parametrize('during', ['rotation', 'expiry'])

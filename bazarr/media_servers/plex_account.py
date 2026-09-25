@@ -121,8 +121,9 @@ def sync_plex_instance(session, settings, *, signed_in=False, signed_out=False, 
     Plex. Switching servers while signed in is neither, and leaves it alone.
 
     ``persist`` writes the config once the owner id changes, so the row this
-    account owns survives a restart instead of being re-guessed from whichever
-    Plex row happens to sort first.
+    account owns survives a restart. The id is the only way back to it, so a
+    row whose id could not be written is removed again rather than orphaned for
+    the next startup to create a second destination beside.
 
     Never raises into a caller that was doing something else: an account change
     that could not reach the database is logged and retried by the next one, and
@@ -190,22 +191,31 @@ def apply_plex_account(session, settings, *, signed_in=False, signed_out=False, 
             repo.update(row.id, **fields)
     # Recorded even when nothing else changed, so the row the account just made
     # is the row it finds next time rather than one it has to guess at.
-    recorded = getattr(settings.plex, 'instance_id', '') != row.id
+    previous = getattr(settings.plex, 'instance_id', '')
+    recorded = previous != row.id
     settings.plex.instance_id = row.id
     session.commit()
-    if recorded and persist is not None:
-        # The row is already saved, so a config write that fails is a lost
-        # shortcut, not a lost destination: the owner falls back to the only
-        # Plex row until the next transition records it again. Never worth
-        # failing the reconcile, which would block the kind.
-        try:
-            persist()
-        except Exception:
-            logging.warning('BAZARR saved the Plex destination but could not record which '
-                            'row the account owns; it will be recorded again on the next change')
-            logging.debug('Recording the Plex destination owner failed', exc_info=True)
+    if recorded and persist is not None and not _persisted(persist):
+        # Ownership is never inferred, so after a restart a row whose id never
+        # reached disk belongs to nobody and the account would create another.
+        # The new row goes, and the next change or startup tries again.
+        settings.plex.instance_id = previous
+        if created:
+            repo.delete(row.id)
+            session.commit()
+        raise RuntimeError('the Plex destination owner could not be saved')
     _publish(session, settings, row.id)
     return row, created
+
+
+def _persisted(persist):
+    """Whether the config write went through. ``write_config`` reports a
+    failed write by returning False rather than raising."""
+    try:
+        return persist() is not False
+    except Exception:
+        logging.debug('Recording the Plex destination owner failed', exc_info=True)
+        return False
 
 
 def _publish(session, settings, instance_id):

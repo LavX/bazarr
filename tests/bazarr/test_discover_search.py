@@ -447,6 +447,7 @@ def test_worker_envelope_outcomes_through_catalog_proxy(authenticated_client, pr
 @pytest.mark.parametrize("invalidate", ["reset", "evict"])
 def test_failed_refresh_omits_invalid_handles_but_retains_usable_rows(authenticated_client, providers, monkeypatch,
                                                                   invalidate):
+    from datetime import datetime
     from compat import file_id_store
     from discover.handles import resolve_result
     from provider_hub.protocol import candidate_from_worker
@@ -473,13 +474,51 @@ def test_failed_refresh_omits_invalid_handles_but_retains_usable_rows(authentica
     monkeypatch.setattr(providers.pool[name], "list_subtitles", fail)
     # Invalid handles force a real refresh even without an explicit refresh flag.
     second = post(authenticated_client, payload).json
-    assert second["results"] == [{**row, "stale": True} for row in retained]
+    # A retained handle is renewed, so only its expiry may move, and only later.
+    assert [{**row, "expires_at": None} for row in second["results"]] == [
+        {**row, "stale": True, "expires_at": None} for row in retained]
+    assert all(datetime.fromisoformat(now["expires_at"]) >= datetime.fromisoformat(then["expires_at"])
+               for now, then in zip(second["results"], retained))
     assert all(resolve_result(row["id"]) is not None for row in second["results"])
     assert second["status"] == ("partial" if retained else "failed")
     assert second["coverage"]["completed_count"] == 0
     assert second["coverage"]["providers"][0]["result_count"] == 0
     if retained:
         assert second["checked_at"] == first["checked_at"]
+
+
+def test_failed_refresh_renews_the_handles_it_retains(authenticated_client, providers, monkeypatch):
+    """A retained row is offered for as long as the stale snapshot is served.
+
+    Checked only for being valid at that instant, a handle close to its expiry
+    was retained unrenewed, so the "Previous result" it named expired while
+    the snapshot still offered it and Download answered that it had expired.
+    """
+    import time
+    from datetime import datetime
+    from compat.file_id_store import get_store
+    from provider_hub.protocol import candidate_from_worker
+    from subliminal.exceptions import AuthenticationError
+    name = providers.add("discover_good", [candidate_from_worker("discover_good", {
+        "id": "1", "language": {"alpha3": "eng"}, "provider_payload": {}})])
+    payload = {"media_type": "movie", "imdb_id": "tt0133093", "language": "eng"}
+    row = post(authenticated_client, payload).json["results"][0]
+    store = get_store()
+    fid = int(row["id"].split(".")[1])
+    with store._lock:
+        _, record = store._store[fid]
+        soon = time.time() + 2
+        store._store[fid] = (soon, {**record, "expires_at": soon})
+
+    def fail(*args):
+        raise AuthenticationError("fixture failure")
+
+    monkeypatch.setattr(providers.pool[name], "list_subtitles", fail)
+    retained = post(authenticated_client, {**payload, "refresh": True}).json["results"]
+    assert [(item["id"], item["stale"]) for item in retained] == [(row["id"], True)]
+    expiry = store._store[fid][0]
+    assert expiry > time.time() + 60
+    assert datetime.fromisoformat(retained[0]["expires_at"]).timestamp() == pytest.approx(expiry, abs=1)
 
 
 def test_unknown_flags_stay_unknown_and_forced_and_hi_are_independent(authenticated_client, providers):
