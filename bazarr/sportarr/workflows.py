@@ -71,6 +71,19 @@ class SportsJobSignal:
         return self.is_set()
 
 
+def require_sports_enabled():
+    """Refuse new sports work while Use Sportarr is off.
+
+    Turning the switch off leaves the instance rows enabled, and
+    require_sportarr() only reads the row, because Local Hub lookup keeps
+    serving enabled owners with the switch off. The scheduler, the event
+    streams and the webhook already stop at the switch; this is the same stop
+    for the searches and syncs the Sports pages queue.
+    """
+    if not settings.general.use_sportarr:
+        raise ValueError("Sportarr is turned off. Turn on Use Sportarr in Settings first.")
+
+
 def _wanted_query(session, arr_instance_id=None, league_id=None):
     """Compile owner/league rules once, then count and page event rows in SQL."""
     from sportarr.settings import get_sports_settings
@@ -230,6 +243,7 @@ def automatic_search_sports(event_id, arr_instance_id, job_id=None, language=Non
     search modal for a single missing-language badge.
     """
     if not job_id:
+        require_sports_enabled()
         resolve_event_in_session(database, event_id, arr_instance_id)
         return jobs_queue.add_job_from_function(
             "Searching sports subtitles", is_progress=True
@@ -244,6 +258,7 @@ def wanted_search_missing_subtitles_sports(
     job_id=None, wait_for_completion=False, arr_instance_id=None
 ):
     if not job_id:
+        require_sports_enabled()
         if not wanted_rows(database, arr_instance_id):
             return False
         return jobs_queue.add_job_from_function(
@@ -256,6 +271,7 @@ def wanted_search_missing_subtitles_sports(
 
 def sports_download_subtitles(league_id, arr_instance_id, job_id=None):
     if not job_id:
+        require_sports_enabled()
         if get_league(database, league_id, arr_instance_id) is None:
             raise SportsNotFound("Sports league not found for this owner")
         return jobs_queue.add_job_from_function(
@@ -266,6 +282,7 @@ def sports_download_subtitles(league_id, arr_instance_id, job_id=None):
 
 def blacklist_sports_subtitle(history_id, arr_instance_id, job_id=None):
     if not job_id:
+        require_sports_enabled()
         require_sportarr(database, arr_instance_id)
         return jobs_queue.add_job_from_function(
             "Excluding sports subtitle and finding replacement", is_progress=True
@@ -471,6 +488,7 @@ def upgrade_sports_subtitles(
     job_id=None, wait_for_completion=False, arr_instance_id=None, event_ids=None, league_ids=None
 ):
     if not job_id:
+        require_sports_enabled()
         if not settings.general.upgrade_subs:
             return False
         if arr_instance_id is not None:
@@ -583,6 +601,9 @@ SPORTS_JOB_FUNCTIONS = frozenset(
 SPORTS_SYNC_JOB_MODULES = {
     "sportarr.sync.leagues": frozenset({"update_sports_for_instance"}),
     "sportarr.sync.events": frozenset({"sync_one_league"}),
+    # A manual download publishes like any other sports job, so switching
+    # Sportarr off has to remove or stop it too.
+    "sportarr.manual_jobs": frozenset({"sports_manually_download_subtitle"}),
 }
 
 
