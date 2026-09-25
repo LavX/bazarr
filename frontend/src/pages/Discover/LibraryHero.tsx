@@ -194,7 +194,8 @@ export default function LibraryHero() {
     {
       // Sportarr counts itself, so this is absent rather than zero wherever it
       // is switched off or not in this build, and the action never appears.
-      count: sportsWanted.data ?? 0,
+      // Switched off, the cache still holds its last count.
+      count: sportsWanted.isEnabled ? (sportsWanted.data ?? 0) : 0,
       to: "/wanted/sports",
       label: (count: number) =>
         `${count} sports event${count === 1 ? " needs" : "s need"} subtitles`,

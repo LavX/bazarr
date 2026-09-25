@@ -14,6 +14,13 @@ import styles from "./Discover.module.scss";
 
 function destination(item: DiscoverArrival) {
   if (item.kind === "translation") return null;
+  if (item.kind === "sports") {
+    // A sports arrival names its league, and the league page needs the owning
+    // instance to find it.
+    return item.library_id
+      ? `/sports/${item.library_id}?instance=${item.arr_instance_id}`
+      : "/history/sports";
+  }
   const category = item.kind === "movie" ? "movies" : "series";
   return item.library_id
     ? `/${category}/${item.library_id}`

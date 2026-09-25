@@ -4,6 +4,8 @@ import { createMemoryRouter, RouterProvider } from "react-router";
 import { http, HttpResponse } from "msw";
 import { readFileSync } from "node:fs";
 import { beforeEach, expect, it, vi } from "vitest";
+import queryClient from "@/apis/queries";
+import { QueryKeys } from "@/apis/queries/keys";
 import { AllProviders } from "@/providers";
 import { act, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
@@ -513,6 +515,28 @@ it("says nothing about sports where Sportarr is not configured", async () => {
     await screen.findByRole("link", { name: /140 episodes need subtitles/i }),
   ).toBeInTheDocument();
   expect(screen.queryByRole("link", { name: /sports event/i })).toBeNull();
+});
+
+it("stops counting sports once Sportarr is switched off", async () => {
+  sportarr = true;
+  sportsTotal = 3;
+  render();
+  expect(
+    await screen.findByRole("link", {
+      name: /3 sports events need subtitles/i,
+    }),
+  ).toBeInTheDocument();
+  sportarr = false;
+  await act(async () => {
+    await queryClient.invalidateQueries({
+      queryKey: [QueryKeys.System, QueryKeys.Settings],
+    });
+  });
+  // The count query stops, but its last answer stays cached, and the link
+  // would open a Wanted page the navigation no longer offers.
+  await waitFor(() =>
+    expect(screen.queryByRole("link", { name: /sports event/i })).toBeNull(),
+  );
 });
 
 it("drops a configured kind that has nothing left to do", async () => {
