@@ -233,42 +233,72 @@ def test_a_missing_or_empty_log_is_an_empty_page(tmp_path):
 # The reverse reader against a plain forward reading
 # ---------------------------------------------------------------------------
 
-_TIMESTAMP = re.compile(rb'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}')
+# Written from the endpoint's rules rather than from the module under test, so
+# the two can disagree: a record is a timestamped line with more than three
+# fields, other lines join the record above them, lines ahead of the first
+# record form one entry, and the stored filter applies to each line first.
+_REFERENCE_START = re.compile(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', re.ASCII)
+_REFERENCE_LEVELS = {'DEBUG': 10, 'INFO': 20, 'WARNING': 30, 'ERROR': 40, 'CRITICAL': 50}
+
+
+def _reference_level(name):
+    if name in _REFERENCE_LEVELS:
+        return _REFERENCE_LEVELS[name]
+    numbered = re.fullmatch(r'Level (\d+)', name)
+    return int(numbered.group(1)) if numbered else None
+
+
+def _reference_contains(needle, raw):
+    # An ASCII needle folds ASCII case only; any other needle folds Unicode case.
+    if needle.isascii():
+        return needle.lower().encode() in raw.lower()
+    return needle.casefold() in raw.decode('utf-8', 'replace').casefold()
 
 
 def _forward_reference(data, delimiter, stored, level, contains):
     """What the page should hold, read front to back with no blocks and no cache."""
     records = []
     orphan = []
-    for line in data.split(delimiter):
-        if not line:
+    for raw in data.split(delimiter):
+        if not raw:
             continue
-        if stored.active and not stored.keeps(log_reader._text(line)):
+        text = raw.decode('utf-8', 'replace').replace('\r\n', '\n')
+        if stored.active and not stored.keeps(text):
             continue
-        if _TIMESTAMP.match(line):
-            if log_reader._level_field(line) is not None:
-                records.append((line, []))
+        if _REFERENCE_START.match(text):
+            fields = text.split('|')
+            if len(fields) > 3:
+                records.append((raw, fields, []))
             continue
         if records:
-            records[-1][1].append(line)
+            records[-1][2].append(raw)
         else:
-            orphan.append(line)
+            orphan.append(raw)
     if orphan:
-        records.insert(0, (None, orphan))
+        records.insert(0, (None, None, orphan))
+    minimum = _REFERENCE_LEVELS[level.upper()] if level else None
     wanted = []
-    minimum = log_reader.LEVEL_NUMBERS[level.upper()] if level else None
-    for header, continuations in records:
-        name = 'ERROR' if header is None else log_reader._level_name(log_reader._level_field(header))
+    for raw, fields, continuations in records:
+        name = 'ERROR' if fields is None else fields[1].rstrip()
         if minimum is not None:
-            number = log_reader.level_number(name)
+            number = _reference_level(name)
             if number is None or number < minimum:
                 continue
-        if contains:
-            folded = contains.casefold()
-            if not any(folded in line.decode('utf-8', 'replace').casefold()
-                       for line in ([header] if header else []) + continuations):
-                continue
-        wanted.append(log_reader._to_entry(header, continuations))
+        if contains and not any(_reference_contains(contains, line)
+                                for line in ([raw] if raw else []) + continuations):
+            continue
+        lines = [line.decode('utf-8', 'replace').replace('\r\n', '\n').strip() for line in continuations]
+        if fields is None:
+            wanted.append({'timestamp': None, 'type': 'ERROR', 'message': 'See exception',
+                           'exception': '\n'.join(lines)})
+            continue
+        exception = None
+        if len(fields) > 4 and fields[4] != '\n':
+            exception = fields[4].strip('\'').replace('  ', '\u2003\u2003')
+        if lines:
+            exception = '\n'.join(([exception] if exception else []) + lines)
+        wanted.append({'timestamp': fields[0], 'type': fields[1].rstrip(), 'message': fields[3],
+                       'exception': exception})
     wanted.reverse()
     return wanted
 
@@ -301,6 +331,11 @@ def _random_log(rng, lines, delimiter, start=0, terminated=True):
     return data
 
 
+def _normalised(data, delimiter):
+    """The bytes a text-mode read would have seen, for the forward reference."""
+    return data.replace(b'\r\n', b'\n') if delimiter == '|\r\n' else data
+
+
 RANDOM_FILTERS = [
     ({}, None, ''),
     ({}, 'warning', ''),
@@ -308,6 +343,7 @@ RANDOM_FILTERS = [
     ({}, 'error', 'árvíz'),
     ({'include': 'e', 'ignore_case': True}, None, ''),
     ({'exclude': r'^\s*$|DEBUG', 'use_regex': True}, 'info', 'o'),
+    ({'include': 'opensubtitles'}, None, ''),
 ]
 
 
@@ -321,10 +357,9 @@ def test_the_reverse_reader_agrees_with_a_forward_reading(tmp_path, seed):
         data = b'orphan line one' + delimiter.encode() + b'orphan two' + delimiter.encode() + data
     path = tmp_path / 'bazarr.log'
     path.write_bytes(data)
-    reference_data = data.replace(b'\r\n', b'\n') if delimiter == '|\r\n' else data
     for stored_settings, level, contains in RANDOM_FILTERS:
         stored = StoredFilter(**stored_settings)
-        expected = _forward_reference(reference_data, b'|\n', stored, level, contains)
+        expected = _forward_reference(_normalised(data, delimiter), b'|\n', stored, level, contains)
         for block_size in (1, 5, 64, 4096):
             page = read_log_page(path, level=level, contains=contains, stored=stored, block_size=block_size,
                                  **EVERYTHING)
@@ -338,32 +373,44 @@ def test_the_reverse_reader_agrees_with_a_forward_reading(tmp_path, seed):
         assert gathered == expected
 
 
-@pytest.mark.parametrize('seed', range(16))
-def test_a_remembered_count_stays_exact_as_the_log_grows(tmp_path, seed):
+@pytest.mark.parametrize('seed', range(24))
+def test_a_remembered_count_stays_exact_as_the_log_changes(tmp_path, seed):
     rng = random.Random(1000 + seed)
+    delimiter = '|\r\n' if seed % 3 == 2 else '|\n'
     path = tmp_path / 'bazarr.log'
-    data = _random_log(rng, rng.randint(1, 40), '|\n')
+    data = _random_log(rng, rng.randint(1, 40), delimiter)
     path.write_bytes(data)
     cache = CountCache()
     written = 40
-    for _ in range(5):
+    for _ in range(6):
         for stored_settings, level, contains in RANDOM_FILTERS:
             stored = StoredFilter(**stored_settings)
-            expected = _forward_reference(data, b'|\n', stored, level, contains)
+            expected = _forward_reference(_normalised(data, delimiter), b'|\n', stored, level, contains)
             for limit, offset in ((5, 0), (5, 5), (MAX_LIMIT, 0)):
                 page = read_log_page(path, limit=limit, offset=offset, level=level, contains=contains,
                                      stored=stored, cache=cache, block_size=rng.choice([3, 16, 256]))
                 assert page.total == len(expected), (stored_settings, level, contains, limit, offset)
                 assert page.entries == expected[offset:offset + limit]
-        # Sometimes an unterminated line, as a record still being written,
-        # which the next append finishes before adding more.
-        addition = _random_log(rng, rng.randint(0, 12), '|\n', start=written, terminated=rng.random() < 0.7)
-        written += 12
-        if data and not data.endswith(b'|\n'):
-            addition = rng.choice([b'', b' and the rest of it']) + b'|\n' + addition
-        data += addition
-        with open(path, 'ab') as handle:
-            handle.write(addition)
+        if rng.random() < 0.15:
+            # Rewritten in place: same inode, different bytes.
+            data = _random_log(rng, rng.randint(0, 30), delimiter, start=written)
+            with open(path, 'r+b') as handle:
+                handle.truncate(0)
+                handle.write(data)
+        else:
+            # Appended, and cut at any byte, so the next read can land in the
+            # middle of a delimiter, a timestamp or a UTF-8 character.
+            addition = _random_log(rng, rng.randint(0, 12), delimiter, start=written)
+            cut = rng.randint(0, len(addition))
+            data += addition[:cut]
+            with open(path, 'ab') as handle:
+                handle.write(addition[:cut])
+            pending_tail = addition[cut:]
+            if pending_tail and rng.random() < 0.5:
+                data += pending_tail
+                with open(path, 'ab') as handle:
+                    handle.write(pending_tail)
+        written += 30
 
 
 def test_a_rewritten_file_is_counted_again_rather_than_trusted(tmp_path):
@@ -382,11 +429,10 @@ def test_a_rewritten_file_is_counted_again_rather_than_trusted(tmp_path):
     assert page.entries[0]['message'] == 'rewritten 699'
 
 
-def test_a_refresh_reads_only_the_end_of_the_file(tmp_path, monkeypatch):
-    path = tmp_path / 'bazarr.log'
-    _numbered_log(path, 20000)
-    size = path.stat().st_size
-    reads = []
+@pytest.fixture
+def reads(monkeypatch):
+    """The sizes of every read the log reader makes."""
+    sizes = []
 
     class CountingFile:
         def __init__(self, handle):
@@ -394,7 +440,7 @@ def test_a_refresh_reads_only_the_end_of_the_file(tmp_path, monkeypatch):
 
         def read(self, size=-1):
             data = self._handle.read(size)
-            reads.append(len(data))
+            sizes.append(len(data))
             return data
 
         def __getattr__(self, name):
@@ -407,15 +453,84 @@ def test_a_refresh_reads_only_the_end_of_the_file(tmp_path, monkeypatch):
             self._handle.close()
 
     monkeypatch.setattr(log_reader, '_open_log', lambda p: CountingFile(open(p, 'rb')))
+    return sizes
+
+
+def _append_record(path, message, level='ERROR'):
+    with open(path, 'ab') as handle:
+        handle.write(f'2026-09-25 23:59:59|{level:<8}|{"bazarr.test":<32}|{message}|\n'.encode())
+
+
+def test_a_refresh_reads_only_the_end_of_the_file(tmp_path, reads):
+    path = tmp_path / 'bazarr.log'
+    _numbered_log(path, 20000)
+    size = path.stat().st_size
     cache = CountCache()
     read_log_page(path, limit=50, cache=cache, block_size=4096)
-    with open(path, 'ab') as handle:
-        handle.write(b'2026-09-25 23:59:59|ERROR   |bazarr.test                     |appended|\n')
+    _append_record(path, 'appended')
     reads.clear()
     page = read_log_page(path, limit=50, cache=cache, block_size=4096)
     assert page.total == 20001
     assert page.entries[0]['message'] == 'appended'
     assert sum(reads) < 64 * 1024 < size
+
+
+def test_a_stored_filter_that_is_quiet_near_the_end_is_still_remembered(tmp_path, reads):
+    # The records the filter keeps are all old, under 1MB of lines it drops.
+    path = tmp_path / 'bazarr.log'
+    with open(path, 'wb') as handle:
+        for index in range(50):
+            handle.write(f'2026-09-25 01:00:00|INFO    |{"root":<32}|whisperai {index}|\n'.encode())
+        for index in range(20000):
+            handle.write(f'2026-09-25 02:00:00|DEBUG   |{"socketio.server":<32}|emitting {index}|\n'.encode())
+    size = path.stat().st_size
+    stored = StoredFilter(include='whisperai')
+    cache = CountCache()
+    assert read_log_page(path, stored=stored, cache=cache).total == 50
+    _append_record(path, 'emitting more', level='DEBUG')
+    reads.clear()
+    page = read_log_page(path, stored=stored, cache=cache, limit=1)
+    assert page.total == 50
+    assert page.entries[0]['message'] == 'whisperai 49'
+    # The count is remembered against the newest kept record, however far back
+    # it is, so the refresh does not count the whole file again. It still walks
+    # back to that record once for the page, and no further.
+    assert sum(reads) < size * 1.1, (sum(reads), size)
+    reads.clear()
+    read_log_page(path, stored=stored, cache=cache, limit=1)
+    assert sum(reads) < size * 1.1
+
+
+def test_an_offset_past_the_end_reads_nothing_more(tmp_path, reads):
+    path = tmp_path / 'bazarr.log'
+    _numbered_log(path, 20000)
+    cache = CountCache()
+    read_log_page(path, cache=cache, block_size=4096)
+    reads.clear()
+    page = read_log_page(path, offset=20000, limit=50, cache=cache, block_size=4096)
+    assert page.entries == [] and page.total == 20000
+    assert sum(reads) < 64 * 1024
+
+
+def test_an_older_page_holds_still_while_new_lines_arrive(tmp_path):
+    path = tmp_path / 'bazarr.log'
+    _numbered_log(path, 300)
+    cache = CountCache()
+    first = read_log_page(path, limit=50, cache=cache)
+    second = read_log_page(path, limit=50, offset=50, cache=cache, baseline_total=first.total)
+    for index in range(70):
+        _append_record(path, f'new {index}')
+    # Without the baseline, page three would repeat rows the reader already saw.
+    shifted = read_log_page(path, limit=50, offset=100, cache=cache)
+    assert shifted.entries[0]['message'] == 'record 269'
+    third = read_log_page(path, limit=50, offset=100, cache=cache, baseline_total=first.total)
+    assert third.total == 370
+    messages = [entry['message'] for entry in first.entries + second.entries + third.entries]
+    assert messages == [f'record {index}' for index in range(299, 149, -1)]
+    # The newest page itself is always the live end of the file.
+    assert read_log_page(path, limit=1, cache=cache).entries[0]['message'] == 'new 69'
+    # A baseline above the total, as after the log was emptied, skips nothing.
+    assert read_log_page(path, limit=1, cache=cache, baseline_total=10 ** 6).entries[0]['message'] == 'new 69'
 
 
 # ---------------------------------------------------------------------------
@@ -469,20 +584,36 @@ def test_the_endpoint_returns_a_page_and_the_total(api):
 def test_the_endpoint_caps_limit_and_refuses_what_it_cannot_serve(api):
     _numbered_log(api.path, 10)
     assert api(limit=999999).get_json()['limit'] == MAX_LIMIT
-    for params in ({'limit': 0}, {'limit': 'many'}, {'offset': -1}, {'level': 'loud'}):
+    for params in ({'limit': 0}, {'limit': 'many'}, {'offset': -1}, {'level': 'loud'},
+                   {'baseline_total': -1}, {'baseline_total': 'all'}):
         assert api(**params).status_code == 400, params
 
 
-def test_an_invalid_stored_regex_is_reported_not_silently_ignored(api, monkeypatch):
+def test_the_endpoint_holds_an_older_page_still_against_a_baseline(api):
+    _numbered_log(api.path, 120)
+    baseline = api(limit=50).get_json()['total']
+    for index in range(30):
+        _append_record(api.path, f'new {index}')
+    body = api(limit=50, offset=50, baseline_total=baseline).get_json()
+    assert body['total'] == 150
+    assert body['data'][0]['message'] == 'record 69'
+
+
+# re.compile refuses a pattern with re.error, but also with OverflowError for a
+# repeat count too large to hold and RecursionError for very deep nesting.
+@pytest.mark.parametrize('include', ['(record', 'record{99999999999}', '(' * 5000 + ')' * 5000])
+def test_an_invalid_stored_regex_is_reported_not_silently_ignored(api, monkeypatch, include):
     _numbered_log(api.path, 20)
     monkeypatch.setitem(api.settings.log, 'use_regex', True)
-    monkeypatch.setitem(api.settings.log, 'include_filter', '(record')
+    monkeypatch.setitem(api.settings.log, 'include_filter', include)
     monkeypatch.setitem(api.settings.log, 'exclude_filter', '[0-')
-    body = api().get_json()
+    response = api()
+    assert response.status_code == 200
+    body = response.get_json()
     # Neither is applied, as before, but the reader is now told.
     assert body['total'] == 20
     assert [(error['filter'], error['pattern']) for error in body['filter_errors']] == \
-        [('include', '(record'), ('exclude', '[0-')]
+        [('include', include), ('exclude', '[0-')]
     assert all(error['message'] for error in body['filter_errors'])
 
     monkeypatch.setitem(api.settings.log, 'include_filter', r'record 1\d')

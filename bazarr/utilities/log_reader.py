@@ -11,7 +11,9 @@ The total is exact. Below the page, records are only counted, by the same pass
 over the same blocks, which holds one block and a few counters at a time.
 Because the log only ever grows at its end, the count below a known record is
 remembered per file and filter. The next request, typically a refresh of the
-newest page, counts only what was appended since and reads the page itself.
+newest page, counts only what was appended since and reads back only as far as
+its page reaches. For a filter that matches rarely, the page itself can reach
+far back: the newest 500 critical lines may span most of the file.
 
 The file format is the one FileHandlerFormatter writes, one record per line:
 
@@ -49,8 +51,6 @@ _CRLF = b'|\r\n'
 # The level of the lines that come before the file's first record, which have
 # always been shown together as one entry of their own.
 _ORPHAN_LEVEL = b'ERROR'
-# How far from the end to look for the record a count is remembered against.
-_ANCHOR_SEARCH = 1024 * 1024
 
 
 class StoredFilter:
@@ -75,8 +75,12 @@ class StoredFilter:
         if use_regex:
             try:
                 return re.compile(pattern, re.IGNORECASE if ignore_case else 0).search
-            except re.error as error:
-                self.errors.append({'filter': name, 'pattern': pattern, 'message': str(error)})
+            except (re.error, OverflowError, RecursionError) as error:
+                # re.error is not the only refusal: a repeat count too large
+                # to hold raises OverflowError and very deep nesting raises
+                # RecursionError. The endpoint caught every one of them before.
+                message = str(error) or type(error).__name__
+                self.errors.append({'filter': name, 'pattern': pattern, 'message': message})
                 return None
         if ignore_case:
             folded = pattern.casefold()
@@ -112,6 +116,9 @@ class _Contains:
         except UnicodeEncodeError:
             self._needle = contains.casefold()
             self._ascii = False
+        # Needles that fold to the same text match the same lines, so they
+        # share one remembered count.
+        self.key = self._needle
 
     def test(self, raw):
         if self._ascii:
@@ -329,12 +336,16 @@ def _bottom_lines(lines, keeps):
     return False, bottom
 
 
-def _scan(f, lo, hi, delimiter, block_size, stored, contains, page, count):
+def _scan(f, lo, hi, delimiter, block_size, stored, contains, page=None, count=False):
     """Walk the records that start in f[lo:hi], newest first.
 
-    Each matching record goes to ``page``. With ``count`` the matching records
-    are also counted by raw level field, before the level filter, and the
-    Counter is returned; without it the walk stops as soon as the page is full.
+    With ``page`` each matching record goes to it, and a walk that does not
+    count stops as soon as the page is full. With ``count`` the matching
+    records are counted by raw level field, before the level filter, and the
+    newest complete record the stored filter keeps is taken as the anchor a
+    count can be remembered against. Returns (counts, anchor), where anchor is
+    (start, digest, counts through it) or None.
+
     ``lo`` is 0 or the start of a record and ``hi`` the start of a record or
     the end of the file, so no record crosses either end.
 
@@ -344,13 +355,21 @@ def _scan(f, lo, hi, delimiter, block_size, stored, contains, page, count):
     keeps = stored.keeps if stored.active else None
     test = contains.test if contains is not None else None
     match = _RECORD_START.match
+    width = len(delimiter)
     counts = Counter() if count else None
-    chosen = page.chosen
-    selects = page.selects
-    offset = page.offset
-    wanted = page.wanted
-    matched = page.matched
-    entries = page.entries
+    anchor = None
+    need_anchor = count
+    if page is not None:
+        chosen = page.chosen
+        selects = page.selects
+        offset = page.offset
+        wanted = page.wanted
+        matched = page.matched
+        entries = page.entries
+    else:
+        chosen = selects = entries = None
+        offset = matched = 0
+        wanted = -1
     # The lines seen since the last record's line, newest first, which belong
     # to the next record found below them. They are kept only while the page
     # may still need them.
@@ -358,10 +377,10 @@ def _scan(f, lo, hi, delimiter, block_size, stored, contains, page, count):
     pending_any = False
     pending_match = False
     try:
-        for _, lines, _, buf in _iter_blocks(f, hi, delimiter, block_size, stop=lo):
-            if matched >= wanted and not count:
-                return counts
-            if test is not None and not pending_match and not test(buf):
+        for lines_end, lines, tail, buf in _iter_blocks(f, hi, delimiter, block_size, stop=lo):
+            if not count and matched >= wanted:
+                return counts, anchor
+            if test is not None and not pending_match and not need_anchor and not test(buf):
                 # No line here contains the needle and nothing above is waiting
                 # on a record here, so no record in this block matches. Its
                 # first lines can still belong to a matching record below.
@@ -377,7 +396,11 @@ def _scan(f, lo, hi, delimiter, block_size, stored, contains, page, count):
                     pending.extend(bottom)
                 pending_any = bool(pending)
                 continue
+            # The index of the line below, kept only while an anchor is wanted.
+            index = len(lines)
             for line in reversed(lines):
+                if need_anchor:
+                    index -= 1
                 if not line:
                     continue
                 if keeps is not None and not keeps(_text(line)):
@@ -394,15 +417,23 @@ def _scan(f, lo, hi, delimiter, block_size, stored, contains, page, count):
                         level = line[first + 1:second]
                         if counts is not None:
                             counts[level] += 1
-                        selected = chosen.get(level)
-                        if selected is None:
-                            selected = selects(level)
-                        if selected:
-                            if offset <= matched < wanted:
-                                entries.append(_to_entry(line, pending[::-1]))
-                            matched += 1
-                            if matched >= wanted and not count:
-                                return counts
+                        if page is not None:
+                            selected = chosen.get(level)
+                            if selected is None:
+                                selected = selects(level)
+                            if selected:
+                                if offset <= matched < wanted:
+                                    entries.append(_to_entry(line, pending[::-1]))
+                                matched += 1
+                                if not count and matched >= wanted:
+                                    return counts, anchor
+                    if need_anchor and not (tail and index == len(lines) - 1):
+                        # The newest complete record: everything below it is
+                        # final, so a count below it stays true as the file grows.
+                        start = lines_end - sum(len(later) for later in lines[index:]) \
+                            - width * (len(lines) - 1 - index)
+                        anchor = (start, _digest(line), counts.copy())
+                        need_anchor = False
                     if pending:
                         pending = []
                     pending_any = pending_match = False
@@ -415,43 +446,18 @@ def _scan(f, lo, hi, delimiter, block_size, stored, contains, page, count):
         if lo == 0 and pending_any and (test is None or pending_match):
             if counts is not None:
                 counts[_ORPHAN_LEVEL] += 1
-            if selects(_ORPHAN_LEVEL):
+            if page is not None and selects(_ORPHAN_LEVEL):
                 if offset <= matched < wanted:
                     entries.append(_to_entry(None, pending[::-1]))
                 matched += 1
-        return counts
+        return counts, anchor
     finally:
-        page.matched = matched
+        if page is not None:
+            page.matched = matched
 
 
 def _digest(raw):
     return hashlib.blake2b(raw, digest_size=16).digest()
-
-
-def _find_anchor(f, end, delimiter, block_size, stored):
-    """The newest complete record line near the end, as (start, digest), or None.
-
-    A count is remembered against it. Only a record's own line will do, since
-    splitting the file anywhere else could cut a record from the lines that
-    belong to it, and it must be complete, since a line still being written
-    will not have the same bytes next time.
-    """
-    keeps = stored.keeps if stored.active else None
-    width = len(delimiter)
-    searched = 0
-    for cursor, lines, tail, buf in _iter_blocks(f, end, delimiter, block_size):
-        last = len(lines) - 1
-        for index in range(last, -1, -1):
-            line = lines[index]
-            cursor -= len(line)
-            if line and not (tail and index == last) \
-                    and (keeps is None or keeps(_text(line))) and _level_field(line) is not None:
-                return cursor, _digest(line)
-            cursor -= width
-        searched += len(buf)
-        if searched >= _ANCHOR_SEARCH:
-            return None
-    return None
 
 
 def _is_line_at(f, start, end, delimiter, digest):
@@ -493,13 +499,17 @@ def _open_log(path):
 
 
 def read_log_page(path, limit=DEFAULT_LIMIT, offset=0, level=None, contains='', stored=None,
-                  cache=None, block_size=BLOCK_SIZE):
+                  cache=None, block_size=BLOCK_SIZE, baseline_total=None):
     """Return one page of log entries, newest first, and how many match in total.
 
     ``level`` is a minimum severity name. ``contains`` is a case-insensitive
     substring of a record's lines, including the timestamp and logger name.
     Both apply on top of the stored filter. ``offset`` and ``limit`` count
     matching entries from the newest.
+
+    ``baseline_total`` is the total a reader saw when they started paging.
+    Entries that matched since are skipped, so an older page shows the same
+    entries it would have shown then instead of shifting as new lines arrive.
     """
     stored = stored if stored is not None else StoredFilter()
     minimum = LEVEL_NUMBERS[level.upper()] if level else None
@@ -517,67 +527,66 @@ def read_log_page(path, limit=DEFAULT_LIMIT, offset=0, level=None, contains='', 
         if end == 0:
             return LogPage()
         delimiter = _detect_delimiter(f, end)
-        key = (status.st_dev, status.st_ino, delimiter, stored.signature, contains)
+        key = (status.st_dev, status.st_ino, delimiter, stored.signature,
+               contains_test.key if contains_test is not None else None)
 
-        def scan(lo, hi, count):
-            """The records in f[lo:hi], counted by level name when ``count``."""
-            names = Counter()
-            if hi <= lo or (not count and page.full):
-                return names
-            raw_counts = _scan(f, lo, hi, delimiter, block_size, stored, contains_test, page, count)
-            for level_field, number in (raw_counts or {}).items():
-                names[_level_name(level_field)] += number
-            return names
+        def names(raw_counts):
+            counted = Counter()
+            for level_field, number in raw_counts.items():
+                counted[_level_name(level_field)] += number
+            return counted
 
         # Records that pass the stored filter and contains, by level. The level
-        # filter is applied to the sum at the end, so one remembered count
-        # serves every level.
-        counts_above = Counter()
-        counts_below = Counter()
-        anchor = None
+        # filter is applied to the sum, so one remembered count serves every
+        # level.
+        counts = Counter()
         complete = True
+        remember = None
         try:
-            anchor = _find_anchor(f, end, delimiter, block_size, stored)
-            top = anchor[0] if anchor is not None else None
-
-            # The count below a remembered record, if that record is still there
-            # and still at or below the newest one.
+            # The count below a remembered record, if that record is still the
+            # same line at the same place.
             known = cache.get(key) if cache is not None else None
-            if known is not None:
-                if top is not None and known.anchor == top:
-                    valid = known.digest == anchor[1]
-                else:
-                    valid = (top is None or known.anchor < top) \
-                        and _is_line_at(f, known.anchor, end, delimiter, known.digest)
-                if not valid:
-                    cache.discard(key)
-                    known = None
+            if known is not None and not (known.anchor < end and _is_line_at(
+                    f, known.anchor, end, delimiter, known.digest)):
+                cache.discard(key)
+                known = None
             floor = known.anchor if known is not None else 0
 
-            # The file is walked in regions that each start on a record: what
-            # lies above the newest complete record, what was appended below it
-            # since the remembered count, and then, only while the page still
-            # needs records, what that count already covers.
-            if top is not None and top >= floor:
-                counts_above = scan(top, end, True)
-                counts_below = scan(floor, top, True)
-            else:
-                counts_above = scan(floor, end, True)
+            # Count what the remembered count does not cover: the whole file
+            # once on a cold read, what was appended since on a refresh. The
+            # page is gathered on the same walk, unless it has to be shifted
+            # by a total that is only known once the walk ends.
+            shifting = baseline_total is not None
+            raw_counts, anchor = _scan(f, floor, end, delimiter, block_size, stored, contains_test,
+                                       page=None if shifting else page, count=True)
+            counts = names(raw_counts)
+            below = Counter()
             if known is not None:
-                counts_below += known.counts
-                # The total is already exact, so the walk below can also stop
-                # once every matching record has been seen, which is what keeps
-                # a rarely matching filter from reading to the start of the file.
-                page.wanted = min(page.wanted, _selected_total(page, counts_above + counts_below))
-                scan(0, known.anchor, False)
+                counts += known.counts
+                below += known.counts
+            if anchor is not None:
+                start, digest, through = anchor
+                below += names(raw_counts - through)
+                remember = _Known(start, digest, below)
+
+            # The total is exact by now, so a walk for the rest of the page
+            # stops once the page or the matching records run out.
+            total = _selected_total(page, counts)
+            if shifting:
+                page.offset += max(0, total - baseline_total)
+                page.wanted = min(page.offset + limit, total)
+                if page.offset < page.wanted:
+                    _scan(f, 0, end, delimiter, block_size, stored, contains_test, page=page)
+            elif known is not None:
+                page.wanted = min(page.wanted, total)
+                if page.offset < page.wanted:
+                    _scan(f, 0, floor, delimiter, block_size, stored, contains_test, page=page)
         except _FileShrank:
             # What was read is right, but the page and the total may be short,
             # so the count is not remembered.
             complete = False
 
-    total = _selected_total(page, counts_above + counts_below)
+    if cache is not None and complete and remember is not None:
+        cache.put(key, remember)
 
-    if cache is not None and complete and anchor is not None:
-        cache.put(key, _Known(anchor[0], anchor[1], counts_below))
-
-    return LogPage(entries=page.entries, total=total)
+    return LogPage(entries=page.entries, total=_selected_total(page, counts))

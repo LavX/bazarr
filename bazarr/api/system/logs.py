@@ -38,6 +38,16 @@ def _offset(value):
 _offset.__schema__ = {'type': 'integer', 'minimum': 0, 'default': 0}
 
 
+def _baseline_total(value):
+    number = int(value)
+    if number < 0:
+        raise ValueError('baseline_total cannot be negative')
+    return number
+
+
+_baseline_total.__schema__ = {'type': 'integer', 'minimum': 0}
+
+
 def _level(value):
     name = str(value).strip().lower()
     if name not in LEVEL_CHOICES:
@@ -81,6 +91,10 @@ class SystemLogs(Resource):
                                     help='Minimum severity to return')
     get_request_parser.add_argument('contains', type=str, required=False, default='',
                                     help='Case-insensitive text the entry must contain')
+    get_request_parser.add_argument('baseline_total', type=_baseline_total, required=False, default=None,
+                                    help='The total from the response paging started from. Entries that '
+                                         'matched since are skipped, so an older page does not shift as '
+                                         'new lines arrive')
 
     @authenticate
     @api_ns_system_logs.doc(parser=get_request_parser)
@@ -98,7 +112,7 @@ class SystemLogs(Resource):
                               use_regex=settings.log.use_regex)
         page = read_log_page(get_log_file_path(), limit=args['limit'], offset=args['offset'],
                              level=args['level'], contains=args['contains'] or '', stored=stored,
-                             cache=_log_counts)
+                             cache=_log_counts, baseline_total=args['baseline_total'])
         return {
             'data': marshal(page.entries, self.get_response_model),
             'total': page.total,

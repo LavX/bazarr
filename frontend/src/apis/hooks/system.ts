@@ -195,24 +195,27 @@ export interface SystemLogsPage {
   pageSize: number;
   level?: System.LogLevel;
   contains?: string;
+  baselineTotal?: number;
 }
 
 // One page of the log at a time. Pages count back from the newest entry, so
 // only the newest page refreshes itself: it is a small read of the end of the
-// file, and refreshing an older page would shift its rows under the reader as
-// new lines arrive. The Refresh button still refreshes whatever is shown.
+// file. An older page is read against the total paging started from, so the
+// lines that arrive meanwhile do not shift its rows under the reader. The
+// Refresh button still refreshes whatever is shown.
 export function useSystemLogs({
   page,
   pageSize,
   level,
   contains,
+  baselineTotal,
 }: SystemLogsPage) {
   const newest = page === 0;
   return useQuery({
     queryKey: [
       QueryKeys.System,
       QueryKeys.Logs,
-      { page, pageSize, level, contains },
+      { page, pageSize, level, contains, baselineTotal },
     ],
     queryFn: () =>
       api.system.logs({
@@ -220,6 +223,7 @@ export function useSystemLogs({
         offset: page * pageSize,
         level,
         contains,
+        baselineTotal,
       }),
     placeholderData: keepPreviousData,
     refetchOnWindowFocus: newest ? "always" : false,

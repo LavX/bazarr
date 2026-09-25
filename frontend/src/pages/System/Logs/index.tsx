@@ -54,8 +54,13 @@ const SystemLogsView: FunctionComponent = () => {
   const pageSize = usePageSize();
   const [level, setLevel] = useState<System.LogLevel | undefined>();
   const [search, setSearch] = useState("");
-  const [contains] = useDebouncedValue(search.trim(), 300);
+  // Each distinct term is a count over the whole file on the server, so wait
+  // for a pause in the typing rather than asking for every prefix.
+  const [contains] = useDebouncedValue(search.trim(), 400);
   const [page, setPage] = useState(0);
+  // The total when the reader left the newest page. Older pages are read
+  // against it, so they hold still while new lines arrive.
+  const [baseline, setBaseline] = useState<number | null>(null);
 
   // A changed filter starts again from the newest entry.
   const filterKey = `${level ?? ""}\n${contains}\n${pageSize}`;
@@ -63,13 +68,37 @@ const SystemLogsView: FunctionComponent = () => {
   if (pageFilterKey !== filterKey) {
     setPageFilterKey(filterKey);
     setPage(0);
+    setBaseline(null);
   }
 
-  const logs = useSystemLogs({ page, pageSize, level, contains });
-  const { isFetching, isLoading, isPlaceholderData, data, refetch } = logs;
-  const total = data?.total ?? 0;
+  const paging = page > 0 && baseline !== null;
+  const logs = useSystemLogs({
+    page,
+    pageSize,
+    level,
+    contains,
+    baselineTotal: paging ? baseline : undefined,
+  });
+  const { isError, isFetching, isLoading, isPlaceholderData, data, refetch } =
+    logs;
+  const liveTotal = data?.total ?? 0;
+  // An older page shows the log as it was when paging started. The total can
+  // only drop below that when the log was emptied or rotated meanwhile.
+  const total = paging ? Math.min(baseline, liveTotal) : liveTotal;
   const pageCount = Math.ceil(total / pageSize);
   const filterErrors = data?.filter_errors ?? [];
+
+  const goto = useCallback(
+    (next: number) => {
+      if (next === 0) {
+        setBaseline(null);
+      } else if (page === 0) {
+        setBaseline(liveTotal);
+      }
+      setPage(next);
+    },
+    [page, liveTotal],
+  );
 
   // Emptying the log, or new lines under a narrower filter, can leave the
   // page past the end.
@@ -211,6 +240,9 @@ const SystemLogsView: FunctionComponent = () => {
             leftSection={
               <FontAwesomeIcon icon={faSearch} size="sm" opacity={0.5} />
             }
+            // Mantine makes input sections ignore the pointer by default,
+            // which would leave the clear button unclickable.
+            rightSectionPointerEvents="all"
             rightSection={
               search.length > 0 ? (
                 <UnstyledButton
@@ -227,6 +259,24 @@ const SystemLogsView: FunctionComponent = () => {
             size="sm"
           />
         </Group>
+        {isError && (
+          <Alert
+            className={styles.alert}
+            color="red"
+            variant="light"
+            title={
+              data
+                ? "The log could not be refreshed"
+                : "The log could not be loaded"
+            }
+          >
+            <Text size="sm">
+              {data
+                ? "These are the entries from the last successful read."
+                : "Try Refresh, or use Download to get the whole file."}
+            </Text>
+          </Alert>
+        )}
         {filterErrors.length > 0 && (
           <Alert
             className={styles.alert}
@@ -249,9 +299,11 @@ const SystemLogsView: FunctionComponent = () => {
           <Table
             logs={data?.data ?? []}
             emptyText={
-              filtered
-                ? "No log entries match these filters"
-                : "The log is empty"
+              isError && !data
+                ? "The log could not be loaded"
+                : filtered
+                  ? "No log entries match these filters"
+                  : "The log is empty"
             }
           ></Table>
           <PageControl
@@ -259,7 +311,7 @@ const SystemLogsView: FunctionComponent = () => {
             index={page}
             size={pageSize}
             total={total}
-            goto={setPage}
+            goto={goto}
           ></PageControl>
         </LoadingProvider>
       </QueryOverlay>

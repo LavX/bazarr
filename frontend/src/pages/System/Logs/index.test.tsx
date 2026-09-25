@@ -45,12 +45,13 @@ function entries(count: number): System.Log[] {
 function serveLogs(
   all: System.Log[],
   extra: Partial<System.LogPage> = {},
+  general: Record<string, unknown> = {},
 ): URLSearchParams[] {
   const requests: URLSearchParams[] = [];
   server.use(
     http.get("/api/system/settings", () =>
       HttpResponse.json({
-        general: { theme: "auto", debug: false },
+        general: { theme: "auto", debug: false, ...general },
         log: {
           include_filter: "",
           exclude_filter: "",
@@ -74,8 +75,12 @@ function serveLogs(
           (!level || RANK[entry.type] >= RANK[level.toUpperCase()]) &&
           (!contains || entry.message.toLowerCase().includes(contains)),
       );
+      // Entries that arrived since the baseline are skipped, as the server does.
+      const baseline = params.get("baseline_total");
+      const skip =
+        baseline === null ? 0 : Math.max(0, matching.length - Number(baseline));
       return HttpResponse.json({
-        data: matching.slice(offset, offset + limit),
+        data: matching.slice(offset + skip, offset + skip + limit),
         total: matching.length,
         offset,
         limit,
@@ -114,6 +119,71 @@ describe("System Logs", () => {
     expect(last(requests).get("offset")).toBe("0");
     expect(last(requests).has("level")).toBe(false);
     expect(last(requests).has("contains")).toBe(false);
+  });
+
+  it("asks for pages of the size set in the settings", async () => {
+    const requests = serveLogs(entries(120), {}, { page_size: 25 });
+    customRender(<SystemLogsView />);
+
+    expect(
+      await screen.findByText("Show 1 to 25 of 120 entries"),
+    ).toBeInTheDocument();
+    expect(last(requests).get("limit")).toBe("25");
+    expect(screen.queryByText("record 94")).not.toBeInTheDocument();
+  });
+
+  it("holds an older page still while new entries arrive", async () => {
+    const all = entries(120);
+    const requests = serveLogs(all);
+    const user = userEvent.setup();
+    customRender(<SystemLogsView />);
+    await screen.findByText("record 119");
+
+    await user.click(screen.getByRole("button", { name: "2" }));
+    await screen.findByText("record 69");
+    expect(last(requests).get("baseline_total")).toBe("120");
+
+    // Seven lines are written while the reader is on page two.
+    all.unshift(
+      ...Array.from({ length: 7 }, (_, index) => ({
+        timestamp: "2026-09-25 11:00:00",
+        type: "INFO" as System.LogType,
+        message: `arrived ${index}`,
+        exception: null,
+      })),
+    );
+    await user.click(screen.getByRole("button", { name: "3" }));
+
+    // Page three carries on from page two instead of repeating seven rows.
+    expect(await screen.findByText("record 19")).toBeInTheDocument();
+    expect(screen.queryByText("record 26")).not.toBeInTheDocument();
+    expect(last(requests).get("baseline_total")).toBe("120");
+    expect(last(requests).get("offset")).toBe("100");
+    expect(
+      screen.getByText("Show 101 to 120 of 120 entries"),
+    ).toBeInTheDocument();
+
+    // Back on the newest page, which refreshes itself, the new lines are there.
+    await user.click(screen.getByRole("button", { name: "1" }));
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(await screen.findByText("arrived 0")).toBeInTheDocument();
+    expect(last(requests).has("baseline_total")).toBe(false);
+  });
+
+  it("says so when the log cannot be loaded", async () => {
+    serveLogs([]);
+    server.use(
+      http.get("/api/system/logs", () =>
+        HttpResponse.json({ message: "broken" }, { status: 500 }),
+      ),
+    );
+    customRender(<SystemLogsView />);
+
+    // In the alert above the table, and in the table where the rows would be.
+    expect(
+      await screen.findAllByText("The log could not be loaded"),
+    ).toHaveLength(2);
+    expect(screen.queryByText("The log is empty")).not.toBeInTheDocument();
   });
 
   it("pages through older entries one request at a time", async () => {

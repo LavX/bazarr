@@ -154,5 +154,8 @@ declare namespace System {
     offset: number;
     level?: LogLevel;
     contains?: string;
+    // The total from the response paging started from, so an older page
+    // skips what arrived since instead of shifting.
+    baselineTotal?: number;
   }
 }

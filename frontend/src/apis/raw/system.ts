@@ -107,6 +107,8 @@ class SystemApi extends BaseApi {
       offset: query.offset,
       level: query.level,
       contains: query.contains || undefined,
+      // eslint-disable-next-line camelcase -- the server's parameter name
+      baseline_total: query.baselineTotal,
     });
   }
 
