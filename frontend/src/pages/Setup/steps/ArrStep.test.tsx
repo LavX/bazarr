@@ -5,7 +5,9 @@ import {
   useCreateArrInstance,
   useDeleteArrInstance,
   useSettingsMutation,
+  useSystemSettings,
   useTestArrInstanceConnection,
+  useUpdateArrInstance,
 } from "@/apis/hooks";
 import {
   readConnectionTests,
@@ -25,6 +27,8 @@ vi.mock("@/apis/hooks", async (importOriginal) => {
     useDeleteArrInstance: vi.fn(),
     useTestArrInstanceConnection: vi.fn(),
     useSettingsMutation: vi.fn(),
+    useSystemSettings: vi.fn(),
+    useUpdateArrInstance: vi.fn(),
   };
 });
 
@@ -35,17 +39,38 @@ const mockedUseTestArrInstanceConnection = vi.mocked(
   useTestArrInstanceConnection,
 );
 const mockedUseSettingsMutation = vi.mocked(useSettingsMutation);
+const mockedUseSystemSettings = vi.mocked(useSystemSettings);
+const mockedUseUpdateArrInstance = vi.mocked(useUpdateArrInstance);
 
 const onNext = vi.fn();
 const createMutate = vi.fn();
 const deleteMutate = vi.fn();
 const testMutate = vi.fn();
 const settingsMutate = vi.fn();
+const updateMutate = vi.fn();
 
 function setInstances(data: unknown) {
   mockedUseArrInstances.mockReturnValue({
     data,
   } as unknown as ReturnType<typeof useArrInstances>);
+}
+
+// The arr master switches always exist in the real settings. They default on
+// here, and a test that is about a switched-off kind says so.
+function setGeneral(general: Record<string, unknown>) {
+  mockedUseSystemSettings.mockReturnValue({
+    data: {
+      general: {
+        // eslint-disable-next-line camelcase
+        use_sonarr: true,
+        // eslint-disable-next-line camelcase
+        use_radarr: true,
+        // eslint-disable-next-line camelcase
+        use_sportarr: true,
+        ...general,
+      },
+    },
+  } as unknown as ReturnType<typeof useSystemSettings>);
 }
 
 function setTestState(state: Record<string, unknown>) {
@@ -104,8 +129,14 @@ describe("ArrStep", () => {
       mutate: settingsMutate,
       isPending: false,
     } as unknown as ReturnType<typeof useSettingsMutation>);
+    mockedUseUpdateArrInstance.mockReturnValue({
+      mutate: updateMutate,
+      isPending: false,
+    } as unknown as ReturnType<typeof useUpdateArrInstance>);
+    setGeneral({});
     succeedingMutation(createMutate);
     succeedingMutation(settingsMutate);
+    succeedingMutation(updateMutate);
   });
 
   it("renders bespoke connection fields for the kind", () => {
@@ -450,6 +481,7 @@ describe("ArrStep", () => {
         id: 1,
         kind: "sonarr",
         name: "Existing Sonarr",
+        enabled: true,
         ip: "10.0.0.5",
         port: 8989,
         base_url: "/",
@@ -464,7 +496,114 @@ describe("ArrStep", () => {
     await user.click(screen.getByRole("button", { name: /^continue$/i }));
 
     expect(createMutate).not.toHaveBeenCalled();
+    // Already on, both the row and the kind, so there is nothing to write.
+    expect(updateMutate).not.toHaveBeenCalled();
+    expect(settingsMutate).not.toHaveBeenCalled();
     expect(onNext).toHaveBeenCalled();
+  });
+
+  // A rerun of setup lands here with the row a previous pass saved. When that
+  // row, or the kind's master switch, had since been turned off, Continue
+  // walked straight past it: the panel presented it as the connection, Finish
+  // counted it, and Bazarr+ never synced it.
+  describe("an existing row that is switched off", () => {
+    const row = {
+      id: 4,
+      kind: "sonarr",
+      name: "Main Sonarr",
+      enabled: false,
+      ip: "10.0.0.5",
+      port: 8989,
+      base_url: "/",
+      ssl: false,
+    };
+
+    it("is turned back on, then the kind, before the step advances", async () => {
+      const user = userEvent.setup();
+      setInstances([row]);
+
+      customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+      expect(
+        screen.getByText(/continue turns it back on/i),
+      ).toBeInTheDocument();
+
+      await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+      expect(updateMutate).toHaveBeenCalledWith(
+        { id: 4, body: { enabled: true } },
+        expect.anything(),
+      );
+      expect(settingsMutate).toHaveBeenCalledWith(
+        { "settings-general-use_sonarr": true },
+        expect.anything(),
+      );
+      expect(updateMutate.mock.invocationCallOrder[0]).toBeLessThan(
+        settingsMutate.mock.invocationCallOrder[0],
+      );
+      expect(onNext).toHaveBeenCalled();
+    });
+
+    it("switches the kind back on when only the switch is off", async () => {
+      const user = userEvent.setup();
+      setInstances([{ ...row, enabled: true }]);
+      // eslint-disable-next-line camelcase
+      setGeneral({ use_sonarr: false });
+
+      customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+      expect(
+        screen.getByText(/continue turns it back on/i),
+      ).toBeInTheDocument();
+
+      await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+      expect(updateMutate).not.toHaveBeenCalled();
+      expect(settingsMutate).toHaveBeenCalledWith(
+        { "settings-general-use_sonarr": true },
+        expect.anything(),
+      );
+      expect(onNext).toHaveBeenCalled();
+    });
+
+    it("stays on the step when the row cannot be turned back on", async () => {
+      const user = userEvent.setup();
+      setInstances([row]);
+      updateMutate.mockImplementation(
+        (_body: unknown, opts?: { onError?: (error: unknown) => void }) => {
+          opts?.onError?.(new Error("boom"));
+        },
+      );
+
+      customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+      await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+      expect(
+        await screen.findByText(/could not turn main sonarr back on/i),
+      ).toBeInTheDocument();
+      expect(settingsMutate).not.toHaveBeenCalled();
+      expect(onNext).not.toHaveBeenCalled();
+    });
+
+    it("is not the row shown while another of the kind is on", async () => {
+      const user = userEvent.setup();
+      setInstances([
+        { ...row, id: 3, name: "Old Sonarr" },
+        { ...row, name: "Main Sonarr", enabled: true },
+      ]);
+
+      customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+      expect(screen.getByText(/^main sonarr at/i)).toBeInTheDocument();
+      expect(screen.queryByText(/old sonarr/i)).toBeNull();
+
+      await user.click(screen.getByRole("button", { name: /^continue$/i }));
+
+      expect(updateMutate).not.toHaveBeenCalled();
+      expect(settingsMutate).not.toHaveBeenCalled();
+      expect(onNext).toHaveBeenCalled();
+    });
   });
 
   // Back lands on the saved panel, and it used to call every row "Already
