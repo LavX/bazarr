@@ -126,11 +126,29 @@ def test_without_an_instance_or_a_legacy_setting_tls_is_not_verified(account, bu
 
 @pytest.mark.parametrize('owned', [True, False])
 def test_a_second_plex_instance_does_not_decide_for_the_account(account, repo, built, owned):
-    """A Plex server someone added by hand is its own, and so is its checkbox."""
+    """A Plex server someone added by hand is its own, and so is its checkbox.
+
+    The hand-added row is the one that sorts first, so reading whichever Plex
+    row comes first instead of the recorded one fails every time, not only
+    when the random ids happen to fall that way.
+    """
     from plex.operations import get_plex_server
-    _own(account, _plex_row(repo, verify_ssl=owned))
-    _plex_row(repo, verify_ssl=not owned, name='Attic')
+    hand_added, account_row = sorted((_plex_row(repo, verify_ssl=False, name='One'),
+                                      _plex_row(repo, verify_ssl=False, name='Two')),
+                                     key=lambda row: row.id)
+    repo.update(hand_added.id, verify_ssl=not owned)
+    repo.update(account_row.id, verify_ssl=owned)
+    _own(account, account_row)
     assert get_plex_server().session.verify is owned
+
+
+def test_an_instance_id_naming_another_kind_is_not_the_account_instance(account, repo, built):
+    """Only a Plex row speaks for the Plex account; anything else falls back."""
+    from plex.operations import get_plex_server
+    emby = repo.create(kind='emby', name='Den', url='https://emby.example',
+                       api_key='synthetic-emby-key', enabled=False, verify_ssl=True)
+    account.plex.instance_id = emby.id
+    assert get_plex_server().session.verify is False
 
 
 def _added_date_movie():
