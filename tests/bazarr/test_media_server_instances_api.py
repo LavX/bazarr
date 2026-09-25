@@ -49,6 +49,27 @@ def test_authenticated_crud_uuid_safe_key_and_status(instance_api, kind):
     assert instance_api.get(path + '/status', headers=HEADERS).status_code == 404
 
 
+def test_the_signed_in_plex_accounts_row_is_removed_by_signing_out_not_by_delete(instance_api, monkeypatch):
+    """The startup import rebuilds the account's row, so a delete would come back."""
+    from app.config import settings as app_settings
+    created = instance_api.post(ROOT, json=payload('plex', path_mappings=[]), headers=HEADERS).json
+    path = ROOT + '/' + created['id']
+    for key, value in {'instance_id': created['id'], 'auth_method': 'oauth', 'token': 'plex-token',
+                       'server_url': 'https://plex.example:32400'}.items():
+        monkeypatch.setattr(app_settings.plex, key, value)
+
+    listed = instance_api.get(ROOT + '?kind=plex', headers=HEADERS).json['data']
+    assert [row['account_owned'] for row in listed] == [True]
+    response = instance_api.delete(path, headers=HEADERS)
+    assert response.status_code == 409 and response.json == {'error_code': 'account_owned'}
+    assert instance_api.get(path, headers=HEADERS).status_code == 200
+
+    # Disconnecting from Plex clears the credential, and the row deletes as any other.
+    monkeypatch.setattr(app_settings.plex, 'token', '')
+    assert instance_api.get(path, headers=HEADERS).json['account_owned'] is False
+    assert instance_api.delete(path, headers=HEADERS).status_code == 204
+
+
 @pytest.mark.parametrize('patch', [{'id': '4'}, {'kind': 'silo'}, {'enabled': 1}, {'api_key': 123},
                                   {'verify_ssl': 'false'}, {'url': 'http://user:secret@host'},
                                   {'clear_api_key': True, 'api_key': 'new'}, {'unknown': 'x'}])
