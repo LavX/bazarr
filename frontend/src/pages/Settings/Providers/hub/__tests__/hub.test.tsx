@@ -49,7 +49,7 @@ describe("Settings > Providers (Provider Hub)", () => {
   beforeEach(() => {
     server.use(
       http.get("/api/system/settings", () => {
-        return HttpResponse.json({});
+        return HttpResponse.json({ general: {} });
       }),
       http.get("/api/provider-hub/catalog", () => {
         return HttpResponse.json({

@@ -1,5 +1,22 @@
 import BaseApi from "./base";
 
+/**
+ * Whether a 2xx body is the settings object at all.
+ *
+ * The client accepts any 2xx answer, and the settings query never goes stale
+ * on its own. A body that is not the settings object (an HTML page from a
+ * proxy or a redirect, an empty answer) would otherwise sit in the cache as if
+ * it were one, with every section and computed field missing, until a reload.
+ */
+export function isSettingsBody(value: unknown): value is Settings {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return false;
+  const general = (value as { general?: unknown }).general;
+  return (
+    typeof general === "object" && general !== null && !Array.isArray(general)
+  );
+}
+
 class SystemApi extends BaseApi {
   constructor() {
     super("/system");
@@ -26,7 +43,11 @@ class SystemApi extends BaseApi {
   }
 
   async settings() {
-    const response = await this.get<Settings>("/settings");
+    const response = await this.get<unknown>("/settings");
+    // Refused as an error, so readers get the retry path, not a settings
+    // object with its sections missing.
+    if (!isSettingsBody(response))
+      throw new Error("The settings response could not be read.");
     return response;
   }
 

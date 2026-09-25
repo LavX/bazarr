@@ -176,3 +176,35 @@ describe("SystemApi.login", () => {
     expect(params?.params).toEqual({ action: "login" });
   });
 });
+
+describe("SystemApi.settings", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function answer(data: unknown): AxiosResponse<unknown> {
+    return { ...okResponse(), data } as AxiosResponse<unknown>;
+  }
+
+  it("returns the settings object", async () => {
+    const settings = { general: { theme: "auto" }, discover: {} };
+    vi.spyOn(client.axios, "get").mockResolvedValue(answer(settings));
+    await expect(systemApi.settings()).resolves.toEqual(settings);
+  });
+
+  // A 2xx that is not the settings object used to be cached as one. The
+  // settings query never goes stale on its own, so every computed field
+  // (Discover's TMDB flag among them) then read as missing until a reload.
+  it.each([
+    ["an HTML page", "<!doctype html><html><body>Login</body></html>"],
+    ["an empty body", ""],
+    ["null", null],
+    ["an array", []],
+    ["an object without the general section", { discover: {} }],
+  ])("refuses %s as settings", async (_name, body) => {
+    vi.spyOn(client.axios, "get").mockResolvedValue(answer(body));
+    await expect(systemApi.settings()).rejects.toThrow(
+      "The settings response could not be read.",
+    );
+  });
+});
