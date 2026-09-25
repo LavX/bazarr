@@ -23,13 +23,17 @@ class GetSportarrInfo:
         only in arr_instances, so the version comes from the DEFAULT instance's
         client. Cached for 60 seconds like the other two, so opening the status
         page does not poll Sportarr on every render.
+
+        A failed probe ("unknown") is cached too: it waited out the instance's
+        HTTP timeout, and repeating that on every status load while Sportarr is
+        down is what the cache is for. A hit is not written back, so the entry
+        still expires and a recovered Sportarr is seen within the minute.
         """
         cached = region.get(
             "sportarr_version",
             expiration_time=datetime.timedelta(seconds=60).total_seconds(),
         )
-        if cached and cached != 'unknown':
-            region.set("sportarr_version", cached)
+        if cached:
             return cached
 
         sportarr_version = ''

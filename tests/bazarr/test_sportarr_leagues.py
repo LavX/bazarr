@@ -310,6 +310,15 @@ def test_authenticated_local_league_endpoints(schema_session, monkeypatch):
     assert client.get('/sports/leagues/51', headers=headers).json['profileId'] == 1
     for bad in [None, {}, {'arr_instance_id': True}, {'arr_instance_id': a.id, 'profileId': '1'}]:
         assert client.patch('/sports/leagues/51', headers=headers, json=bad).status_code == 400
+    # The instance row stays enabled when Use Sportarr is turned off, and a
+    # stale tab could still queue syncs that talk to Sportarr.
+    monkeypatch.setattr(settings.general, 'use_sportarr', False)
+    before = len(queued)
+    for path in ('/sports/leagues/sync', '/sports/leagues/51/sync'):
+        response = client.post(path, headers=headers, json={'arr_instance_id': a.id})
+        assert response.status_code == 400 and 'turned off' in response.json['message']
+    assert len(queued) == before
+    monkeypatch.setattr(settings.general, 'use_sportarr', True)
     assert client.post('/sports/leagues/sync', headers=headers, json={'arr_instance_id': a.id}).status_code == 202
     assert queued[-1]['kwargs'] == {'arr_instance_id': a.id}
     repo.update(a.id, enabled=False)
