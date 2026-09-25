@@ -23,7 +23,9 @@ import type {
   ArrInstanceTest,
 } from "@/apis/raw/arrInstances";
 import {
+  ConnectionTest,
   connectionTestKey,
+  readConnectionTest,
   recordConnectionTest,
 } from "@/pages/Setup/connectionTests";
 import StepLayout from "@/pages/Setup/StepLayout";
@@ -43,6 +45,14 @@ const KIND_META: Record<
   sportarr: { label: "Sportarr", media: "sports events", port: 1867 },
 };
 
+// The saved panel says what Finish will say about the row: saving proves the
+// values were written, and only a passing Test proves they connect.
+const SAVED_TITLE: Record<ConnectionTest, string> = {
+  passed: "Already connected",
+  failed: "Saved, but the connection test failed",
+  untested: "Saved, connection not tested",
+};
+
 function normalizeBaseUrl(value: string) {
   const trimmed = value.trim().replace(/^\/+/, "").replace(/\/+$/, "");
   return trimmed ? `/${trimmed}` : "";
@@ -58,8 +68,8 @@ interface FieldErrors {
  * Onboarding connection step for a single arr kind. Mirrors the InstanceFormModal
  * field set with bespoke inputs (the modal is not reused here). Tests the typed
  * connection, then on Continue creates the instance, flips use_<kind> on, and
- * advances. Idempotent: if an instance of this kind already exists, it shows a
- * connected state and Continue advances without creating a duplicate.
+ * advances. Idempotent: if an instance of this kind already exists, it shows the
+ * saved row and Continue advances without creating a duplicate.
  *
  * Every arr kind is optional, including Sonarr: Bazarr+ runs with no instance
  * at all. Skipping is the shell's job, so there is no skip control here.
@@ -279,6 +289,7 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
     const address = `${existing.ssl ? "https" : "http"}://${existing.ip}:${
       existing.port
     }${existing.base_url && existing.base_url !== "/" ? existing.base_url : ""}`;
+    const savedTest = readConnectionTest(connectionTestKey("arr", existing.id));
     return (
       <StepLayout
         title={meta.label}
@@ -296,7 +307,10 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
           </Group>
         }
       >
-        <Alert color="green" title="Already connected">
+        <Alert
+          color={savedTest === "passed" ? "green" : "yellow"}
+          title={SAVED_TITLE[savedTest]}
+        >
           <Stack gap="sm" align="flex-start">
             <Text size="sm">
               {existing.name} at {address}

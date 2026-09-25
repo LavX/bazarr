@@ -6,6 +6,10 @@ import styles from "./Toolbox.module.scss";
 
 type ToolboxProps = PropsWithChildren<
   Pick<GroupProps, "className"> & {
+    // On a phone the band is one row that scrolls sideways. A band with more
+    // buttons than a phone can show wraps onto more rows instead, so none of
+    // them sits past the edge.
+    wrapOnPhone?: boolean;
     // Lets a caller key its own layout to the band's state, as ItemView does
     // with what its left side is holding, without the band knowing why.
     [data: `data-${string}`]: string | undefined;
@@ -17,7 +21,12 @@ declare type ToolboxComp = FunctionComponent<ToolboxProps> & {
   MutateButton: typeof ToolboxMutateButton;
 };
 
-const Toolbox: ToolboxComp = ({ children, className, ...data }) => {
+const Toolbox: ToolboxComp = ({
+  children,
+  className,
+  wrapOnPhone = false,
+  ...data
+}) => {
   return (
     /* 12px all round put roughly 40px of chrome around a single 36px input,
        which on a table whose left half is empty until something is selected
@@ -27,7 +36,7 @@ const Toolbox: ToolboxComp = ({ children, className, ...data }) => {
       py={6}
       px={12}
       justify="space-between"
-      className={clsx(styles.group, className)}
+      className={clsx(styles.group, wrapOnPhone && styles.wraps, className)}
       {...data}
     >
       {children}

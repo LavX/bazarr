@@ -247,7 +247,7 @@ const SportsEventsView: FunctionComponent = () => {
           active={league?.profileId != null}
           onDrop={onDrop}
         />
-        <Toolbox>
+        <Toolbox wrapOnPhone>
           <Group gap="xs">
             <Toolbox.Button
               icon={faSync}

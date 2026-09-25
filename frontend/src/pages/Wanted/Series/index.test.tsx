@@ -1,8 +1,9 @@
 /* eslint-disable camelcase */
 
+import userEvent from "@testing-library/user-event";
 import { http } from "msw";
 import { HttpResponse } from "msw";
-import { customRender, screen } from "@/tests";
+import { customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import WantedSeriesView from ".";
 
@@ -93,6 +94,47 @@ describe("Wanted Series", () => {
 
     await screen.findByText("Breaking Bad");
     expect(screen.getAllByText("Release mismatch")).toHaveLength(1);
+  });
+
+  it("clears the title search from the button inside the field", async () => {
+    const episode = (id: number, seriesTitle: string) => ({
+      id,
+      series_id: id,
+      sonarrSeriesId: id,
+      sonarrEpisodeId: id,
+      seriesTitle,
+      episode_number: "S01E01",
+      episodeTitle: "Pilot",
+      missing_subtitles: [
+        { code2: "en", name: "English", hi: false, forced: false },
+      ],
+    });
+    server.use(
+      http.get("/api/episodes/wanted", () =>
+        HttpResponse.json({
+          data: [episode(1, "Breaking Bad"), episode(2, "The Expanse")],
+          total: 2,
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+
+    customRender(<WantedSeriesView />);
+    await screen.findByText("The Expanse");
+
+    const search = screen.getByPlaceholderText("Search by title...");
+    await user.type(search, "Breaking");
+    await waitFor(() =>
+      expect(screen.queryByText("The Expanse")).not.toBeInTheDocument(),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Clear search" }));
+
+    expect(search).toHaveValue("");
+    expect(await screen.findByText("The Expanse")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Clear search" }),
+    ).not.toBeInTheDocument();
   });
 
   it("should render empty state when no wanted series", async () => {

@@ -7,6 +7,7 @@ import type {
   MediaServerKind,
 } from "@/apis/raw/mediaServers";
 import { kindName } from "@/pages/Settings/MediaServers/kinds";
+import { readMediaServerTest } from "@/pages/Setup/connectionTests";
 import StepLayout from "@/pages/Setup/StepLayout";
 import { useOnboardingSelection } from "@/pages/Setup/useOnboardingSelection";
 import ConnectedServerRow from "./mediaServer/ConnectedServerRow";
@@ -133,14 +134,23 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
     settings?.general === undefined ||
     (settings.general as LooseObject)[`use_${kind}`] === true;
 
-  // What the reader has lined up for one kind, in the card's own words. Three
+  // What the reader has lined up for one kind, in the card's own words. Four
   // numbers, because they mean different things: a connected server is a row
-  // that refreshes, a stalled one is a row the switch is keeping quiet, and a
-  // pending one is a tick that has written nothing yet.
-  const summarise = (live: number, stalled: number, waiting: number) => {
+  // that refreshes and passed its Test, a saved one refreshes but no Test has
+  // passed against it, a stalled one is a row the switch is keeping quiet, and
+  // a pending one is a tick that has written nothing yet.
+  const summarise = (
+    live: number,
+    saved: number,
+    stalled: number,
+    waiting: number,
+  ) => {
     const parts: string[] = [];
     if (live > 0) {
       parts.push(`${live} connected`);
+    }
+    if (saved > 0) {
+      parts.push(`${saved} saved`);
     }
     if (stalled > 0) {
       parts.push(`${stalled} not refreshing`);
@@ -196,8 +206,12 @@ const MediaServerStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
               : enabledRows.length > 0;
           const checked = answered || pending.length > 0;
           const locked = answered && pending.length === 0;
+          const tested = live.filter(
+            (row) => readMediaServerTest(kind, row.id) === "passed",
+          ).length;
           const summary = summarise(
-            live.length,
+            tested,
+            live.length - tested,
             stalled.length,
             pending.length,
           );

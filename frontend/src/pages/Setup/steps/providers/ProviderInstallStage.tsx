@@ -561,7 +561,7 @@ const ProviderInstallStage: FC<ProviderInstallStageProps> = ({
       <Alert color="yellow" title="Installed, but not enabled">
         <Text size="sm">
           Bazarr+ could not enable these providers: {enableError} Enable them on
-          the next screen, or in Settings, Providers.
+          the next screen, or in Subtitle Hub, My Providers.
         </Text>
       </Alert>
     );
