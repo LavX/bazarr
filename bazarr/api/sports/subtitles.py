@@ -156,6 +156,7 @@ class SportsEventSubtitlesCombine(Resource):
         try:
             body = request.get_json(silent=True) or {}
             owner = _optional_owner(body.get("arr_instance_id") or request.args.get("arr_instance_id"))
+            require_sports_enabled()
             context = resolve_event_in_session(database, event_id, owner)
             operation = capture_profile_operation(context, candidate_signature(context))
         except SportsNotFound as exc:
@@ -198,6 +199,7 @@ class SportsLeagueSubtitlesCombine(Resource):
         try:
             body = request.get_json(silent=True) or {}
             owner = _optional_owner(body.get("arr_instance_id") or request.args.get("arr_instance_id"))
+            require_sports_enabled()
             # A league id is a primary key, so resolve the owner from the row
             # when the caller omitted it. Without this, owner=None compiled to
             # `arr_instance_id IS NULL` below and matched no events at all.

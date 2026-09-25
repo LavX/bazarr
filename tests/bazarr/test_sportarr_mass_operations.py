@@ -26,6 +26,89 @@ def test_the_endpoint_accepts_sports_items():
     assert "'sportsEventId', 'sportsLeagueId'" in source
 
 
+SPORTS_OFF = "Sportarr is turned off. Turn on Use Sportarr in Settings first."
+
+
+@pytest.fixture
+def post_batch(monkeypatch):
+    """POST the real batch endpoint, recording the items it would queue.
+
+    Imported before the switch changes: importing the API builds the
+    scheduler, which reads Sportarr instances from a database these tests do
+    not have while the switch is on.
+    """
+    from flask import Flask
+
+    from api.subtitles import batch
+
+    queued = []
+    monkeypatch.setattr(batch.jobs_queue, 'feed_jobs_pending_queue',
+                        lambda **kwargs: queued.append(kwargs['kwargs']['items']) or 7)
+
+    def post(items, action='search-missing'):
+        resource = batch.BatchOperation
+        with Flask(__name__).test_request_context(
+                '/subtitles/batch', method='POST', json={'items': items, 'action': action}):
+            return resource.post.__wrapped__(resource())
+
+    post.queued = queued
+    return post
+
+
+EVENT = {'type': 'sports', 'sportsEventId': 61, 'arr_instance_id': 42}
+LEAGUE = {'type': 'sportsLeague', 'sportsLeagueId': 51, 'arr_instance_id': 42}
+MOVIE = {'type': 'movie', 'radarrId': 3, 'arr_instance_id': 1}
+
+
+@pytest.mark.parametrize('action', ['search-missing', 'upgrade', 'scan-disk', 'sync'])
+def test_a_sports_only_batch_is_refused_while_use_sportarr_is_off(post_batch, monkeypatch, action):
+    """Search Missing, Upgrade and Scan Disk on the Sports page go through
+    this endpoint, and turning the switch off leaves the instance rows
+    enabled, so they still ran. A batch of only sports rows is refused with
+    the sentence the sports routes answer."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings.general, 'use_sportarr', False)
+
+    assert post_batch([EVENT, LEAGUE], action) == ({'error': SPORTS_OFF}, 400)
+    assert post_batch.queued == []
+
+
+def test_a_mixed_batch_drops_only_its_sports_rows_while_use_sportarr_is_off(post_batch, monkeypatch):
+    """The movie still runs. The sports rows are counted as skipped and the
+    reason comes back in errors, rather than failing the whole request."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings.general, 'use_sportarr', False)
+
+    body, status = post_batch([EVENT, MOVIE, LEAGUE])
+    assert status == 200
+    assert (body['queued'], body['skipped'], body['errors']) == (1, 2, [SPORTS_OFF])
+    assert post_batch.queued == [[MOVIE]]
+
+
+def test_a_batch_without_sports_rows_is_unaffected_while_use_sportarr_is_off(post_batch, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings.general, 'use_sportarr', False)
+
+    body, status = post_batch([MOVIE])
+    assert status == 200
+    assert (body['queued'], body['skipped'], body['errors']) == (1, 0, [])
+    assert post_batch.queued == [[MOVIE]]
+
+
+def test_sports_rows_are_queued_while_use_sportarr_is_on(post_batch, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings.general, 'use_sportarr', True)
+
+    body, status = post_batch([EVENT, MOVIE, LEAGUE])
+    assert status == 200
+    assert (body['queued'], body['skipped'], body['errors']) == (3, 0, [])
+    assert post_batch.queued == [[EVENT, MOVIE, LEAGUE]]
+
+
 @pytest.fixture
 def sports_library(schema_session, monkeypatch, tmp_path):
     from app.database import TableArrInstances, TableSportsEvents, TableSportsLeagues
