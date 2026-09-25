@@ -278,8 +278,8 @@ def test_provider_updates_and_removal_clear_account_quota(tmp_path, monkeypatch)
     monkeypatch.setattr(service, "_bazarr_enabled_providers", lambda: list(enabled_provider_ids))
     monkeypatch.setattr(
         service, "_set_bazarr_provider_enabled",
-        lambda provider_id, enabled: enabled_provider_ids.add(provider_id)
-        if enabled else enabled_provider_ids.discard(provider_id),
+        lambda provider_id, enabled: (enabled_provider_ids.add(provider_id)
+                                      if enabled else enabled_provider_ids.discard(provider_id)) or True,
     )
     state = load_state()
     state["installations"] = {

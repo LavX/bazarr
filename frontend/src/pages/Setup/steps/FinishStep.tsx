@@ -24,6 +24,12 @@ import type {
   MediaServerKind,
 } from "@/apis/raw/mediaServers";
 import { kindName } from "@/pages/Settings/MediaServers/kinds";
+import {
+  clearPersistedConnectionTests,
+  ConnectionTest,
+  connectionTestKey,
+  readConnectionTests,
+} from "@/pages/Setup/connectionTests";
 import { settleSetupComplete } from "@/pages/Setup/setupCompleteCache";
 import StepLayout from "@/pages/Setup/StepLayout";
 import {
@@ -56,6 +62,31 @@ function SummaryItem({ label, done }: SummaryLine) {
       <Text c={done ? undefined : "dimmed"}>{label}</Text>
     </List.Item>
   );
+}
+
+/**
+ * The recap line for rows of one kind that exist. "Connected" is kept for rows
+ * a Test passed against in this run of the wizard: a row that saved proves only
+ * that the values were written, and a wrong address or key saves too.
+ */
+function savedLine(
+  name: string,
+  counted: string,
+  results: ConnectionTest[],
+): SummaryLine {
+  if (results.length > 0 && results.every((result) => result === "passed")) {
+    return { label: `${name} connected (${counted})`, done: true };
+  }
+  if (results.includes("failed")) {
+    return {
+      label: `${name} saved (${counted}), but the connection test failed`,
+      done: false,
+    };
+  }
+  return {
+    label: `${name} saved (${counted}), connection not tested`,
+    done: false,
+  };
 }
 
 /**
@@ -102,7 +133,7 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
   // refreshes nothing however enabled its own row is. Reporting it connected
   // was the one place left that could still tell the reader setup was done
   // when it was not.
-  const activeCount = (
+  const activeRows = (
     kind: MediaServerKind,
     rows: MediaServerInstance[] | undefined,
   ) => {
@@ -111,65 +142,65 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
     // before this screen is actionable, and assuming off would flash the
     // "nothing is connected" warning at a reader who connected four servers.
     if (general !== undefined && flag !== true) {
-      return 0;
+      return [];
     }
-    return (rows ?? []).filter((row) => row.enabled).length;
+    return (rows ?? []).filter((row) => row.enabled);
   };
 
-  const mediaServers: { kind: MediaServerKind; count: number }[] = [
-    { kind: "plex", count: activeCount("plex", plex.data) },
-    { kind: "jellyfin", count: activeCount("jellyfin", jellyfin.data) },
-    { kind: "emby", count: activeCount("emby", emby.data) },
-    { kind: "silo", count: activeCount("silo", silo.data) },
-  ];
+  const mediaServers: {
+    kind: MediaServerKind;
+    count: number;
+    ids: string[];
+  }[] = (
+    [
+      ["plex", plex.data],
+      ["jellyfin", jellyfin.data],
+      ["emby", emby.data],
+      ["silo", silo.data],
+    ] as const
+  ).map(([kind, data]) => {
+    const rows = activeRows(kind, data);
+    return { kind, count: rows.length, ids: rows.map((row) => row.id) };
+  });
   const mediaServerCount = mediaServers.reduce(
     (total, entry) => total + entry.count,
     0,
   );
   const discoverPath = intent === "discover";
 
-  const sonarrCount = (instances ?? []).filter(
-    (i) => i.kind === "sonarr",
-  ).length;
-  const radarrCount = (instances ?? []).filter(
-    (i) => i.kind === "radarr",
-  ).length;
-  const sportarrCount = (instances ?? []).filter(
-    (i) => i.kind === "sportarr",
-  ).length;
-  const instanceCount = sonarrCount + radarrCount + sportarrCount;
+  // What the Test said about each row a connection step saved in this run.
+  const tests = readConnectionTests();
+  const testsFor = (keys: string[]) =>
+    keys.map((key) => tests[key] ?? "untested");
+
+  const arrLine = (kind: "sonarr" | "radarr" | "sportarr", name: string) => {
+    const rows = (instances ?? []).filter((i) => i.kind === kind);
+    if (rows.length === 0) {
+      return {
+        count: 0,
+        line: { label: `${name} not connected`, done: false },
+      };
+    }
+    return {
+      count: rows.length,
+      line: savedLine(
+        name,
+        `${rows.length} ${rows.length === 1 ? "instance" : "instances"}`,
+        testsFor(rows.map((row) => connectionTestKey("arr", row.id))),
+      ),
+    };
+  };
+  const sonarr = arrLine("sonarr", "Sonarr");
+  const radarr = arrLine("radarr", "Radarr");
+  const sportarr = arrLine("sportarr", "Sportarr");
+  const instanceCount = sonarr.count + radarr.count + sportarr.count;
   const profileCount = (profiles ?? []).length;
   const providers = general?.enabled_providers ?? [];
   const useSeerr = general?.use_seerr ?? false;
   const translatorReady =
     (settings?.translator?.openrouter_api_key ?? "").length > 0;
 
-  const libraryLines: SummaryLine[] = [
-    {
-      label: sonarrCount
-        ? `Sonarr connected (${sonarrCount} ${
-            sonarrCount === 1 ? "instance" : "instances"
-          })`
-        : "Sonarr not connected",
-      done: sonarrCount > 0,
-    },
-    {
-      label: radarrCount
-        ? `Radarr connected (${radarrCount} ${
-            radarrCount === 1 ? "instance" : "instances"
-          })`
-        : "Radarr not connected",
-      done: radarrCount > 0,
-    },
-    {
-      label: sportarrCount
-        ? `Sportarr connected (${sportarrCount} ${
-            sportarrCount === 1 ? "instance" : "instances"
-          })`
-        : "Sportarr not connected",
-      done: sportarrCount > 0,
-    },
-  ];
+  const libraryLines: SummaryLine[] = [sonarr.line, radarr.line, sportarr.line];
 
   // Media servers are their own group rather than part of the arr recap: the
   // picker is on both paths, so a Discover reader who connected Jellyfin has to
@@ -181,12 +212,27 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
       ? [{ label: "No media server connected", done: false }]
       : mediaServers
           .filter((entry) => entry.count > 0)
-          .map((entry) => ({
-            label: `${kindName(entry.kind)} connected (${entry.count} ${
+          .map((entry) => {
+            const counted = `${entry.count} ${
               entry.count === 1 ? "server" : "servers"
-            })`,
-            done: true,
-          }));
+            }`;
+            // Plex has no Test in the wizard: its row comes from signing in
+            // and picking one of the account's servers.
+            return entry.kind === "plex"
+              ? {
+                  label: `${kindName(entry.kind)} connected (${counted})`,
+                  done: true,
+                }
+              : savedLine(
+                  kindName(entry.kind),
+                  counted,
+                  testsFor(
+                    entry.ids.map((id) =>
+                      connectionTestKey("media-server", id),
+                    ),
+                  ),
+                );
+          });
 
   const sharedLines: SummaryLine[] = [
     {
@@ -263,6 +309,7 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
           clearPersistedStep();
           clearPersistedIntent();
           clearPersistedSelection();
+          clearPersistedConnectionTests();
           // The Redirector picks routing back up once setup is marked
           // complete. A Discover user goes straight to the page they came for.
           navigate(discoverPath ? "/discover" : "/");
