@@ -1694,13 +1694,6 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
 
             update_subzero = True
 
-    if use_embedded_subs_changed or undefined_audio_track_default_changed or adaptive_searching_max_age_changed:
-        # Queued rather than run here: this is inside the settings save
-        # request, and a library-wide pass held it long enough for a proxy to
-        # time out a save that had already been written.
-        from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
-        queue_missing_subtitles_recalculation()
-
     if undefined_subtitles_track_default_changed:
         from .scheduler import scheduler
         from subtitles.indexer.series import series_full_scan_subtitles
@@ -1788,6 +1781,15 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             # covers every save rather than only those.
             restore_persisted_settings()
             raise ValidationError('Unable to save settings to disk')
+
+        if use_embedded_subs_changed or undefined_audio_track_default_changed or adaptive_searching_max_age_changed:
+            # Queued rather than run here: this is inside the settings save
+            # request, and a library-wide pass held it long enough for a proxy to
+            # time out a save that had already been written. And only now that
+            # it has been written: a save refused by validation or by the disk
+            # changed nothing that needs recalculating.
+            from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
+            queue_missing_subtitles_recalculation()
 
         if clear_disabled_provider_hub_statuses:
             if active_provider_hub_provider_ids is None:
