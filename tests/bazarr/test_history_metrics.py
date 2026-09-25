@@ -289,3 +289,209 @@ def test_daily_average_and_peak_day_are_reported(schema_session, monkeypatch):
     assert body["totals"]["peakDate"] == busy.strftime("%Y-%m-%d")
     # 3 downloads over a 7 day window.
     assert body["totals"]["dailyAverage"] == 0.43
+
+
+def _sports_event(session):
+    """The owner, league and event a sports history or blacklist row needs."""
+    from app.database import TableArrInstances, TableSportsEvents, TableSportsLeagues
+
+    session.add(TableArrInstances(
+        id=1, kind="sportarr", stable_key="s1", name="Sportarr", port=1867,
+    ))
+    session.flush()
+    session.add(TableSportsLeagues(
+        id=1, arr_instance_id=1, sportarrLeagueId=1, title="League",
+    ))
+    session.flush()
+    session.add(TableSportsEvents(
+        id=1, arr_instance_id=1, league_id=1, sportarrEventId=1, file_id=1,
+        path="/sports/a.mkv", title="Event",
+    ))
+    session.flush()
+
+
+def test_a_language_filter_includes_its_variants(schema_session, monkeypatch):
+    """The selector offers base codes only, while rows store en:hi or en:forced.
+
+    Exact equality dropped every variant row from the English figures.
+    """
+    from api.history import metrics
+
+    monkeypatch.setattr(metrics, "database", schema_session)
+    schema_session.add(_episode_row(language="en"))
+    schema_session.add(_episode_row(language="en:hi"))
+    schema_session.add(_movie_row(language="en:forced"))
+    schema_session.add(_episode_row(language="hu"))
+    schema_session.flush()
+
+    body = _call(metrics, "?language=en")
+
+    assert body["totals"]["downloads"] == 3
+
+
+def test_the_activity_chart_counts_the_same_language_variants(schema_session, monkeypatch):
+    """The chart sits under the metrics tiles, so both must read one population."""
+    from api.history import stats
+
+    monkeypatch.setattr(stats, "database", schema_session)
+    schema_session.add(_episode_row(language="en"))
+    schema_session.add(_episode_row(language="en:hi"))
+    schema_session.add(_movie_row(language="en:forced"))
+    schema_session.add(_episode_row(language="hu"))
+    schema_session.flush()
+
+    app = Flask(__name__)
+    with app.test_request_context("/api/history/stats?language=en"):
+        body = stats.HistoryStats.get.__wrapped__(stats.HistoryStats())
+
+    assert sum(day["count"] for day in body["series"]) == 2
+    assert sum(day["count"] for day in body["movies"]) == 1
+
+
+def test_sports_exclusions_count_towards_provider_reliability(schema_session, monkeypatch):
+    """Sports downloads are in the denominator, so their exclusions belong in
+    the numerator. Without them a sports provider always read 0%."""
+    from api.history import metrics
+    from app.database import TableBlacklistSports, TableHistorySports
+
+    monkeypatch.setattr(metrics, "database", schema_session)
+    _sports_event(schema_session)
+    for _ in range(2):
+        schema_session.add(TableHistorySports(
+            arr_instance_id=1, league_id=1, event_id=1, action=1,
+            description="downloaded", language="en", provider="sporty",
+            score=180, score_out_of=180,
+            timestamp=datetime.now() - timedelta(days=1),
+        ))
+    schema_session.add(TableBlacklistSports(
+        arr_instance_id=1, league_id=1, event_id=1, language="en",
+        provider="sporty", subs_id="x",
+        timestamp=datetime.now() - timedelta(days=1),
+    ))
+    schema_session.flush()
+
+    body = _call(metrics)
+
+    sporty = next(p for p in body["providerReliability"] if p["provider"] == "sporty")
+    assert sporty["blacklisted"] == 1
+    assert sporty["ratePct"] == 50.0
+
+
+def test_blacklist_rate_is_narrowed_to_the_selected_language(schema_session, monkeypatch):
+    """One English download against several Hungarian exclusions read as a
+    rate far above 100% while viewing English."""
+    from api.history import metrics
+    from app.database import TableBlacklist
+
+    monkeypatch.setattr(metrics, "database", schema_session)
+    schema_session.add(_episode_row(provider="flaky", language="en"))
+    schema_session.add(_episode_row(provider="flaky", language="en:hi"))
+    for language in ("en:hi", "hu", "hu", "hu"):
+        schema_session.add(TableBlacklist(
+            language=language, provider="flaky", subs_id=f"x-{language}",
+            timestamp=datetime.now() - timedelta(days=1),
+        ))
+    schema_session.flush()
+
+    body = _call(metrics, "?language=en")
+
+    flaky = next(p for p in body["providerReliability"] if p["provider"] == "flaky")
+    assert flaky["downloads"] == 2
+    assert flaky["blacklisted"] == 1
+    assert flaky["ratePct"] == 50.0
+
+
+def test_reliability_is_unavailable_for_a_single_action(schema_session, monkeypatch):
+    """An exclusion does not record which kind of download it undid, so one
+    action's downloads cannot be the denominator for every action's exclusions."""
+    from api.history import metrics
+    from app.database import TableBlacklist
+
+    monkeypatch.setattr(metrics, "database", schema_session)
+    schema_session.add(_episode_row(provider="flaky", action=1))
+    schema_session.add(_episode_row(provider="flaky", action=2))
+    schema_session.add(TableBlacklist(
+        language="en", provider="flaky", subs_id="x",
+        timestamp=datetime.now() - timedelta(days=1),
+    ))
+    schema_session.flush()
+
+    body = _call(metrics, "?action=1")
+
+    assert body["providerReliability"] is None
+    assert body["totals"]["downloads"] == 1
+
+
+def test_unscored_downloads_do_not_weigh_on_a_provider_average(schema_session, monkeypatch):
+    """AVG skips a NULL score but COUNT(*) does not, so weighting each table's
+    average by its row count let unscored rows outvote the scored ones."""
+    from api.history import metrics
+
+    monkeypatch.setattr(metrics, "database", schema_session)
+    schema_session.add(_episode_row(provider="alpha", score=360, score_out_of=360))  # 100%
+    for _ in range(9):
+        schema_session.add(_episode_row(provider="alpha", score=None, score_out_of=None))
+    schema_session.add(_movie_row(provider="alpha", score=90, score_out_of=180))  # 50%
+    schema_session.flush()
+
+    body = _call(metrics)
+
+    alpha = next(p for p in body["byProvider"] if p["provider"] == "alpha")
+    assert alpha["count"] == 11
+    assert alpha["avgScorePct"] == 75.0
+
+
+def test_a_provider_with_only_unscored_downloads_has_no_average(schema_session, monkeypatch):
+    from api.history import metrics
+
+    monkeypatch.setattr(metrics, "database", schema_session)
+    schema_session.add(_episode_row(provider="alpha", score=None, score_out_of=None))
+    schema_session.flush()
+
+    body = _call(metrics)
+
+    alpha = next(p for p in body["byProvider"] if p["provider"] == "alpha")
+    assert alpha["count"] == 1
+    assert alpha["avgScorePct"] is None
+
+
+def test_unscored_downloads_are_left_out_of_the_histogram(schema_session, monkeypatch):
+    """A NULL score fell through the CASE into the 0-9% bucket, reporting an
+    unmeasured download as the worst match. A real zero still counts."""
+    from api.history import metrics
+
+    monkeypatch.setattr(metrics, "database", schema_session)
+    schema_session.add(_episode_row(score=None, score_out_of=None))
+    schema_session.add(_episode_row(score=0, score_out_of=None))
+    schema_session.flush()
+
+    body = _call(metrics)
+
+    counts = {b["bucket"]: b["count"] for b in body["scoreHistogram"]}
+    assert counts[0] == 1
+    assert sum(counts.values()) == 1
+
+
+def test_sports_only_providers_are_offered_to_the_statistics_filter(schema_session, monkeypatch):
+    """The provider selector read only the episode and movie history, so a
+    provider that only ever delivered sports subtitles showed on the
+    leaderboard but could not be picked as a filter."""
+    from api.providers import providers
+    from app.database import TableHistorySports
+
+    monkeypatch.setattr(providers, "database", schema_session)
+    _sports_event(schema_session)
+    schema_session.add(_movie_row(provider="moviesonly"))
+    for provider in ("sportsonly", "manual"):
+        schema_session.add(TableHistorySports(
+            arr_instance_id=1, league_id=1, event_id=1, action=1,
+            description="downloaded", language="en", provider=provider,
+            timestamp=datetime.now() - timedelta(days=1),
+        ))
+    schema_session.flush()
+
+    app = Flask(__name__)
+    with app.test_request_context("/api/providers?history=true"):
+        answer = providers.Providers.get.__wrapped__(providers.Providers())
+
+    assert [item["name"] for item in answer["data"]] == ["moviesonly", "sportsonly"]
