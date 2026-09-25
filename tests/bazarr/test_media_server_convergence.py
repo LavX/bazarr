@@ -1195,7 +1195,7 @@ def test_listing_plex_servers_does_not_rewrite_the_selected_connection(plex_acco
 
     writes = []
     monkeypatch.setattr(oauth, 'write_config', lambda: writes.append(True))
-    monkeypatch.setattr(oauth, 'test_plex_connection', lambda uri, token: (
+    monkeypatch.setattr(oauth, 'test_plex_connection', lambda uri, token, verify: (
         True, 5 if uri == lan_url else 50))
 
     class _Resources:

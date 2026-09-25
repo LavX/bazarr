@@ -234,3 +234,111 @@ def test_a_database_error_is_not_taken_to_mean_unverified(account, built, monkey
     with pytest.raises(RuntimeError, match='synthetic database failure'):
         get_plex_server()
     assert built == []
+
+
+# --- The account panel's own requests ----------------------------------------
+#
+# The server picker, the connection test, the library listing with its counts
+# and locations, and the Autopulse path lookup all talk to the account's server
+# with plain requests calls, which read the legacy setting directly.
+
+class _Response:
+    status_code = 200
+    headers = {'content-type': 'application/json'}
+    text = ''
+
+    def __init__(self, body):
+        self._body = body
+
+    def json(self):
+        return self._body
+
+    def raise_for_status(self):
+        pass
+
+
+def _plex_answer(url):
+    """What plex.tv and the Plex server say to each call, just enough to reach the next."""
+    if url.startswith('https://plex.tv/'):
+        return [{'name': 'Attic', 'clientIdentifier': 'machine-abc', 'provides': 'server',
+                 'owned': True, 'connections': [{'uri': 'https://plex.example:32400'}]}]
+    if url.endswith('/library/sections'):
+        return {'MediaContainer': {'Directory': [{'key': '1', 'title': 'Movies', 'type': 'movie'}]}}
+    if url.endswith('/library/sections/1'):
+        return {'MediaContainer': {'Directory': [{'Location': [{'path': '/movies'}]}]}}
+    return {'MediaContainer': {'size': 3}}
+
+
+@pytest.fixture
+def plex_requests(monkeypatch):
+    """The verify flag of every request sent to the Plex server itself."""
+    import requests
+    sent = []
+
+    def get(url, **kwargs):
+        if not url.startswith('https://plex.tv/'):
+            sent.append(kwargs.get('verify'))
+        return _Response(_plex_answer(url))
+
+    monkeypatch.setattr(requests, 'get', get)
+    return sent
+
+
+def _server_picker():
+    from flask import Flask
+    from api.plex.oauth import PlexServers
+    with Flask(__name__).test_request_context('/plex/oauth/servers'):
+        return PlexServers.get.__wrapped__(PlexServers())
+
+
+def _connection_test():
+    from flask import Flask
+    from api.plex.oauth import PlexTestConnection
+    with Flask(__name__).test_request_context('/plex/test-connection', method='POST',
+                                              json={'uri': 'https://plex.example:32400'}):
+        return PlexTestConnection.post.__wrapped__(PlexTestConnection())
+
+
+def _library_listing():
+    from flask import Flask
+    from api.plex.oauth import PlexLibraries
+    with Flask(__name__).test_request_context('/plex/oauth/libraries'):
+        return PlexLibraries.get.__wrapped__(PlexLibraries())
+
+
+def _autopulse_paths():
+    from utilities.plex_utils import get_plex_libraries_with_paths
+    return get_plex_libraries_with_paths()
+
+
+PANEL_CALLS = {_server_picker: 1, _connection_test: 1, _library_listing: 3, _autopulse_paths: 2}
+
+
+@pytest.fixture
+def oauth_account(account, monkeypatch):
+    """The same account signed in through OAuth with a server picked."""
+    import api.plex.oauth  # noqa: F401  (imports the API before the checks run)
+    for key, value in dict(auth_method='oauth', token='synthetic-plex-token',
+                           server_url='https://plex.example:32400').items():
+        monkeypatch.setitem(account.plex, key, value)
+    return account
+
+
+@pytest.mark.parametrize('verify_ssl', [True, False])
+@pytest.mark.parametrize('call', list(PANEL_CALLS), ids=lambda call: call.__name__.strip('_'))
+def test_every_panel_request_verifies_the_way_the_instance_says(oauth_account, repo,
+                                                                 plex_requests, call, verify_ssl):
+    """The legacy setting says the opposite, so reading it instead fails every case."""
+    oauth_account.plex.verify_ssl = not verify_ssl
+    _own(oauth_account, _plex_row(repo, verify_ssl=verify_ssl))
+    result = call()
+    assert plex_requests == [verify_ssl] * PANEL_CALLS[call]
+    assert result not in ({'data': []}, {'movie_paths': [], 'series_paths': []})
+
+
+@pytest.mark.parametrize('legacy', [True, False])
+def test_picking_the_first_server_follows_the_legacy_setting(oauth_account, plex_requests, legacy):
+    """Before a server is picked there is no instance row, so no checkbox to read."""
+    oauth_account.plex.verify_ssl = legacy
+    assert _server_picker()['data'][0]['name'] == 'Attic'
+    assert plex_requests == [legacy]
