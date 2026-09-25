@@ -9,7 +9,7 @@ import { DiscoverSetupReturn } from "@/contexts/Discover";
 import { useSearchSource } from "@/contexts/UniversalSearch";
 import { createSubtitleSearchSource } from "@/pages/SubtitleEditor/searchSource";
 import { AllProviders } from "@/providers";
-import { rawRender, screen, waitFor } from "@/tests";
+import { rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import UniversalSearch from ".";
 
@@ -76,6 +76,7 @@ function mount(editor?: React.ReactNode) {
           { path: "/movies/:id", element: <p>Library movie</p> },
           { path: "/series/:id", element: <p>Library series</p> },
           { path: "/sports/:id", element: <p>Library league</p> },
+          { path: "/discover", element: <p>Discover title</p> },
           { path: "/editor", element: editor },
         ],
       },
@@ -123,6 +124,79 @@ it("uses canonical library IDs, retains the global query across navigation, and 
   await user.keyboard("{Escape}");
   expect(input).toHaveAttribute("aria-expanded", "false");
 });
+
+// An owned title shows up twice for one query: once in the library group and
+// once in the catalog. The library row going to the library page is the
+// deliberate choice, and the catalog row still going to the Discover title is
+// what keeps that title page reachable for something the reader owns. Pinned
+// together so the two groups cannot quietly collapse onto one target.
+it.each([
+  {
+    kind: "movie",
+    owned: { id: 901, radarrId: 7, arr_instance_id: 2, year: "2016" },
+    library: "/movies/901",
+    catalog: { id: 329865, year: 2016 },
+    discover: "?movie=329865",
+  },
+  {
+    kind: "show",
+    owned: { id: 77, sonarrSeriesId: 5, arr_instance_id: 1, year: "2019" },
+    library: "/series/77",
+    catalog: { id: 88001, year: 2019 },
+    discover: "?show=88001",
+  },
+] as const)(
+  "sends the catalog $kind row for an owned title to Discover and its library row to the library",
+  async ({ kind, owned, library, catalog, discover }) => {
+    server.use(
+      http.get("/api/system/searches", () =>
+        HttpResponse.json([{ ...owned, title: "Arrival", poster: null }]),
+      ),
+      http.get("/api/discover/metadata/search", ({ request }) => {
+        const type = new URL(request.url).searchParams.get("type") ?? "movie";
+        return HttpResponse.json({
+          data: {
+            status: "available",
+            source: "tmdb",
+            revision: "one",
+            items:
+              type === kind
+                ? [
+                    {
+                      source: "tmdb",
+                      source_id: `tmdb:${kind}:${catalog.id}`,
+                      id: catalog.id,
+                      media_type: kind,
+                      title: "Arrival",
+                      year: catalog.year,
+                      mapping_status: "resolved",
+                    },
+                  ]
+                : [],
+          },
+        });
+      }),
+    );
+    const { router, user } = mount();
+    await user.type(screen.getByLabelText("Search"), "Arrival");
+
+    const ownGroup = await screen.findByRole("region", {
+      name: "In your library",
+    });
+    const label = `Arrival (${catalog.year})`;
+    expect(
+      within(ownGroup).getByRole("link", {
+        name: new RegExp(`^Arrival \\(${catalog.year}\\)`),
+      }),
+    ).toHaveAttribute("href", library);
+    const candidate = await screen.findByRole("button", { name: label });
+    expect(ownGroup).not.toContainElement(candidate);
+
+    await user.click(candidate);
+    expect(router.state.location.pathname).toBe("/discover");
+    expect(router.state.location.search).toBe(discover);
+  },
+);
 
 it("searches the registered subtitle and retires its results when leaving the editor", async () => {
   const select = vi.fn();
