@@ -265,9 +265,15 @@ def sports_manual_operation(event_id, arr_instance_id, cancel=None):
     The guard is the same owned publication boundary the provider path uses:
     it pins the file signature, so an operation that started before a resync
     replaced the recording cannot publish over the new file.
+
+    Use Sportarr is checked here rather than in require_sportarr(), which Local
+    Hub lookup still relies on with the switch off. The editor, upload, delete
+    and toolbox sync routes enter through this helper.
     """
     from sportarr.identity import resolve_event_in_session
+    from sportarr.workflows import require_sports_enabled
 
+    require_sports_enabled()
     context = resolve_event_in_session(database, event_id, arr_instance_id)
     signature = candidate_signature(context)
 
@@ -293,7 +299,9 @@ def sports_modification_guard(event_id, arr_instance_id, video_path, source_path
     video-side source even when new subtitles belong in a configured folder.
     """
     from subtitles.tools.subsync_engines import subtitle_source_version
+    from sportarr.workflows import require_sports_enabled
 
+    require_sports_enabled()
     context = resolve_event_in_session(database, event_id, arr_instance_id)
     if context.mapped_path != video_path:
         raise ValueError("Sports mod video no longer belongs to its event")

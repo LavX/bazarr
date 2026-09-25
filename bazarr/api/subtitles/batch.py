@@ -156,7 +156,10 @@ def get_upgradable_media_ids():
         return {'movies': [], 'series': [], 'sports': [],
                 'movieKeys': [], 'seriesKeys': [], 'sportsKeys': []}
 
-    from subtitles.upgrade import get_queries_condition_parameters
+    from subtitles.upgrade import (
+        get_queries_condition_parameters,
+        _ai_translated_subtitles_are_upgrade_candidates,
+    )
     minimum_timestamp, query_actions = get_queries_condition_parameters()
 
     # Movies: only consider the latest eligible history row per (video_path, language)
@@ -237,7 +240,15 @@ def get_upgradable_media_ids():
 
     # Sports, keyed on the league the way series are keyed on the show: the
     # library page marks a league, and its rows are events. Same latest-row
-    # logic, restricted to enabled sportarr owners.
+    # logic, restricted to enabled sportarr owners. The score rule is the one
+    # the sports upgrade job applies, AI translated exception included.
+    sports_score_condition = (
+        func.coalesce(TableHistorySports.score, 0)
+        < func.coalesce(TableHistorySports.score_out_of, 180) - 3
+    )
+    if _ai_translated_subtitles_are_upgrade_candidates():
+        sports_score_condition = or_(sports_score_condition,
+                                     TableHistorySports.ai_translated.is_(True))
     latest_sports = select(
         TableHistorySports.id,
         func.row_number().over(
@@ -268,7 +279,7 @@ def get_upgradable_media_ids():
             TableHistorySports.action.in_(query_actions),
             TableHistorySports.timestamp > minimum_timestamp,
             or_(TableHistorySports.score.is_not(None), TableHistorySports.action == 6),
-            func.coalesce(TableHistorySports.score, 0) < func.coalesce(TableHistorySports.score_out_of, 180) - 3,
+            sports_score_condition,
         ))
     ).all() if settings.general.use_sportarr else []
     sports_ids = [r.league_id for r in sports_results]

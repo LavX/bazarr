@@ -67,6 +67,21 @@ def test_a_good_source_is_accepted(sports_history, monkeypatch):
     assert _source_score_below_threshold(_context(), 'hu') is False
 
 
+def test_a_zero_score_source_is_rejected(sports_history, monkeypatch):
+    """0 is a stored score, not a missing row. Treating it as no history let
+    the worst possible source through a positive threshold."""
+    from app.config import settings
+    from sportarr.profile_hooks import _source_score_below_threshold
+
+    session, history = sports_history
+    session.add(history(event_id=61, league_id=51, arr_instance_id=42, action=1,
+                        timestamp=datetime.now(), language='hu', score=0))
+    session.commit()
+    monkeypatch.setattr(settings.translator, 'min_source_score', 90)
+
+    assert _source_score_below_threshold(_context(), 'hu') is True
+
+
 def test_no_history_row_is_treated_as_at_threshold(sports_history):
     """The series path proceeds rather than silently falling back to providers
     when a subtitle predates history tracking or was placed by hand."""
