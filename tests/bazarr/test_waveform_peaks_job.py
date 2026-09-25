@@ -234,3 +234,59 @@ class TestPeaksEndpoint:
 
         assert self._get(monkeypatch, str(video)) == cached
         assert queue.list_jobs_from_queue() == []
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='uses a POSIX shell script as ffmpeg')
+def test_stop_ends_a_job_whose_ffmpeg_has_stopped_writing(queue, monkeypatch, tmp_path):
+    """Cancellation was only noticed between reads. An ffmpeg stuck on a damaged
+    file or a stalled mount writes nothing, so the read never returned, Stop did
+    nothing, and the stuck job held the waveform lane for good."""
+    import threading
+    import time
+
+    from utilities import binaries
+
+    stalled = tmp_path / 'stalled_ffmpeg.py'
+    # One peak, then nothing. The alarm ends the stall on its own, so a
+    # regression fails instead of hanging.
+    stalled.write_text('import signal, sys, time\n'
+                       'signal.alarm(15)\n'
+                       'sys.stdout.buffer.write(bytes(320))\n'
+                       'sys.stdout.buffer.flush()\n'
+                       'time.sleep(60)\n')
+    fake = tmp_path / 'ffmpeg'
+    fake.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{stalled}" "$@"\n')
+    fake.chmod(0o755)
+    monkeypatch.setattr(binaries, 'get_binary', lambda name: str(fake))
+    job = jobs_queue_module.Job(job_id=7, job_name='Generating waveform for film.mkv',
+                                module=waveform_peaks.PEAKS_MODULE, func=waveform_peaks.PEAKS_FUNC,
+                                kwargs={})
+    queue.jobs_running_queue.append(job)
+    threading.Timer(0.5, queue.cancel_running_job, args=(7,)).start()
+
+    began = time.monotonic()
+    with pytest.raises(jobs_queue_module.JobCancelled):
+        waveform_peaks._extract_peaks(str(tmp_path / 'film.mkv'), 0, 3600.0, 7)
+
+    assert time.monotonic() - began < 5
+
+
+def test_peaks_read_from_a_file_replaced_mid_job_are_not_cached(queue, monkeypatch, tmp_path):
+    """The cache name was worked out after ffmpeg finished, from the file as it
+    was by then. A file replaced while the job ran had the old file's peaks
+    saved under the new file's name, and served for it from then on."""
+    video = tmp_path / 'film.mkv'
+    video.write_bytes(b'old film')
+    monkeypatch.setattr(waveform_peaks, '_duration', lambda path: 3.0)
+
+    def extract_while_replaced(path, audio_track, duration, job_id):
+        video.write_bytes(b'the replacement film')
+        return [0.25, -0.5, 1.0]
+
+    monkeypatch.setattr(waveform_peaks, '_extract_peaks', extract_while_replaced)
+
+    with pytest.raises(waveform_peaks.JobFailed, match='changed while'):
+        waveform_peaks.generate_waveform_peaks(str(video), 0)
+
+    assert waveform_peaks.read_cached_peaks(str(video), 0) is None
+    assert not os.path.isdir(waveform_peaks.PEAKS_CACHE_DIR) or not os.listdir(waveform_peaks.PEAKS_CACHE_DIR)
