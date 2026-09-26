@@ -141,6 +141,35 @@ def test_movies_without_scored_subtitles_returns_null(schema_session, monkeypatc
     assert result["data"][0]["lowest_subtitle_score"] is None
 
 
+def test_movies_newer_unscored_record_shadows_older_scored(schema_session, monkeypatch):
+    movies = _prepare_movies(monkeypatch, schema_session)
+    _add_movie(schema_session, 100, "[['en', '/movies/movie100.en.srt', 100]]")
+    # An older scored record for the current file...
+    _add_movie_history(schema_session, 1, 100, 1, "/movies/movie100.en.srt", "en", 90, 100)
+    # ...shadowed by a newer record for the SAME path that carries no score (a
+    # re-download whose score was not recorded). The seen-set keeps only the
+    # newest record per subtitle, so the older score never counts and the movie
+    # ends up with no known score.
+    _add_movie_history(schema_session, 2, 100, 1, "/movies/movie100.en.srt", "en", None, None)
+
+    result = _get_movies(movies, "/api/movies/movies?id[]=100&scores=1")
+
+    assert result["data"][0]["lowest_subtitle_score"] is None
+
+
+def test_movies_embedded_multivariant_language_matches_canonical_record(schema_session, monkeypatch):
+    movies = _prepare_movies(monkeypatch, schema_session)
+    # The current embedded track carries a combined code ("en:hi:forced"), while
+    # the action-7 record stores the canonical hi-priority variant ("en:hi").
+    # The two must still be recognised as the same track.
+    _add_movie(schema_session, 100, "[['en:hi:forced', None, None]]")
+    _add_movie_history(schema_session, 1, 100, 7, None, "en:hi", 100, 100)
+
+    result = _get_movies(movies, "/api/movies/movies?id[]=100&scores=1")
+
+    assert result["data"][0]["lowest_subtitle_score"] == 100.0
+
+
 # --------------------------------------------------------------------------- #
 # Series                                                                       #
 # --------------------------------------------------------------------------- #

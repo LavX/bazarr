@@ -381,13 +381,13 @@ describe("Movies score filter", () => {
     );
   }
 
-  it("keeps only full-score movies when Full (100 %) is chosen", async () => {
+  it("keeps only full-score movies when Full (100%) is chosen", async () => {
     const user = userEvent.setup();
     customRender(<MovieView />);
     await screen.findByRole("link", { name: "Glass Harbour" });
 
     await openFilters(user);
-    await pickScore(user, "Full (100 %)");
+    await pickScore(user, "Full (100%)");
 
     await waitFor(() =>
       expect(screen.queryByRole("link", { name: "Northern Light" })).toBeNull(),
@@ -399,13 +399,13 @@ describe("Movies score filter", () => {
     expect(screen.queryByRole("link", { name: "Untracked Bay" })).toBeNull();
   });
 
-  it("keeps only movies below 100 % when Not full (< 100 %) is chosen", async () => {
+  it("keeps only movies below 100 % when Not full (< 100%) is chosen", async () => {
     const user = userEvent.setup();
     customRender(<MovieView />);
     await screen.findByRole("link", { name: "Glass Harbour" });
 
     await openFilters(user);
-    await pickScore(user, "Not full (< 100 %)");
+    await pickScore(user, "Not full (< 100%)");
 
     await waitFor(() =>
       expect(screen.queryByRole("link", { name: "Glass Harbour" })).toBeNull(),
@@ -427,7 +427,7 @@ describe("Movies score filter", () => {
 
     await openFilters(user);
     // Threshold is the mocked minimum_score_movie (70).
-    await pickScore(user, "Below threshold (< 70 %)");
+    await pickScore(user, "Below threshold (< 70%)");
 
     await waitFor(() =>
       expect(screen.queryByRole("link", { name: "Northern Light" })).toBeNull(),
@@ -448,9 +448,9 @@ describe("Movies score filter", () => {
 
     await openFilters(user);
     for (const option of [
-      "Full (100 %)",
-      "Not full (< 100 %)",
-      "Below threshold (< 70 %)",
+      "Full (100%)",
+      "Not full (< 100%)",
+      "Below threshold (< 70%)",
     ]) {
       await pickScore(user, option);
       await waitFor(() =>
@@ -472,16 +472,16 @@ describe("Movies score filter", () => {
     ).toBeNull();
 
     await openFilters(user);
-    await pickScore(user, "Not full (< 100 %)");
+    await pickScore(user, "Not full (< 100%)");
 
     expect(
       await screen.findByRole("columnheader", { name: "Lowest score" }),
     ).toBeInTheDocument();
     // The kept rows carry a rounded pill; the dropped 100 % row takes its pill
     // with it. A null-score row is excluded while narrowing, so no dash shows.
-    expect(screen.getByText("85 %")).toBeInTheDocument();
-    expect(screen.getByText("64 %")).toBeInTheDocument();
-    expect(screen.queryByText("100 %")).toBeNull();
+    expect(screen.getByText("85%")).toBeInTheDocument();
+    expect(screen.getByText("64%")).toBeInTheDocument();
+    expect(screen.queryByText("100%")).toBeNull();
     expect(screen.queryByText("—")).toBeNull();
   });
 
@@ -491,11 +491,11 @@ describe("Movies score filter", () => {
     await screen.findByRole("link", { name: "Glass Harbour" });
 
     await openFilters(user);
-    await pickScore(user, "Full (100 %)");
+    await pickScore(user, "Full (100%)");
     expect(
       await screen.findByRole("columnheader", { name: "Lowest score" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("100 %")).toBeInTheDocument();
+    expect(screen.getByText("100%")).toBeInTheDocument();
 
     await pickScore(user, "Any");
     await screen.findByRole("link", { name: "Untracked Bay" });
@@ -510,14 +510,14 @@ describe("Movies score filter", () => {
     await screen.findByRole("link", { name: "Glass Harbour" });
 
     await openFilters(user);
-    await pickScore(user, "Full (100 %)");
+    await pickScore(user, "Full (100%)");
     await waitFor(() =>
       expect(screen.queryByRole("link", { name: "Northern Light" })).toBeNull(),
     );
 
     await user.click(
       screen.getByRole("button", {
-        name: "Remove filter: Score: Full (100 %)",
+        name: "Remove filter: Score: Full (100%)",
       }),
     );
 
@@ -532,6 +532,40 @@ describe("Movies score filter", () => {
     expect(
       screen.queryByRole("columnheader", { name: "Lowest score" }),
     ).toBeNull();
+  });
+
+  // Before the threshold setting loads (or when it is absent) scoreThreshold is
+  // undefined, so the option is the plain "Below threshold" and ItemView's
+  // graceful fallback keeps every scored row, dropping only null-score rows
+  // rather than emptying the table.
+  it("keeps scored rows and drops only null-score rows under Below threshold when the threshold is unknown", async () => {
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({ general: { theme: "auto" } }),
+      ),
+    );
+    const user = userEvent.setup();
+    customRender(<MovieView />);
+    await screen.findByRole("link", { name: "Glass Harbour" });
+
+    await openFilters(user);
+    await pickScore(user, "Below threshold");
+
+    // The null-score row is dropped by every narrowing group.
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "Untracked Bay" })).toBeNull(),
+    );
+    // Every scored row stays: with no threshold to compare against, none is
+    // considered "below".
+    expect(
+      screen.getByRole("link", { name: "Glass Harbour" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Northern Light" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Southern Cross" }),
+    ).toBeInTheDocument();
   });
 });
 /* eslint-enable camelcase */

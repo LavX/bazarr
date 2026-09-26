@@ -471,6 +471,38 @@ def postprocess(item):
     return item
 
 
+def chunked(items, size=900):
+    """Yield ``items`` in successive lists of at most ``size`` entries.
+
+    Used to keep an ``IN (...)`` clause within SQLite's bound-parameter limit
+    (999 on older builds) when a fetchAll id list can grow with the library.
+    Postgres has no such limit, so a single large batch would work there, but
+    chunking is behaviour-equivalent for both back ends.
+    """
+    for start in range(0, len(items), size):
+        yield items[start:start + size]
+
+
+def _canonical_embedded_language(language):
+    """Reduce a possibly multi-variant embedded language code to the
+    hi-priority single variant that action-7 history rows store.
+
+    The raw ``subtitles`` column can hold a combined code like
+    ``"en:hi:forced"`` for a track that is both HI and forced, while
+    ``_log_embedded_history_movie`` writes the canonical single variant
+    ``"en:hi"``. Applying the same reduction here (base, plus ``":hi"`` when HI,
+    else ``":forced"`` when forced, else the base) lets the two match.
+    """
+    parts = str(language).split(':')
+    base = parts[0]
+    variants = set(parts[1:])
+    if 'hi' in variants:
+        return base + ':hi'
+    if 'forced' in variants:
+        return base + ':forced'
+    return base
+
+
 def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table):
     """Lowest current-subtitle score (0-100 %) for each item id.
 
@@ -504,21 +536,27 @@ def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table):
                 if entry[1]:
                     paths.add(entry[1])
                 else:
-                    langs.add(entry[0])
+                    langs.add(_canonical_embedded_language(entry[0]))
         current_paths[item_id] = paths
         embedded_langs[item_id] = langs
 
-    rows = db.execute(
-        select(id_column.label('item_id'),
-               history_table.action,
-               history_table.language,
-               history_table.subtitles_path,
-               history_table.score,
-               history_table.score_out_of)
-        .where(id_column.in_(ids))
-        .where(history_table.action.in_([1, 2, 3, 7]))
-        .order_by(history_table.timestamp.desc(), history_table.id.desc())
-    ).all()
+    # Chunk the id list so the IN (...) clause stays within SQLite's
+    # bound-parameter limit for large libraries. Each id lives in exactly one
+    # chunk, so every row for a given item keeps its timestamp/id ordering and
+    # the newest-record-wins seen-set below still holds across the merge.
+    rows = []
+    for chunk in chunked(ids):
+        rows.extend(db.execute(
+            select(id_column.label('item_id'),
+                   history_table.action,
+                   history_table.language,
+                   history_table.subtitles_path,
+                   history_table.score,
+                   history_table.score_out_of)
+            .where(id_column.in_(chunk))
+            .where(history_table.action.in_([1, 2, 3, 7]))
+            .order_by(history_table.timestamp.desc(), history_table.id.desc())
+        ).all())
 
     lowest = {}
     # (item_id, kind, key) already resolved: the newest record wins, so an older

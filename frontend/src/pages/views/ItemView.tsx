@@ -146,13 +146,13 @@ function ItemView<T extends Item.Base>({
   const scoreFilterOptions = useMemo<{ value: ScoreFilter; label: string }[]>(
     () => [
       { value: "any", label: "Any" },
-      { value: "full", label: "Full (100 %)" },
-      { value: "notFull", label: "Not full (< 100 %)" },
+      { value: "full", label: "Full (100%)" },
+      { value: "notFull", label: "Not full (< 100%)" },
       {
         value: "belowThreshold",
         label:
           scoreThreshold != null
-            ? `Below threshold (< ${scoreThreshold} %)`
+            ? `Below threshold (< ${scoreThreshold}%)`
             : "Below threshold",
       },
     ],

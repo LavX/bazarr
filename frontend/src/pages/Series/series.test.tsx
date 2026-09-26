@@ -429,13 +429,13 @@ describe("Series score filter", () => {
     );
   }
 
-  it("keeps only full-score series when Full (100 %) is chosen", async () => {
+  it("keeps only full-score series when Full (100%) is chosen", async () => {
     const user = userEvent.setup();
     customRender(<SeriesView />);
     await screen.findByRole("link", { name: "Northern Light" });
 
     await openFilters(user);
-    await pickScore(user, "Full (100 %)");
+    await pickScore(user, "Full (100%)");
 
     await waitFor(() =>
       expect(screen.queryByRole("link", { name: "The Long Shore" })).toBeNull(),
@@ -447,13 +447,13 @@ describe("Series score filter", () => {
     expect(screen.queryByRole("link", { name: "Untracked Bay" })).toBeNull();
   });
 
-  it("keeps only series below 100 % when Not full (< 100 %) is chosen", async () => {
+  it("keeps only series below 100 % when Not full (< 100%) is chosen", async () => {
     const user = userEvent.setup();
     customRender(<SeriesView />);
     await screen.findByRole("link", { name: "Northern Light" });
 
     await openFilters(user);
-    await pickScore(user, "Not full (< 100 %)");
+    await pickScore(user, "Not full (< 100%)");
 
     await waitFor(() =>
       expect(screen.queryByRole("link", { name: "Northern Light" })).toBeNull(),
@@ -474,7 +474,7 @@ describe("Series score filter", () => {
 
     await openFilters(user);
     // Threshold is the mocked minimum_score (80).
-    await pickScore(user, "Below threshold (< 80 %)");
+    await pickScore(user, "Below threshold (< 80%)");
 
     await waitFor(() =>
       expect(screen.queryByRole("link", { name: "The Long Shore" })).toBeNull(),
@@ -494,9 +494,9 @@ describe("Series score filter", () => {
 
     await openFilters(user);
     for (const option of [
-      "Full (100 %)",
-      "Not full (< 100 %)",
-      "Below threshold (< 80 %)",
+      "Full (100%)",
+      "Not full (< 100%)",
+      "Below threshold (< 80%)",
     ]) {
       await pickScore(user, option);
       await waitFor(() =>
@@ -517,14 +517,14 @@ describe("Series score filter", () => {
     ).toBeNull();
 
     await openFilters(user);
-    await pickScore(user, "Not full (< 100 %)");
+    await pickScore(user, "Not full (< 100%)");
 
     expect(
       await screen.findByRole("columnheader", { name: "Lowest score" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("88 %")).toBeInTheDocument();
-    expect(screen.getByText("55 %")).toBeInTheDocument();
-    expect(screen.queryByText("100 %")).toBeNull();
+    expect(screen.getByText("88%")).toBeInTheDocument();
+    expect(screen.getByText("55%")).toBeInTheDocument();
+    expect(screen.queryByText("100%")).toBeNull();
     expect(screen.queryByText("—")).toBeNull();
   });
 
@@ -534,14 +534,14 @@ describe("Series score filter", () => {
     await screen.findByRole("link", { name: "Northern Light" });
 
     await openFilters(user);
-    await pickScore(user, "Full (100 %)");
+    await pickScore(user, "Full (100%)");
     await waitFor(() =>
       expect(screen.queryByRole("link", { name: "The Long Shore" })).toBeNull(),
     );
 
     await user.click(
       screen.getByRole("button", {
-        name: "Remove filter: Score: Full (100 %)",
+        name: "Remove filter: Score: Full (100%)",
       }),
     );
 

@@ -18,7 +18,7 @@ from subtitles.wanted import wanted_search_missing_subtitles_series, wanted_scan
 from app.event_handler import event_stream
 from api.swaggerui import subtitles_model, subtitles_language_model, audio_language_model, job_queued_model
 
-from api.utils import authenticate, None_Keys, postprocess, lowest_subtitle_scores
+from api.utils import authenticate, None_Keys, postprocess, lowest_subtitle_scores, chunked
 
 api_ns_series = Namespace('Series', description='List series metadata, update series languages profile or run actions '
                                                 'for specific series.')
@@ -214,10 +214,14 @@ class Series(Resource):
         if not series_ids:
             return {}
 
-        episodes = database.execute(
-            select(TableEpisodes.id, TableEpisodes.series_id, TableEpisodes.subtitles)
-            .where(TableEpisodes.series_id.in_(series_ids))
-        ).all()
+        # Chunk the series id list so the IN (...) clause stays within SQLite's
+        # bound-parameter limit for large libraries; equivalent on Postgres.
+        episodes = []
+        for chunk in chunked(series_ids):
+            episodes.extend(database.execute(
+                select(TableEpisodes.id, TableEpisodes.series_id, TableEpisodes.subtitles)
+                .where(TableEpisodes.series_id.in_(chunk))
+            ).all())
         if not episodes:
             return {}
 

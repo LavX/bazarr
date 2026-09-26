@@ -20,7 +20,7 @@ const ScorePill: FunctionComponent<Props> = ({ score }) => {
   const band = score >= 90 ? "green" : score >= 70 ? "yellow" : "red";
   return (
     <span className={`${styles.pill} ${styles[band]}`}>
-      {`${Math.round(score)} %`}
+      {`${Math.round(score)}%`}
     </span>
   );
 };
