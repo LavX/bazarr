@@ -367,3 +367,193 @@ describe("Series subtitles filter", () => {
     ).toBeInTheDocument();
   });
 });
+
+// A scored series carries lowest_subtitle_score (the backend fills it when the
+// list is requested with scores=1). null means no current subtitle has a known
+// score, so the row belongs to no narrowing group.
+function scoredSeries(
+  id: number,
+  title: string,
+  lowestScore: number | null,
+): Item.Series {
+  return { ...series(id, title), lowest_subtitle_score: lowestScore };
+}
+
+// The Score filter keeps rows whose lowest current-subtitle score matches the
+// choice, using the series (episode) acceptance threshold. A row with no known
+// score belongs to no group and shows only under Any. The "Lowest score" column
+// appears only while the filter narrows.
+describe("Series score filter", () => {
+  const full = scoredSeries(1, "Northern Light", 100);
+  const mid = scoredSeries(2, "The Long Shore", 88);
+  const low = scoredSeries(3, "Glass Harbour", 55);
+  const unknown = scoredSeries(4, "Untracked Bay", null);
+
+  beforeEach(() => {
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: { theme: "auto", minimum_score: 80 },
+        }),
+      ),
+      http.get("/api/series", () =>
+        HttpResponse.json({ data: [full, mid, low, unknown], total: 4 }),
+      ),
+    );
+  });
+
+  async function openFilters(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(
+      await screen.findByRole("button", { name: "Toggle filters" }),
+    );
+  }
+
+  async function pickScore(
+    user: ReturnType<typeof userEvent.setup>,
+    option: string,
+  ) {
+    const input = screen.getByRole("combobox", { name: "Score" });
+    await user.click(input);
+    if (input.getAttribute("aria-expanded") !== "true")
+      await user.keyboard("{ArrowDown}");
+    const controlled = input.getAttribute("aria-controls");
+    const listboxes = await screen.findAllByRole("listbox", { hidden: true });
+    const listbox =
+      listboxes.find((box) => box.getAttribute("id") === controlled) ??
+      listboxes[0];
+    await user.click(
+      await within(listbox).findByRole("option", {
+        name: option,
+        hidden: true,
+      }),
+    );
+  }
+
+  it("keeps only full-score series when Full (100 %) is chosen", async () => {
+    const user = userEvent.setup();
+    customRender(<SeriesView />);
+    await screen.findByRole("link", { name: "Northern Light" });
+
+    await openFilters(user);
+    await pickScore(user, "Full (100 %)");
+
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "The Long Shore" })).toBeNull(),
+    );
+    expect(
+      screen.getByRole("link", { name: "Northern Light" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Glass Harbour" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Untracked Bay" })).toBeNull();
+  });
+
+  it("keeps only series below 100 % when Not full (< 100 %) is chosen", async () => {
+    const user = userEvent.setup();
+    customRender(<SeriesView />);
+    await screen.findByRole("link", { name: "Northern Light" });
+
+    await openFilters(user);
+    await pickScore(user, "Not full (< 100 %)");
+
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "Northern Light" })).toBeNull(),
+    );
+    expect(
+      screen.getByRole("link", { name: "The Long Shore" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Glass Harbour" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Untracked Bay" })).toBeNull();
+  });
+
+  it("keeps only series under the configured threshold when Below threshold is chosen", async () => {
+    const user = userEvent.setup();
+    customRender(<SeriesView />);
+    await screen.findByRole("link", { name: "Northern Light" });
+
+    await openFilters(user);
+    // Threshold is the mocked minimum_score (80).
+    await pickScore(user, "Below threshold (< 80 %)");
+
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "The Long Shore" })).toBeNull(),
+    );
+    // 55 < 80 stays; 88 and 100 drop.
+    expect(
+      screen.getByRole("link", { name: "Glass Harbour" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Northern Light" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Untracked Bay" })).toBeNull();
+  });
+
+  it("excludes a series with no known score from every narrowing group", async () => {
+    const user = userEvent.setup();
+    customRender(<SeriesView />);
+    await screen.findByRole("link", { name: "Untracked Bay" });
+
+    await openFilters(user);
+    for (const option of [
+      "Full (100 %)",
+      "Not full (< 100 %)",
+      "Below threshold (< 80 %)",
+    ]) {
+      await pickScore(user, option);
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("link", { name: "Untracked Bay" }),
+        ).toBeNull(),
+      );
+    }
+  });
+
+  it("shows the Lowest score column with a pill per kept row only while the filter is active", async () => {
+    const user = userEvent.setup();
+    customRender(<SeriesView />);
+    await screen.findByRole("link", { name: "Northern Light" });
+
+    expect(
+      screen.queryByRole("columnheader", { name: "Lowest score" }),
+    ).toBeNull();
+
+    await openFilters(user);
+    await pickScore(user, "Not full (< 100 %)");
+
+    expect(
+      await screen.findByRole("columnheader", { name: "Lowest score" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("88 %")).toBeInTheDocument();
+    expect(screen.getByText("55 %")).toBeInTheDocument();
+    expect(screen.queryByText("100 %")).toBeNull();
+    expect(screen.queryByText("—")).toBeNull();
+  });
+
+  it("restores every series when the Score chip is removed", async () => {
+    const user = userEvent.setup();
+    customRender(<SeriesView />);
+    await screen.findByRole("link", { name: "Northern Light" });
+
+    await openFilters(user);
+    await pickScore(user, "Full (100 %)");
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "The Long Shore" })).toBeNull(),
+    );
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "Remove filter: Score: Full (100 %)",
+      }),
+    );
+
+    await screen.findByRole("link", { name: "The Long Shore" });
+    expect(
+      screen.getByRole("link", { name: "Glass Harbour" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Untracked Bay" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: "Lowest score" }),
+    ).toBeNull();
+  });
+});

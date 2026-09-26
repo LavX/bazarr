@@ -36,6 +36,12 @@ export function usePaginationQuery<
   cacheIndividual = true,
   fetchAll = false,
   enabled = true,
+  // When the caller opts into the extra score aggregate (scores=1), it belongs
+  // in the react-query key so the with-scores and without-scores reads are
+  // cached apart and toggling the score filter refetches. It rides the range
+  // key rather than the base key, which would break the [...queryKey, id]
+  // individual cache the detail pages read.
+  includeScores = false,
 ): UsePaginationQueryResult<TObject> {
   const client = useQueryClient();
 
@@ -73,11 +79,15 @@ export function usePaginationQuery<
   const start = fetchAll ? 0 : page * pageSize;
   const length = fetchAll ? -1 : pageSize;
 
+  const rangeKeyParams = fetchAll ? { all: true } : { start, size: pageSize };
+
   const results = useQuery({
     enabled,
-    queryKey: fetchAll
-      ? [...queryKey, QueryKeys.Range, { all: true }]
-      : [...queryKey, QueryKeys.Range, { start, size: pageSize }],
+    queryKey: [
+      ...queryKey,
+      QueryKeys.Range,
+      includeScores ? { ...rangeKeyParams, scores: true } : rangeKeyParams,
+    ],
 
     queryFn: () => {
       const param: Parameter.Range = {

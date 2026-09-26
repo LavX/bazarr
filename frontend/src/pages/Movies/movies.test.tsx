@@ -316,4 +316,222 @@ describe("Movies subtitles filter", () => {
     ).toBeInTheDocument();
   });
 });
+
+// A scored movie carries lowest_subtitle_score (the backend fills it when the
+// list is requested with scores=1). null means no current subtitle has a known
+// score, so the row belongs to no narrowing group.
+function scoredMovie(
+  id: number,
+  title: string,
+  lowestScore: number | null,
+): Item.Movie {
+  return { ...movie(id, title, []), lowest_subtitle_score: lowestScore };
+}
+
+// The Score filter keeps rows whose lowest current-subtitle score matches the
+// choice: Full keeps 100 %, Not full keeps anything short of it, Below threshold
+// keeps anything under the configured acceptance threshold. A row with no known
+// score belongs to none of them and shows only under Any. The "Lowest score"
+// column appears only while the filter narrows.
+describe("Movies score filter", () => {
+  const full = scoredMovie(1, "Glass Harbour", 100);
+  const mid = scoredMovie(2, "Northern Light", 85);
+  const low = scoredMovie(3, "Southern Cross", 64);
+  const unknown = scoredMovie(4, "Untracked Bay", null);
+
+  beforeEach(() => {
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({
+          general: { theme: "auto", minimum_score_movie: 70 },
+        }),
+      ),
+      http.get("/api/movies", () =>
+        HttpResponse.json({ data: [full, mid, low, unknown], total: 4 }),
+      ),
+    );
+  });
+
+  async function openFilters(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(
+      await screen.findByRole("button", { name: "Toggle filters" }),
+    );
+  }
+
+  // Same hidden-listbox dance as the subtitles select; the option is awaited so
+  // the "Below threshold" label can pick up the live threshold first.
+  async function pickScore(
+    user: ReturnType<typeof userEvent.setup>,
+    option: string,
+  ) {
+    const input = screen.getByRole("combobox", { name: "Score" });
+    await user.click(input);
+    if (input.getAttribute("aria-expanded") !== "true")
+      await user.keyboard("{ArrowDown}");
+    const controlled = input.getAttribute("aria-controls");
+    const listboxes = await screen.findAllByRole("listbox", { hidden: true });
+    const listbox =
+      listboxes.find((box) => box.getAttribute("id") === controlled) ??
+      listboxes[0];
+    await user.click(
+      await within(listbox).findByRole("option", {
+        name: option,
+        hidden: true,
+      }),
+    );
+  }
+
+  it("keeps only full-score movies when Full (100 %) is chosen", async () => {
+    const user = userEvent.setup();
+    customRender(<MovieView />);
+    await screen.findByRole("link", { name: "Glass Harbour" });
+
+    await openFilters(user);
+    await pickScore(user, "Full (100 %)");
+
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "Northern Light" })).toBeNull(),
+    );
+    expect(
+      screen.getByRole("link", { name: "Glass Harbour" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Southern Cross" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Untracked Bay" })).toBeNull();
+  });
+
+  it("keeps only movies below 100 % when Not full (< 100 %) is chosen", async () => {
+    const user = userEvent.setup();
+    customRender(<MovieView />);
+    await screen.findByRole("link", { name: "Glass Harbour" });
+
+    await openFilters(user);
+    await pickScore(user, "Not full (< 100 %)");
+
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "Glass Harbour" })).toBeNull(),
+    );
+    expect(
+      screen.getByRole("link", { name: "Northern Light" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Southern Cross" }),
+    ).toBeInTheDocument();
+    // The unknown-score row is not "below 100 %"; it belongs to no group.
+    expect(screen.queryByRole("link", { name: "Untracked Bay" })).toBeNull();
+  });
+
+  it("keeps only movies under the configured threshold when Below threshold is chosen", async () => {
+    const user = userEvent.setup();
+    customRender(<MovieView />);
+    await screen.findByRole("link", { name: "Glass Harbour" });
+
+    await openFilters(user);
+    // Threshold is the mocked minimum_score_movie (70).
+    await pickScore(user, "Below threshold (< 70 %)");
+
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "Northern Light" })).toBeNull(),
+    );
+    // 64 < 70 stays; 85 and 100 drop.
+    expect(
+      screen.getByRole("link", { name: "Southern Cross" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Glass Harbour" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Untracked Bay" })).toBeNull();
+  });
+
+  it("excludes a movie with no known score from every narrowing group", async () => {
+    const user = userEvent.setup();
+    customRender(<MovieView />);
+    // Present under the default Any filter.
+    await screen.findByRole("link", { name: "Untracked Bay" });
+
+    await openFilters(user);
+    for (const option of [
+      "Full (100 %)",
+      "Not full (< 100 %)",
+      "Below threshold (< 70 %)",
+    ]) {
+      await pickScore(user, option);
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("link", { name: "Untracked Bay" }),
+        ).toBeNull(),
+      );
+    }
+  });
+
+  it("shows the Lowest score column with a pill per kept row only while the filter is active", async () => {
+    const user = userEvent.setup();
+    customRender(<MovieView />);
+    await screen.findByRole("link", { name: "Glass Harbour" });
+
+    // Hidden until the filter narrows.
+    expect(
+      screen.queryByRole("columnheader", { name: "Lowest score" }),
+    ).toBeNull();
+
+    await openFilters(user);
+    await pickScore(user, "Not full (< 100 %)");
+
+    expect(
+      await screen.findByRole("columnheader", { name: "Lowest score" }),
+    ).toBeInTheDocument();
+    // The kept rows carry a rounded pill; the dropped 100 % row takes its pill
+    // with it. A null-score row is excluded while narrowing, so no dash shows.
+    expect(screen.getByText("85 %")).toBeInTheDocument();
+    expect(screen.getByText("64 %")).toBeInTheDocument();
+    expect(screen.queryByText("100 %")).toBeNull();
+    expect(screen.queryByText("—")).toBeNull();
+  });
+
+  it("shows the full-band pill under Full and hides the column again under Any", async () => {
+    const user = userEvent.setup();
+    customRender(<MovieView />);
+    await screen.findByRole("link", { name: "Glass Harbour" });
+
+    await openFilters(user);
+    await pickScore(user, "Full (100 %)");
+    expect(
+      await screen.findByRole("columnheader", { name: "Lowest score" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("100 %")).toBeInTheDocument();
+
+    await pickScore(user, "Any");
+    await screen.findByRole("link", { name: "Untracked Bay" });
+    expect(
+      screen.queryByRole("columnheader", { name: "Lowest score" }),
+    ).toBeNull();
+  });
+
+  it("restores every movie when the Score chip is removed", async () => {
+    const user = userEvent.setup();
+    customRender(<MovieView />);
+    await screen.findByRole("link", { name: "Glass Harbour" });
+
+    await openFilters(user);
+    await pickScore(user, "Full (100 %)");
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "Northern Light" })).toBeNull(),
+    );
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "Remove filter: Score: Full (100 %)",
+      }),
+    );
+
+    await screen.findByRole("link", { name: "Northern Light" });
+    expect(
+      screen.getByRole("link", { name: "Southern Cross" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Untracked Bay" }),
+    ).toBeInTheDocument();
+    // Chip gone, so the column is gone with it.
+    expect(
+      screen.queryByRole("columnheader", { name: "Lowest score" }),
+    ).toBeNull();
+  });
+});
 /* eslint-enable camelcase */
