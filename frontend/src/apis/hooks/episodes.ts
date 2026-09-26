@@ -129,3 +129,25 @@ export function useEpisodeHistory(episodeId?: number) {
     },
   });
 }
+
+// One request per series detail page: the whole show's episode history, which
+// the episodes table maps to per-subtitle scores. Distinct from
+// useEpisodeHistory (a single episode) above.
+export function useEpisodesHistory(seriesId?: number) {
+  return useQuery({
+    queryKey: [
+      QueryKeys.Series,
+      seriesId,
+      QueryKeys.Episodes,
+      QueryKeys.History,
+    ],
+
+    queryFn: () => {
+      if (seriesId) {
+        return api.episodes.historyBySeriesId(seriesId);
+      }
+
+      return [];
+    },
+  });
+}

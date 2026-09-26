@@ -22,6 +22,8 @@ class EpisodesHistory(Resource):
     get_request_parser.add_argument('length', type=int, required=False, default=-1, help='Paging length integer')
     get_request_parser.add_argument('id', type=int, required=False, help='Local episode ID')
     get_request_parser.add_argument('episodeid', type=int, required=False, help='Episode ID')
+    get_request_parser.add_argument('series_id', type=int, required=False, help='Local series ID')
+    get_request_parser.add_argument('seriesid', type=int, required=False, help='Series ID')
     get_request_parser.add_argument('include_embedded', type=inputs.boolean, required=False, default=False,
                                     help='Include Embedded Source records (default excludes them)')
 
@@ -72,6 +74,8 @@ class EpisodesHistory(Resource):
         length = args.get('length')
         local_episode_id = args.get('id')
         episodeid = args.get('episodeid')
+        local_series_id = args.get('series_id')
+        seriesid = args.get('seriesid')
         include_embedded = args.get('include_embedded')
 
         blacklisted_subtitles = select(TableBlacklist.provider,
@@ -91,6 +95,13 @@ class EpisodesHistory(Resource):
             query_conditions.append((TableEpisodes.id == local_episode_id))
         elif episodeid:
             query_conditions.append((TableEpisodes.sonarrEpisodeId == episodeid))
+        # The series detail table reads every episode's scores in one request.
+        # Filter on TableEpisodes columns (not TableShows) so the count query,
+        # which only joins TableEpisodes, stays valid.
+        elif local_series_id:
+            query_conditions.append((TableEpisodes.series_id == local_series_id))
+        elif seriesid:
+            query_conditions.append((TableEpisodes.sonarrSeriesId == seriesid))
 
         stmt = select(TableHistory.id.label('history_id'),
                       TableEpisodes.id,
