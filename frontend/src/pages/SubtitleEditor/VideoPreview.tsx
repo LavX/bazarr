@@ -320,14 +320,21 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
       });
     }, [audioTrack]);
 
+    // Identifies this player to the backend, so a new session replaces this
+    // player's previous encoder and leaves other tabs on the same file alone.
+    const [playerId] = useState(() => Math.random().toString(36).slice(2, 12));
+
     // HLS playlist URL is path-based so segments resolve correctly via relative
     // URLs in the manifest. startSec is part of the path so segment URLs inherit
     // the same session.
-    const hlsUrl = hasMedia
+    const scopedHlsUrl = hasMedia
       ? appendArrInstanceParam(
           `${Environment.baseUrl}/api/editor/hls/${encodeURIComponent(mediaType)}/${mediaId}/${hlsSession.audioTrack}/${hlsSession.startSec.toFixed(3)}/playlist.m3u8`,
           arrInstanceId,
         )
+      : "";
+    const hlsUrl = scopedHlsUrl
+      ? `${scopedHlsUrl}${scopedHlsUrl.includes("?") ? "&" : "?"}player=${playerId}`
       : "";
 
     // Set up hls.js (or native HLS on Safari) on the video element. Re-runs when
