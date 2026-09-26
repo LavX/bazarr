@@ -56,6 +56,17 @@ class EpisodeApi extends BaseApi {
     return response.data;
   }
 
+  async historyBySeriesId(seriesId: number) {
+    const response = await this.get<DataWrapperWithTotal<History.Episode>>(
+      "/history",
+      // The series detail table reads score + provider for every episode's
+      // subtitles in one request, including the Embedded Source rows the
+      // paginated history hides by default.
+      { series_id: seriesId, include_embedded: true, length: -1 },
+    );
+    return response.data;
+  }
+
   async downloadSubtitles(
     seriesid: number,
     episodeid: number,
