@@ -13,7 +13,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from app import activity
 from app.config import settings, base_url
 from languages.get_languages import language_from_alpha2, alpha3_from_alpha2
-from app.database import get_audio_profile_languages, get_desired_languages
+from app.database import get_audio_profile_languages, get_desired_languages, select
 from utilities.path_mappings import path_mappings
 
 None_Keys = ['null', 'undefined', '', None]
@@ -469,3 +469,77 @@ def postprocess(item):
         item['fanart'] = _proxy_image(item['fanart'])
 
     return item
+
+
+def lowest_subtitle_scores(db, subtitles_by_id, id_column, history_table):
+    """Lowest current-subtitle score (0-100 %) for each item id.
+
+    Mirrors what the detail pages show. For every item, per current subtitle:
+      * file subtitles -> the newest download history record (action 1/2/3)
+        whose subtitles_path is still among the item's current subtitle files;
+      * embedded tracks -> the newest source record (action 7) whose language
+        the item still has as an embedded track (a subtitles entry with an
+        empty path).
+    Each counted record scores ``round(score * 100 / score_out_of, 2)``; records
+    without a usable score/score_out_of are skipped. The item's value is the
+    minimum over the counted records, absent from the result when nothing counts.
+
+    ``subtitles_by_id`` maps id -> raw ``subtitles`` column (the DB-side string,
+    so its paths compare like-for-like with the history subtitles_path). One
+    grouped, ordered history query runs for the whole page (no per-item query).
+    """
+    ids = list(subtitles_by_id.keys())
+    if not ids:
+        return {}
+
+    # Current file-subtitle paths and embedded-track languages per item, read
+    # straight from the raw subtitles column.
+    current_paths = {}
+    embedded_langs = {}
+    for item_id, raw in subtitles_by_id.items():
+        paths = set()
+        langs = set()
+        if raw:
+            for entry in ast.literal_eval(raw):
+                if entry[1]:
+                    paths.add(entry[1])
+                else:
+                    langs.add(entry[0])
+        current_paths[item_id] = paths
+        embedded_langs[item_id] = langs
+
+    rows = db.execute(
+        select(id_column.label('item_id'),
+               history_table.action,
+               history_table.language,
+               history_table.subtitles_path,
+               history_table.score,
+               history_table.score_out_of)
+        .where(id_column.in_(ids))
+        .where(history_table.action.in_([1, 2, 3, 7]))
+        .order_by(history_table.timestamp.desc(), history_table.id.desc())
+    ).all()
+
+    lowest = {}
+    # (item_id, kind, key) already resolved: the newest record wins, so an older
+    # record for the same subtitle is ignored even when the newest had no score.
+    seen = set()
+    for row in rows:
+        if row.action == 7:
+            if row.language not in embedded_langs.get(row.item_id, ()):
+                continue
+            key = (row.item_id, 'embedded', row.language)
+        else:
+            if row.subtitles_path not in current_paths.get(row.item_id, ()):
+                continue
+            key = (row.item_id, 'file', row.subtitles_path)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not row.score or not row.score_out_of:
+            continue
+        percent = round(row.score * 100 / row.score_out_of, 2)
+        current = lowest.get(row.item_id)
+        if current is None or percent < current:
+            lowest[row.item_id] = percent
+    return lowest

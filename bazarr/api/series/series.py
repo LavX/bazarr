@@ -3,11 +3,11 @@
 import operator
 
 from flask import request
-from flask_restx import Resource, Namespace, reqparse, fields, marshal
+from flask_restx import Resource, Namespace, inputs, reqparse, fields, marshal
 from functools import reduce
 from sqlalchemy import case
 
-from app.database import get_exclusion_clause, TableEpisodes, TableShows, database, select, update, func
+from app.database import get_exclusion_clause, TableEpisodes, TableShows, TableHistory, database, select, update, func
 from arr_instances.resolution import scoped
 from sonarr.sync.series import update_one_series, update_one_series_for_instance
 from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
@@ -18,7 +18,7 @@ from subtitles.wanted import wanted_search_missing_subtitles_series, wanted_scan
 from app.event_handler import event_stream
 from api.swaggerui import subtitles_model, subtitles_language_model, audio_language_model, job_queued_model
 
-from api.utils import authenticate, None_Keys, postprocess
+from api.utils import authenticate, None_Keys, postprocess, lowest_subtitle_scores
 
 api_ns_series = Namespace('Series', description='List series metadata, update series languages profile or run actions '
                                                 'for specific series.')
@@ -33,6 +33,8 @@ class Series(Resource):
                                     help='Upstream Sonarr series IDs (legacy; not unique across instances)')
     get_request_parser.add_argument('id[]', type=int, action='append', required=False, default=[],
                                     help='Canonical local series IDs (#156; preferred, unique across instances)')
+    get_request_parser.add_argument('scores', type=inputs.boolean, required=False, default=False,
+                                    help='Add lowest_subtitle_score per series (opt-in; absent = unchanged response)')
 
     get_subtitles_model = api_ns_series.model('subtitles_model', subtitles_model)
     get_subtitles_language_model = api_ns_series.model('subtitles_language_model', subtitles_language_model)
@@ -69,6 +71,18 @@ class Series(Resource):
         'total': fields.Integer(),
     })
 
+    # Opt-in variant (scores=1): adds lowest_subtitle_score. Kept as a separate
+    # model so the default response stays byte-identical (marshal drops fields
+    # the model does not declare).
+    data_model_with_scores = api_ns_series.clone('series_data_model_scores', data_model, {
+        'lowest_subtitle_score': fields.Float(),
+    })
+
+    get_response_model_with_scores = api_ns_series.model('SeriesGetResponseScores', {
+        'data': fields.Nested(data_model_with_scores),
+        'total': fields.Integer(),
+    })
+
     @authenticate
     @api_ns_series.doc(parser=get_request_parser)
     @api_ns_series.response(200, 'Success')
@@ -80,6 +94,7 @@ class Series(Resource):
         length = args.get('length')
         seriesId = args.get('seriesid[]')
         localId = args.get('id[]')
+        scores = args.get('scores')
 
         episodeFileCount = select(TableEpisodes.series_id,
                                   func.count(TableEpisodes.id).label('episodeFileCount')) \
@@ -150,6 +165,7 @@ class Series(Resource):
         elif length > 0:
             stmt = stmt.limit(length).offset(start)
 
+        rows = database.execute(stmt).all()
         results = [postprocess({
             'id': x.id,
             'arr_instance_id': x.arr_instance_id,
@@ -172,14 +188,51 @@ class Series(Resource):
             'lastAired': x.lastAired,
             'episodeFileCount': x.episodeFileCount,
             'episodeMissingCount': x.episodeMissingCount,
-        }) for x in database.execute(stmt).all()]
+        }) for x in rows]
 
         count = database.execute(
             select(func.count())
             .select_from(TableShows)) \
             .scalar()
 
+        if scores:
+            # Two extra queries for the page: one for the series' episodes and one
+            # grouped/ordered history query. The lowest score is computed per
+            # episode, then reduced to the minimum across each series' episodes.
+            series_ids = [x.id for x in rows]
+            series_lowest = self._series_lowest_subtitle_scores(series_ids)
+            for item in results:
+                item['lowest_subtitle_score'] = series_lowest.get(item['id'])
+            return marshal({'data': results, 'total': count}, self.get_response_model_with_scores)
+
         return marshal({'data': results, 'total': count}, self.get_response_model)
+
+    @staticmethod
+    def _series_lowest_subtitle_scores(series_ids):
+        """Lowest current-subtitle score (%) per series: the minimum over all of
+        the series' episodes' current subtitles, or None when nothing scores."""
+        if not series_ids:
+            return {}
+
+        episodes = database.execute(
+            select(TableEpisodes.id, TableEpisodes.series_id, TableEpisodes.subtitles)
+            .where(TableEpisodes.series_id.in_(series_ids))
+        ).all()
+        if not episodes:
+            return {}
+
+        series_of_episode = {e.id: e.series_id for e in episodes}
+        episode_scores = lowest_subtitle_scores(
+            database, {e.id: e.subtitles for e in episodes},
+            TableHistory.episode_id, TableHistory)
+
+        series_lowest = {}
+        for episode_id, percent in episode_scores.items():
+            series_id = series_of_episode[episode_id]
+            current = series_lowest.get(series_id)
+            if current is None or percent < current:
+                series_lowest[series_id] = percent
+        return series_lowest
 
     post_request_parser = reqparse.RequestParser()
     post_request_parser.add_argument('seriesid', type=int, action='append', required=False, default=[],
