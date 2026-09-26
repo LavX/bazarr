@@ -51,7 +51,7 @@ import {
 } from "@/components/forms/MassTranslateForm";
 import { SUBTITLE_TOOL_ACTIONS } from "@/constants/batch";
 import { useModals } from "@/modules/modals";
-import ItemView from "@/pages/views/ItemView";
+import ItemView, { SubtitlesFilter } from "@/pages/views/ItemView";
 import { GetItemId } from "@/utilities";
 
 function upgradableKey(upstreamId: number, arrInstanceId?: number | null) {
@@ -65,6 +65,8 @@ const SeriesView: FunctionComponent = () => {
   const [search, setSearch] = useState("");
   const [audioLanguages, setAudioLanguages] = useState<string[]>([]);
   const [excludeLanguages, setExcludeLanguages] = useState<string[]>([]);
+  const [subtitlesFilter, setSubtitlesFilter] =
+    useState<SubtitlesFilter>("any");
   const [instanceFilter, setInstanceFilter] = useState<string[]>([]);
   const {
     multiInstance,
@@ -72,6 +74,14 @@ const SeriesView: FunctionComponent = () => {
     defaultId: instanceDefaultId,
     options: instanceOptions,
   } = useArrInstanceLabels("sonarr");
+
+  // A series is complete when no episode is missing. A series with no episode
+  // files has nothing that can be missing, so it counts as complete.
+  const subtitlesComplete = useCallback(
+    (series: Item.Series) =>
+      series.episodeFileCount === 0 || series.episodeMissingCount === 0,
+    [],
+  );
 
   const query = useSeriesPagination(true);
   const { data: upgradableData } = useUpgradableItems();
@@ -591,6 +601,9 @@ const SeriesView: FunctionComponent = () => {
         onAudioLanguagesChange={setAudioLanguages}
         excludeLanguages={excludeLanguages}
         onExcludeLanguagesChange={setExcludeLanguages}
+        subtitlesFilter={subtitlesFilter}
+        onSubtitlesFilterChange={setSubtitlesFilter}
+        subtitlesComplete={subtitlesComplete}
         instanceOptions={multiInstance ? instanceOptions : undefined}
         instanceValues={instanceFilter}
         onInstanceValuesChange={setInstanceFilter}

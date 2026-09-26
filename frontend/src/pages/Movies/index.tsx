@@ -50,7 +50,7 @@ import {
 } from "@/components/forms/MassTranslateForm";
 import { SUBTITLE_TOOL_ACTIONS } from "@/constants/batch";
 import { useModals } from "@/modules/modals";
-import ItemView from "@/pages/views/ItemView";
+import ItemView, { SubtitlesFilter } from "@/pages/views/ItemView";
 import { BuildKey, GetItemId } from "@/utilities";
 
 function upgradableKey(upstreamId: number, arrInstanceId?: number | null) {
@@ -64,6 +64,8 @@ const MovieView: FunctionComponent = () => {
   const [search, setSearch] = useState("");
   const [audioLanguages, setAudioLanguages] = useState<string[]>([]);
   const [excludeLanguages, setExcludeLanguages] = useState<string[]>([]);
+  const [subtitlesFilter, setSubtitlesFilter] =
+    useState<SubtitlesFilter>("any");
   const [instanceFilter, setInstanceFilter] = useState<string[]>([]);
   const {
     multiInstance,
@@ -71,6 +73,12 @@ const MovieView: FunctionComponent = () => {
     defaultId: instanceDefaultId,
     options: instanceOptions,
   } = useArrInstanceLabels("radarr");
+
+  // A movie is complete when nothing is missing.
+  const subtitlesComplete = useCallback(
+    (movie: Item.Movie) => movie.missing_subtitles.length === 0,
+    [],
+  );
 
   const query = useMoviesPagination(true);
   const { data: upgradableData } = useUpgradableItems();
@@ -564,6 +572,9 @@ const MovieView: FunctionComponent = () => {
         onAudioLanguagesChange={setAudioLanguages}
         excludeLanguages={excludeLanguages}
         onExcludeLanguagesChange={setExcludeLanguages}
+        subtitlesFilter={subtitlesFilter}
+        onSubtitlesFilterChange={setSubtitlesFilter}
+        subtitlesComplete={subtitlesComplete}
         instanceOptions={multiInstance ? instanceOptions : undefined}
         instanceValues={instanceFilter}
         onInstanceValuesChange={setInstanceFilter}

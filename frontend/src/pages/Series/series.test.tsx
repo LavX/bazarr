@@ -185,3 +185,143 @@ describe("Series toolbar band", () => {
     ).toBeInTheDocument();
   });
 });
+
+function seriesWith(
+  id: number,
+  title: string,
+  episodeFileCount: number,
+  episodeMissingCount: number,
+): Item.Series {
+  return {
+    ...series(id, title),
+    episodeFileCount,
+    episodeMissingCount,
+  };
+}
+
+// The Subtitles filter keeps rows whose completeness matches the choice. A
+// series is complete when no episode is missing; one with no episode files has
+// nothing that can be missing, so it counts as complete too.
+describe("Series subtitles filter", () => {
+  const complete = seriesWith(1, "Northern Light", 10, 0);
+  const missing = seriesWith(2, "The Long Shore", 10, 3);
+  const empty = seriesWith(3, "Glass Harbour", 0, 0);
+
+  beforeEach(() => {
+    server.use(
+      http.get("/api/series", () =>
+        HttpResponse.json({
+          data: [complete, missing, empty],
+          total: 3,
+        }),
+      ),
+    );
+  });
+
+  async function openFilters(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(
+      await screen.findByRole("button", { name: "Toggle filters" }),
+    );
+  }
+
+  // The dropdown never settles in jsdom, so a click focuses without opening and
+  // the list stays out of the accessibility tree: open with ArrowDown and query
+  // the options hidden, the way the other select-driven page tests do.
+  async function pickSubtitles(
+    user: ReturnType<typeof userEvent.setup>,
+    option: string,
+  ) {
+    const input = screen.getByRole("combobox", { name: "Subtitles" });
+    await user.click(input);
+    if (input.getAttribute("aria-expanded") !== "true")
+      await user.keyboard("{ArrowDown}");
+    const controlled = input.getAttribute("aria-controls");
+    const listboxes = await screen.findAllByRole("listbox", { hidden: true });
+    const listbox =
+      listboxes.find((box) => box.getAttribute("id") === controlled) ??
+      listboxes[0];
+    await user.click(
+      within(listbox).getByRole("option", { name: option, hidden: true }),
+    );
+  }
+
+  it("keeps only complete series when Complete is chosen", async () => {
+    const user = userEvent.setup();
+    customRender(<SeriesView />);
+    await screen.findByRole("link", { name: "The Long Shore" });
+
+    await openFilters(user);
+    await pickSubtitles(user, "Complete");
+
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "The Long Shore" })).toBeNull(),
+    );
+    expect(
+      screen.getByRole("link", { name: "Northern Light" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps only series still missing episodes when Missing some is chosen", async () => {
+    const user = userEvent.setup();
+    customRender(<SeriesView />);
+    await screen.findByRole("link", { name: "Northern Light" });
+
+    await openFilters(user);
+    await pickSubtitles(user, "Missing some");
+
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "Northern Light" })).toBeNull(),
+    );
+    expect(
+      screen.getByRole("link", { name: "The Long Shore" }),
+    ).toBeInTheDocument();
+  });
+
+  it("counts a series with no episode files as complete", async () => {
+    const user = userEvent.setup();
+    customRender(<SeriesView />);
+    await screen.findByRole("link", { name: "Glass Harbour" });
+
+    await openFilters(user);
+    // Nothing can be missing, so it stays under Complete...
+    await pickSubtitles(user, "Complete");
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "The Long Shore" })).toBeNull(),
+    );
+    expect(
+      screen.getByRole("link", { name: "Glass Harbour" }),
+    ).toBeInTheDocument();
+
+    // ...and drops out under Missing some.
+    await pickSubtitles(user, "Missing some");
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "Glass Harbour" })).toBeNull(),
+    );
+    expect(
+      screen.getByRole("link", { name: "The Long Shore" }),
+    ).toBeInTheDocument();
+  });
+
+  it("restores every series when the Subtitles chip is removed", async () => {
+    const user = userEvent.setup();
+    customRender(<SeriesView />);
+    await screen.findByRole("link", { name: "Northern Light" });
+
+    await openFilters(user);
+    await pickSubtitles(user, "Missing some");
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "Northern Light" })).toBeNull(),
+    );
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "Remove filter: Subtitles: Missing some",
+      }),
+    );
+
+    await screen.findByRole("link", { name: "Northern Light" });
+    expect(
+      screen.getByRole("link", { name: "The Long Shore" }),
+    ).toBeInTheDocument();
+  });
+});
