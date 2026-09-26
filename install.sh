@@ -274,32 +274,225 @@ check_existing() {
   [[ -f "$dir/docker-compose.yml" ]] || return 1
   printf "\n"
   info "Existing installation found in $dir"
-  printf "  ${BLD}[u]${RST} Upgrade (pull latest images, restart)\n" >&2
+  printf "  ${BLD}[u]${RST} Upgrade (back up, pull latest images, restart)\n" >&2
   printf "  ${BLD}[r]${RST} Reinstall (backup config, full setup)\n" >&2
   printf "  ${BLD}[q]${RST} Quit\n\n" >&2
   local choice
   printf "${BLD}Choice${RST}: " >&2; read -r choice </dev/tty
   case "${choice,,}" in
     u) do_upgrade "$dir"; exit 0 ;;
-    r) do_backup "$dir" ;;
+    r) do_backup "$dir"
+       run_with_spinner "Starting services again" sudo docker compose -f "$dir/docker-compose.yml" start \
+         || warn "Could not start the old services. Setup starts them again when it finishes." ;;
     *) info "Exiting."; exit 0 ;;
   esac
 }
 
+PG_BACKUP_DOCS="https://github.com/LavX/bazarr/blob/master/docs/postgresql-backups.md"
+
+# The helpers below read `docker compose config`, where Docker has already merged env_file
+# into each service and filled in ${VARS}. That output holds secrets from .env, so it is
+# only ever parsed here, never printed.
+compose_services() {
+  printf '%s\n' "$1" | awk '/^services:/ { s = 1; next } /^[^ ]/ { s = 0 }
+    s && /^  [^ ]/ { c = $1; sub(/:$/, "", c); print c }'
+}
+
+# The service that runs the Bazarr+ image ("bazarr" in the compose file this script writes).
+compose_bazarr_service() {
+  printf '%s\n' "$1" | awk '/^services:/ { s = 1; next } /^[^ ]/ { s = 0 } !s { next }
+    /^  [^ ]/ { c = $1; sub(/:$/, "", c); next }
+    /^    image: .*lavx\/bazarr/ { print c; exit }'
+}
+
+# One environment value of one service.
+compose_env() {
+  printf '%s\n' "$1" | awk -v svc="$2" -v key="$3" '
+    /^services:/ { s = 1; next }
+    /^[^ ]/ { s = 0 }
+    !s { next }
+    /^  [^ ]/ { c = $1; sub(/:$/, "", c); e = 0; next }
+    c != svc { next }
+    /^    [^ ]/ { e = ($1 == "environment:"); next }
+    e && $1 == key ":" { $1 = ""; sub(/^ +/, ""); gsub(/^"|"$/, ""); print; exit }'
+}
+
+# The type and source, tab-separated, of what the Bazarr+ service mounts at /config. Printed
+# empty when there is none. `docker compose config` writes every mount out in long form, with
+# ${CONFIG_PATH} filled in and a relative path made absolute, so a bind source is the
+# directory the container uses.
+compose_config_mount() {
+  printf '%s\n' "$1" | awk -v svc="$2" '
+    function flush() {
+      if (!done && target == "/config" && type != "") { print type "\t" source; done = 1 }
+      type = ""; source = ""; target = ""
+    }
+    /^services:/ { s = 1; next }
+    /^[^ ]/ { flush(); s = 0 }
+    !s { next }
+    /^  [^ ]/ { flush(); c = $1; sub(/:$/, "", c); v = 0; next }
+    c != svc { next }
+    /^    [^ ]/ { flush(); v = ($1 == "volumes:"); next }
+    !v { next }
+    /^      - / { flush(); sub(/^      - /, "        ") }
+    /^        [^ ]/ {
+      key = $1; value = $0; sub(/^ *[^ ]+ */, "", value); gsub(/^"|"$/, "", value)
+      if (key == "type:") type = value
+      else if (key == "source:") source = value
+      else if (key == "target:") target = value
+    }
+    END { flush() }'
+}
+
+# postgresql.<key> from Bazarr's config.yaml.
+config_postgres_value() {
+  [[ -f "$1" ]] || return 0
+  awk -v key="$2" -v q="'" '/^postgresql:/ { s = 1; next } /^[^ #]/ { s = 0 }
+    s && $1 == key ":" { $1 = ""; sub(/^ +/, ""); gsub("^[\"" q "]|[\"" q "]$", ""); print; exit }' "$1"
+}
+
+# Works out which database the existing install uses, the way Bazarr+ itself decides:
+# the POSTGRES_* environment wins over config.yaml, and POSTGRES_URL fills in what is left.
+# Sets DB_ENGINE to sqlite, postgres (DB_SERVICE in this compose stack holds DB_NAME) or
+# external (a PostgreSQL server outside the stack, which this script cannot back up).
+# Also sets CONFIG_DIR, the host directory mounted at /config: ./config unless the compose
+# file mounts another one, as CONFIG_PATH in the reference compose file does. A /config that
+# is not a host directory, such as a named volume, ends the script: there is nothing here to
+# copy, and falling back to ./config would back up the wrong folder or none at all.
+detect_database() {
+  local dir="$1" config svc enabled host database url rest yaml mount mount_type
+  DB_ENGINE=sqlite; DB_SERVICE=""; DB_NAME=""; DB_OTHER_SERVICES=()
+  config=$(sudo docker compose -f "$dir/docker-compose.yml" config 2>/dev/null) \
+    || fatal "Could not read $dir/docker-compose.yml. Nothing was changed."
+  svc=$(compose_bazarr_service "$config"); svc="${svc:-bazarr}"
+  mount=$(compose_config_mount "$config" "$svc")
+  mount_type="${mount%%$'\t'*}"; CONFIG_DIR="${mount#*$'\t'}"
+  if [[ -n "$mount" && "$mount_type" != bind ]]; then
+    fatal "Bazarr+ keeps /config in a Docker $mount_type${CONFIG_DIR:+ ($CONFIG_DIR)}, not a host directory, so this installer cannot back it up. Your running containers were not changed. Back it up yourself, then upgrade with: docker compose -f $dir/docker-compose.yml pull && docker compose -f $dir/docker-compose.yml up -d"
+  fi
+  CONFIG_DIR="${CONFIG_DIR:-$dir/config}"
+  yaml="$CONFIG_DIR/config/config.yaml"
+  enabled=$(compose_env "$config" "$svc" POSTGRES_ENABLED)
+  [[ -n "$enabled" ]] || enabled=$(config_postgres_value "$yaml" enabled)
+  [[ "${enabled,,}" == "true" ]] || return 0
+
+  DB_ENGINE=external
+  host=$(compose_env "$config" "$svc" POSTGRES_HOST)
+  [[ -n "$host" ]] || host=$(config_postgres_value "$yaml" host)
+  database=$(compose_env "$config" "$svc" POSTGRES_DATABASE)
+  [[ -n "$database" ]] || database=$(config_postgres_value "$yaml" database)
+  url=$(compose_env "$config" "$svc" POSTGRES_URL)
+  [[ -n "$url" ]] || url=$(config_postgres_value "$yaml" url)
+  if [[ -n "$url" ]]; then
+    rest="${url#*://}"; rest="${rest##*@}"
+    [[ -n "$host" ]] || { host="${rest%%[/?]*}"; host="${host%:*}"; }
+    if [[ -z "$database" && "$rest" == */* ]]; then
+      database="${rest#*/}"; database="${database%%\?*}"
+    fi
+  fi
+  if [[ -n "$host" && -n "$database" && "$host" != "$svc" ]] \
+     && compose_services "$config" | grep -qxF -- "$host"; then
+    DB_ENGINE=postgres; DB_SERVICE="$host"; DB_NAME="$database"
+    mapfile -t DB_OTHER_SERVICES < <(compose_services "$config" | grep -vxF -- "$host")
+  fi
+}
+
+# Runs pg_dump inside the database container as its superuser, so no password is put on
+# a command line here. A dump that fails or comes out empty is removed, not kept. The dump
+# holds secrets, so it is created 0600 (umask 077 in a subshell, so the rest of the script
+# keeps its umask).
+dump_postgres() {
+  local compose="$1" service="$2" database="$3" file="$4"
+  # The redirect runs as this user on purpose: the backup folder is this user's.
+  # shellcheck disable=SC2024
+  if ( umask 077
+       sudo docker compose -f "$compose" exec -T "$service" sh -c \
+         'PGPASSWORD="${POSTGRES_PASSWORD:-}" exec pg_dump --username="${POSTGRES_USER:-postgres}" --no-password --format=custom --dbname="$1"' \
+         sh "$database" > "$file" ) && [[ -s "$file" ]]; then
+    return 0
+  fi
+  rm -f "$file"
+  return 1
+}
+
+# Ends the script after a failed backup step, starting the old containers again first.
+# `start`, not `up -d`: after the upgrade's pull, `up -d` would recreate the services on
+# the new images, which is the upgrade this backup was supposed to protect.
+restart_and_fail() {
+  local compose="$1" why="$2"
+  if run_with_spinner "Starting the old services again" sudo docker compose -f "$compose" start; then
+    fatal "$why Nothing was upgraded or reinstalled, and the old services were started again."
+  fi
+  fatal "$why Nothing was upgraded or reinstalled, and the old services did not start again. Start them with: docker compose -f $compose start"
+}
+
+# Backs up docker-compose.yml, .env, the config directory and the database. The services are stopped
+# first so the SQLite database is not copied mid-write, and a PostgreSQL database in this
+# compose stack is dumped once Bazarr+ has stopped. Any failed step ends the script before
+# anything is upgraded or reinstalled, with the old services started again. The summary
+# names only what was actually backed up.
 do_backup() {
   local dir="$1" ts; ts=$(date +%Y%m%d_%H%M%S)
-  local backup="${dir}/backup_${ts}"
-  mkdir -p "$backup"
-  cp -a "$dir/docker-compose.yml" "$backup/" 2>/dev/null
-  cp -a "$dir/.env" "$backup/" 2>/dev/null
-  success "Config backed up to $backup"
+  local backup="${dir}/backup_${ts}" compose="${dir}/docker-compose.yml"
+  local saved=("docker-compose.yml") database_item="" list i config_item
+  detect_database "$dir"
+  config_item="$CONFIG_DIR"; [[ "$CONFIG_DIR" == "$dir/config" ]] && config_item="./config"
+  if [[ "$DB_ENGINE" == external ]]; then
+    warn "Bazarr+ uses a PostgreSQL database outside this compose stack. This backup does NOT include it."
+    warn "Back the database up with pg_dump first: $PG_BACKUP_DOCS"
+    confirm "Continue without a database backup?" \
+      || { info "Nothing was upgraded or reinstalled. Back up the database, then run the installer again."; exit 0; }
+  fi
+  # 0700: the backup holds .env, config.yaml and possibly a database dump, all with secrets.
+  ( umask 077 && mkdir -p "$backup" ) || fatal "Cannot create backup directory: $backup"
+  cp -a "$compose" "$backup/" || fatal "Could not back up docker-compose.yml. Nothing was changed."
+  if [[ -f "$dir/.env" ]]; then
+    cp -a "$dir/.env" "$backup/" || fatal "Could not back up .env. Nothing was changed."
+    saved+=(".env")
+  fi
+
+  if [[ "$DB_ENGINE" == postgres ]]; then
+    if (( ${#DB_OTHER_SERVICES[@]} )); then
+      run_with_spinner "Stopping Bazarr+ for the database dump" \
+        sudo docker compose -f "$compose" stop "${DB_OTHER_SERVICES[@]}" \
+        || restart_and_fail "$compose" "Could not stop the services, so the database was not dumped."
+    fi
+    run_with_spinner "Dumping the PostgreSQL database" \
+      dump_postgres "$compose" "$DB_SERVICE" "$DB_NAME" "$backup/bazarr_postgres.dump" \
+      || restart_and_fail "$compose" "Dumping the PostgreSQL database failed, so there is no database backup."
+    database_item="the PostgreSQL database (bazarr_postgres.dump)"
+  fi
+
+  if [[ -d "$CONFIG_DIR" ]]; then
+    run_with_spinner "Stopping services for the backup" sudo docker compose -f "$compose" stop \
+      || restart_and_fail "$compose" "Could not stop the services, so $config_item was not backed up."
+    run_with_spinner "Backing up $config_item" sudo cp -a "$CONFIG_DIR" "$backup/config" \
+      || restart_and_fail "$compose" "Backing up $config_item failed."
+    saved+=("$config_item")
+    if [[ "$DB_ENGINE" == sqlite && -f "$CONFIG_DIR/db/bazarr.db" ]]; then
+      database_item="the SQLite database inside it"
+    fi
+  else
+    warn "The config directory $CONFIG_DIR does not exist, so it was not backed up."
+  fi
+  [[ -n "$database_item" ]] && saved+=("$database_item")
+
+  list="${saved[0]}"
+  for (( i = 1; i < ${#saved[@]}; i++ )); do
+    if (( i == ${#saved[@]} - 1 )); then list+=" and ${saved[i]}"; else list+=", ${saved[i]}"; fi
+  done
+  success "Backed up $list to $backup"
+  if [[ "$DB_ENGINE" == external ]]; then
+    warn "The PostgreSQL database is NOT in this backup. See $PG_BACKUP_DOCS"
+  fi
 }
 
 do_upgrade() {
   local dir="$1"
-  do_backup "$dir"
-  cd "$dir"
+  cd "$dir" || fatal "Cannot enter $dir"
+  # Pull while the old version keeps running, so a failed pull changes nothing.
   run_with_spinner "Pulling latest images" sudo docker compose pull || fatal "Pull failed"
+  do_backup "$dir"
   run_with_spinner "Restarting services" sudo docker compose up -d || fatal "Restart failed"
   printf "\n"
   success "Upgrade complete."
@@ -384,6 +577,17 @@ __BAZARR_DEPENDS__
       - ./config:/config
 __MOVIES_VOLUME__
 __TV_VOLUME__
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:6767/_supervisor/status | grep -q '\''\"running\"'\''"]
       interval: 30s
@@ -639,7 +843,8 @@ ENC_KEY=""
 write_env "$INSTALL_DIR" "$PUID" "$PGID" "$TZ" "$API_KEY" "$ENC_KEY"
 success "Created .env (mode 600)"
 
-generate_config "$INSTALL_DIR"
+# ./config is mounted as /config, and Bazarr+ reads /config/config/config.yaml.
+generate_config "$INSTALL_DIR/config"
 
 generate_compose "$BAZARR_PORT" "$MOVIES_PATH" "$TV_PATH" "$TRANSLATOR" "$TRANSLATOR_PORT" "$FLARESOLVERR" \
   > docker-compose.yml

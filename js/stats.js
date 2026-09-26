@@ -165,6 +165,17 @@
     });
   }
 
+  /* The catalog also carries a test fixture (SmokeHub) whose manifest is marked
+     "smoketest". It is not a real provider, so it is left out by the same rule
+     the setup wizard uses to hide it. site-stats.yml applies the identical
+     filter to data/stats.json; keep the two in step. */
+  function countProviders(list) {
+    return list.filter(function (entry) {
+      var m = (entry && entry.manifest) || {};
+      return !/smoketest/i.test([m.provider_id, m.name, m.description].join(" "));
+    }).length;
+  }
+
   function fromApi() {
     var gh = { headers: { Accept: "application/vnd.github+json" } };
     return Promise.all([
@@ -180,7 +191,7 @@
       if (rel && rel.tag_name) {
         out.release = { tag: rel.tag_name, url: rel.html_url, published: rel.published_at };
       }
-      if (cat && cat.providers) out.providers = cat.providers.length;
+      if (cat && cat.providers) out.providers = countProviders(cat.providers);
       return out;
     });
   }
