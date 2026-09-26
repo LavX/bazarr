@@ -93,6 +93,19 @@ That is the whole design: the failure mode is refusal, never a guess in the
 permissive direction. It costs some friction when the workflow grows a new
 shape, and it buys the property the five previous versions did not have.
 
+There is one condition the guard accepts on a job without it being always
+true, and one expression it accepts as a matrix dimension: the Plan job's
+`code` output and its Python version list. Plan exists so a pull request that
+only touches documentation stops waiting for the backend, and so a pull request
+into development runs one Python version instead of three. Both are ways to run
+fewer tests, so neither is taken on trust. The job has to be exactly a checkout
+followed by the committed planner, handing its outputs on unchanged, and every
+job relying on it has to `need` it. The planner is then imported and asked:
+about every file a test can depend on, named here rather than by the planner,
+and about every event with an unreadable, empty and documentation-only change.
+A planner that would skip a suite for any of them, or hand back an empty
+version list, is untrusted, and every job gated on it grants nothing.
+
 Coverage is also grounded in the filesystem rather than in string matching. A
 positional argument is expanded against the repo: `tests/compat/` covers the
 files that are really under it, a glob covers what it really matches, and a
@@ -139,9 +152,19 @@ workflow can reach, and no amount of parsing gets to them:
   unrun rather than as moved, and it reads no other workflow file at all.
 - Whether the run passed, or how many tests it collected. A path handed to
   pytest and a suite that really executed are not the same claim.
+- A new document a test starts reading. _DOCUMENTS_TESTS_READ names the ones
+  known today; a test that opens another file the planner calls documentation
+  is skipped by a pull request or a push that changes only that file, until it
+  is added there and to the planner's TESTED_DOCUMENTS. The next run that
+  touches code, and the weekly scheduled run, still run it.
+- Whether git reported the change list correctly. The planner's use of git is
+  covered by tests/bazarr/test_ci_plan.py, and it fails towards running
+  everything, but reading a diff is not something a workflow parser can check.
 """
 
 import configparser
+import importlib.util
+import os
 import pathlib
 import re
 import shlex
@@ -468,6 +491,59 @@ _ALWAYS_RUNS = {
     True, "true", "always()", "${{ always() }}", "${{always()}}",
     "success()", "${{ success() }}", "${{success()}}",
 }
+# The one conditional job, and the one expression-valued matrix, that still
+# count as coverage: the ones decided by the Plan job. Both are matched exactly,
+# like _ALWAYS_RUNS, and both are accepted only on a job that needs Plan, and
+# only while Plan is exactly the job described below and its script classifies
+# every file a test can depend on as code. See _plan_problem.
+#
+# Why accept a condition at all, when `if:` is the oldest hole in this file: a
+# documentation-only pull request used to wait forty minutes for a backend
+# matrix that could not be affected by it, and the queue that built up behind
+# those runs is what made the checks slow enough to be worked around. The
+# condition is safe for the same reason `success()` is: it is false only for a
+# change the guard has proved cannot reach a test, and it is true, by
+# construction, whenever the plan could not be read at all.
+_PLAN_JOB = "changes"
+_PLAN_STEP_ID = "plan"
+# Repository-relative path of the planning script. Module-level so a case can
+# point it at a planner that misbehaves.
+PLAN_SCRIPT = pathlib.Path(".github/scripts/ci_plan.py")
+_PLAN_COMMAND = "python3 .github/scripts/ci_plan.py"
+_PLAN_OUTPUTS = {
+    "code": "${{ steps.plan.outputs.code }}",
+    "python": "${{ steps.plan.outputs.python }}",
+}
+_PLANNED_CONDITIONS = frozenset({"${{ needs.changes.outputs.code == 'true' }}"})
+_PLANNED_MATRIX = "${{ fromJSON(needs.changes.outputs.python) }}"
+# The checkout Plan may do before it runs the script. Nothing else: any other
+# step, even one that looks harmless, could rewrite the script or its inputs.
+_PLAN_CHECKOUT = "actions/checkout@"
+_PLAN_CHECKOUT_INPUTS = {"fetch-depth", "persist-credentials"}
+# Files the guard knows a test reads that are not Python. A planner that calls
+# one of them documentation would skip the test that reads it.
+# tests/bazarr/test_container_hardening.py reads all three.
+_DOCUMENTS_TESTS_READ = frozenset({
+    "README.md",
+    "site/install.sh",
+    "site/guides/getting-started.html",
+})
+# Files that decide what the suites install and run, whatever they are called.
+_FILES_THAT_DECIDE_A_RUN = frozenset({
+    "requirements.txt",
+    "dev-requirements.txt",
+    "postgres-requirements.txt",
+    "Dockerfile",
+    ".github/workflows/ci.yml",
+    ".github/scripts/ci_plan.py",
+    ".github/scripts/build_test.sh",
+    "frontend/package.json",
+    "frontend/package-lock.json",
+    "frontend/vite.config.ts",
+    "frontend/.nvmrc",
+})
+# Trees whose every file is code or test input.
+_CODE_TREES = ("tests", "bazarr", "custom_libs", "migrations", "frontend/src")
 # `working-directory` values that leave every path in the script meaning what it
 # says. Anything else is refused, because the guard resolves paths against the
 # repository root.
@@ -1156,9 +1232,18 @@ def _neuters_pytest(name: str) -> bool:
 
 
 def _scope_problem(
-    kind: str, name: str, scope: dict, safe_keys: set, restrict_env: bool = False
+    kind: str,
+    name: str,
+    scope: dict,
+    safe_keys: set,
+    restrict_env: bool = False,
+    jobs: dict = None,
 ) -> str:
-    """Why this workflow, job or step cannot be counted as guaranteed coverage."""
+    """Why this workflow, job or step cannot be counted as guaranteed coverage.
+
+    `jobs` is the workflow's jobs, passed for a job so a condition or a matrix
+    decided by the Plan job can be checked against that job.
+    """
     if not isinstance(scope, dict):
         return f"{kind} {name} is not a mapping"
 
@@ -1171,11 +1256,20 @@ def _scope_problem(
         )
 
     condition = scope.get("if")
-    if condition is not None and condition not in _ALWAYS_RUNS:
+    if (
+        kind == "job"
+        and isinstance(condition, str)
+        and condition in _PLANNED_CONDITIONS
+    ):
+        planned = _planned_problem(name, scope, jobs, f"`if: {condition}`")
+        if planned:
+            return planned
+    elif condition is not None and condition not in _ALWAYS_RUNS:
         return (
             f"{kind} {name} carries `if: {condition}`, so it may not run and "
             "cannot count as guaranteed coverage. Only an exactly unconditional "
-            "`if` counts, such as always()"
+            "`if` counts, such as always(), or on a job, the Plan job's "
+            f"{sorted(_PLANNED_CONDITIONS)[0]}"
         )
     if scope.get("continue-on-error"):
         return (
@@ -1220,7 +1314,7 @@ def _scope_problem(
                 "it to _ALLOWED_TEST_ENV"
             )
     if kind == "job":
-        return _runs_on_problem(name, scope) or _strategy_problem(name, scope)
+        return _runs_on_problem(name, scope) or _strategy_problem(name, scope, jobs)
     return ""
 
 
@@ -1283,7 +1377,7 @@ def _runs_on_problem(name: str, job: dict) -> str:
     )
 
 
-def _strategy_problem(name: str, job: dict) -> str:
+def _strategy_problem(name: str, job: dict, jobs: dict = None) -> str:
     """A matrix with no combination left runs the job zero times.
 
     `strategy` was safe-listed with its value unread, so emptying
@@ -1304,7 +1398,12 @@ def _strategy_problem(name: str, job: dict) -> str:
         )
     if "matrix" not in strategy:
         return ""
-    combinations, problem = _matrix_combinations(strategy["matrix"])
+    matrix = strategy["matrix"]
+    if isinstance(matrix, dict) and _PLANNED_MATRIX in matrix.values():
+        planned = _planned_problem(name, job, jobs, f"the matrix {_PLANNED_MATRIX}")
+        if planned:
+            return planned
+    combinations, problem = _matrix_combinations(matrix)
     if problem:
         return f"job {name} carries a matrix the guard cannot read: {problem}"
     if not combinations:
@@ -1323,12 +1422,19 @@ def _matrix_combinations(matrix) -> tuple:
     minus the `exclude` entries that cover a whole combination. `include` is not
     modelled, so a matrix that ends up empty and carries one is refused rather
     than guessed at.
+
+    The Plan job's version list is read as one row. The caller has already
+    checked that the job needs Plan and that the planner never returns an empty
+    list, and the guard counts files, not versions.
     """
     if not isinstance(matrix, dict):
         return [], f"{matrix!r} is not a mapping"
     dimensions = {}
     for key, value in matrix.items():
         if key in {"include", "exclude"}:
+            continue
+        if value == _PLANNED_MATRIX:
+            dimensions[key] = [value]
             continue
         if isinstance(value, str) and "${{" in value:
             return [], (
@@ -1491,12 +1597,205 @@ def _dependency_problems(job_name: str, jobs: dict) -> list:
                 )
                 continue
             problem = _scope_problem(
-                "job", f"{name}, which {current} needs,", jobs[name], _SAFE_JOB_KEYS
+                "job",
+                f"{name}, which {current} needs,",
+                jobs[name],
+                _SAFE_JOB_KEYS,
+                jobs=jobs,
             )
             if problem:
                 problems.append(problem)
             queue.append(name)
     return problems
+
+
+def _planned_problem(name: str, job: dict, jobs, what: str) -> str:
+    """"" when this job may rely on a Plan output, or why it may not.
+
+    The output is only there for a job that needs Plan. Without the `needs:`,
+    `needs.changes.outputs.code` is an empty string, the condition is false on
+    every run, and the job is skipped for good without failing anything.
+    """
+    needs = job.get("needs")
+    names = [needs] if isinstance(needs, str) else needs
+    if not isinstance(names, list) or _PLAN_JOB not in names:
+        return (
+            f"job {name} relies on {what} but does not need {_PLAN_JOB}, so the "
+            "output is empty on every run: the job is skipped, it fails "
+            "nothing, and every path it enumerates would still read as coverage"
+        )
+    if not isinstance(jobs, dict):
+        return (
+            f"job {name} relies on {what}, and the guard was not handed the "
+            "workflow's jobs, so it cannot check the Plan job behind it"
+        )
+    problem = _plan_problem(jobs)
+    if problem:
+        return f"job {name} relies on {what}, and Plan cannot be trusted: {problem}"
+    return ""
+
+
+_PLAN_MEMO = {}
+
+
+def _plan_problem(jobs: dict) -> str:
+    """Why the Plan job's outputs cannot be relied on, or "" when they can.
+
+    Two halves. The job has to be exactly the shape that runs the committed
+    planner and hands its outputs on unchanged, and the planner, imported and
+    called here, has to classify every file a test can depend on as code, and
+    never hand back an empty version list. The answer depends only on the job
+    and the repository, so it is worked out once per shape.
+    """
+    job = jobs.get(_PLAN_JOB)
+    key = (str(REPO_ROOT), str(PLAN_SCRIPT), yaml.safe_dump(job, sort_keys=True))
+    if key not in _PLAN_MEMO:
+        _PLAN_MEMO[key] = _plan_job_problem(job) or _planner_problem()
+    return _PLAN_MEMO[key]
+
+
+def _plan_job_problem(job) -> str:
+    if not isinstance(job, dict):
+        return f"the workflow defines no {_PLAN_JOB} job"
+    problem = _scope_problem("job", _PLAN_JOB, job, _SAFE_JOB_KEYS)
+    if problem:
+        return problem
+    if job.get("if") is not None or job.get("needs") is not None:
+        return (
+            f"{_PLAN_JOB} carries `if:` or `needs:`, so whether it runs is "
+            "decided somewhere else"
+        )
+    outputs = job.get("outputs") or {}
+    if not isinstance(outputs, dict) or any(
+        outputs.get(key) != value for key, value in _PLAN_OUTPUTS.items()
+    ):
+        return (
+            f"{_PLAN_JOB} does not hand on the plan step's outputs unchanged: "
+            f"expected {_PLAN_OUTPUTS}, found {outputs!r}"
+        )
+    steps = job.get("steps") or []
+    if not isinstance(steps, list) or not steps:
+        return f"{_PLAN_JOB} has no steps"
+    *before, last = steps
+    for step in before:
+        if (
+            not isinstance(step, dict)
+            or set(step) - {"name", "uses", "with"}
+            or not str(step.get("uses", "")).startswith(_PLAN_CHECKOUT)
+            or set(step.get("with") or {}) - _PLAN_CHECKOUT_INPUTS
+        ):
+            return (
+                f"{_PLAN_JOB} runs {step!r} before the plan. Only a checkout "
+                f"taking {sorted(_PLAN_CHECKOUT_INPUTS)} is accepted there, "
+                "because any other step can rewrite the planner or its inputs"
+            )
+    if (
+        not isinstance(last, dict)
+        or set(last) - {"name", "id", "run"}
+        or last.get("id") != _PLAN_STEP_ID
+        or str(last.get("run", "")).strip() != _PLAN_COMMAND
+    ):
+        return (
+            f"the last step of {_PLAN_JOB} has to be exactly "
+            f"`id: {_PLAN_STEP_ID}` running `{_PLAN_COMMAND}`, found {last!r}"
+        )
+    return ""
+
+
+def _load_planner():
+    path = REPO_ROOT / PLAN_SCRIPT
+    spec = importlib.util.spec_from_file_location("_ci_plan_under_guard", path)
+    if spec is None or not path.is_file():
+        raise _Unverifiable(f"{PLAN_SCRIPT} does not exist")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as error:  # any failure means the planner cannot be trusted
+        raise _Unverifiable(f"{PLAN_SCRIPT} cannot be imported: {error!r}")
+    return module
+
+
+def _files_a_test_can_depend_on() -> set:
+    """What a planner must never call documentation.
+
+    Stated here rather than read from the planner, so a planner that widens its
+    idea of documentation is caught by something it does not control: every
+    test file and everything else under the test tree, every Python file,
+    everything under the application's source trees, the documents a test is
+    known to read, and the files that decide what the suites install and run.
+    """
+    found = set(_all_test_files()) | _DOCUMENTS_TESTS_READ | _FILES_THAT_DECIDE_A_RUN
+    for tree in _CODE_TREES:
+        found |= {
+            match.relative_to(REPO_ROOT).as_posix()
+            for match in _glob(tree + "/**/*")
+            if _path_kind(match) == "file"
+        }
+    for directory, subdirectories, names in os.walk(REPO_ROOT):
+        subdirectories[:] = [
+            entry
+            for entry in subdirectories
+            if not entry.startswith(".") and entry != "node_modules"
+        ]
+        root = pathlib.Path(directory)
+        found |= {
+            (root / entry).relative_to(REPO_ROOT).as_posix()
+            for entry in names
+            if entry.endswith(".py")
+        }
+    return found
+
+
+_PLANNED_EVENTS = (
+    ("pull_request", "development"),
+    ("pull_request", "master"),
+    ("pull_request", "feature/some-stacked-base"),
+    ("push", ""),
+    ("schedule", ""),
+    ("workflow_dispatch", ""),
+    ("merge_group", ""),
+)
+
+
+def _planner_problem() -> str:
+    try:
+        planner = _load_planner()
+    except _Unverifiable as refusal:
+        return str(refusal)
+    plan = getattr(planner, "plan", None)
+    if not callable(plan):
+        return f"{PLAN_SCRIPT} defines no plan() function"
+    try:
+        for event, base in _PLANNED_EVENTS:
+            for changed in (None, [], ["docs/some-page.md"]):
+                decision = plan(event, base, changed)
+                versions = decision.get("python")
+                if (
+                    not isinstance(versions, list)
+                    or not versions
+                    or not all(isinstance(v, str) and v for v in versions)
+                ):
+                    return (
+                        f"plan({event!r}, {base!r}, {changed!r}) returns the "
+                        f"version list {versions!r}, and an empty matrix runs "
+                        "every backend job zero times"
+                    )
+                if changed != ["docs/some-page.md"] and decision.get("code") is not True:
+                    return (
+                        f"plan({event!r}, {base!r}, {changed!r}) skips the "
+                        "suites for a change it could not read, which is the "
+                        "direction the planner must never fail in"
+                    )
+            for name in sorted(_files_a_test_can_depend_on()):
+                if plan(event, base, [name], image_python="3.14").get("code") is not True:
+                    return (
+                        f"plan({event!r}, {base!r}, [{name!r}]) calls {name} "
+                        "documentation and skips the suites, but a test can "
+                        "depend on it"
+                    )
+    except Exception as error:  # a planner that raises is untrusted
+        return f"{PLAN_SCRIPT} raised {error!r} when asked for a plan"
+    return ""
 
 
 def _ini_settings(path: pathlib.Path, section: str) -> dict:
@@ -1637,7 +1936,7 @@ def _read_workflow() -> tuple:
             continue
 
         job_problem = _scope_problem(
-            "job", job_name, job, _SAFE_JOB_KEYS, restrict_env=True
+            "job", job_name, job, _SAFE_JOB_KEYS, restrict_env=True, jobs=jobs
         )
         if job_problem:
             problems.append(job_problem)
@@ -2597,7 +2896,7 @@ def test_needs_naming_a_job_that_does_not_exist_is_not_coverage(constructed_work
 
 
 def test_needs_a_healthy_job_is_still_coverage(constructed_workflow):
-    """The real workflow's Backend needs Frontend, so this must not false-alarm."""
+    """The real workflow's backend jobs need the UI build job, so this must not false-alarm."""
     constructed_workflow(
         {
             "on": {"pull_request": None},
@@ -2689,6 +2988,208 @@ def test_a_matrix_with_rows_left_is_still_coverage(constructed_workflow):
     )
     covered, problems = _read_workflow()
     assert covered == {_REAL} and not problems
+
+
+_GATE = sorted(_PLANNED_CONDITIONS)[0]
+
+
+def _plan_job() -> dict:
+    return {
+        "name": "Plan",
+        "runs-on": "ubuntu-latest",
+        "outputs": dict(_PLAN_OUTPUTS, docs="${{ steps.plan.outputs.docs }}"),
+        "steps": [
+            {
+                "name": "Checkout repository",
+                "uses": "actions/checkout@v7",
+                "with": {"fetch-depth": 2, "persist-credentials": False},
+            },
+            {"name": "Plan", "id": _PLAN_STEP_ID, "run": _PLAN_COMMAND + "\n"},
+        ],
+    }
+
+
+def _planned_workflow(plan: dict = None, **job) -> dict:
+    """The real workflow's shape: a Plan job, and a test job gated on it."""
+    job.setdefault("runs-on", "ubuntu-latest")
+    job.setdefault("needs", [_PLAN_JOB])
+    job.setdefault("if", _GATE)
+    job.setdefault(
+        "strategy", {"fail-fast": False, "matrix": {"python-version": _PLANNED_MATRIX}}
+    )
+    jobs = {"backend": dict(job, steps=[{"run": f"pytest {_REAL}\n"}])}
+    if plan is not False:
+        jobs = {_PLAN_JOB: _plan_job() if plan is None else plan, **jobs}
+    return {"on": {"pull_request": None}, "jobs": jobs}
+
+
+def test_a_job_the_plan_gates_is_still_coverage(constructed_workflow):
+    """The shape the real workflow uses, which must not false-alarm."""
+    constructed_workflow(_planned_workflow())
+    covered, problems = _read_workflow()
+    assert covered == {_REAL} and not problems
+
+
+def _without(mapping: dict, key: str) -> dict:
+    return {name: value for name, value in mapping.items() if name != key}
+
+
+def _plan_with(**changes) -> dict:
+    plan = _plan_job()
+    plan.update(changes)
+    return plan
+
+
+def _plan_steps(*steps) -> dict:
+    plan = _plan_job()
+    plan["steps"] = list(steps)
+    return plan
+
+
+_CHECKOUT = _plan_job()["steps"][0]
+_PLAN_STEP = _plan_job()["steps"][1]
+
+
+@pytest.mark.parametrize(
+    "case,workflow",
+    [
+        ("the job does not need the plan", _planned_workflow(needs=[])),
+        ("the job needs something else", _planned_workflow(needs="other")),
+        ("there is no plan job", _planned_workflow(plan=False)),
+        ("the plan job is conditional", _planned_workflow(plan=_plan_with(**{"if": "false"}))),
+        ("the plan job waits on another", _planned_workflow(plan=_plan_with(needs="backend"))),
+        (
+            "the plan job may fail quietly",
+            _planned_workflow(plan=_plan_with(**{"continue-on-error": True})),
+        ),
+        (
+            "the output is rewired",
+            _planned_workflow(plan=_plan_with(outputs={"code": "true", "python": "[]"})),
+        ),
+        (
+            "the plan step runs something else",
+            _planned_workflow(
+                plan=_plan_steps(_CHECKOUT, dict(_PLAN_STEP, run="python3 -c 'print(1)'\n"))
+            ),
+        ),
+        (
+            "the plan step is handed an environment",
+            _planned_workflow(
+                plan=_plan_steps(_CHECKOUT, dict(_PLAN_STEP, env={"GITHUB_EVENT_NAME": "push"}))
+            ),
+        ),
+        (
+            "a step before the plan rewrites the planner",
+            _planned_workflow(
+                plan=_plan_steps(
+                    _CHECKOUT,
+                    {"run": "echo 'print(\"code=false\")' > .github/scripts/ci_plan.py\n"},
+                    _PLAN_STEP,
+                )
+            ),
+        ),
+        (
+            "the checkout fetches another branch's planner",
+            _planned_workflow(
+                plan=_plan_steps(dict(_CHECKOUT, **{"with": {"ref": "elsewhere"}}), _PLAN_STEP)
+            ),
+        ),
+        (
+            "a step after the plan",
+            _planned_workflow(plan=_plan_steps(_CHECKOUT, _PLAN_STEP, {"run": "true\n"})),
+        ),
+        (
+            "the plan step is not the one the outputs name",
+            _planned_workflow(plan=_plan_steps(_CHECKOUT, dict(_PLAN_STEP, id="other"))),
+        ),
+        (
+            "the matrix reads the plan without needing it",
+            _planned_workflow(needs=[], **{"if": "true"}),
+        ),
+    ],
+)
+def test_a_plan_that_cannot_be_trusted_is_not_coverage(constructed_workflow, case, workflow):
+    """Each of these leaves the gate or the matrix saying something Plan did not.
+
+    Without `needs:` the output is empty and the condition is false forever.
+    A conditional, dependent or failure-tolerant Plan decides nothing, and any
+    step the guard has not read, before or instead of the committed planner,
+    can write whatever outputs it likes.
+    """
+    constructed_workflow(workflow)
+    covered, problems = _read_workflow()
+    assert _REAL not in covered, f"when {case}, the gated job was counted as coverage"
+    assert problems, f"when {case}, the guard dropped the job without saying why"
+
+
+def _planner(tmp_path, monkeypatch, body: str) -> None:
+    path = tmp_path / "planner_under_test.py"
+    path.write_text(body)
+    monkeypatch.setattr(sys.modules[__name__], "PLAN_SCRIPT", path)
+
+
+_PLANNER_BYPASSES = {
+    "it skips the suites when it cannot read the change": (
+        "def plan(event, base, changed, image_python=None):\n"
+        "    return {'code': changed is not None, 'python': ['3.14']}\n",
+        "could not read",
+    ),
+    "it calls the test tree documentation": (
+        "def plan(event, base, changed, image_python=None):\n"
+        "    skip = bool(changed) and all(p.startswith(('docs/', 'tests/')) for p in changed)\n"
+        "    return {'code': not skip, 'python': ['3.14']}\n",
+        "tests/",
+    ),
+    "it calls a document a test reads documentation": (
+        "def plan(event, base, changed, image_python=None):\n"
+        "    skip = bool(changed) and all(p.endswith(('.md', '.html')) for p in changed)\n"
+        "    return {'code': not skip, 'python': ['3.14']}\n",
+        "README.md",
+    ),
+    "it hands back no versions": (
+        "def plan(event, base, changed, image_python=None):\n"
+        "    return {'code': True, 'python': [] if event == 'schedule' else ['3.14']}\n",
+        "empty matrix",
+    ),
+    "it raises": (
+        "def plan(event, base, changed, image_python=None):\n"
+        "    raise RuntimeError('no plan today')\n",
+        "no plan today",
+    ),
+    "it has no plan function": ("PLAN = None\n", "plan()"),
+    "it does not import": ("import module_that_is_not_there\n", "cannot be imported"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_PLANNER_BYPASSES))
+def test_a_planner_that_can_skip_a_test_is_not_trusted(
+    constructed_workflow, tmp_path, monkeypatch, case
+):
+    """The planner is Python, so the guard runs it rather than reading it.
+
+    It is asked about every file a test can depend on, stated here and not
+    taken from the planner, and about every event with an unreadable, an empty
+    and a documentation-only change list.
+    """
+    body, reason = _PLANNER_BYPASSES[case]
+    _planner(tmp_path, monkeypatch, body)
+    constructed_workflow(_planned_workflow())
+    covered, problems = _read_workflow()
+    assert _REAL not in covered, f"a planner where {case} was trusted"
+    assert any(reason in problem for problem in problems), problems
+
+
+def test_a_missing_planner_is_not_trusted(constructed_workflow, tmp_path, monkeypatch):
+    monkeypatch.setattr(sys.modules[__name__], "PLAN_SCRIPT", tmp_path / "gone.py")
+    constructed_workflow(_planned_workflow())
+    covered, problems = _read_workflow()
+    assert _REAL not in covered
+    assert any("does not exist" in problem for problem in problems)
+
+
+def test_the_committed_planner_is_trusted():
+    """The real planner has to pass its own checks, or the gate is just an outage."""
+    assert not _planner_problem()
 
 
 _PG_FILE = "tests/bazarr/test_arr_pg_cutover_migration.py"
@@ -2947,8 +3448,17 @@ def _add_max_parallel(workflow: dict) -> dict:
 
 
 def _add_python_version(workflow: dict) -> dict:
+    """The versions come from Plan, so writing them out is the edit to make here.
+
+    A maintainer pinning the matrix while a new interpreter is tried out
+    replaces the Plan expression with a list; the list form must stay green.
+    """
     matrix = _test_bearing_job(workflow)["strategy"]["matrix"]
-    matrix["python-version"] = list(matrix["python-version"]) + ["3.15"]
+    versions = matrix["python-version"]
+    if versions == _PLANNED_MATRIX:
+        versions = ["3.12", "3.13", "3.14"]
+    assert isinstance(versions, list), f"the matrix is {versions!r}, re-anchor this case"
+    matrix["python-version"] = list(versions) + ["3.15"]
     return workflow
 
 

@@ -1,5 +1,22 @@
 import BaseApi from "./base";
 
+/**
+ * Whether a 2xx body is the settings object at all.
+ *
+ * The client accepts any 2xx answer, and the settings query never goes stale
+ * on its own. A body that is not the settings object (an HTML page from a
+ * proxy or a redirect, an empty answer) would otherwise sit in the cache as if
+ * it were one, with every section and computed field missing, until a reload.
+ */
+export function isSettingsBody(value: unknown): value is Settings {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return false;
+  const general = (value as { general?: unknown }).general;
+  return (
+    typeof general === "object" && general !== null && !Array.isArray(general)
+  );
+}
+
 class SystemApi extends BaseApi {
   constructor() {
     super("/system");
@@ -10,19 +27,7 @@ class SystemApi extends BaseApi {
   }
 
   async login(username: string, password: string) {
-    const response = await this.post<{
-      upgrade_hash?: boolean;
-      upgrade_token?: string;
-    }>("/account", { username, password }, { action: "login" });
-    return response.data;
-  }
-
-  async upgradePasswordHash(upgradeToken: string) {
-    await this.post(
-      "/account",
-      { password: upgradeToken },
-      { action: "upgrade_hash" },
-    );
+    await this.post("/account", { username, password }, { action: "login" });
   }
 
   async logout() {
@@ -38,7 +43,11 @@ class SystemApi extends BaseApi {
   }
 
   async settings() {
-    const response = await this.get<Settings>("/settings");
+    const response = await this.get<unknown>("/settings");
+    // Refused as an error, so readers get the retry path, not a settings
+    // object with its sections missing.
+    if (!isSettingsBody(response))
+      throw new Error("The settings response could not be read.");
     return response;
   }
 
@@ -92,7 +101,11 @@ class SystemApi extends BaseApi {
   }
 
   async restoreBackups(filename: string) {
-    await this.patch("/backups", { filename });
+    const response = await this.patch<{ restart: boolean; message: string }>(
+      "/backups",
+      { filename },
+    );
+    return response.data;
   }
 
   async deleteBackups(filename: string) {
@@ -108,9 +121,16 @@ class SystemApi extends BaseApi {
     await this.post("/health");
   }
 
-  async logs() {
-    const response = await this.get<DataWrapper<System.Log[]>>("/logs");
-    return response.data;
+  // One page of the log, newest first, with the total that matches.
+  async logs(query: System.LogQuery) {
+    return this.get<System.LogPage>("/logs", {
+      limit: query.limit,
+      offset: query.offset,
+      level: query.level,
+      contains: query.contains || undefined,
+      // eslint-disable-next-line camelcase -- the server's parameter name
+      baseline_total: query.baselineTotal,
+    });
   }
 
   async jobs(id?: number, status?: string) {
@@ -134,6 +154,15 @@ class SystemApi extends BaseApi {
       id,
       action,
     });
+  }
+
+  /** Queue a failed, retryable job again; answers with the new job's id. */
+  async retryJob(id: number) {
+    const response = await this.post<{ job_id: number }>("/jobs", undefined, {
+      id,
+      action: "retry",
+    });
+    return response.data.job_id;
   }
 
   async releases() {

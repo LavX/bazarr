@@ -6,7 +6,8 @@ import ast
 import re
 import subprocess
 import uuid
-from app.database import TableEpisodes, TableMovies, TableShows, database, select
+from app.database import (TableEpisodes, TableMovies, TableShows, TableSportsEvents,
+                          database, select)
 from app.config import settings
 from app.jobs_queue import jobs_queue
 from app.event_handler import event_stream
@@ -21,6 +22,39 @@ from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.tools.translate.main import translate_subtitles_file
 
 logger = logging.getLogger(__name__)
+
+
+def extracted_subtitles_dir():
+    """Where server-side embedded-track extractions are cached.
+
+    Inside Bazarr's config dir rather than next to the video, so a media server
+    scanning the library does not pick the extraction up as a real subtitle.
+    """
+    from app.get_args import args as bazarr_args
+
+    return os.path.join(bazarr_args.config_dir, "extracted_subs")
+
+
+def extracted_subtitle_key(video_path):
+    """The cache key an extraction of ``video_path`` is named after.
+
+    Keyed on the video's identity (path + size + mtime), not just the path: a
+    replaced or upgraded file at the same path would otherwise reuse the
+    previous video's extracted subtitle (stale text), the exact upgrade case
+    embedded translation targets.
+
+    Shared with the sports profile guard, which recomputes this key to tell one
+    of these artifacts from an arbitrary file handed to it. The two have to
+    agree on the name, so they read it from here.
+    """
+    import hashlib
+
+    try:
+        stat_result = os.stat(video_path)
+        identity = f"{video_path}:{stat_result.st_size}:{int(stat_result.st_mtime)}"
+    except OSError:
+        identity = video_path
+    return hashlib.md5(identity.encode()).hexdigest()
 
 
 def process_episode_translation(
@@ -396,7 +430,30 @@ def extract_embedded_subtitle(
         return None
 
     # Look up file metadata needed by parse_video_metadata
-    if media_type == "episode":
+    if media_type == "sports":
+        db_path = path_mappings.path_replace_reverse_instance(
+            video_path, arr_instance_id, "sports")
+        # Sports rows are keyed by the local event id and the probe cache hangs
+        # off the same row, so the row is resolved by mapped path and owner and
+        # its id drives the sports branch of parse_video_metadata. Without this
+        # arm a sports extraction ran the movie lookup, found no movie row and
+        # returned None, so a collected event could never be extracted.
+        media = database.execute(
+            scoped(
+                select(TableSportsEvents.id, TableSportsEvents.file_size).where(
+                    TableSportsEvents.path == db_path
+                ),
+                TableSportsEvents.arr_instance_id,
+                arr_instance_id,
+            )
+        ).first()
+        if not media:
+            return None
+        data = parse_video_metadata(
+            video_path, media.file_size, arr_instance_id=arr_instance_id,
+            sports_event_id=media.id
+        )
+    elif media_type == "episode":
         db_path = path_mappings.path_replace_reverse_instance(
             video_path, arr_instance_id, "series")
         # Scoped to the owning instance (#156): two instances can index the
@@ -510,22 +567,9 @@ def extract_embedded_subtitle(
         return None
 
     # Build output path in Bazarr's config dir so Jellyfin won't pick it up
-    import hashlib
-
-    from app.get_args import args as bazarr_args
-
-    extract_dir = os.path.join(bazarr_args.config_dir, "extracted_subs")
+    extract_dir = extracted_subtitles_dir()
     os.makedirs(extract_dir, exist_ok=True)
-    # Key the cache on the video's identity (path + size + mtime), not just the
-    # path: a replaced/upgraded file at the same path would otherwise reuse the
-    # previous video's extracted subtitle (stale text), the exact upgrade case
-    # embedded translation targets.
-    try:
-        _st = os.stat(video_path)
-        _identity = f"{video_path}:{_st.st_size}:{int(_st.st_mtime)}"
-    except OSError:
-        _identity = video_path
-    video_hash = hashlib.md5(_identity.encode()).hexdigest()
+    video_hash = extracted_subtitle_key(video_path)
     suffix = ""
     if hi:
         suffix += ".hi"

@@ -1,0 +1,281 @@
+"""Transactional ownership revisions and bounded row change metadata."""
+
+import secrets
+from threading import RLock
+
+from sqlalchemy import inspect, text
+from sqlalchemy.exc import SQLAlchemyError
+
+OWNER_TABLES = ("arr_instances", "table_episodes", "table_movies", "table_sports_events")
+REVISION_TABLE = "subtitle_ownership_revision"
+CHANGES_TABLE = "subtitle_ownership_changes"
+
+
+ROW_FUNCTION = """
+BEGIN
+    UPDATE subtitle_ownership_revision SET revision = revision + 1 WHERE id = 1;
+    IF NOT FOUND THEN RAISE EXCEPTION 'Subtitle ownership revision missing'; END IF;
+    IF TG_TABLE_NAME = 'arr_instances' THEN
+        INSERT INTO subtitle_ownership_changes VALUES ('arr_instances', 0, (SELECT revision FROM subtitle_ownership_revision WHERE id = 1))
+        ON CONFLICT (table_name, row_id) DO UPDATE SET revision = EXCLUDED.revision;
+    ELSIF TG_OP = 'DELETE' THEN
+        DELETE FROM subtitle_ownership_changes WHERE table_name = TG_TABLE_NAME AND row_id = OLD.id;
+        INSERT INTO subtitle_ownership_changes VALUES ('*', 0, (SELECT revision FROM subtitle_ownership_revision WHERE id = 1))
+        ON CONFLICT (table_name, row_id) DO UPDATE SET revision = EXCLUDED.revision;
+    ELSE
+        INSERT INTO subtitle_ownership_changes VALUES (TG_TABLE_NAME, NEW.id, (SELECT revision FROM subtitle_ownership_revision WHERE id = 1))
+        ON CONFLICT (table_name, row_id) DO UPDATE SET revision = EXCLUDED.revision;
+        IF TG_OP = 'UPDATE' AND OLD.id <> NEW.id THEN
+            DELETE FROM subtitle_ownership_changes WHERE table_name = TG_TABLE_NAME AND row_id = OLD.id;
+            INSERT INTO subtitle_ownership_changes VALUES ('*', 0, (SELECT revision FROM subtitle_ownership_revision WHERE id = 1))
+            ON CONFLICT (table_name, row_id) DO UPDATE SET revision = EXCLUDED.revision;
+        END IF;
+    END IF;
+    RETURN NULL;
+END
+"""
+TRUNCATE_FUNCTION = """
+BEGIN
+    UPDATE subtitle_ownership_revision SET revision = revision + 1 WHERE id = 1;
+    IF NOT FOUND THEN RAISE EXCEPTION 'Subtitle ownership revision missing'; END IF;
+    DELETE FROM subtitle_ownership_changes WHERE table_name = TG_TABLE_NAME;
+    INSERT INTO subtitle_ownership_changes VALUES ('*', 0, (SELECT revision FROM subtitle_ownership_revision WHERE id = 1))
+    ON CONFLICT (table_name, row_id) DO UPDATE SET revision = EXCLUDED.revision;
+    RETURN NULL;
+END
+"""
+
+
+def _sqlite_trigger(table, action):
+    name = f"ownership_revision_{table}_{action.lower()}"
+    revision = "(SELECT revision FROM subtitle_ownership_revision WHERE id = 1)"
+    if table == 'arr_instances':
+        changed = f"INSERT INTO subtitle_ownership_changes VALUES ('arr_instances', 0, {revision}) ON CONFLICT (table_name, row_id) DO UPDATE SET revision = excluded.revision;"
+    elif action == 'DELETE':
+        changed = f"""DELETE FROM subtitle_ownership_changes WHERE table_name = '{table}' AND row_id = OLD.id;
+        INSERT INTO subtitle_ownership_changes VALUES ('*', 0, {revision}) ON CONFLICT (table_name, row_id) DO UPDATE SET revision = excluded.revision;"""
+    else:
+        changed = f"INSERT INTO subtitle_ownership_changes VALUES ('{table}', NEW.id, {revision}) ON CONFLICT (table_name, row_id) DO UPDATE SET revision = excluded.revision;"
+        if action == 'UPDATE':
+            changed += f"""
+            DELETE FROM subtitle_ownership_changes WHERE table_name = '{table}' AND row_id = OLD.id AND OLD.id <> NEW.id;
+            INSERT INTO subtitle_ownership_changes SELECT '*', 0, {revision} WHERE OLD.id <> NEW.id
+            ON CONFLICT (table_name, row_id) DO UPDATE SET revision = excluded.revision;"""
+    return name, f"""CREATE TRIGGER "{name}" AFTER {action} ON "{table}"
+    BEGIN
+        SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM subtitle_ownership_revision WHERE id = 1)
+            THEN RAISE(ABORT, 'Subtitle ownership revision missing') END;
+        UPDATE subtitle_ownership_revision SET revision = revision + 1 WHERE id = 1;
+        {changed}
+    END"""
+
+
+def _normalized(sql):
+    return ' '.join(sql.split()).rstrip(';')
+
+
+def sportarr_in_use(connection):
+    """Whether any Sportarr instance exists, enabled or not.
+
+    Enabled is deliberately not part of it: an instance that is switched off
+    for an evening still owns rows whose ownership has to stay tracked. Nothing
+    would be lost if it were, because a reinstall writes the '*' full-resync
+    marker and any snapshot older than that is rebuilt from the tables rather
+    than from the change log. What it would cost is the reinstall itself, on
+    every toggle: a trigger drop and recreate, a forced full snapshot rebuild,
+    and on PostgreSQL ACCESS EXCLUSIVE on the two busiest tables.
+
+    Raises rather than answering False on a database fault. False is not a
+    safe default here: the caller drops every trigger for it, so a transient
+    error on this one statement would silently strip ownership tracking from an
+    install that does have Sportarr.
+    """
+    return bool(connection.execute(
+        text("SELECT 1 FROM arr_instances WHERE kind = 'sportarr' LIMIT 1")).first())
+
+
+def install_ownership_revision(connection):
+    if not set(OWNER_TABLES) <= set(inspect(connection).get_table_names()):
+        return
+    # Asked before anything is written. The answer decides whether the triggers
+    # below are created or dropped, and the DROPs are unconditional, so a fault
+    # here must leave the schema exactly as it found it rather than take the
+    # triggers with it. It is also the first statement, so on PostgreSQL a
+    # failure cannot abort a transaction this function has already written to.
+    wanted = sportarr_in_use(connection)
+    connection.execute(text("CREATE TABLE IF NOT EXISTS subtitle_ownership_revision (id INTEGER PRIMARY KEY, revision BIGINT NOT NULL)"))
+    connection.execute(text("INSERT INTO subtitle_ownership_revision (id, revision) VALUES (1, 0) ON CONFLICT (id) DO NOTHING"))
+    connection.execute(text("CREATE TABLE IF NOT EXISTS subtitle_ownership_changes (table_name VARCHAR(64) NOT NULL, row_id BIGINT NOT NULL, revision BIGINT NOT NULL, PRIMARY KEY (table_name, row_id))"))
+    connection.execute(text("CREATE INDEX IF NOT EXISTS ix_subtitle_ownership_changes_revision ON subtitle_ownership_changes (revision)"))
+    connection.execute(text("INSERT INTO subtitle_ownership_changes VALUES ('generation', 0, :generation) ON CONFLICT (table_name, row_id) DO NOTHING"), {'generation': secrets.randbits(63) or 1})
+    # Startup and rebuilt tables invalidate any snapshot from the previous schema.
+    connection.execute(text("UPDATE subtitle_ownership_revision SET revision = revision + 1 WHERE id = 1"))
+    connection.execute(text("DELETE FROM subtitle_ownership_changes WHERE table_name <> 'generation'"))
+    connection.execute(text("INSERT INTO subtitle_ownership_changes SELECT '*', 0, revision FROM subtitle_ownership_revision WHERE id = 1"))
+    # OWNER_TABLES covers table_episodes and table_movies, the two busiest
+    # tables in the schema, and every row change on them takes the one global
+    # revision row. That is the price of an incremental ownership snapshot, and
+    # only a Sportarr publication ever reads one, so an install that has no
+    # Sportarr instance does not pay it. The tables above are still created:
+    # they cost nothing, and ownership_revision() reads the counter whether or
+    # not anything advances it.
+    if connection.dialect.name == 'postgresql':
+        for function, body in [('advance_subtitle_ownership_revision', ROW_FUNCTION),
+                               ('truncate_subtitle_ownership_revision', TRUNCATE_FUNCTION)]:
+            connection.execute(text(f"CREATE OR REPLACE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$ {body} $$"))
+        for table in OWNER_TABLES:
+            connection.execute(text(f'DROP TRIGGER IF EXISTS ownership_revision ON "{table}"'))
+            connection.execute(text(f'DROP TRIGGER IF EXISTS ownership_revision_truncate ON "{table}"'))
+            if not wanted:
+                continue
+            connection.execute(text(f'CREATE TRIGGER ownership_revision AFTER INSERT OR UPDATE OR DELETE ON "{table}" FOR EACH ROW EXECUTE FUNCTION advance_subtitle_ownership_revision()'))
+            connection.execute(text(f'CREATE TRIGGER ownership_revision_truncate AFTER TRUNCATE ON "{table}" FOR EACH STATEMENT EXECUTE FUNCTION truncate_subtitle_ownership_revision()'))
+    elif connection.dialect.name == 'sqlite':
+        for table in OWNER_TABLES:
+            for action in ('INSERT', 'UPDATE', 'DELETE'):
+                name, sql = _sqlite_trigger(table, action)
+                connection.execute(text(f'DROP TRIGGER IF EXISTS "{name}"'))
+                if wanted:
+                    connection.execute(text(sql))
+    else:
+        raise ValueError('Unsupported subtitle ownership database')
+
+
+def metadata_created(metadata, connection, **kwargs):
+    install_ownership_revision(connection)
+
+
+def verify_ownership_protection(session):
+    """Check definitions, not just names, before using incremental metadata."""
+    if session.get_bind().dialect.name == 'sqlite':
+        actual = {name: sql for name, sql in session.execute(text("SELECT name, sql FROM sqlite_master WHERE type='trigger'"))}
+        valid = all(_normalized(actual.get(name, '')) == _normalized(sql)
+                    for table in OWNER_TABLES for action in ('INSERT', 'UPDATE', 'DELETE')
+                    for name, sql in [_sqlite_trigger(table, action)])
+    else:
+        rows = session.execute(text("""SELECT c.relname, t.tgname, t.tgtype, p.proname, p.prosrc
+            FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
+            JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_proc p ON p.oid=t.tgfoid
+            WHERE t.tgname IN ('ownership_revision', 'ownership_revision_truncate')
+            AND t.tgenabled IN ('O','A') AND n.nspname=current_schema()"""))
+        actual = {(table, trigger): (kind, function, _normalized(body))
+                  for table, trigger, kind, function, body in rows}
+        valid = all(actual.get((table, 'ownership_revision')) == (29, 'advance_subtitle_ownership_revision', _normalized(ROW_FUNCTION))
+                    and actual.get((table, 'ownership_revision_truncate')) == (32, 'truncate_subtitle_ownership_revision', _normalized(TRUNCATE_FUNCTION))
+                    for table in OWNER_TABLES)
+    if not valid:
+        raise ValueError('Subtitle ownership protection is unavailable')
+
+
+_install_lock = RLock()
+
+
+def ownership_triggers_present(session):
+    """Whether any ownership trigger at all is installed on the owner tables."""
+    if session.get_bind().dialect.name == 'sqlite':
+        names = {name for (name,) in session.execute(text(
+            "SELECT name FROM sqlite_master WHERE type='trigger'"))}
+        return any(trigger in names for table in OWNER_TABLES
+                   for action in ('INSERT', 'UPDATE', 'DELETE')
+                   for trigger, _ in [_sqlite_trigger(table, action)])
+    return bool(session.execute(text("""SELECT 1 FROM pg_trigger t
+        JOIN pg_class c ON c.oid = t.tgrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE t.tgname IN ('ownership_revision', 'ownership_revision_truncate')
+        AND n.nspname = current_schema() LIMIT 1""")).first())
+
+
+def ownership_triggers_match(session, wanted):
+    """Whether the installed triggers are already what ``wanted`` calls for.
+
+    Not the same question as ``ownership_triggers_present``, which answers
+    "is any one of them there". A partial or drifted set answers yes to that
+    and still fails ``verify_ownership_protection``, so gating a rebuild on
+    presence alone leaves exactly the state the publication boundary refuses
+    to run against, with nothing left to repair it before the next restart.
+    """
+    if not wanted:
+        return not ownership_triggers_present(session)
+    try:
+        verify_ownership_protection(session)
+        return True
+    except ValueError:
+        return False
+
+
+def ensure_ownership_protection(session):
+    """Verify the triggers, installing them first if none are there to verify.
+
+    They are not installed for an install with no Sportarr instance, because
+    they tax every write to table_episodes and table_movies for a snapshot only
+    a Sportarr publication reads. Startup cannot be the only place that decides
+    whether to install them: the first instance is created from a running
+    process, so reaching here with none installed means a publication needs
+    them now and Sportarr exists to justify them.
+
+    Absent is the only state this repairs. A trigger that exists but does not
+    match is a definition this code did not write, and the snapshot it fed may
+    already be wrong, so the publication refuses rather than overwriting the
+    evidence.
+
+    That call is only made under the lock. The install below runs one
+    statement at a time on the caller's session, which is usually the app one
+    on an AUTOCOMMIT engine, so a publication on another thread can read the
+    set half written while it runs. Outside the lock a partial set is either a
+    foreign definition or an install still in progress, and refusing it there
+    turned the second of two concurrent publications into a spurious failure.
+    """
+    try:
+        verify_ownership_protection(session)
+        return
+    except ValueError:
+        pass
+    with _install_lock:
+        try:
+            verify_ownership_protection(session)
+            return
+        except ValueError:
+            if ownership_triggers_present(session):
+                raise
+        install_ownership_revision(session.connection())
+    verify_ownership_protection(session)
+
+
+def ownership_revision(session):
+    try:
+        value = session.execute(text("SELECT revision FROM subtitle_ownership_revision WHERE id = 1")).scalar_one_or_none()
+    except SQLAlchemyError as exc:
+        raise ValueError('Subtitle ownership revision is unavailable') from exc
+    if value is None:
+        raise ValueError('Subtitle ownership revision is unavailable')
+    return value
+
+
+def ownership_token(session):
+    try:
+        value = session.execute(text("""SELECT r.revision, c.revision
+            FROM subtitle_ownership_revision r JOIN subtitle_ownership_changes c
+            ON c.table_name='generation' AND c.row_id=0 WHERE r.id=1""")).one_or_none()
+    except SQLAlchemyError as exc:
+        raise ValueError('Subtitle ownership revision is unavailable') from exc
+    if value is None:
+        raise ValueError('Subtitle ownership generation is unavailable')
+    return tuple(value)
+
+
+def remove_ownership_revision(connection):
+    existing = set(inspect(connection).get_table_names())
+    for table in OWNER_TABLES:
+        if table not in existing:
+            continue
+        if connection.dialect.name == 'postgresql':
+            for name in ('ownership_revision', 'ownership_revision_truncate'):
+                connection.execute(text(f'DROP TRIGGER IF EXISTS {name} ON "{table}"'))
+        else:
+            for action in ('insert', 'update', 'delete'):
+                connection.execute(text(f'DROP TRIGGER IF EXISTS "ownership_revision_{table}_{action}"'))
+    if connection.dialect.name == 'postgresql':
+        for name in ('advance_subtitle_ownership_revision', 'truncate_subtitle_ownership_revision'):
+            connection.execute(text(f'DROP FUNCTION IF EXISTS {name}()'))
+    connection.execute(text('DROP TABLE IF EXISTS subtitle_ownership_changes'))
+    connection.execute(text('DROP TABLE IF EXISTS subtitle_ownership_revision'))

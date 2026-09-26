@@ -9,6 +9,31 @@ from unittest.mock import patch
 import pytest
 
 
+@pytest.mark.parametrize("media_type,season,episode", [("movie", None, None), ("episode", 0, 3)])
+def test_title_only_never_adopts_library_or_filename_context(monkeypatch, media_type, season, episode):
+    from compat import service
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("title-only search touched library metadata, media or filename parsing")
+
+    monkeypatch.setattr(service, "_lookup_library_metadata", forbidden)
+    monkeypatch.setattr(service, "_parse_video_from_library", forbidden)
+    monkeypatch.setattr(service, "_guessit_filename", forbidden)
+    video = service._build_video(
+        "tt0133093", season, episode, media_type,
+        query="1917", title_only=True, year=2019,
+        moviehash="1234567890abcdef", moviebytesize=500,
+    )
+    assert video.name == ""
+    assert (video.title if media_type == "movie" else video.series) == "1917"
+    assert video.year == 2019
+    assert video.hashes == {}
+    assert video.source is None and video.release_group is None
+    assert video.size is None
+    if media_type == "episode":
+        assert (video.season, video.episode, video.series_imdb_id) == (0, 3, "tt0133093")
+
+
 @pytest.fixture(autouse=True)
 def _no_library(monkeypatch):
     """Force the library metadata lookup to return empty by default; tests
@@ -184,3 +209,99 @@ def test_library_path_missing_file_falls_back_to_virtual():
     # Virtual Movie built from library title + imdb
     assert v.title == "Shawshank"
     assert v.imdb_id == "tt0111161"
+
+
+@pytest.mark.parametrize("query,kind,title,year,season,episode", [
+    ("Example.Movie.2024.1080p.WEB-DL", "movie", "Example Movie", 2024, None, None),
+    ("Example.Show.S02E03.1080p", "episode", "Example Show", None, 2, 3),
+    ("Example.Show.0x3.1080p", "episode", "Example Show", None, 0, 3),
+    ("/tmp/existing.mkv", "movie", "existing", None, None, None),
+])
+def test_release_query_policy_uses_only_inferred_filename_hints(monkeypatch, query, kind, title, year, season, episode):
+    from compat import service
+    from subliminal.video import Episode
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Raw construction used library, media or refiners")
+
+    for name in ("_lookup_library_metadata", "_parse_video_from_library", "_refine_from_imdb"):
+        monkeypatch.setattr(service, name, forbidden)
+    video = service._build_video(None, None, None, "movie", query=query, release_query=True)
+    assert video.name == query
+    assert isinstance(video, Episode) is (kind == "episode")
+    assert (video.series if kind == "episode" else video.title) == title
+    assert video.imdb_id is None and video.year == year
+    assert video.size is None and video.hashes == {}
+    assert video.source is None and video.resolution is None
+    if kind == "episode":
+        assert (video.season, video.episode, video.series_imdb_id) == (season, episode, None)
+
+
+@pytest.mark.parametrize("query", [
+    "Example.Show.S02E03E04", "Example.Show.S01-S02E03", "Example.Show.E03",
+    "Example.Show.S02", "Example.Show.103", "Example.Show.2024.03.12", "1080p.WEB-DL",
+])
+def test_release_query_policy_rejects_ambiguous_or_incomplete_hints(query):
+    from compat import service
+    with pytest.raises(ValueError, match="release name|episode"):
+        service._build_video(None, None, None, "movie", query=query, release_query=True)
+
+
+@pytest.mark.parametrize("hints", [
+    {}, {"type": "episode", "title": "Show", "episode": 3},
+    {"type": "episode", "title": "Show", "season": 2, "episode": [3, 4]},
+    {"type": "episode", "title": "Show", "season": [1, 2], "episode": 3},
+    {"type": "episode", "title": "Show", "season": 1, "episode": 3},
+    {"type": "movie", "title": ["One", "Two"]},
+    {"type": "movie", "title": "Film", "year": [2023, 2024]},
+    {"type": "movie", "title": "Film", "episode": 3},
+    {"type": ["movie", "episode"], "title": "Film"},
+])
+def test_release_query_policy_never_collapses_conflicting_parser_values(monkeypatch, hints):
+    from compat import service
+    monkeypatch.setattr(service, "_guessit_filename", lambda query: hints)
+    with pytest.raises(ValueError):
+        service._build_video(None, None, None, "movie", query="Example.Show.S02E03", release_query=True)
+
+
+def test_release_query_does_not_adopt_an_existing_file(monkeypatch, tmp_path):
+    from compat import service
+    media = tmp_path / "Example.Movie.2024.mkv"
+    media.write_bytes(b"synthetic media fixture")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Raw query attempted file or library adoption")
+
+    for name in ("_lookup_library_metadata", "_parse_video_from_library", "_refine_from_imdb"):
+        monkeypatch.setattr(service, name, forbidden)
+    video = service._build_video(None, None, None, "movie", query=str(media), release_query=True)
+    assert video.name == str(media) and video.title == "Example Movie"
+    assert video.imdb_id is None and video.size is None and video.hashes == {}
+    assert media.read_bytes() == b"synthetic media fixture"
+
+
+@pytest.mark.parametrize("options", [
+    {"moviehash": "hash"}, {"moviebytesize": 2}, {"title_only": True},
+    {"year": 2024}, {"series_anidb_id": 7}, {"series_anidb_episode_id": 8},
+])
+def test_release_query_policy_cannot_be_combined_with_file_or_identified_properties(options):
+    from compat import service
+    with pytest.raises(ValueError):
+        service._build_video(None, None, None, "movie", query="Example.Movie.2024", release_query=True, **options)
+
+
+def test_title_only_preserves_separate_episode_identity_in_worker_payload():
+    from compat.service import _build_video
+    from provider_hub.protocol import video_to_payload
+    identity = {"id": 401, "show_id": 100, "imdb_id": "tt7654321", "tvdb_id": 501,
+                "show_tvdb_id": 300, "title": "Home", "air_date": "2026-09-01"}
+    video = _build_video("tt1234567", 2, 1, "episode", query="Northern Light", year=2020,
+                         title_only=True, episode_identity=identity)
+    assert video.series == "Northern Light" and video.title == "Home" and video.year == 2020
+    assert video.series_imdb_id == "tt1234567" and video.imdb_id == "tt7654321"
+    assert video.series_tvdb_id == 300 and video.tvdb_id == 501
+    assert video.series_tmdb_id == 100 and video.tmdb_id == 401
+    assert video.absolute_episode is None
+    worker = video_to_payload(video)
+    assert worker["series_imdb_id"] == "tt1234567" and worker["imdb_id"] == "tt7654321"
+    assert worker["tmdb_id"] == 401 and worker["title"] == "Home"

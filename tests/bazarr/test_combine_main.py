@@ -4,6 +4,7 @@ import os
 import shutil
 import pytest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 from subtitles.tools.combine.main import (
     CombineResult,
@@ -164,57 +165,57 @@ class TestTryCombine:
 
 
 class TestPostWrite:
-    @patch("app.database.database")
+    @patch("subtitles.tools.combine.main._metadata_for")
     @patch("api.subtitles.subtitles.postprocess_subtitles")
     def test_maps_series_to_episode(self, mock_pp, mock_db):
-        meta = object()
-        mock_db.execute.return_value.first.return_value = meta
+        meta = SimpleNamespace(arr_instance_id=7)
+        mock_db.return_value = meta
         _post_write("/out.srt", "/video.mkv", "series",
                     sonarr_episode_id=99, radarr_id=None)
-        mock_pp.assert_called_once_with("/out.srt", "/video.mkv", "episode", meta, 99)
+        mock_pp.assert_called_once_with("/out.srt", "/video.mkv", "episode", meta, 99, arr_instance_id=7)
 
-    @patch("app.database.database")
+    @patch("subtitles.tools.combine.main._metadata_for")
     @patch("api.subtitles.subtitles.postprocess_subtitles")
     def test_maps_movies_to_movie(self, mock_pp, mock_db):
-        meta = object()
-        mock_db.execute.return_value.first.return_value = meta
+        meta = SimpleNamespace(arr_instance_id=7)
+        mock_db.return_value = meta
         _post_write("/out.srt", "/video.mkv", "movies",
                     sonarr_episode_id=None, radarr_id=42)
-        mock_pp.assert_called_once_with("/out.srt", "/video.mkv", "movie", meta, 42)
+        mock_pp.assert_called_once_with("/out.srt", "/video.mkv", "movie", meta, 42, arr_instance_id=7)
 
-    @patch("app.database.database")
+    @patch("subtitles.tools.combine.main._metadata_for")
     @patch("api.subtitles.subtitles.postprocess_subtitles")
     def test_maps_singular_movie_to_movie(self, mock_pp, mock_db):
         # The auto-combine path forwards process_subtitle's singular 'movie'.
-        meta = object()
-        mock_db.execute.return_value.first.return_value = meta
+        meta = SimpleNamespace(arr_instance_id=7)
+        mock_db.return_value = meta
         _post_write("/out.srt", "/video.mkv", "movie",
                     sonarr_episode_id=None, radarr_id=42)
-        mock_pp.assert_called_once_with("/out.srt", "/video.mkv", "movie", meta, 42)
+        mock_pp.assert_called_once_with("/out.srt", "/video.mkv", "movie", meta, 42, arr_instance_id=7)
 
 
 class TestProfileFor:
     @patch("app.database.get_profiles_list")
-    @patch("app.database.get_profile_id")
+    @patch("subtitles.tools.combine.main._metadata_for")
     def test_singular_movie_resolves_via_radarr_id(self, mock_pid, mock_list):
         # Regression: the auto-combine path passes 'movie' (singular); it must
         # resolve the movie profile by radarr id, not fall through to the
         # episode/series branch (which has no ids and returns no rule).
-        mock_pid.return_value = 7
+        mock_pid.return_value = SimpleNamespace(profileId=7)
         mock_list.return_value = {"profileId": 7}
         result = _profile_for("movie", sonarr_series_id=None,
                               sonarr_episode_id=None, radarr_id=42)
-        mock_pid.assert_called_once_with(movie_id=42)
+        mock_pid.assert_called_once_with(None, "movie", None, 42, None)
         assert result == {"profileId": 7}
 
     @patch("app.database.get_profiles_list")
-    @patch("app.database.get_profile_id")
+    @patch("subtitles.tools.combine.main._metadata_for")
     def test_plural_movies_resolves_via_radarr_id(self, mock_pid, mock_list):
-        mock_pid.return_value = 7
+        mock_pid.return_value = SimpleNamespace(profileId=7)
         mock_list.return_value = {"profileId": 7}
         _profile_for("movies", sonarr_series_id=None,
                      sonarr_episode_id=None, radarr_id=42)
-        mock_pid.assert_called_once_with(movie_id=42)
+        mock_pid.assert_called_once_with(None, "movies", None, 42, None)
 
 
 class TestCustomLanguageRoundTrip:

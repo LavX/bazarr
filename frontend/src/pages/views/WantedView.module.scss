@@ -1,0 +1,34 @@
+// The Wanted band. On a phone it wraps (Toolbox wrapOnPhone), and its two
+// groups flow as one run of controls, so Mass Translate shares the second row
+// with the filter button and the search, and the search takes what that row
+// has left. Wrapped as two groups, the three batch buttons took two rows and
+// the search a third.
+.band {
+  @include mantine.smaller-than(mantine.$mantine-breakpoint-sm) {
+    justify-content: flex-start;
+    column-gap: 10px;
+
+    > .actions,
+    > .controls {
+      display: contents;
+    }
+  }
+}
+
+// A width in the stylesheet rather than a style prop, the same as the list
+// toolbar's: an inline width is the narrowest a flex item measures, so the
+// field could never give any of it up on a phone.
+.search {
+  width: 220px;
+
+  @include mantine.smaller-than(mantine.$mantine-breakpoint-sm) {
+    width: auto;
+    flex: 1 1 120px;
+    min-width: 120px;
+
+    // The row leaves the field about 135px, short of its placeholder.
+    input {
+      text-overflow: ellipsis;
+    }
+  }
+}

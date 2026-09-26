@@ -8,12 +8,14 @@ import {
 import { faSpinner, faTimes } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useLanguages } from "@/apis/hooks/languages";
+import { useTranslatorModels } from "@/apis/hooks/translator";
 import {
-  useCancelTranslatorJob,
-  useTranslatorJob,
-  useTranslatorModels,
-} from "@/apis/hooks/translator";
-import client from "@/apis/raw/client";
+  cancelEditorTranslation,
+  isTerminalJob,
+  queueEditorTranslation,
+  readEditorTranslation,
+  useEditorJob,
+} from "./editorJobs";
 
 interface TranslatePanelProps {
   open: boolean;
@@ -172,24 +174,6 @@ const styles = {
   } satisfies CSSProperties,
 };
 
-interface SubmitResponse {
-  jobId: string;
-}
-
-async function submitTranslationJob(params: {
-  lines: Array<{ position: number; line: string }>;
-  sourceLanguage: string;
-  targetLanguage: string;
-  title: string;
-  mediaType: string;
-}): Promise<SubmitResponse> {
-  const response = await client.axios.post<SubmitResponse>(
-    "/translator/jobs",
-    params,
-  );
-  return response.data;
-}
-
 export default function TranslatePanel({
   open,
   cues,
@@ -211,7 +195,7 @@ export default function TranslatePanel({
   const [sourceLanguage, setSourceLanguage] = useState("");
   const [targetLanguage, setTargetLanguage] = useState("");
   const [phase, setPhase] = useState<TranslatePhase>("idle");
-  const [jobId, setJobId] = useState("");
+  const [jobId, setJobId] = useState<number | null>(null);
   const [errorMsg, setErrorMsg] = useState("");
   const [translatedLines, setTranslatedLines] = useState<Map<number, string>>(
     new Map(),
@@ -221,7 +205,6 @@ export default function TranslatePanel({
 
   const { data: modelsData } = useTranslatorModels(open);
   const { data: serverLanguages } = useLanguages();
-  const cancelJob = useCancelTranslatorJob();
 
   const languageOptions = useMemo(() => {
     if (!serverLanguages) return [];
@@ -238,10 +221,9 @@ export default function TranslatePanel({
     }
   }, [open, currentLanguage, targetLanguage]);
 
-  // Poll the active job
-  const { data: jobData } = useTranslatorJob(
-    phase === "translating" ? jobId : "",
-  );
+  // The translation is a Bazarr job: its progress and its end arrive on the
+  // jobs socket, so the panel reads the shared jobs cache instead of polling.
+  const jobData = useEditorJob(phase === "translating" ? jobId : null);
 
   // React to job status changes
   const effectiveSource =
@@ -255,42 +237,65 @@ export default function TranslatePanel({
     referenceCues &&
     referenceCues.length > 0;
 
-  useEffect(() => {
-    if (phase !== "translating" || !jobData) return;
+  const jobFinished = isTerminalJob(jobData);
 
-    if (jobData.status === "completed" || jobData.status === "partial") {
-      const result = jobData.result as
-        | { lines?: Array<{ position: number; line: string }> }
-        | undefined;
-      const lines = result?.lines;
-      if (lines && Array.isArray(lines)) {
-        const map = new Map<number, string>();
-        for (const item of lines) {
-          map.set(item.position, item.line);
-        }
-        setTranslatedLines(map);
-        // Only set reference when translating from editor cues, not from loaded reference
-        if (!useRefCues) {
-          onSetReference(map);
-        }
-        setPhase("completed");
-        onTranslatingChange?.(false);
-        setApplied(false);
-      } else {
-        setPhase("failed");
-        onTranslatingChange?.(false);
-        setErrorMsg("Translation completed but no lines were returned.");
-      }
-    } else if (jobData.status === "failed") {
-      setPhase("failed");
+  useEffect(() => {
+    if (phase !== "translating" || jobId == null || !jobFinished) return;
+    let active = true;
+
+    const finish = (next: TranslatePhase, message = "") => {
+      setPhase(next);
       onTranslatingChange?.(false);
-      setErrorMsg(jobData.error || jobData.message || "Translation failed.");
-    } else if (jobData.status === "cancelled") {
-      setPhase("idle");
-      onTranslatingChange?.(false);
-      setJobId("");
-    }
-  }, [phase, jobData, onSetReference, onTranslatingChange, useRefCues]);
+      setErrorMsg(message);
+    };
+
+    readEditorTranslation(jobId)
+      .then((state) => {
+        if (!active) return;
+        if (state.status === "completed") {
+          const lines = state.lines;
+          if (lines && lines.length > 0) {
+            const map = new Map<number, string>();
+            for (const item of lines) {
+              map.set(item.position, item.line);
+            }
+            setTranslatedLines(map);
+            // Only set reference when translating from editor cues, not from loaded reference
+            if (!useRefCues) {
+              onSetReference(map);
+            }
+            setApplied(false);
+            finish("completed");
+          } else {
+            finish(
+              "failed",
+              "Translation completed but no lines were returned.",
+            );
+          }
+        } else if (state.status === "cancelled") {
+          finish("idle");
+          setJobId(null);
+        } else {
+          finish("failed", state.error || "Translation failed.");
+        }
+      })
+      .catch(() => {
+        if (active) {
+          finish("failed", "The finished translation could not be read.");
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [
+    phase,
+    jobId,
+    jobFinished,
+    onSetReference,
+    onTranslatingChange,
+    useRefCues,
+  ]);
 
   const handleSubmit = useCallback(async () => {
     if (!targetLanguage) return;
@@ -315,7 +320,7 @@ export default function TranslatePanel({
       targetLanguage;
 
     try {
-      const result = await submitTranslationJob({
+      const queuedJobId = await queueEditorTranslation({
         lines,
         sourceLanguage: sourceLangName,
         targetLanguage: targetLangName,
@@ -323,13 +328,13 @@ export default function TranslatePanel({
         mediaType: "",
       });
 
-      if (result.jobId) {
-        setJobId(result.jobId);
+      if (queuedJobId) {
+        setJobId(queuedJobId);
         setPhase("translating");
         onTranslatingChange?.(true);
       } else {
         setPhase("failed");
-        setErrorMsg("No job ID returned from translator.");
+        setErrorMsg("The translation could not be queued.");
       }
     } catch (err) {
       setPhase("failed");
@@ -353,12 +358,13 @@ export default function TranslatePanel({
   ]);
 
   const handleCancel = useCallback(() => {
-    if (jobId) {
-      cancelJob.mutate(jobId);
+    if (jobId != null) {
+      void cancelEditorTranslation(jobId).catch(() => undefined);
     }
     setPhase("idle");
-    setJobId("");
-  }, [jobId, cancelJob]);
+    onTranslatingChange?.(false);
+    setJobId(null);
+  }, [jobId, onTranslatingChange]);
 
   const handleApply = useCallback(() => {
     if (translatedLines.size === 0 || applied) return;
@@ -368,7 +374,7 @@ export default function TranslatePanel({
 
   const handleReset = useCallback(() => {
     setPhase("idle");
-    setJobId("");
+    setJobId(null);
     setErrorMsg("");
     setTranslatedLines(new Map());
     setApplied(false);
@@ -376,10 +382,13 @@ export default function TranslatePanel({
 
   if (!open) return null;
 
-  const progress = jobData?.progress ?? 0;
-  const jobMessage = jobData?.message || "";
-  const completedLines = jobData?.completedLines ?? 0;
-  const totalLines = jobData?.totalLines ?? cues.length;
+  const progress =
+    jobData && jobData.progress_max > 0
+      ? Math.min(100, (jobData.progress_value / jobData.progress_max) * 100)
+      : 0;
+  const jobMessage =
+    jobData?.progress_message ||
+    (jobData?.status === "pending" ? "Queued..." : "");
   const modelUsed = modelsData?.default_model || "";
   const isWorking = phase === "submitting" || phase === "translating";
 
@@ -563,8 +572,7 @@ export default function TranslatePanel({
             <div style={{ ...styles.progressFill, width: `${progress}%` }} />
           </div>
           <div style={styles.statusText}>
-            {jobMessage ||
-              `Translating... ${completedLines}/${totalLines} lines (${Math.round(progress)}%)`}
+            {jobMessage || "Translating..."} ({Math.round(progress)}%)
           </div>
         </>
       )}

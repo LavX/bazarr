@@ -39,7 +39,7 @@ import {
   useMovieHistory,
   useMovieModification,
 } from "@/apis/hooks/movies";
-import { useInstanceName } from "@/apis/hooks/site";
+import { useAppTitle } from "@/apis/hooks/site";
 import { Action, FullPageDropzone, Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import { CombineModal } from "@/components/forms/CombineForm";
@@ -49,7 +49,7 @@ import { SubtitleDownloadModal } from "@/components/forms/SubtitleDownloadForm";
 import { MovieHistoryModal, SubtitleToolsModal } from "@/components/modals";
 import { MovieSearchModal } from "@/components/modals/ManualSearchModal";
 import { useModals } from "@/modules/modals";
-import { notification, task, TaskGroup } from "@/modules/task";
+import { notification } from "@/modules/notification";
 import ItemOverview from "@/pages/views/ItemOverview";
 import { RouterNames } from "@/Router/RouterNames";
 import { useLanguageProfileBy } from "@/utilities/languages";
@@ -139,7 +139,7 @@ const MovieDetailView: FunctionComponent = () => {
   const hasTask = useIsMovieActionRunning();
 
   useDocumentTitle(
-    `${movie?.title ?? "Unknown Movie"} - ${useInstanceName()} (Movies)`,
+    `${movie?.title ?? "Unknown Movie"} - ${useAppTitle()} (Movies)`,
   );
 
   const openDropzone = useRef<VoidFunction>(null);
@@ -185,7 +185,7 @@ const MovieDetailView: FunctionComponent = () => {
           active={profile !== undefined}
           onDrop={onDrop}
         />
-        <Toolbox>
+        <Toolbox wrapOnPhone>
           <Group gap="xs">
             <Toolbox.Button
               icon={faSync}
@@ -207,11 +207,14 @@ const MovieDetailView: FunctionComponent = () => {
               disabled={hasTask}
               onClick={() => {
                 if (movie) {
-                  task.create(movie.title, TaskGroup.ScanDisk, action, {
+                  // Queued as a backend job: the request returns at once and the
+                  // scan reports through the jobs drawer. HTTP errors are
+                  // already reported by the API client.
+                  action({
                     action: "scan-disk",
                     radarrid: movie.radarrId,
                     arr_instance_id: movie.arr_instance_id,
-                  });
+                  }).catch(() => undefined);
                 }
               }}
             >

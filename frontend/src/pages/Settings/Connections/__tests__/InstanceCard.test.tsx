@@ -17,34 +17,14 @@
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
-import type { ArrInstance } from "@/apis/raw/arrInstances";
 import InstanceCard from "@/pages/Settings/Connections/InstanceCard";
 import { customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
+import { makeInstance } from "./fixtures";
 
 // ---------------------------------------------------------------------------
 // Shared fixture
 // ---------------------------------------------------------------------------
-
-function makeInstance(overrides: Partial<ArrInstance> = {}): ArrInstance {
-  return {
-    id: 42,
-    kind: "sonarr",
-    stable_key: "test-stable-key",
-    name: "Main Sonarr",
-    display_name: "Main Sonarr",
-    enabled: true,
-    is_default: false,
-    ip: "192.168.1.10",
-    port: 8989,
-    base_url: "",
-    ssl: false,
-    verify_ssl: false,
-    http_timeout: 30,
-    api_key_set: true,
-    ...overrides,
-  };
-}
 
 // ---------------------------------------------------------------------------
 // Helpers

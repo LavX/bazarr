@@ -1,3 +1,14 @@
+.tabList {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
+
+  > * {
+    flex: 0 0 auto;
+  }
+}
+
 .card {
   position: relative;
   border-radius: var(--bz-radius-lg);
@@ -114,5 +125,23 @@
 
   .testResult {
     animation: none;
+  }
+}
+
+.cardLayout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--mantine-spacing-md);
+  align-items: start;
+}
+.cardActions {
+  flex-shrink: 0;
+}
+@media (max-width: 48em) {
+  .cardLayout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .cardActions {
+    justify-self: end;
   }
 }

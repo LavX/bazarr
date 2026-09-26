@@ -14,7 +14,7 @@ import { UseMutationResult } from "@tanstack/react-query";
 import { useLanguageProfiles } from "@/apis/hooks";
 import { MultiSelector, Selector } from "@/components/inputs";
 import { useModals, withModal } from "@/modules/modals";
-import { notification } from "@/modules/task";
+import { notification } from "@/modules/notification";
 import { GetItemId, useSelectorOptions } from "@/utilities";
 
 interface Props {

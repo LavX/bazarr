@@ -20,10 +20,17 @@ from unittest.mock import MagicMock
 import pytest
 
 
-def _baseline_compat_threads() -> int:
-    """Count live threads whose name starts with the compat-fanout prefix."""
-    return sum(1 for t in threading.enumerate()
-               if t.is_alive() and t.name.startswith("compat-fanout"))
+def _compat_threads() -> set:
+    """Live compat-fanout worker threads, as objects rather than a count.
+
+    reset_pool() shuts the executor down without waiting, so a previous pool's
+    workers can still be sleeping in an abandoned fanout while the next test
+    runs, and every pool names its threads with the same prefix. Comparing the
+    identities before and after isolates the pool under test, which is what the
+    cap applies to, instead of measuring how busy the machine happened to be.
+    """
+    return {t for t in threading.enumerate()
+            if t.is_alive() and t.name.startswith("compat-fanout")}
 
 
 @pytest.fixture(autouse=True)
@@ -65,6 +72,7 @@ def test_max_workers_cap_respected_under_repeated_timeouts():
             per_provider_timeout=1, wall_timeout=1,
         )
 
+    inherited = _compat_threads()
     drivers = [threading.Thread(target=_drive) for _ in range(10)]
     for d in drivers:
         d.start()
@@ -72,7 +80,7 @@ def test_max_workers_cap_respected_under_repeated_timeouts():
         d.join(timeout=15)
 
     stats = fanout_stats()
-    live = _baseline_compat_threads()
+    live = len(_compat_threads() - inherited)
     # Hard ceiling: never more than max_workers compat-fanout threads,
     # regardless of how many fanouts were issued.
     assert live <= stats["max_workers"], (

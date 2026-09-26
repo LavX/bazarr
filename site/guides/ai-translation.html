@@ -170,12 +170,68 @@
         <li><strong>Quality vs. speed.</strong> Larger models (Claude Opus 4.6, GPT-4.1) produce better translations but cost more. Mid-range models (Gemini 2.5 Flash, Claude Sonnet 4.5) hit a good balance. Lightweight models (Gemini 2.5 Flash Lite, Claude Haiku 4.5) are fast and cheap.</li>
         <li><strong>Free models.</strong> OpenRouter offers free tiers for select models (look for the "free" badge). Great for testing the workflow or large batches where perfect quality is not critical.</li>
         <li><strong>Context window.</strong> Subtitle files can be large. Models with bigger context windows (200k+ tokens) handle full-length movies in fewer chunks, producing more consistent translations.</li>
-        <li><strong>Provider routing.</strong> Most models are served by several OpenRouter providers at different prices and speeds. The <strong>Provider Routing</strong> selector picks between them: <em>Fastest</em> (the default) takes the highest-throughput provider, <em>Cheapest</em> the lowest price. The <code class="inline">:nitro</code> and <code class="inline">:floor</code> variants also make OpenRouter's priority and flex tiers eligible, and <em>OpenRouter default</em> leaves their load balancing on. Typing <code class="inline">:floor</code> or <code class="inline">:nitro</code> straight after a model ID works too: Bazarr+ moves the shortcut into the selector and leaves the plain model ID in the field, so the two can never disagree and the model details still load. Routing only changes anything when a model is served by more than one provider, and around half of OpenRouter's catalogue is served by exactly one. OpenRouter ignores a suffix it does not recognise, so a typo such as <code class="inline">:floorr</code> fails silently rather than erroring. The two shortcut options and <em>OpenRouter default</em> need AI Subtitle Translator 1.3.4 or newer; on an older sidecar Bazarr+ sends the plain sort each of them stands for (fastest or cheapest) and logs a warning.</li>
+        <li><strong>Provider routing.</strong> Most models are served by several OpenRouter providers at different prices and speeds, and which one serves you decides what a translation costs. <a href="#provider-routing">Provider routing</a> below covers how Bazarr+ chooses.</li>
       </ul>
 
       <div class="note">
         <strong>Recommendation:</strong> Start with <code class="inline">google/gemini-2.5-flash-lite</code>. It handles subtitle translation well and costs fractions of a cent per episode. Switch to Claude Sonnet 4.5 if you need higher quality for difficult content.
       </div>
+
+      <h2 id="provider-routing">Provider routing <span class="badge-new" aria-label="New in v2.7">v2.7</span></h2>
+      <p>Most OpenRouter models are served by more than one provider, at different prices and different speeds, for the same model and the same output. The provider that serves a request is what decides its cost. <strong>Settings &gt; AI Translator &gt; Provider Routing</strong> is where you say how that choice is made.</p>
+
+      <p>This only changes anything when a model has more than one provider. Around half of OpenRouter's catalogue is served by exactly one, and for those every option below does the same thing.</p>
+
+      <p>Every option below is carried out by AI Subtitle Translator, so the <em>Needs</em> column is the version of that service, not of Bazarr+.</p>
+
+      <table class="opts">
+        <thead>
+          <tr><th>Option</th><th>What it does</th><th>Needs</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><strong>SmartFast</strong> (default)</td><td>Weighs speed against price, per translation</td><td>2.0.0</td></tr>
+          <tr><td><strong>Custom</strong></td><td>Only the providers you pick, in your order</td><td>1.3.4</td></tr>
+          <tr><td>Fastest</td><td>Highest throughput, at any price</td><td>any</td></tr>
+          <tr><td>Fastest + priority tier</td><td>The same, plus OpenRouter's priority tier</td><td>1.3.4</td></tr>
+          <tr><td>Cheapest</td><td>Lowest quoted price</td><td>any</td></tr>
+          <tr><td>Cheapest + flex tier</td><td>The same, plus OpenRouter's flex tier</td><td>1.3.4</td></tr>
+          <tr><td>Lowest latency</td><td>Quickest to start responding</td><td>any</td></tr>
+          <tr><td>OpenRouter default</td><td>Leaves their load balancing on</td><td>1.3.4</td></tr>
+        </tbody>
+      </table>
+
+      <h3 id="smartfast">SmartFast</h3>
+      <p>SmartFast is what a new install uses. Rather than sorting on one axis, the translator loads the endpoints that actually serve your model and picks among them: it drops anything unhealthy or priced above its limits, discards the cost outliers, keeps the candidates within a tolerance of the fastest it has measured, and takes the cheapest of those. It then stays on that provider for the rest of the translation, so a prompt cache has a chance to be reused, and moves off it if the provider starts failing or slows down consistently.</p>
+
+      <p>The reason it is the default is measurable. In the September provider benchmarks, plain throughput routing repeatedly landed on endpoints priced around twice the cheapest that served the same model, with nothing on screen to say so. SmartFast gives up a little speed for that.</p>
+
+      <div class="note">
+        <strong>Upgrading?</strong> SmartFast is picked up automatically only by a new installation. An existing install keeps the routing it was already using, and an install from before this setting existed keeps <em>Fastest</em>, which every version of the translator serves. Either way nothing changes under you, so switch it by hand if you want SmartFast.
+      </div>
+
+      <h3 id="custom-providers">Custom providers</h3>
+      <p>Custom is for when you already know which providers you will accept, whether that is for price, for privacy, for data retention policy, or because one of them has been unreliable for you.</p>
+
+      <p>Choosing it reveals a picker listing every endpoint that serves the model you selected, with its availability, its quoted input and output price per million tokens, and its recent median throughput where OpenRouter reports one. Pick from the list, or type an exact provider slug such as <code class="inline">deepinfra</code> or an endpoint slug such as <code class="inline">parasail/fp8</code>, and reorder them with the Up and Down controls. The translator tries them in the order you set.</p>
+
+      <p>Providers outside your list are excluded rather than deprioritised. That is the point of the mode, and it has a consequence worth being clear about: <strong>if none of your chosen providers can serve the model, the translation fails</strong> rather than quietly going somewhere you ruled out. The picker helps you avoid that by marking any slug the model's endpoint list does not contain as <em>Does not serve this model</em>. Change models and it re-checks, so it is worth a glance after switching.</p>
+
+      <p>A list of up to 20 slugs is allowed. Bazarr+ refuses to save Custom routing with nothing selected, since that configuration cannot translate anything.</p>
+
+      <h3 id="routing-shortcuts">Shortcuts typed into the model ID</h3>
+      <p>Appending <code class="inline">:nitro</code>, <code class="inline">:floor</code> or <code class="inline">:smartfast</code> to a model ID works as a shorthand. Bazarr+ moves the shortcut into the Provider Routing selector when you leave the field and puts the plain model ID back, so the two can never disagree and the model details still resolve. Genuine model variants such as <code class="inline">:free</code> and <code class="inline">:thinking</code> name a different model rather than a way to route to the same one, and are left alone: <code class="inline">author/model:free:nitro</code> becomes <code class="inline">author/model:free</code> with the selector on the priority tier.</p>
+
+      <p>One exception. If the selector is already on <strong>Custom</strong>, a typed shortcut does not override it, because that would silently discard the provider list you built. The shortcut comes off the model ID and the page tells you the selection was kept.</p>
+
+      <p>OpenRouter ignores a suffix it does not recognise, so a typo such as <code class="inline">:floorr</code> fails silently rather than erroring.</p>
+
+      <h3 id="routing-versions">Version requirements</h3>
+      <p>Routing is carried out by AI Subtitle Translator, so some options need a recent enough one. The <em>Needs</em> column above lists them, and the behaviour when it is not met differs by option, deliberately:</p>
+
+      <ul>
+        <li>The shortcut options and <em>OpenRouter default</em> fall back. On a sidecar below 1.3.4, Bazarr+ sends the plain sort each of them stands for, fastest or cheapest, and logs a warning.</li>
+        <li><strong>SmartFast and Custom do not fall back.</strong> No plain sort stands for "weigh speed against price" or "only these providers", so rather than routing your translation some other way, Bazarr+ refuses and tells you which version is needed. Update the translator, or pick another option.</li>
+      </ul>
 
       <h2 id="batch-translation-from-missing-pages">Batch translation from Missing pages</h2>
       <p>The Missing pages (Episodes and Movies) show episodes and films that are missing subtitles in your configured languages. With AI translation, you can handle these in bulk:</p>

@@ -1,0 +1,679 @@
+"""Explicit title and release-query searches independent of Distribution Hub clients."""
+from __future__ import annotations
+
+import copy
+from dataclasses import dataclass, field
+import datetime as dt
+import hashlib
+import json
+import os
+import re
+import time
+import uuid
+from threading import Lock
+
+from dogpile.cache.api import NO_VALUE
+from babelfish.exceptions import LanguageReverseError
+from subzero.language import Language
+
+from app.config import settings
+from app import activity
+from app import get_providers
+from compat import cache, service
+from subliminal_patch.extensions import provider_registry
+from subliminal_patch.score import ComputeScore, MAX_SCORES
+
+from .handles import mint_result, renew_result, resolve_result
+
+_IMDB = re.compile(r"tt[0-9]{7,10}\Z")
+_LANGUAGE = re.compile(r"[a-z]{2,3}(?:-[A-Za-z]{2,4})?\Z")
+_STATE_LOCK = Lock()
+_COMPLETE = {"success", "empty"}
+# Statuses that mean no request left this instance, so nothing upstream failed.
+# A search whose every outcome is one of these did not fail; it never ran, and
+# saying "No provider completed this search" about it answers a question the
+# reader did not ask. "setup_required" belongs here because both ways to reach
+# it, missing configuration found before the search and ConfigurationError
+# raised instead of a listing, are the operator's to fix, not an upstream fault.
+_NOT_ATTEMPTED = {"skipped", "setup_required", "not_started"}
+# ...but a provider that never started still leaves a hole where its answer
+# would have been, so it cannot count toward a search claiming complete
+# coverage the way a deliberate skip does. "setup_required" is the same kind of
+# hole: a skip is the provider correctly declining this target and has no
+# answer to give, while a provider missing its credentials has answers it was
+# never able to look for, and will have them the moment the operator fixes the
+# configuration. Claiming complete coverage there both overstates the search
+# and buys the finished snapshot the long cache lifetime.
+_NO_COVERAGE = {"not_started", "setup_required"}
+# Outcomes that must not put a provider on a Discover cooldown. A skip is a
+# decision about this target, and a call that never started is not evidence
+# about the provider, so neither earns a wait before asking again.
+_NO_COOLDOWN = {"skipped", "not_started"}
+
+# What the throttle table's recorded exception class means for the reader. The
+# table stores the original class name, so a rate limit and a download quota
+# arrive here distinguishable and are worth telling apart: one clears in
+# minutes, the other usually at the provider's own daily reset. This is only
+# the reason. A provider the table holds back is not asked at all, so its
+# status is always "cooldown": reporting it as a timeout or an unreachable
+# site says this search tried it, which it did not.
+_THROTTLE_CAUSE = {
+    "AuthenticationError": "authentication_required",
+    "ConfigurationError": "setup_required",
+    "ServiceUnavailable": "unreachable",
+    "IPAddressBlocked": "automated_requests_blocked",
+    "ConnectTimeout": "timeout",
+    "ReadTimeout": "timeout",
+    "Timeout": "timeout",
+    "TooManyRequests": "rate_limited",
+    "DownloadLimitExceeded": "download_limit_reached",
+    "SearchLimitReached": "search_limit_reached",
+}
+
+# How long Discover waits before offering this provider again, by cause, when
+# nothing more specific is available. A flat delay for every cause was the
+# whole defect: a site answering 500 to the entire internet was re-asked on the
+# same schedule as a provider that merely answered slowly. These are only the
+# floor; a Retry-After the provider sent, and the throttle table's own
+# per-provider, per-exception durations, both outrank them.
+_RETRY_AFTER_CAUSE = {
+    "authentication_required": 900,
+    "setup_required": 900,
+    "cooldown": 600,
+    "unreachable": 300,
+    "error": 300,
+    "timeout": 120,
+    "unverified": 120,
+    # Our wall, not the provider's failing. Wait long enough that an
+    # immediate retry does not re-run the same losing race, no longer.
+    "abandoned": 45,
+    "saturated": 20,
+}
+_RETRY_AFTER_DEFAULT = 60
+
+
+@dataclass(frozen=True)
+class SearchRequest:
+    context: dict
+    refresh: bool
+    metadata_valid_until: float | None = None
+    # The resolved copy carries the mapped path and content hash, so it stays
+    # out of repr and never travels with the serialized context.
+    copy: dict | None = field(default=None, repr=False)
+
+
+class SearchAdmissionExpired(ValueError):
+    """Authoritative metadata expired before provider work could start."""
+
+
+def _admit_provider_search(request):
+    from . import metadata
+    try:
+        metadata._require_dependency_validity(request.metadata_valid_until)
+    except metadata.UpstreamFailure:
+        raise SearchAdmissionExpired(
+            "Episode metadata expired before subtitle search started. Reload details and try again.") from None
+
+
+def _iso(timestamp):
+    return dt.datetime.fromtimestamp(timestamp, dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _language(code):
+    from languages.custom_lang import CustomLanguage
+
+    custom = CustomLanguage.from_value(code) or CustomLanguage.from_value(code, "alpha2")
+    if custom is not None:
+        return custom.subzero_language()
+    try:
+        return Language.fromietf(code)
+    except ValueError:
+        return Language.fromalpha3b(code)
+
+
+def validate_context(payload) -> SearchRequest:
+    if not isinstance(payload, dict):
+        raise ValueError("A search context is required.")
+    mode = payload.get("mode", "title")
+    if mode not in ("title", "release"):
+        raise ValueError("Choose an identified title or an advanced release-name search.")
+    allowed = ({"mode", "query", "language", "refresh"} if mode == "release" else
+               {"mode", "media_type", "imdb_id", "language", "season", "episode", "title", "year", "refresh", "episode_identity", "manual_confirmed", "show_id", "copy_id"})
+    if set(payload) - allowed:
+        raise ValueError("Unsupported search context. Choose a title and subtitle language.")
+    media_type = payload.get("media_type")
+    imdb_id = payload.get("imdb_id")
+    language = payload.get("language")
+    if mode == "title" and media_type not in ("movie", "episode"):
+        raise ValueError("Choose a movie or an exact episode.")
+    if mode == "title" and (not isinstance(imdb_id, str) or not _IMDB.fullmatch(imdb_id.strip().lower())):
+        raise ValueError("Enter a valid IMDb ID, for example tt0133093.")
+    if not isinstance(language, str) or not _LANGUAGE.fullmatch(language):
+        raise ValueError("Choose one subtitle language.")
+    try:
+        lang = _language(language)
+    except (ValueError, KeyError, LanguageReverseError):
+        raise ValueError("Choose a supported subtitle language.") from None
+    # Keep explicit regional/script variants. No profile or locale defaults.
+    canonical = str(lang)
+    refresh = payload.get("refresh", False)
+    if type(refresh) is not bool:
+        raise ValueError("Invalid refresh option.")
+    if mode == "release":
+        query = payload.get("query")
+        if (not isinstance(query, str) or len(query) > 500
+                or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in query)
+                or not any(c.isalnum() for c in query)):
+            raise ValueError("Enter a release name containing letters or numbers, up to 500 characters.")
+        service._build_release_query_video(query.strip())
+        return SearchRequest({"mode": "release", "query": query.strip(), "language": canonical,
+                              "matching_mode": "release"}, refresh)
+    context = {"media_type": media_type, "imdb_id": imdb_id.strip().lower(),
+               "language": canonical, "matching_mode": "title"}
+    if media_type == "episode":
+        for key, minimum in (("season", 0), ("episode", 1)):
+            value = payload.get(key)
+            if type(value) is not int or not minimum <= value <= 9999:
+                raise ValueError("Choose an exact season and episode.")
+            context[key] = value
+    elif any(payload.get(key) is not None for key in ("season", "episode")):
+        raise ValueError("Movie searches cannot contain an episode.")
+    if "title" in payload:
+        title = payload["title"]
+        if not isinstance(title, str) or len(title) > 300 or any(ord(c) < 32 for c in title):
+            raise ValueError("Invalid title.")
+        if title.strip():
+            context["title"] = title.strip()
+    if payload.get("year") is not None:
+        year = payload["year"]
+        if type(year) is not int or not 1870 <= year <= 2200:
+            raise ValueError("Invalid title year.")
+        context["year"] = year
+    metadata_valid_until = None
+    if media_type == "episode":
+        metadata_valid_until = _reconcile_episode(payload, context)
+    elif any(key in payload for key in ("episode_identity", "manual_confirmed", "show_id")):
+        raise ValueError("Movie searches cannot contain episode identity.")
+    return SearchRequest(context, refresh, metadata_valid_until, _reconcile_copy(payload, context))
+
+
+def _reconcile_copy(payload, context):
+    """Resolve an explicitly chosen library copy against the confirmed target.
+
+    The client supplies one opaque identity and nothing else. The path, the
+    release facts and the physical revision are all read here, server side,
+    from the row that identity actually names within the current instance
+    scope. A copy that no longer resolves raises instead of falling back, so a
+    stale choice can never be answered with a different file.
+    """
+    from .library import copy_context, resolve_copy
+
+    chosen = payload.get("copy_id")
+    if chosen is None:
+        return None
+    if not isinstance(chosen, str) or len(chosen) > 64:
+        raise ValueError("Choose a library copy from the offered list.")
+    facts = resolve_copy(chosen, context)
+    context["copy_id"] = facts["copy_id"]
+    context["file_revision"] = facts["file_revision"]
+    context["copy"] = copy_context(facts)
+    return facts
+
+
+
+def _reconcile_episode(payload, context):
+    from . import metadata
+
+    manual = payload.get("manual_confirmed", False)
+    if type(manual) is not bool:
+        raise ValueError("Confirm the manual series and episode identity.")
+    identity = payload.get("episode_identity")
+    show_id = payload.get("show_id")
+    valid_until = None
+    if show_id is not None and not metadata._positive_id(show_id):
+        raise ValueError("Invalid show identity.")
+    if identity is not None:
+        if (not isinstance(identity, dict) or identity.get("source") != "tmdb"
+                or not metadata._positive_id(identity.get("show_id"))
+                or not metadata._positive_id(identity.get("id"))
+                or not metadata._number(identity.get("season"))
+                or not metadata._number(identity.get("episode"), 1)):
+            raise ValueError("Choose an exact source episode.")
+        if show_id is not None and show_id != identity["show_id"]:
+            raise ValueError("Conflicting show identity. Choose the episode again.")
+        response, valid_until = metadata._episode_details_with_validity(
+            str(identity["show_id"]), str(identity["season"]), str(identity["episode"]))
+        canonical = response["data"].get("episode")
+        if canonical is None or valid_until is None:
+            raise ValueError("Episode metadata is unavailable. Retry details before searching this selection.")
+        if canonical != identity:
+            raise ValueError("Episode mapping changed. Reload episode details and confirm the selection again.")
+        if canonical["identity_status"] == "conflict":
+            raise ValueError("Conflicting source episode identity. Resolve the mapping before searching.")
+        if not manual and canonical["identity_status"] != "resolved":
+            raise ValueError("Episode numbering is unverified. Confirm a manual episode to search.")
+        if not manual and (context["season"], context["episode"]) != (canonical["target_season"], canonical["target_episode"]):
+            raise ValueError("Conflicting target numbers. Choose the episode again.")
+        if (context["imdb_id"], context.get("title"), context.get("year")) != (
+                canonical["show_imdb_id"], canonical["show_title"], canonical["show_year"]):
+            raise ValueError("Conflicting series identity. Choose the show again.")
+        context["episode_identity"] = copy.deepcopy(canonical)
+        show_id = canonical["show_id"]
+    else:
+        if not manual:
+            raise ValueError("Confirm the series identity and manual episode numbers before searching.")
+        if show_id is not None:
+            response, valid_until = metadata._show_details_with_validity(str(show_id))
+            show = response["data"].get("item")
+            if not show or valid_until is None or (context["imdb_id"], context.get("title"), context.get("year")) != (
+                    show["imdb_id"], show["title"], show["year"]):
+                raise ValueError("Confirm the show identity in details before entering a manual episode.")
+    if show_id is not None:
+        context["show_id"] = show_id
+    if manual:
+        context["manual_confirmed"] = True
+    return valid_until
+
+
+def _retry_delay(outcome):
+    """Seconds to wait before Discover offers this provider again.
+
+    Two clocks can be running at once. What the provider itself said, through
+    a Retry-After it sent, and the throttle table, which the pool has just
+    written for this exact exception if the failure was one the backoff knows,
+    and which carries the per-provider durations an operator can reason about
+    (a rate limit on one site, a daily download quota on another). Whichever
+    runs longer is the one that decides when the provider is next asked, so
+    that is the one the reader is told about: offering a retry at the earlier
+    of the two produces a button that searches nothing, because
+    get_providers_sorted() still excludes the provider until the table's
+    deadline and the retry only replaces the deadline on screen.
+
+    A per-cause floor applies only when neither clock is running.
+
+    Reading the table rather than duplicating its numbers also keeps the row
+    Discover shows and the reason the provider is missing from the next search
+    in agreement, instead of two independent clocks disagreeing on screen.
+    """
+    delay = max(1.0, float(outcome.retry_after)) if outcome.retry_after else 0.0
+    throttle = get_providers.tp.get(outcome.provider)
+    if throttle and throttle[1]:
+        delay = max(delay, (throttle[1] - dt.datetime.now()).total_seconds())
+    if delay > 0:
+        return delay
+    return _RETRY_AFTER_CAUSE.get(outcome.status, _RETRY_AFTER_DEFAULT)
+
+
+def _pool_state(pool):
+    with _STATE_LOCK:
+        if not hasattr(pool, "_discover_state"):
+            pool._discover_state = {"namespace": uuid.uuid4().hex, "cooldowns": {}}
+        return pool._discover_state
+
+
+def _coverage(pool, state, *, has_file=False):
+    # Registration performs catalog validation. Check the actual class too:
+    # historical registration IDs can outlive a removed/rejected installation.
+    available = set(get_providers.get_providers_sorted() or [])
+    # Resolved here rather than at module import. api/__init__.py eagerly
+    # imports every namespace, so a module-level import of the Hub registry and
+    # the provider health tracker makes the whole API surface depend on deep
+    # provider internals: importing one API module then drags in
+    # subliminal_patch.providers and subliminal_patch.provider_health, which is
+    # exactly what three existing API tests cannot satisfy when they replace
+    # subliminal_patch with a bounded stub. Neither name is needed until a
+    # search actually computes provider coverage.
+    from provider_hub import registry
+    from subliminal_patch.provider_health import get_tracker
+
+    trusted = {item.provider_id for item in registry.active_installations() if item.trusted}
+    discarded = get_tracker().currently_discarded() | set(pool.discarded_providers)
+    now = time.time()
+    planned, outcomes = [], {}
+    with _STATE_LOCK:
+        cooldowns = dict(state["cooldowns"])
+    for name in sorted(set(settings.general.enabled_providers or [])):
+        cls = provider_registry[name]
+        status, reason, retry_at = None, None, None
+        if cls is None:
+            status, reason = "setup_required", "provider_unavailable"
+        elif not issubclass(cls, registry.HubProxyProvider) or name not in trusted:
+            status, reason = "skipped", "not_catalog_provider"
+        elif any(
+                field not in pool.provider_configs.get(name, {})
+                or pool.provider_configs[name][field] is None
+                or pool.provider_configs[name][field] == ""
+                for field in getattr(getattr(cls, "manifest", None), "config_schema", {}).get("required", [])):
+            status, reason = "setup_required", "missing_configuration"
+        elif name in service._SKIP_FOR_VIRTUAL_VIDEO and not has_file:
+            status, reason = "skipped", "requires_file"
+        elif name in cooldowns and cooldowns[name][0] > now:
+            until, prior = cooldowns[name]
+            # Not asked this time, so it is reported as cooling down, with what
+            # happened on the search that put it there as the reason. Copying
+            # the earlier outcome instead told the reader this search had
+            # waited on the provider until the deadline, or that it had just
+            # failed, with the old duration beside it, about a provider this
+            # search never called.
+            status, reason = "cooldown", prior["reason"]
+            # The same longer-of-the-two rule _retry_delay applies, applied
+            # again on the way out. A cooldown is fixed when the outcome is
+            # recorded, but the throttle table can move afterwards: a provider
+            # abandoned at the wall goes on the short abandonment wait, then
+            # its call finishes and writes a real rate limit. Offering the
+            # earlier of the two produces a retry that searches nothing,
+            # because the provider stays out of get_providers_sorted() until
+            # the table's deadline. The later clock is also the one keeping
+            # the provider out, so its cause is the one named.
+            throttle = get_providers.tp.get(name)
+            if throttle and throttle[1] and throttle[1].timestamp() > until:
+                until = throttle[1].timestamp()
+                reason = _THROTTLE_CAUSE.get(throttle[0], "provider_cooldown")
+            retry_at = _iso(until)
+        elif name not in available or name in discarded:
+            status, reason = "cooldown", "provider_cooldown"
+            throttle = get_providers.tp.get(name)
+            if throttle and throttle[1]:
+                reason = _THROTTLE_CAUSE.get(throttle[0], "provider_cooldown")
+                retry_at = throttle[1].astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+        elif name not in pool.providers:
+            status, reason = "setup_required", "provider_unavailable"
+        if status:
+            outcomes[name] = {"provider": name, "status": status, "reason": reason,
+                              "result_count": 0, "elapsed_ms": 0, "retry_at": retry_at}
+        else:
+            planned.append(name)
+    return planned, outcomes
+
+
+def _number(value):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value if float("-inf") < value < float("inf") else None
+    return None
+
+
+_COMPATIBILITY_FACTS = (("source", "source"), ("resolution", "screen_size"),
+                        ("video_codec", "video_codec"), ("audio_codec", "audio_codec"),
+                        ("release_group", "release_group"), ("edition", "edition"))
+
+
+def _comparable(value):
+    if isinstance(value, (list, tuple, set)):
+        return frozenset(_comparable(item) for item in value if _comparable(item) is not None) or None
+    if isinstance(value, str):
+        return value.strip().lower() or None
+    return str(value).strip().lower() if value is not None else None
+
+
+def _copy_compatibility(video, sub, parsed):
+    """Three-state evidence from the compared facts, not from score keys.
+
+    A scoring match set counts two absent optional fields as agreement and
+    cannot tell a missing fact from a contradicted one. This compares what the
+    chosen copy actually states against what the offered release actually
+    states, and says "unknown" whenever either side is silent. None of it is
+    evidence of synchronization.
+    """
+    release = getattr(sub, "release_info", None) or ""
+    if release not in parsed:
+        parsed[release] = service._copy_release_hints(release)
+    hints = parsed[release]
+    result = {}
+    for attribute, key in _COMPATIBILITY_FACTS:
+        mine, theirs = _comparable(getattr(video, attribute, None)), _comparable(hints.get(key))
+        result[attribute] = ("unknown" if mine is None or theirs is None
+                             else "match" if mine == theirs else "conflict")
+    return result
+
+
+def _result(sub, video, context, search_id, checked_at, ttl, parsed=None):
+    result_id, expires = mint_result(sub, context, search_id, ttl)
+    language = sub.language
+    matches = None
+    if context.get("mode") != "release":
+        try:
+            matches = sorted(set(sub.get_matches(video)))
+        except Exception:
+            pass
+    score = None
+    if matches is not None:
+        try:
+            score, _ = ComputeScore()(set(matches), sub, video)
+        except Exception:
+            pass
+    forced = getattr(sub, "_reported_forced", None)
+    if getattr(language, "forced", False):
+        forced = True
+    hi = getattr(sub, "_reported_hearing_impaired", None)
+    if getattr(language, "hi", False) or getattr(sub, "hearing_impaired", False):
+        hi = True
+    variant = "-".join(str(part) for part in (language.country, language.script) if part) or None
+    return {
+        "id": result_id, "search_id": search_id, "provider": sub.provider_name,
+        "language": str(language), "language_variant": variant,
+        "release": getattr(sub, "release_info", None) or None,
+        "uploader": getattr(sub, "uploader", None),
+        "scope": "forced" if forced is True else "full" if forced is False else "unknown",
+        "hearing_impaired": hi,
+        "matches": matches, "compatibility_score": _number(score),
+        "compatibility_score_max": MAX_SCORES.get(context.get("media_type")),
+        "rating": _number(getattr(sub, "rating", None)),
+        "copy_compatibility": (_copy_compatibility(video, sub, parsed)
+                               if context.get("copy_id") and parsed is not None else None),
+        "checked_at": checked_at, "expires_at": _iso(expires), "stale": False,
+    }
+
+
+def search(request: SearchRequest, on_progress=None) -> dict:
+    context, refresh = request.context, request.refresh
+    pool = service._get_compat_pool(restore_available=True)
+    state = _pool_state(pool)
+    language = _language(context["language"])
+    planned, initial = _coverage(pool, state, has_file=bool(request.copy and os.path.isfile(request.copy["path"])))
+    key = "discover:" + state["namespace"] + ":" + cache.build_key(
+        context.get("media_type"), context.get("imdb_id"), context.get("season"), context.get("episode"),
+        [language], sorted(set(settings.general.enabled_providers or [])),
+        query=context.get("query") if context.get("mode") == "release" else context.get("title"),
+        matching_mode=context["matching_mode"], year=context.get("year"),
+        requested_languages=[context["language"]],
+    )
+    key += ":" + hashlib.sha256(json.dumps(context, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    previous = cache.compat_region.get(key, ignore_expiration=True)
+    # Provider eligibility changes, including catalog removal and throttling,
+    # must not reuse a cached claim of complete coverage.
+    eligibility = [(name, id(provider_registry[name])) for name in planned]
+    eligibility += [(name, item["status"], item["reason"]) for name, item in sorted(initial.items())]
+    previous_exists = previous is not NO_VALUE
+    if previous_exists and previous.get("_eligibility") != eligibility:
+        refresh = True
+    if previous_exists and any(resolve_result(row["id"]) is None for row in previous["results"]):
+        refresh = True
+    ttl = max(1, min(int(settings.compat_endpoint.cache_ttl_seconds),
+                     int(settings.compat_endpoint.file_id_ttl_seconds), 1800))
+    partial_ttl = max(1, min(ttl, int(settings.compat_endpoint.get("cache_ttl_partial_seconds", 15))))
+    expiration = partial_ttl if previous_exists and previous["status"] != "complete" else ttl
+    created = False
+
+    def create():
+        nonlocal created
+        created = True
+        # Recompute under the cache creator lock so a preceding search's
+        # cooldown applies even to a concurrent explicit refresh.
+        providers, outcomes = _coverage(pool, state, has_file=bool(request.copy and os.path.isfile(request.copy["path"])))
+        now = time.time()
+        checked = _iso(now)
+        search_id = uuid.uuid4().hex
+        raw = context.get("mode") == "release"
+        video = service._build_video(
+            context.get("imdb_id"), context.get("season"), context.get("episode"), context.get("media_type", "movie"),
+            query=context["query"] if raw else context.get("title"), year=context.get("year"),
+            title_only=not raw, release_query=raw,
+            episode_identity=context.get("episode_identity") if not context.get("manual_confirmed") else None,
+            copy_path=request.copy["path"] if request.copy is not None else None,
+        )
+        if request.copy is not None:
+            # Only the explicitly chosen copy contributes a file name, size,
+            # hash and release description. Confirmed identity is untouched.
+            service.refine_video_with_copy(video, request.copy)
+
+        # Rows the fanout has already produced, published while the search is
+        # still running so a reader can act on them without waiting for the
+        # slowest provider. `built` keeps each row beside the subtitle it was
+        # minted for, which both keeps that subtitle referenced (so its id
+        # stays unique) and lets the final list reuse the very same row: one
+        # handle per subtitle, and an id a reader saw mid-search still names
+        # the same result in the finished snapshot.
+        parsed = {}
+        built = {}
+        live_rows = []
+        # Building a row costs match evidence and a compatibility score. That
+        # cost is paid once either way, but paying it here spends the fanout's
+        # own wall clock, which the remaining providers are still living on.
+        # Past this budget the rest of the rows are built after the fanout, as
+        # before, and appear when the search completes.
+        live_budget = 1.5
+        # A handle offered mid-search has to outlive the search that offered
+        # it. Its lifetime starts when the row is published, while the wall the
+        # remaining providers are still searching on can be longer than the
+        # result TTL itself, so minting for the TTL alone publishes rows the
+        # store has already dropped before the last provider answers: the
+        # reader sees them, clicks Download and is told they expired. Renewal
+        # at completion cannot close that window, since it refuses an entry
+        # that is already gone and mints a replacement for the id the reader
+        # was offered. Covering the wall as well leaves exactly the TTL once
+        # the completed snapshot renews it, because renewal never shortens.
+        live_ttl = ttl + service.search_wall_seconds()
+
+        def report_progress():
+            # Charged to the same budget as building. Every outcome publishes
+            # the whole accumulated list and the observer copies it, so past a
+            # certain number of rows the copying costs more than the building
+            # it was meant to bound, and both come out of the wall the other
+            # providers are still searching on. Charging it here is what stops
+            # the list growing once that is what the budget is going to.
+            nonlocal live_budget
+            if on_progress is None:
+                return
+            started = time.monotonic()
+            on_progress({"phase": "searching", "search_id": search_id, "context": dict(context),
+                         "results": list(live_rows), "providers": [
+                outcomes.get(name, {"provider": name, "status": "pending", "result_count": 0})
+                for name in sorted(set(providers) | set(outcomes))]})
+            live_budget -= time.monotonic() - started
+
+        def build_live_rows(subtitles):
+            # Charged per row, not per response. Checking only on the way in
+            # lets a single provider answering with a large batch spend the
+            # budget many times over, and every millisecond of it comes out of
+            # the shared wall the still-running providers are being judged
+            # against: they get reported as abandoned for work this loop did.
+            # Whatever is left when the budget runs out is built after the
+            # fanout, which is where all of it was built before.
+            nonlocal live_budget
+            if on_progress is None:
+                return
+            for sub in subtitles:
+                if live_budget <= 0:
+                    return
+                started = time.monotonic()
+                row = _result(sub, video, context, search_id, checked, live_ttl, parsed)
+                built[id(sub)] = (sub, row)
+                live_rows.append(row)
+                live_budget -= time.monotonic() - started
+
+        report_progress()
+
+        def on_outcome(outcome, elapsed):
+            if outcome.provider not in providers:
+                return
+            unverified = raw and outcome.status == "empty"
+            item = {"provider": outcome.provider, "status": "unverified" if unverified else outcome.status,
+                    "reason": "query_support_unverified" if unverified else outcome.reason,
+                    "result_count": len(outcome.subtitles), "elapsed_ms": elapsed, "retry_at": None}
+            manifest = getattr(provider_registry[outcome.provider], "manifest", None)
+            if outcome.reason == "unsupported_media" and manifest is not None:
+                item["supported_media"] = list(manifest.supported_media)
+            if outcome.reason == "unsupported_language" and manifest is not None:
+                item["supported_languages"] = list(manifest.languages)
+            if outcome.status not in _COMPLETE | _NO_COOLDOWN:
+                until = time.time() + _retry_delay(outcome)
+                item["retry_at"] = _iso(until)
+                with _STATE_LOCK:
+                    state["cooldowns"][outcome.provider] = (until, dict(item))
+            outcomes[outcome.provider] = item
+            build_live_rows(outcome.subtitles)
+            report_progress()
+
+        # This is admission to one provider operation. Cache-creator and
+        # preparation waits precede it; admitted work may finish after expiry.
+        _admit_provider_search(request)
+        # A Discover search never becomes a queue job, so it is observed here or
+        # it is invisible to a status reader while it is the running work.
+        with activity.observed_operation(
+                "discover_search", scope_kind="request", language=context["language"],
+                media_type=context.get("media_type"),
+                title=context.get("title") or context.get("query") or context.get("imdb_id"),
+                season=context.get("season"), episode=context.get("episode")):
+            subtitles = service.search_title(video, [language], pool, providers, on_outcome)
+        rows = []
+        for sub in subtitles:
+            # A row already published mid-search is reused rather than minted
+            # again, so the finished snapshot repeats the ids a reader has
+            # already been offered instead of retiring them. Its handle has
+            # been expiring since the moment it was offered, though, while this
+            # snapshot's own cache lifetime starts here, so the reused handle
+            # gets the rest of its life back. Without that the cache entry
+            # outlives the handles it names by the length of the search, and a
+            # slow search with a short TTL files rows whose handles are gone
+            # before anyone is served them.
+            existing = built.get(id(sub))
+            renewed = (renew_result(existing[1]["id"], ttl)
+                       if existing is not None and existing[0] is sub else None)
+            rows.append({**existing[1], "expires_at": _iso(renewed)} if renewed is not None
+                        else _result(sub, video, context, search_id, checked, ttl, parsed))
+        # Failed refreshes retain usable rows only for providers that failed.
+        # Successful empty searches replace their earlier results. A retained
+        # handle is renewed like a live one: this snapshot offers it for its
+        # whole lifetime, and one that was about to expire would otherwise do
+        # so while the snapshot still names it.
+        if previous_exists:
+            for row in previous["results"]:
+                if (row["provider"] in outcomes
+                        and outcomes[row["provider"]]["status"] not in _COMPLETE | {"skipped"}):
+                    renewed = renew_result(row["id"], ttl)
+                    if renewed is not None:
+                        rows.append({**row, "stale": True, "expires_at": _iso(renewed)})
+        completed = sum(item["status"] in _COMPLETE for item in outcomes.values())
+        # Only a provider that was actually asked and did not answer counts as
+        # a failure. Skips, unmet setup and calls that never started are all
+        # reasons the search did not happen, which is a different answer to
+        # give the reader than "every provider failed".
+        failures = sum(item["status"] not in _COMPLETE | _NOT_ATTEMPTED
+                       for item in outcomes.values())
+        uncovered = sum(item["status"] in _NO_COVERAGE for item in outcomes.values())
+        if completed and not failures and not uncovered:
+            status = "complete"
+        elif completed or rows:
+            status = "partial"
+        elif failures or not outcomes:
+            status = "failed"
+        else:
+            status = "skipped"
+        stale = any(row["stale"] for row in rows)
+        return {
+            "search_id": search_id, "context": dict(context), "status": status,
+            "checked_at": previous["checked_at"] if stale and not completed else checked,
+            "attempted_at": checked, "cache_status": "stale" if stale else "fresh",
+            "coverage": {"providers": sorted(outcomes.values(), key=lambda item: item["provider"]),
+                         "complete": status == "complete", "configured_count": len(outcomes),
+                         "completed_count": completed},
+            "results": rows, "_eligibility": eligibility,
+        }
+
+    snapshot = copy.deepcopy(cache.compat_region.get_or_create(
+        key, create, expiration_time=0 if refresh else expiration,
+    ))
+    snapshot.pop("_eligibility", None)
+    if not created and snapshot["cache_status"] != "stale":
+        snapshot["cache_status"] = "cached"
+    return snapshot

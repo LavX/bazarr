@@ -7,11 +7,12 @@ import os
 import time
 
 from time import sleep
-from datetime import datetime
+from datetime import datetime, timezone
 from collections import deque
 from typing import Union
 from threading import Thread, Lock, RLock
 
+from app import activity
 from app.event_handler import event_stream
 from app.config import settings
 
@@ -35,6 +36,30 @@ bazarr_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 class JobCancelled(Exception):
     """Raised when a running job is cancelled by the user."""
     pass
+
+
+class JobFailed(Exception):
+    """Raised by a job that failed for a reason it can name.
+
+    The job ends up in the failed queue like any other failure. Its ``error``
+    carries ``reason`` and the one-line ``message``, which the user sees in the
+    failure notification and in the Jobs drawer. The queue logs it at DEBUG
+    only: the job is expected to have logged the cause itself, once.
+    ``retryable`` overrides the job's own flag for this failure, for example a
+    reason that no retry can fix.
+    """
+
+    def __init__(self, message: str, reason: str = "failed", returned_value=None, retryable: bool = None):
+        super().__init__(message)
+        self.reason = reason
+        self.returned_value = returned_value
+        self.retryable = retryable
+
+
+# What a user sees for a failure the job did not name. The exception text can
+# carry paths or provider payloads, so it stays in the log.
+UNEXPECTED_JOB_ERROR = {"reason": "unexpected_error",
+                        "message": "The job failed unexpectedly. Check the logs for details."}
 
 
 class Job:
@@ -74,9 +99,22 @@ class Job:
     :type progress_message: str
     :ivar job_returned_value: Value returned by the job function, initialized to None.
     :type job_returned_value: Any
+    :ivar error: Why the job failed, ``{"reason", "message"}``, or None. Shown to the user.
+    :type error: dict, optional
+    :ivar action: What the user can do with the finished job, set by the job itself:
+        ``{"kind", "label", ...}``. The frontend knows how to run each kind.
+    :type action: dict, optional
+    :ivar retryable: Whether a failed job may be queued again with the same arguments.
+    :type retryable: bool
+    :ivar retry_of: The id of the failed job this one retries, or None.
+    :type retry_of: int, optional
+    :ivar stopped: Whether the job ended at Stop instead of finishing. It is still recorded as completed.
+        ``cancelled`` only records that Stop was pressed, and a job past its last checkpoint finishes anyway.
+    :type stopped: bool
     """
     def __init__(self, job_id: int, job_name: str, module: str, func: str, args: list = None, kwargs: dict = None,
-                 is_progress: bool = False, is_signalr: bool = False, progress_max: int = 0, job_returned_value=None,):
+                 is_progress: bool = False, is_signalr: bool = False, progress_max: int = 0, job_returned_value=None,
+                 retryable: bool = False, retry_of: int = None):
         self.job_id = job_id
         self.job_name = job_name
         self.module = module
@@ -84,14 +122,29 @@ class Job:
         self.args = args
         self.kwargs = kwargs
         self.status = 'pending'
-        self.last_run_time = datetime.now()
+        self.last_run_time = datetime.now(timezone.utc)
         self.is_progress = is_progress
         self.is_signalr = is_signalr
         self.progress_value = 0
         self.progress_max = progress_max
         self.progress_message = ""
         self.job_returned_value = job_returned_value
+        self.error = None
+        self.action = None
+        self.retryable = retryable
+        self.retry_of = retry_of
         self.cancelled = False
+        self.stopped = False
+        # Observation only. ``last_run_time`` is overwritten at creation, start
+        # and terminal state, so it cannot tell those three apart; these can.
+        # They never take part in equality, scheduling or execution.
+        self.activity_id = activity.activity_id_for_job(job_id)
+        self.scheduler_run_id = activity.current_scheduler_run()
+        self.observed_created_at = datetime.now(timezone.utc)
+        self.observed_started_at = None
+        self.observed_updated_at = None
+        self.observed_finished_at = None
+        self.observed_monotonic = time.monotonic()
 
     def __eq__(self, other):
         """
@@ -142,7 +195,8 @@ class JobsQueue:
         flush_thread.start()
 
     def feed_jobs_pending_queue(self, job_name, module, func, args: list = None, kwargs: dict = None,
-                                is_progress=False, is_signalr=False, progress_max: int = 0,):
+                                is_progress=False, is_signalr=False, progress_max: int = 0,
+                                retryable: bool = False, retry_of: int = None):
         """
         Adds a new job to the pending jobs queue with specified details and triggers an event
         to notify about the queue update. Each job is uniquely identified by a job ID,
@@ -165,6 +219,10 @@ class JobsQueue:
         :type is_signalr: bool
         :param progress_max: Maximum value of the job's progress, initialized to 0.
         :type progress_max: int
+        :param retryable: Whether the user may retry the job with the same arguments if it fails.
+        :type retryable: bool
+        :param retry_of: The id of the failed job this one retries.
+        :type retry_of: int
         :return: The unique job ID assigned to the newly queued job.
         :rtype: int | bool
         """
@@ -190,7 +248,9 @@ class JobsQueue:
                     kwargs=kwargs,
                     is_progress=is_progress,
                     is_signalr=is_signalr,
-                    progress_max=progress_max,)
+                    progress_max=progress_max,
+                    retryable=retryable,
+                    retry_of=retry_of,)
             )
 
         logging.debug(f"Task {job_name} ({new_job_id}) added to queue")  # noqa: G004
@@ -227,6 +287,77 @@ class JobsQueue:
             return [vars(job) for job in queues if job.job_id == job_id]
         else:
             return [vars(job) for job in queues]
+
+    SNAPSHOT_FIELDS = (
+        'job_id', 'job_name', 'module', 'func', 'status', 'is_progress', 'is_signalr',
+        'progress_value', 'progress_max', 'progress_message', 'cancelled',
+        'activity_id', 'scheduler_run_id',
+        'created_at', 'started_at', 'updated_at', 'finished_at', 'age_seconds',
+    )
+
+    def snapshot_activity(self, limit_per_state: int = 5):
+        """A detached, whitelisted view of the queues for read-only reporting.
+
+        ``list_jobs_from_queue`` concatenates the deques without the lock and
+        hands back ``vars(job)``, which aliases the live job and exposes its
+        args, kwargs and returned value. Those carry subtitle objects, absolute
+        paths, provider clients and API keys, so this copies a fixed field list
+        under the lock instead.
+
+        Counts are reported for the whole queue and samples are bounded, so a
+        truncated sample can never be mistaken for the total. ``running`` counts
+        jobs whose status has actually flipped: reservation puts a job on the
+        running deque one step before it starts, and that gap is reported
+        separately as ``reserved`` rather than as work in progress.
+        """
+        limit = max(0, int(limit_per_state))
+        now = time.monotonic()
+
+        def project(job):
+            return {
+                'job_id': job.job_id,
+                'job_name': job.job_name,
+                'module': job.module,
+                'func': job.func,
+                'status': job.status,
+                'is_progress': bool(job.is_progress),
+                'is_signalr': bool(job.is_signalr),
+                'progress_value': job.progress_value,
+                'progress_max': job.progress_max,
+                'progress_message': job.progress_message,
+                'cancelled': bool(job.cancelled),
+                'activity_id': getattr(job, 'activity_id', None),
+                'scheduler_run_id': getattr(job, 'scheduler_run_id', None),
+                'created_at': getattr(job, 'observed_created_at', None),
+                'started_at': getattr(job, 'observed_started_at', None),
+                'updated_at': getattr(job, 'observed_updated_at', None),
+                'finished_at': getattr(job, 'observed_finished_at', None),
+                'age_seconds': max(0.0, round(now - getattr(job, 'observed_monotonic', now), 3)),
+            }
+
+        with self._queue_lock:
+            pending = list(self.jobs_pending_queue)
+            running_members = list(self.jobs_running_queue)
+            failed = list(self.jobs_failed_queue)
+            completed = list(self.jobs_completed_queue)
+            running = [job for job in running_members if job.status == 'running']
+            reserved = [job for job in running_members if job.status != 'running']
+            samples = {
+                'pending': [project(job) for job in pending[:limit]],
+                'running': [project(job) for job in running[:limit]],
+                'reserved': [project(job) for job in reserved[:limit]],
+                'failed': [project(job) for job in failed[:limit]],
+                'completed': [project(job) for job in completed[:limit]],
+            }
+            counts = {'pending': len(pending), 'running': len(running), 'reserved': len(reserved),
+                      'failed': len(failed), 'completed': len(completed)}
+
+        return {
+            'observed_at': datetime.now(timezone.utc),
+            'counts': counts,
+            'samples': samples,
+            'truncated': {state: counts[state] > len(samples[state]) for state in counts},
+        }
 
     def get_job_status(self, job_id: int):
         """
@@ -272,6 +403,38 @@ class JobsQueue:
                 return job.job_name
         return ""
 
+    def set_job_action(self, job_id: int, action: dict) -> bool:
+        """Offer the user something to do with this job once it has finished.
+
+        ``action`` is a flat, JSON-safe dict with a ``kind`` the frontend knows
+        how to run and a ``label`` for its button, plus whatever that kind
+        needs, for example ``{"kind": "discover.save", "label": "Save",
+        "ticket": 12}``. The completion notification and the Jobs drawer show
+        it; nothing else about the job is exposed.
+        """
+        with self._queue_lock:
+            for job in self.jobs_running_queue:
+                if job.job_id == job_id:
+                    job.action = dict(action)
+                    return True
+        return False
+
+    def retry_job(self, job_id: int) -> Union[int, bool]:
+        """Queue a failed, retryable job again with its original arguments.
+
+        Returns the new job's id, which carries ``retry_of`` so whoever was
+        following the failed job can follow its retry, or False.
+        """
+        with self._queue_lock:
+            job = next((item for item in self.jobs_failed_queue if item.job_id == job_id), None)
+        if job is None or not job.retryable:
+            return False
+        kwargs = {key: value for key, value in (job.kwargs or {}).items() if key != 'job_id'}
+        return self.feed_jobs_pending_queue(job_name=job.job_name, module=job.module, func=job.func,
+                                            args=list(job.args or []), kwargs=kwargs,
+                                            is_progress=job.is_progress, progress_max=job.progress_max,
+                                            retryable=True, retry_of=job.job_id)
+
     def get_job_returned_value(self, job_id: int):
         """
         Fetches the returned value of a job from the queue provided its unique identifier.
@@ -302,7 +465,8 @@ class JobsQueue:
                 event_stream(type='jobs', action='update', payload=payload)
 
     def update_job_progress(self, job_id: int, progress_value: Union[int, str, None] = None,
-                            progress_max: Union[int, None] = None, progress_message: str = ""):
+                            progress_max: Union[int, None] = None, progress_message: str = "", *,
+                            allow_cancelled: bool = False):
         """
         Updates the progress value and message for a specific job within the running jobs queue. The function
         iterates through a queue of running jobs, identifies the matching job by its ID, and updates its progress
@@ -322,7 +486,9 @@ class JobsQueue:
         """
         for job in self.jobs_running_queue:
             if job.job_id == job_id:
-                if job.cancelled:
+                # Only final accounting of an already committed operation may
+                # report after cancellation. Work checks retain the default.
+                if job.cancelled and not allow_cancelled:
                     raise JobCancelled(f"Job {job.job_name} ({job.job_id}) was cancelled")
                 payload = self._build_progress_payload(job, progress_value, progress_max, progress_message)
                 with self._progress_buffer_lock:
@@ -369,6 +535,7 @@ class JobsQueue:
             job.progress_message = progress_message
         payload["progress_message"] = job.progress_message
 
+        job.observed_updated_at = datetime.now(timezone.utc)
         return payload
 
     def update_job_progress_status(self, job_id: int, is_progress: bool = False) -> bool:
@@ -669,7 +836,8 @@ class JobsQueue:
             return False
         try:
             job.status = 'running'
-            job.last_run_time = datetime.now()
+            job.last_run_time = datetime.now(timezone.utc)
+            job.observed_started_at = datetime.now(timezone.utc)
             if 'job_id' not in job.kwargs or not job.kwargs['job_id']:
                 job.kwargs['job_id'] = job.job_id
 
@@ -692,23 +860,35 @@ class JobsQueue:
         except JobCancelled:
             logging.info(f"Job {job.job_name} ({job.job_id}) was cancelled by user")  # noqa: G004
             job.status = 'completed'
+            job.stopped = True
             job.progress_message = "Cancelled by user"
-            job.last_run_time = datetime.now()
+            job.last_run_time = datetime.now(timezone.utc)
+            job.observed_finished_at = datetime.now(timezone.utc)
+            activity.finish(job.activity_id, outcome='cancelled')
             with self._queue_lock:
                 self.jobs_running_queue.remove(job)
             self.jobs_completed_queue.append(job)
             return False
+        except JobFailed as e:
+            logging.debug(f"Job {job.job_name} ({job.job_id}) failed: {e}")  # noqa: G004
+            job.job_returned_value = e.returned_value
+            job.error = {"reason": e.reason, "message": str(e)}
+            if e.retryable is not None:
+                job.retryable = e.retryable
+            self._mark_failed(job)
+            return False
         except Exception as e:
             logging.exception(f"Exception raised while running function: {e}")  # noqa: G004
-            job.status = 'failed'
-            job.last_run_time = datetime.now()
-            with self._queue_lock:
-                self.jobs_running_queue.remove(job)
-            self.jobs_failed_queue.append(job)
+            job.error = dict(UNEXPECTED_JOB_ERROR)
+            self._mark_failed(job)
             return False
         else:
             job.status = 'completed'
-            job.last_run_time = datetime.now()
+            job.last_run_time = datetime.now(timezone.utc)
+            job.observed_finished_at = datetime.now(timezone.utc)
+            # A generic completed envelope is not a publication. Only a typed
+            # outcome recorded at a real publication boundary can claim one.
+            activity.finish(job.activity_id)
             with self._queue_lock:
                 self.jobs_running_queue.remove(job)
             self.jobs_completed_queue.append(job)
@@ -724,11 +904,22 @@ class JobsQueue:
                 payload = {
                     "job_id": job.job_id,
                     "status": job.status,  # 'completed' or 'failed'
-                    "progress_value": None  # Trigger frontend API call to update the whole job payload
+                    "progress_value": None,  # Trigger frontend API call to update the whole job payload
+                    "error": job.error,
+                    "action": job.action,
                 }
                 event_stream(type='jobs', action='update', payload=payload)
             except Exception as e:
                 logging.exception(f"Exception raised while sending event: {e}")  # noqa: G004
+
+    def _mark_failed(self, job):
+        job.status = 'failed'
+        job.last_run_time = datetime.now(timezone.utc)
+        job.observed_finished_at = datetime.now(timezone.utc)
+        activity.finish(job.activity_id, outcome='failed')
+        with self._queue_lock:
+            self.jobs_running_queue.remove(job)
+        self.jobs_failed_queue.append(job)
 
     def _is_an_existing_job(self, module, func, args, kwargs):
         """

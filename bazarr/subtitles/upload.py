@@ -5,6 +5,7 @@ import os
 import sys
 import logging
 from functools import partial
+from media_servers.events import publication_callback, observe_subtitle_change
 
 from subzero.language import Language
 from subliminal_patch.core import save_subtitles
@@ -23,9 +24,10 @@ from sonarr.history import history_log
 from arr_instances.resolution import scoped, client_for_instance
 from sonarr.notify import notify_sonarr
 from languages.custom_lang import CustomLanguage
-from app.database import (TableEpisodes, TableMovies, TableShows, get_profiles_list, get_audio_profile_languages,
+from app.database import (TableEpisodes, TableMovies, TableShows,
+                         get_profiles_list, get_audio_profile_languages,
                           database, select)
-from app.jobs_queue import jobs_queue
+from app.jobs_queue import jobs_queue, JobFailed
 from app.event_handler import event_stream
 from app.notifier import send_notifications
 from app.notifier import send_notifications_movie
@@ -35,8 +37,7 @@ from subtitles.tools.subsync_engines import (SubtitlePublication, write_subtitle
 
 from .sync import sync_subtitles, _index_keep_all_outputs
 from .post_processing import postprocessing
-from plex.operations import plex_set_movie_added_date_now, plex_set_episode_added_date_now, plex_refresh_item
-from jellyfin.operations import jellyfin_refresh_item
+from plex.operations import plex_set_movie_added_date_now, plex_set_episode_added_date_now
 
 
 def _refresh_uploaded_subtitles(video_path, subtitle_path, sonarr_series_id=None, sonarr_episode_id=None,
@@ -55,26 +56,23 @@ def _notify_upload(consumer, callback, *args, **kwargs):
 
 def _refresh_upload_consumers(media_type, metadata, arr_instance_id):
     callbacks = []
+    if media_type == 'sports':
+        # Sportarr offers only an untargeted whole-library scan, so one rescan
+        # per affected owner is requested behind the per-instance transport,
+        # non-blocking. The media servers refresh through the publication the
+        # upload already dispatched, which falls to their configured sports
+        # libraries. The event re-index is what makes the upload visible.
+        from sportarr.notify import notify_rescan
+        notify_rescan(arr_instance_id)
+        return
     if media_type == 'series':
         callbacks.append(('Sonarr', lambda: notify_sonarr(
             metadata.sonarrSeriesId,
             arr_client=client_for_instance(database, arr_instance_id, enabled_only=False))))
-        if settings.general.use_plex and settings.plex.update_series_library:
-            callbacks.append(('Plex', lambda: plex_refresh_item(
-                metadata.imdbId, is_movie=False, season=metadata.season, episode=metadata.episode)))
-        if settings.general.use_jellyfin and settings.jellyfin.update_series_library:
-            callbacks.append(('Jellyfin', lambda: jellyfin_refresh_item(
-                metadata.imdbId, is_movie=False, season=metadata.season, episode=metadata.episode,
-                tvdb_id=metadata.tvdbId)))
     else:
         callbacks.append(('Radarr', lambda: notify_radarr(
             metadata.radarrId,
             arr_client=client_for_instance(database, arr_instance_id, enabled_only=False))))
-        if settings.general.use_plex and settings.plex.update_movie_library:
-            callbacks.append(('Plex', lambda: plex_refresh_item(metadata.imdbId, is_movie=True)))
-        if settings.general.use_jellyfin and settings.jellyfin.update_movie_library:
-            callbacks.append(('Jellyfin', lambda: jellyfin_refresh_item(
-                metadata.imdbId, is_movie=True, tmdb_id=metadata.tmdbId)))
     for consumer, callback in callbacks:
         try:
             callback()
@@ -82,10 +80,37 @@ def _refresh_upload_consumers(media_type, metadata, arr_instance_id):
             logging.warning('BAZARR upload refresh failed for %s (%s)', consumer, type(exc).__name__)
 
 
+def _profile_original_format(profile_id):
+    """Whether this profile keeps the uploaded subtitle in its original format.
+
+    get_profiles_list only returns a profile when the id resolves to one. A NULL
+    profileId (the column is nullable, and the media editor sets it to nothing)
+    makes it return the whole profile LIST, and an id that no longer resolves
+    makes it return None, so subscripting the answer raised TypeError and lost
+    the upload behind the endpoint's 204.
+
+    No usable profile means no preference to honour, so the answer is False: the
+    subtitle is converted to srt, which is what every profile does until someone
+    turns originalFormat on. Uploading is a deliberate act on a file the user
+    chose, and refusing it because the media carries no profile would be a worse
+    answer than saving it in the default format.
+    """
+    profile = get_profiles_list(profile_id)
+    if not isinstance(profile, dict):
+        return False
+    return bool(profile["originalFormat"])
+
+
 def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, filename, audio_language, job_id=None,
-                           sonarrSeriesId=None, sonarrEpisodeId=None, radarrId=None, arr_instance_id=None):
+                           sonarrSeriesId=None, sonarrEpisodeId=None, radarrId=None, arr_instance_id=None,
+                           sportsEventId=None):
     if not job_id:
         return jobs_queue.add_job_from_function(f"Uploading {filename}", is_progress=False)
+
+    if media_type == 'sports':
+        from sportarr.upload import upload_sports_subtitle
+        return upload_sports_subtitle(sportsEventId, arr_instance_id, language, forced, hi,
+                                      subtitle, filename, job_id)
 
     logging.debug(f'BAZARR Manually uploading subtitles: {filename}')  # noqa: G004
 
@@ -133,9 +158,9 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
         if episode_metadata:
             sonarrSeriesId = episode_metadata.sonarrSeriesId
             sonarrEpisodeId = episode_metadata.sonarrEpisodeId
-            use_original_format = bool(get_profiles_list(episode_metadata.profileId)["originalFormat"])
+            use_original_format = _profile_original_format(episode_metadata.profileId)
         else:
-            return
+            raise JobFailed(f'Could not upload {filename}: the episode is no longer in the library.')
     else:
         movie_metadata = database.execute(scoped(
             select(TableMovies.radarrId, TableMovies.profileId,
@@ -146,9 +171,9 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
 
         if movie_metadata:
             radarrId = movie_metadata.radarrId
-            use_original_format = bool(get_profiles_list(movie_metadata.profileId)["originalFormat"])
+            use_original_format = _profile_original_format(movie_metadata.profileId)
         else:
-            return
+            raise JobFailed(f'Could not upload {filename}: the movie is no longer in the library.')
 
     audio_language = get_audio_profile_languages(audio_language)
     if len(audio_language) and isinstance(audio_language[0], dict):
@@ -191,18 +216,21 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
                                             chmod=chmod,
                                             formats=sub_format if use_original_format else ("srt",),
                                             path_decoder=force_unicode,
-                                            write_subtitle=partial(write_subtitle_file, path, written_paths=written_paths))
+                                            write_subtitle=partial(
+                                                write_subtitle_file, path, written_paths=written_paths,
+                                                on_publish=publication_callback(media_type, path, 'upload', arr_instance_id)))
             saved_subtitles = [saved for saved in saved_subtitles if saved.storage_path in written_paths]
             source_version = subtitle_source_version(saved_subtitles[0].storage_path) if saved_subtitles else None
             source_publication = (SubtitlePublication(path, saved_subtitles[0].storage_path, source_version)
                                   if source_version is not None else None)
     except Exception as e:
         logging.exception(f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')  # noqa: G004
-        return
+        raise JobFailed(f'Could not save {filename} to disk: {e}') from e
 
     if len(saved_subtitles) < 1:
-        logging.exception(f'BAZARR Error saving Subtitles file to disk for this file: {path}')  # noqa: G004
-        return
+        logging.error(f'BAZARR Error saving Subtitles file to disk for this file: {path}')  # noqa: G004
+        raise JobFailed(f'Could not save {filename} to disk: nothing was written. Check that the file is a '
+                               f'readable subtitle and that the media folder is writable.')
 
     # An uploaded subtitle satisfies the language as surely as a downloaded one,
     # so whatever mismatch was recorded for it no longer describes anything. This
@@ -242,8 +270,9 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
                              sonarrEpisodeId or radarrId,)
         with subtitle_write_locks(path, subtitle_path):
             if subtitle_source_version(subtitle_path) == source_version:
-                postprocessing(command, path, subtitle_path=subtitle_path)
-                set_chmod(subtitles_path=subtitle_path)
+                with observe_subtitle_change(media_type, path, subtitle_path, 'upload', arr_instance_id):
+                    postprocessing(command, path, subtitle_path=subtitle_path)
+                    set_chmod(subtitles_path=subtitle_path)
                 source_version = subtitle_source_version(subtitle_path)
                 source_publication.release()
                 source_publication = SubtitlePublication(path, subtitle_path, source_version)
@@ -308,8 +337,10 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
                 if settings.plex.set_movie_added:
                     _notify_upload("Plex added date", plex_set_movie_added_date_now, movie_metadata)
 
-    refresh_consumers = partial(_refresh_upload_consumers, media_type,
-                                episode_metadata if media_type == 'series' else movie_metadata, arr_instance_id)
+    refresh_consumers = partial(
+        _refresh_upload_consumers, media_type,
+        episode_metadata if media_type == 'series' else movie_metadata,
+        arr_instance_id)
     refresh_consumers()
     if source_publication is not None:
         sync_subtitles(video_path=path, srt_path=subtitle_path, srt_lang=uploaded_language_code2,

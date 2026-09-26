@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { showNotification } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AxiosError } from "axios";
@@ -9,7 +9,11 @@ import type {
   ArrInstanceTest,
   ArrInstanceTestOverrides,
   ArrInstanceUpdate,
+  ArrKind,
 } from "@/apis/raw/arrInstances";
+// Imported from the defining module, not the barrel: index re-exports this
+// file, so going through "." would close an import cycle.
+import { useSystemSettings } from "./system";
 
 const arrKey = [QueryKeys.ArrInstances];
 
@@ -35,11 +39,33 @@ export function useArrInstances() {
 }
 
 /**
+ * Whether one arr kind is actually in use. Both conditions matter: the master
+ * toggle is the operator's intent, and an enabled instance is what there is to
+ * actually query. Sports has gated its status row on this since it landed;
+ * Sonarr and Radarr now use the same answer, so an install without them shows
+ * no row for them instead of an empty one.
+ */
+export function useArrKindAvailability(kind: ArrKind) {
+  const query = useArrInstances();
+  const { data: settings, isLoading: settingsLoading } = useSystemSettings();
+  const master = settings?.general?.[`use_${kind}`] ?? false;
+  const instances =
+    query.data?.filter(
+      (instance) => instance.kind === kind && instance.enabled,
+    ) ?? [];
+  return {
+    instances,
+    enabled: master && instances.length > 0,
+    isLoading: query.isLoading || settingsLoading,
+  };
+}
+
+/**
  * Multi-instance UI helpers (#156) for a given kind: a name lookup by
  * arr_instance_id, MultiSelect options for that kind's instances, and whether
  * there is more than one (so the instance badge/filter only show when relevant).
  */
-export function useArrInstanceLabels(kind: "sonarr" | "radarr") {
+export function useArrInstanceLabels(kind: ArrKind) {
   const { data } = useArrInstances();
   return useMemo(() => {
     const all = data ?? [];
@@ -132,13 +158,34 @@ export function useDeleteArrInstance() {
   });
 }
 
-export function useTestArrInstanceConnection() {
-  return useMutation({
+/**
+ * The connection a test verdict belongs to. Pass the values the form currently
+ * holds and the last verdict is dropped the moment any of them changes: a
+ * green "Connected to Sonarr, version 4.0.0" that was measured against a
+ * different address or a different key is worse than no verdict at all,
+ * because it reads as an answer about what is on screen now.
+ */
+export interface ArrTestConnection {
+  ip?: string;
+  port?: number | string;
+  baseUrl?: string;
+  ssl?: boolean;
+  apiKey?: string;
+}
+
+export function useTestArrInstanceConnection(
+  connection: ArrTestConnection = {},
+) {
+  const mutation = useMutation({
     // The key never appears here: mutation keys are static strings and the
     // request body is the only place credentials travel.
     mutationKey: [...arrKey, QueryKeys.Actions, "test"],
     mutationFn: (body: ArrInstanceTest) => api.arrInstances.test(body),
   });
+  const { reset } = mutation;
+  const { ip, port, baseUrl, ssl, apiKey } = connection;
+  useEffect(() => reset(), [ip, port, baseUrl, ssl, apiKey, reset]);
+  return mutation;
 }
 
 // Tests a saved instance using its stored key (decrypted server-side). The key
@@ -177,6 +224,7 @@ export function useApplyArrInstanceDefaultProfile() {
       });
       client.invalidateQueries({ queryKey: [QueryKeys.Series] });
       client.invalidateQueries({ queryKey: [QueryKeys.Movies] });
+      client.invalidateQueries({ queryKey: [QueryKeys.Sports] });
     },
     onError: (error) =>
       showNotification({

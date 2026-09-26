@@ -65,7 +65,7 @@ def test_local_to_os_entry_forced_flag():
 def test_local_to_os_entry_subtitle_id_unique_per_file():
     """Two distinct local files (different file_ids) for the same lang
     + media must produce different subtitle_id values, otherwise clients
-    that de-dupe on subtitle_id collapse them. Codex P2."""
+    that de-dupe on subtitle_id collapse them."""
     from compat.response_mapper import local_to_os_entry
     e1 = local_to_os_entry(
         file_id=42, lang="en", modifier=None, filename="alt1.srt",

@@ -129,7 +129,7 @@ def test_persist_master_key_generates_and_writes_when_empty(monkeypatch):
 
     monkeypatch.setattr(cfg.settings.general, "secrets_encryption_key", "", raising=False)
     calls = []
-    monkeypatch.setattr(cfg, "write_config", lambda: calls.append(True))
+    monkeypatch.setattr(cfg, "write_config", lambda: (calls.append(True) or True))
 
     persist_master_key()
 
@@ -143,7 +143,7 @@ def test_persist_master_key_noop_when_already_persisted(monkeypatch):
 
     monkeypatch.setattr(cfg.settings.general, "secrets_encryption_key", "already-here", raising=False)
     calls = []
-    monkeypatch.setattr(cfg, "write_config", lambda: calls.append(True))
+    monkeypatch.setattr(cfg, "write_config", lambda: (calls.append(True) or True))
 
     persist_master_key()
 
@@ -197,3 +197,72 @@ def test_test_connection_for_instance_handles_undecryptable_key(schema_session):
     assert status == 200
     assert body["ok"] is False
     assert body["error"] == "decrypt_failed"  # clean structured error, not a 500
+
+
+@pytest.mark.parametrize('result', [False, None, 'raise'])
+def test_failed_master_key_persistence_restores_blank_and_retries(monkeypatch, result):
+    from app import config
+    from secret_store import persist_master_key
+    monkeypatch.setattr(config.settings.general, 'secrets_encryption_key', '')
+    def fail():
+        if result == 'raise':
+            raise OSError('synthetic private detail')
+        return result
+    monkeypatch.setattr(config, 'write_config', fail)
+    with pytest.raises(ValueError, match='Unable to persist secrets encryption key'):
+        persist_master_key()
+    assert config.settings.general.secrets_encryption_key == ''
+    monkeypatch.setattr(config, 'write_config', lambda: True)
+    persist_master_key()
+    assert config.settings.general.secrets_encryption_key
+
+
+def test_concurrent_first_master_key_waits_for_durability(monkeypatch):
+    from threading import Event, Thread
+    from app import config
+    from secret_store import persist_master_key
+    monkeypatch.setattr(config.settings.general, 'secrets_encryption_key', '')
+    reached, release, second_done = Event(), Event(), Event()
+    writes, errors = [], []
+    def write():
+        writes.append(config.settings.general.secrets_encryption_key)
+        reached.set()
+        assert release.wait(3)
+        return True
+    monkeypatch.setattr(config, 'write_config', write)
+    def persist(done=None):
+        try:
+            persist_master_key()
+        except Exception as error:
+            errors.append(type(error).__name__)
+        if done:
+            done.set()
+    first = Thread(target=persist)
+    second = Thread(target=persist, args=(second_done,))
+    first.start()
+    try:
+        assert reached.wait(3)
+        second.start()
+        assert not second_done.wait(.05)
+    finally:
+        release.set()
+        first.join(3)
+        second.join(3)
+    assert not errors and second_done.is_set()
+    assert len(writes) == 1
+
+
+def test_generated_before_persist_is_not_mistaken_for_durable(monkeypatch):
+    from app import config
+    from secret_store import get_master_key, persist_master_key
+    monkeypatch.setattr(config.settings.general, 'secrets_encryption_key', '')
+    generated = get_master_key()
+    monkeypatch.setattr(config, 'write_config', lambda: False)
+    with pytest.raises(ValueError, match='Unable to persist secrets encryption key'):
+        persist_master_key()
+    assert config.settings.general.secrets_encryption_key == generated
+    writes = []
+    monkeypatch.setattr(config, 'write_config', lambda: (writes.append(True) or True))
+    persist_master_key()
+    persist_master_key()
+    assert writes == [True]

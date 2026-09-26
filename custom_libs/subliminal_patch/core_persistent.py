@@ -243,11 +243,51 @@ def _safe_submit(executor: ThreadPoolExecutor, fn, *args, **kwargs):
         return fresh.submit(fn, *args, **kwargs)
 
 
+def _health_outcome(status: str, success_outcome: str) -> Optional[str]:
+    """Translate a detailed search result into a health-tracker outcome.
+
+    A detailed call reports a failure by RETURNING a ProviderSearchResult, not
+    by raising, so reading "the future did not raise, therefore the provider is
+    healthy" marks every provider failure as a success. Wiring on_result up
+    without this would have fed the tracker nothing but "ok" and left the
+    escalating discard exactly as dead as it was with no callback at all.
+
+    "skipped" returns None: the provider does not serve this target, which is
+    a fact about the search, not about the provider's health.
+    """
+    if status in ("success", "empty"):
+        return success_outcome
+    if status == "skipped":
+        return None
+    if status == "timeout":
+        return "timeout"
+    return "exception"
+
+
+def _log_wall_outcome(provider: str, status: str, latency_s: float) -> None:
+    """Record a wall-clock outcome on the same logger provider_search_failure
+    writes to.
+
+    Everything that reaches the caller as a provider outcome used to be logged
+    from exactly one place, provider_search_failure, which the wall path never
+    goes through. So the only outcomes an operator could see in the log were
+    the ones a provider raised, while the abandonment path, the one that
+    produced most of the unhappy rows on screen, left no trace at all. A report
+    of "the UI shows three timeouts the backend never recorded" is then
+    unanswerable from the log.
+    """
+    logging.getLogger("provider_search").info(
+        "Provider search outcome: provider=%s status=%s elapsed_ms=%d",
+        provider, status, int(latency_s * 1000),
+    )
+
+
 def list_all_subtitles_parallel(videos, languages, pool_instance,
                                  per_provider_timeout: int = 5,
                                  wall_timeout: int = 8,
                                  exclude_providers=None,
-                                 on_result=None):
+                                 on_result=None,
+                                 on_outcome=None):
     """Parallel fanout with a hard wall-clock timeout, sharing one
     bounded executor process-wide.
 
@@ -263,6 +303,13 @@ def list_all_subtitles_parallel(videos, languages, pool_instance,
         not yet yielded is harvested (no results dropped); futures still
         running are reported as "abandoned" via on_result and registered
         in the module-level abandoned set so they remain observable.
+      - A future still queued when the wall fires is cancelled and
+        reported as "not_started". It never reached a worker, so it made
+        no request and is not evidence about the provider at all. That
+        is a different fact from "abandoned" (the provider was working
+        and we stopped waiting) and from "timeout" (the provider itself
+        blew a deadline), and the three are kept apart because the
+        caller turns them into user-visible text and into backoff.
       - Concurrency cap: a process-wide semaphore allows at most
         max_concurrent_fanouts simultaneous fanouts. If the cap is hit
         for longer than wall_timeout, the request degrades to "no
@@ -286,7 +333,10 @@ def list_all_subtitles_parallel(videos, languages, pool_instance,
         ``"ok"`` (returned within per_provider_timeout),
         ``"slow"`` (returned, but over threshold),
         ``"exception"`` (raised),
-        ``"abandoned"`` (wall fired before completion).
+        ``"abandoned"`` (wall fired while the provider was working),
+        ``"not_started"`` (wall fired before a worker picked it up).
+        ``"not_started"`` is deliberately not one of the health
+        tracker's failure outcomes: the provider was never asked.
     """
     global _abandoned_total
     exclude = set(exclude_providers or ())
@@ -296,6 +346,17 @@ def list_all_subtitles_parallel(videos, languages, pool_instance,
     providers = [p for p in pool_instance.providers
                  if p not in getattr(pool_instance, "discarded_providers", set())
                  and p not in exclude]
+    def emit_outcome(result, latency_ms=0):
+        if on_outcome is not None:
+            on_outcome(result, latency_ms)
+
+    from .core import ProviderSearchResult, provider_search_failure
+
+    if on_outcome is not None:
+        for name in pool_instance.providers:
+            if name not in providers:
+                emit_outcome(ProviderSearchResult(name, status="skipped", reason="provider_excluded"))
+
     if not providers:
         return out
 
@@ -313,6 +374,8 @@ def list_all_subtitles_parallel(videos, languages, pool_instance,
             "compat fanout: dropped (concurrency cap reached, wall=%ds)",
             wall_timeout,
         )
+        for name in providers:
+            emit_outcome(ProviderSearchResult(name, status="saturated", reason="capacity"))
         return out
 
     try:
@@ -327,14 +390,17 @@ def list_all_subtitles_parallel(videos, languages, pool_instance,
                     "concurrency wait, wall=%ds)",
                     wall_timeout,
                 )
+                for name in providers:
+                    emit_outcome(ProviderSearchResult(name, status="saturated", reason="capacity"))
                 return out
 
             futures: Dict[Future, str] = {}
             start_times: Dict[Future, float] = {}
             for p in providers:
+                options = {"detailed": True} if on_outcome is not None else {}
                 fut = _safe_submit(executor,
-                                    pool_instance.list_subtitles_provider,
-                                    p, video, languages)
+                                   pool_instance.list_subtitles_provider,
+                                   p, video, languages, **options)
                 futures[fut] = p
                 start_times[fut] = time.monotonic()
 
@@ -352,14 +418,21 @@ def list_all_subtitles_parallel(videos, languages, pool_instance,
                 # Process a done future: record outcome, extend `out` on success.
                 try:
                     result = fut.result(timeout=0)
-                except Exception:
+                except Exception as error:
                     _emit(name, "exception", latency_s)
+                    emit_outcome(provider_search_failure(name, error), int(latency_s * 1000))
                     return
-                if isinstance(result, tuple) and len(result) == 2:
+                health = "slow" if latency_s > slow_threshold else "ok"
+                if isinstance(result, ProviderSearchResult):
+                    emit_outcome(result, int(latency_s * 1000))
+                    subs = result.subtitles
+                    health = _health_outcome(result.status, health)
+                elif isinstance(result, tuple) and len(result) == 2:
                     _, subs = result
                 else:
                     subs = result
-                _emit(name, "slow" if latency_s > slow_threshold else "ok", latency_s)
+                if health is not None:
+                    _emit(name, health, latency_s)
                 if subs:
                     out[video].extend(subs)
 
@@ -395,13 +468,22 @@ def list_all_subtitles_parallel(videos, languages, pool_instance,
                         _ingest(fut, name, latency_s)
                     elif fut.cancel():
                         # Was queued, not running. No work happened, no
-                        # work will happen. Still report as abandoned
-                        # for the health tracker - a queued provider
-                        # that never got CPU time is just as useless to
-                        # the caller as one that timed out.
-                        _emit(name, "abandoned", latency_s)
+                        # work will happen, and the provider was never
+                        # contacted. Reporting that as a timeout blames
+                        # a provider for our own scheduling, so it gets
+                        # its own outcome and does not count against the
+                        # provider's health.
+                        _emit(name, "not_started", latency_s)
+                        _log_wall_outcome(name, "not_started", latency_s)
+                        emit_outcome(ProviderSearchResult(name, status="not_started",
+                                                          reason="fanout_capacity"),
+                                     int(latency_s * 1000))
                     else:
                         _emit(name, "abandoned", latency_s)
+                        _log_wall_outcome(name, "abandoned", latency_s)
+                        emit_outcome(ProviderSearchResult(name, status="abandoned",
+                                                          reason="wall_timeout"),
+                                     int(latency_s * 1000))
                         still_running.append((fut, name))
                 if still_running:
                     with _abandoned_lock:

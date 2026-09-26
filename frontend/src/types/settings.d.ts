@@ -1,13 +1,22 @@
 interface Settings {
   general: Settings.General;
+  discover?: {
+    tmdb_configured: boolean;
+    /** Whether the reader saved a key of their own, never the key itself. */
+    tmdb_token_stored?: boolean;
+    metadata_revision: string;
+    locale: string;
+  };
   log: Settings.Log;
   proxy: Settings.Proxy;
   auth: Settings.Auth;
   subsync: Settings.Subsync;
   sonarr: Settings.Sonarr;
   radarr: Settings.Radarr;
+  sportarr: Settings.Sportarr;
   backup: Settings.Backup;
   translator: Settings.Translator;
+  plex?: Settings.Plex;
   // Anitcaptcha
   anticaptcha: Settings.Anticaptcha;
   deathbycaptcha: Settings.DeathByCaptche;
@@ -27,6 +36,7 @@ interface Settings {
 
 declare namespace Settings {
   interface General {
+    metadata_language?: string;
     adaptive_searching: boolean;
     adaptive_searching_delay: string;
     adaptive_searching_delta: string;
@@ -47,9 +57,11 @@ declare namespace Settings {
     ignore_vobsub_subs: boolean;
     instance_name: string;
     ip: string;
+    trusted_proxy: string;
     multithreading: boolean;
     minimum_score: number;
     minimum_score_movie: number;
+    minimum_score_sports: number;
     movie_default_enabled: boolean;
     movie_default_profile?: number;
     serie_default_enabled: boolean;
@@ -59,6 +71,7 @@ declare namespace Settings {
     setup_complete?: boolean;
     path_mappings: [string, string][];
     path_mappings_movie: [string, string][];
+    path_mappings_sports: [string, string][];
     page_size: number;
     theme: string;
     port: number;
@@ -76,21 +89,28 @@ declare namespace Settings {
     update_restart: boolean;
     upgrade_frequency: number;
     upgrade_manual: boolean;
+    upgrade_translated: boolean;
     use_embedded_subs: boolean;
     use_jellyfin?: boolean;
+    use_emby?: boolean;
+    use_silo?: boolean;
     use_plex?: boolean;
+    use_seerr?: boolean;
     use_postprocessing: boolean;
     use_postprocessing_threshold: boolean;
     use_postprocessing_threshold_movie: boolean;
     use_radarr: boolean;
+    use_sportarr: boolean;
     use_scenename: boolean;
     use_sonarr: boolean;
     utf8_encode: boolean;
     provider_priorities?: string;
     provider_languages?: Record<string, string[]> | string;
     provider_score_modifiers?: Record<string, number> | string;
+    ai_translated_score_penalty?: number;
     wanted_search_frequency: number;
     wanted_search_frequency_movie: number;
+    wanted_search_frequency_sports: number;
     use_external_webhook?: boolean;
     external_webhook_url?: string;
     external_webhook_username?: string;
@@ -102,6 +122,8 @@ declare namespace Settings {
     exclude_filter: string;
     ignore_case: boolean;
     use_regex: boolean;
+    max_file_size_mb: number;
+    backup_count: number;
   }
 
   interface Proxy {
@@ -126,6 +148,8 @@ declare namespace Settings {
     username?: string;
     password?: string;
     apikey: string;
+    session_lifetime_days: number;
+    cookie_secure: string;
   }
 
   interface Subsync {
@@ -187,6 +211,20 @@ declare namespace Settings {
     excluded_tags: string[];
   }
 
+  interface Sportarr {
+    sports_sync: number;
+    full_update: FullUpdateOptions;
+    full_update_day: number;
+    full_update_hour: number;
+    only_monitored: boolean;
+    sync_only_monitored_leagues: boolean;
+    sync_only_monitored_events: boolean;
+    excluded_tags: string[];
+    excluded_sports: string[];
+    search_on_sync: boolean;
+    use_ffprobe_cache: boolean;
+  }
+
   interface Translator {
     default_score: number;
     gemini_keys: string[];
@@ -204,11 +242,19 @@ declare namespace Settings {
     openrouter_reasoning?: string;
     openrouter_parallel_batches?: number;
     openrouter_provider_routing?: string;
+    openrouter_provider_order?: string[];
   }
 
   interface Plex {
     ip: string;
     port: number;
+    /**
+     * The media server row the Plex account owns, written by the backend on
+     * every account transition (media_servers/plex_account.py). Never a
+     * credential: it is how a caller tells the account's destination apart
+     * from a Plex instance somebody added by hand.
+     */
+    instance_id?: string;
     apikey?: string;
     ssl?: boolean;
     set_movie_added?: boolean;

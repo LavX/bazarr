@@ -15,7 +15,7 @@ from sonarr.history import history_log
 from app.notifier import send_notifications
 from app.get_providers import get_providers
 from app.database import (get_exclusion_clause, get_audio_profile_languages, TableShows, TableEpisodes, database,
-                          select, get_profile_id)
+                          select)
 from app.jobs_queue import jobs_queue
 from app.event_handler import event_stream
 from app.config import settings
@@ -136,7 +136,8 @@ def episode_download_subtitles(no, job_id=None, job_sub_function=False, provider
         list_missing_subtitles(epno=no, arr_instance_id=arr_instance_id)
         episode = database.execute(stmt).first()
 
-    episodePath = path_mappings.path_replace_instance(episode.path, episode.arr_instance_id, 'series')
+    arr_instance_id = episode.arr_instance_id
+    episodePath = path_mappings.path_replace_instance(episode.path, arr_instance_id, 'series')
 
     if not os.path.exists(episodePath):
         logging.debug(f"BAZARR episode file not found. Path mapping issue?: {episodePath}")  # noqa: G004
@@ -218,6 +219,7 @@ def episode_download_specific_subtitles(sonarr_series_id, sonarr_episode_id, lan
                    TableEpisodes.season,
                    TableEpisodes.episode,
                    TableEpisodes.title.label("episodeTitle"),
+                   TableShows.profileId,
                    TableShows.title)
             .select_from(TableEpisodes)
             .join(TableShows)
@@ -228,7 +230,8 @@ def episode_download_specific_subtitles(sonarr_series_id, sonarr_episode_id, lan
     if not episodeInfo:
         return 'Episode not found', 404
 
-    episodePath = path_mappings.path_replace_instance(episodeInfo.path, episodeInfo.arr_instance_id, 'series')
+    arr_instance_id = episodeInfo.arr_instance_id
+    episodePath = path_mappings.path_replace_instance(episodeInfo.path, arr_instance_id, 'series')
 
     if not os.path.exists(episodePath):
         return 'Episode file not found. Path mapping issue?', 500
@@ -258,7 +261,7 @@ def episode_download_specific_subtitles(sonarr_series_id, sonarr_episode_id, lan
 
     try:
         result = list(generate_subtitles(episodePath, [(language, hi, forced)], audio_language, sceneName,
-                                         title, 'series', profile_id=get_profile_id(episode_id=sonarr_episode_id),
+                                         title, 'series', profile_id=episodeInfo.profileId,
                                          job_id=job_id, arr_instance_id=arr_instance_id))
         if isinstance(result, list) and len(result):
             result = result[0]

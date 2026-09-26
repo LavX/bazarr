@@ -14,6 +14,7 @@ when the caller asks with include_embedded=true.
 from datetime import datetime
 
 from flask import Flask
+import pytest
 
 
 EMBEDDED_ACTION = 7
@@ -216,3 +217,63 @@ def test_movie_history_includes_embedded_on_request(schema_session, monkeypatch)
 
     assert sorted(item["action"] for item in result["data"]) == [1, 7]
     assert result["total"] == 2
+
+
+@pytest.mark.parametrize("media_type", ["movie", "episode"])
+def test_history_exposes_event_identity_and_precise_timestamp(media_type, schema_session, monkeypatch):
+    from app.database import TableHistory, TableHistoryMovie, select
+
+    if media_type == "movie":
+        _movie_fixture(schema_session)
+        _patch_movie_endpoint(monkeypatch, schema_session)
+        model, get_history = TableHistoryMovie, _get_movie_history
+    else:
+        _series_fixture(schema_session)
+        _patch_episode_endpoint(monkeypatch, schema_session)
+        model, get_history = TableHistory, _get_episode_history
+
+    timestamp = datetime(2026, 9, 13, 12, 0, 0, 123456)
+    rows = schema_session.execute(select(model)).scalars().all()
+    for row in rows:
+        row.timestamp = timestamp
+        if row.action == 1:
+            row.ai_translated = True
+    schema_session.flush()
+
+    result = get_history("?id=1&length=-1&include_embedded=true")
+
+    assert [item["history_id"] for item in result["data"]] == sorted(
+        [row.id for row in rows], reverse=True)
+    assert {item["id"] for item in result["data"]} == {1}
+    assert [item["ai_translated"] for item in result["data"] if item["action"] == 1] == [True]
+    assert all(item["ai_translated"] is False for item in result["data"] if item["action"] == 7)
+    assert {item["timestamp_iso"] for item in result["data"]} == {"2026-09-13T12:00:00.123456"}
+    assert {item["timestamp"] for item in result["data"]} == {"pretty"}
+    assert {item["parsed_timestamp"] for item in result["data"]} == {timestamp.strftime("%x %X")}
+    assert len(schema_session.execute(select(model)).scalars().all()) == result["total"]
+
+
+@pytest.mark.parametrize("media_type", ["movie", "episode"])
+def test_history_pagination_orders_timestamp_ties_by_event_id(media_type, schema_session, monkeypatch):
+    from app.database import TableHistory, TableHistoryMovie, select
+
+    if media_type == "movie":
+        _movie_fixture(schema_session)
+        _patch_movie_endpoint(monkeypatch, schema_session)
+        model, get_history = TableHistoryMovie, _get_movie_history
+    else:
+        _series_fixture(schema_session)
+        _patch_episode_endpoint(monkeypatch, schema_session)
+        model, get_history = TableHistory, _get_episode_history
+
+    rows = schema_session.execute(select(model)).scalars().all()
+    for row in rows:
+        row.timestamp = datetime(2026, 9, 13, 12, 0)
+    schema_session.flush()
+
+    pages = [get_history(f"?id=1&start={index}&length=1&include_embedded=true")
+             for index in range(len(rows))]
+
+    assert [page["data"][0]["action"] for page in pages] == [row.action for row in sorted(
+        rows, key=lambda row: row.id, reverse=True)]
+    assert {page["total"] for page in pages} == {len(rows)}

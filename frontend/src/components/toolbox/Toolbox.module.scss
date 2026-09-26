@@ -1,6 +1,8 @@
 .group {
   border-radius: var(--bz-radius-lg);
-  margin: 8px 12px;
+  // Matching the reduced vertical padding: the two together were most of the
+  // band's height on a row with nothing selected.
+  margin: 4px 12px;
 
   @include mantine.light {
     background-color: var(--mantine-color-gray-1);
@@ -16,5 +18,15 @@
     overflow-x: auto;
     flex-wrap: nowrap !important;
     scrollbar-width: none;
+
+    // For a band with more buttons than a phone is wide. Held to one row,
+    // its groups shrank to their narrowest button and stacked the rest in a
+    // column (234px on a series page), or ran past the edge, as the Wanted
+    // search did. Here each group lays its buttons out in rows, and a group
+    // that does not fit beside the other starts a row of its own.
+    &.wraps {
+      flex-wrap: wrap !important;
+      row-gap: 8px;
+    }
   }
 }

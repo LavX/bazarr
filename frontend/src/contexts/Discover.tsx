@@ -1,0 +1,858 @@
+import {
+  createContext,
+  PropsWithChildren,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+} from "react";
+import { showNotification } from "@mantine/notifications";
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  useDiscoverDownload,
+  useDiscoverPreview,
+  useDiscoverSearch,
+} from "@/apis/hooks/discover";
+import { QueryKeys } from "@/apis/queries/keys";
+import api from "@/apis/raw";
+import {
+  claimJobCompletion,
+  isJobCompletionClaimed,
+  registerJobAction,
+} from "@/modules/jobs";
+import { notification } from "@/modules/notification";
+import type {
+  DiscoverContext as SearchContext,
+  DiscoverDownloadFeedback,
+  DiscoverPreviewFeedback,
+  DiscoverSelection,
+  DiscoverSubtitleResult,
+} from "@/types/discover";
+import { writeStoredValue } from "@/utilities/browserStorage";
+import { filenameFromContentDisposition, saveBlobAs } from "@/utilities/files";
+import {
+  copyTargetKey,
+  DISCOVER_LANGUAGE_KEY,
+  DiscoverBrowsing,
+  discoverContextKey,
+  DiscoverDraft,
+  discoverReducer,
+  DiscoverState,
+  initialDiscoverState,
+  offeredResults,
+  recentEpisodeMismatch,
+  searchSelection,
+} from "./discoverState";
+
+interface DiscoverContextValue {
+  state: DiscoverState;
+  rememberPage: (key: string, page: DiscoverState) => void;
+  /**
+   * Adopt the page filed for a browser history entry. Answers whether the
+   * caller can stop there: true when that page was restored, and true when the
+   * live state already is that page, so the URL must not be derived over it.
+   */
+  restorePage: (key: string) => boolean;
+  updateBrowsing: (changes: Partial<DiscoverBrowsing>) => void;
+  updateDraft: (changes: Partial<DiscoverDraft>) => void;
+  /**
+   * Preselect a subtitle language from the reader's language profile. Only an
+   * empty language is ever seeded, nothing is written to browser storage, and
+   * the state says it was seeded so the page can show where it came from.
+   */
+  seedLanguage: (language: string) => void;
+  findSubtitles: (refresh?: boolean) => Promise<void>;
+  /**
+   * Queue the exact result as a standard job. The row follows that job
+   * through the jobs cache and saves the finished file as soon as it is ready.
+   */
+  downloadSubtitle: (row: DiscoverSubtitleResult) => Promise<void>;
+  /** Save the finished file again after the automatic save failed. */
+  saveSubtitle: () => Promise<void>;
+  previewSubtitle: (row: DiscoverSubtitleResult) => Promise<void>;
+  closePreview: () => void;
+  /**
+   * Retire in-flight search, download and preview responses without touching
+   * filed results. Leaving the title is the owner going away: a response that
+   * lands after it belongs to a selection the reader has already left.
+   */
+  cancelPending: () => void;
+  searchAgain: () => Promise<void>;
+}
+
+const DiscoverContext = createContext<DiscoverContextValue | null>(null);
+
+export function DiscoverProvider({ children }: PropsWithChildren) {
+  const [state, dispatch] = useReducer(
+    discoverReducer,
+    undefined,
+    initialDiscoverState,
+  );
+  const pages = useRef(
+    new Map<string, { savedAt: number; state: DiscoverState }>(),
+  );
+  const searches = useRef(
+    new Map<string, { savedAt: number; state: DiscoverState }>(),
+  );
+  const authenticated = useRef(true);
+  // Bumped on every sign-in change, so a response that outlives one is dropped.
+  const authEpoch = useRef(0);
+  // Jobs this row has seen in the jobs cache. One that disappears again was
+  // removed from the queue, which is how a queued job is cancelled.
+  const seenJobs = useRef(new Set<number>());
+  // Ticket fetches in flight, so Save in the drawer during the automatic save
+  // joins it instead of saving the file a second time.
+  const saving = useRef(new Map<number, Promise<string | null>>());
+  const generation = useRef(0);
+  const draft = useRef(state.draft);
+  const currentState = useRef(state);
+  currentState.current = state;
+  const downloadSequence = useRef(0);
+  const previewSequence = useRef(0);
+  const { mutateAsync: fetchPreview, reset: resetPreview } =
+    useDiscoverPreview();
+  const { mutateAsync: fetchDownload, reset: resetDownload } =
+    useDiscoverDownload();
+  const mutation = useDiscoverSearch();
+  const { mutateAsync, reset } = mutation;
+  const client = useQueryClient();
+
+  useEffect(() => {
+    const onAuth = (event: WindowEventMap["app-auth-changed"]) => {
+      authenticated.current = event.detail.authenticated;
+      authEpoch.current += 1;
+      if (!event.detail.authenticated) {
+        pages.current.clear();
+        searches.current.clear();
+        generation.current += 1;
+        downloadSequence.current += 1;
+        previewSequence.current += 1;
+        draft.current = initialDiscoverState().draft;
+        dispatch({ type: "clear", generation: generation.current });
+        reset();
+        resetDownload();
+        resetPreview();
+      }
+    };
+    window.addEventListener("app-auth-changed", onAuth);
+    return () => window.removeEventListener("app-auth-changed", onAuth);
+  }, [reset, resetDownload, resetPreview]);
+
+  const rememberPage = useCallback((key: string, page: DiscoverState) => {
+    if (
+      !authenticated.current ||
+      page.sessionId !== currentState.current.sessionId
+    )
+      return;
+    // Keep only this browser session's recent history, never subtitle handles in storage.
+    const now = Date.now();
+    for (const [id, entry] of pages.current)
+      if (now - entry.savedAt > 30 * 60_000) pages.current.delete(id);
+    pages.current.delete(key);
+    pages.current.set(key, { savedAt: now, state: page });
+    while (pages.current.size > 20)
+      pages.current.delete(pages.current.keys().next().value!);
+  }, []);
+
+  const restorePage = useCallback((key: string) => {
+    const entry = pages.current.get(key);
+    if (
+      !authenticated.current ||
+      !entry ||
+      Date.now() - entry.savedAt > 30 * 60_000
+    )
+      return false;
+    // A page is filed as the reader leaves its entry, so a page filed mid-search
+    // holds no results. The answer arrives after that, and it answers the same
+    // search: restoring the page over it would drop a result list the reader
+    // has already paid for, and the generation the restore moves on would
+    // retire that response instead when it has not landed yet. The live state
+    // is the fresher answer to the same search, so it stays, and the caller is
+    // told not to derive the URL over it.
+    const live = currentState.current;
+    if (
+      entry.state.snapshot === null &&
+      (live.snapshot !== null || live.status === "searching") &&
+      discoverContextKey(live.draft) === discoverContextKey(entry.state.draft)
+    )
+      return true;
+    generation.current += 1;
+    downloadSequence.current += 1;
+    previewSequence.current += 1;
+    draft.current = entry.state.draft;
+    dispatch({
+      type: "restore",
+      state: entry.state,
+      generation: generation.current,
+    });
+    return true;
+  }, []);
+
+  const updateDraft = useCallback(
+    (changes: Partial<DiscoverDraft>) => {
+      const merged = { ...draft.current, ...changes };
+      // A copy belongs to one exact target. Retiring it here, rather than in
+      // every caller, is what keeps a stale choice from surviving a change of
+      // film or episode. The comparison is unconditional: a caller that
+      // changes the target and supplies a copy in the same update is supplying
+      // a copy for a target that no longer exists, so the copy loses.
+      const next =
+        copyTargetKey(merged) === copyTargetKey(draft.current)
+          ? merged
+          : { ...merged, copyId: undefined };
+      const nextKey = discoverContextKey(next);
+      const changed = nextKey !== discoverContextKey(draft.current);
+      if (changed) {
+        const current = currentState.current;
+        if (
+          authenticated.current &&
+          current.sessionId === state.sessionId &&
+          current.snapshot &&
+          discoverContextKey(current.draft) ===
+            discoverContextKey(draft.current)
+        ) {
+          const oldKey = discoverContextKey(current.draft);
+          searches.current.delete(oldKey);
+          searches.current.set(oldKey, { savedAt: Date.now(), state: current });
+          while (searches.current.size > 20)
+            searches.current.delete(searches.current.keys().next().value!);
+        }
+        generation.current += 1;
+        downloadSequence.current += 1;
+        previewSequence.current += 1;
+      }
+      draft.current = next;
+      let storageAvailable = state.storageAvailable;
+      if (changes.language !== undefined) {
+        // Whether the write landed is what decides the session-only notice
+        // under the language select, so the helper's answer is the answer.
+        storageAvailable = writeStoredValue(
+          DISCOVER_LANGUAGE_KEY,
+          changes.language,
+        );
+      }
+      dispatch({
+        type: "draft",
+        draft: next,
+        generation: generation.current,
+        storageAvailable,
+        cached:
+          changed &&
+          authenticated.current &&
+          searches.current.get(nextKey)?.state.sessionId ===
+            currentState.current.sessionId &&
+          searches.current.has(nextKey) &&
+          Date.now() - searches.current.get(nextKey)!.savedAt <= 30 * 60_000
+            ? searches.current.get(nextKey)!.state
+            : undefined,
+        // A language the reader set by hand is no longer a seeded one.
+        ...(changes.language !== undefined ? { languageSeeded: false } : {}),
+      });
+    },
+    [state.storageAvailable, state.sessionId],
+  );
+
+  const seedLanguage = useCallback((language: string) => {
+    if (!language || draft.current.language) return;
+    draft.current = { ...draft.current, language };
+    dispatch({
+      type: "draft",
+      draft: draft.current,
+      generation: generation.current,
+      storageAvailable: currentState.current.storageAvailable,
+      languageSeeded: true,
+    });
+  }, []);
+
+  const runSearch = useCallback(
+    async (
+      refresh = false,
+      captured?: { context: SearchContext; key: string },
+    ) => {
+      if (!captured && recentEpisodeMismatch(currentState.current)) return;
+      // A recovery search reuses the context it captured, so the key it files
+      // results under travels with that context instead of being recomputed
+      // from the draft. If the two have drifted apart the results would belong
+      // to a context the reader has already left, so nothing is filed at all.
+      const key = captured?.key ?? discoverContextKey(draft.current);
+      if (key !== discoverContextKey(draft.current)) return;
+      const context = captured?.context ?? searchSelection(draft.current);
+      if (!context) return;
+      const attempt = ++generation.current;
+      // A seeded language becomes the remembered one the first time it is
+      // actually used for a search; a chosen language was written when chosen.
+      // Either way the helper's answer is what the storage notice is made of,
+      // so it is carried into the dispatch rather than dropped: a reader whose
+      // storage refuses the seeded language must be told it is session-only,
+      // exactly as one who chose it by hand is.
+      const stored = currentState.current.languageSeeded
+        ? writeStoredValue(DISCOVER_LANGUAGE_KEY, context.language)
+        : undefined;
+      dispatch({
+        type: "start",
+        generation: attempt,
+        storageAvailable: stored,
+      });
+      // getRandomValues also works on plain HTTP LAN installations.
+      const bytes = crypto.getRandomValues(new Uint8Array(16));
+      const hex = Array.from(bytes, (byte) =>
+        byte.toString(16).padStart(2, "0"),
+      ).join("");
+      const progressId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+      const controller = new AbortController();
+      let pollTimer: ReturnType<typeof setTimeout> | undefined;
+      const poll = async () => {
+        if (controller.signal.aborted || generation.current !== attempt) return;
+        try {
+          const progress = await api.discover.searchProgress(
+            progressId,
+            controller.signal,
+          );
+          dispatch({ type: "progress", generation: attempt, progress });
+        } catch {
+          // Losing observations does not cancel the search or discard results.
+        }
+        if (!controller.signal.aborted && generation.current === attempt)
+          pollTimer = setTimeout(() => void poll(), 600);
+      };
+      pollTimer = setTimeout(() => void poll(), 200);
+      try {
+        // matching_mode, the resolved copy and its physical revision are all
+        // server-owned. Only the opaque copy identity is ever an input.
+        const selection: DiscoverSelection & {
+          matching_mode?: string;
+          copy?: unknown;
+          file_revision?: string;
+        } = { ...context };
+        delete selection.matching_mode;
+        delete selection.copy;
+        delete selection.file_revision;
+        const snapshot = await mutateAsync({
+          context: selection,
+          refresh,
+          progressId,
+        });
+        dispatch({ type: "success", generation: attempt, key, snapshot });
+      } catch (error) {
+        const response = (
+          error as {
+            response?: { status?: number; data?: { message?: unknown } };
+          }
+        ).response;
+        dispatch({
+          type: "failure",
+          message:
+            // 409 is a chosen copy that no longer resolves. Its message names
+            // the recovery, and the choice is never replaced automatically.
+            (response?.status === 400 || response?.status === 409) &&
+            typeof response.data?.message === "string"
+              ? response.data.message
+              : undefined,
+          generation: attempt,
+          key,
+          now: Date.now(),
+        });
+      } finally {
+        controller.abort();
+        clearTimeout(pollTimer);
+      }
+    },
+    [mutateAsync],
+  );
+
+  const findSubtitles = useCallback(
+    (refresh = false) => runSearch(refresh),
+    [runSearch],
+  );
+  const searchAgain = useCallback(async () => {
+    const captured =
+      currentState.current.preview ?? currentState.current.download;
+    // Fails closed: feedback without its own captured key is never replayed.
+    if (captured?.contextKey)
+      await runSearch(true, {
+        context: captured.context,
+        key: captured.contextKey,
+      });
+  }, [runSearch]);
+
+  const downloadSubtitle = useCallback(
+    async (row: DiscoverSubtitleResult) => {
+      const owner = currentState.current;
+      // A row published by the running search is as real as one in a finished
+      // snapshot: its handle is already minted, so the server can serve it
+      // now. Waiting for the last provider would be refusing to act on a row
+      // the reader can already see.
+      const offered = owner.snapshot ?? owner.live;
+      if (
+        !offeredResults(owner).some(
+          (candidate) =>
+            candidate.id === row.id && candidate.search_id === row.search_id,
+        ) ||
+        !offered ||
+        owner.retiredResultIds.includes(row.id) ||
+        owner.download?.status === "pending"
+      )
+        return;
+      const key = discoverContextKey(draft.current);
+      const requestId = ++downloadSequence.current;
+      const feedback: DiscoverDownloadFeedback = {
+        requestId,
+        contextKey: key,
+        context: { ...offered.context },
+        row: { ...row },
+        status: "pending",
+      };
+      dispatch({ type: "download", key, feedback });
+      const stillCurrent = () =>
+        requestId === downloadSequence.current &&
+        key === discoverContextKey(draft.current) &&
+        offeredResults(currentState.current).some(
+          (candidate) =>
+            candidate.id === row.id && candidate.search_id === row.search_id,
+        ) &&
+        !currentState.current.retiredResultIds.includes(row.id);
+      try {
+        if (Date.parse(row.expires_at) <= Date.now()) {
+          dispatch({
+            type: "download",
+            key,
+            feedback: { ...feedback, status: "expired" },
+          });
+          return;
+        }
+        const jobId = await fetchDownload({
+          resultId: row.id,
+          searchId: row.search_id,
+        });
+        if (!stillCurrent()) return;
+        // Still pending: the jobs cache moves it on from here.
+        dispatch({
+          type: "download",
+          key,
+          feedback: { ...feedback, jobId },
+        });
+      } catch (error) {
+        if (!stillCurrent()) return;
+        const status = (error as { response?: { status?: number } }).response
+          ?.status;
+        dispatch({
+          type: "download",
+          key,
+          feedback: {
+            ...feedback,
+            status: status === 410 ? "expired" : "failed",
+          },
+        });
+      }
+    },
+    [fetchDownload],
+  );
+
+  /** Fetch a ticket's file and save it; null when the sign-in changed meanwhile. */
+  const fetchAndSave = useCallback(async (ticket: number) => {
+    const epoch = authEpoch.current;
+    let response;
+    try {
+      response = await api.discover.downloadTicket(ticket);
+    } catch (error) {
+      // The reason arrives as a blob body; read it so the caller can show it.
+      const data = (error as { response?: { data?: unknown } }).response?.data;
+      if (data instanceof Blob) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(await data.text());
+        } catch {
+          parsed = undefined;
+        }
+        throw Object.assign(new Error("Download unavailable"), {
+          response: { data: parsed },
+        });
+      }
+      throw error;
+    }
+    // Signed out, or in as someone else, while the file was on its way.
+    if (!authenticated.current || epoch !== authEpoch.current) return null;
+    if (
+      !response.data.size ||
+      !response.data.type.includes("application/x-subrip")
+    )
+      throw new Error("Invalid subtitle response");
+    const filename = filenameFromContentDisposition(
+      response.headers["content-disposition"],
+      "subtitle.srt",
+    );
+    saveBlobAs(response.data, filename);
+    const feedback = currentState.current.download;
+    if (feedback?.ticket === ticket && feedback.contextKey)
+      dispatch({
+        type: "download",
+        key: feedback.contextKey,
+        feedback: { ...feedback, status: "started", filename },
+      });
+    return filename;
+  }, []);
+
+  const saveTicket = useCallback(
+    (ticket: number) => {
+      const running = saving.current.get(ticket);
+      if (running) return running;
+      const next = fetchAndSave(ticket).finally(() =>
+        saving.current.delete(ticket),
+      );
+      saving.current.set(ticket, next);
+      return next;
+    },
+    [fetchAndSave],
+  );
+
+  /**
+   * Save a finished job's file without a click, once per job. A programmatic
+   * download needs no user activation. When it fails the row offers Save and
+   * a notification says why.
+   */
+  const autoSave = useCallback(
+    async (jobId: number, ticket: number, suggested?: string) => {
+      // The jobs cache reports a completion more than once, and the generic
+      // job outcome sees it too; the claim is what keeps one save per job.
+      if (!claimJobCompletion(jobId)) return;
+      const settle = (changes: Partial<DiscoverDownloadFeedback>) => {
+        const feedback = currentState.current.download;
+        if (feedback?.jobId === jobId && feedback.contextKey)
+          dispatch({
+            type: "download",
+            key: feedback.contextKey,
+            feedback: { ...feedback, ticket, ...changes },
+          });
+      };
+      try {
+        const filename = await saveTicket(ticket);
+        if (filename === null) return;
+        settle({ status: "started", filename });
+        showNotification(notification.info("Saved", filename));
+      } catch (error) {
+        settle({ status: "ready", filename: suggested });
+        const data = (error as { response?: { data?: { message?: unknown } } })
+          .response?.data;
+        showNotification(
+          notification.error(
+            "The subtitle was not saved",
+            typeof data?.message === "string"
+              ? data.message
+              : "The file could not be saved automatically. Use Save to try again.",
+          ),
+        );
+      }
+    },
+    [saveTicket],
+  );
+
+  /**
+   * Follow the row's job in the standard jobs cache, which the jobs socket
+   * events keep current. A retry started from the job's notification or the
+   * drawer replaces the failed job, so the row follows the retry too.
+   */
+  const followJob = useCallback(() => {
+    const feedback = currentState.current.download;
+    if (
+      !feedback?.jobId ||
+      !feedback.contextKey ||
+      (feedback.status !== "pending" && feedback.status !== "failed")
+    )
+      return;
+    const jobs = client.getQueryData<System.Jobs[]>([
+      QueryKeys.System,
+      QueryKeys.Jobs,
+    ]);
+    if (!Array.isArray(jobs)) return;
+    const key = feedback.contextKey;
+    const retry = jobs.find((job) => job.retry_of === feedback.jobId);
+    if (retry) {
+      dispatch({
+        type: "download",
+        key,
+        feedback: {
+          ...feedback,
+          status: "pending",
+          jobId: retry.job_id,
+          message: undefined,
+        },
+      });
+      return;
+    }
+    const job = jobs.find((candidate) => candidate.job_id === feedback.jobId);
+    if (feedback.status !== "pending") return;
+    if (!job) {
+      if (seenJobs.current.has(feedback.jobId))
+        dispatch({
+          type: "download",
+          key,
+          feedback: {
+            ...feedback,
+            status: "failed",
+            message: "The download was cancelled.",
+            retryable: true,
+          },
+        });
+      return;
+    }
+    seenJobs.current.add(job.job_id);
+    if (job.status === "completed") {
+      const action = job.action;
+      if (action?.kind === "discover.save" && typeof action.ticket === "number")
+        void autoSave(
+          job.job_id,
+          action.ticket,
+          typeof action.filename === "string" ? action.filename : undefined,
+        );
+      else
+        dispatch({
+          type: "download",
+          key,
+          feedback: {
+            ...feedback,
+            status: "failed",
+            message: job.progress_message || "The download was cancelled.",
+            retryable: true,
+          },
+        });
+    } else if (job.status === "failed") {
+      dispatch({
+        type: "download",
+        key,
+        feedback: {
+          ...feedback,
+          status: job.error?.reason === "expired_handle" ? "expired" : "failed",
+          message: job.error?.message,
+          retryable: !!job.retryable,
+        },
+      });
+    }
+  }, [client, autoSave]);
+
+  useEffect(
+    () =>
+      client.getQueryCache().subscribe((event) => {
+        const key = event.query.queryKey;
+        if (
+          key.length === 2 &&
+          key[0] === QueryKeys.System &&
+          key[1] === QueryKeys.Jobs
+        )
+          followJob();
+      }),
+    [client, followJob],
+  );
+  // The job may have finished before its id reached the row.
+  useEffect(() => followJob(), [state.download, followJob]);
+
+  /** Save a ticket; a failure also fails the row that is waiting on it. */
+  const saveOrFail = useCallback(
+    async (ticket: number) => {
+      try {
+        await saveTicket(ticket);
+      } catch (error) {
+        const feedback = currentState.current.download;
+        if (feedback?.ticket === ticket && feedback.contextKey) {
+          const data = (
+            error as { response?: { data?: { message?: unknown } } }
+          ).response?.data;
+          dispatch({
+            type: "download",
+            key: feedback.contextKey,
+            feedback: {
+              ...feedback,
+              status: "failed",
+              message:
+                typeof data?.message === "string"
+                  ? data.message
+                  : "The file could not be saved. Download it again.",
+              retryable: true,
+            },
+          });
+        }
+        throw error;
+      }
+    },
+    [saveTicket],
+  );
+
+  // The standard completion action for a Discover download job. The
+  // notification and the Jobs drawer run it without knowing about Discover.
+  useEffect(
+    () =>
+      registerJobAction(
+        "discover.save",
+        (action) => saveOrFail(Number(action.ticket)),
+        {
+          // A job started on this page saves itself, so its completion is not
+          // announced with Save. Other jobs keep Save in the notification.
+          handlesCompletion: (job) =>
+            isJobCompletionClaimed(job.job_id) ||
+            currentState.current.download?.jobId === job.job_id,
+        },
+      ),
+    [saveOrFail],
+  );
+
+  const saveSubtitle = useCallback(async () => {
+    const ticket = currentState.current.download?.ticket;
+    if (!ticket) return;
+    // The row shows the failure itself, so nothing is rethrown here.
+    await saveOrFail(ticket).catch(() => undefined);
+  }, [saveOrFail]);
+
+  const closePreview = useCallback(() => {
+    previewSequence.current += 1;
+    dispatch({ type: "close-preview" });
+    resetPreview();
+  }, [resetPreview]);
+
+  const cancelPending = useCallback(() => {
+    generation.current += 1;
+    downloadSequence.current += 1;
+    previewSequence.current += 1;
+    dispatch({ type: "cancel", generation: generation.current });
+  }, []);
+  const previewSubtitle = useCallback(
+    async (row: DiscoverSubtitleResult) => {
+      const owner = currentState.current;
+      const offered = owner.snapshot ?? owner.live;
+      if (
+        !offeredResults(owner).some(
+          (candidate) =>
+            candidate.id === row.id && candidate.search_id === row.search_id,
+        ) ||
+        !offered ||
+        owner.retiredResultIds.includes(row.id)
+      )
+        return;
+      const key = discoverContextKey(draft.current);
+      const requestId = ++previewSequence.current;
+      const feedback: DiscoverPreviewFeedback = {
+        requestId,
+        contextKey: key,
+        context: { ...offered.context },
+        row: { ...row },
+        status: "pending",
+      };
+      dispatch({ type: "preview", key, feedback });
+      const stillCurrent = () =>
+        requestId === previewSequence.current &&
+        key === discoverContextKey(draft.current) &&
+        offeredResults(currentState.current).some(
+          (candidate) =>
+            candidate.id === row.id && candidate.search_id === row.search_id,
+        ) &&
+        !currentState.current.retiredResultIds.includes(row.id);
+      try {
+        if (Date.parse(row.expires_at) <= Date.now()) {
+          dispatch({
+            type: "preview",
+            key,
+            feedback: { ...feedback, status: "expired" },
+          });
+          return;
+        }
+        const data = await fetchPreview({
+          resultId: row.id,
+          searchId: row.search_id,
+        });
+        if (!stillCurrent()) return;
+        if (
+          data.result_id !== row.id ||
+          data.search_id !== row.search_id ||
+          !Array.isArray(data.cues) ||
+          !data.cues.length ||
+          data.cues.length > 40 ||
+          data.cues.some(
+            (cue) =>
+              typeof cue.text !== "string" ||
+              !Number.isFinite(cue.start_ms) ||
+              !Number.isFinite(cue.end_ms) ||
+              cue.start_ms < 0 ||
+              cue.end_ms <= cue.start_ms,
+          ) ||
+          data.cues.reduce(
+            (length, cue) => length + Array.from(cue.text).length,
+            0,
+          ) > 24000
+        )
+          throw new Error("Invalid subtitle preview response");
+        dispatch({
+          type: "preview",
+          key,
+          feedback: { ...feedback, status: "ready", data },
+        });
+      } catch (error) {
+        if (!stillCurrent()) return;
+        const status = (error as { response?: { status?: number } }).response
+          ?.status;
+        dispatch({
+          type: "preview",
+          key,
+          feedback: {
+            ...feedback,
+            status: status === 410 ? "expired" : "failed",
+          },
+        });
+      }
+    },
+    [fetchPreview],
+  );
+
+  const updateBrowsing = useCallback(
+    (changes: Partial<DiscoverBrowsing>) =>
+      dispatch({ type: "browsing", changes }),
+    [],
+  );
+
+  const value = useMemo(
+    () => ({
+      state,
+      rememberPage,
+      restorePage,
+      updateBrowsing,
+      updateDraft,
+      seedLanguage,
+      findSubtitles,
+      downloadSubtitle,
+      saveSubtitle,
+      previewSubtitle,
+      closePreview,
+      cancelPending,
+      searchAgain,
+    }),
+    [
+      state,
+      rememberPage,
+      restorePage,
+      updateBrowsing,
+      updateDraft,
+      seedLanguage,
+      findSubtitles,
+      downloadSubtitle,
+      saveSubtitle,
+      previewSubtitle,
+      closePreview,
+      cancelPending,
+      searchAgain,
+    ],
+  );
+  return (
+    <DiscoverContext.Provider value={value}>
+      {children}
+    </DiscoverContext.Provider>
+  );
+}
+
+export function useDiscover() {
+  const value = useContext(DiscoverContext);
+  if (!value) throw new Error("DiscoverProvider is required");
+  return value;
+}
+
+export function DiscoverSetupReturn({ children }: PropsWithChildren) {
+  return <>{children}</>;
+}

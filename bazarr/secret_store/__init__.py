@@ -38,6 +38,8 @@ from .migration import (
 )
 from .registry import (
     SYSTEM_SECRETS,
+    WRITE_ONLY_SECRETS,
+    is_write_only_secret,
     USER_VISIBLE_SECRET_LISTS,
     USER_VISIBLE_SECRETS,
     is_system_secret,
@@ -48,6 +50,8 @@ from .registry import (
 __all__ = [
     "SECRET_MARKER_PREFIX",
     "SYSTEM_SECRETS",
+    "WRITE_ONLY_SECRETS",
+    "is_write_only_secret",
     "USER_VISIBLE_SECRET_LISTS",
     "USER_VISIBLE_SECRETS",
     "decrypt_secret",

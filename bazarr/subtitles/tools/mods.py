@@ -3,6 +3,7 @@
 import os
 import sys
 import logging
+from contextlib import nullcontext
 
 from subliminal_patch.subtitle import Subtitle
 from subliminal_patch.core import get_subtitle_path
@@ -14,7 +15,9 @@ from languages.custom_lang import CustomLanguage
 from languages.get_languages import alpha3_from_alpha2
 from subtitles.indexer.utils import get_subtitle_destination_path
 from utilities.helper import get_target_folder
-from subtitles.tools.subsync_engines import subtitle_write_locks, subtitle_mutation
+from media_servers.events import publication_callback
+from subtitles.tools.subsync_engines import (_report_subtitle_publication, subtitle_mutation,
+                                            subtitle_write_locks)
 
 
 def has_remove_hi(mods):
@@ -78,38 +81,55 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
     """Job-aware wrapper for subtitles_apply_mods.
 
     When called without a job_id, queues the work as a backend job and returns
-    immediately. When called with a job_id (by the job queue consumer), does the
-    actual work and handles post-processing (store_subtitles, event_stream, chmod).
+    its id immediately. When called with a job_id (by the job queue consumer),
+    does the actual work and handles post-processing (store_subtitles,
+    event_stream, chmod). A mod that could not be applied raises with the
+    reason, which is what marks the job failed.
     """
     if not job_id:
         # No local variables can be assigned before add_job_from_function because
         # it introspects the frame and re-passes all locals as kwargs on re-invocation.
-        jobs_queue.add_job_from_function(
+        return jobs_queue.add_job_from_function(
             (lambda m, p: f'{MOD_LABELS.get(m, m)}: {os.path.basename(p)}')(
                 mods[0] if mods else 'mods', subtitle_path),
             is_progress=False,
         )
-        return
+
+    from app.job_errors import reason_of
+    from app.jobs_queue import JobFailed
 
     mod_label = MOD_LABELS.get(mods[0], mods[0]) if mods else 'Apply Mods'
     filename = os.path.basename(subtitle_path)
 
     try:
-        subtitles_apply_mods(language=language, subtitle_path=subtitle_path,
-                             mods=mods, video_path=video_path,
-                             arr_instance_id=arr_instance_id)
-    except Exception:
+        output_path = subtitles_apply_mods(language=language, subtitle_path=subtitle_path,
+                                           mods=mods, video_path=video_path,
+                                           arr_instance_id=arr_instance_id, media_type=media_type,
+                                           **({'sports_event_id': media_id} if media_type == 'sports' else {}))
+    except Exception as error:
         jobs_queue.update_job_name(
             job_id=job_id,
             new_job_name=f'Failed {mod_label}: {filename}',
         )
-        raise
+        raise JobFailed(f'{mod_label} failed on {filename}: {reason_of(error)}') from error
 
-    # apply chmod if required
+    if not output_path:
+        # subtitles_apply_mods answers None for a file it cannot parse and for a
+        # mod that produced nothing to write. Nothing changed on disk, and the
+        # request that queued this used to answer 409 for it.
+        jobs_queue.update_job_name(
+            job_id=job_id,
+            new_job_name=f'Failed {mod_label}: {filename}',
+        )
+        raise JobFailed(f'{mod_label} failed on {filename}: the subtitle file could not be read '
+                        f'or the mod produced no content')
+
+    # apply chmod if required. Remove HI can rename the file, so the one to
+    # chmod is the output, not the path the request named.
     chmod = int(settings.general.chmod, 8) if not sys.platform.startswith(
         'win') and settings.general.chmod_enabled else None
-    if chmod and os.path.exists(subtitle_path):
-        os.chmod(subtitle_path, chmod)
+    if chmod and os.path.exists(output_path):
+        os.chmod(output_path, chmod)
 
     # re-index subtitles so Bazarr's DB picks up the changes
     from subtitles.indexer.series import store_subtitles
@@ -137,6 +157,30 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
             if metadata:
                 event_stream(type='series', payload=metadata.sonarrSeriesId)
             event_stream(type='episode', payload=metadata.id if metadata else media_id)
+        elif media_type == 'sports':
+            # Reindexed by its own indexer, which takes the event id rather
+            # than a pair of paths, and announced as a sports event. Falling
+            # through to the movie branch announced an event id as a movie id.
+            #
+            # Best effort, unlike the sibling indexers above: those swallow
+            # their own indexing failures, while the sports one raises a bare
+            # OSError on a probe failure or its analysis timeout. The mod is already applied to the file by
+            # here, so letting that through would fail the job for work that
+            # succeeded and skip the event below, leaving the UI on the old state.
+            from subtitles.indexer.sports import store_subtitles_sports
+            try:
+                store_subtitles_sports(media_id, arr_instance_id)
+            except Exception:
+                logging.exception('BAZARR could not reindex sports event %s after applying mods',
+                                  media_id)
+            # The file publication already reached every media server; only
+            # Sportarr still needs its own rescan, as the request path did.
+            try:
+                from sportarr.notify import notify_rescan
+                notify_rescan(arr_instance_id)
+            except Exception:
+                logging.exception('BAZARR could not ask Sportarr to rescan after applying mods')
+            event_stream(type='sports', action='update', payload=media_id)
         else:
             event_stream(type='movie', payload=media_id)
 
@@ -146,13 +190,22 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
     )
 
 
-def subtitles_apply_mods(language, subtitle_path, mods, video_path, arr_instance_id=None):
+def subtitles_apply_mods(language, subtitle_path, mods, video_path, arr_instance_id=None, media_type=None,
+                         *, sports_event_id=None, cancel=None):
     destination = os.path.join(get_target_folder(video_path, create=False) or os.path.dirname(video_path), '.destination')
-    with subtitle_write_locks(video_path, subtitle_path, destination):
-        return _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_id)
+    with subtitle_write_locks(video_path, subtitle_path, destination, cancel=cancel):
+        publication_guard = None
+        if media_type == 'sports':
+            from sportarr.subtitles import sports_modification_guard
+
+            publication_guard = sports_modification_guard(
+                sports_event_id, arr_instance_id, video_path, subtitle_path, cancel)
+        return _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_id, media_type,
+                                  publication_guard=publication_guard)
 
 
-def _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_id):
+def _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_id, media_type=None,
+                       *, publication_guard=None):
     # The mod list is user-chosen here, so only the keep-lyrics preference is
     # instance-relevant: resolve it against the media's owning instance (#227).
     # A None owner keeps the legacy global-only behaviour (single-instance).
@@ -195,7 +248,8 @@ def _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_i
         else:
             modded_subtitles_path = subtitle_path
 
-        with subtitle_mutation(video_path, subtitle_path, modded_subtitles_path):
+        with (publication_guard(modded_subtitles_path) if publication_guard else nullcontext(),
+              subtitle_mutation(video_path, subtitle_path, modded_subtitles_path)):
             if os.path.exists(subtitle_path):
                 os.remove(subtitle_path)
 
@@ -204,3 +258,19 @@ def _apply_mods_locked(language, subtitle_path, mods, video_path, arr_instance_i
 
             with open(modded_subtitles_path, 'wb') as f:
                 f.write(content)
+
+            # The mod rewrote the subtitle, and Remove HI can rename it on the
+            # way. Publish the file this leaves behind, here rather than at each
+            # caller, so every route into the mods (the subtitle toolbar, a bulk
+            # action, the job queue) reaches the same destinations. Through the
+            # same guarded reporter every other publication inside a mutation
+            # uses: the file is already written, so nothing raised here may
+            # take the mod down with it.
+            if media_type:
+                _report_subtitle_publication(
+                    publication_callback(media_type, video_path, 'edit', arr_instance_id),
+                    modded_subtitles_path)
+            else:
+                logging.debug('BAZARR mod on %s published nothing: no media type was given',
+                              video_path)
+        return modded_subtitles_path

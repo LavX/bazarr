@@ -215,3 +215,65 @@ def test_worker_transport_failure_keeps_generic_error(output, diagnostic):
 def test_invalid_success_payload_keeps_generic_error(response_worker):
     with pytest.raises(WorkerError, match="payload must be an object"):
         response_worker({"ok": True, "payload": ["candidate"]}).request("search", timeout=5)
+
+
+def test_a_providers_retry_after_survives_the_worker_boundary(response_worker):
+    """The envelope carries the class name and the message, so a rate limit the
+    provider timed for us was lost here and its backoff fell back to whatever
+    the exception class is worth in general. A catalog provider asking for an
+    hour was contacted again after ten minutes."""
+    with pytest.raises(APIThrottled) as raised:
+        response_worker({"ok": False, "error": {
+            "class_name": "APIThrottled", "code": "provider", "message": "slow down",
+            "retry_after": 3600, "retryable": False,
+        }}).request("search", timeout=5)
+    assert raised.value.retry_after == 3600
+
+
+@pytest.mark.parametrize("retry_after", [None, 0, -5, "3600", [], True, float("inf")])
+def test_only_a_finite_positive_retry_after_crosses(response_worker, retry_after):
+    """A plugin is untrusted code and this number decides how long the host
+    stops asking, so anything that is not a usable duration is dropped rather
+    than reasoned about later."""
+    with pytest.raises(APIThrottled) as raised:
+        response_worker({"ok": False, "error": {
+            "class_name": "APIThrottled", "code": "provider", "message": "slow down",
+            "retry_after": retry_after, "retryable": False,
+        }}).request("search", timeout=5)
+    assert raised.value.retry_after is None
+
+
+def test_a_retry_after_is_capped_at_a_day(response_worker):
+    with pytest.raises(APIThrottled) as raised:
+        response_worker({"ok": False, "error": {
+            "class_name": "APIThrottled", "code": "provider", "message": "slow down",
+            "retry_after": 10 ** 9, "retryable": False,
+        }}).request("search", timeout=5)
+    assert raised.value.retry_after == 86400.0
+
+
+def test_an_exception_that_takes_no_retry_after_is_still_raised(response_worker):
+    """TooManyRequests carries no such field. Offering it one must fall back to
+    the plain exception rather than take the search down."""
+    with pytest.raises(TooManyRequests, match="slow down"):
+        response_worker({"ok": False, "error": {
+            "class_name": "TooManyRequests", "code": "provider", "message": "slow down",
+            "retry_after": 3600, "retryable": False,
+        }}).request("search", timeout=5)
+
+
+@pytest.mark.parametrize("value,expected", [
+    (3600, 3600.0), (10 ** 9, 86400.0), (None, None), (0, None), (-1, None),
+    ("later", None), (float("nan"), None), (float("inf"), None),
+])
+def test_the_worker_side_only_sends_a_usable_duration(value, expected):
+    from provider_hub import worker_runner
+
+    error = APIThrottled("slow down", retry_after=value)
+    assert worker_runner._retry_after(error) == expected
+
+
+def test_an_exception_without_the_field_sends_nothing():
+    from provider_hub import worker_runner
+
+    assert worker_runner._retry_after(RuntimeError("upstream returned 500")) is None

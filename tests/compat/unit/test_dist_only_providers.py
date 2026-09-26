@@ -25,7 +25,9 @@ def capture_exclude(monkeypatch):
         pool = MagicMock()
         pool.providers = list(pool_providers)
         pool.discarded_providers = set()
-        monkeypatch.setattr(service, "_get_compat_pool", lambda: pool)
+        # Keyword-tolerant: the fanout asks for restore_available so a pool
+        # rebuilt during a backoff takes the provider back afterwards.
+        monkeypatch.setattr(service, "_get_compat_pool", lambda **kwargs: pool)
         # Virtual video with a non-existent file path: video_has_file is False
         # but os.path.exists() gets a real string (no MagicMock TypeError).
         monkeypatch.setattr(service, "_build_video",
@@ -36,6 +38,13 @@ def capture_exclude(monkeypatch):
                             lambda: health)
         from app.config import settings
         settings["compat_endpoint"]["serve_local_subs"] = False
+        # The fanout now re-checks its own pool membership against the same
+        # enabled-and-not-throttled gate the pool adopts through, so these
+        # fixture names have to pass it or every one of them is excluded
+        # before the allow-list under test gets a say. In production
+        # pool.providers is derived from exactly that gate's inputs.
+        monkeypatch.setattr(service, "provider_is_usable",
+                            lambda name: name in set(pool_providers))
 
         def _fake_parallel(videos, languages, pool_instance, **kw):
             captured["exclude"] = set(kw.get("exclude_providers") or ())

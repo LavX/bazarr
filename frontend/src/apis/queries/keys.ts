@@ -1,7 +1,9 @@
 export enum QueryKeys {
+  Discover = "discover",
   Movies = "movies",
   Episodes = "episodes",
   Series = "series",
+  Sports = "sports",
   Badges = "badges",
   FileSystem = "file-system",
   System = "system",
@@ -27,6 +29,6 @@ export enum QueryKeys {
   Range = "range",
   All = "all",
   Plex = "plex",
-  Jellyfin = "jellyfin",
+  Seerr = "seerr",
   Translator = "translator",
 }

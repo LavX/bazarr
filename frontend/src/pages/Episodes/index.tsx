@@ -47,7 +47,7 @@ import {
   useSeriesModification,
 } from "@/apis/hooks";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
-import { useInstanceName } from "@/apis/hooks/site";
+import { useAppTitle } from "@/apis/hooks/site";
 import { FullPageDropzone, Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import { CombineModal } from "@/components/forms/CombineForm";
@@ -56,7 +56,7 @@ import { SeriesUploadModal } from "@/components/forms/SeriesUploadForm";
 import { SubtitleDownloadModal } from "@/components/forms/SubtitleDownloadForm";
 import { SubtitleToolsModal } from "@/components/modals";
 import { useModals } from "@/modules/modals";
-import { notification, task, TaskGroup } from "@/modules/task";
+import { notification } from "@/modules/notification";
 import ItemOverview from "@/pages/views/ItemOverview";
 import { RouterNames } from "@/Router/RouterNames";
 import { useLanguageProfileBy } from "@/utilities/languages";
@@ -208,7 +208,7 @@ const SeriesEpisodesView: FunctionComponent = () => {
   );
 
   useDocumentTitle(
-    `${series?.title ?? "Unknown Series"} - ${useInstanceName()} (Series)`,
+    `${series?.title ?? "Unknown Series"} - ${useAppTitle()} (Series)`,
   );
 
   const tableRef = useRef<TableInstance<Item.Episode> | null>(null);
@@ -241,7 +241,7 @@ const SeriesEpisodesView: FunctionComponent = () => {
           active={profile !== undefined}
           onDrop={onDrop}
         />
-        <Toolbox>
+        <Toolbox wrapOnPhone>
           <Group gap="xs">
             <Toolbox.Button
               icon={faSync}
@@ -378,11 +378,14 @@ const SeriesEpisodesView: FunctionComponent = () => {
                   disabled={!available || hasTask}
                   onClick={() => {
                     if (series) {
-                      task.create(series.title, TaskGroup.ScanDisk, action, {
+                      // Queued as a backend job: the request returns at once and the
+                      // scan reports through the jobs drawer. HTTP errors are
+                      // already reported by the API client.
+                      action({
                         action: "scan-disk",
                         seriesid: series.sonarrSeriesId,
                         arr_instance_id: series.arr_instance_id,
-                      });
+                      }).catch(() => undefined);
                     }
                   }}
                 >

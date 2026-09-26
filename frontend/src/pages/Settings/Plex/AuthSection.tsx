@@ -10,6 +10,7 @@ import {
 } from "@/apis/hooks/plex";
 import { QueryKeys } from "@/apis/queries/keys";
 import { PLEX_AUTH_CONFIG } from "@/constants/plex";
+import { useModals } from "@/modules/modals";
 import styles from "@/pages/Settings/Plex/AuthSection.module.scss";
 
 const AuthSection = () => {
@@ -24,6 +25,7 @@ const AuthSection = () => {
   const [pin, setPin] = useState<Plex.Pin | null>(null);
   const authWindowRef = useRef<Window | null>(null);
   const queryClient = useQueryClient();
+  const modals = useModals();
 
   const isPolling = !!pin?.pinId;
 
@@ -58,7 +60,32 @@ const AuthSection = () => {
   );
 
   const handleAuth = async () => {
-    const { data: pin } = await createPin();
+    // Every branch below used to fall through to `pin.authUrl`, so a Plex API
+    // that was unreachable, rate-limited or simply answered without a pin threw
+    // an unhandled rejection and the button did nothing at all.
+    let pin: Plex.Pin | null = null;
+    try {
+      pin = (await createPin()).data ?? null;
+    } catch (error) {
+      notifications.show({
+        title: "Could not reach Plex",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Plex did not answer the sign-in request. Try again in a moment.",
+        color: "red",
+      });
+      return;
+    }
+
+    if (!pin?.authUrl) {
+      notifications.show({
+        title: "Could not start Plex sign-in",
+        message: "Plex answered without a sign-in link. Try again in a moment.",
+        color: "red",
+      });
+      return;
+    }
 
     setPin(pin);
 
@@ -71,19 +98,45 @@ const AuthSection = () => {
       "PlexAuth",
       `width=${width},height=${height},left=${left},top=${top},${features}`,
     );
+
+    // A blocked popup returns null, which otherwise leaves the panel polling a
+    // pin against a window the user never saw.
+    if (!authWindowRef.current) {
+      setPin(null);
+      notifications.show({
+        title: "Plex sign-in window was blocked",
+        message:
+          "Allow pop-ups for this site, then start the Plex sign-in again.",
+        color: "red",
+      });
+    }
   };
 
-  const handleLogout = () => {
-    logout(undefined, {
-      onSuccess: () => {
-        notifications.show({
-          title: "Disconnected from Plex",
-          message: "All settings related to Plex were removed",
-          color: "green",
-        });
-      },
+  // Signing out also turns use_plex off, which silences every Plex server,
+  // including the ones added by hand, so it asks first, as the account card's
+  // Disconnect does.
+  const handleLogout = () =>
+    modals.openConfirmModal({
+      title: "Disconnect from Plex",
+      children: (
+        <Text size="sm">
+          This signs you out of Plex and turns off Plex integration, which also
+          stops refreshes to any Plex server you added by hand.
+        </Text>
+      ),
+      labels: { confirm: "Disconnect", cancel: "Cancel" },
+      confirmProps: { color: "red" },
+      onConfirm: () =>
+        logout(undefined, {
+          onSuccess: () => {
+            notifications.show({
+              title: "Disconnected from Plex",
+              message: "All settings related to Plex were removed",
+              color: "green",
+            });
+          },
+        }),
     });
-  };
 
   const handleCancelAuth = () => {
     setPin(null);

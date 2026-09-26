@@ -11,7 +11,7 @@ import {
 import { showNotification } from "@mantine/notifications";
 import { useCombineSubtitles } from "@/apis/hooks/combine";
 import { useModals, withModal } from "@/modules/modals";
-import { notification } from "@/modules/task";
+import { notification } from "@/modules/notification";
 
 type Scope =
   | { kind: "movie"; radarrId: number; arrInstanceId?: number }
@@ -54,7 +54,17 @@ const CombineForm: FunctionComponent<Props> = ({
         scope,
         body: { languages: selected, format },
       });
-      if (result.status === "built") {
+      if (result.status === "built" && result.error) {
+        // Published, but a follow-up step did not complete. Reporting this as
+        // a plain success hid work the operator still has to do: the subtitle
+        // can be missing from the event index until it is reindexed.
+        showNotification(
+          notification.warn(
+            "Combined subtitle needs attention",
+            `Saved to ${result.path}, but a follow-up step failed: ${result.error}`,
+          ),
+        );
+      } else if (result.status === "built") {
         showNotification(
           notification.info(
             "Combined subtitle generated",
@@ -63,16 +73,9 @@ const CombineForm: FunctionComponent<Props> = ({
         );
       } else if (result.status === "skipped") {
         showNotification(notification.warn("Skipped", result.reason ?? ""));
-      } else if (result.status === "batch_complete") {
-        const built = result.built ?? 0;
-        const skipped = result.skipped ?? 0;
-        const failed = result.failed ?? 0;
-        showNotification(
-          notification.info(
-            "Series combine complete",
-            `Built ${built}, skipped ${skipped}, failed ${failed}`,
-          ),
-        );
+      } else if (result.status === "queued") {
+        // A series combine runs as a queued job, which reports its progress
+        // and outcome through Jobs.
       } else {
         showNotification(
           notification.error("Combine failed", result.error ?? ""),

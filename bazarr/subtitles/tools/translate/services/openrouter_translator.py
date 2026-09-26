@@ -4,45 +4,102 @@ import re
 import time
 import logging
 import pysubs2
+from sportarr.profile_hooks import sports_write_kwargs, finish_translation
+from sportarr.connection import check_cancelled
 from subtitles.tools.subsync_engines import staged_subtitle_write, SubtitleDestinationChanged
+from media_servers.events import publication_callback
 import requests
-from typing import Optional, List, Dict, Any
+from typing import List, Dict, Any
 
 from retry.api import retry
 from deep_translator.exceptions import TooManyRequests, RequestError
+from dynaconf.validator import ValidationError
 
-from app.config import settings
+from app.config import settings, normalize_openrouter_provider_order
+from app import activity
 from languages.get_languages import language_from_alpha2, language_from_alpha3
 from radarr.history import history_log_movie
 from sonarr.history import history_log
-from app.event_handler import show_progress, hide_progress, show_message
-from app.jobs_queue import jobs_queue, JobCancelled
+from app.jobs_queue import jobs_queue, JobCancelled, JobFailed
 
 from ..core.translator_utils import add_translator_info, create_process_result, get_title
 from .auth import get_translator_auth_headers
 
 logger = logging.getLogger(__name__)
 
-PROVIDER_ROUTING_VALUES = ('throughput', 'nitro', 'price', 'floor', 'latency', 'default')
-DEFAULT_PROVIDER_ROUTING = 'throughput'
+PROVIDER_ROUTING_VALUES = ('throughput', 'nitro', 'price', 'floor', 'latency', 'default', 'smartfast', 'custom')
+DEFAULT_PROVIDER_ROUTING = 'smartfast'
+# What a routing we cannot make sense of falls back to, which is deliberately not the
+# shipped default. A stored value outside PROVIDER_ROUTING_VALUES, or no stored value at
+# all, is a config we do not understand, and smartfast refuses outright on an older
+# sidecar. The plain sort translates on every version.
+UNKNOWN_ROUTING_FALLBACK = 'throughput'
 # Sidecars before this version forward provider.sort to OpenRouter verbatim, which
-# rejects nitro, floor and default; they get the plain sort each value stands for.
+# rejects nitro, floor and default; a selector set to one of those three gets the plain
+# sort each value stands for. Custom routing is gated on the same version because that is
+# where order, only and allowFallbacks began to be forwarded, but it cannot degrade to a
+# plain sort without sending the job to a provider the user excluded, so it refuses instead.
 ROUTING_SHORTCUTS_MIN_SIDECAR = (1, 3, 4)
+# The release that added smartfast to the sidecar's own provider.sort values. Older ones
+# reject the sort outright, and no plain sort stands for "balance speed against price",
+# so a selector set to smartfast refuses rather than silently routing some other way.
+SMARTFAST_MIN_SIDECAR = (2, 0, 0)
 ROUTING_PLAIN_SORT = {'nitro': 'throughput', 'floor': 'price', 'default': 'throughput'}
+MODEL_ROUTING_SUFFIXES = ('floor', 'nitro', 'smartfast')
 SIDECAR_VERSION_CACHE_SECONDS = 300
+# How stale a reading may be when the caller is about to refuse work over it. A user told
+# to update the translator will do so and retry within seconds, and answering that retry
+# from a five-minute-old reading of the version they just replaced tells them their fix
+# did not work. Only the refusing paths ask for a reading this fresh; the paths that
+# merely degrade keep the full interval, because re-probing changes nothing they do.
+SIDECAR_VERSION_ACTIONABLE_CACHE_SECONDS = 10
 _sidecar_version_cache = {}
 
 POLL_HARD_CAP_SECONDS = 12 * 3600
 POLL_UNREACHABLE_LIMIT_SECONDS = 600
 POLL_INTERVAL_SECONDS = 2
+# Opaque service identity for observation. Never a URL and never a credential.
+TRANSLATOR_SERVICE_ID = 'ai-subtitle-translator'
+
+
+class ProviderRoutingError(ValueError):
+    """The selected provider routing cannot be honored safely."""
+
+
+class TranslationServiceError(JobFailed, RuntimeError):
+    """The AI Subtitle Translator could not produce a translation.
+
+    The message is the reason in words a user can act on. It is the queue's
+    JobFailed, so a job that raises it is recorded as failed with that reason
+    as its error, which the failure toast and the Jobs drawer show.
+    """
+
+
+def _model_variants(model_id):
+    """A model id split into its base slug and its colon-separated variants."""
+    parts = str(model_id or '').strip().split(':')
+    return parts[0], parts[1:]
 
 
 def _typed_routing_suffix(model_id):
-    """'floor' or 'nitro' when the model id ends with that OpenRouter shortcut, else None."""
-    for suffix in ('floor', 'nitro'):
-        if str(model_id or '').endswith(f':{suffix}'):
-            return suffix
-    return None
+    """The routing shortcut typed into a model id, wherever it sits, else None.
+
+    A stacked id carries more than one, and the last one is the one the user typed
+    most recently, which is the one the settings page adopts. Reading only the final
+    colon segment would miss a shortcut sitting in front of a genuine variant, and
+    would then forward that shortcut to OpenRouter, which does not know it.
+    """
+    shortcuts = [part for part in _model_variants(model_id)[1] if part.lower() in MODEL_ROUTING_SUFFIXES]
+    return shortcuts[-1].lower() if shortcuts else None
+
+
+def _strip_routing_suffixes(model_id):
+    """``model_id`` without any routing shortcut, keeping genuine variants such as :free."""
+    base, variants = _model_variants(model_id)
+    # Empty segments go too. A trailing-colon typo used to survive as "author/model:",
+    # which the legacy branch then rebuilt into "author/model::nitro".
+    return ':'.join([base] + [part for part in variants
+                              if part and part.lower() not in MODEL_ROUTING_SUFFIXES])
 
 
 def reset_sidecar_version_cache():
@@ -57,16 +114,21 @@ def _parse_version(text):
     return tuple(int(part or 0) for part in numbers.groups())
 
 
-def sidecar_version(base_url):
+def sidecar_version(base_url, max_age=None):
     """The AI Subtitle Translator version behind ``base_url``, cached per URL.
 
     Returns a version tuple, or None when the health endpoint is unreachable or
     does not report a version. The probe is cheap and unauthenticated, and it is
     cached so a job of many batches asks once.
+
+    ``max_age`` is how stale a cached reading the caller will accept, in seconds. A
+    caller about to refuse work over the answer passes a short one so the user's retry
+    is answered by a fresh probe rather than by the reading that failed them.
     """
     base_url = (base_url or '').rstrip('/')
+    max_age = SIDECAR_VERSION_CACHE_SECONDS if max_age is None else max_age
     cached = _sidecar_version_cache.get(base_url)
-    if cached and cached[0] > time.monotonic():
+    if cached and time.monotonic() - cached[0] < max_age:
         return cached[1]
     version = None
     try:
@@ -75,30 +137,89 @@ def sidecar_version(base_url):
             version = _parse_version(response.json().get('version'))
     except (requests.exceptions.RequestException, ValueError, AttributeError) as e:
         logger.debug("Could not read the AI Subtitle Translator version from %s: %s", base_url, e)
-    _sidecar_version_cache[base_url] = (time.monotonic() + SIDECAR_VERSION_CACHE_SECONDS, version)
+    _sidecar_version_cache[base_url] = (time.monotonic(), version)
     return version
 
 
-def build_provider_config():
-    """The OpenRouter provider routing the sidecar applies to every request of a job.
+def _require_routing_support(routing, minimum, degrade_on_unknown=False):
+    """True when the service behind the configured URL can honor ``routing``.
 
-    Left unset the sidecar sorts providers by throughput, which is the fastest and
-    often not the cheapest endpoint; the setting lets the user pick price, latency,
-    the ``:nitro``/``:floor`` shortcuts, or OpenRouter's own load balancing. A
-    sidecar older than 1.3.4 (or one whose version cannot be read) does not know
-    the shortcuts and would hand them to OpenRouter as an invalid sort, so it gets
-    the plain sort each of them stands for.
+    A version we read that is below the floor is actionable, so it raises and the message
+    names the version to install. A version we could not read is not evidence of an old
+    one: /health may be hidden behind a reverse proxy, or answer without a version field,
+    while the job API works perfectly. Refusing there would fail every translation on a
+    service that supports the routing, which is the failure this returns False to avoid.
+
+    ``degrade_on_unknown`` says the caller has a plain sort it can safely fall back to.
+    Custom has none: falling back would send the job to a provider the user excluded,
+    which is the one outcome that mode exists to prevent, so it asks for a refusal.
     """
-    routing = getattr(settings.translator, 'openrouter_provider_routing', DEFAULT_PROVIDER_ROUTING)
-    if routing not in PROVIDER_ROUTING_VALUES:
-        logger.warning("Unknown OpenRouter provider routing '%s', using %s", routing, DEFAULT_PROVIDER_ROUTING)
-        routing = DEFAULT_PROVIDER_ROUTING
-    typed = _typed_routing_suffix(getattr(settings.translator, 'openrouter_model', ''))
-    if typed:
+    version = sidecar_version(settings.translator.openrouter_url,
+                              max_age=SIDECAR_VERSION_ACTIONABLE_CACHE_SECONDS)
+    required = '.'.join(map(str, minimum))
+    if version is None:
+        if degrade_on_unknown:
+            return False
+        raise ProviderRoutingError(
+            f"OpenRouter {routing} routing requires AI Subtitle Translator {required} or newer, and its "
+            f"version could not be read from the service URL. Check the service URL and the translator.")
+    if version < minimum:
+        raise ProviderRoutingError(
+            f"OpenRouter {routing} routing requires AI Subtitle Translator {required} or newer "
+            f"(detected version: {'.'.join(map(str, version))}). Update the translator.")
+    return True
+
+
+def build_routing_config():
+    """Resolve the outgoing model and provider settings together for both job APIs.
+
+    Explicit smartfast/custom selections supersede old routing suffixes while
+    preserving genuine model variants. Older shortcut selections retain their
+    historical compatibility behavior.
+    """
+    routing = getattr(settings.translator, 'openrouter_provider_routing', None)
+    # A missing setting is a weaker signal than an unreadable one, so both land on the
+    # fallback rather than on the shipped default, which can refuse.
+    understood = routing in PROVIDER_ROUTING_VALUES
+    if not understood:
+        logger.warning("Unusable OpenRouter provider routing %r, using %s", routing, UNKNOWN_ROUTING_FALLBACK)
+        routing = UNKNOWN_ROUTING_FALLBACK
+    model = getattr(settings.translator, 'openrouter_model', '')
+    typed = _typed_routing_suffix(model)
+    # Only a routing we understood may be upgraded by a suffix. Promoting a config we
+    # could not read into smartfast would undo the fallback on the next line.
+    if understood and routing not in ('smartfast', 'custom') and typed == 'smartfast':
+        routing = 'smartfast'
+    if routing in ('smartfast', 'custom'):
+        if routing == 'custom':
+            try:
+                order = normalize_openrouter_provider_order(
+                    getattr(settings.translator, 'openrouter_provider_order', []))
+            except ValidationError as error:
+                raise ProviderRoutingError(str(error)) from error
+            if not order:
+                raise ProviderRoutingError('OpenRouter custom routing requires at least one provider slug.')
+            _require_routing_support(routing, ROUTING_SHORTCUTS_MIN_SIDECAR)
+            provider = {'sort': 'default', 'order': order, 'only': list(order), 'allowFallbacks': False}
+        else:
+            if not _require_routing_support(routing, SMARTFAST_MIN_SIDECAR, degrade_on_unknown=True):
+                logger.warning(
+                    "Could not read the AI Subtitle Translator version, so smartfast routing cannot be "
+                    "confirmed; sending %s instead of failing the translation", UNKNOWN_ROUTING_FALLBACK)
+                return _strip_routing_suffixes(model), {'sort': UNKNOWN_ROUTING_FALLBACK}
+            provider = {'sort': 'smartfast'}
+        return _strip_routing_suffixes(model), provider
+    # Only a shortcut that stands for a plain sort is honored here. :smartfast reaches
+    # this point when the stored routing could not be read, and it has no plain sort, so
+    # it comes off the id and the fallback below decides.
+    if typed in ROUTING_PLAIN_SORT:
         # The slug already says how to route. A sidecar from 1.3.4 on drops the sort
         # for a typed shortcut anyway; an older one forwards both, so the sort has to
-        # agree with the slug rather than with the setting.
-        return {'sort': ROUTING_PLAIN_SORT[typed]}
+        # agree with the slug rather than with the setting. Only the adopted shortcut
+        # goes back on: the sidecar reads a single trailing one, so leaving an earlier
+        # shortcut in place would send it to OpenRouter as part of the model id.
+        model = f'{_strip_routing_suffixes(model)}:{typed}'
+        return model, {'sort': ROUTING_PLAIN_SORT[typed]}
     if routing in ROUTING_PLAIN_SORT:
         version = sidecar_version(settings.translator.openrouter_url)
         if version is None or version < ROUTING_SHORTCUTS_MIN_SIDECAR:
@@ -107,7 +228,21 @@ def build_provider_config():
                 "AI Subtitle Translator %s does not support the '%s' provider routing (needs 1.3.4), sending %s",
                 '.'.join(map(str, version)) if version else 'of unknown version', routing, plain)
             routing = plain
-    return {'sort': routing}
+    return _strip_routing_suffixes(model), {'sort': routing}
+
+
+def build_provider_config():
+    return build_routing_config()[1]
+
+
+def _cancel_remote_job(remote_job_id, base_url):
+    if not remote_job_id or not base_url:
+        return
+    try:
+        requests.delete(f'{base_url.rstrip("/")}/api/v1/jobs/{remote_job_id}',
+                        headers=get_translator_auth_headers(), timeout=10)
+    except requests.exceptions.RequestException:
+        logger.debug('Could not cancel AI Subtitle Translator job %s', remote_job_id)
 
 
 class OpenRouterTranslatorService:
@@ -118,7 +253,7 @@ class OpenRouterTranslatorService:
 
     def __init__(self, source_srt_file, dest_srt_file, lang_obj, to_lang, from_lang, media_type,
                  video_path, orig_to_lang, forced, hi, sonarr_series_id, sonarr_episode_id,
-                 radarr_id, arr_instance_id=None):
+                 radarr_id, arr_instance_id=None, sports_operation=None, cancel=None):
         self.source_srt_file = source_srt_file
         self.dest_srt_file = dest_srt_file
         self.lang_obj = lang_obj
@@ -135,7 +270,11 @@ class OpenRouterTranslatorService:
         # The owning arr instance (#156): radarrId and sonarrSeriesId are only
         # unique together with it, so every media lookup below carries it.
         self.arr_instance_id = arr_instance_id
+        self.sports_operation = sports_operation
+        self.cancel = cancel
         self.partial_error = None
+        self.routing_error = None
+        self.remote_job_id = None
         self.language_code_convert_dict = {
             'he': 'iw',
             'zh': 'zh-CN',
@@ -145,12 +284,19 @@ class OpenRouterTranslatorService:
     def _build_reasoning_config(self):
         """
         Build reasoning configuration based on Bazarr settings.
-        Sends effort level directly to the AI Subtitle Translator service.
+        Sends an explicit disable flag or effort level to the AI Subtitle Translator service.
         """
         reasoning_mode = getattr(settings.translator, 'openrouter_reasoning', 'disabled')
 
-        if reasoning_mode == 'disabled':
-            return None
+        # An empty value means disabled, not "let the model decide". The validator
+        # that pins this setting to one of disabled/low/medium/high only runs at
+        # startup, so a settings save that clears the key leaves an empty string
+        # behind until the next restart. An empty effort is one the translator
+        # service ignores, which puts the model's own default reasoning back in
+        # charge and stalls the job: the exact failure this setting exists to
+        # prevent.
+        if not reasoning_mode or reasoning_mode == 'disabled':
+            return {'enabled': False}
 
         return {
             'effort': reasoning_mode,
@@ -171,28 +317,27 @@ class OpenRouterTranslatorService:
 
     def translate(self, job_id=None):
         self.partial_error = None
+        self.routing_error = None
         try:
             with staged_subtitle_write(self.video_path, self.dest_srt_file,
+                                       on_publish=publication_callback(self.media_type, self.video_path,
+                                                                       'translate', self.arr_instance_id),
                                        source_paths=(self.source_srt_file,),
                                        before_publish=lambda: jobs_queue.update_job_progress(job_id=job_id),
-                                       allow_empty=True) as temporary:
+                                       allow_empty=not bool(self.sports_operation),
+                                       **sports_write_kwargs(self, job_id)) as temporary:
                 subs = pysubs2.load(self.source_srt_file, encoding='utf-8')
                 lines_list: List[str] = [x.plaintext for x in subs]
                 lines_list_len = len(lines_list)
 
                 if lines_list_len == 0:
-                    logger.debug('No lines to translate in subtitle file')
-                    return False
+                    raise TranslationServiceError('The source subtitle has no lines to translate.')
 
                 logger.debug(f'Starting AI translation for {self.source_srt_file}')  # noqa: G004
 
-                # Submit job and poll for completion
+                # Submit job and poll for completion. Every failure raises with the
+                # reason, so the queue records this job as failed and says why.
                 translated_lines = self._submit_and_poll(lines_list, bazarr_job_id=job_id)
-
-                if translated_lines is None:
-                    logger.error(f'Translation failed for {self.source_srt_file}')  # noqa: G004
-                    show_message(f'Translation failed for {self.source_srt_file}')
-                    return False
 
                 # Process results
                 logger.debug(f'BAZARR saving AI translated subtitles to {self.dest_srt_file}')  # noqa: G004
@@ -217,8 +362,12 @@ class OpenRouterTranslatorService:
             message = f"{language_from_alpha2(self.from_lang)} subtitles {translated} to {language_from_alpha3(self.to_lang)} using AI Subtitle Translator."
             if self.partial_error:
                 message += f' Some lines may remain in the source language. {self.partial_error}'
-            result = create_process_result(message, self.video_path, self.orig_to_lang, self.forced, self.hi, self.dest_srt_file, self.media_type)
+            result = create_process_result(message, self.video_path, self.orig_to_lang, self.forced, self.hi, self.dest_srt_file, self.media_type,
+                                           **({"sports_context": self.sports_operation.context}
+                                              if self.sports_operation else {}))
 
+            if finish_translation(self, result):
+                return self.dest_srt_file
             if self.media_type == 'episode':
                 history_log(action=6,
                             sonarr_series_id=self.sonarr_series_id,
@@ -231,72 +380,96 @@ class OpenRouterTranslatorService:
 
             return self.dest_srt_file
 
-        except (JobCancelled, SubtitleDestinationChanged):
+        except (JobCancelled, SubtitleDestinationChanged, TranslationServiceError):
             raise
         except Exception as e:
+            if self.sports_operation:
+                raise
             logger.error(f'BAZARR encountered an error during AI translation: {str(e)}')  # noqa: G004
-            show_message(f'AI translation failed: {str(e)}')
-            hide_progress(id=f'translate_progress_{self.dest_srt_file}')
-            return False
+            raise TranslationServiceError(f'AI translation failed: {e}') from e
 
-    def _submit_and_poll(self, lines_list: List[str], bazarr_job_id=None) -> Optional[List[Dict[str, Any]]]:
-        """Submit translation job and poll for completion with progress updates"""
+    def _submit_and_poll(self, lines_list: List[str], bazarr_job_id=None) -> List[Dict[str, Any]]:
+        """Submit a library translation and poll it to the end, with progress on the job.
+
+        Returns the translated lines. Raises TranslationServiceError with the reason
+        when the service refuses, cannot be reached or reports a failure.
+        """
+        check_cancelled(self.cancel)
+        # Prepare language codes
+        # from_lang should be alpha2 (e.g., "en")
+        # orig_to_lang should be alpha2 (e.g., "hu")
+        # to_lang is alpha3 (e.g., "hun")
+        source_lang = self.from_lang
+        target_lang = self.orig_to_lang  # Use original alpha2 code
+
+        # Apply any special language code conversions
+        source_lang = self.language_code_convert_dict.get(source_lang, source_lang)
+        target_lang = self.language_code_convert_dict.get(target_lang, target_lang)
+
+        # Resolve alpha2 codes to full language names for the AI translator prompt
+        source_lang = language_from_alpha2(source_lang) or source_lang
+        target_lang = language_from_alpha2(target_lang) or target_lang
+
+        logger.debug(f'BAZARR translation language codes: from_lang={self.from_lang}, to_lang={self.to_lang}, '  # noqa: G004
+                     f'orig_to_lang={self.orig_to_lang}, final source={source_lang}, final target={target_lang}')
+
+        if not target_lang:
+            logger.error(f'Target language is empty! from_lang={self.from_lang}, to_lang={self.to_lang}, orig_to_lang={self.orig_to_lang}')  # noqa: G004
+            raise TranslationServiceError('The target language for this translation is unknown.')
+
+        title = get_title(
+            media_type=self.media_type,
+            radarr_id=self.radarr_id,
+            sonarr_series_id=self.sonarr_series_id,
+            sonarr_episode_id=self.sonarr_episode_id,
+            arr_instance_id=self.arr_instance_id,
+            **({"sports_context": self.sports_operation.context}
+               if self.sports_operation else {})
+        )
+
+        api_media_type = "Episode" if self.media_type == 'episode' else "Movie"
+        arr_media_id = self.sonarr_series_id if self.media_type == 'episode' else self.radarr_id or 0
+
+        extra = {} if self.sports_operation else {"arrMediaId": arr_media_id, "mediaType": api_media_type}
+        return self.submit_content(lines_list, source_lang, target_lang, title,
+                                   bazarr_job_id=bazarr_job_id, **extra)
+
+    def submit_content(self, lines_list: List[str], source_language, target_language, title,
+                       bazarr_job_id=None, **payload_fields) -> List[Dict[str, Any]]:
+        """Send lines to the AI Subtitle Translator and follow the job to its end.
+
+        Shared by the library translation and the subtitle editor, so both send the
+        same configuration and report through the same job progress. Raises
+        TranslationServiceError with a user-readable reason on any failure.
+        """
+        self.remote_job_id = None
+        base_url = ''
         try:
-            # Prepare language codes
-            # from_lang should be alpha2 (e.g., "en")
-            # orig_to_lang should be alpha2 (e.g., "hu")
-            # to_lang is alpha3 (e.g., "hun")
-            source_lang = self.from_lang
-            target_lang = self.orig_to_lang  # Use original alpha2 code
-            
-            # Apply any special language code conversions
-            source_lang = self.language_code_convert_dict.get(source_lang, source_lang)
-            target_lang = self.language_code_convert_dict.get(target_lang, target_lang)
-
-            # Resolve alpha2 codes to full language names for the AI translator prompt
-            source_lang = language_from_alpha2(source_lang) or source_lang
-            target_lang = language_from_alpha2(target_lang) or target_lang
-
-            logger.debug(f'BAZARR translation language codes: from_lang={self.from_lang}, to_lang={self.to_lang}, '  # noqa: G004
-                         f'orig_to_lang={self.orig_to_lang}, final source={source_lang}, final target={target_lang}')
-
-            if not target_lang:
-                logger.error(f'Target language is empty! from_lang={self.from_lang}, to_lang={self.to_lang}, orig_to_lang={self.orig_to_lang}')  # noqa: G004
-                return None
-
+            check_cancelled(self.cancel)
+            model, provider = build_routing_config()
             lines_payload: List[Dict[str, Any]] = [{"position": i, "line": line} for i, line in enumerate(lines_list)]
 
-            title = get_title(
-                media_type=self.media_type,
-                radarr_id=self.radarr_id,
-                sonarr_series_id=self.sonarr_series_id,
-                sonarr_episode_id=self.sonarr_episode_id,
-                arr_instance_id=self.arr_instance_id
-            )
-
-            api_media_type = "Episode" if self.media_type == 'episode' else "Movie"
-            arr_media_id = self.sonarr_series_id if self.media_type == 'episode' else self.radarr_id or 0
-
             payload = {
-                "arrMediaId": arr_media_id,
+                **payload_fields,
                 "title": title,
-                "sourceLanguage": source_lang,
-                "targetLanguage": target_lang,
-                "mediaType": api_media_type,
+                "sourceLanguage": source_language,
+                "targetLanguage": target_language,
                 "lines": lines_payload,
                 # Add configuration from Bazarr settings
                 "config": {
                     "apiKey": self._get_api_key_value(),
-                    "model": settings.translator.openrouter_model,
+                    "model": model,
                     "temperature": settings.translator.openrouter_temperature,
                     "maxConcurrentJobs": settings.translator.openrouter_max_concurrent,
                     "parallelBatches": settings.translator.openrouter_parallel_batches,
                     "reasoning": self._build_reasoning_config(),
-                    "provider": build_provider_config(),
+                    "provider": provider,
                 }
             }
 
-            base_url = settings.translator.openrouter_url.rstrip('/')
+            base_url = (settings.translator.openrouter_url or '').rstrip('/')
+            if not base_url:
+                raise TranslationServiceError('The AI Subtitle Translator service URL is not configured.')
 
             # Submit job
             logger.debug(f'BAZARR submitting {len(lines_payload)} lines to AI Subtitle Translator')  # noqa: G004
@@ -306,6 +479,7 @@ class OpenRouterTranslatorService:
                 headers={"Content-Type": "application/json", **get_translator_auth_headers()},
                 timeout=30
             )
+            check_cancelled(self.cancel)
 
             if submit_response.status_code != 200:
                 # Fallback to sync endpoint if job queue not available
@@ -316,42 +490,65 @@ class OpenRouterTranslatorService:
             job_id = job_data.get("jobId")
             if not job_id:
                 logger.error("No jobId returned from translation service")
-                return None
+                raise TranslationServiceError('The AI Subtitle Translator accepted the request but returned no job.')
 
             logger.debug(f'BAZARR translation job submitted: {job_id}')  # noqa: G004
+            self.remote_job_id = job_id
+
+            # Retain the remote job identity. It only ever lived in this local
+            # variable, so a status reader had no way to tell one host job's
+            # remote work from another's.
+            activity.note_remote_submission(activity.activity_id_for_job(bazarr_job_id),
+                                            service_id=TRANSLATOR_SERVICE_ID, remote_job_id=job_id)
 
             # Poll for completion
             return self._poll_job(base_url, job_id, len(lines_payload), bazarr_job_id=bazarr_job_id)
 
-        except requests.exceptions.Timeout:
+        except JobCancelled:
+            # Stop ends the sidecar's job too. Left running, it keeps spending
+            # model tokens on a result nothing is going to collect.
+            _cancel_remote_job(self.remote_job_id, base_url)
+            raise
+        except TranslationServiceError:
+            raise
+        except ProviderRoutingError as error:
+            # The refusal names what the user has to change, so it is the reason.
+            logger.error('AI Subtitle Translator routing error: %s', error)
+            self.routing_error = str(error)
+            raise TranslationServiceError(f'AI translation failed: {error}') from error
+        except requests.exceptions.Timeout as error:
             logger.error('AI Subtitle Translator request timed out')
-            return None
-        except requests.exceptions.ConnectionError:
+            raise TranslationServiceError('The AI Subtitle Translator did not answer in time.') from error
+        except requests.exceptions.ConnectionError as error:
             logger.error('AI Subtitle Translator connection error')
-            return None
+            raise TranslationServiceError('Cannot connect to the AI Subtitle Translator service.') from error
         except Exception as e:
+            # A Sportarr owner switched off mid-poll stops it here, and so does
+            # anything else that abandons the poll, so the sidecar job goes too.
+            _cancel_remote_job(self.remote_job_id, base_url)
             logger.error(f'AI Subtitle Translator error: {str(e)}')  # noqa: G004
-            return None
+            raise TranslationServiceError(f'AI translation failed: {e}') from e
 
     def _mark_partial(self, detail):
         self.partial_error = ' '.join(str(detail).split())[:500] or 'Some translation batches failed.'
         logger.warning("Translation partially completed: %s", self.partial_error)
-        show_message('Translation is partial. Some lines may remain in the source language. '
-                     f'{self.partial_error}')
 
-    def _poll_job(self, base_url: str, job_id: str, total_lines: int, bazarr_job_id=None) -> Optional[Any]:
+    def _poll_job(self, base_url: str, job_id: str, total_lines: int, bazarr_job_id=None) -> List[Any]:
         """Poll until a terminal status, subject to reachability and safety limits.
 
         The sidecar owns request timeouts and retries, so there is no normal total-time cap.
         A slow model with reasoning enabled and a shrunk batch size can take over half an hour.
         The old 30-minute cap discarded a translation that the sidecar finished successfully.
         A 12-hour hard cap remains as a safety net.
+
+        Returns the translated lines, or raises TranslationServiceError with the reason.
         """
         self.partial_error = None
         started_at = time.monotonic()
         last_reachable_at = started_at
 
         while True:
+            check_cancelled(self.cancel)
             now = time.monotonic()
             if now - started_at >= POLL_HARD_CAP_SECONDS:
                 reason = "reached the 12-hour polling hard cap"
@@ -371,6 +568,7 @@ class OpenRouterTranslatorService:
                     headers=get_translator_auth_headers(),
                     timeout=10
                 )
+                check_cancelled(self.cancel)
 
                 if status_response.status_code != 200:
                     logger.error(f"Error getting job status: {status_response.status_code}")  # noqa: G004
@@ -383,16 +581,13 @@ class OpenRouterTranslatorService:
                 progress = job_status.get("progress", 0)
                 message = job_status.get("message", "")
 
-                # Update progress in Bazarr UI
-                show_progress(
-                    id=f'translate_progress_{self.dest_srt_file}',
-                    header='Translating subtitles with AI...',
-                    name=message,
-                    value=progress,
-                    count=100
-                )
+                # Observation only: the remote phase this poll actually saw. A
+                # remote queued phase means the host is waiting, not translating.
+                activity.note_remote_phase(service_id=TRANSLATOR_SERVICE_ID, remote_job_id=job_id,
+                                           phase=status, progress=progress, total=100)
 
-                # Sync progress to bazarr jobs queue (for NotificationDrawer)
+                # Mirror the service's progress onto the Bazarr job, which is what the
+                # Jobs button, the drawer and the editor all read.
                 if bazarr_job_id:
                     model_used = job_status.get("model_used", settings.translator.openrouter_model or "")
                     jobs_queue.update_job_progress(
@@ -403,7 +598,6 @@ class OpenRouterTranslatorService:
                     )
 
                 if status == "completed":
-                    hide_progress(id=f'translate_progress_{self.dest_srt_file}')
                     lines = self._validated_result_lines(job_status.get("result"), total_lines)
                     # An empty list is not a translation: saving it would write every source
                     # line under the target name and record a success in History.
@@ -411,30 +605,25 @@ class OpenRouterTranslatorService:
                         logger.debug(f'Extracted {len(lines)} lines from job result')  # noqa: G004
                         return lines
                     logger.error("Job completed but no result returned")
-                    return None
+                    raise TranslationServiceError('The AI Subtitle Translator finished without returning any translated lines.')
 
                 elif status == "failed":
-                    hide_progress(id=f'translate_progress_{self.dest_srt_file}')
                     error = job_status.get("error", "Unknown error")
                     logger.error(f"Translation job failed: {error}")  # noqa: G004
-                    show_message(f"Translation failed: {error}")
-                    return None
+                    raise TranslationServiceError(f"Translation failed: {error}")
 
                 elif status == "partial":
-                    hide_progress(id=f'translate_progress_{self.dest_srt_file}')
                     error = job_status.get("error") or message or "Partial translation"
                     lines = self._validated_result_lines(job_status.get("result"), total_lines)
                     if lines is not None:
                         self._mark_partial(error)
                         return lines
                     logger.error(f"Translation partially failed: {error}")  # noqa: G004
-                    show_message(f"Translation failed (partial): {error}")
-                    return None
+                    raise TranslationServiceError(f"Translation failed (partial): {error}")
 
                 elif status == "cancelled":
-                    hide_progress(id=f'translate_progress_{self.dest_srt_file}')
                     logger.info("Translation job was cancelled")
-                    return None
+                    raise TranslationServiceError('The translation was cancelled in the AI Subtitle Translator.')
 
                 # Still processing or queued
                 time.sleep(POLL_INTERVAL_SECONDS)
@@ -443,10 +632,8 @@ class OpenRouterTranslatorService:
                 logger.warning(f"Error polling job status: {e}")  # noqa: G004
                 time.sleep(POLL_INTERVAL_SECONDS)
 
-        hide_progress(id=f'translate_progress_{self.dest_srt_file}')
         logger.error(f"Translation job {job_id} {reason}")  # noqa: G004
-        show_message(user_message)
-        return None
+        raise TranslationServiceError(user_message)
 
     @staticmethod
     def _validated_result_lines(result, total_lines):
@@ -469,9 +656,10 @@ class OpenRouterTranslatorService:
         return result if has_translation else None
 
     @retry(exceptions=(TooManyRequests, RequestError, requests.exceptions.RequestException), tries=3, delay=1, backoff=2, jitter=(0, 1))
-    def _translate_sync(self, lines_list: List[str], payload: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    def _translate_sync(self, lines_list: List[str], payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Fallback synchronous translation (Lingarr-compatible)"""
         base_url = settings.translator.openrouter_url.rstrip('/')
+        check_cancelled(self.cancel)
 
         response = requests.post(
             f"{base_url}/api/v1/translate/content",
@@ -479,13 +667,17 @@ class OpenRouterTranslatorService:
             headers={"Content-Type": "application/json", **get_translator_auth_headers()},
             timeout=1800
         )
+        check_cancelled(self.cancel)
 
         if response.status_code == 200:
-            return self._validated_result_lines(response.json(), len(lines_list))
+            lines = self._validated_result_lines(response.json(), len(lines_list))
+            if lines is None:
+                raise TranslationServiceError('The AI Subtitle Translator returned no usable translated lines.')
+            return lines
         elif response.status_code == 429:
             raise TooManyRequests("Rate limit exceeded")
         elif response.status_code >= 500:
             raise RequestError(f"Server error: {response.status_code}")
         else:
             logger.error(f'API error: {response.status_code} - {response.text}')  # noqa: G004
-            return None
+            raise TranslationServiceError(f'The AI Subtitle Translator refused the request (HTTP {response.status_code}).')

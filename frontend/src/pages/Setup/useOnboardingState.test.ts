@@ -25,6 +25,7 @@ function freshSettings(overrides: Partial<Settings.General> = {}) {
       general: {
         use_sonarr: false,
         use_radarr: false,
+        use_sportarr: false,
         enabled_providers: [],
         setup_complete: false,
         ...overrides,
@@ -36,6 +37,14 @@ function freshSettings(overrides: Partial<Settings.General> = {}) {
 
 function instances(data: ArrInstance[] | undefined, isLoading = false) {
   return { data, isLoading } as unknown as ReturnType<typeof useArrInstances>;
+}
+
+function failedInstances() {
+  return {
+    data: undefined,
+    isLoading: false,
+    isError: true,
+  } as unknown as ReturnType<typeof useArrInstances>;
 }
 
 describe("useOnboardingState", () => {
@@ -51,6 +60,18 @@ describe("useOnboardingState", () => {
 
     expect(result.current.needsOnboarding).toBe(true);
     expect(result.current.isLoading).toBe(false);
+  });
+
+  it("treats a failed instances read as unknown, not as none", () => {
+    // Read as none, an install with a full library and a momentarily
+    // unreachable database answers the first-run question with yes and routes
+    // its owner into the setup wizard over a configured install.
+    mockedSettings.mockReturnValue(freshSettings());
+    mockedInstances.mockReturnValue(failedInstances());
+
+    const { result } = renderHook(() => useOnboardingState());
+
+    expect(result.current.needsOnboarding).toBe(false);
   });
 
   it("returns needsOnboarding=false when a sonarr instance exists", () => {
@@ -75,6 +96,18 @@ describe("useOnboardingState", () => {
 
   it("returns needsOnboarding=false when use_radarr is true", () => {
     mockedSettings.mockReturnValue(freshSettings({ use_radarr: true }));
+    mockedInstances.mockReturnValue(instances([]));
+
+    const { result } = renderHook(() => useOnboardingState());
+
+    expect(result.current.needsOnboarding).toBe(false);
+  });
+
+  it("returns needsOnboarding=false when only Sportarr is turned on", () => {
+    // Left out of the check, a user who had configured Sportarr and nothing
+    // else was shown the first-run wizard as though the install were
+    // untouched.
+    mockedSettings.mockReturnValue(freshSettings({ use_sportarr: true }));
     mockedInstances.mockReturnValue(instances([]));
 
     const { result } = renderHook(() => useOnboardingState());

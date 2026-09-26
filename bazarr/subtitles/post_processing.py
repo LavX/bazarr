@@ -4,17 +4,58 @@
 import os
 import logging
 import subprocess
+import shutil
 
 from locale import getpreferredencoding
 from utilities.helper import get_target_folder
 from subtitles.tools.subsync_engines import subtitle_write_locks, subtitle_mutation
 
 
-def postprocessing(command, path, subtitle_path=None):
+def postprocessing(command, path, subtitle_path=None, *, lock_paths=None,
+                   publication_guard=None, command_builder=None, source_version=None,
+                   after_write=None, on_publish=None):
+    if publication_guard is not None:
+        from subtitles.tools.subsync_engines import (
+            staged_subtitle_write, source_is_unchanged, SubtitleSourceChanged,
+            _report_subtitle_publication,
+        )
+        if not subtitle_path or command_builder is None:
+            raise ValueError('Guarded postprocessing requires a subtitle and command builder')
+        def validate_source():
+            if source_version is not None and not source_is_unchanged(subtitle_path, source_version):
+                raise SubtitleSourceChanged('Uploaded subtitle changed before post-processing')
+
+        with staged_subtitle_write(path, subtitle_path, source_paths=(subtitle_path,),
+                                    publication_guard=publication_guard,
+                                    before_publish=validate_source, after_write=after_write) as temporary:
+            with subtitle_write_locks(path, subtitle_path):
+                validate_source()
+                shutil.copyfile(subtitle_path, temporary)
+            # Deliberately outside the locks, unlike the branch below, and the
+            # difference is what the command is pointed at. Here it rewrites an
+            # O_EXCL staging file that nothing else can name, and the publish
+            # that follows re-takes the locks and refuses if the destination or
+            # the source moved meanwhile. Holding the coordinator across an
+            # operator-configured command instead would block every other
+            # writer for as long as that command takes, and a later writer that
+            # arrives during it would be locked out rather than preserved.
+            _postprocessing_locked(command_builder(temporary), path)
+        _report_subtitle_publication(on_publish, subtitle_path)
+        return
     # Configured commands can mutate subtitles in place. This is the one boundary
-    # that must hold this media's mutation locks while the external command runs.
-    destination = os.path.join(get_target_folder(path, create=False) or os.path.dirname(path), '.destination')
-    with subtitle_write_locks(path, path, destination, subtitle_path or path) as states:
+    # that must hold this media's mutation locks while the external command runs:
+    # the command is pointed at the published subtitle itself, so nothing else
+    # stands between it and another writer. Note what "these" covers here and
+    # not above: this branch locks the destination folder too, and enters
+    # subtitle_mutation. The guarded branch takes only the two directory locks,
+    # for its copy, and releases them before the command; it reaches the
+    # mutation coordinator later, around the replace inside staged_subtitle_write.
+    if lock_paths is None:
+        destination = os.path.join(get_target_folder(path, create=False) or os.path.dirname(path), '.destination')
+        lock_paths = (path, destination, subtitle_path or path)
+    # A caller already holding these locks must reuse its resolved directories.
+    # Live destination settings may have changed since that outer acquisition.
+    with subtitle_write_locks(path, *lock_paths) as states:
         watched_paths = {watched for state in states.values() for watched in state.revisions}
         if subtitle_path:
             watched_paths.add(subtitle_path)

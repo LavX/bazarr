@@ -234,6 +234,223 @@ def test_manifest_rejects_built_in_provider_shadowing():
         validate_manifest(manifest, built_in_provider_ids={"opensubtitles"})
 
 
+def test_manifest_rejects_provider_id_naming_a_bazarr_settings_section():
+    # The pool overlay copies every key a plugin declares in its config_schema
+    # out of the settings section named after the plugin, so an id that names one
+    # of Bazarr's own sections is a credential handout: sonarr.apikey,
+    # plex.token, auth.password, postgresql.password. The reserved set is derived
+    # from the settings validators, never hand-kept here, so a section added
+    # later is covered the day it is declared.
+    from provider_hub.manifest import (
+        ManifestValidationError,
+        reserved_settings_sections,
+        validate_manifest,
+    )
+
+    reserved = reserved_settings_sections()
+    # Two floors under the loop below, because a loop over whatever the set
+    # happens to hold stops testing a section the day it silently leaves it.
+    # The literal one is the sections the leak was found on; the derived one is
+    # every section the secret store keeps a credential in that no provider owns,
+    # so the two cannot drift apart as the secret registry grows.
+    assert {
+        "anticaptcha",
+        "auth",
+        "captchaai",
+        "compat_endpoint",
+        "deathbycaptcha",
+        "discover",
+        "emby",
+        "general",
+        "jellyfin",
+        "omdb",
+        "plex",
+        "postgresql",
+        "proxy",
+        "radarr",
+        "seerr",
+        "silo",
+        "sonarr",
+        "translator",
+    } <= reserved
+    assert _secret_bearing_non_provider_sections() <= reserved
+
+    for section in sorted(reserved):
+        with pytest.raises(ManifestValidationError, match="settings section"):
+            validate_manifest(
+                _manifest(provider_id=section, name=section.title()),
+                built_in_provider_ids=set(),
+            )
+
+
+def _secret_bearing_non_provider_sections():
+    """Sections the secret store keeps a credential in that no provider owns.
+
+    Derived from secret_store.registry rather than listed here, so a credential
+    added to a new section is covered by the reserved-section rule the day it is
+    registered.
+    """
+    from provider_hub.migration import (
+        MIGRATED_BUILT_IN_PROVIDER_IDS,
+        RETIRED_BUILT_IN_PROVIDER_IDS,
+    )
+    from secret_store.registry import (
+        IMPORT_ONLY_SECTIONS,
+        SYSTEM_SECRETS,
+        USER_VISIBLE_SECRET_LISTS,
+        USER_VISIBLE_SECRETS,
+        WRITE_ONLY_SECRETS,
+    )
+    from subliminal_patch.extensions import provider_registry
+
+    secret_paths = (
+        USER_VISIBLE_SECRETS
+        | USER_VISIBLE_SECRET_LISTS
+        | SYSTEM_SECRETS
+        | WRITE_ONLY_SECRETS
+    )
+    sections = {path.split(".", 1)[0] for path in secret_paths} | set(IMPORT_ONLY_SECTIONS)
+    return sections - (
+        set(provider_registry.names())
+        | MIGRATED_BUILT_IN_PROVIDER_IDS
+        | RETIRED_BUILT_IN_PROVIDER_IDS
+    )
+
+
+def test_a_registered_hub_plugin_cannot_unreserve_a_section_for_itself():
+    # Hub plugins register into the same provider registry as the built-ins, so
+    # reading that registry back without subtracting them would let the very
+    # plugin the rule exists to stop turn its id into a "provider-owned" section
+    # and unreserve it, which is the same trap registry.py's shadow gate names.
+    import provider_hub.registry as hub_registry
+    from provider_hub.manifest import (
+        ManifestValidationError,
+        reserved_settings_sections,
+        validate_manifest,
+    )
+    from subliminal_patch.extensions import provider_registry
+
+    class ImpostorProvider:
+        pass
+
+    assert "sonarr" in reserved_settings_sections()
+
+    provider_registry.register("sonarr", ImpostorProvider)
+    hub_registry._REGISTERED_PROVIDER_HUB_IDS.add("sonarr")
+    try:
+        assert "sonarr" in reserved_settings_sections()
+        with pytest.raises(ManifestValidationError, match="settings section"):
+            validate_manifest(
+                _manifest(provider_id="sonarr", name="Sonarr"),
+                built_in_provider_ids=set(),
+            )
+    finally:
+        hub_registry._REGISTERED_PROVIDER_HUB_IDS.discard("sonarr")
+        if "sonarr" in provider_registry:
+            del provider_registry["sonarr"]
+
+
+def test_manifest_validation_refuses_when_the_reserved_set_cannot_be_derived(monkeypatch):
+    # The reserved set is half of a security gate. Failing open would accept a
+    # plugin calling itself sonarr and the pool overlay would then hand it the
+    # section, so a derivation that cannot run has to refuse instead.
+    import sys
+
+    from provider_hub.manifest import (
+        ManifestValidationError,
+        reserved_settings_sections,
+        validate_manifest,
+    )
+
+    monkeypatch.setitem(sys.modules, "app.config", None)
+
+    with pytest.raises(ManifestValidationError, match="reserved"):
+        reserved_settings_sections()
+    with pytest.raises(ManifestValidationError, match="reserved"):
+        validate_manifest(_manifest(), built_in_provider_ids=set())
+
+
+def test_manifest_validation_refuses_an_empty_reserved_derivation(monkeypatch):
+    # Same refusal for settings that import but declare nothing: an empty set
+    # reserves nothing at all, which is indistinguishable from no rule.
+    import sys
+    from types import SimpleNamespace
+
+    from provider_hub.manifest import ManifestValidationError, validate_manifest
+
+    monkeypatch.setitem(sys.modules, "app.config", SimpleNamespace(validators=[]))
+
+    with pytest.raises(ManifestValidationError, match="reserved"):
+        validate_manifest(_manifest(), built_in_provider_ids=set())
+
+
+def test_settings_section_provider_id_is_rejected_from_a_trusted_source():
+    # No built-in provider owns one of these sections, so there is nothing for
+    # the trusted shadow gate to grant: the rejection holds for every install
+    # source, trusted catalog and local upload alike.
+    from provider_hub.manifest import ManifestValidationError, validate_manifest
+    from provider_hub.migration import validation_built_in_provider_ids
+    from provider_hub.service import _built_in_provider_ids
+
+    manifest = _manifest(provider_id="sonarr", name="Sonarr")
+    manifest["source"] = dict(manifest["source"], trusted=True)
+
+    with pytest.raises(ManifestValidationError, match="settings section"):
+        validate_manifest(
+            manifest,
+            built_in_provider_ids=validation_built_in_provider_ids(
+                "sonarr", _built_in_provider_ids(), trusted=True
+            ),
+        )
+
+
+def test_reserved_settings_sections_leave_provider_owned_sections_alone():
+    # Catalog plugins reuse built-in provider ids on purpose (subdl, whisperai,
+    # titlovi and the rest of the migration allowlist), and every one of those
+    # ids is also a settings section. Reserving them would reject those manifests
+    # and drop the plugins from the pool on the next boot, so the reserved set is
+    # only ever the sections no provider owns.
+    from provider_hub.manifest import reserved_settings_sections, validate_manifest
+    from provider_hub.migration import (
+        MIGRATED_BUILT_IN_PROVIDER_IDS,
+        RETIRED_BUILT_IN_PROVIDER_IDS,
+    )
+    from subliminal_patch.extensions import provider_registry
+
+    provider_owned = (
+        set(provider_registry.names())
+        | MIGRATED_BUILT_IN_PROVIDER_IDS
+        | RETIRED_BUILT_IN_PROVIDER_IDS
+    )
+    assert not reserved_settings_sections() & provider_owned
+
+    for provider_id in ("subdl", "whisperai", "titlovi", "opensubtitlescom", "subf2m"):
+        validate_manifest(
+            _manifest(provider_id=provider_id, name=provider_id.title()),
+            built_in_provider_ids=set(),
+        )
+
+
+def test_a_plugins_own_config_section_never_becomes_reserved():
+    # Saving a plugin's Settings card writes its config into config.yaml under
+    # the plugin's id, so the plugin's own section is in the live settings object
+    # from the next boot on. Deriving the reserved set from the stored sections
+    # instead of the validators would make the plugin reserve itself out of the
+    # pool the moment its user configured it.
+    from app.config import settings
+    from provider_hub.manifest import reserved_settings_sections, validate_manifest
+
+    settings.set("configuredhub", {"api_key": "configured-by-the-user"})
+    try:
+        assert "configuredhub" not in reserved_settings_sections()
+        validate_manifest(
+            _manifest(provider_id="configuredhub", name="Configured Hub"),
+            built_in_provider_ids=set(),
+        )
+    finally:
+        settings.set("configuredhub", {})
+
+
 @pytest.mark.parametrize(
     "requirement",
     [
@@ -4284,6 +4501,36 @@ def test_get_matches_without_release_info_returns_only_worker_matches():
     assert candidate.get_matches(movie) == {"title"}
 
 
+@pytest.mark.parametrize("flag, expected", [
+    (True, True), (False, False), ("true", False), (1, False), (None, False),
+])
+def test_candidate_ai_translation_requires_literal_true(flag, expected):
+    from provider_hub.protocol import candidate_from_worker
+
+    payload = {
+        "id": "sub-1", "language": {"alpha3": "eng"},
+        "provider_payload": {"provider": "examplehub"},
+        "display": {"ai_translated": True},
+    }
+    if flag is not None:
+        payload["ai_translated"] = flag
+    candidate = candidate_from_worker("examplehub", payload)
+    assert candidate.ai_translated is expected
+
+
+def test_candidate_language_round_trips_script_and_country():
+    from provider_hub.protocol import candidate_from_worker, language_to_payload
+
+    language = Language("zho", "TW", script="Hant")
+    candidate = candidate_from_worker("examplehub", {
+        "id": "sub-1",
+        "language": language_to_payload(language),
+        "provider_payload": {"provider": "examplehub"},
+    })
+    assert candidate.language.script == language.script
+    assert candidate.language.country == language.country
+
+
 def test_get_matches_swallows_release_update_errors(monkeypatch):
     # A malformed release string must never break scoring for a candidate: if the
     # release-based match update raises, get_matches falls back to the worker matches.
@@ -4412,3 +4659,413 @@ def test_pool_drops_subtitles_whose_language_is_not_a_language_object(monkeypatc
     out = pool.list_subtitles_provider("fakeguard", movie, {Language("eng")})
 
     assert out == [good]
+
+
+@pytest.mark.parametrize("status", [403, 429])
+def test_catalog_rate_limit_preserves_cached_source(tmp_path, monkeypatch, status):
+    import requests
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    checked = "2026-09-12T12:00:00+00:00"
+    state_file = tmp_path / "state.json"
+    entry = {"source": "community", "provider_id": "example", "version": "1.0.0", "trusted": False}
+    state_file.write_text(json.dumps({
+        "catalog_sources": {"community": {
+            "id": "community", "name": "community", "url": "https://github.com/example/providers/blob/main/catalog.json",
+            "last_checked_at": checked,
+        }}, "catalog_entries": {"community:example:1.0.0": entry}, "jobs": [],
+    }))
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    response = requests.Response()
+    response.status_code = status
+    response.headers.update({"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1789228800"})
+
+    def limited(*args, **kwargs):
+        raise requests.HTTPError(response=response)
+
+    monkeypatch.setattr(service, "_fetch_github_catalog", limited)
+    service.refresh_catalog()
+    saved = load_state()
+    source = saved["catalog_sources"]["community"]
+    assert source["last_checked_at"] == checked
+    assert source["last_attempted_at"]
+    assert "2026-09-12 16:00:00 UTC" in source["last_error"]
+    assert "temporarily limited" in source["last_error"]
+    assert saved["catalog_entries"]["community:example:1.0.0"] == entry
+
+
+def test_catalog_forbidden_is_not_presented_as_rate_limiting():
+    import requests
+    from provider_hub.service import _catalog_source_error_message
+    response = requests.Response()
+    response.status_code = 403
+    response.headers["x-ratelimit-remaining"] = "20"
+    message = _catalog_source_error_message(requests.HTTPError(response=response))
+    assert "denied access" in message
+    assert "temporarily" not in message
+
+
+@pytest.mark.parametrize("reset", ["invalid", "9999999999999999999999999"])
+def test_catalog_malformed_rate_limit_time_is_recoverable(reset):
+    import requests
+    from provider_hub.service import _catalog_source_error_message
+    response = requests.Response()
+    response.status_code = 429
+    response.headers["x-ratelimit-remaining"] = "0"
+    response.headers["x-ratelimit-reset"] = reset
+    assert "did not provide a reset time" in _catalog_source_error_message(requests.HTTPError(response=response))
+
+
+def test_catalog_secondary_limit_without_retry_header_is_temporary():
+    import requests
+    from provider_hub.service import _catalog_source_error_message
+    response = requests.Response()
+    response.status_code = 403
+    response.headers["x-ratelimit-remaining"] = "20"
+    response.headers["x-ratelimit-reset"] = "1789228800"
+    response._content = b'{"message":"You have exceeded a secondary rate limit. Please wait before you try again."}'
+    message = _catalog_source_error_message(requests.HTTPError(response=response))
+    assert "temporarily limited" in message
+    assert "permissions" not in message
+    assert "did not provide a reset time" in message
+    assert "2026-09-12" not in message
+
+
+def test_catalog_retry_after_has_precedence(monkeypatch):
+    import requests
+    from provider_hub import service
+    monkeypatch.setattr(service.time, "time", lambda: 1789228800)
+    response = requests.Response()
+    response.status_code = 429
+    response.headers.update({"retry-after": "60", "x-ratelimit-reset": "1789228800", "x-ratelimit-remaining": "0"})
+    message = service._catalog_source_error_message(requests.HTTPError(response=response))
+    assert "2026-09-12 16:01:00 UTC" in message
+
+
+@pytest.mark.parametrize("failure", ["rate_limit", "timeout"])
+def test_failed_initial_catalog_refresh_waits_for_explicit_retry(tmp_path, monkeypatch, failure):
+    import requests
+    from provider_hub import service
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+    attempts = []
+    response = requests.Response()
+    response.status_code = 429
+    response.headers["Retry-After"] = "60"
+
+    def fetch(*args, **kwargs):
+        attempts.append(args)
+        if len(attempts) == 1:
+            if failure == "rate_limit":
+                raise requests.HTTPError(response=response)
+            raise requests.Timeout("Catalog request timed out")
+        return {"providers": []}, "f" * 40
+
+    monkeypatch.setattr(service, "_fetch_github_catalog", fetch)
+    first = service.list_catalog(auto_refresh=True)
+    source = first["sources"][0]
+    assert len(attempts) == 1
+    assert source["last_checked_at"] is None
+    assert source["last_attempted_at"]
+    assert source["last_error"]
+    for _ in range(3):
+        assert service.list_catalog(auto_refresh=True) == first
+    assert len(attempts) == 1
+
+    service.refresh_catalog()
+    recovered = service.list_catalog(auto_refresh=True)["sources"][0]
+    assert len(attempts) == 2
+    assert recovered["last_checked_at"]
+    assert recovered["last_error"] is None
+
+
+# ---------------------------------------------------------------------------
+# enabled_providers across a run of back-to-back installs
+#
+# The onboarding wizard lets a user tick several providers and install them in
+# one go, and the report was "installing multiple providers might end up
+# installing only the first". Two very different faults produce that symptom: an
+# install that fails and stops the run, or an install that succeeds and then
+# vanishes because the next one read a stale enabled_providers and wrote it back
+# without the previous entry. _set_bazarr_provider_enabled read-modify-writes
+# that list, so this pins the second possibility shut: three sequential installs
+# leave all three ids in the list, in memory and on disk.
+#
+# It runs in a child process with its own config dir because it exercises the
+# real settings singleton and a real write_config(); doing that in the test
+# process would rewrite the repository's own config.
+
+_ENABLED_PROVIDERS_SEQUENCE_CHILD = '''\
+import json
+import os
+import sys
+import threading
+import time
+
+ROOT = os.environ["BAZARR_REPO_ROOT"]
+sys.path.insert(0, os.path.join(ROOT, "bazarr"))
+sys.path.insert(0, os.path.join(ROOT, "custom_libs"))
+
+from app.get_args import args
+
+assert os.path.realpath(args.config_dir) == os.path.realpath(
+    os.environ["EXPECTED_CONFIG_DIR"]
+), "child resolved config_dir to %r" % (args.config_dir,)
+
+from app.config import config_yaml_file
+from provider_hub import service
+from provider_hub.service import _bazarr_enabled_providers, _set_bazarr_provider_enabled
+
+ids = json.loads(os.environ["PROVIDER_IDS"])
+returned = [_set_bazarr_provider_enabled(provider_id, True) for provider_id in ids]
+
+sequential_in_memory = list(_bazarr_enabled_providers())
+
+# Concurrent half. A parallel install run reaches _set_bazarr_provider_enabled
+# from several threads at once; widening the gap between its read and its write
+# turns the lost update from a rare interleaving into a certainty, so the lock
+# is what the assertion is really measuring.
+_real_read = service._bazarr_enabled_providers
+
+
+def _slow_read():
+    value = _real_read()
+    time.sleep(0.05)
+    return value
+
+
+service._bazarr_enabled_providers = _slow_read
+
+threaded_ids = json.loads(os.environ["THREADED_PROVIDER_IDS"])
+errors = []
+
+
+def _enable(provider_id):
+    try:
+        service._set_bazarr_provider_enabled(provider_id, True)
+    except Exception as error:  # noqa: BLE001
+        errors.append(repr(error))
+
+
+threads = [threading.Thread(target=_enable, args=(pid,)) for pid in threaded_ids]
+for thread in threads:
+    thread.start()
+for thread in threads:
+    thread.join()
+
+service._bazarr_enabled_providers = _real_read
+
+from dynaconf import Dynaconf
+
+on_disk = Dynaconf(settings_file=config_yaml_file, core_loaders=["YAML"]).as_dict()
+
+print("__RESULT__" + json.dumps({
+    "returned": returned,
+    "sequential_in_memory": sequential_in_memory,
+    "in_memory": list(_bazarr_enabled_providers()),
+    "on_disk": list(on_disk.get("GENERAL", {}).get("enabled_providers") or []),
+    "thread_errors": errors,
+}))
+'''
+
+
+def test_installs_keep_every_enabled_provider_sequentially_and_in_parallel(tmp_path):
+    import sys
+
+    repo_root = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    provider_ids = ["hubalpha", "hubbravo", "hubcharlie"]
+    threaded_ids = ["hubpara1", "hubpara2", "hubpara3", "hubpara4", "hubpara5"]
+
+    script = tmp_path / "enabled_providers_sequence.py"
+    script.write_text(_ENABLED_PROVIDERS_SEQUENCE_CHILD, encoding="utf-8")
+
+    env = dict(os.environ)
+    env.update({
+        "BAZARR_REPO_ROOT": repo_root,
+        "EXPECTED_CONFIG_DIR": str(tmp_path),
+        "PROVIDER_IDS": json.dumps(provider_ids),
+        "THREADED_PROVIDER_IDS": json.dumps(threaded_ids),
+        "SZ_USER_AGENT": "test",
+        "BAZARR_VERSION": "test",
+        "NO_CLI": "false",
+    })
+
+    proc = subprocess.run(
+        [sys.executable, str(script), "-c", str(tmp_path)],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert proc.returncode == 0, (
+        f"child crashed\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+
+    marker = "__RESULT__"
+    line = next((ln for ln in proc.stdout.splitlines() if ln.startswith(marker)), None)
+    assert line is not None, f"child produced no result\nstdout:\n{proc.stdout}"
+    result = json.loads(line[len(marker):])
+
+    assert result["returned"] == [True, True, True]
+    assert result["sequential_in_memory"] == provider_ids
+    assert result["thread_errors"] == []
+
+    # Order is not a contract once threads are in play, membership is.
+    assert sorted(result["in_memory"]) == sorted(provider_ids + threaded_ids)
+    assert sorted(result["on_disk"]) == sorted(provider_ids + threaded_ids)
+
+
+# ---------------------------------------------------------------------------
+# enabled_providers that cannot be saved
+#
+# write_config() answers a full or read-only volume with False rather than an
+# exception, and that answer was ignored: installs, enable and disable, and
+# removals all reported success and changed the live list while the file kept
+# the old one, so a restart undid them.
+# ---------------------------------------------------------------------------
+
+def test_enabled_providers_that_cannot_be_saved_are_put_back(monkeypatch):
+    from app import config
+    from provider_hub import service
+
+    monkeypatch.setattr(config.settings.general, "enabled_providers", ["alpha"])
+    monkeypatch.setattr(config, "write_config", lambda: False)
+
+    assert service._set_bazarr_provider_enabled("beta", True) is False
+    assert list(config.settings.general.enabled_providers) == ["alpha"]
+    assert service._set_bazarr_provider_enabled("alpha", False) is False
+    assert list(config.settings.general.enabled_providers) == ["alpha"]
+    # A list that already holds the requested state needs no write, and is not a failure.
+    assert service._set_bazarr_provider_enabled("alpha", True) is True
+
+
+def _installed_examplehub(tmp_path, monkeypatch):
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+    state = load_state()
+    state["installations"]["examplehub"] = {
+        "provider_id": "examplehub",
+        "name": "Example",
+        "active_version": "1.0.0",
+        "state": "active",
+        "pending_restart": False,
+        "enabled": True,
+        "config": {},
+        "manifest": {"provider_id": "examplehub", "version": "1.0.0"},
+    }
+    save_state(state)
+
+
+def test_an_update_whose_enabled_state_cannot_be_saved_changes_nothing(tmp_path, monkeypatch):
+    from flask import Flask
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    _installed_examplehub(tmp_path, monkeypatch)
+    monkeypatch.setattr(service, "_set_bazarr_provider_enabled", lambda provider_id, enabled: False)
+    monkeypatch.setattr(service, "_forget_credential_throttle", lambda provider_id: None)
+
+    with pytest.raises(service.ProviderHubSettingsError):
+        service.update_provider("examplehub", enabled=False, config={"api_key": "new"})
+
+    stored = load_state()["installations"]["examplehub"]
+    assert stored["enabled"] is True
+    assert stored["config"] == {}
+
+    # The API reports it as a failure, not as the updated provider.
+    import api.provider_hub.provider_hub as hub_api
+    app = Flask(__name__)
+    with app.test_request_context("/api/provider-hub/providers/examplehub", method="PATCH",
+                                  json={"enabled": False}):
+        body, status = hub_api.ProviderHubProvider.patch.__wrapped__(
+            hub_api.ProviderHubProvider(), "examplehub")
+    assert status == 500
+    assert "could not be saved" in body
+
+
+def test_a_removal_whose_disable_cannot_be_saved_leaves_the_provider_installed(tmp_path, monkeypatch):
+    from app.jobs_queue import JobFailed
+    from provider_hub import jobs as hub_jobs, service
+    from provider_hub.state import load_state
+
+    _installed_examplehub(tmp_path, monkeypatch)
+    monkeypatch.setattr(service, "_set_bazarr_provider_enabled", lambda provider_id, enabled: False)
+
+    with pytest.raises(JobFailed, match="could not be saved"):
+        hub_jobs.uninstall_provider("examplehub", "Example")
+
+    stored = load_state()["installations"]["examplehub"]
+    assert stored["state"] == "active"
+    assert stored["pending_restart"] is False
+
+
+def test_a_removal_whose_staging_cannot_be_saved_keeps_the_provider_enabled(tmp_path, monkeypatch):
+    """The disable is saved before the removal is staged. When the Hub state
+    then cannot be written, the provider is still installed and active, so the
+    disable has to be put back or it stays switched off after a restart."""
+    from app import config
+    from provider_hub import service
+    from provider_hub.state import load_state
+
+    _installed_examplehub(tmp_path, monkeypatch)
+    monkeypatch.setattr(config.settings.general, "enabled_providers", ["examplehub"])
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    original = service.mutate_state
+
+    def full_volume(mutator, *args, **kwargs):
+        if mutator.__name__ == "remove_or_stage":
+            raise OSError("No space left on device")
+        return original(mutator, *args, **kwargs)
+
+    monkeypatch.setattr(service, "mutate_state", full_volume)
+
+    with pytest.raises(OSError):
+        service.remove_installation("examplehub")
+
+    assert list(config.settings.general.enabled_providers) == ["examplehub"]
+    assert load_state()["installations"]["examplehub"]["state"] == "active"
+
+
+def test_a_failed_removal_does_not_enable_a_provider_that_was_off(tmp_path, monkeypatch):
+    from app import config
+    from provider_hub import service
+
+    _installed_examplehub(tmp_path, monkeypatch)
+    monkeypatch.setattr(config.settings.general, "enabled_providers", ["other"])
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    original = service.mutate_state
+
+    def full_volume(mutator, *args, **kwargs):
+        if mutator.__name__ == "remove_or_stage":
+            raise OSError("No space left on device")
+        return original(mutator, *args, **kwargs)
+
+    monkeypatch.setattr(service, "mutate_state", full_volume)
+
+    with pytest.raises(OSError):
+        service.remove_installation("examplehub")
+
+    assert list(config.settings.general.enabled_providers) == ["other"]
+
+
+def test_a_first_install_that_cannot_be_enabled_is_reported_as_failed(tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.service import stage_install_local
+
+    provider_content = b"class LocalProvider: pass\n"
+    file_payloads = {"provider.py": provider_content}
+    manifest = _manifest(provider_id="locallyinstalled", name="Locally Installed",
+                         provider_content=provider_content, dependencies={"requirements": []})
+    package = _provider_zip(manifest, file_payloads)
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(json.dumps({"installations": {}, "jobs": []}), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    _patch_local_install_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(service, "_set_bazarr_provider_enabled", lambda provider_id, enabled: False)
+
+    with pytest.raises(service.ProviderHubSettingsError, match="could not be enabled"):
+        stage_install_local(package)

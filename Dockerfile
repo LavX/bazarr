@@ -77,6 +77,13 @@ LABEL org.opencontainers.image.title="Bazarr+" \
 # extracted via unar (from Debian main); unrar is used instead when an
 # operator installs it, since it is not in Debian main. p7zip-full stays for
 # zip/7z archives and as the last-resort RAR fallback in init_binaries().
+# postgresql-client supplies pg_dump and pg_restore, which backup and restore
+# shell out to when the instance runs on PostgreSQL. Without them a PostgreSQL
+# backup refuses to run at all, so they belong in the image rather than in the
+# operator's setup notes. Debian's client puts a version-selecting perl wrapper
+# in front of the binaries, which is where most of its ~40 MB goes; taking the
+# binaries out of the package by hand would save that but would stop them
+# getting security updates with the rest of the image.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
@@ -86,11 +93,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libpq5 \
     mediainfo \
     p7zip-full \
+    postgresql-client \
     unar \
     bash \
     gosu \
     curl \
-    && mkdir -p /app/bazarr/bin /config /defaults \
+    && mkdir -p /config /defaults \
     && groupadd -g 1000 bazarr \
     && useradd -u 1000 -g bazarr -d /config -s /bin/bash bazarr
 
@@ -124,6 +132,18 @@ COPY package_info /app/bazarr/package_info
 # Copy pre-built frontend (built in GitHub Actions workflow for caching)
 # This layer only rebuilds when frontend/build changes
 COPY frontend/build ./frontend/build
+
+# The application tree belongs to root and to nobody else. Bazarr runs as
+# PUID:PGID, and a runtime user who can write /app/bazarr can replace the code
+# the host imports on its next restart, which would leave the Provider Hub's
+# worker subprocess a fault boundary rather than a security one. Everything
+# written at runtime lives under /config instead.
+#
+# COPY already lands as root:root, so this asserts the property rather than
+# imposing it: a chown -R here would rewrite the metadata of every file and add
+# a second copy of the whole tree to the image for no gain. The build fails if
+# anything under /app is owned by someone else or is group/other writable.
+RUN test -z "$(find /app \( ! -user root -o -perm /go=w \) -print -quit)"
 
 # Set environment variables
 ENV HOME="/config" \

@@ -52,6 +52,80 @@ def _build_pooled_session(verify: bool) -> requests.Session:
     return s
 
 
+def plex_server_for(baseurl: str, token: str, verify: bool) -> PlexServer:
+    """A pooled PlexServer for one explicit endpoint.
+
+    Native destinations carry their own URL and token rather than reading the
+    scalar settings, so the cache is keyed the same way but the credentials
+    come from the caller. Same cache, same FIFO bound: a destination rotation
+    evicts old entries instead of leaking them.
+
+    ``verify`` has no default. Every caller knows which instance it is talking
+    to, and a default would let one quietly skip certificate checks.
+    """
+    cache_key = (baseurl, token, verify)
+    with _plex_cache_lock:
+        cached = _plex_cache.get(cache_key)
+        if cached is not None:
+            _plex_cache.move_to_end(cache_key)
+            return cached
+        session = _build_pooled_session(verify=verify)
+        plex_server = PlexServer(baseurl, token, session=session)
+        _plex_cache[cache_key] = plex_server
+        while len(_plex_cache) > _PLEX_CACHE_MAX_ENTRIES:
+            _plex_cache.popitem(last=False)
+        return plex_server
+
+
+def plex_server_identity(baseurl: str, token: str, verify: bool) -> tuple:
+    """Read a Plex server's own name and version now, not when it was pooled.
+
+    ``PlexServer`` fills friendlyName and version once, from the root document
+    its initialiser fetches, and nothing it does afterwards re-reads them.
+    Listing library sections certainly does not. So a pooled client keeps
+    answering with whatever the server said when that client was built, and a
+    Plex upgraded in place, same URL, same token, would report its old version
+    until the entry is evicted or Bazarr restarts.
+
+    Asking the server again is one small request, and it goes over the session
+    the cached client already holds, so the connection pooling that the cache
+    exists for is untouched. Dropping the client instead would pay a fresh
+    TCP and TLS handshake plus a full PlexServer init, which is the cost the
+    cache was added to avoid.
+    """
+    server = plex_server_for(baseurl, token, verify)
+    root = server.query(server.key)
+    attrib = getattr(root, 'attrib', None) or {}
+    return attrib.get('friendlyName') or '', attrib.get('version') or ''
+
+
+def plex_account_verify_ssl() -> bool:
+    """Whether to verify TLS for the Plex server the account connects to.
+
+    Every function in this module connects with the account's own settings,
+    and the media server instance the account owns, ``plex.instance_id``, is
+    that same server. Its "Verify SSL" checkbox is the user's choice for it,
+    the one the refresh client and the connection test already follow. It is
+    read on every call, so a change takes effect on the next one.
+
+    An account with no instance of its own has no such checkbox, so the
+    legacy ``plex.verify_ssl`` setting decides, and it defaults to off. A
+    database error is raised rather than read as off: guessing would switch
+    verification off for someone who turned it on.
+    """
+    instance_id = settings.plex.get('instance_id', '')
+    if isinstance(instance_id, str) and instance_id:
+        from sqlalchemy import select
+        from app.database import TableMediaServerInstances, database
+        verify = database.execute(
+            select(TableMediaServerInstances.verify_ssl)
+            .where(TableMediaServerInstances.id == instance_id,
+                   TableMediaServerInstances.kind == 'plex')).scalar_one_or_none()
+        if verify is not None:
+            return bool(verify)
+    return settings.plex.get('verify_ssl', False) is True
+
+
 def get_plex_server() -> PlexServer:
     """Connect to the Plex server and return the server instance.
 
@@ -61,10 +135,14 @@ def get_plex_server() -> PlexServer:
     decryption ceremony, no auto-encrypt branch, no encryption_key /
     apikey_encrypted bookkeeping.
 
+    TLS verification follows the account's own Plex instance, see
+    :func:`plex_account_verify_ssl`.
+
     The constructed PlexServer (and its pooled Session) is cached by
     (baseurl, token, verify) so a sync that touches many items does not
-    rebuild the server connection for each one. The cache is FIFO-bounded
-    so a settings rotation evicts old entries.
+    rebuild the server connection for each one, and ticking or clearing
+    "Verify SSL" gets a new connection rather than the old one. The cache is
+    FIFO-bounded so a settings rotation evicts old entries.
     """
     try:
         auth_method = settings.plex.get('auth_method', 'apikey')
@@ -85,29 +163,7 @@ def get_plex_server() -> PlexServer:
             if not token:
                 raise ValueError("API key not configured. Please configure Plex authentication.")
 
-        # Verify is False here for compatibility with the prior behaviour:
-        # the original code unconditionally set ``session.verify = False``.
-        # If TLS verification ever becomes user-configurable for Plex, plumb
-        # that flag through to the cache key as well.
-        verify = False
-        cache_key = (baseurl, token, verify)
-
-        with _plex_cache_lock:
-            cached = _plex_cache.get(cache_key)
-            if cached is not None:
-                # Move-to-end to keep the most-recently-used at the tail
-                # so eviction continues to drop the oldest entry.
-                _plex_cache.move_to_end(cache_key)
-                return cached
-
-            session = _build_pooled_session(verify=verify)
-            plex_server = PlexServer(baseurl, token, session=session)
-
-            _plex_cache[cache_key] = plex_server
-            while len(_plex_cache) > _PLEX_CACHE_MAX_ENTRIES:
-                _plex_cache.popitem(last=False)
-
-            return plex_server
+        return plex_server_for(baseurl, token, plex_account_verify_ssl())
 
     except Exception as e:
         logger.error(f"Failed to connect to Plex server: {e}")  # noqa: G004
@@ -252,6 +308,49 @@ def plex_update_library(is_movie_library: bool) -> None:
             
     except Exception as e:
         logger.error(f"Error in plex_update_library: {e}")  # noqa: G004
+
+
+def plex_update_sports_library() -> None:
+    """Trigger a library update for every configured Plex sports library.
+
+    A sports event carries no IMDB id, so ``plex_refresh_item`` has nothing to
+    resolve the item with; scanning each configured sports section is the
+    equivalent refresh for the sports content in it.
+    """
+    try:
+        plex = get_plex_server()
+        library_names = settings.plex.sports_library
+
+        # Ensure we have a list
+        if not isinstance(library_names, list):
+            library_names = [library_names] if library_names else []
+
+        if not library_names:
+            logger.debug("No sports libraries configured in Plex settings")
+            return
+
+        # Update all configured sports libraries
+        updated_count = 0
+        for library_name in library_names:
+            if not library_name:  # Skip empty strings
+                continue
+
+            try:
+                library = plex.library.section(library_name)
+                library.update()
+                logger.info(f"Triggered update for sports library: {library_name}")  # noqa: G004
+                updated_count += 1
+            except Exception as lib_error:
+                logger.error(f"Failed to update sports library '{library_name}': {lib_error}")  # noqa: G004
+                continue
+
+        if updated_count > 0:
+            logger.debug(f"Successfully triggered update for {updated_count} sports libraries")  # noqa: G004
+        else:
+            logger.warning("Failed to update any Plex sports libraries")
+
+    except Exception as e:
+        logger.error(f"Error in plex_update_sports_library: {e}")  # noqa: G004
 
 
 def plex_refresh_item(imdb_id: str, is_movie: bool, season: int = None, episode: int = None) -> None:

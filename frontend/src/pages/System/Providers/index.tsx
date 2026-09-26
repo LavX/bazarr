@@ -3,7 +3,7 @@ import { Container, Group } from "@mantine/core";
 import { useDocumentTitle } from "@mantine/hooks";
 import { faSync, faTrash } from "@fortawesome/free-solid-svg-icons";
 import { useResetProvider, useSystemProviders } from "@/apis/hooks";
-import { useInstanceName } from "@/apis/hooks/site";
+import { useAppTitle } from "@/apis/hooks/site";
 import { Toolbox } from "@/components";
 import { QueryOverlay } from "@/components/async";
 import Table from "./table";
@@ -15,7 +15,7 @@ const SystemProvidersView: FunctionComponent = () => {
 
   const { mutate: reset, isPending: isResetting } = useResetProvider();
 
-  useDocumentTitle(`Providers - ${useInstanceName()} (System)`);
+  useDocumentTitle(`Providers - ${useAppTitle()} (System)`);
 
   return (
     <QueryOverlay result={providers}>

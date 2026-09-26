@@ -2,7 +2,8 @@
 
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
 
-from utilities.backup import get_backup_files, prepare_restore, delete_backup_file, backup_to_zip
+from utilities.backup import (get_backup_files, prepare_restore, delete_backup_file,
+                              backup_to_zip, schedule_restore_restart)
 
 from ..utils import authenticate
 
@@ -31,17 +32,24 @@ class SystemBackups(Resource):
     @api_ns_system_backups.doc(parser=None)
     @api_ns_system_backups.response(204, 'Success')
     @api_ns_system_backups.response(401, 'Not Authenticated')
+    @api_ns_system_backups.response(500, 'Error while starting backup. Check logs.')
     def post(self):
         """Create a new backup"""
-        backup_to_zip()
+        if not backup_to_zip():
+            return 'Unable to start the backup. Check logs.', 500
         return '', 204
 
     patch_request_parser = reqparse.RequestParser()
     patch_request_parser.add_argument('filename', type=str, required=True, help='Backups to restore filename')
 
+    patch_response_model = api_ns_system_backups.model('SystemBackupsPatchResponse', {
+        'restart': fields.Boolean(),
+        'message': fields.String(),
+    })
+
     @authenticate
     @api_ns_system_backups.doc(parser=patch_request_parser)
-    @api_ns_system_backups.response(204, 'Success')
+    @api_ns_system_backups.response(200, 'Restore staged; restart follows', patch_response_model)
     @api_ns_system_backups.response(400, 'Filename not provided')
     @api_ns_system_backups.response(401, 'Not Authenticated')
     @api_ns_system_backups.response(500, 'Error while restoring backup. Check logs.')
@@ -52,7 +60,11 @@ class SystemBackups(Resource):
         if filename:
             restored = prepare_restore(filename)
             if restored:
-                return '', 204
+                schedule_restore_restart()
+                return {
+                    'restart': True,
+                    'message': 'Restore staged; Bazarr will restart to apply it',
+                }, 200
             else:
                 return 'Error while restoring backup. Check logs.', 500
         else:

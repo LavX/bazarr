@@ -13,7 +13,8 @@ import zipfile
 from flask import request, send_file
 from flask_restx import Resource, Namespace
 
-from app.database import TableEpisodes, TableMovies, TableShows, database, select
+from app.database import (TableArrInstances, TableEpisodes, TableMovies, TableShows,
+                          TableSportsEvents, TableSportsLeagues, database, select)
 from arr_instances.resolution import scoped
 from utilities.helper import get_target_folder
 from utilities.path_mappings import path_mappings
@@ -265,7 +266,7 @@ def _collect_bundle_entries(rows, media_type, language=None, season=None):
             if real_path is None:
                 continue
             component = sanitize_arcname_component(os.path.basename(real_path))
-            if media_type == 'episode':
+            if media_type in ('episode', 'sports') and row.season is not None:
                 arcname = f'Season {row.season:02d}/{component}'
             else:
                 arcname = component
@@ -280,6 +281,13 @@ def collect_series_bundle_entries(episode_rows, season=None, language=None):
 
 def collect_movie_bundle_entries(movie_row, language=None):
     return _collect_bundle_entries([movie_row], 'movie', language=language)
+
+
+def collect_sports_bundle_entries(event_rows, season=None, language=None):
+    # Foldered by season like a series, because a sports library is season
+    # shaped too; a sports season is the year rather than a run of a show.
+    return _collect_bundle_entries(event_rows, 'sports',
+                                   language=language, season=season)
 
 
 def _zip_date_time(mtime):
@@ -399,6 +407,12 @@ def _ambiguous_media_error(media_type, media_id, arr_instance_id):
     """400 tuple when the upstream id matches more than one instance's row
     and the caller did not disambiguate; None otherwise. Mirrors the bundle
     endpoints: resolve_subtitle_path would silently .first() one of them."""
+    if media_type == 'sports':
+        # A sports event is addressed by its LOCAL id, which is a primary key,
+        # so two instances can never both answer to it. There is nothing to
+        # disambiguate, and running the episode query on it would look up an
+        # unrelated Sonarr episode that happens to share the number.
+        return None
     if media_type == 'episode':
         query = scoped(
             select(TableEpisodes.id)
@@ -489,6 +503,18 @@ class MovieSubtitleFileDownload(Resource):
         return _send_single_subtitle('movie', radarrId, language)
 
 
+@api_ns_subtitle_download.route('sports/events/<int:eventId>/subtitles/<language>/download')
+class SportsEventSubtitleFileDownload(Resource):
+    @authenticate
+    @api_ns_subtitle_download.doc(description='Download one sports event subtitle file')
+    @api_ns_subtitle_download.response(200, 'The subtitle file')
+    @api_ns_subtitle_download.response(400, 'Invalid language code')
+    @api_ns_subtitle_download.response(401, 'Not authenticated')
+    @api_ns_subtitle_download.response(404, 'Media or subtitle not found')
+    def get(self, eventId, language):
+        return _send_single_subtitle('sports', eventId, language)
+
+
 @api_ns_subtitle_download.route('series/<int:seriesId>/subtitles/download')
 class SeriesSubtitleBundleDownload(Resource):
     @authenticate
@@ -533,6 +559,60 @@ class SeriesSubtitleBundleDownload(Resource):
         entries = collect_series_bundle_entries(episode_rows, season=season, language=language)
         download_name = bundle_download_name(
             safe_filename_component(series_row.title, 'series'),
+            season=season, language=language)
+        return _send_bundle(entries, download_name)
+
+
+@api_ns_subtitle_download.route('sports/leagues/<int:leagueId>/subtitles/download')
+class SportsLeagueSubtitleBundleDownload(Resource):
+    @authenticate
+    @api_ns_subtitle_download.doc(
+        description='Download a zip of a sports league\'s subtitle files, '
+                    'optionally filtered by season and/or base language')
+    @api_ns_subtitle_download.response(200, 'Zip archive of subtitle files')
+    @api_ns_subtitle_download.response(400, 'Invalid filter or missing owner')
+    @api_ns_subtitle_download.response(401, 'Not authenticated')
+    @api_ns_subtitle_download.response(404, 'League not found or no subtitle files')
+    @api_ns_subtitle_download.response(413, 'Bundle exceeds the size limit')
+    def get(self, leagueId):
+        season, season_error = _validated_season_filter()
+        if season_error:
+            return season_error
+        language, language_error = _validated_language_filter()
+        if language_error:
+            return language_error
+
+        # A league id is a primary key, so there is no ambiguity to refuse the
+        # way the series and movies routes must. The owner still has to be
+        # resolvable: sports paths map per instance with no global fallback.
+        # Joined to an ENABLED sportarr owner. Without the join a disabled
+        # instance still matched here, and the per-instance sports mapping,
+        # which requires an enabled owner, then raised out of the handler as a
+        # 500. A disabled owner's league is not reachable, so 404 is the honest
+        # answer and it is what every sports-native reader already gives.
+        league_row = database.execute(
+            scoped(
+                select(TableSportsLeagues.title, TableSportsLeagues.arr_instance_id)
+                .join(TableArrInstances,
+                      TableSportsLeagues.arr_instance_id == TableArrInstances.id)
+                .where(TableSportsLeagues.id == leagueId,
+                       TableArrInstances.kind == 'sportarr',
+                       TableArrInstances.enabled == 1),
+                TableSportsLeagues.arr_instance_id, _request_arr_instance_id())
+        ).first()
+        if not league_row:
+            return 'League not found', 404
+
+        event_rows = database.execute(
+            select(TableSportsEvents.season, TableSportsEvents.path,
+                   TableSportsEvents.subtitles, TableSportsEvents.arr_instance_id)
+            .where(TableSportsEvents.league_id == leagueId,
+                   TableSportsEvents.arr_instance_id == league_row.arr_instance_id)
+        ).all()
+
+        entries = collect_sports_bundle_entries(event_rows, season=season, language=language)
+        download_name = bundle_download_name(
+            safe_filename_component(league_row.title, 'sports'),
             season=season, language=language)
         return _send_bundle(entries, download_name)
 

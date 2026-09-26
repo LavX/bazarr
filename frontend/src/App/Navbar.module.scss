@@ -19,7 +19,8 @@
 
 .navFooter {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   justify-content: space-between;
   gap: 8px;
   margin-top: 8px;

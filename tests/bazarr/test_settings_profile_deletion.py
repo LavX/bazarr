@@ -33,12 +33,32 @@ def _profile_payload(profile_id, name):
 @pytest.fixture
 def post_settings(schema_session, monkeypatch):
     """Drive the real endpoint with a form, the way the frontend submits one."""
-    import api.system.settings as endpoint
+    import importlib.util
+    from pathlib import Path
+    import sys
+    from types import ModuleType, SimpleNamespace
+    from app import database as db_module
+    from subtitles.indexer import sports
+
+    # Import this HTTP boundary without starting unrelated API startup jobs.
+    root = Path(__file__).resolve().parents[2] / 'bazarr' / 'api'
+    for name in ('api', 'api.system'):
+        package = ModuleType(name)
+        package.__path__ = [str(root if name == 'api' else root / 'system')]
+        monkeypatch.setitem(sys.modules, name, package)
+    monkeypatch.setitem(sys.modules, 'app.scheduler', SimpleNamespace(scheduler=None))
+    for name, path in [('api.utils', root / 'utils.py'), ('api.system.settings', root / 'system/settings.py')]:
+        spec = importlib.util.spec_from_file_location(name, path)
+        endpoint = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, name, endpoint)
+        spec.loader.exec_module(endpoint)
+    monkeypatch.setattr(db_module, 'database', schema_session)
+    monkeypatch.setattr(sports, 'database', schema_session)
+    monkeypatch.setattr(sports, 'notify', lambda *a: None)
 
     monkeypatch.setattr(endpoint, "database", schema_session)
     monkeypatch.setattr(endpoint, "event_stream", lambda *a, **kw: None)
-    monkeypatch.setattr(endpoint, "list_missing_subtitles", lambda *a, **kw: None)
-    monkeypatch.setattr(endpoint, "list_missing_subtitles_movies", lambda *a, **kw: None)
+    monkeypatch.setattr(endpoint, "queue_missing_subtitles_recalculation", lambda *a, **kw: None)
     monkeypatch.setattr(endpoint.TableLanguagesProfiles, "__table__",
                         endpoint.TableLanguagesProfiles.__table__)
 
@@ -100,3 +120,98 @@ def test_deleting_the_default_without_replacing_it_still_turns_it_off(
     finally:
         settings.general.serie_default_enabled = False
         settings.general.serie_default_profile = ''
+
+
+# ---------------------------------------------------------------------------
+# A save refused for its configuration keeps none of its database rows
+#
+# The languages, profiles and notifiers used to be written first, on an
+# AUTOCOMMIT engine the configuration rollback cannot reach, so a save answered
+# with 503 or 406 still kept them.
+# ---------------------------------------------------------------------------
+
+def _seed_rows(session):
+    from app.database import TableSettingsLanguages, TableSettingsNotifier
+
+    _profile(session, 3, "Old")
+    session.execute(insert(TableSettingsLanguages).values(
+        code3="eng", code2="en", enabled=0, name="English"))
+    session.execute(insert(TableSettingsNotifier).values(
+        name="Discord", enabled=0, url=None))
+    session.commit()
+
+
+def _rows(session):
+    from sqlalchemy import select
+    from app.database import TableSettingsLanguages, TableSettingsNotifier
+
+    return {
+        "profiles": sorted(session.execute(
+            select(TableLanguagesProfiles.profileId, TableLanguagesProfiles.name)).all()),
+        "languages": session.execute(select(TableSettingsLanguages.enabled)).scalars().all(),
+        "notifiers": session.execute(
+            select(TableSettingsNotifier.enabled, TableSettingsNotifier.url)).all(),
+    }
+
+
+_ROW_FORM = {
+    "languages-enabled": "en",
+    "languages-profiles": json.dumps([_profile_payload(4, "New")]),
+    "notifications-providers": json.dumps({"name": "Discord", "enabled": True,
+                                           "url": "discord://token"}),
+}
+
+
+@pytest.mark.parametrize("failure", ["persistence", "validation"])
+def test_a_refused_save_writes_no_database_rows(schema_session, post_settings, monkeypatch, failure):
+    import sys
+    from dynaconf.validator import ValidationError
+    from app.config import MetadataPersistenceError
+
+    endpoint = sys.modules["api.system.settings"]
+    _seed_rows(schema_session)
+    before = _rows(schema_session)
+
+    def refuse(_items):
+        if failure == "persistence":
+            raise MetadataPersistenceError("synthetic")
+        raise ValidationError("Unable to save settings to disk")
+
+    monkeypatch.setattr(endpoint, "save_settings", refuse)
+
+    _body, status = post_settings(dict(_ROW_FORM))
+
+    assert status == (503 if failure == "persistence" else 406)
+    assert _rows(schema_session) == before, "a refused save kept part of what it submitted"
+
+
+def test_a_save_whose_refresh_fails_still_writes_its_rows(schema_session, post_settings, monkeypatch):
+    """The configuration reached the disk there, so the rows go with it."""
+    import sys
+    from app.config import MetadataFollowupError
+
+    endpoint = sys.modules["api.system.settings"]
+    _seed_rows(schema_session)
+
+    def saved_then_failed(_items):
+        raise MetadataFollowupError("synthetic")
+
+    monkeypatch.setattr(endpoint, "save_settings", saved_then_failed)
+
+    _body, status = post_settings(dict(_ROW_FORM))
+
+    assert status == 503
+    assert _rows(schema_session) == {"profiles": [(4, "New")], "languages": [1],
+                                     "notifiers": [(1, "discord://token")]}
+
+
+def test_a_saved_request_writes_its_rows(schema_session, post_settings, monkeypatch):
+    import sys
+
+    endpoint = sys.modules["api.system.settings"]
+    _seed_rows(schema_session)
+    monkeypatch.setattr(endpoint, "save_settings", lambda _items: None)
+
+    assert post_settings(dict(_ROW_FORM)) == ('', 204)
+    assert _rows(schema_session) == {"profiles": [(4, "New")], "languages": [1],
+                                     "notifiers": [(1, "discord://token")]}

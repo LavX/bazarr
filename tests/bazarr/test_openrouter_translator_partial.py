@@ -1,4 +1,5 @@
 import logging
+import re
 from pathlib import Path
 
 import pytest
@@ -29,7 +30,7 @@ def _mock_dependencies(mocker):
     mocker.patch.object(openrouter_translator.requests, "get", return_value=mocker.Mock(status_code=200))
     mocker.patch.object(openrouter_translator.time, "sleep")
     for name in (
-        "show_progress", "hide_progress", "show_message", "jobs_queue", "history_log", "history_log_movie",
+        "jobs_queue", "history_log", "history_log_movie",
         "add_translator_info", "create_process_result",
     ):
         mocker.patch.object(openrouter_translator, name)
@@ -50,10 +51,6 @@ def test_poll_job_keeps_partial_lines_and_bounded_error(structured, caplog):
         assert service._poll_job("http://translator", "job-1", 2, bazarr_job_id="bazarr-job-1") == lines
 
     assert service.partial_error == detail
-    openrouter_translator.hide_progress.assert_called_once_with(id="translate_progress_output.srt")
-    openrouter_translator.show_message.assert_called_once_with(
-        f"Translation is partial. Some lines may remain in the source language. {detail}"
-    )
     assert (openrouter_translator.__name__, logging.WARNING,
             f"Translation partially completed: {detail}") in caplog.record_tuples
     openrouter_translator.time.sleep.assert_not_called()
@@ -67,9 +64,9 @@ def test_poll_job_rejects_partial_without_lines(result, caplog):
         "status": "partial", "result": result, "error": error,
     }
 
-    assert service._poll_job("http://translator", "job-1", 1) is None
-    openrouter_translator.hide_progress.assert_called_once_with(id="translate_progress_output.srt")
-    openrouter_translator.show_message.assert_called_once_with(f"Translation failed (partial): {error}")
+    with pytest.raises(openrouter_translator.TranslationServiceError,
+                       match=re.escape(f"Translation failed (partial): {error}")):
+        service._poll_job("http://translator", "job-1", 1)
     assert (openrouter_translator.__name__, logging.ERROR,
             f"Translation partially failed: {error}") in caplog.record_tuples
 
@@ -83,8 +80,6 @@ def test_poll_job_returns_completed_lines(structured):
 
     assert service._poll_job("http://translator", "job-1", 1) == lines
     assert service.partial_error is None
-    openrouter_translator.hide_progress.assert_called_once_with(id="translate_progress_output.srt")
-    openrouter_translator.show_message.assert_not_called()
 
 
 @pytest.mark.parametrize("result", [None, [], {"lines": []}, {"lines": "invalid"}, {"model_used": "model"}, "invalid", 42])
@@ -92,7 +87,8 @@ def test_poll_job_rejects_completed_without_lines(result):
     service = _build_service()
     openrouter_translator.requests.get.return_value.json.return_value = {"status": "completed", "result": result}
 
-    assert service._poll_job("http://translator", "job-1", 1) is None
+    with pytest.raises(openrouter_translator.TranslationServiceError, match="without returning"):
+        service._poll_job("http://translator", "job-1", 1)
 
 
 @pytest.mark.parametrize("media_type", ["episode", "movie"])
@@ -178,8 +174,6 @@ def test_poll_job_completes_after_more_than_thirty_minutes(poll_clock, mocker, s
 
     assert service._poll_job("http://translator", "job-1", 1) == lines
     assert poll_clock.elapsed == 40 * 60
-    openrouter_translator.hide_progress.assert_called_once_with(id="translate_progress_output.srt")
-    openrouter_translator.show_message.assert_not_called()
 
 
 @pytest.mark.parametrize("failure", ["http_500", "request_exception"])
@@ -195,10 +189,9 @@ def test_poll_job_stops_when_status_endpoint_is_unreachable(poll_clock, mocker, 
 
     openrouter_translator.requests.get.side_effect = _get_status
 
-    assert service._poll_job("http://translator", "job-1", 1) is None
+    with pytest.raises(openrouter_translator.TranslationServiceError, match="unreachable for 10 minutes"):
+        service._poll_job("http://translator", "job-1", 1)
     assert poll_clock.elapsed == 10 * 60
-    openrouter_translator.hide_progress.assert_called_once_with(id="translate_progress_output.srt")
-    openrouter_translator.show_message.assert_called_once()
     assert any(
         record.levelno == logging.ERROR
         and "job-1" in record.message
@@ -229,8 +222,6 @@ def test_poll_job_resets_unreachable_clock_after_http_200(poll_clock, mocker, fa
 
     assert service._poll_job("http://translator", "job-1", 1) == lines
     assert poll_clock.elapsed == 16 * 60
-    openrouter_translator.hide_progress.assert_called_once_with(id="translate_progress_output.srt")
-    openrouter_translator.show_message.assert_not_called()
 
 
 def test_poll_job_stops_at_twelve_hour_hard_cap(poll_clock, caplog):
@@ -238,13 +229,51 @@ def test_poll_job_stops_at_twelve_hour_hard_cap(poll_clock, caplog):
     openrouter_translator.requests.get.return_value.json.return_value = {"status": "processing"}
     openrouter_translator.time.sleep.side_effect = lambda seconds: poll_clock.advance(5 * 60)
 
-    assert service._poll_job("http://translator", "job-1", 1) is None
+    with pytest.raises(openrouter_translator.TranslationServiceError, match="12 hours"):
+        service._poll_job("http://translator", "job-1", 1)
     assert poll_clock.elapsed == 12 * 3600
-    openrouter_translator.hide_progress.assert_called_once_with(id="translate_progress_output.srt")
-    openrouter_translator.show_message.assert_called_once()
     assert any(
         record.levelno == logging.ERROR
         and "job-1" in record.message
         and "hard cap" in record.message
         for record in caplog.records
     )
+
+
+def _failing_service(tmp_path, mocker, error):
+    """A service whose submission raises ``error``."""
+    source = tmp_path / "input.srt"
+    destination = tmp_path / "output.srt"
+    source.write_text("1\n00:00:00,000 --> 00:00:02,000\nHello\n\n", encoding="utf-8")
+    service = _build_service(str(source), str(destination))
+    mocker.patch.object(service, "_submit_and_poll", side_effect=error)
+    mocker.patch.object(openrouter_translator, "language_from_alpha2", return_value="English")
+    mocker.patch.object(openrouter_translator, "language_from_alpha3", return_value="Hungarian")
+    return service, destination
+
+
+def test_translate_raises_the_service_reason_so_the_job_fails(tmp_path, mocker):
+    # The reason travels in the exception, which the queue records as the failure.
+    # Nothing is announced on the old progress or message channels any more.
+    detail = "AI translation failed: OpenRouter custom routing requires at least one provider slug."
+    service, destination = _failing_service(
+        tmp_path, mocker, openrouter_translator.TranslationServiceError(detail))
+
+    with pytest.raises(openrouter_translator.TranslationServiceError) as raised:
+        service.translate()
+
+    assert str(raised.value) == detail
+    assert not destination.exists()
+    openrouter_translator.history_log.assert_not_called()
+
+
+def test_translate_turns_an_unexpected_error_into_a_readable_failure(tmp_path, mocker):
+    service, _ = _failing_service(tmp_path, mocker, KeyError("lines"))
+
+    with pytest.raises(openrouter_translator.TranslationServiceError, match="AI translation failed"):
+        service.translate()
+
+
+def test_the_legacy_toast_channels_are_not_used():
+    for name in ("show_progress", "hide_progress", "show_message", "_translation_progress"):
+        assert not hasattr(openrouter_translator, name)

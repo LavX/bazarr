@@ -14,7 +14,9 @@ import {
   TextInput,
   Tooltip,
   UnstyledButton,
+  VisuallyHidden,
 } from "@mantine/core";
+import { useDebouncedValue } from "@mantine/hooks";
 import {
   faEraser,
   faFilter,
@@ -29,6 +31,7 @@ import { ColumnDef, Row } from "@tanstack/react-table";
 import { useAudioLanguages } from "@/apis/hooks";
 import { UsePaginationQueryResult } from "@/apis/queries/hooks";
 import { QueryPageTable, Toolbox } from "@/components";
+import styles from "./ItemView.module.scss";
 
 interface Props<T extends Item.Base = Item.Base> {
   query: UsePaginationQueryResult<T>;
@@ -48,7 +51,11 @@ interface Props<T extends Item.Base = Item.Base> {
   onSelectionChanged?: (selections: T[]) => void;
   selectionToolbar?: ReactNode;
   profileToolbar?: ReactNode;
+  // What one row is, for the count the band leads with ("312 series").
+  itemNoun?: { one: string; other: string };
 }
+
+const ITEMS = { one: "item", other: "items" };
 
 function ItemView<T extends Item.Base>({
   query,
@@ -66,6 +73,7 @@ function ItemView<T extends Item.Base>({
   onSelectionChanged,
   selectionToolbar,
   profileToolbar,
+  itemNoun = ITEMS,
 }: Props<T>) {
   const showInstanceFilter =
     onInstanceValuesChange !== undefined &&
@@ -216,81 +224,126 @@ function ItemView<T extends Item.Base>({
     onExcludeLanguagesChange !== undefined ||
     showInstanceFilter;
 
+  // The band's left side is never empty. While rows are selected it holds the
+  // batch tools; otherwise it says how many rows there are and which filters
+  // are narrowing them. The filters used to render as a second band under
+  // this one, beside a left half that held nothing at all.
+  const holdsActions = Boolean(selectionToolbar || profileToolbar);
+
+  const { totalCount, fetchAll } = query.paginationStatus;
+  const rows = query.data?.data;
+  const placeholder = query.isPlaceholderData;
+  // Only a whole-library read can say how many rows a filter kept. Every
+  // caller fetches all rows while a filter is active, since the filter runs
+  // over query.data, but a page of them gives a confident wrong count. That
+  // includes the moment a filter starts: Sports switches to the all-rows
+  // query then, and until it answers the query client hands back the page
+  // it had as placeholder data. Either way this says nothing rather than
+  // something false.
+  const shownCount = useMemo(() => {
+    if (!hasActiveFilter || !rows || !fetchAll || placeholder) return null;
+    return rows.filter(dataFilter).length;
+  }, [hasActiveFilter, rows, fetchAll, placeholder, dataFilter]);
+
+  let countLabel = "";
+  if (rows !== undefined && (!hasActiveFilter || shownCount !== null)) {
+    const noun = totalCount === 1 ? itemNoun.one : itemNoun.other;
+    const total = totalCount.toLocaleString();
+    countLabel =
+      shownCount === null
+        ? `${total} ${noun}`
+        : `${shownCount.toLocaleString()} of ${total} ${noun}`;
+  }
+  // Read out once the typing settles, not at every keystroke.
+  const [announcedCount] = useDebouncedValue(countLabel, 500);
+
   return (
     <Stack gap={0}>
-      <Toolbox>
-        <Group gap="xs">
-          {selectionToolbar ? <Box>{selectionToolbar}</Box> : null}
-          {profileToolbar ? <Box>{profileToolbar}</Box> : null}
-        </Group>
-        <Group gap="xs">
-          {hasAnyFilterControl && (
-            <Tooltip
-              label={filtersOpen ? "Hide filters" : "Show filters"}
-              position="bottom"
-              withArrow
-            >
-              <Indicator
-                label={activeFilterCount > 0 ? activeFilterCount : undefined}
-                size={16}
-                offset={4}
-                color="brand"
-                disabled={activeFilterCount === 0}
-              >
-                <ActionIcon
-                  variant="gradient"
-                  gradient={{ from: "brand.5", to: "brand.6", deg: 135 }}
-                  size="lg"
-                  onClick={() => setFiltersOpen((v) => !v)}
-                  aria-label="Toggle filters"
-                  style={{ opacity: filtersOpen ? 1 : 0.9 }}
-                >
-                  <FontAwesomeIcon icon={faFilter} />
-                </ActionIcon>
-              </Indicator>
-            </Tooltip>
-          )}
-          {onSearchChange !== undefined && (
-            <TextInput
-              placeholder="Search by title..."
-              leftSection={
-                <FontAwesomeIcon icon={faSearch} size="sm" opacity={0.5} />
-              }
-              rightSection={
-                searchValue.length > 0 ? (
-                  <UnstyledButton
-                    onClick={() => onSearchChange("")}
-                    style={{ display: "flex", alignItems: "center" }}
-                    aria-label="Clear search"
-                  >
-                    <FontAwesomeIcon icon={faTimes} size="sm" opacity={0.5} />
-                  </UnstyledButton>
-                ) : undefined
-              }
-              value={searchValue}
-              onChange={(e) => onSearchChange(e.currentTarget.value)}
+      <Toolbox
+        className={styles.band}
+        data-holds={holdsActions ? "actions" : "summary"}
+      >
+        <div className={styles.head}>
+          {holdsActions ? (
+            <Group gap="xs" role="group" aria-label="Batch actions">
+              {selectionToolbar ? <Box>{selectionToolbar}</Box> : null}
+              {profileToolbar ? <Box>{profileToolbar}</Box> : null}
+            </Group>
+          ) : (
+            // Hidden from assistive technology because the status region
+            // below says the same thing once the typing settles.
+            <Text
               size="sm"
-              w={220}
-              styles={{
-                input: {
-                  transition: "border-color 150ms ease",
-                },
-              }}
-            />
+              fw={500}
+              aria-hidden="true"
+              className={styles.count}
+            >
+              {countLabel}
+            </Text>
           )}
-        </Group>
-      </Toolbox>
-
-      {/* Active filter pills */}
-      {activeFilterChips.length > 0 && (
-        <Box
-          px="md"
-          py={8}
-          style={{
-            borderBottom: "1px solid var(--bz-border-divider)",
-          }}
-        >
-          <Group gap={8}>
+          <Group gap="xs" className={styles.controls}>
+            {hasAnyFilterControl && (
+              <Tooltip
+                label={filtersOpen ? "Hide filters" : "Show filters"}
+                position="bottom"
+                withArrow
+              >
+                <Indicator
+                  label={activeFilterCount > 0 ? activeFilterCount : undefined}
+                  size={16}
+                  offset={4}
+                  color="brand"
+                  disabled={activeFilterCount === 0}
+                >
+                  <ActionIcon
+                    variant="gradient"
+                    gradient={{ from: "brand.5", to: "brand.6", deg: 135 }}
+                    size="lg"
+                    onClick={() => setFiltersOpen((v) => !v)}
+                    aria-label="Toggle filters"
+                    style={{ opacity: filtersOpen ? 1 : 0.9 }}
+                  >
+                    <FontAwesomeIcon icon={faFilter} />
+                  </ActionIcon>
+                </Indicator>
+              </Tooltip>
+            )}
+            {onSearchChange !== undefined && (
+              <TextInput
+                placeholder="Search by title..."
+                leftSection={
+                  <FontAwesomeIcon icon={faSearch} size="sm" opacity={0.5} />
+                }
+                rightSection={
+                  searchValue.length > 0 ? (
+                    <UnstyledButton
+                      onClick={() => onSearchChange("")}
+                      style={{ display: "flex", alignItems: "center" }}
+                      aria-label="Clear search"
+                    >
+                      <FontAwesomeIcon icon={faTimes} size="sm" opacity={0.5} />
+                    </UnstyledButton>
+                  ) : undefined
+                }
+                value={searchValue}
+                onChange={(e) => onSearchChange(e.currentTarget.value)}
+                size="sm"
+                className={styles.search}
+                styles={{
+                  input: {
+                    transition: "border-color 150ms ease",
+                  },
+                }}
+              />
+            )}
+          </Group>
+        </div>
+        {/* Under the head in both states, so selecting a row never takes
+            the filters away, and with them the only sign the table is
+            narrowed. Badges wrap rather than elide: a truncated filter
+            cannot say which filter it is. */}
+        {activeFilterChips.length > 0 && (
+          <Group gap={8} className={styles.filters}>
             <Text size="xs" c="var(--bz-text-tertiary)" fw={500}>
               Active filters:
             </Text>
@@ -317,6 +370,13 @@ function ItemView<T extends Item.Base>({
                 styles={{
                   root: {
                     paddingRight: 6,
+                    height: "auto",
+                    minHeight: "var(--badge-height)",
+                    maxWidth: "100%",
+                  },
+                  label: {
+                    whiteSpace: "normal",
+                    overflowWrap: "anywhere",
                   },
                 }}
               >
@@ -333,8 +393,9 @@ function ItemView<T extends Item.Base>({
               </Group>
             </UnstyledButton>
           </Group>
-        </Box>
-      )}
+        )}
+        <VisuallyHidden role="status">{announcedCount}</VisuallyHidden>
+      </Toolbox>
 
       {/* Collapsible filter panel */}
       <Collapse expanded={filtersOpen}>

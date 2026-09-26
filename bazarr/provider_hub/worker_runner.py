@@ -56,6 +56,56 @@ def _content_payload(result):
     return result
 
 
+
+def _retry_after(error):
+    """The provider's own Retry-After, if it gave one, as a plain number.
+
+    Only a finite, positive value crosses: a plugin is untrusted code, and this
+    number decides how long the host stops asking for. Bounded at a day, the
+    same ceiling the host applies to the value it reads back.
+    """
+    value = getattr(error, "retry_after", None)
+    try:
+        value = float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+    if value is None or value != value or value in (float("inf"), float("-inf")) or value <= 0:
+        return None
+    return min(86400.0, value)
+
+
+def _drain_events(provider):
+    try:
+        drain = getattr(provider, "drain_events", None)
+        if drain is None:
+            return []
+        reported = drain()
+        if not isinstance(reported, list):
+            return []
+        events = []
+        encoded_size = 2
+        for event in reported:
+            if len(events) == 8:
+                break
+            if not isinstance(event, dict):
+                continue
+            try:
+                encoded = json.dumps(event, separators=(",", ":"), allow_nan=False)
+                decoded = json.loads(encoded)
+            except Exception:
+                print(traceback.format_exc(), file=sys.stderr, flush=True)
+                continue
+            event_size = len(encoded.encode("utf-8")) + (1 if events else 0)
+            if encoded_size + event_size > 4096:
+                continue
+            events.append(decoded)
+            encoded_size += event_size
+        return events
+    except Exception:
+        print(traceback.format_exc(), file=sys.stderr, flush=True)
+        return []
+
+
 def _handle(provider, op, payload):
     if op == "health":
         return {"initialized": True}
@@ -105,6 +155,7 @@ def _handle(provider, op, payload):
 def main():
     provider, _manifest = _load_provider()
     for line in sys.stdin:
+        request = None
         try:
             request = json.loads(line)
             response = {
@@ -112,24 +163,32 @@ def main():
                 "id": request.get("id"),
                 "ok": True,
                 "payload": _handle(provider, request.get("op"), request.get("payload") or {}),
-                "events": [],
+                "events": _drain_events(provider) if request.get("op") in ("search", "download") else [],
             }
         except Exception as error:
             print(traceback.format_exc(), file=sys.stderr, flush=True)
+            if isinstance(request, dict) and request.get("op") in ("search", "download"):
+                _drain_events(provider)
             response = {
                 "abi": ABI,
-                "id": locals().get("request", {}).get("id") if isinstance(locals().get("request"), dict) else None,
+                "id": request.get("id") if isinstance(request, dict) else None,
                 "ok": False,
                 "error": {
                     "code": "provider",
                     "class_name": error.__class__.__name__,
                     "message": str(error),
+                    # A rate limit the provider timed for us. The host rebuilds
+                    # the exception from the class name and message alone, so
+                    # without carrying this the provider's own "come back in an
+                    # hour" is lost at the boundary and its backoff falls back
+                    # to whatever the exception class is worth in general.
+                    "retry_after": _retry_after(error),
                     "retryable": False,
                 },
             }
         sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
         sys.stdout.flush()
-        if response.get("ok") and locals().get("request", {}).get("op") == "shutdown":
+        if response.get("ok") and isinstance(request, dict) and request.get("op") == "shutdown":
             break
 
 

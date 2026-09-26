@@ -20,6 +20,7 @@ from .migration import (
 )
 from .protocol import candidate_from_worker, language_to_payload, video_to_payload, worker_download_to_content
 from .state import active_installations
+from . import runtime_status
 from .worker import ProviderWorkerClient, WorkerError, worker_command
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,25 @@ def _coerce_timeout(value):
     if timeout <= 0:
         return None
     return timeout
+
+
+def _consume_runtime_events(provider_id, result, request_generation,
+                            request_configuration_generation):
+    result_generation = getattr(result, "status_generation", None)
+    result_configuration_generation = getattr(
+        result, "status_configuration_generation", None
+    )
+    if (
+        type(result_generation) is int
+        and type(result_configuration_generation) is int
+        and result_configuration_generation == request_configuration_generation
+    ):
+        request_generation = result_generation
+    runtime_status.consume(
+        provider_id,
+        getattr(result, "events", []),
+        expected_generation=request_generation,
+    )
 
 
 def _global_worker_timeout():
@@ -93,6 +113,7 @@ class HubProxyProvider(Provider):
                     "BAZARR_PROVIDER_HUB_BUNDLE": str(bundle_path),
                     "BAZARR_PROVIDER_HUB_MANIFEST": manifest_json,
                 },
+                provider_id=self.provider_name,
             )
             return self.worker_client
         raise WorkerError("Provider Hub worker is not configured")
@@ -132,6 +153,10 @@ class HubProxyProvider(Provider):
 
     def list_subtitles(self, video, languages):
         timeout = self._request_timeout()
+        status_generation = runtime_status.generation(self.provider_name)
+        status_configuration_generation = runtime_status.configuration_generation(
+            self.provider_name
+        )
         request = {
             "provider": self.provider_name,
             "config": self.config,
@@ -139,6 +164,12 @@ class HubProxyProvider(Provider):
             "languages": [language_to_payload(item) for item in languages],
         }
         result = self._worker().request("search", request, timeout=timeout)
+        _consume_runtime_events(
+            self.provider_name,
+            result,
+            status_generation,
+            status_configuration_generation,
+        )
         subtitles = []
         for item in result.payload.get("candidates", []):
             subtitle = candidate_from_worker(self.provider_name, item)
@@ -154,6 +185,10 @@ class HubProxyProvider(Provider):
 
     def download_subtitle(self, subtitle):
         timeout = self._request_timeout()
+        status_generation = runtime_status.generation(self.provider_name)
+        status_configuration_generation = runtime_status.configuration_generation(
+            self.provider_name
+        )
         request = {
             "provider": self.provider_name,
             "provider_payload": subtitle.provider_payload,
@@ -161,6 +196,12 @@ class HubProxyProvider(Provider):
             "config": self.config,
         }
         result = self._worker().request("download", request, timeout=timeout)
+        _consume_runtime_events(
+            self.provider_name,
+            result,
+            status_generation,
+            status_configuration_generation,
+        )
 
         def _select_member_cb(members):
             context = getattr(subtitle, "_requested_archive_context", {})

@@ -65,3 +65,110 @@ def test_movie_substep_sync_does_not_track_parent_job_progress():
     assert sync_mock.call_args.kwargs.get("job_id") == 99
     assert sync_mock.call_args.kwargs.get("owns_job_progress") is False
     assert sync_mock.call_args.kwargs.get("track_job_progress") is not False
+
+
+def test_sports_media_refresh_publishes_once_for_any_configured_destination(monkeypatch):
+    """A sports write reaches every destination through one publication.
+
+    No kind is called from here any more: each destination falls to its own
+    configured sports library on the library rung, so the only gate left is
+    whether any media server is switched on at all."""
+    from app.config import settings
+    from subtitles import processing
+
+    notified = []
+    monkeypatch.setattr(processing, "notify_subtitle_mutation", notified.append)
+    for kind in ("plex", "jellyfin", "emby", "silo"):
+        monkeypatch.setattr(settings.general, "use_" + kind, False)
+
+    processing.refresh_sports_media_servers("/sports/Event.mkv", "/sports/Event.en.srt", 1)
+    assert notified == []
+
+    monkeypatch.setattr(settings.general, "use_plex", True)
+    processing.refresh_sports_media_servers("/sports/Event.mkv", "/sports/Event.en.srt", 1)
+    assert len(notified) == 1
+
+    monkeypatch.setattr(settings.general, "use_emby", True)
+    monkeypatch.setattr(settings.general, "use_silo", True)
+    monkeypatch.setattr(settings.general, "use_jellyfin", True)
+    processing.refresh_sports_media_servers("/sports/Event.mkv", "/sports/Event.en.srt", 1)
+    # Still one publication, whatever is switched on. Fan-out is the
+    # dispatcher's job, and doing it here would refresh each kind twice.
+    assert len(notified) == 2
+    assert notified[-1].media_type == "sports"
+    assert notified[-1].operation == "download"
+    assert notified[-1].arr_instance_id == 1
+    assert notified[-1].video_path == "/sports/Event.mkv"
+
+
+def test_sports_process_subtitle_calls_the_media_server_refresh(monkeypatch):
+    """Processing publishes the sports write and reports the exact file owner."""
+    from types import SimpleNamespace
+    from contextlib import nullcontext
+    from subzero.language import Language
+    from app.config import settings
+    from languages import get_languages
+    from subtitles import processing
+
+    published = []
+    monkeypatch.setattr(settings.general, "use_plex", True)
+    monkeypatch.setattr(settings.general, "use_jellyfin", True)
+    monkeypatch.setattr(settings.general, "use_emby", True)
+    monkeypatch.setattr(processing, "notify_subtitle_mutation", published.append)
+    monkeypatch.setattr(processing, "_defaul_sync_checker", lambda subtitle: False)
+    monkeypatch.setattr(processing, "_postprocessing_config", lambda *args: (False, "", False, 0))
+    monkeypatch.setattr(processing, "call_external_webhook", lambda **kwargs: None)
+    monkeypatch.setattr(get_languages, "languages_dict", [
+        {"code2": "en", "code3": "eng", "code3b": "eng", "name": "English"},
+    ], raising=False)
+    context = SimpleNamespace(mapped_path="/tmp/x.mkv", arr_instance_id=42)
+    instance = SimpleNamespace(path_mappings='[["/sports", "/tmp"]]')
+    subtitle = _fake_subtitle()
+    subtitle.language = Language("eng")
+
+    result, = processing.process_subtitle(
+        subtitle, "sports", "English", context.mapped_path, max_score=100,
+        context=context, validate=lambda: instance, publication_guard=nullcontext)
+
+    assert result.path == "/sports/x.mkv"
+    assert result.subs_path == "/sports/x.en.srt"
+    assert len(published) == 1
+    assert published[0].arr_instance_id == 42
+    assert published[0].video_path == "/tmp/x.mkv"
+    assert published[0].subtitle_path == "/tmp/x.en.srt"
+    assert published[0].media_type == "sports"
+    assert published[0].operation == "download"
+
+
+@pytest.mark.parametrize("ai_translated, label", [(True, " AI-translated"), (False, "")])
+def test_the_history_message_says_when_a_subtitle_is_ai_translated(monkeypatch, ai_translated, label):
+    """The download message is what history and notifications show, so an
+    AI-translated subtitle is named as one there."""
+    from types import SimpleNamespace
+    from contextlib import nullcontext
+    from subzero.language import Language
+    from app.config import settings
+    from languages import get_languages
+    from subtitles import processing
+
+    for kind in ("plex", "jellyfin", "emby", "silo"):
+        monkeypatch.setattr(settings.general, "use_" + kind, False)
+    monkeypatch.setattr(processing, "_defaul_sync_checker", lambda subtitle: False)
+    monkeypatch.setattr(processing, "_postprocessing_config", lambda *args: (False, "", False, 0))
+    monkeypatch.setattr(processing, "call_external_webhook", lambda **kwargs: None)
+    monkeypatch.setattr(get_languages, "languages_dict", [
+        {"code2": "en", "code3": "eng", "code3b": "eng", "name": "English"},
+    ], raising=False)
+    context = SimpleNamespace(mapped_path="/tmp/x.mkv", arr_instance_id=42)
+    instance = SimpleNamespace(path_mappings='[["/sports", "/tmp"]]')
+    subtitle = _fake_subtitle()
+    subtitle.language = Language("eng")
+    subtitle.ai_translated = ai_translated
+
+    result, = processing.process_subtitle(
+        subtitle, "sports", "English", context.mapped_path, max_score=100,
+        context=context, validate=lambda: instance, publication_guard=nullcontext)
+
+    assert result.message == (
+        f"English{label} subtitles downloaded from opensubtitles with a score of 80.0%.")
+

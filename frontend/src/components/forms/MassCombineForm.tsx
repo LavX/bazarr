@@ -58,10 +58,23 @@ const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
     setSelected(next);
   };
 
-  const canSubmit = selected.length >= 2 && items.length > 0 && !running;
+  const sportsCount = items.filter(
+    (item) => item.type === "sports" || item.type === "sportsLeague",
+  ).length;
+  const sportsOnly = sportsCount > 0 && sportsCount === items.length;
+
+  // A sports composition publishes under the owned-file guard, which is
+  // captured from the event's assigned profile, so the engine refuses an
+  // ad-hoc override alongside it. A sports-only selection therefore needs no
+  // language picked here, and picking one changes nothing.
+  const canSubmit =
+    (sportsOnly || selected.length >= 2) && items.length > 0 && !running;
 
   const submit = async () => {
-    if (selected.length < 2) return;
+    // Same condition as canSubmit. Gating on selected.length alone left the
+    // sports-only case with an enabled button that did nothing at all: the
+    // notice above says no language is needed, then the click returned here.
+    if (!sportsOnly && selected.length < 2) return;
 
     if (items.length >= 50) {
       const confirmed = window.confirm(
@@ -74,12 +87,16 @@ const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
     let built = 0;
     let skipped = 0;
     let failed = 0;
+    let warnings = 0;
+    let queued = 0;
 
     for (const item of items) {
       let scope:
         | { kind: "movie"; radarrId: number; arrInstanceId?: number }
         | { kind: "episode"; episodeId: number; arrInstanceId?: number }
-        | { kind: "series"; seriesId: number; arrInstanceId?: number };
+        | { kind: "series"; seriesId: number; arrInstanceId?: number }
+        | { kind: "sports"; eventId: number; arrInstanceId?: number }
+        | { kind: "sportsLeague"; leagueId: number; arrInstanceId?: number };
 
       if (item.type === "movie") {
         scope = {
@@ -93,6 +110,18 @@ const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
           seriesId: item.sonarrSeriesId,
           arrInstanceId: itemArrInstanceId(item),
         };
+      } else if (item.type === "sports") {
+        scope = {
+          kind: "sports",
+          eventId: item.sportsEventId,
+          arrInstanceId: itemArrInstanceId(item),
+        };
+      } else if (item.type === "sportsLeague") {
+        scope = {
+          kind: "sportsLeague",
+          leagueId: item.sportsLeagueId,
+          arrInstanceId: itemArrInstanceId(item),
+        };
       } else {
         scope = {
           kind: "episode",
@@ -102,17 +131,33 @@ const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
       }
 
       try {
+        // A sports composition publishes under the owned-file guard captured
+        // from the event's profile, and the engine refuses an ad-hoc language
+        // override alongside it, so send no override for sports scopes. This
+        // matches what the league-level combine in SportsEvents already does.
+        const sportsScope =
+          scope.kind === "sports" || scope.kind === "sportsLeague";
         const result = await mutateAsync({
           scope,
-          body: { languages: selected, format },
+          body: sportsScope ? {} : { languages: selected, format },
         });
 
-        if (result.status === "batch_complete") {
+        if (result.status === "queued") {
+          // A series or league runs as its own job and reports there.
+          queued += 1;
+        } else if (result.status === "batch_complete") {
           built += result.built ?? 0;
           skipped += result.skipped ?? 0;
           failed += result.failed ?? 0;
+          warnings += result.warnings ?? 0;
         } else if (result.status === "built") {
           built += 1;
+          // Published with a failed follow-up step, most often the index
+          // refresh. Still built, but the summary has to say so rather than
+          // count it as a clean one.
+          if (result.error) {
+            warnings += 1;
+          }
         } else if (result.status === "skipped") {
           skipped += 1;
         } else {
@@ -127,8 +172,13 @@ const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
 
     notifications.show({
       title: "Combine complete",
-      message: `Built ${built}, skipped ${skipped}, failed ${failed}`,
-      color: failed > 0 ? "yellow" : "green",
+      message:
+        `Built ${built}, skipped ${skipped}, failed ${failed}` +
+        (warnings > 0 ? `, ${warnings} needing attention` : "") +
+        (queued > 0
+          ? `, ${queued} series or league job${queued === 1 ? "" : "s"} queued`
+          : ""),
+      color: failed > 0 || warnings > 0 ? "yellow" : "green",
     });
 
     onComplete?.();
@@ -167,6 +217,17 @@ const MassCombineForm: FunctionComponent<Props> = ({ items, onComplete }) => {
         <Text size="sm" c="var(--bz-text-tertiary)">
           {items.length} items selected
         </Text>
+      )}
+
+      {sportsCount > 0 && (
+        <Alert color="yellow">
+          <Text size="sm">
+            {sportsOnly ? "This selection is" : `${sportsCount} of these are`}{" "}
+            sports, which follow the combine rule on their league&apos;s
+            language profile. The languages and format chosen here do not apply
+            to them.
+          </Text>
+        </Alert>
       )}
 
       <Text size="sm" fw={500}>

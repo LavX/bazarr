@@ -1,26 +1,29 @@
 # coding=utf-8
 
+import codecs
 import hashlib
 import json
 import logging
 import os
 import re
 import shutil
-import struct
 import subprocess
 import threading
 import time
 from urllib.parse import quote
 
 from flask import Response, request, send_file
-from flask_restx import Namespace, Resource
+from flask_restx import Namespace, Resource, fields
 
 from arr_instances.resolution import scoped
-from app.database import TableEpisodes, TableMovies, TableShows, database, select  # noqa: F401
+from app.database import (TableArrInstances, TableEpisodes, TableMovies, TableShows,  # noqa: F401
+                          TableSportsEvents, database, select)
 from app.get_args import args
 from utilities.path_mappings import path_mappings
+from utilities.waveform_peaks import request_peaks
 from api.subtitles.content import resolve_subtitle_path  # noqa: F401
-from subtitles.tools.subsync_engines import is_sync_engine_language_key
+from subtitles.tools.subsync_engines import (create_preview_workspace, discard_preview_workspace,
+                                             is_sync_engine_language_key)
 
 from ..utils import authenticate
 
@@ -28,7 +31,6 @@ logger = logging.getLogger(__name__)
 
 api_ns_editor = Namespace('Editor', description='Video editor streaming and metadata')
 
-PEAKS_CACHE_DIR = os.path.join(args.config_dir, 'cache', 'peaks')
 HLS_CACHE_DIR = os.path.join(args.config_dir, 'cache', 'hls')
 
 # Bump this whenever the HLS encoding strategy changes in a way that makes
@@ -45,26 +47,78 @@ HLS_IDLE_TTL_SECONDS = 30 * 60
 # is empty or short.
 HLS_FIRST_SEGMENT_WAIT_SECONDS = 8.0
 
+# How long a segment request waits for ffmpeg to write a segment it lacks.
+HLS_SEGMENT_WAIT_SECONDS = 5.0
+
 # Whitelist of files we'll serve from an HLS cache directory.
-HLS_FILENAME_RE = re.compile(r'^(playlist\.m3u8|init\.mp4|segment_\d{1,6}\.m4s)$')
+HLS_FILENAME_RE = re.compile(r'playlist\.m3u8|init\.mp4|segment_\d{1,6}\.m4s')
 
 # Tracks ffmpeg encoder threads keyed by cache directory so we don't
 # double-spawn for concurrent first requests on the same session.
 _hls_encoder_locks: dict[str, threading.Lock] = {}
 _hls_encoder_locks_guard = threading.Lock()
 
-# Tracks live ffmpeg subprocesses keyed by cache directory so we can terminate
-# encoders for sessions the user has walked away from. Without this, switching
-# tracks or seeking-before-session-start leaves the original ffmpeg encoding the
-# rest of the file in the background, accumulating CPU + disk pressure.
-_hls_encoder_processes: dict[str, subprocess.Popen] = {}
-_hls_encoder_processes_guard = threading.Lock()
 
-# How long a session must be untouched (no segment requests) before its ffmpeg
-# is considered abandoned and gets killed. Short enough that a track switch
-# clears the old encoder quickly; long enough that a user briefly seeking
-# elsewhere doesn't lose the original session.
-HLS_ENCODER_IDLE_TIMEOUT_SECONDS = 60
+class _HlsEncoder:
+    """One live ffmpeg HLS encoder and the session state the reaper needs."""
+
+    __slots__ = ('process', 'players', 'last_access')
+
+    def __init__(self, process, player, last_access):
+        self.process = process
+        # Players that requested this session, with when they last did. Tabs
+        # on the same file, track and start point share one session.
+        self.players = {player: last_access} if player else {}
+        self.last_access = last_access
+
+
+# Live ffmpeg encoders keyed by cache directory. Every encoder is registered
+# here from the moment it starts, so the reaper can find the ones the preview
+# has walked away from. Without this, a closed preview or a track switch left
+# ffmpeg transcoding the rest of the file in the background.
+_hls_encoders: dict[str, _HlsEncoder] = {}
+_hls_encoders_guard = threading.Lock()
+
+# Sessions a newer session of the same player replaced, with when. A late
+# segment request from the torn-down player must not start the old session
+# again and displace the new one. Guarded by _hls_encoders_guard.
+_hls_replaced_dirs: dict[str, float] = {}
+
+# Sessions whose encoder is being stopped and whose directory is about to be
+# deleted. Nothing may start a new encoder there until that is done, or the
+# deletion would take the new encoder's files with it. Guarded by
+# _hls_encoders_guard.
+_hls_stopping_dirs: set[str] = set()
+
+# How long a session may go without a playlist or segment request before its
+# ffmpeg is considered abandoned and stopped. hls.js refreshes the playlist
+# every few seconds while the preview is open, even when paused, so this only
+# fires once the preview is gone. The margin covers browsers that throttle
+# timers in background tabs.
+HLS_ENCODER_IDLE_TIMEOUT_SECONDS = 90
+
+# How often the background reaper looks for idle encoders and stale caches.
+HLS_SWEEP_INTERVAL_SECONDS = 20
+
+# At most this many encoders run at once. Each one can use a couple of CPU
+# cores, and a single preview only ever needs one.
+HLS_MAX_ENCODERS = 2
+
+# How long a stopped ffmpeg gets to exit after SIGTERM before it is killed.
+HLS_ENCODER_STOP_GRACE_SECONDS = 5.0
+
+# The preview sends a random id per player, so a new session only replaces
+# encoders that player was using. Other tabs keep their own sessions.
+HLS_PLAYER_RE = re.compile(r'[A-Za-z0-9]{1,32}')
+
+_hls_reaper_thread = None
+_hls_reaper_stop = threading.Event()
+_hls_reaper_guard = threading.Lock()
+
+
+def _now():
+    """Monotonic clock for encoder idle tracking. Tests replace it."""
+    return time.monotonic()
 
 
 def _optional_int(value, field_name):
@@ -85,6 +139,16 @@ def _payload_arr_instance_id(data):
     if value in (None, ''):
         value = data.get('arr_instance_id')
     return _optional_int(value, 'arrInstanceId')
+
+
+# The media types the editor works on. One tuple rather than six hardcoded
+# pairs: the copies are what left sports rejected at five separate gates while
+# the sixth already understood it.
+MEDIA_TYPES = ('episode', 'movie', 'sports')
+MEDIA_TYPE_ERROR = 'mediaType must be one of "episode", "movie", "sports"'
+# Maps an accepted request value to the tuple's own string, so validation
+# hands back a constant and never the request's copy of it.
+_CANONICAL_MEDIA_TYPES = {media_type: media_type for media_type in MEDIA_TYPES}
 
 
 def _resolve_video_path(media_type, media_id, arr_instance_id=None):
@@ -116,7 +180,30 @@ def _resolve_video_path(media_type, media_id, arr_instance_id=None):
             return 'Movie not found', 404
         return path_mappings.path_replace_movie(row.path)
 
-    return 'Invalid media type, must be "episode" or "movie"', 400
+    elif media_type == 'sports':
+        # media_id is the local event id, a primary key, so scoping is about
+        # enforcing ownership rather than resolving a collision. The row's own
+        # owner drives the mapping: sports mappings are per instance and the
+        # caller is allowed to omit arr_instance_id.
+        # Joined to an ENABLED sportarr owner: the sports mapping below refuses
+        # a disabled one and would raise a 500 out of this handler instead.
+        row = database.execute(
+            scoped(
+                select(TableSportsEvents.path, TableSportsEvents.arr_instance_id)
+                .join(TableArrInstances,
+                      TableSportsEvents.arr_instance_id == TableArrInstances.id)
+                .where(TableSportsEvents.id == media_id,
+                       TableArrInstances.kind == 'sportarr',
+                       TableArrInstances.enabled == 1),
+                TableSportsEvents.arr_instance_id,
+                arr_instance_id,
+            )
+        ).first()
+        if not row:
+            return 'Sports event not found', 404
+        return path_mappings.path_replace_instance(row.path, row.arr_instance_id, 'sports')
+
+    return MEDIA_TYPE_ERROR, 400
 
 
 def _get_ffmpeg():
@@ -226,11 +313,15 @@ def _validate_params():
 
     Returns (media_type, media_id) on success, or a (message, status_code) tuple on failure.
     """
-    media_type = request.args.get('mediaType')
+    # Keep the canonical constant, not the request string. _resolve_or_abort
+    # returns this tuple unchanged when it holds an error, and a static
+    # analyser cannot tell that branch from success, so a request string here
+    # reads as flowing into the ffprobe command line.
+    media_type = _CANONICAL_MEDIA_TYPES.get(request.args.get('mediaType'))
     media_id = request.args.get('mediaId')
 
-    if not media_type or media_type not in ('episode', 'movie'):
-        return 'mediaType must be "episode" or "movie"', 400
+    if media_type is None:
+        return MEDIA_TYPE_ERROR, 400
     if not media_id:
         return 'mediaId is required', 400
     try:
@@ -245,8 +336,8 @@ def _resolve_or_abort():
     """Validate params and resolve video path. Returns (video_path,) or a Flask error tuple."""
     params = _validate_params()
     # _validate_params returns (str, int) on success or (error_msg, status_code) on failure.
-    # On success media_type is "episode" or "movie", on error it's a longer message.
-    if isinstance(params[0], str) and params[0] not in ('episode', 'movie'):
+    # On success media_type is one of MEDIA_TYPES, on error it's a longer message.
+    if isinstance(params[0], str) and params[0] not in MEDIA_TYPES:
         return params
 
     media_type, media_id = params
@@ -301,49 +392,159 @@ def _is_playlist_complete(playlist_path):
     (an empty file, a manifest still being appended, or a manifest from an
     encoder that was killed mid-stream) is partial."""
     try:
-        with open(playlist_path) as f:
-            return '#EXT-X-ENDLIST' in f.read()
+        with open(playlist_path, 'rb') as f:
+            return b'#EXT-X-ENDLIST' in f.read()
     except OSError:
         return False
 
 
-def _kill_idle_hls_encoders():
-    """Terminate ffmpeg HLS encoders whose cache dirs haven't been touched recently.
+def _remove_hls_dir(cache_dir):
+    shutil.rmtree(cache_dir, ignore_errors=True)
+    with _hls_encoder_locks_guard:
+        # Drop the per-dir lock only when nobody holds it. A spawn holding it
+        # must stay the only one for this directory.
+        lock = _hls_encoder_locks.get(cache_dir)
+        if lock is not None and lock.acquire(blocking=False):
+            _hls_encoder_locks.pop(cache_dir, None)
+            lock.release()
 
-    Each segment request bumps the cache directory's atime via os.utime, so the
-    ffmpeg keeps running as long as hls.js is fetching segments. When the user
-    switches sessions (track change, seek-before-start), the old session goes
-    silent and its ffmpeg is killed here on the next sweep.
+
+def _stop_hls_encoder(cache_dir, encoder, reason, remove_dir=True):
+    """Stop one encoder that is already out of the registry, then drop its cache.
+
+    SIGTERM first, SIGKILL after a grace period, and always a wait, so no
+    zombie is left behind. The segment directory goes too: it holds a
+    truncated session that nothing will reuse.
     """
-    cutoff = time.time() - HLS_ENCODER_IDLE_TIMEOUT_SECONDS
-    with _hls_encoder_processes_guard:
-        items = list(_hls_encoder_processes.items())
-    for cache_dir, process in items:
-        if process.poll() is not None:
-            # Encoder exited on its own.
-            with _hls_encoder_processes_guard:
-                _hls_encoder_processes.pop(cache_dir, None)
-            continue
+    process = encoder.process
+    if process.poll() is None:
         try:
-            atime = os.stat(cache_dir).st_atime
+            process.terminate()
         except OSError:
-            atime = 0
-        if atime < cutoff:
+            pass
+        try:
+            process.wait(timeout=HLS_ENCODER_STOP_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
             try:
-                process.terminate()
-                logger.info('Terminated idle HLS encoder for %s', cache_dir)
-            except Exception:
-                logger.exception('Failed to terminate ffmpeg for %s', cache_dir)
-            with _hls_encoder_processes_guard:
-                _hls_encoder_processes.pop(cache_dir, None)
-            # Drop the now-incomplete manifest. Without this, the next request
-            # for the same session would short-circuit on "playlist exists,
-            # marker gone" and serve the truncated playlist forever, stalling
-            # at the last segment that was written before the kill.
-            try:
-                os.unlink(os.path.join(cache_dir, 'playlist.m3u8'))
+                process.kill()
             except OSError:
                 pass
+            try:
+                process.wait(timeout=HLS_ENCODER_STOP_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                logger.warning('HLS encoder for %s did not exit after SIGKILL', cache_dir)
+        logger.info('Terminated %s HLS encoder for %s', reason, cache_dir)
+    if remove_dir:
+        _remove_hls_dir(cache_dir)
+        with _hls_encoders_guard:
+            _hls_stopping_dirs.discard(cache_dir)
+
+
+def _stop_hls_encoders(displaced):
+    for cache_dir, encoder, reason, remove_dir in displaced:
+        try:
+            _stop_hls_encoder(cache_dir, encoder, reason, remove_dir=remove_dir)
+        except Exception:
+            logger.exception('Failed to stop HLS encoder for %s', cache_dir)
+            with _hls_encoders_guard:
+                _hls_stopping_dirs.discard(cache_dir)
+
+
+def _register_hls_encoder(cache_dir, process, player=None):
+    """Register a new encoder and return the ones it displaces.
+
+    A player only ever plays one session, so its new session (an audio-track
+    switch, a seek outside the current session, another file) replaces the
+    sessions it was using, unless another player used one of them recently.
+    Past that, the least recently used encoders make room so no more than
+    HLS_MAX_ENCODERS run at once. The caller stops the returned encoders
+    outside the lock, with _stop_hls_encoders.
+    """
+    now = _now()
+    displaced = []
+
+    def displace(key, reason):
+        displaced.append((key, _hls_encoders.pop(key), reason, key != cache_dir))
+        if key != cache_dir:
+            _hls_stopping_dirs.add(key)
+
+    with _hls_encoders_guard:
+        if cache_dir in _hls_encoders:
+            displace(cache_dir, 'replaced')
+        if player:
+            for other_dir, other in list(_hls_encoders.items()):
+                if other.players.pop(player, None) is None:
+                    continue
+                shared = any(now - seen <= HLS_ENCODER_IDLE_TIMEOUT_SECONDS
+                             for seen in other.players.values())
+                if not shared:
+                    displace(other_dir, 'replaced')
+                    _hls_replaced_dirs[other_dir] = now
+        while True:
+            # An encoder that already exited does not hold a slot; its waiter
+            # thread is about to unregister it.
+            live = [key for key, encoder in _hls_encoders.items() if encoder.process.poll() is None]
+            if len(live) < HLS_MAX_ENCODERS:
+                break
+            displace(min(live, key=lambda key: _hls_encoders[key].last_access), 'over-limit')
+        _hls_encoders[cache_dir] = _HlsEncoder(process, player, now)
+        _hls_replaced_dirs.pop(cache_dir, None)
+    return displaced
+
+
+def _hls_encoder_is_live(cache_dir):
+    with _hls_encoders_guard:
+        encoder = _hls_encoders.get(cache_dir)
+        return encoder is not None and encoder.process.poll() is None
+
+
+def _hls_dir_is_stopping(cache_dir):
+    with _hls_encoders_guard:
+        return cache_dir in _hls_stopping_dirs
+
+
+def _hls_segment_miss_needs_encoder(cache_dir):
+    """Whether a missing segment should start the session's encoder again."""
+    with _hls_encoders_guard:
+        encoder = _hls_encoders.get(cache_dir)
+        if encoder is not None and encoder.process.poll() is None:
+            return False
+        if cache_dir in _hls_stopping_dirs:
+            return False
+        replaced_at = _hls_replaced_dirs.get(cache_dir)
+        return replaced_at is None or _now() - replaced_at > HLS_ENCODER_IDLE_TIMEOUT_SECONDS
+
+
+def _touch_hls_session(cache_dir, player=None):
+    """Record a playlist or segment request, which keeps the session alive."""
+    with _hls_encoders_guard:
+        encoder = _hls_encoders.get(cache_dir)
+        if encoder is not None:
+            encoder.last_access = _now()
+            if player:
+                encoder.players[player] = encoder.last_access
+    # The directory timestamp drives cache eviction for finished sessions.
+    try:
+        os.utime(cache_dir, None)
+    except OSError:
+        pass
+
+
+def _reap_idle_hls_encoders():
+    """Stop encoders whose session has had no request for the idle timeout."""
+    cutoff = _now() - HLS_ENCODER_IDLE_TIMEOUT_SECONDS
+    idle = []
+    with _hls_encoders_guard:
+        for cache_dir, replaced_at in list(_hls_replaced_dirs.items()):
+            if replaced_at < cutoff:
+                _hls_replaced_dirs.pop(cache_dir, None)
+        for cache_dir, encoder in list(_hls_encoders.items()):
+            # An encoder that exited on its own is unregistered by its waiter
+            # thread, which also clears the encoding marker.
+            if encoder.process.poll() is None and encoder.last_access < cutoff:
+                idle.append((cache_dir, _hls_encoders.pop(cache_dir), 'idle', True))
+                _hls_stopping_dirs.add(cache_dir)
+    _stop_hls_encoders(idle)
 
 
 def _evict_stale_hls_dirs():
@@ -351,23 +552,84 @@ def _evict_stale_hls_dirs():
     if not os.path.isdir(HLS_CACHE_DIR):
         return
     cutoff = time.time() - HLS_IDLE_TTL_SECONDS
+    with _hls_encoders_guard:
+        live = set(_hls_encoders) | _hls_stopping_dirs
     for entry in os.listdir(HLS_CACHE_DIR):
         path = os.path.join(HLS_CACHE_DIR, entry)
+        if path in live or not os.path.isdir(path):
+            continue
         try:
             stat = os.stat(path)
         except OSError:
             continue
-        if not os.path.isdir(path):
+        # Requests touch the directory, and a new session's marker and
+        # segments bump its mtime, so both times are fresh while in use.
+        if max(stat.st_atime, stat.st_mtime) < cutoff:
+            _remove_hls_dir(path)
+
+
+def _sweep_hls_cache():
+    """One reaper pass: stop idle encoders, then evict stale cache dirs."""
+    try:
+        _reap_idle_hls_encoders()
+    except Exception:
+        logger.exception('HLS encoder sweep error')
+    try:
+        _evict_stale_hls_dirs()
+    except Exception:
+        logger.exception('HLS cache eviction error')
+
+
+def _hls_reaper_loop(stop_event):
+    while not stop_event.wait(HLS_SWEEP_INTERVAL_SECONDS):
+        _sweep_hls_cache()
+
+
+def _ensure_hls_reaper_started():
+    """Start the background reaper once. It runs whether or not requests come in."""
+    global _hls_reaper_thread
+    with _hls_reaper_guard:
+        if _hls_reaper_thread is not None and _hls_reaper_thread.is_alive():
+            return
+        _hls_reaper_thread = threading.Thread(
+            target=_hls_reaper_loop, args=(_hls_reaper_stop,),
+            name='hls-encoder-reaper', daemon=True,
+        )
+        _hls_reaper_thread.start()
+
+
+def _remove_stale_hls_dirs():
+    """Startup cleanup: no encoder survives a restart, so drop partial sessions.
+
+    A directory still marked as encoding, or without a finished playlist, was
+    left by an encoder from a previous run. Removing it also makes any orphaned
+    ffmpeg from that run fail its next write and exit. Finished sessions stay
+    reusable until the normal idle eviction removes them.
+    """
+    if not os.path.isdir(HLS_CACHE_DIR):
+        return
+    with _hls_encoders_guard:
+        live = set(_hls_encoders)
+    for entry in os.listdir(HLS_CACHE_DIR):
+        path = os.path.join(HLS_CACHE_DIR, entry)
+        if path in live or not os.path.isdir(path):
             continue
-        # Skip dirs with an active encoding marker; ffmpeg might still be writing.
-        if os.path.isfile(os.path.join(path, '.encoding')):
-            continue
-        if stat.st_atime < cutoff:
-            shutil.rmtree(path, ignore_errors=True)
-            with _hls_encoder_locks_guard:
-                _hls_encoder_locks.pop(path, None)
-            with _hls_encoder_processes_guard:
-                _hls_encoder_processes.pop(path, None)
+        if (
+            os.path.isfile(os.path.join(path, '.encoding'))
+            or not _is_playlist_complete(os.path.join(path, 'playlist.m3u8'))
+        ):
+            _remove_hls_dir(path)
+    _evict_stale_hls_dirs()
+
+
+def start_hls_housekeeping():
+    """Clean the HLS cache left by a previous run and start the reaper."""
+    try:
+        _remove_stale_hls_dirs()
+    except Exception:
+        # A damaged cache must never keep Bazarr+ from starting.
+        logger.exception('HLS cache startup cleanup error')
+    _ensure_hls_reaper_started()
 
 
 def _build_hls_ffmpeg_command(
@@ -443,6 +705,9 @@ def _build_hls_ffmpeg_command(
         '-f', 'hls',
         '-hls_time', '4',
         '-hls_list_size', '0',
+        # ffmpeg closes the playlist even when it is stopped early, which
+        # would make a cut-off session look finished. The waiter closes it.
+        '-hls_flags', 'omit_endlist',
         '-hls_segment_type', 'fmp4',
         '-hls_fmp4_init_filename', 'init.mp4',
         '-hls_segment_filename', os.path.join(cache_dir, 'segment_%03d.m4s'),
@@ -452,8 +717,60 @@ def _build_hls_ffmpeg_command(
     ]
 
 
-def _spawn_hls_encoder(video_path, audio_track_idx, start_time_sec, cache_dir):
-    """Start ffmpeg writing HLS to cache_dir in a background thread.
+def _wait_for_hls_encoder(cache_dir, process, video_path, encoding_marker):
+    """Waiter thread: collect ffmpeg's exit and clean up after a natural exit.
+
+    There is no wall-clock timeout. A 4-hour movie at libx264 ultrafast can
+    legitimately take hours on slow hardware, and a hard kill would truncate a
+    session that is still being watched. The reaper stops encoders that are
+    abandoned, and HLS_MAX_ENCODERS bounds how many run at once.
+    """
+    stderr_data = b''
+    try:
+        # stdout is DEVNULL, so only the stderr half carries anything.
+        _, stderr_data = process.communicate()
+    except Exception:
+        logger.exception('HLS encoding error for %s', video_path)
+        try:
+            process.wait()
+        except Exception:
+            pass
+    returncode = process.returncode
+    # ffmpeg runs with omit_endlist, so the session is closed here, and only
+    # while this encoder is still the registered one: a stopped or replaced
+    # encoder's directory belongs to whoever stopped it. A clean exit, or an
+    # error that would recur at the same point, ends the session where it is.
+    # An outside signal (255 after SIGTERM or SIGINT, or a negative code when
+    # killed) leaves it open, so the next request encodes it again.
+    interrupted = returncode is None or returncode < 0 or returncode == 255
+    playlist = os.path.join(cache_dir, 'playlist.m3u8')
+    with _hls_encoders_guard:
+        encoder = _hls_encoders.get(cache_dir)
+        still_registered = encoder is not None and encoder.process is process
+        if still_registered:
+            if not interrupted and os.path.isfile(playlist):
+                try:
+                    with open(playlist, 'a') as f:
+                        f.write('#EXT-X-ENDLIST\n')
+                except OSError:
+                    logger.exception('Failed to close HLS playlist for %s', cache_dir)
+            _hls_encoders.pop(cache_dir, None)
+    if not still_registered:
+        return
+    if returncode != 0:
+        logger.error(
+            'HLS encode failed for %s (rc=%s): %s',
+            video_path, returncode,
+            (stderr_data or b'').decode(errors='replace')[:500],
+        )
+    try:
+        os.unlink(encoding_marker)
+    except OSError:
+        pass
+
+
+def _spawn_hls_encoder(video_path, audio_track_idx, start_time_sec, cache_dir, player=None):
+    """Start ffmpeg writing HLS to cache_dir, with a thread waiting on it.
 
     start_time_sec is applied as an input seek (-ss before -i). Sessions that
     start after zero re-encode video, which lets ffmpeg accurately decode from
@@ -482,14 +799,17 @@ def _spawn_hls_encoder(video_path, audio_track_idx, start_time_sec, cache_dir):
         return
 
     try:
-        # Re-check inside the lock.
-        if (
-            os.path.isfile(playlist)
-            and not os.path.isfile(encoding_marker)
-            and _is_playlist_complete(playlist)
-        ):
+        # Re-check inside the lock. A live encoder already owns the session,
+        # and one being stopped is about to have its directory deleted. A
+        # marker without either was left by an encoder that is gone, so it no
+        # longer blocks reuse or a fresh spawn.
+        if _hls_encoder_is_live(cache_dir) or _hls_dir_is_stopping(cache_dir):
             return
-        if os.path.isfile(encoding_marker):
+        if _is_playlist_complete(playlist):
+            try:
+                os.unlink(encoding_marker)
+            except OSError:
+                pass
             return
 
         os.makedirs(cache_dir, exist_ok=True)
@@ -500,62 +820,38 @@ def _spawn_hls_encoder(video_path, audio_track_idx, start_time_sec, cache_dir):
             ffmpeg, video_path, audio_track_idx, start_time_sec, cache_dir, probe_data,
         )
 
-        def encode():
-            process = None
-            try:
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                )
-                with _hls_encoder_processes_guard:
-                    _hls_encoder_processes[cache_dir] = process
-                # No wall-clock timeout. A 4-hour movie at libx264 ultrafast
-                # could legitimately take >2h on slow hardware, and a hard
-                # kill there would truncate the playlist. The right safety
-                # net is _kill_idle_hls_encoders, which only acts when the
-                # session has actually been abandoned (no segment requests
-                # for HLS_ENCODER_IDLE_TIMEOUT_SECONDS).
-                # communicate() returns (stdout, stderr); stdout is DEVNULL
-                # so we only care about the stderr half.
-                _, stderr_data = process.communicate()
-                if process.returncode != 0 and process.returncode != -15:
-                    # rc=-15 is SIGTERM, which is what _kill_idle_hls_encoders
-                    # sends; not an error.
-                    logger.error(
-                        'HLS encode failed for %s (rc=%d): %s',
-                        video_path, process.returncode,
-                        stderr_data.decode(errors='replace')[:500],
-                    )
-            except Exception:
-                logger.exception('HLS encoding error for %s', video_path)
-            finally:
-                if process is not None:
-                    with _hls_encoder_processes_guard:
-                        # Pop only if it's still us (a newer encoder for the
-                        # same dir might have replaced the entry).
-                        if _hls_encoder_processes.get(cache_dir) is process:
-                            _hls_encoder_processes.pop(cache_dir, None)
-                try:
-                    os.unlink(encoding_marker)
-                except OSError:
-                    pass
-
-        # Marker creation deferred to here — after probe / ffmpeg lookup / cmd
-        # build have all succeeded. If any of those raised, we'd have left a
-        # stale .encoding behind that future requests would see and skip,
-        # stranding the session permanently. Now the marker only exists when
-        # the encoder thread is about to take ownership of it.
+        # The marker goes down before ffmpeg starts, so a concurrent request
+        # sees the session as encoding rather than spawning a second encoder.
+        # It is written only after the probe, ffmpeg lookup and command build
+        # succeeded, so a failure there never strands the session behind a
+        # stale marker.
         with open(encoding_marker, 'w') as f:
             f.write(str(int(time.time())))
         try:
-            threading.Thread(target=encode, daemon=True).start()
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
         except Exception:
             try:
                 os.unlink(encoding_marker)
             except OSError:
                 pass
             raise
+        displaced = _register_hls_encoder(cache_dir, process, player)
+        try:
+            # The waiter starts first so the new ffmpeg's stderr is drained
+            # while the displaced encoders are being stopped.
+            threading.Thread(
+                target=_wait_for_hls_encoder,
+                args=(cache_dir, process, video_path, encoding_marker),
+                name='hls-encoder-wait',
+                daemon=True,
+            ).start()
+        finally:
+            _stop_hls_encoders(displaced)
+        _ensure_hls_reaper_started()
     finally:
         lock.release()
 
@@ -597,9 +893,9 @@ class EditorHls(Resource):
         ffmpeg writes them. hls.js handles segment fetching, buffer management,
         and seek-back within the cached portion.
         """
-        if media_type not in ('episode', 'movie'):
-            return 'mediaType must be "episode" or "movie"', 400
-        if not HLS_FILENAME_RE.match(filename):
+        if media_type not in MEDIA_TYPES:
+            return MEDIA_TYPE_ERROR, 400
+        if not HLS_FILENAME_RE.fullmatch(filename):
             return 'Invalid HLS filename', 400
         if audio_track < 0:
             return 'audioTrack must be >= 0', 400
@@ -613,6 +909,9 @@ class EditorHls(Resource):
         arr_instance_id = _request_arr_instance_id()
         if isinstance(arr_instance_id, tuple):
             return arr_instance_id
+        player = request.args.get('player')
+        if not player or not HLS_PLAYER_RE.fullmatch(player):
+            player = None
 
         resolved = _resolve_video_path(media_type, media_id, arr_instance_id=arr_instance_id)
         if isinstance(resolved, tuple):
@@ -642,23 +941,14 @@ class EditorHls(Resource):
             return 'Invalid HLS path', 400
 
         if filename == 'playlist.m3u8':
-            # Lazy-sweep on every playlist request: kill any ffmpeg encoders
-            # whose sessions have gone idle (user switched tracks / sessions),
-            # then evict directories that have been cold long enough.
+            # Idle encoders and stale directories are handled by the
+            # background reaper, which does not depend on requests arriving.
             try:
-                _kill_idle_hls_encoders()
-            except Exception:
-                logger.exception('HLS encoder sweep error')
-            try:
-                _evict_stale_hls_dirs()
-            except OSError:
-                logger.exception('HLS cache eviction error')
-
-            try:
-                _spawn_hls_encoder(video_path, audio_track, start_time_sec, cache_dir)
+                _spawn_hls_encoder(video_path, audio_track, start_time_sec, cache_dir, player=player)
             except Exception:
                 logger.exception('Failed to spawn HLS encoder for %s', video_path)
                 return 'ffmpeg not available', 500
+            _touch_hls_session(cache_dir, player)
 
             # Wait briefly for ffmpeg to write the first segment so the player
             # gets a useful playlist on the first response.
@@ -669,22 +959,26 @@ class EditorHls(Resource):
             if not os.path.isfile(target):
                 return 'Encoding starting, retry shortly', 503
 
-            # Native HLS clients (Safari / iOS) can't inject custom request
-            # headers on segment requests, so the apikey has to ride in the
-            # URL. The manifest's segment lines and #EXT-X-MAP URI are
-            # relative paths that resolve without the playlist URL's query
-            # string, so we rewrite them server-side to carry the apikey when
-            # the request authenticated via query. Header-auth paths (hls.js
-            # with xhrSetup) don't include apikey on the request and skip
-            # this branch, keeping the manifest clean.
+            # Relative segment and #EXT-X-MAP URLs do not inherit the
+            # playlist query string. Carry the validated instance scope so
+            # every request resolves the same media and stream cache. Native
+            # HLS clients also need query authentication because they cannot
+            # inject headers into segment requests.
+            resource_query = []
+            if arr_instance_id is not None:
+                resource_query.append(f'arr_instance_id={arr_instance_id}')
+            if player is not None:
+                resource_query.append(f'player={player}')
             apikey_query = request.args.get('apikey')
             if apikey_query:
+                resource_query.append(f'apikey={quote(apikey_query, safe="")}')
+            if resource_query:
                 try:
                     with open(target) as f:
                         manifest = f.read()
                 except OSError:
                     return 'Encoding starting, retry shortly', 503
-                encoded = quote(apikey_query, safe='')
+                query_string = '&'.join(resource_query)
                 rewritten = []
                 for line in manifest.splitlines(keepends=True):
                     stripped = line.rstrip('\n').rstrip('\r')
@@ -692,13 +986,13 @@ class EditorHls(Resource):
                         rewritten.append(
                             re.sub(
                                 r'URI="([^"?]+)"',
-                                f'URI="\\1?apikey={encoded}"',
+                                f'URI="\\1?{query_string}"',
                                 line,
                             )
                         )
                     elif stripped and not stripped.startswith('#'):
                         sep = '\n' if line.endswith('\n') else ''
-                        rewritten.append(f'{stripped}?apikey={encoded}{sep}')
+                        rewritten.append(f'{stripped}?{query_string}{sep}')
                     else:
                         rewritten.append(line)
                 response = Response(
@@ -712,30 +1006,46 @@ class EditorHls(Resource):
             response.headers['Cache-Control'] = 'no-cache'
             return response
 
-        # Init segment or media segment.
+        # Init segment or media segment. Any request keeps the session alive.
+        _touch_hls_session(cache_dir, player)
+        if not os.path.isfile(target) and _hls_segment_miss_needs_encoder(cache_dir):
+            # The player still holds this session, but its encoder was
+            # stopped or its finished cache evicted while nothing was
+            # requested, for example during a long pause. Encode it again
+            # instead of answering 404 for the rest of the session.
+            try:
+                _spawn_hls_encoder(video_path, audio_track, start_time_sec, cache_dir, player=player)
+            except Exception:
+                logger.exception('Failed to respawn HLS encoder for %s', video_path)
         if not os.path.isfile(target):
             # Segment may not have been written yet by ffmpeg; brief wait.
-            deadline = time.time() + 5.0
+            deadline = time.time() + HLS_SEGMENT_WAIT_SECONDS
             while time.time() < deadline and not os.path.isfile(target):
                 time.sleep(0.1)
             if not os.path.isfile(target):
                 return 'Segment not yet available', 404
 
         mimetype = 'video/mp4' if filename.endswith('.mp4') else 'video/iso.segment'
-        response = _serve_file_with_ranges(target, mimetype)
-        # Touch parent dir so eviction TTL tracks last access.
-        try:
-            os.utime(cache_dir, None)
-        except OSError:
-            pass
-        return response
+        return _serve_file_with_ranges(target, mimetype)
 
 
 @api_ns_editor.route('editor/peaks')
 class EditorPeaks(Resource):
+    get_pending_model = api_ns_editor.model('EditorPeaksPending', {
+        'jobId': fields.Integer(description='Id of the job generating the peaks'),
+        'status': fields.String(description='Always "pending"'),
+    })
+
     @authenticate
+    @api_ns_editor.response(200, 'Cached waveform peaks')
+    @api_ns_editor.response(202, 'Peaks are being generated by a job. Fetch again once it finishes.',
+                            get_pending_model)
+    @api_ns_editor.response(400, 'Invalid mediaType, mediaId or arr_instance_id')
+    @api_ns_editor.response(401, 'Not Authenticated')
+    @api_ns_editor.response(404, 'Media or video file not found')
+    @api_ns_editor.response(503, 'Waveform generation could not be queued')
     def get(self):
-        """Return pre-generated waveform peaks as JSON for wavesurfer.js."""
+        """Return waveform peaks as JSON for wavesurfer.js, or 202 with the job generating them."""
         resolved = _resolve_or_abort()
         if len(resolved) == 2:
             return resolved
@@ -744,115 +1054,18 @@ class EditorPeaks(Resource):
 
         audio_track = request.args.get('audioTrack', '0')
         try:
-            audio_track_idx = int(audio_track)
+            audio_track_idx = max(0, int(audio_track))
         except (ValueError, TypeError):
             audio_track_idx = 0
 
-        # Build a cache key from the file path and modification time
-        stat = os.stat(video_path)
-        # Use a stable filename derived from the video path
-        import hashlib
-        path_hash = hashlib.md5(video_path.encode()).hexdigest()
-        track_suffix = f'_t{audio_track_idx}' if audio_track_idx > 0 else ''
-        cache_file = os.path.join(PEAKS_CACHE_DIR, f'{path_hash}_{int(stat.st_mtime)}{track_suffix}.json')
-
-        # Check cache
-        if os.path.isfile(cache_file):
-            try:
-                with open(cache_file, 'r') as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, OSError):
-                # Corrupted cache, regenerate
-                pass
-
-        # Get duration first
-        probe_data = _probe_video(video_path)
-        if not probe_data:
-            return 'Failed to probe video file', 500
-
-        duration = None
-        fmt = probe_data.get('format', {})
-        if 'duration' in fmt:
-            try:
-                duration = float(fmt['duration'])
-            except (ValueError, TypeError):
-                pass
-
-        if duration is None:
-            return 'Could not determine video duration', 500
-
-        # Generate peaks by having ffmpeg output low-rate PCM and processing in chunks.
-        # Use 800Hz sample rate (much less data than 8000Hz) and produce ~10 peaks/sec.
-        try:
-            ffmpeg = _get_ffmpeg()
-        except Exception:
-            logger.exception('ffmpeg binary not available')
-            return 'ffmpeg not found', 500
-
-        sample_rate = 800
-        target_rate = 10
-        samples_per_peak = max(1, sample_rate // target_rate)  # 80 samples per peak
-        chunk_bytes = samples_per_peak * 4  # 320 bytes per peak
-
-        cmd = [
-            ffmpeg,
-            '-i', video_path,
-            '-map', f'0:a:{audio_track_idx}',
-            '-ac', '1',
-            '-ar', str(sample_rate),
-            '-f', 'f32le',
-            '-v', 'error',
-            'pipe:1',
-        ]
-
-        peaks = []
-        try:
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            while True:
-                data = process.stdout.read(chunk_bytes)
-                if not data:
-                    break
-                n = len(data) // 4
-                if n == 0:
-                    break
-                chunk = struct.unpack(f'<{n}f', data[:n * 4])
-                max_val = max(chunk, key=abs)
-                peaks.append(round(max_val, 4))
-            process.wait(timeout=10)
-            if process.returncode != 0:
-                stderr_out = process.stderr.read().decode(errors='replace')[:500]
-                logger.error('ffmpeg peaks generation failed: %s', stderr_out)
-                if not peaks:
-                    return 'Failed to generate audio peaks', 500
-        except subprocess.TimeoutExpired:
-            if process.poll() is None:
-                process.kill()
-            if not peaks:
-                return 'Peak generation timed out', 500
-
-        if not peaks:
-            return 'No audio data found in file', 500
-
-        # Normalize to [-1, 1]
-        max_abs = max(abs(p) for p in peaks)
-        if max_abs > 0:
-            peaks = [round(p / max_abs, 4) for p in peaks]
-
-        response_data = {
-            'peaks': peaks,
-            'duration': round(duration, 2),
-            'sampleRate': target_rate,
-        }
-
-        # Cache the result
-        try:
-            os.makedirs(PEAKS_CACHE_DIR, exist_ok=True)
-            with open(cache_file, 'w') as f:
-                json.dump(response_data, f)
-        except OSError:
-            logger.warning('Failed to cache peaks for %s', video_path)
-
-        return response_data
+        # Cached peaks are served at once. Otherwise one job per file and track
+        # generates them, and the editor fetches again when that job finishes.
+        state, value = request_peaks(video_path, audio_track_idx)
+        if state == 'ready':
+            return value
+        if not value:
+            return 'Waveform generation could not be queued', 503
+        return {'jobId': value, 'status': 'pending'}, 202
 
 
 @api_ns_editor.route('editor/info')
@@ -938,7 +1151,7 @@ class EditorSubtitles(Resource):
         """Return available subtitle files for a media item."""
         import ast
         params = _validate_params()
-        if isinstance(params[0], str) and params[0] not in ('episode', 'movie'):
+        if isinstance(params[0], str) and params[0] not in MEDIA_TYPES:
             return params
 
         media_type, media_id = params
@@ -951,6 +1164,14 @@ class EditorSubtitles(Resource):
                 scoped(
                     select(TableEpisodes.subtitles).where(TableEpisodes.sonarrEpisodeId == media_id),
                     TableEpisodes.arr_instance_id,
+                    arr_instance_id,
+                )
+            ).first()
+        elif media_type == 'sports':
+            row = database.execute(
+                scoped(
+                    select(TableSportsEvents.subtitles).where(TableSportsEvents.id == media_id),
+                    TableSportsEvents.arr_instance_id,
                     arr_instance_id,
                 )
             ).first()
@@ -992,9 +1213,10 @@ _editor_sync_jobs = {}  # job_key -> {status, content, message}
 
 
 def run_editor_sync(job_key, video_path, tmp_in, tmp_out, encoding, max_offset, gss, reference,
-                    no_fix_framerate=True, vad=None, job_id=None, output_mode='keep_all', enabled_engines=None):
+                    no_fix_framerate=True, vad=None, job_id=None, output_mode='keep_all', enabled_engines=None,
+                    preview_workspace=None):
     """Background sync worker. Called by jobs_queue."""
-    from app.jobs_queue import jobs_queue
+    from app.jobs_queue import jobs_queue, JobCancelled
 
     def update_progress(name, value, count):
         _editor_sync_jobs[job_key]['message'] = name
@@ -1080,9 +1302,17 @@ def run_editor_sync(job_key, video_path, tmp_in, tmp_out, encoding, max_offset, 
             completed_job['results'] = engine_results
         _editor_sync_jobs[job_key] = completed_job
 
+    except JobCancelled:
+        _editor_sync_jobs[job_key] = {'status': 'failed', 'content': None, 'message': 'Cancelled by user'}
+        raise
     except Exception as e:
         logger.exception('Editor sync failed')
-        _editor_sync_jobs[job_key] = {'status': 'failed', 'content': None, 'message': str(e)[:500]}
+        message = str(e)[:500] or 'Sync failed'
+        _editor_sync_jobs[job_key] = {'status': 'failed', 'content': None, 'message': message}
+        # The editor reads the outcome from the side store above; the job
+        # itself has to fail too, or the Jobs drawer lists it as completed.
+        from app.jobs_queue import JobFailed
+        raise JobFailed(f'Editor sync failed: {message}') from e
     finally:
         # Clean up in-memory result after 10 minutes
         import threading
@@ -1095,6 +1325,8 @@ def run_editor_sync(job_key, video_path, tmp_in, tmp_out, encoding, max_offset, 
                         os.unlink(p)
                     except OSError:
                         pass
+            # Engine outputs land beside the input, so the workspace goes too.
+            discard_preview_workspace(preview_workspace)
         threading.Timer(600, cleanup).start()
 
 
@@ -1125,8 +1357,8 @@ class EditorSync(Resource):
         if vad and vad not in ('subs_then_webrtc', 'subs_then_auditok', 'webrtc', 'auditok'):
             return 'Invalid vad option', 400
 
-        if not media_type or media_type not in ('episode', 'movie'):
-            return 'mediaType must be "episode" or "movie"', 400
+        if not media_type or media_type not in MEDIA_TYPES:
+            return MEDIA_TYPE_ERROR, 400
         if not media_id:
             return 'mediaId is required', 400
         if not content:
@@ -1138,6 +1370,15 @@ class EditorSync(Resource):
         # (e.g. path-traversal, shell metachars) into the tempfile suffix.
         if fmt not in ('srt', 'vtt', 'ass', 'ssa', 'sub', 'smi', 'mpl', 'txt'):
             return 'Invalid format; must be one of srt, vtt, ass, ssa, sub, smi, mpl, txt', 400
+
+        # The body names the codec its content is written in, and it is also what the
+        # worker reads the aligned result back with. An unknown name is the caller's
+        # mistake, so it is refused here rather than raising LookupError later, once
+        # the temporary files already exist.
+        try:
+            codecs.lookup(encoding)
+        except (LookupError, TypeError):
+            return 'Invalid encoding', 400
 
         try:
             media_id = int(media_id)
@@ -1155,39 +1396,56 @@ class EditorSync(Resource):
         if not os.path.isfile(video_path):
             return 'Video file not found', 404
 
-        ext = f'.{fmt}'
-        fd, tmp_in = tempfile.mkstemp(suffix=ext, prefix='bazarr_sync_')
-        os.write(fd, content.encode(encoding))
-        os.close(fd)
-        tmp_out = tmp_in.replace(ext, f'.synced{ext}')
-
         import threading
 
-        job_key = f'editor_sync_{hashlib.md5(tmp_in.encode()).hexdigest()[:8]}'
-        _editor_sync_jobs[job_key] = {'status': 'running', 'content': None, 'message': 'Starting sync...'}
+        ext = f'.{fmt}'
+        # The editor previews an alignment: nothing here is a library subtitle until
+        # the user saves the content back. Input and engine outputs share a directory
+        # of Bazarr's own, which keeps generated names off the media folder and gives
+        # the destinations an owner that does not depend on the video's stem.
+        preview_workspace = create_preview_workspace()
+        job_key = None
+        # Once the workspace exists, only the queued job's cleanup timer removes it,
+        # so everything up to a successful hand-off unwinds here instead. Content the
+        # named codec cannot represent is the realistic way in.
+        try:
+            fd, tmp_in = tempfile.mkstemp(suffix=ext, prefix='bazarr_sync_', dir=preview_workspace)
+            try:
+                os.write(fd, content.encode(encoding))
+            finally:
+                os.close(fd)
+            tmp_out = tmp_in.replace(ext, f'.synced{ext}')
 
-        # Submit to the jobs queue for visibility in Jobs Manager
-        queue_job_id = jobs_queue.feed_jobs_pending_queue(
-            job_name='Editor Sync',
-            module='api.editor.editor',
-            func='run_editor_sync',
-            kwargs={
-                'job_key': job_key,
-                'video_path': video_path,
-                'tmp_in': tmp_in,
-                'tmp_out': tmp_out,
-                'encoding': encoding,
-                'max_offset': max_offset,
-                'gss': gss,
-                'reference': reference,
-                'no_fix_framerate': no_fix_framerate,
-                'vad': vad,
-                'output_mode': output_mode,
-                'enabled_engines': enabled_engines,
-            },
-            is_progress=True,
-            progress_max=3,
-        )
+            job_key = f'editor_sync_{hashlib.md5(tmp_in.encode()).hexdigest()[:8]}'
+            _editor_sync_jobs[job_key] = {'status': 'running', 'content': None, 'message': 'Starting sync...'}
+
+            # Submit to the jobs queue for visibility in Jobs Manager.
+            queue_job_id = jobs_queue.feed_jobs_pending_queue(
+                job_name='Editor Sync',
+                module='api.editor.editor',
+                func='run_editor_sync',
+                kwargs={
+                    'job_key': job_key,
+                    'video_path': video_path,
+                    'tmp_in': tmp_in,
+                    'tmp_out': tmp_out,
+                    'encoding': encoding,
+                    'max_offset': max_offset,
+                    'gss': gss,
+                    'reference': reference,
+                    'no_fix_framerate': no_fix_framerate,
+                    'vad': vad,
+                    'output_mode': output_mode,
+                    'enabled_engines': enabled_engines,
+                    'preview_workspace': preview_workspace,
+                },
+                is_progress=True,
+                progress_max=3,
+            )
+        except BaseException:
+            _editor_sync_jobs.pop(job_key, None)
+            discard_preview_workspace(preview_workspace)
+            raise
 
         # Force-start in a separate thread so it doesn't wait behind other queued jobs
         threading.Thread(

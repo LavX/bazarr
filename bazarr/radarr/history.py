@@ -47,6 +47,7 @@ def history_log_movie(action, radarr_id, result, fake_provider=None, fake_score=
     subtitles_path = result.subs_path
     matched = result.matched
     not_matched = result.not_matched
+    ai_translated = (getattr(result, 'ai_translated', False) is True) if action in (1, 2, 3) else None
 
     values = dict(
         action=action,
@@ -56,8 +57,9 @@ def history_log_movie(action, radarr_id, result, fake_provider=None, fake_score=
         video_path=video_path,
         language=language,
         provider=provider,
+        ai_translated=ai_translated,
         score=score,
-        score_out_of=MAX_SCORES['movie'] if score else None,
+        score_out_of=MAX_SCORES['movie'] if score or (ai_translated is True and score == 0) else None,
         subs_id=subs_id,
         subtitles_path=subtitles_path,
         matched=str(matched) if matched else None,

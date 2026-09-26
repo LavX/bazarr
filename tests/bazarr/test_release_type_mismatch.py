@@ -303,6 +303,27 @@ def _pool():
     return pool
 
 
+def test_ai_penalty_changes_real_download_ranking_and_zero_preserves_order(monkeypatch):
+    from app.config import settings
+    import app.get_providers  # noqa: F401 - installs the live score hooks
+    from subzero.language import Language
+
+    monkeypatch.setattr(settings.general, "provider_score_modifiers", {}, raising=False)
+    ai = _FakeSubtitle("ai", WEB_RELEASE, {"series", "season", "episode"})
+    ai.ai_translated = True
+    human = _FakeSubtitle("human", WEB_RELEASE, {"series", "season", "episode"})
+    candidates = [ai, human]
+    pool = _pool()
+    language = {Language("eng")}
+    video = _episode_video()
+
+    monkeypatch.setattr(settings.general, "ai_translated_score_penalty", 0, raising=False)
+    assert pool.download_best_subtitles(candidates, video, language, only_one=True) == [ai]
+
+    monkeypatch.setattr(settings.general, "ai_translated_score_penalty", 10, raising=False)
+    assert pool.download_best_subtitles(candidates, video, language, only_one=True) == [human]
+
+
 def test_download_best_subtitles_reports_every_scored_candidate():
     from subzero.language import Language
 
@@ -721,6 +742,7 @@ def test_an_upgrade_search_is_never_reported_as_a_mismatch(search):
 
     search.run(is_upgrade=True, forced_minimum_score=200)
 
+    assert search.calls.searches[0]["min_score"] == 200
     assert reports == []
 
 

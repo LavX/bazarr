@@ -105,6 +105,17 @@ npm test
 npm test -- Translator
 ```
 
+Before you open a pull request, run the checks CI will run, in parallel:
+
+```bash
+scripts/ci/run-local.sh                  # everything
+scripts/ci/run-local.sh --backend-only   # or --frontend-only, or --python 3.12
+```
+
+It needs Docker for a throwaway PostgreSQL. [docs/agents/ci.md](docs/agents/ci.md)
+describes the pipeline, the one check a pull request has to pass (`ci-ok`), and
+where a new test file has to be listed.
+
 When to include tests:
 - New features: add tests covering the core behavior
 - Bug fixes: add a test that reproduces the bug and verifies the fix
@@ -145,6 +156,8 @@ cd bazarr
 
 # Backend
 pip install -r requirements.txt
+# Only when testing against PostgreSQL: the driver is kept in a separate file
+pip install -r postgres-requirements.txt
 python bazarr.py --no-update --config ./config
 
 # Frontend (separate terminal)
@@ -152,3 +165,7 @@ cd frontend
 npm ci
 npm start
 ```
+
+PostgreSQL backups and restores also need the PostgreSQL client tools (`pg_dump` and `pg_restore`,
+the `postgresql-client` package) on the PATH, at the server's major version or newer. See
+[docs/postgresql-backups.md](docs/postgresql-backups.md).

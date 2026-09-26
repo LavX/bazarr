@@ -24,7 +24,11 @@ def upgrade_db(monkeypatch):
         general=SimpleNamespace(
             days_to_upgrade_subs=365,
             upgrade_manual=False,
+            upgrade_translated=False,
             upgrade_subs=True,
+            # get_upgradable_media_ids gained a sports branch, gated on the
+            # master toggle so a non-sports install does not pay for the query.
+            use_sportarr=False,
         )
     )
     monkeypatch.setattr(upgrade, "database", session)
@@ -198,6 +202,11 @@ def test_batch_upgrade_ids_ignore_newer_embedded_history(upgrade_db):
         "series": [10],
         "movieKeys": [{"radarrId": 30, "arr_instance_id": 2}],
         "seriesKeys": [{"sonarrSeriesId": 10, "arr_instance_id": 1}],
+        # The endpoint carries sports now, so the sports library page can show
+        # the same low-score marker Series and Movies do. Empty here: this
+        # fixture has no sports rows and use_sportarr is off.
+        "sports": [],
+        "sportsKeys": [],
     }
 
 
@@ -320,3 +329,54 @@ def _insert_movie(db):
         title="Movie",
         tmdbId="100",
     ))
+
+
+@pytest.mark.parametrize("penalty,marked", [(10, True), (0, False)])
+def test_batch_upgrade_ids_mark_high_score_ai_rows_like_the_upgrade_job(upgrade_db, monkeypatch, penalty, marked):
+    """With a valid AI translated penalty the upgrade jobs take an AI translated
+    row whatever its score, so the Series and Movies markers have to too."""
+    from api.subtitles.batch import get_upgradable_media_ids
+    from subtitles import upgrade
+
+    monkeypatch.setattr(upgrade.settings.general, "ai_translated_score_penalty", penalty, raising=False)
+    now = datetime.now()
+    _insert_episode(upgrade_db)
+    _insert_movie(upgrade_db)
+    upgrade_db.execute(insert(TableHistory).values(
+        id=101,
+        arr_instance_id=1,
+        series_id=10,
+        episode_id=20,
+        action=1,
+        description="English subtitles downloaded.",
+        language="en",
+        provider="opensubtitlescom",
+        score=100,
+        score_out_of=100,
+        ai_translated=True,
+        sonarrEpisodeId=20,
+        sonarrSeriesId=10,
+        timestamp=now,
+        video_path="/series/show/s01e01.mkv",
+    ))
+    upgrade_db.execute(insert(TableHistoryMovie).values(
+        id=201,
+        arr_instance_id=2,
+        movie_id=30,
+        action=1,
+        description="English subtitles downloaded.",
+        language="en",
+        provider="opensubtitlescom",
+        score=100,
+        score_out_of=100,
+        ai_translated=True,
+        radarrId=30,
+        timestamp=now,
+        video_path="/movies/movie.mkv",
+    ))
+
+    assert bool(upgrade.get_upgradable_episode_subtitles()) is marked
+    assert bool(upgrade.get_upgradable_movies_subtitles()) is marked
+    result = get_upgradable_media_ids()
+    assert result["seriesKeys"] == ([{"sonarrSeriesId": 10, "arr_instance_id": 1}] if marked else [])
+    assert result["movieKeys"] == ([{"radarrId": 30, "arr_instance_id": 2}] if marked else [])

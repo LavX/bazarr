@@ -1,11 +1,20 @@
 /* eslint-disable @typescript-eslint/no-empty-function */
 
+import { cleanup, configure } from "@testing-library/react";
 import { http } from "msw";
 import { HttpResponse } from "msw";
 import { vi, vitest } from "vitest";
 import "@testing-library/jest-dom";
 import queryClient from "@/apis/queries";
 import server from "./mocks/node";
+
+// Testing Library's async queries have their own 1s budget, separate from
+// vitest's 20s per-test timeout. jsdom suites run in parallel forks, so on a
+// loaded machine a render that is perfectly correct can take longer than a
+// second to settle, and files that pass on their own fail in a full run. This
+// is not a threshold for correctness: a query that will never settle still
+// fails, it just takes longer to say so.
+configure({ asyncUtilTimeout: 5000 });
 
 vi.mock("recharts", async () => {
   const OriginalRechartsModule = await vi.importActual("recharts");
@@ -74,10 +83,14 @@ beforeEach(() => {
   );
 });
 
-afterEach(() => {
-  server.resetHandlers();
-
+afterEach(async () => {
+  // Vitest unwinds hooks in reverse registration order. Unmount before
+  // clearing shared state so active observers cannot refill the next test's
+  // settings cache using handlers that have already been reset.
+  cleanup();
+  await queryClient.cancelQueries();
   queryClient.clear();
+  server.resetHandlers();
 });
 
 afterAll(() => server.close());

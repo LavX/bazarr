@@ -13,6 +13,7 @@ import {
 } from "@mantine/core";
 import { showNotification } from "@mantine/notifications";
 import {
+  faPaperPlane,
   faPlus,
   faRotateRight,
   faServer,
@@ -28,10 +29,12 @@ import {
 } from "@/apis/hooks";
 import type { ArrInstance, ArrKind } from "@/apis/raw/arrInstances";
 import { Layout, Section } from "@/pages/Settings/components";
-import JellyfinSection from "@/pages/Settings/Jellyfin/JellyfinSection";
-import PlexSection from "@/pages/Settings/Plex/PlexSection";
+import MediaServerSection from "@/pages/Settings/MediaServers/MediaServerSection";
+import PlexAccountSection from "@/pages/Settings/Plex/PlexAccountSection";
 import RadarrSection from "@/pages/Settings/Radarr/RadarrSection";
+import SeerrSection from "@/pages/Settings/Seerr/SeerrSection";
 import SonarrSection from "@/pages/Settings/Sonarr/SonarrSection";
+import SportarrSection from "@/pages/Settings/Sportarr/SportarrSection";
 import InstanceCard from "./InstanceCard";
 import InstanceFormModal from "./InstanceFormModal";
 import { ARR_META } from "./meta";
@@ -216,7 +219,7 @@ const SettingsConnectionsView: FunctionComponent = () => {
   return (
     <Layout name="Connections">
       <Tabs value={activeTab} onChange={handleTabChange} keepMounted={false}>
-        <Tabs.List mb="md">
+        <Tabs.List mb="md" className={styles.tabList}>
           <Tabs.Tab
             value="sonarr"
             leftSection={<FontAwesomeIcon icon={ARR_META.sonarr.icon} />}
@@ -230,6 +233,12 @@ const SettingsConnectionsView: FunctionComponent = () => {
             Radarr
           </Tabs.Tab>
           <Tabs.Tab
+            value="sportarr"
+            leftSection={<FontAwesomeIcon icon={ARR_META.sportarr.icon} />}
+          >
+            Sportarr
+          </Tabs.Tab>
+          <Tabs.Tab
             value="plex"
             leftSection={<FontAwesomeIcon icon={faServer} />}
           >
@@ -240,6 +249,21 @@ const SettingsConnectionsView: FunctionComponent = () => {
             leftSection={<FontAwesomeIcon icon={faTv} />}
           >
             Jellyfin
+          </Tabs.Tab>
+          <Tabs.Tab value="emby" leftSection={<FontAwesomeIcon icon={faTv} />}>
+            Emby
+          </Tabs.Tab>
+          <Tabs.Tab
+            value="silo"
+            leftSection={<FontAwesomeIcon icon={faServer} />}
+          >
+            Silo
+          </Tabs.Tab>
+          <Tabs.Tab
+            value="seerr"
+            leftSection={<FontAwesomeIcon icon={faPaperPlane} />}
+          >
+            Seerr
           </Tabs.Tab>
         </Tabs.List>
 
@@ -267,12 +291,34 @@ const SettingsConnectionsView: FunctionComponent = () => {
           </RadarrSection>
         </Tabs.Panel>
 
+        <Tabs.Panel value="sportarr">
+          <SportarrSection>
+            <KindSection
+              kind="sportarr"
+              query={instances}
+              onAdd={openCreate}
+              onEdit={openEdit}
+              onDelete={openDelete}
+            />
+          </SportarrSection>
+        </Tabs.Panel>
+
         <Tabs.Panel value="plex">
-          <PlexSection />
+          <MediaServerSection kind="plex" />
+          <PlexAccountSection />
         </Tabs.Panel>
 
         <Tabs.Panel value="jellyfin">
-          <JellyfinSection />
+          <MediaServerSection kind="jellyfin" />
+        </Tabs.Panel>
+        <Tabs.Panel value="emby">
+          <MediaServerSection kind="emby" />
+        </Tabs.Panel>
+        <Tabs.Panel value="silo">
+          <MediaServerSection kind="silo" />
+        </Tabs.Panel>
+        <Tabs.Panel value="seerr">
+          <SeerrSection />
         </Tabs.Panel>
       </Tabs>
 
@@ -296,7 +342,9 @@ const SettingsConnectionsView: FunctionComponent = () => {
               {deleteTarget?.name}
             </Text>{" "}
             ({deleteTarget ? ARR_META[deleteTarget.kind].label : ""})? Its
-            connection settings will be removed. This cannot be undone.
+            {deleteTarget?.kind === "sportarr"
+              ? "connection settings and owned sports library, history and exclusion records will be removed. Media and subtitle files remain on disk. This cannot be undone."
+              : "connection settings will be removed. This cannot be undone."}
           </Text>
           {conflictMessage && (
             <Alert

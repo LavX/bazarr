@@ -268,12 +268,10 @@ function buildLanguageKey(sub: {
   return key;
 }
 
-// Key for the embedded action=7 score lookup. The backend stores embedded history
-// with a single hi-priority modifier (ProcessSubtitlesResult drops forced when hi is
-// set), so a hi+forced track is recorded as "<code>:hi". Mirror that here so the row
-// lookup matches the stored history; do NOT use buildLanguageKey (which keeps both
-// modifiers and is needed for unique row ids).
-function buildEmbeddedScoreKey(sub: {
+// History stores a single hi-priority modifier: ProcessSubtitlesResult drops
+// forced when hi is set. Match that for history lookups, while row IDs retain
+// both flags through buildLanguageKey.
+function buildHistoryLanguageKey(sub: {
   code2: string;
   hi?: boolean;
   forced?: boolean;
@@ -328,7 +326,7 @@ const Table: FunctionComponent<Props> = ({
     const map = new Map<string, History.Movie>();
     history?.forEach((h) => {
       if (h.action === 7 && h.language?.code2) {
-        const key = buildEmbeddedScoreKey(h.language);
+        const key = buildHistoryLanguageKey(h.language);
         if (!map.has(key)) map.set(key, h);
       }
     });
@@ -337,15 +335,44 @@ const Table: FunctionComponent<Props> = ({
 
   const statusMap = useMemo(() => {
     const map = new Map<string, Set<number>>();
-    history?.forEach((h) => {
-      if (!h.subtitles_path) return;
-      if ([5, 6].includes(h.action)) {
-        if (!map.has(h.subtitles_path)) map.set(h.subtitles_path, new Set());
-        map.get(h.subtitles_path)!.add(h.action);
+    const completed = new Set<string>();
+    const records = [...(history ?? [])].sort((a, b) => {
+      // ISO timestamps retain the database's microsecond precision. Display
+      // timestamps are localized and cannot be used to order file mutations.
+      if (
+        a.timestamp_iso &&
+        b.timestamp_iso &&
+        a.timestamp_iso !== b.timestamp_iso
+      ) {
+        return a.timestamp_iso > b.timestamp_iso ? -1 : 1;
       }
+      return (b.history_id ?? 0) - (a.history_id ?? 0);
+    });
+    records.forEach((record) => {
+      if (!record.subtitles_path || record.id !== movie?.id) return;
+      if (
+        record.arr_instance_id != null &&
+        movie?.arr_instance_id != null &&
+        record.arr_instance_id !== movie.arr_instance_id
+      )
+        return;
+
+      if (completed.has(record.subtitles_path)) return;
+      if ([5, 6].includes(record.action) && record.language) {
+        const key = JSON.stringify([
+          record.subtitles_path,
+          buildHistoryLanguageKey(record.language),
+        ]);
+        if (!map.has(key)) map.set(key, new Set());
+        map.get(key)!.add(record.action);
+      }
+      // A replacement or deletion ends this file's history. Translation also
+      // writes a new file, so only syncs after that translation still apply.
+      if ([0, 1, 2, 3, 4, 6].includes(record.action))
+        completed.add(record.subtitles_path);
     });
     return map;
-  }, [history]);
+  }, [history, movie]);
 
   const navigate = useNavigate();
 
@@ -585,7 +612,7 @@ const Table: FunctionComponent<Props> = ({
         cell: ({ row: { original } }) => {
           const record = !isSubtitleTrack(original.path)
             ? historyMap.get(original.path!)
-            : embeddedScoreMap.get(buildEmbeddedScoreKey(original));
+            : embeddedScoreMap.get(buildHistoryLanguageKey(original));
           return <ScoreBadge score={record?.score} />;
         },
       },
@@ -595,7 +622,7 @@ const Table: FunctionComponent<Props> = ({
         cell: ({ row: { original } }) => {
           const record = !isSubtitleTrack(original.path)
             ? historyMap.get(original.path!)
-            : embeddedScoreMap.get(buildEmbeddedScoreKey(original));
+            : embeddedScoreMap.get(buildHistoryLanguageKey(original));
           if (!record?.provider)
             return (
               <Text c="dimmed" size="xs">
@@ -610,7 +637,12 @@ const Table: FunctionComponent<Props> = ({
         header: "Status",
         cell: ({ row: { original } }) => {
           const actions = !isSubtitleTrack(original.path)
-            ? statusMap.get(original.path!)
+            ? statusMap.get(
+                JSON.stringify([
+                  original.path,
+                  buildHistoryLanguageKey(original),
+                ]),
+              )
             : undefined;
           if (!actions?.size)
             return (

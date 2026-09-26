@@ -1,21 +1,33 @@
-import {
-  hideNotification,
-  showNotification,
-  updateNotification,
-} from "@mantine/notifications";
 import { isArray, isEmpty, isNumber } from "lodash";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
-import { notification } from "@/modules/task";
+import { notifyJobOutcome, resetJobNotifications } from "@/modules/jobs";
 import { LOG } from "@/utilities/console";
 import { setOnlineStatus } from "@/utilities/event";
 
 export function createDefaultReducer(): SocketIO.Reducer[] {
   return [
     {
+      key: "sports",
+      any: () => {
+        void queryClient.invalidateQueries({ queryKey: [QueryKeys.Sports] });
+        void queryClient.invalidateQueries({ queryKey: [QueryKeys.Badges] });
+      },
+    },
+    {
       key: "connect",
-      any: () => setOnlineStatus(true),
+      any: () => {
+        resetJobNotifications();
+        // Job ids restart with the backend too, so a finished row cached
+        // before the restart can carry the id of the next new job and settle
+        // its waiter before that job has run. Drop the list and read it again.
+        void queryClient.resetQueries({
+          queryKey: [QueryKeys.System, QueryKeys.Jobs],
+          exact: true,
+        });
+        setOnlineStatus(true);
+      },
     },
     {
       key: "connect_error",
@@ -26,46 +38,6 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
     {
       key: "disconnect",
       any: () => setOnlineStatus(false),
-    },
-    {
-      key: "message",
-      update: (msg) => {
-        msg
-          .map((message) => notification.info("Notification", message))
-          .forEach((data) => showNotification(data));
-      },
-    },
-    {
-      key: "progress",
-      update: (items) => {
-        items.forEach((item) => {
-          // Ensure the notification exists before updating it. showNotification
-          // is a no-op when a notification with this id is already displayed.
-          showNotification(notification.progress.pending(item.id, item.header));
-
-          if (item.value >= item.count) {
-            updateNotification(notification.progress.end(item.id, item.header));
-          } else {
-            updateNotification(
-              notification.progress.update(
-                item.id,
-                item.header,
-                item.name,
-                item.value,
-                item.count,
-              ),
-            );
-          }
-        });
-      },
-      delete: (ids) => {
-        // hide_progress fires when a job finishes or is cancelled. Give the
-        // user a moment to read the final state before closing.
-        setTimeout(
-          () => ids.forEach((id) => hideNotification(id)),
-          notification.PROGRESS_TIMEOUT,
-        );
-      },
     },
     {
       key: "series",
@@ -378,6 +350,13 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
                   : next;
 
               queryClient.setQueryData(keys, trimmed);
+              // The terminal event is the one place a finish is announced.
+              if (
+                payload.status === "completed" ||
+                payload.status === "failed"
+              ) {
+                notifyJobOutcome(incoming as System.Jobs);
+              }
             })
             .catch((e: unknown) => {
               LOG("warning", "Failed to fetch job update", payload.job_id, e);

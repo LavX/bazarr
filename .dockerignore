@@ -24,10 +24,16 @@ screenshot/
 
 # Tests
 tests/
-__pycache__/
-*.py[cod]
 *$py.class
 .pytest_cache/
+
+# Compiled bytecode, at any depth. The bare `__pycache__/` and `*.py[cod]`
+# these replace only matched the top level, so a local test run left every
+# nested __pycache__ in the build context and the image shipped bytecode
+# compiled on somebody's laptop. The application tree is read-only at runtime,
+# so it is also bytecode nothing can ever refresh.
+**/__pycache__/
+**/*.py[cod]
 .coverage
 htmlcov/
 
@@ -51,6 +57,8 @@ frontend/node_modules/
 frontend/.env*
 frontend/*.log
 frontend/.eslintcache
+frontend/e2e-report/
+frontend/e2e-results/
 
 # Data directories (mounted at runtime)
 data/

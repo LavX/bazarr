@@ -311,10 +311,16 @@ def list_missing_subtitles_movies(no=None, arr_instance_id=None):
             desired_subtitles_list = []
             if desired_subtitles_temp:
                 for language in desired_subtitles_temp['items']:
-                    if language['audio_exclude'] == "True":
+                    # .get, not [...]: the optional audio keys are added to
+                    # existing items by a startup migration, so an item saved
+                    # between two startups can lack them entirely and every
+                    # indexing pass then died on a KeyError. Absent means the
+                    # user set no audio restriction, which is "False": the
+                    # language stays desired.
+                    if language.get('audio_exclude') == "True":
                         if matches_audio(language):
                             continue
-                    if language['audio_only_include'] == "True":
+                    if language.get('audio_only_include') == "True":
                         if not matches_audio(language):
                             continue
                     desired_subtitles_list.append({'language': language['language'],
@@ -361,11 +367,12 @@ def list_missing_subtitles_movies(no=None, arr_instance_id=None):
                     cutoff_language = {'language': cutoff_temp['language'],
                                        'forced': cutoff_temp['forced'],
                                        'hi': cutoff_temp['hi']}
-                    if cutoff_temp['audio_only_include'] == 'True' and not matches_audio(cutoff_temp):
+                    # Same items, same missing keys, same default.
+                    if cutoff_temp.get('audio_only_include') == 'True' and not matches_audio(cutoff_temp):
                         # We don't want subs in this language unless it matches
                         # the audio. Don't use it to meet the cutoff.
                         continue
-                    elif cutoff_temp['audio_exclude'] == 'True' and matches_audio(cutoff_temp):
+                    elif cutoff_temp.get('audio_exclude') == 'True' and matches_audio(cutoff_temp):
                         # The cutoff is met through one of the audio tracks.
                         cutoff_met = True
                     elif cutoff_language in actual_subtitles_list:
@@ -472,3 +479,24 @@ def movies_scan_subtitles(no, arr_instance_id=None):
                               path_mappings.path_replace_instance(movie.path,
                                                                   movie.arr_instance_id, 'movie'),
                               use_cache=False, arr_instance_id=movie.arr_instance_id, ownership_index=ownership_index)
+
+
+def movies_scan_disk(radarr_id, arr_instance_id=None, job_id=None):
+    """Scan disk for one movie from its detail page, as a queued job."""
+    if not job_id:
+        return jobs_queue.add_job_from_function("Scanning disk for movie subtitles", is_progress=False)
+
+    from app.job_errors import reason_of
+    from app.jobs_queue import JobFailed
+
+    movie = database.execute(
+        scoped(select(TableMovies.title).where(TableMovies.radarrId == radarr_id),
+               TableMovies.arr_instance_id, arr_instance_id)).first()
+    if not movie:
+        raise JobFailed(f"Scanning disk failed: movie {radarr_id} is no longer in the library")
+    jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Scanning disk for {movie.title}")
+    try:
+        movies_scan_subtitles(radarr_id, arr_instance_id=arr_instance_id)
+    except Exception as error:
+        raise JobFailed(f"Scanning disk for {movie.title} failed: {reason_of(error)}") from error
+    event_stream(type='movie', payload=radarr_id)

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from . import WORKER_ABI_VERSION
+from . import runtime_status
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,18 @@ def _raise_worker_error(payload):
     }.get(remote_name)
     if exception_type is None:
         raise error
+    # Rebuild the provider's own Retry-After too, where the exception takes
+    # one. The class and message alone lose it at the boundary, and it is what
+    # decides how long the backoff keeps the provider out.
+    retry_after = payload.get("retry_after")
+    retry_after = (retry_after if isinstance(retry_after, (int, float))
+                   and not isinstance(retry_after, bool)
+                   and 0 < retry_after < float("inf") else None)
+    if retry_after is not None:
+        try:
+            raise exception_type(message, retry_after=min(86400.0, float(retry_after))) from error
+        except TypeError:
+            pass
     raise exception_type(message) from error
 
 
@@ -106,6 +119,9 @@ class WorkerResult:
     ok: bool
     payload: dict[str, Any]
     events: list[dict[str, Any]]
+    status_generation: int | None = None
+    status_configuration_generation: int | None = None
+    worker_started: bool = False
 
 
 # Every started worker registers here so idle ones can be reclaimed. A weak set,
@@ -163,10 +179,12 @@ class ProviderWorkerClient:
         command: list[str],
         cwd: str | os.PathLike[str] | None = None,
         env: dict[str, str] | None = None,
+        provider_id: str | None = None,
     ):
         self.command = command
         self.cwd = str(cwd) if cwd else None
         self.env = env
+        self.provider_id = provider_id if isinstance(provider_id, str) and provider_id else None
         self.process: subprocess.Popen | None = None
         # monotonic timestamp of the last request, read by reap_idle_workers
         self.last_used: float = time.monotonic()
@@ -175,9 +193,9 @@ class ProviderWorkerClient:
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
 
-    def start(self) -> None:
+    def start(self) -> bool:
         if self.process and self.process.poll() is None:
-            return
+            return False
 
         env = {
             "PATH": os.environ.get("PATH", ""),
@@ -217,6 +235,10 @@ class ProviderWorkerClient:
 
         with _live_clients_lock:
             _live_clients.add(self)
+        provider_id = getattr(self, "provider_id", None)
+        if provider_id is not None:
+            runtime_status.worker_started(provider_id)
+        return True
 
     @staticmethod
     def _enqueue_stdout(process: subprocess.Popen, stdout_queue: queue.Queue[Any]) -> None:
@@ -435,8 +457,14 @@ class ProviderWorkerClient:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 self._kill_worker()
+                # Carry the cause. Without a code this arrives at
+                # provider_search_failure as a bare RuntimeError and is
+                # classified "error", so a plugin that hung until the hard kill
+                # was reported as "Provider search failed" rather than as the
+                # timeout it was.
                 raise WorkerError(
-                    f"worker exceeded {timeout:.1f}s deadline"
+                    f"worker exceeded {timeout:.1f}s deadline",
+                    code="timeout",
                 )
             try:
                 chunk = stdout_queue.get(timeout=remaining)
@@ -482,7 +510,18 @@ class ProviderWorkerClient:
             # outside it, the sweep can acquire the lock after start() returns,
             # read the old timestamp, and kill the worker this request is
             # about to write to.
-            self.start()
+            worker_started = self.start() is True
+            provider_id = getattr(self, "provider_id", None)
+            status_generation = (
+                runtime_status.generation(provider_id)
+                if provider_id is not None
+                else None
+            )
+            status_configuration_generation = (
+                runtime_status.configuration_generation(provider_id)
+                if provider_id is not None
+                else None
+            )
             self.last_used = time.monotonic()
             if self.process is None or self.process.stdin is None or self.process.stdout is None:
                 raise WorkerError("worker process did not start")
@@ -523,7 +562,14 @@ class ProviderWorkerClient:
             raise WorkerError("worker payload must be an object")
         if not isinstance(events, list):
             events = []
-        return WorkerResult(ok=True, payload=payload, events=events)
+        return WorkerResult(
+            ok=True,
+            payload=payload,
+            events=events,
+            status_generation=status_generation,
+            status_configuration_generation=status_configuration_generation,
+            worker_started=worker_started,
+        )
 
 
 def worker_command(python_exe: str | os.PathLike[str], runner: str | os.PathLike[str]) -> list[str]:

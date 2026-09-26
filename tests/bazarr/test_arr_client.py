@@ -180,3 +180,36 @@ def test_service_test_connection_for_instance_applies_overrides_with_stored_key(
 
     assert captured["url"].startswith("http://9.9.9.9:9000")
     assert captured["headers"]["X-Api-Key"] == "stored-secret"
+
+
+def test_url_sonarr_does_not_rewrite_stored_base_url(monkeypatch):
+    """Building a Sonarr URL used to normalise settings.sonarr.base_url in
+    place (``/`` became ``''``, a trailing slash was stripped). Any later
+    write_config, including one from an unrelated GET, then persisted that
+    change. Normalise for the URL; leave the stored value alone.
+    """
+    from sonarr import info
+
+    monkeypatch.setattr(info.settings.sonarr, "ssl", False)
+    monkeypatch.setattr(info.settings.sonarr, "ip", "10.0.0.5")
+    monkeypatch.setattr(info.settings.sonarr, "port", 8989)
+    monkeypatch.setattr(info.settings.sonarr, "base_url", "/")
+
+    url = info.url_sonarr()
+
+    assert info.settings.sonarr.base_url == "/"
+    assert url == "http://10.0.0.5:8989"
+
+
+def test_url_radarr_does_not_rewrite_stored_base_url(monkeypatch):
+    from radarr import info
+
+    monkeypatch.setattr(info.settings.radarr, "ssl", False)
+    monkeypatch.setattr(info.settings.radarr, "ip", "10.0.0.6")
+    monkeypatch.setattr(info.settings.radarr, "port", 7878)
+    monkeypatch.setattr(info.settings.radarr, "base_url", "/")
+
+    url = info.url_radarr()
+
+    assert info.settings.radarr.base_url == "/"
+    assert url == "http://10.0.0.6:7878"

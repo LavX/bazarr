@@ -5,8 +5,10 @@ from flask_restx import Resource, Namespace, fields
 from sqlalchemy import and_, or_, func
 
 from app.config import settings
-from app.database import TableHistory, TableHistoryMovie, TableEpisodes, TableMovies, database, select
+from app.database import (TableArrInstances, TableEpisodes, TableHistory, TableHistoryMovie,
+                          TableHistorySports, TableMovies, TableSportsEvents, database, select)
 from app.jobs_queue import jobs_queue
+from sportarr.workflows import require_sports_enabled
 from subtitles.mass_operations import mass_batch_operation, VALID_ACTIONS  # noqa: F401
 from ..utils import authenticate
 
@@ -88,8 +90,11 @@ class BatchOperation(Resource):
         if not items:
             return {'error': 'Empty items list'}, 400
 
-        VALID_ITEM_KEYS = {'type', 'sonarrSeriesId', 'sonarrEpisodeId', 'radarrId', 'arr_instance_id'}
-        VALID_TYPES = {'episode', 'movie', 'series'}
+        VALID_ITEM_KEYS = {'type', 'sonarrSeriesId', 'sonarrEpisodeId', 'radarrId',
+                           'sportsEventId', 'sportsLeagueId', 'arr_instance_id'}
+        # 'sports' names an event, as it does everywhere else in the sports
+        # code, and 'sportsLeague' names a league the way 'series' names a show.
+        VALID_TYPES = {'episode', 'movie', 'series', 'sports', 'sportsLeague'}
 
         sanitized_items = []
         for item in items:
@@ -100,6 +105,21 @@ class BatchOperation(Resource):
 
         if not items:
             return {'error': 'No valid items after sanitization'}, 400
+
+        # Use Sportarr off leaves the instance rows enabled, so the Sports
+        # pages could still queue work here. The sports rows are dropped and
+        # the rest of the batch runs; a batch of only sports rows is refused
+        # the way the sports routes refuse.
+        skipped, errors = 0, []
+        try:
+            require_sports_enabled()
+        except ValueError as exc:
+            kept = [item for item in items if item['type'] not in ('sports', 'sportsLeague')]
+            if not kept:
+                return {'error': str(exc)}, 400
+            if len(kept) < len(items):
+                skipped, errors = len(items) - len(kept), [str(exc)]
+            items = kept
 
         MAX_BATCH_SIZE = 10000
 
@@ -123,7 +143,7 @@ class BatchOperation(Resource):
             is_progress=True,
         )
 
-        return {'queued': len(items), 'skipped': 0, 'errors': [], 'job_id': job_id}, 200
+        return {'queued': len(items), 'skipped': skipped, 'errors': errors, 'job_id': job_id}, 200
 
 
 def get_upgradable_media_ids():
@@ -133,10 +153,17 @@ def get_upgradable_media_ids():
     false positives from old history entries that have already been superseded.
     """
     if not settings.general.upgrade_subs:
-        return {'movies': [], 'series': []}
+        return {'movies': [], 'series': [], 'sports': [],
+                'movieKeys': [], 'seriesKeys': [], 'sportsKeys': []}
 
-    from subtitles.upgrade import get_queries_condition_parameters
+    from subtitles.upgrade import (
+        get_queries_condition_parameters,
+        _ai_translated_subtitles_are_upgrade_candidates,
+    )
     minimum_timestamp, query_actions = get_queries_condition_parameters()
+    # With a valid AI translated penalty the upgrade jobs take an AI translated
+    # row whatever its score, so the markers have to as well.
+    allow_high_score_ai = _ai_translated_subtitles_are_upgrade_candidates()
 
     # Movies: only consider the latest eligible history row per (video_path, language)
     max_movie_ts = select(
@@ -148,6 +175,12 @@ def get_upgradable_media_ids():
     ).group_by(
         TableHistoryMovie.video_path, TableHistoryMovie.language
     ).distinct().subquery()
+    movie_score_conditions = [
+        and_(TableHistoryMovie.score.is_(None), TableHistoryMovie.action == 6),
+        TableHistoryMovie.score < TableHistoryMovie.score_out_of - 3,
+    ]
+    if allow_high_score_ai:
+        movie_score_conditions.append(TableHistoryMovie.ai_translated.is_(True))
 
     movie_results = database.execute(
         select(TableHistoryMovie.radarrId, TableHistoryMovie.arr_instance_id)
@@ -164,10 +197,7 @@ def get_upgradable_media_ids():
         .where(and_(
             TableHistoryMovie.action.in_(query_actions),
             TableHistoryMovie.timestamp > minimum_timestamp,
-            or_(
-                and_(TableHistoryMovie.score.is_(None), TableHistoryMovie.action == 6),
-                TableHistoryMovie.score < TableHistoryMovie.score_out_of - 3
-            )
+            or_(*movie_score_conditions),
         ))
     ).all()
     movie_ids = [r.radarrId for r in movie_results]
@@ -186,6 +216,12 @@ def get_upgradable_media_ids():
     ).group_by(
         TableHistory.video_path, TableHistory.language
     ).distinct().subquery()
+    episode_score_conditions = [
+        and_(TableHistory.score.is_(None), TableHistory.action == 6),
+        TableHistory.score < TableHistory.score_out_of - 3,
+    ]
+    if allow_high_score_ai:
+        episode_score_conditions.append(TableHistory.ai_translated.is_(True))
 
     series_results = database.execute(
         select(TableHistory.sonarrSeriesId, TableHistory.arr_instance_id)
@@ -202,10 +238,7 @@ def get_upgradable_media_ids():
         .where(and_(
             TableHistory.action.in_(query_actions),
             TableHistory.timestamp > minimum_timestamp,
-            or_(
-                and_(TableHistory.score.is_(None), TableHistory.action == 6),
-                TableHistory.score < TableHistory.score_out_of - 3
-            )
+            or_(*episode_score_conditions),
         ))
     ).all()
     series_ids = [r.sonarrSeriesId for r in series_results]
@@ -214,7 +247,57 @@ def get_upgradable_media_ids():
         for r in series_results
     ]
 
-    return {'movies': movie_ids, 'series': series_ids, 'movieKeys': movie_keys, 'seriesKeys': series_keys}
+    # Sports, keyed on the league the way series are keyed on the show: the
+    # library page marks a league, and its rows are events. Same latest-row
+    # logic, restricted to enabled sportarr owners, and the same score rule.
+    sports_score_condition = (
+        func.coalesce(TableHistorySports.score, 0)
+        < func.coalesce(TableHistorySports.score_out_of, 180) - 3
+    )
+    if allow_high_score_ai:
+        sports_score_condition = or_(sports_score_condition,
+                                     TableHistorySports.ai_translated.is_(True))
+    latest_sports = select(
+        TableHistorySports.id,
+        func.row_number().over(
+            partition_by=(TableHistorySports.event_id, TableHistorySports.arr_instance_id,
+                          TableHistorySports.language),
+            order_by=(TableHistorySports.timestamp.desc(), TableHistorySports.id.desc()),
+        ).label('position'),
+    ).subquery()
+
+    sports_results = database.execute(
+        select(TableSportsEvents.league_id, TableSportsEvents.arr_instance_id)
+        .distinct()
+        .select_from(TableHistorySports)
+        .join(TableSportsEvents, onclause=and_(
+            TableHistorySports.event_id == TableSportsEvents.id,
+            TableHistorySports.arr_instance_id == TableSportsEvents.arr_instance_id,
+        ))
+        .join(TableArrInstances, onclause=and_(
+            TableSportsEvents.arr_instance_id == TableArrInstances.id,
+            TableArrInstances.kind == 'sportarr',
+            TableArrInstances.enabled == 1,
+        ))
+        .join(latest_sports, onclause=and_(
+            TableHistorySports.id == latest_sports.c.id,
+            latest_sports.c.position == 1,
+        ))
+        .where(and_(
+            TableHistorySports.action.in_(query_actions),
+            TableHistorySports.timestamp > minimum_timestamp,
+            or_(TableHistorySports.score.is_not(None), TableHistorySports.action == 6),
+            sports_score_condition,
+        ))
+    ).all() if settings.general.use_sportarr else []
+    sports_ids = [r.league_id for r in sports_results]
+    sports_keys = [
+        {'sportsLeagueId': r.league_id, 'arr_instance_id': r.arr_instance_id}
+        for r in sports_results
+    ]
+
+    return {'movies': movie_ids, 'series': series_ids, 'sports': sports_ids,
+            'movieKeys': movie_keys, 'seriesKeys': series_keys, 'sportsKeys': sports_keys}
 
 
 @api_ns_batch.route('subtitles/upgradable')

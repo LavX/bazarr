@@ -1,4 +1,4 @@
-import { FC, useState } from "react";
+import { FC, useCallback, useState } from "react";
 import { Center, Loader } from "@mantine/core";
 import { useProviderHubProviders } from "@/apis/hooks";
 import type { WizardStepProps } from "@/pages/Setup/steps/types";
@@ -19,13 +19,34 @@ type Stage = "install" | "configure";
  * wrongly drop the user back on the install list. Instead we wait for the query
  * (loader), then derive: installed providers present -> configure. An explicit
  * user choice (`override`) wins so "install more" / "use installed" still work.
+ * "Installed" means a loaded version (active_version), not merely a row: see the
+ * note on hasInstalled below.
  */
 const ProvidersStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   const providersQuery = useProviderHubProviders();
-  const hasInstalled = (providersQuery.data ?? []).length > 0;
+  // A run stages its providers the moment each install answers, so counting any
+  // row at all flipped this step to configure while the install stage was still
+  // working: the outcome report and the restart that activates what was just
+  // installed never rendered, and the redirect that follows the restart then
+  // landed on top of a configure stage the reader had started answering. Only a
+  // provider that has a loaded version counts, which is what "installed" means
+  // on resume as well.
+  const hasInstalled = (providersQuery.data ?? []).some(
+    (provider) => provider.active_version != null,
+  );
 
   const [override, setOverride] = useState<Stage | null>(null);
   const stage: Stage = override ?? (hasInstalled ? "configure" : "install");
+
+  // Stable identity matters here: the install stage builds its restart callback
+  // from this prop, and its partial-install countdown re-arms its one second
+  // tick whenever that callback changes. An inline arrow would hand it a new
+  // function on every render of this component and keep resetting the tick.
+  const handleInstalledNeedsRestart = useCallback(() => {
+    // The install stage owns the restart overlay + resume; nothing to do
+    // here beyond letting it take over the view.
+  }, []);
+  const handleUseInstalled = useCallback(() => setOverride("configure"), []);
 
   // Wait for the installed-providers list before choosing a stage, so a resume
   // after the install-restart does not flash the install catalog first.
@@ -50,11 +71,9 @@ const ProvidersStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   return (
     <ProviderInstallStage
       hasInstalled={hasInstalled}
-      onInstalledNeedsRestart={() => {
-        // The install stage owns the restart overlay + resume; nothing to do
-        // here beyond letting it take over the view.
-      }}
-      onUseInstalled={() => setOverride("configure")}
+      onNext={onNext}
+      onInstalledNeedsRestart={handleInstalledNeedsRestart}
+      onUseInstalled={handleUseInstalled}
       onBack={onBack}
     />
   );

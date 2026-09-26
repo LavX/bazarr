@@ -187,7 +187,7 @@ class EpisodesSubtitlesCombine(Resource):
         arr_instance_id = request.args.get('arr_instance_id', type=int)
         row = database.execute(
             scoped(
-                select(TableEpisodes.path, TableEpisodes.sonarrSeriesId)
+                select(TableEpisodes.path, TableEpisodes.sonarrSeriesId, TableEpisodes.arr_instance_id)
                 .where(TableEpisodes.sonarrEpisodeId == episode_id),
                 TableEpisodes.arr_instance_id,
                 arr_instance_id,
@@ -195,7 +195,8 @@ class EpisodesSubtitlesCombine(Resource):
         ).first()
         if not row:
             return {'status': 'not_found'}, 404
-        video_path = path_mappings.path_replace(row.path)
+        arr_instance_id = row.arr_instance_id
+        video_path = path_mappings.path_replace_instance(row.path, arr_instance_id, 'episode')
 
         result = try_combine_for_video(
             video_path=video_path,
@@ -205,6 +206,7 @@ class EpisodesSubtitlesCombine(Resource):
             sonarr_episode_id=episode_id,
             languages=languages,
             format=format_,
+            arr_instance_id=arr_instance_id,
         )
         body = {
             'status': result.status,

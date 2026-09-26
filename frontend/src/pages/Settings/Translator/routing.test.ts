@@ -100,3 +100,28 @@ describe("routingLabel", () => {
     expect(routingLabel("cheapest")).toBe("cheapest");
   });
 });
+
+describe("routing shortcuts sitting in front of a variant", () => {
+  // The Bazarr backend removes a shortcut from any position. Stopping at the first
+  // non-routing tail here left the two disagreeing about which model is requested:
+  // the picker looked up one id while the request carried another.
+  it.each([
+    ["deepseek/example:nitro:free", "deepseek/example:free", "nitro"],
+    [
+      "deepseek/example:smartfast:thinking",
+      "deepseek/example:thinking",
+      "smartfast",
+    ],
+    ["deepseek/example:floor:free:nitro", "deepseek/example:free", "nitro"],
+    ["deepseek/example:smartfast:nitro", "deepseek/example", "nitro"],
+  ])("splits %s", (raw, modelId, routing) => {
+    expect(splitRoutingSuffix(raw)).toEqual({ modelId, routing });
+  });
+
+  it("leaves a genuine variant alone", () => {
+    expect(splitRoutingSuffix("deepseek/example:free:thinking")).toEqual({
+      modelId: "deepseek/example:free:thinking",
+      routing: null,
+    });
+  });
+});

@@ -30,6 +30,34 @@ class FileIdStore:
                 self._gc_locked()
             return fid
 
+    def renew(self, fid, ttl_seconds: int) -> float | None:
+        """Restart a live entry's lifetime, keeping its id and payload.
+
+        For a caller that handed an id out before it had finished assembling
+        the answer that id belongs to. Minting a replacement would give the
+        entry a full lifetime too, but it would retire an id the caller has
+        already offered someone. Returns the new expiry, or None when the
+        entry is gone. Never shortens: a renewal that lands behind the current
+        expiry leaves it alone.
+        """
+        try:
+            key = int(fid)
+        except (TypeError, ValueError):
+            return None
+        now = time.time()
+        with self._lock:
+            row = self._store.get(key)
+            if row is None:
+                return None
+            exp, payload = row
+            if exp < now:
+                self._store.pop(key, None)
+                return None
+            expires = max(exp, now + ttl_seconds)
+            payload = {**payload, "expires_at": expires} if "expires_at" in payload else payload
+            self._store[key] = (expires, payload)
+            return expires
+
     def get(self, fid) -> Tuple[bool, dict]:
         try:
             key = int(fid)

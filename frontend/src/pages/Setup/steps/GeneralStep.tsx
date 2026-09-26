@@ -1,17 +1,9 @@
-import { FC, useState } from "react";
-import {
-  Button,
-  Group,
-  Select,
-  Stack,
-  Switch,
-  Text,
-  TextInput,
-  Title,
-} from "@mantine/core";
+import { FC } from "react";
+import { Button, Group, Select, Switch, TextInput } from "@mantine/core";
 import { useSettingsMutation, useSystemSettings } from "@/apis/hooks";
 import { folderOptions } from "@/pages/Settings/Subtitles/options";
-import { pageSizeOptions } from "@/pages/Settings/UI/options";
+import StepLayout from "@/pages/Setup/StepLayout";
+import { useStepDraft } from "@/pages/Setup/useStepDrafts";
 import type { WizardStepProps } from "./types";
 
 // The "alongside media" default keeps subtitles next to the video file; any
@@ -27,7 +19,7 @@ function needsCustomFolder(value: string): boolean {
  * pre-fills from the current settings and only writes the keys the user actually
  * changed, so Continue with no edits just advances.
  */
-const GeneralStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
+const GeneralStep: FC<WizardStepProps> = ({ onNext, onBack, stepKey }) => {
   const { data: settings } = useSystemSettings();
   const mutation = useSettingsMutation();
 
@@ -36,14 +28,20 @@ const GeneralStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   const initialSubfolder = general?.subfolder ?? DEFAULT_SUBFOLDER;
   const initialSubfolderCustom = general?.subfolder_custom ?? "";
   const initialUpgrade = general?.upgrade_subs ?? true;
-  const initialPageSize = general?.page_size ?? 25;
 
-  const [subfolder, setSubfolder] = useState<string>(initialSubfolder);
-  const [subfolderCustom, setSubfolderCustom] = useState<string>(
-    initialSubfolderCustom,
-  );
-  const [upgradeSubs, setUpgradeSubs] = useState<boolean>(initialUpgrade);
-  const [pageSize, setPageSize] = useState<number>(initialPageSize);
+  // Held by the wizard, so Back and forward keep the edits. Only a field the
+  // reader actually changed is stored, so the rest still follows the settings
+  // query when it answers after this step first rendered.
+  const [draft, patchDraft] = useStepDraft(stepKey, {
+    subfolder: initialSubfolder,
+    subfolderCustom: initialSubfolderCustom,
+    upgradeSubs: initialUpgrade,
+  });
+  const { subfolder, subfolderCustom, upgradeSubs } = draft;
+  const setSubfolder = (value: string) => patchDraft({ subfolder: value });
+  const setSubfolderCustom = (value: string) =>
+    patchDraft({ subfolderCustom: value });
+  const setUpgradeSubs = (value: boolean) => patchDraft({ upgradeSubs: value });
 
   const showCustomFolder = needsCustomFolder(subfolder);
 
@@ -59,9 +57,6 @@ const GeneralStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
     if (upgradeSubs !== initialUpgrade) {
       payload["settings-general-upgrade_subs"] = upgradeSubs;
     }
-    if (pageSize !== initialPageSize) {
-      payload["settings-general-page_size"] = pageSize;
-    }
 
     if (Object.keys(payload).length === 0) {
       onNext();
@@ -76,15 +71,24 @@ const GeneralStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
   };
 
   return (
-    <Stack gap="lg">
-      <Stack gap="xs">
-        <Title order={2}>General basics</Title>
-        <Text c="dimmed">
-          A few application preferences to round things out. These are optional
-          and can all be changed later in Settings.
-        </Text>
-      </Stack>
-
+    <StepLayout
+      title="General basics"
+      description="A few application preferences to round things out. These are optional and can all be changed later in Settings."
+      actions={
+        <Group justify="space-between">
+          <Group gap="sm">
+            {onBack && (
+              <Button variant="default" onClick={onBack}>
+                Back
+              </Button>
+            )}
+          </Group>
+          <Button onClick={handleContinue} loading={mutation.isPending}>
+            Continue
+          </Button>
+        </Group>
+      }
+    >
       <Select
         label="Subtitle Folder"
         description="Where Bazarr stores the subtitles it downloads."
@@ -109,34 +113,7 @@ const GeneralStep: FC<WizardStepProps> = ({ onNext, onBack }) => {
         checked={upgradeSubs}
         onChange={(e) => setUpgradeSubs(e.currentTarget.checked)}
       />
-
-      <Select
-        label="Page Size"
-        description="How many items to show per page in lists."
-        data={pageSizeOptions.map((o) => ({
-          value: String(o.value),
-          label: o.label,
-        }))}
-        value={String(pageSize)}
-        onChange={(value) =>
-          setPageSize(value ? Number(value) : initialPageSize)
-        }
-        allowDeselect={false}
-      />
-
-      <Group justify="space-between">
-        <Group gap="sm">
-          {onBack && (
-            <Button variant="default" onClick={onBack}>
-              Back
-            </Button>
-          )}
-        </Group>
-        <Button onClick={handleContinue} loading={mutation.isPending}>
-          Continue
-        </Button>
-      </Group>
-    </Stack>
+    </StepLayout>
   );
 };
 

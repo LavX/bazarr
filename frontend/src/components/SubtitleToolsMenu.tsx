@@ -30,7 +30,6 @@ import { TimeOffsetModal } from "@/components/forms/TimeOffsetForm";
 import { TranslationModal } from "@/components/forms/TranslationForm";
 import { useModals } from "@/modules/modals";
 import { ModalComponent } from "@/modules/modals/WithModal";
-import { task } from "@/modules/task";
 import { toPython } from "@/utilities";
 import { SyncSubtitleModal } from "./forms/SyncSubtitleForm";
 import { TwoPointFitModal } from "./forms/TwoPointFit";
@@ -153,6 +152,7 @@ interface Props {
   children?: ReactElement;
   menu?: Omit<MenuProps, "children">;
   canSync?: boolean;
+  allowSearchExisting?: boolean;
   onAction?: (
     action:
       | "delete"
@@ -171,7 +171,7 @@ interface Props {
   missingLanguage?: Subtitle;
   translationSources?: Subtitle[];
   mediaId?: number;
-  mediaType?: "episode" | "movie";
+  mediaType?: "episode" | "movie" | "sports";
   // Owning Sonarr/Radarr instance id (#156) for the missing-subtitle translate
   // path, which builds its ModifySubtitle form explicitly from mediaId/mediaType.
   arrInstanceId?: number;
@@ -187,6 +187,7 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
   children,
   menu,
   canSync = true,
+  allowSearchExisting = false,
   onAction,
   canCompareSyncOutputs = false,
   isCombinedOutput = false,
@@ -197,10 +198,12 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
   arrInstanceId,
   embeddedTrack = false,
 }) => {
-  const { mutateAsync } = useSubtitleAction();
+  const { mutate, mutateAsync } = useSubtitleAction();
 
   const process = useCallback(
-    (action: string, name: string) => {
+    (action: string) => {
+      // Each selection is queued as its own backend job, so the request
+      // returns at once and the job reports through the jobs drawer.
       selections.forEach((s) => {
         const form: FormType.ModifySubtitle = {
           id: s.id,
@@ -212,10 +215,10 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
           // eslint-disable-next-line camelcase
           arr_instance_id: s.arr_instance_id,
         };
-        task.create(s.path, name, mutateAsync, { action, form });
+        mutate({ action, form });
       });
     },
-    [mutateAsync, selections],
+    [mutate, selections],
   );
 
   const toolGroups = useToolGroups();
@@ -278,7 +281,7 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
                     if (tool.modal) {
                       modals.openContextModal(tool.modal, { selections });
                     } else {
-                      process(tool.key, tool.name);
+                      process(tool.key);
                     }
                   }}
                 >
@@ -401,7 +404,7 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
         {!isCombinedOutput && (
           <Menu.Item
             disabled={
-              selections.length !== 0 ||
+              (selections.length !== 0 && !allowSearchExisting) ||
               onAction === undefined ||
               isTranslateOnlyMode
             }

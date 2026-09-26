@@ -11,13 +11,20 @@ from .core.translator_utils import validate_translation_params, convert_language
 from .services.translator_factory import TranslatorFactory
 from languages.get_languages import alpha3_from_alpha2
 from app.config import settings
-from app.jobs_queue import jobs_queue
+from app import activity
+from app.jobs_queue import jobs_queue, JobCancelled
 from subtitles.indexer.utils import get_subtitle_destination_path
 
 
 def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, forced, hi,
                              media_type, sonarr_series_id, sonarr_episode_id, radarr_id, metadata,
-                             job_id=None, arr_instance_id=None):
+                             job_id=None, arr_instance_id=None, sports_operation=None, embedded_source=None):
+    """Translate a subtitle file, as a queued job.
+
+    ``embedded_source`` names an embedded track to translate instead of a file:
+    a dict with ``language`` (alpha2), ``hi`` and ``forced``. The track is
+    extracted by the job, so the request that queues it returns at once.
+    """
     if not job_id:
         # Build job label with media title. Note: no local variables can be
         # assigned here because add_job_from_function introspects the frame
@@ -26,12 +33,40 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
             (lambda t: f'Translating {t} ({from_lang.upper()} to {to_lang.upper()})' if t else
              f'Translating {from_lang.upper()} to {to_lang.upper()}')(
                 get_title(media_type, radarr_id, sonarr_series_id, sonarr_episode_id,
-                          arr_instance_id)),
+                          arr_instance_id,
+                          **({'sports_context': sports_operation.context} if sports_operation else {}))),
             is_progress=True)
         return
 
     translator_label = settings.translator.translator_type.replace("_", " ").title()
+    # Observation only. The queue records a generic completed envelope for every
+    # ordinary return, so a typed outcome has to be recorded where publication
+    # actually happens, further down, and a partial result has to dominate it.
+    observed = activity.register(activity.activity_id_for_job(job_id), operation='translation',
+                                 scope_kind='media', arr_instance_id=arr_instance_id,
+                                 media_type=media_type, language=to_lang, source_language=from_lang,
+                                 forced=forced, hi=hi,
+                                 upstream_series_id=sonarr_series_id,
+                                 upstream_episode_id=sonarr_episode_id,
+                                 upstream_movie_id=radarr_id)
     try:
+        activity.note_scope(observed, title=get_title(media_type, radarr_id, sonarr_series_id,
+                                                      sonarr_episode_id, arr_instance_id))
+    except Exception:
+        logging.debug('Could not record the media title for this translation observation')
+    try:
+        cancel = None
+        if media_type == 'sports':
+            from sportarr.workflows import SportsJobSignal
+            if sports_operation is None or sports_operation.context.arr_instance_id != arr_instance_id:
+                raise ValueError('An exact sports profile operation is required')
+            if any(value is not None for value in (sonarr_series_id, sonarr_episode_id, radarr_id, metadata)):
+                raise ValueError('Sports translation cannot use native media metadata')
+            cancel = SportsJobSignal(arr_instance_id, job_id)
+            sports_operation.validate(wanted=True, cancel=cancel)
+        if embedded_source:
+            source_srt_file = _extract_embedded_source(video_path, media_type, embedded_source, job_id,
+                                                       arr_instance_id)
         logging.debug(f'Translation request: video={video_path}, source={source_srt_file}, from={from_lang}, to={to_lang}')  # noqa: G004
 
         validate_translation_params(video_path, source_srt_file, from_lang, to_lang)
@@ -72,7 +107,8 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
             sonarr_series_id=sonarr_series_id,
             sonarr_episode_id=sonarr_episode_id,
             radarr_id=radarr_id,
-            arr_instance_id=arr_instance_id
+            arr_instance_id=arr_instance_id,
+            **({'sports_operation': sports_operation, 'cancel': cancel} if sports_operation else {})
         )
 
         logging.debug(f'Created translator instance: {translator.__class__.__name__}')  # noqa: G004
@@ -81,15 +117,16 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
             raise RuntimeError(f'{translator.__class__.__name__} returned a failed translation result')
         logging.debug(f'BAZARR saved translated subtitles to {dest_srt_file}')  # noqa: G004
 
-        from api.subtitles.subtitles import postprocess_subtitles
         # Call postprocess_subtitles after translation (handles chmod, re-indexing, events)
         # The owning instance goes with it (#156). postprocess_subtitles
         # re-indexes the new file, and that write is scoped now, so without
         # the owner the translated subtitle can land on a sibling instance's
         # row and leave the one the user asked about showing nothing.
-        postprocess_subtitles(dest_srt_file, video_path, media_type, metadata,
-                              sonarr_episode_id if media_type == 'episode' else radarr_id,
-                              arr_instance_id=arr_instance_id)
+        if sports_operation is None:
+            from api.subtitles.subtitles import postprocess_subtitles
+            postprocess_subtitles(dest_srt_file, video_path, media_type, metadata,
+                                  sonarr_episode_id if media_type == 'episode' else radarr_id,
+                                  arr_instance_id=arr_instance_id)
 
         # The translated file is now on disk. The download-time combine ran before
         # this async translation finished (so it skipped, source missing); build or
@@ -104,12 +141,25 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
                 sonarr_series_id=sonarr_series_id,
                 sonarr_episode_id=sonarr_episode_id,
                 radarr_id=radarr_id,
+                arr_instance_id=arr_instance_id,
+                **({'sports_operation': sports_operation, 'cancel': cancel} if sports_operation else {}),
             )
+        except JobCancelled:
+            raise
         except Exception:
+            if cancel is not None:
+                from sportarr.connection import check_cancelled
+                check_cancelled(cancel)
             logging.exception("BAZARR combine-after-translate failed for %s", video_path)
 
+        # The file is on disk and post-processing has run, so this is the real
+        # publication boundary. A partial translation is not a successful one.
+        partial_detail = getattr(translator, 'partial_error', None)
+        activity.note_publication(observed, outcome='partial' if partial_detail else 'success',
+                                  detail=partial_detail)
+
         # Get current job name (which batch.py already set with title) and mark as done
-        completion_label = 'Partially translated' if getattr(translator, 'partial_error', None) else 'Translated'
+        completion_label = 'Partially translated' if partial_detail else 'Translated'
         current_name = jobs_queue.get_job_name(job_id)
         if current_name and 'Translating' in current_name:
             done_name = current_name.replace('Translating', completion_label)
@@ -118,7 +168,10 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         jobs_queue.update_job_name(job_id=job_id, new_job_name=done_name)
         return result
 
+    except JobCancelled:
+        raise
     except Exception as e:
+        activity.note_publication(observed, outcome='failed', detail=str(e))
         logging.error(f'Translation failed: {str(e)}', exc_info=True)  # noqa: G004, G201
         current_name = jobs_queue.get_job_name(job_id)
         if current_name and 'Translating' in current_name:
@@ -126,4 +179,31 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         else:
             fail_name = f'Failed: {from_lang.upper()} → {to_lang.upper()} using {translator_label}'
         jobs_queue.update_job_name(job_id=job_id, new_job_name=fail_name)
+        # A TranslationServiceError is a JobFailed, so its reason becomes the
+        # job's error. Anything else keeps its type: synchronous callers answer
+        # a ValueError as a 409.
         raise
+
+
+def _extract_embedded_source(video_path, media_type, embedded_source, job_id, arr_instance_id):
+    """Extract the embedded track this translation reads, inside the job.
+
+    The file lands in the persistent extracted_subs cache, so it is not removed
+    after the translation reads it.
+    """
+    from app.jobs_queue import JobFailed
+    from subtitles.tools.translate.batch import extract_embedded_subtitle
+
+    jobs_queue.update_job_progress(job_id=job_id, progress_message='Extracting the embedded subtitle track')
+    extracted = extract_embedded_subtitle(
+        video_path,
+        embedded_source.get('language'),
+        media_type,
+        hi=bool(embedded_source.get('hi')),
+        forced=bool(embedded_source.get('forced')),
+        arr_instance_id=arr_instance_id,
+    )
+    if not extracted:
+        raise JobFailed('Could not extract the embedded subtitle track. Its codec may be bitmap '
+                               '(PGS or VobSub), or the language track was not found.')
+    return extracted

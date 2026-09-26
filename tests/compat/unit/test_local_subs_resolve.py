@@ -65,7 +65,7 @@ def test_imdb_candidates_includes_zero_padded_forms():
 
 def test_resolve_by_imdb_movie_with_zero_stripped_request_hits_padded_db_row():
     """Plugin sends 481369 (no leading zero); DB has tt0481369. Lookup
-    must succeed — Codex/Jellyfin contract."""
+    must succeed. Jellyfin contract."""
     from compat import local_subs
     from unittest.mock import patch, MagicMock
     fake_movie = MagicMock(radarrId=99, imdbId="tt0481369", year="2007")

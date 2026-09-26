@@ -14,16 +14,11 @@ declare namespace Manager {
     progress_max: number;
     progress_message: string;
     status: string;
+    error?: System.JobError | null;
+    action?: System.JobAction | null;
   }
 }
 
 declare namespace Site {
   type Status = "uninitialized" | "unauthenticated" | "initialized" | "error";
-  interface Progress {
-    id: string;
-    header: string;
-    name: string;
-    value: number;
-    count: number;
-  }
 }

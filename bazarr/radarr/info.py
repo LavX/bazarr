@@ -94,19 +94,18 @@ def url_radarr():
     else:
         protocol_radarr = "http"
 
-    if settings.radarr.base_url == '':
-        settings.radarr.base_url = "/"
-    if not settings.radarr.base_url.startswith("/"):
-        settings.radarr.base_url = f"/{settings.radarr.base_url}"
-    if settings.radarr.base_url.endswith("/"):
-        settings.radarr.base_url = settings.radarr.base_url[:-1]
+    base = settings.radarr.base_url or "/"
+    if not base.startswith("/"):
+        base = f"/{base}"
+    if base.endswith("/"):
+        base = base[:-1]
 
     if settings.radarr.port in empty_values:
         port = ""
     else:
         port = f":{settings.radarr.port}"
 
-    return f"{protocol_radarr}://{settings.radarr.ip}{port}{settings.radarr.base_url}"
+    return f"{protocol_radarr}://{settings.radarr.ip}{port}{base}"
 
 
 def url_api_radarr():

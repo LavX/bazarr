@@ -106,6 +106,7 @@ class ComputeScore:
     """
 
     modifier = None
+    ai_translated_penalty = None
 
     def __init__(self, scores=None):
         if scores:
@@ -215,32 +216,30 @@ class ComputeScore:
         return score, score_without_hash
 
     def _modifier_for(self, subtitle):
-        """The modifier for this subtitle's provider, or nothing.
-
-        The hook reads live settings, so a value the user has just broken must
-        cost them a modifier rather than every search on the instance.
-        """
-        if self.modifier is None:
-            return 0
+        """Combine the live provider modifier and AI penalty before clamping."""
         provider_name = getattr(subtitle, "provider_name", None)
-        if not provider_name:
-            return 0
-        try:
-            modifier = self.modifier(provider_name) or 0
-        except Exception:
-            logger.exception("Provider score modifier failed for %r", provider_name)
-            return 0
-        # NaN and the infinities are floats, so a type check upstream lets them
-        # through, and round() raises on both. That would happen outside this
-        # guard and take the whole search down with it.
-        if not isinstance(modifier, (int, float)) or isinstance(modifier, bool) \
+        modifier = 0
+        if provider_name and self.modifier is not None:
+            try:
+                modifier = self.modifier(provider_name) or 0
+            except Exception:
+                logger.exception("Provider score modifier failed for %r", provider_name)
+        if isinstance(modifier, bool) or not isinstance(modifier, (int, float)) \
                 or not math.isfinite(modifier):
             logger.warning("Ignoring unusable score modifier %r for %r", modifier, provider_name)
-            return 0
-        # A finite value can still be large enough that multiplying it by the
-        # maximum score overflows to infinity, and round() raises on that a
-        # frame above this guard. The scale only goes to a hundred either way.
-        return max(-100, min(100, modifier))
+            modifier = 0
+
+        penalty = 0
+        if getattr(subtitle, "ai_translated", False) is True and self.ai_translated_penalty is not None:
+            try:
+                penalty = self.ai_translated_penalty()
+            except Exception:
+                logger.exception("AI-translated score penalty failed")
+            if isinstance(penalty, bool) or not isinstance(penalty, (int, float)) \
+                    or not math.isfinite(penalty):
+                penalty = 0
+            penalty = max(0, min(100, penalty))
+        return max(-100, min(100, modifier - penalty))
 
 
 def _episode_checks(video, eq_matches, matches):

@@ -48,6 +48,17 @@ class ProviderHubInstallError(RuntimeError):
     """Raised when a Provider Hub install could not be staged."""
 
 
+class ProviderHubStopped(Exception):
+    """Stop was pressed, and the action ended at a step boundary with nothing recorded."""
+
+
+class ProviderHubSettingsError(RuntimeError):
+    """Raised when Bazarr's enabled_providers could not be saved for a Provider Hub action."""
+
+
+ENABLED_PROVIDERS_NOT_SAVED = "the enabled providers list could not be saved to the configuration file"
+
+
 SECRET_PLACEHOLDER = "********"
 _VERSION_TOKEN_RE = re.compile(r"\d+|[A-Za-z]+")
 _SEMVER_RE = re.compile(
@@ -82,30 +93,53 @@ def _bazarr_enabled_providers() -> list[str]:
 def _set_bazarr_provider_enabled(provider_id: str, enabled: bool) -> bool:
     """Add ``provider_id`` to (or remove it from) Bazarr's enabled_providers.
 
-    Returns True when the on-disk config changed. Logs and swallows
-    failures so a hub action never aborts on a settings hiccup.
+    Returns True when the list holds the requested state on disk, whether
+    this call changed it or it already did. Returns False when the change
+    could not be saved, with the live list put back as it was: a change that
+    reached no file would make the provider look enabled, or removed, until
+    the next restart quietly undid it. Callers report that as a failure.
+
+    The read, the edit and the write are one critical section. Installing
+    several providers at once reaches this from several threads: the venv
+    lock in venv.py serializes only the pip work and is released before the
+    caller gets here, and write_config takes CONFIG_LOCK around the file
+    write alone, not around the read. Two installs finishing in the same
+    window would each read the list before the other wrote it, and the
+    second write would drop the first provider: a successful install that
+    vanishes. CONFIG_LOCK is reentrant, so the write_config below still
+    takes it on the same thread.
     """
+    import logging
+
     try:
         from app.config import settings, write_config
+        from discover.metadata import CONFIG_LOCK
     except Exception:
-        return False
-    current = list(_bazarr_enabled_providers())
-    if enabled and provider_id not in current:
-        current.append(provider_id)
-    elif not enabled and provider_id in current:
-        current = [item for item in current if item != provider_id]
-    else:
-        return False
-    try:
-        settings.general.enabled_providers = current
-        write_config()
-        return True
-    except Exception:
-        import logging
         logging.getLogger(__name__).exception(
             "Failed to sync enabled_providers for %s", provider_id
         )
         return False
+    with CONFIG_LOCK:
+        current = list(_bazarr_enabled_providers())
+        if enabled and provider_id not in current:
+            current.append(provider_id)
+        elif not enabled and provider_id in current:
+            current = [item for item in current if item != provider_id]
+        else:
+            return True
+        previous = settings.general.enabled_providers
+        try:
+            settings.general.enabled_providers = current
+            saved = write_config()
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Failed to sync enabled_providers for %s", provider_id
+            )
+            saved = False
+        if saved is not True:
+            settings.general.enabled_providers = previous
+            return False
+        return True
 
 
 def utcnow_iso() -> str:
@@ -303,6 +337,35 @@ def _catalog_source_error_message(error: Exception) -> str:
     if isinstance(error, requests.exceptions.HTTPError):
         response = getattr(error, "response", None)
         status_code = getattr(response, "status_code", None)
+        headers = getattr(response, "headers", {}) or {}
+        secondary_limit = False
+        if status_code == 403 and len(getattr(response, "content", b"") or b"") <= 8192:
+            try:
+                payload = response.json()
+                message = payload.get("message", "") if isinstance(payload, dict) else ""
+                secondary_limit = isinstance(message, str) and message.lower().startswith(
+                    "you have exceeded a secondary rate limit")
+            except (ValueError, TypeError):
+                pass
+        limited = status_code in (403, 429) and (
+            status_code == 429 or secondary_limit or headers.get("x-ratelimit-remaining") == "0"
+            or headers.get("retry-after") is not None
+        )
+        if limited:
+            retry_at = None
+            try:
+                if headers.get("retry-after") is not None:
+                    retry_at = time.time() + max(0, int(headers["retry-after"]))
+                elif headers.get("x-ratelimit-remaining") == "0" and headers.get("x-ratelimit-reset") is not None:
+                    retry_at = int(headers["x-ratelimit-reset"])
+                reset = datetime.fromtimestamp(retry_at, timezone.utc) if retry_at is not None else None
+            except (ValueError, TypeError, OverflowError, OSError):
+                reset = None
+            recovery = (f"Retry after {reset:%Y-%m-%d %H:%M:%S} UTC."
+                        if reset is not None else "GitHub did not provide a reset time. Retry later.")
+            return f"GitHub temporarily limited catalog requests. {recovery} Your cached catalog is unchanged."
+        if status_code == 403:
+            return "GitHub denied access to this catalog source. Check the repository URL and access permissions."
         if status_code:
             return f"GitHub returned HTTP {status_code} while refreshing this catalog source."
         return "GitHub returned an error while refreshing this catalog source."
@@ -463,7 +526,9 @@ def _catalog_needs_auto_refresh(state: dict[str, Any]) -> bool:
     for source in (state.get("catalog_sources") or {}).values():
         if not isinstance(source, dict):
             continue
-        if source.get("enabled", True) and source.get("last_checked_at") is None:
+        if (source.get("enabled", True)
+                and source.get("last_checked_at") is None
+                and source.get("last_attempted_at") is None):
             return True
     return False
 
@@ -595,10 +660,15 @@ def _normalize_catalog_manifest(manifest: dict[str, Any], source: dict[str, Any]
     return normalized
 
 
-def refresh_catalog(source_ids: set[str] | None = None) -> dict[str, Any]:
+def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict[str, Any]:
     """Refresh catalog sources. When ``source_ids`` is given, only those source ids
     are fetched (e.g. the startup migration refreshes only the official source so an
-    unrelated slow/broken third-party source can't delay boot); otherwise all are."""
+    unrelated slow/broken third-party source can't delay boot); otherwise all are.
+
+    ``checkpoint(message)`` runs before each source is fetched and raises
+    ProviderHubStopped when the job was stopped. The whole refresh is one state
+    write, so a stop leaves the catalog exactly as it was.
+    """
     with record_job("refresh_catalog", target_kind="system") as job:
         def refresh(state: dict[str, Any]) -> dict[str, Any]:
             now = utcnow_iso()
@@ -613,13 +683,16 @@ def refresh_catalog(source_ids: set[str] | None = None) -> dict[str, Any]:
                     continue
                 if source_ids is not None and source.get("id") not in source_ids:
                     continue
+                if checkpoint is not None:
+                    checkpoint(f"Fetching {source.get('name') or source.get('id') or 'a catalog source'}")
                 sources_count += 1
-                source["last_checked_at"] = now
+                source["last_attempted_at"] = now
                 try:
                     catalog, commit = _fetch_github_catalog(
                         source["url"], override_ref=source.get("dev_ref")
                     )
                     source["resolved_commit"] = commit
+                    source["last_checked_at"] = now
                     source["last_error"] = None
                     refreshed_sources.add(source.get("id") or source["name"])
                 except Exception as error:
@@ -758,6 +831,36 @@ def _effective_installation_config(installation: dict[str, Any]) -> dict[str, An
     return effective
 
 
+def _forget_credential_throttle(provider_id: str) -> None:
+    """Hand a re-configured provider its next attempt back.
+
+    An AuthenticationError parks a provider in throttled_providers.dat for
+    twelve hours, and the only thing that fixes it is the user correcting what
+    they typed. The settings page already clears those entries on save, but a
+    Provider Hub plugin is configured through this module instead, so the
+    corrected provider stayed skipped by every search, and reported as cooling
+    down on Discover, until the backoff ran out on its own.
+
+    The compat pool holds provider instances built with the old credentials, so
+    it is dropped here too, exactly as the settings path does. Both steps are
+    best-effort: saving a plugin's configuration must not fail because the
+    throttle table or the pool is unavailable.
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+    try:
+        from app.get_providers import reset_throttled_provider
+        reset_throttled_provider(provider_id)
+    except Exception:
+        logger.exception("Failed to clear the throttle for %s after a configuration change", provider_id)
+    try:
+        from compat.service import reset_compat_pool
+        reset_compat_pool()
+    except Exception:
+        logger.exception("Failed to reset the compat pool after configuring %s", provider_id)
+
+
 def update_provider(provider_id: str, enabled: bool | None = None, config: dict[str, Any] | None = None) -> dict[str, Any] | None:
     if config is not None:
         if not isinstance(config, dict):
@@ -770,7 +873,13 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
 
         if enabled is not None:
             provider["enabled"] = bool(enabled)
-            _set_bazarr_provider_enabled(provider_id, bool(enabled))
+            if not _set_bazarr_provider_enabled(provider_id, bool(enabled)):
+                # Raised inside the mutation, so the Hub state is not saved
+                # either and the whole update is refused, configuration included.
+                raise ProviderHubSettingsError(
+                    f"Could not {'enable' if enabled else 'disable'} {provider_id}: "
+                    f"{ENABLED_PROVIDERS_NOT_SAVED}"
+                )
 
         if config is not None:
             secret_fields = _manifest_secret_fields(provider)
@@ -788,6 +897,11 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
     provider = mutate_state(update_installation)
     if provider is None:
         return None
+    if config is not None:
+        _forget_credential_throttle(provider_id)
+    if config is not None or enabled is not None:
+        from . import runtime_status
+        runtime_status.clear(provider_id)
     return _redact_installation(provider)
 
 
@@ -809,17 +923,25 @@ def runtime_provider_configs() -> dict[str, dict[str, Any]]:
 
 
 def list_providers(redact: bool = True) -> list[dict[str, Any]]:
+    from . import runtime_status
+
     state = load_state()
-    providers = [
-        _with_origin(provider, state) if isinstance(provider, dict) else provider
-        for provider in (state.get("installations") or {}).values()
-    ]
-    if not redact:
-        return providers
-    return [
-        _redact_installation(provider) if isinstance(provider, dict) else provider
-        for provider in providers
-    ]
+    enabled_provider_ids = set(_bazarr_enabled_providers())
+    providers = []
+    for provider in (state.get("installations") or {}).values():
+        if not isinstance(provider, dict):
+            providers.append(provider)
+            continue
+        item = dict(_with_origin(provider, state))
+        status = runtime_status.get(item.get("provider_id"))
+        status_is_current = (
+            item.get("provider_id") in enabled_provider_ids
+            and item.get("state") != "removed"
+        )
+        if status is not None and status_is_current:
+            item["runtime_status"] = status
+        providers.append(_redact_installation(item) if redact else item)
+    return providers
 
 
 def get_provider(provider_id: str, redact: bool = True) -> dict[str, Any] | None:
@@ -1307,6 +1429,7 @@ def _stage_validated(
     bundle_stager,
     catalog_url: str | None = None,
     install_timeout: float | None = None,
+    checkpoint=None,
 ) -> dict[str, Any]:
     """Shared install core: stage the bundle, build the venv, smoke-test, record.
 
@@ -1315,7 +1438,14 @@ def _stage_validated(
     set, is a single wall-clock budget for the whole stage (bundle fetch + venv
     build) shared via ``deadline``, so the startup auto-install can't run past it;
     ``None`` (manual installs) leaves it unbounded.
+
+    ``checkpoint(message)`` runs before each step and raises ProviderHubStopped
+    when the job was stopped. A stop records nothing, so a fresh install leaves no
+    row and an update leaves the active version as it was, and it removes the
+    bundle and venv this run staged. Recording is the last step it can stop.
     """
+    step = checkpoint or (lambda message: None)
+    staged = []
     state = load_state()
     existing = (state.get("installations") or {}).get(validated.provider_id)
     existing_version = (
@@ -1335,11 +1465,20 @@ def _stage_validated(
     ) as job:
         try:
             deadline = None if install_timeout is None else time.monotonic() + max(0.0, install_timeout)
+            step("Downloading the provider")
             bundle_path = bundle_stager(validated, deadline)
+            staged.append(bundle_path)
+            step("Installing the provider's dependencies")
             install_remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
             env_path = PluginEnvironment(provider_hub_dir()).install(validated, timeout=install_remaining)
+            staged.append(env_path)
             staged_python_path = python_executable(env_path)
+            step("Checking that the provider starts")
             _smoke_validate_worker(validated, bundle_path, staged_python_path)
+            step("Recording the installation")
+        except ProviderHubStopped:
+            _discard_stopped_install(staged, existing)
+            raise
         except Exception as error:
             install_error = error
 
@@ -1371,10 +1510,15 @@ def _stage_validated(
             return dict(installation)
 
         installation = mutate_state(record_staged_install)
-        if not is_update:
+        if not is_update and not _set_bazarr_provider_enabled(validated.provider_id, True):
             # First install: opt the provider into Bazarr's enabled_providers so
             # the new plugin is search-eligible without a separate UI toggle.
-            _set_bazarr_provider_enabled(validated.provider_id, True)
+            # When that cannot be saved the install is staged but disabled,
+            # and saying so beats reporting a provider that will not search.
+            raise ProviderHubSettingsError(
+                f"it was staged but could not be enabled: {ENABLED_PROVIDERS_NOT_SAVED}. "
+                "Enable it once the configuration can be written"
+            )
         if is_update:
             message = (
                 f"Staged update {existing_version} -> {validated.version} "
@@ -1386,7 +1530,25 @@ def _stage_validated(
         return _redact_installation(installation)
 
 
-def stage_install(manifest: dict[str, Any], install_timeout: float | None = None) -> dict[str, Any]:
+def _discard_stopped_install(paths, existing) -> None:
+    """Remove the bundle and venv a stopped install staged, unless they are in use.
+
+    Both live at paths keyed by the version, so reinstalling the version that is
+    already active or staged lands on that installation's own files, which stay.
+    """
+    existing = existing if isinstance(existing, dict) else {}
+    in_use = {existing.get(key) for key in ("active_path", "staged_path", "python_path", "staged_python_path")}
+    in_use.discard(None)
+    for path in paths:
+        # A bundle is recorded by its directory, a venv by its interpreter.
+        if {str(path), str(python_executable(path))} & in_use:
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def stage_install(
+    manifest: dict[str, Any], install_timeout: float | None = None, checkpoint=None,
+) -> dict[str, Any]:
     state = load_state()
     source_trusted = _catalog_manifest_trusted(manifest, state) if isinstance(manifest, dict) else False
     origin, source_id = _install_origin(manifest, state) if isinstance(manifest, dict) else ("local", None)
@@ -1407,10 +1569,11 @@ def stage_install(manifest: dict[str, Any], install_timeout: float | None = None
         _fetch_bundle,
         catalog_url=catalog_url,
         install_timeout=install_timeout,
+        checkpoint=checkpoint,
     )
 
 
-def stage_install_local(archive_bytes: bytes) -> dict[str, Any]:
+def stage_install_local(archive_bytes: bytes, checkpoint=None) -> dict[str, Any]:
     """Install a Provider Hub provider from an uploaded .zip package.
 
     A local package has no catalog vouching for it, so it is always recorded as
@@ -1441,6 +1604,7 @@ def stage_install_local(archive_bytes: bytes) -> dict[str, Any]:
             origin="local",
             source_id=None,
             bundle_stager=lambda candidate, deadline=None: _stage_local_bundle(candidate, bundle_root),
+            checkpoint=checkpoint,
         )
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
@@ -1576,6 +1740,13 @@ def remove_installation(provider_id: str) -> bool:
         target_name=target_name,
         from_version=active_version,
     ) as job:
+        # Disabled first: once the removal is staged, a list that still names
+        # the provider after the restart would bring it back, and a failure
+        # here leaves nothing changed.
+        was_enabled = provider_id in _bazarr_enabled_providers()
+        if not _set_bazarr_provider_enabled(provider_id, False):
+            raise ProviderHubSettingsError(ENABLED_PROVIDERS_NOT_SAVED)
+
         def remove_or_stage(state: dict[str, Any]) -> str:
             installations = state.setdefault("installations", {})
             item = installations.get(provider_id)
@@ -1593,11 +1764,19 @@ def remove_installation(provider_id: str) -> bool:
             item["last_error"] = None
             return "staged"
 
-        result = mutate_state(remove_or_stage)
+        try:
+            result = mutate_state(remove_or_stage)
+        except Exception:
+            # Nothing was staged, so the provider is still installed and has to
+            # stay enabled as it was rather than silently switched off.
+            if was_enabled:
+                _set_bazarr_provider_enabled(provider_id, True)
+            raise
         if result == "missing":
             job.update(message=f"Plugin '{target_name}' not found")
             return False
-        _set_bazarr_provider_enabled(provider_id, False)
+        from . import runtime_status
+        runtime_status.clear(provider_id)
         if result == "removed_pending":
             job.update(message=f"Removed pending install of '{target_name}'")
             return True
@@ -1698,7 +1877,7 @@ def _latest_catalog_manifest(state: dict[str, Any], provider_id: str, active_ver
     return max(candidates, key=lambda item: item[0])[1]
 
 
-def apply_update(provider_id: str) -> dict[str, Any] | None:
+def apply_update(provider_id: str, checkpoint=None) -> dict[str, Any] | None:
     provider = get_provider(provider_id, redact=False)
     if not provider:
         return None
@@ -1733,7 +1912,7 @@ def apply_update(provider_id: str) -> dict[str, Any] | None:
             )
         return _redact_installation(provider)
     try:
-        return stage_install(manifest)
+        return stage_install(manifest, checkpoint=checkpoint)
     except ProviderHubInstallError:
         return get_provider(provider_id)
 

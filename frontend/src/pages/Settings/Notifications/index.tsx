@@ -21,8 +21,8 @@ const SettingsNotificationsView: FunctionComponent = () => {
           settingKey="settings-general-notify_if_nothing_is_missing_for_signalr_event"
         ></Check>
         <Message>
-          Send a notification when Sonarr or Radarr triggers a sync for an item
-          that is already fully subtitled. Off by default.
+          Send a notification when Sonarr, Radarr or Sportarr triggers a sync
+          for an item or league that is already fully subtitled. Off by default.
         </Message>
       </Section>
     </Layout>

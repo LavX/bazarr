@@ -9,6 +9,9 @@ request, call these, and commit.
 
 Plan: docs/superpowers/plans/2026-05-27-multiple-arr-instances-final.md (Phase 6).
 """
+import pytest
+
+pytestmark = pytest.mark.usefixtures('scheduler_runtime')
 
 
 def test_create_returns_201_and_never_echoes_api_key(schema_session):
@@ -182,6 +185,96 @@ def test_mirror_scalar_config_noop_without_default(schema_session, monkeypatch):
         assert wrote == []  # nothing to mirror, no write
     finally:
         settings.radarr.ip = original_ip
+
+
+class _FakeUpdate:
+    def values(self, **_kwargs):
+        return self
+
+
+def _mirror_default_with_timeout(schema_session, kind, timeout):
+    from arr_instances import service
+
+    _, status = service.create_instance(
+        schema_session,
+        {"kind": kind, "name": "Main", "api_key": "k", "http_timeout": timeout,
+         "is_default": True},
+    )
+    assert status == 201
+    service.mirror_scalar_config_from_default(schema_session, kind)
+
+
+@pytest.fixture
+def scalar_snapshot():
+    """Put back every scalar field the mirror writes."""
+    from app.config import settings
+
+    fields = ("ip", "port", "base_url", "ssl", "verify_ssl", "http_timeout", "apikey")
+    saved = {kind: {f: getattr(settings, kind)[f] for f in fields} for kind in ("sonarr", "radarr")}
+    trusted_proxy = settings.general.trusted_proxy
+    yield
+    for kind, values in saved.items():
+        for field, value in values.items():
+            setattr(getattr(settings, kind), field, value)
+    settings.general.trusted_proxy = trusted_proxy
+
+
+@pytest.mark.parametrize("kind", ["sonarr", "radarr"])
+def test_default_instance_timeout_of_30_does_not_block_settings_save(
+        schema_session, monkeypatch, scalar_snapshot, kind):
+    """The instance API accepts any timeout from 1 s. The mirror copies it into
+    the scalar config, whose validator used to allow only 60, 120, 180, 240,
+    300 or 600, so every save through /api/system/settings then failed with 406.
+    """
+    import sys
+    from types import SimpleNamespace
+
+    from app import config as app_config
+
+    monkeypatch.setattr(app_config, "write_config", lambda **_kwargs: True)
+    monkeypatch.setattr(app_config, "validate_log_regex", lambda: None)
+
+    _mirror_default_with_timeout(schema_session, kind, 30)
+    assert getattr(app_config.settings, kind).http_timeout == 30
+
+    monkeypatch.setitem(
+        sys.modules,
+        "app.database",
+        SimpleNamespace(
+            database=SimpleNamespace(execute=lambda statement: None),
+            update=lambda _model: _FakeUpdate(),
+            System=object,
+        ),
+    )
+    # An unrelated setting, as any save from the Settings pages would carry.
+    app_config.save_settings([("settings-general-trusted_proxy", ["10.0.0.5"])])
+
+    assert app_config.settings.general.trusted_proxy == "10.0.0.5"
+    assert getattr(app_config.settings, kind).http_timeout == 30
+
+
+@pytest.mark.parametrize("kind", ["sonarr", "radarr"])
+def test_default_instance_timeout_of_30_survives_restart(
+        schema_session, monkeypatch, scalar_snapshot, kind):
+    """Startup validates the config before the mirror runs. The old rule reset
+    30 to 60 and the mirror then wrote 30 straight back, so a restart never
+    cleared the lockout. Now the value passes and the mirror has nothing to do.
+    """
+    from app import config as app_config
+    from arr_instances import service
+
+    writes = []
+    monkeypatch.setattr(app_config, "write_config", lambda **_kwargs: writes.append(True) or True)
+
+    _mirror_default_with_timeout(schema_session, kind, 30)
+    writes.clear()
+
+    # The startup loop resets any value that fails here back to its default.
+    app_config.settings.validators.validate_all(only=f"{kind}.http_timeout")
+    assert getattr(app_config.settings, kind).http_timeout == 30
+
+    service.mirror_scalar_config_from_default(schema_session, kind)
+    assert writes == []
 
 
 def test_test_connection_rejects_invalid_port():

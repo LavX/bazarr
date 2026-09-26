@@ -1,23 +1,31 @@
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import {
+  faChartLine,
   faClockRotateLeft,
+  faCompass,
   faDatabase,
   faDownload,
   faFileZipper,
+  faGaugeHigh,
   faLayerGroup,
+  faListCheck,
   faScaleBalanced,
   faServer,
   faShieldHalved,
   faSliders,
   faStore,
   faTowerBroadcast,
+  faTrophy,
   faWandMagicSparkles,
 } from "@fortawesome/free-solid-svg-icons";
 
 export interface WhatsNewSlide {
   /** Short headline for the change. */
   title: string;
-  /** One to three lines describing it. */
+  /**
+   * Lead with the user benefit and keep new slides to two short sentences.
+   * Detailed fixes and implementation notes belong in the full release notes.
+   */
   body: string;
   /** Optional imported asset URL; takes priority over `icon`. */
   image?: string;
@@ -32,7 +40,7 @@ export interface WhatsNewSlide {
  * cutting a release. Kept as an explicit token so the wizard never has to parse the
  * fork's `version + YYMMDD` runtime string.
  */
-export const latestWhatsNewVersion = "2.6.2";
+export const latestWhatsNewVersion = "2.7.0";
 
 // v2.6.0 feature slides; v2.6.1 (a patch on the same line) leads with its
 // fix and keeps the whole Clockwork tour behind it.
@@ -87,6 +95,43 @@ const clockworkSlides: WhatsNewSlide[] = [
 ];
 
 export const whatsNew: Record<string, WhatsNewSlide[]> = {
+  "2.7.0": [
+    {
+      title: "Find subtitles for any film or show",
+      body: "Search, preview and save subtitles from Discover, even without Sonarr or Radarr. Results appear as providers finish, so you can download without waiting for the whole search.",
+      icon: faCompass,
+      cta: { label: "Find subtitles", to: "/discover" },
+    },
+    {
+      title: "Give sports the same subtitle tools",
+      body: "Connect Sportarr to search, sync and translate subtitles for your recordings. Set a language profile for each league and let Bazarr+ find what is missing.",
+      icon: faTrophy,
+      cta: { label: "Connect Sportarr", to: "/settings/connections#sportarr" },
+    },
+    {
+      title: "See new subtitles in your media server",
+      body: "Connect Emby, Silo, Jellyfin or Plex, including multiple servers of each kind. After a subtitle arrives, Bazarr+ asks the matching servers to refresh it.",
+      icon: faServer,
+      cta: { label: "Open connection settings", to: "/settings/connections" },
+    },
+    {
+      title: "Spend less on translation with SmartFast",
+      body: "SmartFast balances price and speed when choosing an OpenRouter provider. Your current routing stays unchanged; switch under Provider Routing after updating AI Subtitle Translator to 2.0.0 or newer.",
+      icon: faGaugeHigh,
+      cta: { label: "Choose translation routing", to: "/settings/translator" },
+    },
+    {
+      title: "Know when your work is done",
+      body: "Downloads, translations and other long tasks report their progress in Jobs. If something fails, you get a reason and a Retry action when another attempt can help.",
+      icon: faListCheck,
+    },
+    {
+      title: "See which providers work best for you",
+      body: "Compare provider results, subtitle quality and download activity in System > Statistics. See which providers deliver the best matches and which languages you download most.",
+      icon: faChartLine,
+      cta: { label: "Explore your statistics", to: "/system/statistics" },
+    },
+  ],
   "2.6.2": [
     {
       title: "Uploaded subtitles appear before sync finishes",

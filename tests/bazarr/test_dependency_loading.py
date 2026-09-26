@@ -57,7 +57,7 @@ def test_flask_compress_is_loaded_from_python_environment_not_custom_libs():
 
     assert not custom_flask_compress_dir.exists()
     assert not flask_compress_path.is_relative_to(custom_flask_compress_dir)
-    assert "Flask-Compress==1.24" in requirements
+    assert "Flask-Compress==1.25" in requirements
     assert "Flask-Compress" not in custom_versions
 
 
@@ -242,7 +242,7 @@ def test_startup_requirements_probe_uses_security_patched_dependency_versions():
     expected_versions = {
         "cryptography": ("cryptography", ">=50.0.1"),
         "dynaconf": ("dynaconf", "==3.3.5"),
-        "urllib3": ("urllib3", "==2.7.0"),
+        "urllib3": ("urllib3", "==2.8.0"),
     }
 
     for module, (distribution, spec) in expected_versions.items():

@@ -53,9 +53,14 @@ def convert_language_codes(to_lang, forced=False, hi=False):
     return lang_obj, orig_to_lang
 
 
-def create_process_result(message, video_path, orig_to_lang, forced, hi, dest_srt_file, media_type):
+def create_process_result(message, video_path, orig_to_lang, forced, hi, dest_srt_file, media_type, sports_context=None):
     """Create a ProcessSubtitlesResult object with common parameters."""
-    if media_type == 'episode':
+    if sports_context is not None:
+        from sportarr.subtitles import reverse_path
+        def prr(path):
+            return reverse_path(sports_context, path)
+        score = int((settings.translator.default_score / 100) * MAX_SCORES['movie'])
+    elif media_type == 'episode':
         prr = path_mappings.path_replace_reverse
         score = int((settings.translator.default_score / 100) * MAX_SCORES['episode'])
     else:
@@ -135,7 +140,10 @@ def _scope(statement, table, arr_instance_id):
     return statement.where(table.arr_instance_id == arr_instance_id)
 
 
-def get_description(media_type, radarr_id, sonarr_series_id, arr_instance_id=None):
+def get_description(media_type, radarr_id, sonarr_series_id, arr_instance_id=None, sports_context=None):
+    if sports_context is not None:
+        from sportarr.profile_hooks import metadata
+        return metadata(sports_context)[1]
     try:
         if is_movie_media_type(media_type):
             movie = database.execute(
@@ -176,8 +184,12 @@ def get_title(
         radarr_id: Union[int, None] = None,
         sonarr_series_id: Union[int, None] = None,
         sonarr_episode_id: Union[int, None] = None,
-        arr_instance_id: Union[int, None] = None
+        arr_instance_id: Union[int, None] = None,
+        sports_context=None
 ) -> str:
+    if sports_context is not None:
+        from sportarr.profile_hooks import metadata
+        return metadata(sports_context)[0]
     try:
         if is_movie_media_type(media_type):
             if radarr_id is None:

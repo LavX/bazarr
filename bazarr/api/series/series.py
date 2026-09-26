@@ -10,13 +10,13 @@ from sqlalchemy import case
 from app.database import get_exclusion_clause, TableEpisodes, TableShows, database, select, update, func
 from arr_instances.resolution import scoped
 from sonarr.sync.series import update_one_series, update_one_series_for_instance
-from subtitles.indexer.series import list_missing_subtitles, series_scan_subtitles
+from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
+from subtitles.indexer.series import series_scan_disk
 from subtitles.mass_download import series_download_subtitles
-from subtitles.tools.combine.main import try_combine_for_video
+from app.jobs_queue import jobs_queue
 from subtitles.wanted import wanted_search_missing_subtitles_series, wanted_scan_subtitles_series
 from app.event_handler import event_stream
-from api.swaggerui import subtitles_model, subtitles_language_model, audio_language_model
-from utilities.path_mappings import path_mappings
+from api.swaggerui import subtitles_model, subtitles_language_model, audio_language_model, job_queued_model
 
 from api.utils import authenticate, None_Keys, postprocess
 
@@ -203,6 +203,7 @@ class Series(Resource):
         arrInstanceIdList = args.get('arr_instance_id')
         profileIdList = args.get('profileid')
         targetList = localIdList if localIdList else seriesIdList
+        changed = []
 
         for idx in range(len(targetList)):
             profileId = profileIdList[idx]
@@ -229,7 +230,6 @@ class Series(Resource):
                     .where(TableShows.id == localId))
                 seriesId = series.sonarrSeriesId
                 arr_instance_id = series.arr_instance_id
-                episode_id_query = select(TableEpisodes.sonarrEpisodeId).where(TableEpisodes.series_id == localId)
             else:
                 seriesId = targetList[idx]
                 arr_instance_id = arrInstanceIdList[idx] if idx < len(arrInstanceIdList) else None
@@ -257,22 +257,14 @@ class Series(Resource):
                         TableShows.arr_instance_id,
                         arr_instance_id,
                     ))
-                episode_id_query = scoped(
-                    select(TableEpisodes.sonarrEpisodeId).where(TableEpisodes.sonarrSeriesId == seriesId),
-                    TableEpisodes.arr_instance_id,
-                    arr_instance_id,
-                )
 
-            list_missing_subtitles(no=seriesId, arr_instance_id=arr_instance_id)
-
+            changed.append((seriesId, arr_instance_id))
             event_stream(type='series', payload=seriesId)
 
-            episode_id_list = database.execute(episode_id_query).all()
-
-            for item in episode_id_list:
-                event_stream(type='episode-wanted', payload=item.sonarrEpisodeId)
-
-        event_stream(type='badges')
+        # What is missing is recalculated by a queued job, which announces the
+        # episodes and the badges once it has. Doing it here, one full pass per
+        # series, held the save for as long as the whole selection took.
+        queue_missing_subtitles_recalculation(series=changed)
 
         return '', 204
 
@@ -283,9 +275,12 @@ class Series(Resource):
     patch_request_parser.add_argument('action', type=str, required=False, help='Action to perform from ["scan-disk", '
                                                                                '"search-missing", "search-wanted", "sync"]')
 
+    patch_job_model = api_ns_series.model('JobQueued', job_queued_model)
+
     @authenticate
     @api_ns_series.doc(parser=patch_request_parser)
-    @api_ns_series.response(204, 'Success')
+    @api_ns_series.response(202, 'scan-disk queued as a job', patch_job_model)
+    @api_ns_series.response(204, 'Success for every other action')
     @api_ns_series.response(400, 'Unknown action')
     @api_ns_series.response(401, 'Not Authenticated')
     @api_ns_series.response(500, 'Series directory not found. Path mapping issue?')
@@ -296,8 +291,8 @@ class Series(Resource):
         arr_instance_id = args.get('arr_instance_id')
         action = args.get('action')
         if action == "scan-disk":
-            series_scan_subtitles(seriesid, arr_instance_id=arr_instance_id)
-            return '', 204
+            job_id = series_scan_disk(seriesid, arr_instance_id=arr_instance_id)
+            return {'job_id': job_id or None}, 202
         elif action == "search-missing":
             try:
                 series_download_subtitles(seriesid, arr_instance_id=arr_instance_id)
@@ -328,6 +323,7 @@ def _list_series_episodes(series_id, arr_instance_id=None):
                 TableEpisodes.sonarrEpisodeId,
                 TableEpisodes.sonarrSeriesId,
                 TableEpisodes.path,
+                TableEpisodes.arr_instance_id,
             ).where(TableEpisodes.sonarrSeriesId == series_id),
             TableEpisodes.arr_instance_id,
             arr_instance_id,
@@ -338,6 +334,7 @@ def _list_series_episodes(series_id, arr_instance_id=None):
             'sonarrEpisodeId': r.sonarrEpisodeId,
             'sonarrSeriesId': r.sonarrSeriesId,
             'path': r.path,
+            'arr_instance_id': r.arr_instance_id,
         }
         for r in rows
     ]
@@ -346,7 +343,7 @@ def _list_series_episodes(series_id, arr_instance_id=None):
 @api_ns_series.route('series/<int:series_id>/subtitles/combine')
 class SeriesSubtitlesCombine(Resource):
     @authenticate
-    @api_ns_series.response(200, 'Batch combine summary')
+    @api_ns_series.response(202, 'Combine job queued')
     @api_ns_series.response(401, 'Not Authenticated')
     @api_ns_series.response(404, 'Series not found')
     def post(self, series_id):
@@ -361,36 +358,18 @@ class SeriesSubtitlesCombine(Resource):
         if not episodes:
             return {'status': 'not_found'}, 404
 
-        built, skipped, failed = 0, 0, 0
-        details = []
-        for ep in episodes:
-            video_path = path_mappings.path_replace(ep['path'])
-            r = try_combine_for_video(
-                video_path=video_path,
-                media_type='series',
-                radarr_id=None,
-                sonarr_series_id=ep['sonarrSeriesId'],
-                sonarr_episode_id=ep['sonarrEpisodeId'],
-                languages=languages,
-                format=format_,
-            )
-            details.append({
-                'episodeId': ep['sonarrEpisodeId'],
-                'status': r.status,
-                'path': r.path,
-                'reason': r.reason,
-                'error': r.error,
-            })
-            if r.status == 'built':
-                built += 1
-            elif r.status == 'skipped':
-                skipped += 1
-            else:
-                failed += 1
-        return {
-            'status': 'batch_complete',
-            'built': built,
-            'skipped': skipped,
-            'failed': failed,
-            'details': details,
-        }, 200
+        # One queued job for the whole series: it reports per-episode progress
+        # and fails with a summary when any episode failed.
+        show = database.execute(scoped(
+            select(TableShows.title).where(TableShows.sonarrSeriesId == series_id),
+            TableShows.arr_instance_id, arr_instance_id)).first()
+        job_id = jobs_queue.feed_jobs_pending_queue(
+            job_name=f"Combining subtitles for {show.title if show else f'series {series_id}'}",
+            module='subtitles.tools.combine.batch',
+            func='combine_series_subtitles',
+            kwargs={'series_id': series_id, 'languages': languages, 'format': format_,
+                    'arr_instance_id': arr_instance_id},
+            is_progress=True,
+            progress_max=len(episodes),
+        )
+        return {'status': 'queued', 'job_id': job_id or None}, 202

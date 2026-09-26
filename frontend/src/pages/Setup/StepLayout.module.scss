@@ -1,0 +1,80 @@
+// Layout for one wizard step. See StepLayout.tsx for which variant a step
+// takes and why.
+
+.layout,
+.stacked,
+.wide {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+
+// A step whose explanation is a sentence or two. The shell is wide because the
+// configure screens need it; a step with nothing to put beside its controls
+// reads down the middle at a comfortable measure instead of stretching to fill
+// a width it has no use for.
+.stacked {
+  width: 100%;
+  max-width: 760px;
+  margin-inline: auto;
+}
+
+.intro {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.controls {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.actions {
+  min-width: 0;
+}
+
+// The shell is 1120px wide, so from 1200 there is room for the explanation and
+// the controls beside each other. The gain is vertical: the tallest media
+// server screens lose the whole height of their heading, their paragraph and
+// their status lines, which is what put them past the bottom of the window.
+@media (min-width: 1200px) {
+  .layout {
+    display: grid;
+    grid-template-columns: minmax(260px, 330px) minmax(0, 1fr);
+    column-gap: 40px;
+    row-gap: 24px;
+    align-items: start;
+  }
+
+  .layout .intro {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .layout .controls {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .layout .actions {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+}
+
+// A step whose body is a long list keeps Back and Continue in sight. Nothing
+// inside the wizard scrolls, so on a step that fits this rule does nothing at
+// all; it is there so a catalog longer than any budget allows for cannot push
+// the only way forward under the bottom of the window.
+.actionsSticky {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  padding-top: 12px;
+  background: var(--bz-surface-card);
+}

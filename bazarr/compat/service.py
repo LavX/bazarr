@@ -10,15 +10,22 @@ from subliminal.video import Episode, Movie, Video
 from subliminal_patch.core_persistent import list_all_subtitles_parallel
 
 from app.config import settings
-from app.get_providers import get_provider_language_hook, get_providers_sorted, get_providers_auth
+from app.get_providers import (CREDENTIAL_THROTTLE_REASONS, get_provider_language_hook,
+                               get_providers_sorted, get_providers_auth,
+                               provider_is_usable, provider_throttle)
 from . import auth, cache as C, response_mapper as M
-from .local_subs import search_local
+from .local_subs import search_local, _UNRESOLVED_SPORTS
 from utilities.url_guard import assert_safe_outbound, resolve_safe_url, UnsafeURLError  # noqa: F401
 
 logger = logging.getLogger("bazarr.compat.service")
 
 _pool_lock = Lock()
 _compat_pool = None  # lazy singleton, dedicated (B2)
+# Bumped every time the pool is dropped. A drop does not cancel the searches
+# already running on the old pool, and those calls carry the credentials the
+# user has just replaced, so their verdict on those credentials has to be told
+# apart from the new pool's.
+_pool_generation = 0
 # Providers that consume the client-supplied OpenSubtitles-style moviehash.
 # NapiProjekt is intentionally excluded: it keys on a different hash (md5 of the
 # first 10 MB, a 32-char digest), and feeding it the 16-char OS hash makes its
@@ -32,7 +39,61 @@ _CLIENT_MOVIEHASH_PROVIDERS = (
 _SHOOTER_HASH_RE = re.compile(r"^[0-9a-fA-F]{32}(?:;[0-9a-fA-F]{32}){3}$")
 
 
-def _get_compat_pool():
+def _record_throttle(name, exception, ids=None, language=None, sports_context=None):
+    """Record a provider failure without spending the fanout's wall clock.
+
+    provider_throttle sleeps between the first few rate-limit events, which is
+    correct where it came from: the library search retries the same provider in
+    the same call, and the pause is what makes the retry worth attempting. This
+    pool never retries. Its callback runs inside the provider future, before
+    the detailed outcome is returned, so the sleep would be charged to the wall
+    the remaining providers are still searching against. With the smallest
+    valid five-second wall, the default five-second pause is enough on its own
+    to have the provider reported as abandoned instead of cooling down, its
+    retry metadata discarded and a health failure counted against it, all for a
+    failure we had already classified correctly.
+    """
+    return provider_throttle(name, exception, ids=ids, language=language,
+                             sports_context=sports_context, wait=False)
+
+
+def _throttle_recorder(generation):
+    """The pool's throttle callback, tied to the pool that was given it.
+
+    Dropping the pool is how a credential change takes effect, but it does not
+    cancel the searches already in flight on the old one. Those calls are still
+    presenting the password the user has just corrected, so the
+    AuthenticationError one of them is about to raise is evidence about the old
+    credentials and none at all about the new ones. Recorded anyway, it writes
+    the twelve-hour entry back over the one the save just cleared, and the
+    provider the user has only now fixed is skipped again with nothing on
+    screen to say why. Only the credential classes are dropped: a rate limit or
+    an outage a superseded call ran into is about the provider itself and
+    stands whatever the local configuration does.
+
+    A save replaces the whole pool's configuration, so this covers every
+    provider on the old pool rather than one. An unchanged provider whose
+    credentials really are wrong therefore records its backoff on the next
+    search instead of this one, which is the right way round to be wrong: it
+    asks a bad provider once more, where the alternative keeps skipping one the
+    user has just fixed.
+    """
+    def record(name, exception, ids=None, language=None, sports_context=None):
+        if generation != _pool_generation and (
+                exception.__class__.__name__ in CREDENTIAL_THROTTLE_REASONS):
+            logger.info("compat: not recording a %s backoff for %s, the configuration it "
+                        "judged has already been replaced",
+                        exception.__class__.__name__, name)
+            # What a no-wait record returns: there is no retry on this path
+            # either way, so the caller's handling is unchanged.
+            return True
+        return _record_throttle(name, exception, ids=ids, language=language,
+                                sports_context=sports_context)
+
+    return record
+
+
+def _get_compat_pool(*, restore_available=False):
     """Dedicated SZAsyncProviderPool instance. MUST NOT share app.get_providers._pools."""
     global _compat_pool
     with _pool_lock:
@@ -43,17 +104,43 @@ def _get_compat_pool():
                 provider_configs=get_providers_auth(),
                 blacklist=None,
                 ban_list=None,
+                # The library pool has carried these two since the backoff was
+                # written; this pool never did, so every per-exception cool-off
+                # in provider_throttle_map() was dead code on the compat and
+                # Discover paths and throttled_providers.dat was never written
+                # by them. A provider returning 500 to every request was asked
+                # again on the next search, forever. throttle_callback records
+                # the failure with the duration its exception class earns, and
+                # adoption_gate keeps a provider that is serving out a backoff
+                # from being re-adopted into the pool behind that record's back.
+                throttle_callback=_throttle_recorder(_pool_generation),
+                adoption_gate=provider_is_usable,
                 language_hook=get_provider_language_hook(),
                 language_equals=[],
             )
+        elif restore_available:
+            # A cold pool can omit a configured provider while it is throttled.
+            # Restore availability without update() clearing unrelated discards
+            # or retiring initialized members that another search is using.
+            missing = [name for name in get_providers_sorted() or [] if name not in _compat_pool.providers]
+            if missing:
+                configs = get_providers_auth()
+                for name in missing:
+                    try:
+                        _compat_pool.adopt_provider(name, configs.get(name, {}))
+                    except KeyError:
+                        # Registration or the pool's adoption gate can change
+                        # after the availability snapshot. Coverage reports it.
+                        continue
         return _compat_pool
 
 
 def reset_compat_pool() -> None:
     """Called on settings-change or provider toggle so stale creds don't persist."""
-    global _compat_pool
+    global _compat_pool, _pool_generation
     with _pool_lock:
         _compat_pool = None
+        _pool_generation += 1
 
 
 def _tt(imdb_id) -> str:
@@ -233,12 +320,47 @@ def _apply_anidb_ids(video, series_anidb_id: int | None = None,
     return video
 
 
-def _build_video(imdb_id: str, season: int | None, episode: int | None,
+def _build_release_query_video(query: str | None) -> Video:
+    """Parse only explicit release text into unverified provider query hints.
+
+    These hints are neither resolved metadata nor a local video association.
+    Keep the complete parse until ambiguity has been checked, without defaults
+    from Video.fromname or Episode.fromguess.
+    """
+    hints = _guessit_filename(query) if query else {}
+    kind, title, year = hints.get("type"), hints.get("title"), hints.get("year")
+    if (kind not in ("movie", "episode") or not isinstance(title, str)
+            or not any(c.isalnum() for c in title)
+            or (year is not None and (type(year) is not int or not 1870 <= year <= 2200))):
+        raise ValueError("Could not read this release name. Include a clear movie title or one numbered episode.")
+    numbering = re.findall(
+        r"(?<![a-z0-9])(?:s([0-9]{1,4})[ ._-]*e([0-9]{1,4})|([0-9]{1,4})x([0-9]{1,4}))(?![a-z0-9])",
+        query, re.IGNORECASE,
+    )
+    if kind == "episode":
+        season, episode = hints.get("season"), hints.get("episode")
+        if (type(season) is not int or not 0 <= season <= 9999
+                or type(episode) is not int or not 1 <= episode <= 9999
+                or len(numbering) != 1 or hints.get("date") is not None):
+            raise ValueError("Use one explicitly numbered episode, for example Show.S02E03. Packs and absolute numbering need an exact episode.")
+        s, e, x_s, x_e = numbering[0]
+        if (int(s or x_s), int(e or x_e)) != (season, episode):
+            raise ValueError("This release name has conflicting episode numbers. Use one explicit season and episode.")
+        return Episode(name=query, series=title, year=year, season=season, episodes=[episode])
+    if numbering or any(hints.get(key) is not None for key in ("season", "episode", "date")):
+        raise ValueError("This release name has ambiguous episode hints. Use one explicit season and episode.")
+    return Movie(name=query, title=title, year=year)
+
+
+def _build_video(imdb_id: str | None, season: int | None, episode: int | None,
                  media_type: str, query: str | None = None,
                  moviehash: str | None = None,
                  moviebytesize: int | None = None,
                  series_anidb_id: int | None = None,
-                 series_anidb_episode_id: int | None = None) -> Video:
+                 series_anidb_episode_id: int | None = None,
+                 *, title_only: bool = False, year: int | None = None,
+                 release_query: bool = False, episode_identity: dict | None = None,
+                 copy_path: str | None = None) -> Video:
     """Construct a Video for compat fanout.
 
     Preferred path: when the imdb_id resolves to a library entry with a
@@ -253,11 +375,29 @@ def _build_video(imdb_id: str, season: int | None, episode: int | None,
     on the client's filename + OMDB/TVDB refiner lookups. Lower scoring
     signal but still better than nothing for query-only searches.
     """
+    if release_query:
+        if (title_only or imdb_id or season is not None or episode is not None or year is not None
+                or moviehash or moviebytesize is not None or series_anidb_id is not None
+                or series_anidb_episode_id is not None or episode_identity is not None
+                or copy_path is not None):
+            raise ValueError("A release query cannot adopt identified media or file properties.")
+        return _build_release_query_video(query)
     # Normalize up front: clients (Jellyfin plugin) strip 'tt' before
     # sending. OMDB / TVDB v1 / v4 all reject the bare numeric form, so
     # carrying the normalized value through the Video avoids having to
     # re-prepend in every downstream caller.
     imdb_id = _tt(imdb_id) or imdb_id
+    if title_only:
+        if media_type == "episode":
+            identity = episode_identity or {}
+            video = Episode(name=copy_path or "", series=query or "", season=season, episodes=[episode],
+                            year=year, series_imdb_id=imdb_id, title=identity.get("title"),
+                            imdb_id=identity.get("imdb_id"), tvdb_id=identity.get("tvdb_id"),
+                            series_tvdb_id=identity.get("show_tvdb_id"), tmdb_id=identity.get("id"),
+                            series_tmdb_id=identity.get("show_id"))
+            video.episode_title = identity.get("title")
+            return video
+        return Movie(name=copy_path or "", title=query or "", year=year, imdb_id=imdb_id)
     meta = _lookup_library_metadata(imdb_id, media_type, season, episode)
 
     path = meta.get("path") or ""
@@ -633,16 +773,122 @@ _SKIP_FOR_VIRTUAL_VIDEO = frozenset({"embeddedsubtitles"})
 LOCAL_PROVIDER = "local"
 
 
+# Release facts a chosen local copy may contribute, and the guessit key each
+# one is read from. Identity is deliberately absent: a copy refines how a
+# release is described, never which title, episode or numbering was confirmed.
+COPY_RELEASE_ATTRIBUTES = (
+    ("release_group", "release_group"),
+    ("source", "source"),
+    ("resolution", "screen_size"),
+    ("video_codec", "video_codec"),
+    ("audio_codec", "audio_codec"),
+    ("edition", "edition"),
+    ("streaming_service", "streaming_service"),
+    ("other", "other"),
+)
+_COPY_STORED_COLUMNS = (("source", "source"), ("resolution", None),
+                        ("video_codec", "video_codec"), ("audio_codec", "audio_codec"))
+
+
+def _copy_release_hints(text: str) -> dict:
+    """Bounded string parsing of one release-bearing name, nothing more."""
+    if not isinstance(text, str) or not text.strip() or len(text) > 500:
+        return {}
+    return _guessit_filename(text.strip())
+
+
+def refine_video_with_copy(video, copy_facts: dict):
+    """Supplement one prebuilt title target with facts from a chosen local copy.
+
+    Only release description, file name, observed size and, when it was
+    computed, the content hash are contributed. Title, series, season, episode
+    and every external identifier are left exactly as the confirmed target
+    established them, so a copy can never redirect the search to another work.
+
+    Every fact comes from the copy the reader picked: the mapped path's own
+    file name first, then its scene name, then the stored release columns. No
+    refiner registry, no media probe, no cache write and no network call.
+
+    ``Video.name`` is read-only and takes part in the video's hash, so the
+    chosen copy's path is supplied to ``_build_video`` at construction instead
+    of being assigned here.
+    """
+    from subtitles.refiners.utils import convert_to_guessit
+
+    path = copy_facts.get("path") or ""
+    hints = _copy_release_hints(os.path.basename(path))
+    scene = _copy_release_hints(copy_facts.get("release"))
+    for attribute, key in COPY_RELEASE_ATTRIBUTES:
+        for source in (hints, scene):
+            value = source.get(key)
+            if value and getattr(video, attribute, None) in (None, "", []):
+                setattr(video, attribute, value)
+    for attribute, key in _COPY_STORED_COLUMNS:
+        stored = copy_facts.get(attribute)
+        # convert_to_guessit returns its argument unchanged on a miss, and the
+        # column can hold the literal string "None" from an older writer.
+        if not stored or stored == "None" or getattr(video, attribute, None):
+            continue
+        setattr(video, attribute, convert_to_guessit(key, stored) if key else stored)
+    size = copy_facts.get("observed_size")
+    if isinstance(size, int) and size > 0:
+        video.size = size
+    if copy_facts.get("file_hash"):
+        _apply_client_moviehash(video, copy_facts["file_hash"])
+    return video
+
+
+def search_wall_seconds() -> int:
+    """How long one fanout may run, clamped the way the fanout clamps it.
+
+    A caller that hands something out while the search is still running needs
+    this number too, and two copies of the clamp would drift.
+    """
+    return max(5, min(120, int(settings.compat_endpoint.search_timeout_seconds)))
+
+
+def search_title(video, languages, pool, providers, on_outcome):
+    """Search a prebuilt title target using the shared bounded provider executor."""
+    # Imported here for the same reason discover.search._coverage does it: the
+    # API blueprint imports every namespace eagerly, and a module-level import
+    # of the health tracker drags provider internals into modules whose tests
+    # replace subliminal_patch with a bounded stub.
+    from subliminal_patch.provider_health import get_tracker
+    health = get_tracker()
+    wall = search_wall_seconds()
+    return list_all_subtitles_parallel(
+        [video], set(languages), pool,
+        per_provider_timeout=max(3, int(wall * 0.6)), wall_timeout=wall,
+        exclude_providers=set(pool.providers) - set(providers),
+        # Without this the tracker only ever read: discover.search consults
+        # currently_discarded() while nothing fed record(), so the escalating
+        # discard could never engage no matter how badly a provider behaved.
+        on_result=health.record,
+        on_outcome=on_outcome,
+    ).get(video, [])
+
+
 def _do_fanout(imdb_id, season, episode, languages, media_type,
                query=None, moviehash=None, moviebytesize=None,
                series_anidb_id=None, series_anidb_episode_id=None,
                moviehash_match=None,
                requested_languages=None, exclude_providers=None,
-               timeout_seconds=None, only_providers=None):
+               timeout_seconds=None, only_providers=None,
+               sports_match=_UNRESOLVED_SPORTS):
     from subliminal_patch.provider_health import get_tracker as _get_health_tracker
     from subliminal_patch.score import ComputeScore, MAX_SCORES
     health = _get_health_tracker()
-    pool = _get_compat_pool()
+    # restore_available, for the same reason Discover asks for it. Any pool
+    # reset, a settings save, a provider toggle or a Hub configuration change,
+    # is served by the next fanout building a pool from the providers that are
+    # searchable right then, so a provider serving out a backoff at that moment
+    # is left out of a membership list nothing else ever adds to. On this path
+    # that is permanent: the exclusion below is re-checked per fanout, while
+    # nothing re-checked the way back in, so one provider's backoff plus one
+    # unrelated save dropped it from every compat search for the life of the
+    # process. Adoption still goes through provider_is_usable, so the backoff
+    # itself is served out in full.
+    pool = _get_compat_pool(restore_available=True)
     video = _build_video(imdb_id, season, episode, media_type,
                          query=query, moviehash=moviehash,
                          moviebytesize=moviebytesize,
@@ -654,7 +900,18 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
     # Per-request / per-key provider exclusion (Distribution Hub req #1) is
     # unioned with the health-discard set and the virtual-video skip list.
     requested_exclude = {str(p).strip() for p in (exclude_providers or []) if str(p).strip()}
-    exclude = (health_discarded | requested_exclude
+    # The adoption gate only guards the way IN. It is consulted when a name is
+    # missing from pool.providers and has to be adopted, which is exactly the
+    # case a throttled provider is not in: this pool is a process-lifetime
+    # singleton, so a provider that was healthy when it was built stays in
+    # pool.providers for as long as the process lives, and the fanout submits
+    # every member. Writing the throttle table therefore took that provider out
+    # of the library search and out of Discover's coverage while this path went
+    # on asking it on every request, with the rest of Bazarr reporting it as
+    # throttled. Re-check the membership we already hold, per fanout, against
+    # the same gate.
+    throttled = {name for name in pool.providers if not provider_is_usable(name)}
+    exclude = (health_discarded | requested_exclude | throttled
                | (set() if video_has_file else set(_SKIP_FOR_VIRTUAL_VIDEO)))
     # Per-request / per-key allow-list (only_providers). None means no allow-list
     # (every enabled provider is in play); a list (even empty) scopes the search
@@ -671,14 +928,15 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
     if only_providers is not None:
         requested_only = {str(p).strip() for p in only_providers if str(p).strip()}
         exclude |= (set(pool.providers) - requested_only)
-        local_allowed = LOCAL_PROVIDER in requested_only
+        local_allowed = LOCAL_PROVIDER in requested_only and LOCAL_PROVIDER not in requested_exclude
     else:
         requested_only = None
         local_allowed = LOCAL_PROVIDER not in requested_exclude
-    logger.info("compat fanout: video=%r lang=%s providers=%d health_skipped=%s "
+    logger.info("compat fanout: video=%r lang=%s providers=%d health_skipped=%s throttled=%s "
                 "req_excluded=%s req_only=%s local_allowed=%s",
                 video, [str(l) for l in languages], len(pool.providers),  # noqa: E741
-                sorted(health_discarded) or "[]", sorted(requested_exclude) or "[]",
+                sorted(health_discarded) or "[]", sorted(throttled) or "[]",
+                sorted(requested_exclude) or "[]",
                 "none" if requested_only is None else (sorted(requested_only) or "[]"),
                 local_allowed)
 
@@ -796,6 +1054,7 @@ def _do_fanout(imdb_id, season, episode, languages, media_type,
                 languages=requested_languages or [],
                 query=query, moviehash=moviehash,
                 moviehash_match=moviehash_match,
+                sports_match=sports_match,
             )
         except Exception as e:
             logger.warning("compat: search_local failed (continuing without locals): %s", e)
@@ -840,6 +1099,10 @@ def available_providers() -> list[str]:
         return []
 
 
+class SportsSelectionChanged(RuntimeError):
+    pass
+
+
 def search(imdb_id: str, season, episode, languages: Iterable[Language],
            media_type: str, query: str | None = None,
            moviehash: str | None = None,
@@ -862,23 +1125,61 @@ def search(imdb_id: str, season, episode, languages: Iterable[Language],
                       exclude_providers=exclude_providers,
                       timeout_seconds=timeout_seconds,
                       only_providers=only_providers)
+    local_allowed = (LOCAL_PROVIDER not in (exclude_providers or [])
+                     and (only_providers is None or LOCAL_PROVIDER in only_providers))
+    check_sports = local_allowed and bool(settings.compat_endpoint.serve_local_subs)
+    from .sports import resolve_for_request
+
+    def resolve_sports():
+        if check_sports:
+            return resolve_for_request(
+                imdb_id, season, episode, media_type, query, moviehash, moviehash_match)
+        return None
+
     cache_ttl = int(settings.compat_endpoint.cache_ttl_seconds)
     fid_ttl = int(settings.compat_endpoint.file_id_ttl_seconds)
     ttl = min(cache_ttl, fid_ttl)
-    return C.compat_region.get_or_create(
-        key,
-        creator=lambda: _do_fanout(imdb_id, season, episode, languages,
-                                    media_type, query=query, moviehash=moviehash,
-                                    moviebytesize=moviebytesize,
-                                    series_anidb_id=series_anidb_id,
-                                    series_anidb_episode_id=series_anidb_episode_id,
-                                    moviehash_match=moviehash_match,
-                                    requested_languages=requested_languages,
-                                    exclude_providers=exclude_providers,
-                                    timeout_seconds=timeout_seconds,
-                                    only_providers=only_providers),
-        expiration_time=ttl,
-    )
+    fanout_started = False
+    for attempt in range(2):
+        sports_match = resolve_sports()
+        sports_key = sports_match.cache_key() if sports_match is not None else None
+        cache_key = key + ":sports:" + sports_key if sports_key is not None else key
+
+        def validate_selection():
+            current = resolve_sports()
+            current_key = current.cache_key() if current is not None else None
+            if current_key != sports_key:
+                raise SportsSelectionChanged("Sports selection changed during search")
+
+        def create():
+            nonlocal fanout_started
+            validate_selection()
+            # Bind local results to the match used for this key. Explicit None
+            # also matters: a newly appearing sports file cannot enter a native key.
+            fanout_started = True
+            result = _do_fanout(
+                imdb_id, season, episode, languages, media_type,
+                query=query, moviehash=moviehash, moviebytesize=moviebytesize,
+                series_anidb_id=series_anidb_id,
+                series_anidb_episode_id=series_anidb_episode_id,
+                moviehash_match=moviehash_match,
+                requested_languages=requested_languages,
+                exclude_providers=exclude_providers,
+                timeout_seconds=timeout_seconds, only_providers=only_providers,
+                sports_match=sports_match)
+            validate_selection()
+            return result
+
+        try:
+            result = C.compat_region.get_or_create(cache_key, creator=create, expiration_time=ttl)
+            # Cache hits need the same current-selection check as new results.
+            validate_selection()
+            return result
+        except SportsSelectionChanged:
+            if attempt == 1 or fanout_started:
+                raise
+            # Creation exceptions are not cached. Retry once before provider work
+            # starts; never spend a second fanout timeout or another admission.
 
 
 def download(file_id, base_host: str = "",
@@ -895,7 +1196,15 @@ def download(file_id, base_host: str = "",
     ok, _payload = auth.parse_file_id(file_id)
     if not ok:
         raise FileNotFoundError("file_id invalid or expired")
-    stream_tok = auth.mint_file_stream_token(int(file_id))
+    if _payload.get("media_type") == "sports":
+        from .sports import validate_payload
+        try:
+            validate_payload(_payload)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise FileNotFoundError("Sports subtitle is no longer available") from exc
+        stream_tok = auth.mint_file_stream_token(int(file_id), sports_binding=_payload["sports"]["binding"])
+    else:
+        stream_tok = auth.mint_file_stream_token(int(file_id))
     base_url = (settings.general.base_url or "").rstrip("/")
     path = f"{base_url}/api/v1/download/stream/{quote(stream_tok, safe='')}"
     link = f"{base_host.rstrip('/')}{path}" if base_host else path
@@ -982,6 +1291,13 @@ def serve_subtitle_content(stream_token: str) -> tuple[bytes, str]:
     ok, fpayload = auth.parse_file_id(fid)
     if not ok:
         raise FileNotFoundError("file_id expired or not found")
+
+    if fpayload.get("media_type") == "sports" or payload.get("sports") is not None:
+        from .sports import serve
+        binding = (fpayload.get("sports") or {}).get("binding")
+        if fpayload.get("media_type") != "sports" or not binding or payload.get("sports") != binding:
+            raise FileNotFoundError("Sports capability no longer matches its file")
+        return serve(fpayload)
 
     # Local-library payloads carry an explicit kind discriminator; serve
     # them from disk (with on-the-fly format conversion) instead of the

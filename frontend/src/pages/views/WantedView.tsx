@@ -30,12 +30,13 @@ import {
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef, Row } from "@tanstack/react-table";
 import { useIsAnyActionRunning } from "@/apis/hooks";
-import { useInstanceName } from "@/apis/hooks/site";
+import { useAppTitle } from "@/apis/hooks/site";
 import { UsePaginationQueryResult } from "@/apis/queries/hooks";
 import { QueryPageTable, Toolbox } from "@/components";
 import { MassTranslateModal } from "@/components/forms/MassTranslateForm";
 import { WantedItem } from "@/components/forms/MassTranslateForm";
 import { useModals } from "@/modules/modals";
+import styles from "./WantedView.module.scss";
 
 interface LangOption {
   value: string;
@@ -87,7 +88,7 @@ function WantedView<T extends Wanted.Base>({
   const [selectedRows, setSelectedRows] = useState<Row<T>[]>([]);
   const [filtersOpen, setFiltersOpen] = useState(false);
 
-  useDocumentTitle(`Wanted ${name} - ${useInstanceName()}`);
+  useDocumentTitle(`Wanted ${name} - ${useAppTitle()}`);
 
   const handleRowSelectionChanged = useCallback((rows: Row<T>[]) => {
     setSelectedRows(rows);
@@ -204,8 +205,8 @@ function WantedView<T extends Wanted.Base>({
 
   return (
     <Stack gap={0}>
-      <Toolbox>
-        <Group gap="xs">
+      <Toolbox wrapOnPhone className={styles.band}>
+        <Group gap="xs" className={styles.actions}>
           <Toolbox.Button
             disabled={hasTask || dataCount === 0}
             onClick={searchAll}
@@ -228,7 +229,7 @@ function WantedView<T extends Wanted.Base>({
             {`Mass Translate (${selectedRows.length})`}
           </Toolbox.Button>
         </Group>
-        <Group gap="xs">
+        <Group gap="xs" className={styles.controls}>
           {hasAnyFilterControl && (
             <Tooltip
               label={filtersOpen ? "Hide filters" : "Show filters"}
@@ -261,6 +262,11 @@ function WantedView<T extends Wanted.Base>({
               leftSection={
                 <FontAwesomeIcon icon={faSearch} size="sm" opacity={0.5} />
               }
+              // Mantine inputs default their sections to ignoring the pointer,
+              // which would leave the clear button unclickable. TextInput does
+              // not apply that default in the Mantine pinned here, so this
+              // keeps the button working if it ever does, as on the Logs page.
+              rightSectionPointerEvents="all"
               rightSection={
                 searchValue.length > 0 ? (
                   <UnstyledButton
@@ -275,7 +281,7 @@ function WantedView<T extends Wanted.Base>({
               value={searchValue}
               onChange={(e) => onSearchChange(e.currentTarget.value)}
               size="sm"
-              w={220}
+              className={styles.search}
               styles={{
                 input: {
                   transition: "border-color 150ms ease",

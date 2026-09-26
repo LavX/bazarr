@@ -1,37 +1,48 @@
 name: CI
 
+# One workflow, one verdict: the `ci-ok` job at the bottom is the only check a
+# branch rule needs to require. Everything else fans out from the Plan job.
+#
+# What runs, and when:
+#
+# - A pull request into development, or into any other branch but master,
+#   runs every suite once, on the Python the Docker image ships, split into
+#   parallel jobs so the verdict arrives in about ten minutes.
+# - A push to development or master, the release pull request into master,
+#   the weekly schedule and a manual run add the other supported Python
+#   versions, with exactly the same jobs and steps on each.
+# - A change that touches documentation only runs the Docs job and skips the
+#   rest; .github/scripts/ci_plan.py decides, and fails towards running more.
+#
+# scripts/ci/run-local.sh runs the same suites on a workstation, in parallel,
+# against a throwaway PostgreSQL.
 on:
+  # No paths filter: Plan skips the suites for a documentation-only push, and a
+  # filter here is what let changes to README.md, site/install.sh and the
+  # getting-started guide, all three read by a test, land without running it.
   push:
     branches: [master, development]
-    paths:
-      - frontend/**
-      - bazarr/**
-      - custom_libs/**
-      - tests/**
-      - docs/**
-      - migrations/**
-      - bazarr.py
-      - requirements.txt
-      - dev-requirements.txt
-      - Dockerfile
-      - .github/workflows/ci.yml
   # No branches filter on purpose. A stacked pull request, one whose base is
   # another feature branch rather than development, got no CI at all under
   # `branches: [master, development]`: GitHub simply did not trigger, and the
-  # pull request sat green-looking with zero checks.
-  #
-  # What that costs is a run per opened / synchronize / reopened event on every
-  # pull request against any base, not one run per stacked branch: pushing ten
-  # times to each branch of a three-deep stack is thirty runs, and each one is a
-  # three-way Python matrix plus a Postgres service. The concurrency group below
-  # is what keeps it bounded, cancelling a pull request's superseded runs as soon
-  # as the next push lands. Pushes to master and development are deliberately not
-  # cancelled: those runs are the record of what the branch does.
+  # pull request sat green-looking with zero checks. The concurrency group
+  # below keeps the cost bounded by cancelling a pull request's superseded runs
+  # as soon as the next push lands.
   pull_request:
+  # The full matrix once a week, so a dependency release that breaks one of
+  # the older interpreters is found without waiting for the next merge.
+  # GitHub runs schedules on the default branch, master, from its copy of this
+  # file.
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  # A newer push supersedes a pull request's run and a development run alike.
+  # Runs on master are the record of what a release was built from, so they
+  # are never cancelled.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 permissions:
   contents: read
@@ -43,29 +54,98 @@ env:
   UI_ARTIFACT_NAME: ui
 
 jobs:
-  Frontend:
+  changes:
+    name: Plan
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.plan.outputs.code }}
+      docs: ${{ steps.plan.outputs.docs }}
+      python: ${{ steps.plan.outputs.python }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          # The merge commit and its first parent, the tip of the base branch,
+          # which is all a pull request's change list needs.
+          fetch-depth: 2
+          persist-credentials: false
 
-      - name: Cache node_modules
+      - name: Decide what this run has to do
+        id: plan
+        run: python3 .github/scripts/ci_plan.py
+
+  docs:
+    name: Docs
+    needs: changes
+    if: ${{ needs.changes.outputs.docs == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Install pandoc
+        # scripts/release/notes.py renders release notes with pandoc GFM, which
+        # is what the public release page does.
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends pandoc
+
+      - name: Check the changed documentation
+        run: python3 .github/scripts/docs_check.py
+
+  frontend-build:
+    name: Frontend build
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - &checkout
+        name: Checkout repository
+        uses: actions/checkout@v7
+
+      - &node-modules-cache
+        name: Cache node_modules
         uses: actions/cache@v6
         with:
           path: "${{ env.UI_DIRECTORY }}/node_modules"
-          key: ${{ runner.os }}-modules-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: ${{ runner.os }}-modules-
+          key: ${{ runner.os }}-node-${{ hashFiles('frontend/.nvmrc') }}-modules-${{ hashFiles('frontend/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-${{ hashFiles('frontend/.nvmrc') }}-modules-
 
-      - name: Setup NodeJS
+      - &setup-node
+        name: Setup NodeJS
         uses: actions/setup-node@v7
         with:
           node-version-file: "${{ env.UI_DIRECTORY }}/.nvmrc"
 
-      - name: Install dependencies
+      - &npm-install
+        name: Install dependencies
         run: npm install
         working-directory: ${{ env.UI_DIRECTORY }}
+
+      - name: Build
+        run: npm run build:ci
+        working-directory: ${{ env.UI_DIRECTORY }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.UI_ARTIFACT_NAME }}
+          path: "${{ env.UI_DIRECTORY }}/build"
+
+  frontend-checks:
+    name: Frontend checks
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - *checkout
+      - *node-modules-cache
+      - *setup-node
+      - *npm-install
 
       - name: Check Types
         run: npm run check:ts
@@ -79,65 +159,117 @@ jobs:
         run: npm run check:fmt
         working-directory: ${{ env.UI_DIRECTORY }}
 
-      - name: Unit Test (with coverage thresholds)
-        run: npm run coverage
-        working-directory: ${{ env.UI_DIRECTORY }}
+  frontend-tests:
+    name: Frontend tests ${{ matrix.shard }}/3
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - *checkout
+      - *node-modules-cache
+      - *setup-node
+      - *npm-install
 
-      - name: Build
-        run: npm run build:ci
+      - name: Unit Test (shard ${{ matrix.shard }} of 3)
+        # Each shard records its results and its coverage in a blob report.
+        # The coverage floor is set for the whole src tree, which no single
+        # shard reaches, so the thresholds are zeroed here and enforced once,
+        # over the merged coverage, by Frontend coverage.
+        # The blob goes to a named file in .vitest-reports, the folder the
+        # upload below and the merge in Frontend coverage use. Vitest's default
+        # folder moved to .vitest/blob in version 5, which left the upload
+        # empty, so the path is spelled out rather than left to the default.
+        run: >-
+          npx vitest run --shard=${{ matrix.shard }}/3
+          --reporter=blob --reporter=default
+          --outputFile.blob=.vitest-reports/blob-${{ matrix.shard }}.json
+          --coverage --coverage.reporter=text-summary
+          --coverage.thresholds.lines=0 --coverage.thresholds.statements=0
+          --coverage.thresholds.functions=0 --coverage.thresholds.branches=0
         working-directory: ${{ env.UI_DIRECTORY }}
 
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ env.UI_ARTIFACT_NAME }}
-          path: "${{ env.UI_DIRECTORY }}/build"
+          name: vitest-blob-${{ matrix.shard }}
+          path: "${{ env.UI_DIRECTORY }}/.vitest-reports"
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 3
 
-  Backend:
+  frontend-coverage:
+    name: Frontend coverage
+    needs: [changes, frontend-tests]
+    if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-latest
-    needs: Frontend
-    permissions:
-      contents: read
+    timeout-minutes: 10
+    steps:
+      - *checkout
+      - *node-modules-cache
+      - *setup-node
+      - *npm-install
 
-    strategy:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: vitest-blob-*
+          path: "${{ env.UI_DIRECTORY }}/.vitest-reports"
+          merge-multiple: true
+
+      - name: Unit Test (with coverage thresholds)
+        # A missing shard would lower the coverage without necessarily taking
+        # it under the floor, so the count is checked before the merge.
+        run: |
+          count=$(find .vitest-reports -name 'blob-*.json' | wc -l)
+          if [ "$count" -ne 3 ]; then
+            echo "Expected 3 shard reports, found $count"
+            exit 1
+          fi
+          npx vitest run --merge-reports=.vitest-reports --coverage
+        working-directory: ${{ env.UI_DIRECTORY }}
+
+  # The backend is split into seven jobs per Python version. They share their
+  # setup through YAML anchors, so every job installs exactly what the single
+  # backend job used to, and every Python version runs exactly the same steps.
+  # All of them wait for the UI build, because the application imports
+  # frontend/build when it is there and the suites have always run with it.
+  backend-core:
+    name: Backend core (Python ${{ matrix.python-version }})
+    needs: [changes, frontend-build]
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy: &python-matrix
       fail-fast: false
       matrix:
-        python-version: [ '3.12', '3.13', '3.14' ]
-    name: Python ${{ matrix.python-version }} backend
-
-    # Postgres service so the native-PG local-id cutover migration test actually
-    # runs on CI (it skips when no Postgres is reachable) instead of silently
-    # passing vacuously.
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          # Throwaway password for the ephemeral CI service container.
-          POSTGRES_PASSWORD: postgres  # pragma: allowlist secret
-          POSTGRES_DB: bazarr_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
+        python-version: ${{ fromJSON(needs.changes.outputs.python) }}
     steps:
-      - name: Checkout repository
+      - &backend-checkout
+        name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - &setup-python
+        name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            dev-requirements.txt
 
-      - name: Install UI
+      - &install-ui
+        name: Install UI
         uses: actions/download-artifact@v8
         with:
           name: ${{ env.UI_ARTIFACT_NAME }}
           path: "${{ env.UI_DIRECTORY }}/build"
 
-      - name: Install ffmpeg and a RAR extractor
+      - &system-packages
+        name: Install ffmpeg and a RAR extractor
         # ffmpeg: test_embeddedsubtitles uses real .mkv fixtures that require
         # ffprobe to extract stream metadata, and Ubuntu runners ship without it.
         # unar: the RAR fixtures cannot be read without it. 7z is present on the
@@ -145,14 +277,16 @@ jobs:
         # decompression codec, which is the same trap the image once shipped.
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ffmpeg unar
 
-      - name: Install Python dependencies
+      - &python-dependencies
+        name: Install Python dependencies
         run: |
           pip install -r requirements.txt
           # signalrcore over-pins msgpack==1.1.2 (GHSA-6v7p-g79w-8964); install it
           # with --no-deps so our msgpack==1.2.1 from requirements.txt wins.
           pip install --no-deps signalrcore==1.0.2
 
-      - name: Install dev dependencies
+      - &dev-dependencies
+        name: Install dev dependencies
         run: pip install -r dev-requirements.txt
 
       - name: Lint with ruff
@@ -172,10 +306,15 @@ jobs:
             tests/bazarr/test_gestdown_release_matching.py \
             tests/bazarr/test_dependency_loading.py \
             tests/bazarr/test_signalrcore_compat.py \
+            tests/bazarr/test_app_cors.py \
             tests/bazarr/test_app_get_providers.py \
             tests/bazarr/test_retired_provider_config_compat.py \
             tests/bazarr/test_settings_profile_deletion.py \
+            tests/bazarr/test_standard_job_actions.py \
             tests/bazarr/test_jellyfin_apikey_location.py \
+            tests/bazarr/test_emby_api.py \
+            tests/bazarr/test_silo_api.py \
+            tests/bazarr/test_media_server_instances_api.py \
             tests/bazarr/test_provider_hub.py \
             tests/bazarr/test_provider_pool_config_reload.py \
             tests/bazarr/test_rar_extraction_production_config.py \
@@ -185,6 +324,7 @@ jobs:
             tests/bazarr/test_archive_member_matching.py \
             tests/bazarr/test_provider_hub_worker_timeout.py \
             tests/bazarr/test_arr_instances_schema.py \
+            tests/bazarr/test_sportarr_instances.py \
             tests/bazarr/test_arr_ownership_columns.py \
             tests/bazarr/test_arr_instance_repository.py \
             tests/bazarr/test_arr_instances_api.py \
@@ -199,6 +339,7 @@ jobs:
             tests/bazarr/test_arr_aux_leaves.py \
             tests/bazarr/test_arr_rootfolder.py \
             tests/bazarr/test_arr_local_id_cutover_migration.py \
+            tests/bazarr/test_activity_registry.py \
             tests/bazarr/test_jobs_queue_progress.py \
             tests/bazarr/test_jobs_concurrency_limit.py \
             tests/bazarr/test_processing_sync_substep.py \
@@ -218,8 +359,25 @@ jobs:
             tests/bazarr/test_security_guards.py \
             tests/bazarr/test_login_backdrops.py \
             tests/bazarr/test_onboarding_flag.py \
+            tests/bazarr/test_session_auth.py \
+            tests/bazarr/test_socket_auth.py \
+            tests/bazarr/test_session_cookie_policy.py \
+            tests/bazarr/test_session_settings_roundtrip.py \
             tests/bazarr/test_ui.py \
             tests/bazarr/test_utilities_video_analyzer.py \
+            tests/bazarr/test_sportarr_sync_references.py \
+            tests/bazarr/test_sportarr_retrieval_diagnostics.py \
+            tests/bazarr/test_sportarr_subtitle_file_download.py \
+            tests/bazarr/test_sportarr_editor.py \
+            tests/bazarr/test_sportarr_combine.py \
+            tests/bazarr/test_sportarr_webhook.py \
+            tests/bazarr/test_sportarr_manual_translate.py \
+            tests/bazarr/test_sportarr_mass_operations.py \
+            tests/bazarr/test_sportarr_pagination.py \
+            tests/bazarr/test_provider_blacklist_attribution.py \
+            tests/bazarr/test_sportarr_translate_source.py \
+            tests/bazarr/test_sportarr_league_sync_route.py \
+            tests/bazarr/test_sportarr_review_round.py \
             tests/bazarr/test_embedded_subtitle_extraction.py \
             tests/subliminal_patch/test_subliminal_rebase.py \
             tests/subliminal_patch/test_embeddedsubtitles.py \
@@ -232,6 +390,21 @@ jobs:
             tests/subliminal_patch/test_mods_keep_lyrics.py \
             tests/subliminal_patch/test_video.py \
             -v --tb=short
+
+  backend-suites:
+    name: Backend suites (Python ${{ matrix.python-version }})
+    needs: [changes, frontend-build]
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy: *python-matrix
+    steps:
+      - *backend-checkout
+      - *setup-python
+      - *install-ui
+      - *system-packages
+      - *python-dependencies
+      - *dev-dependencies
 
       - name: pytest previously unguarded suites
         # These existed but were never collected by CI, so their assertions protected
@@ -253,7 +426,9 @@ jobs:
             tests/bazarr/test_anti_captcha_config.py \
             tests/bazarr/test_app_notifier.py \
             tests/bazarr/test_auto_translation_profile.py \
+            tests/bazarr/test_backup_contract.py \
             tests/bazarr/test_ci_guard_list.py \
+            tests/bazarr/test_ci_plan.py \
             tests/bazarr/test_combine_aligner.py \
             tests/bazarr/test_combine_api_dto.py \
             tests/bazarr/test_history_embedded_filter.py \
@@ -270,6 +445,8 @@ jobs:
             tests/bazarr/test_compat_cache.py \
             tests/bazarr/test_config.py \
             tests/bazarr/test_config_save.py \
+            tests/bazarr/test_container_hardening.py \
+            tests/bazarr/test_installer_backup.py \
             tests/bazarr/test_embedded_history_indexer.py \
             tests/bazarr/test_encryption.py \
             tests/bazarr/test_extra_languages.py \
@@ -277,11 +454,27 @@ jobs:
             tests/bazarr/test_get_video_scenename_fallback.py \
             tests/bazarr/test_jellyfin_client.py \
             tests/bazarr/test_jellyfin_operations.py \
+            tests/bazarr/test_emby_client.py \
+            tests/bazarr/test_silo_client.py \
+            tests/bazarr/test_silo_scans.py \
+            tests/bazarr/test_media_server_paths.py \
+            tests/bazarr/test_media_server_http.py \
+            tests/bazarr/test_media_server_config.py \
+            tests/bazarr/test_media_server_instances.py \
+            tests/bazarr/test_media_server_instance_migration.py \
+            tests/bazarr/test_media_server_dispatcher.py \
+            tests/bazarr/test_media_server_convergence.py \
+            tests/bazarr/test_media_server_resolution.py \
+            tests/bazarr/test_media_server_mutation_hooks.py \
+            tests/bazarr/test_media_server_versions.py \
+            tests/bazarr/test_plex_tls_verify.py \
+            tests/bazarr/test_language_profile_guards.py \
             tests/bazarr/test_logging_filters.py \
             tests/bazarr/test_openrouter_provider_routing.py \
             tests/bazarr/test_openrouter_model_migration.py \
             tests/bazarr/test_openrouter_translator_partial.py \
             tests/bazarr/test_openrouter_translator.py \
+            tests/bazarr/test_translation_progress_lifecycle.py \
             tests/bazarr/test_translator_model_migration.py \
             tests/bazarr/test_provider_hub_install_serialization.py \
             tests/bazarr/test_provider_hub_language_fallback.py \
@@ -302,10 +495,12 @@ jobs:
             tests/bazarr/test_swagger_static.py \
             tests/bazarr/test_supervisor_proxy.py \
             tests/bazarr/test_supervisor_stages.py \
+            tests/bazarr/test_system_logs_api.py \
             tests/bazarr/test_tracemalloc_dumper.py \
             tests/bazarr/test_translate_job_media_name.py \
             tests/bazarr/test_translator_auth.py \
             tests/bazarr/test_upgrade_embedded_history.py \
+            tests/bazarr/test_upgrade_subtitle_toggles.py \
             tests/subliminal_patch/test_animetosho.py \
             tests/subliminal_patch/test_core.py \
             tests/subliminal_patch/test_prioritized_satisfaction.py \
@@ -319,66 +514,325 @@ jobs:
             tests/subliminal_patch/test_utils.py \
             -v --tb=short
 
-      - name: pytest cross-instance isolation guards (isolated per file)
-        # These seed colliding upstream ids across instances and assert no leak -
-        # the central invariant of the multiple-arr-instances feature. Several of
-        # them leak module/global state (sys.modules, config) when pytest collects
-        # them in ONE process, so each runs in its OWN pytest process. The PG
-        # cutover test needs a driver + the postgres service (env below).
+      - name: Unit Tests
+        # Starts the application and checks that it serves the UI.
+        run: |
+          bash '${{ env.SCRIPTS_DIRECTORY }}/build_test.sh'
+
+  # The cross-instance isolation guards. These seed colliding upstream ids
+  # across instances and assert no leak, the central invariant of the
+  # multiple-arr-instances feature. Several of them leak module/global state
+  # (sys.modules, config) when pytest collects them in ONE process, so each
+  # file runs in its OWN pytest process, one after another within a job. The
+  # files are spread over 5 jobs by their recorded run time, about five
+  # minutes each; add a new file to whichever job is currently the shortest.
+  # The PG suites need a driver and the postgres service (env below).
+
+  backend-isolation-1:
+    name: Backend isolation 1/5 (Python ${{ matrix.python-version }})
+    needs: [changes, frontend-build]
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy: *python-matrix
+    # Postgres service so the native-PG suites actually run on CI (they skip,
+    # or fail, when no Postgres is reachable) instead of passing vacuously.
+    services: &postgres
+      postgres:
+        image: postgres:16-alpine
         env:
+          # Throwaway password for the ephemeral CI service container.
+          POSTGRES_PASSWORD: postgres  # pragma: allowlist secret
+          POSTGRES_DB: bazarr_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - *backend-checkout
+      - *setup-python
+      - *install-ui
+      - *system-packages
+      - *python-dependencies
+      - *dev-dependencies
+
+      - name: pytest cross-instance isolation guards 1/5 (isolated per file)
+        env: &postgres-url
           # Same throwaway credentials, in URL form.
           BAZARR_PG_TEST_URL: postgresql+psycopg://postgres:postgres@localhost:5432/bazarr_test  # pragma: allowlist secret
         run: |
           set -e
           pip install "psycopg[binary]"
           for f in \
+            tests/bazarr/test_discover_digital_releases.py \
+            tests/bazarr/test_discover_recent_episodes.py \
             tests/bazarr/test_editor_api.py \
-            tests/bazarr/test_arr_atomicity_secrets.py \
-            tests/bazarr/test_arr_pg_cutover_migration.py \
-            tests/bazarr/test_editor_instance_scope.py \
-            tests/bazarr/test_history_blacklist_scope.py \
+            tests/bazarr/test_media_server_convergence_migration.py \
+            tests/bazarr/test_sportarr_leagues.py \
+            tests/bazarr/test_sportarr_workflows.py \
+            tests/bazarr/test_sportarr_audio_language.py \
             tests/bazarr/test_history_owner_resolution.py \
-            tests/bazarr/test_local_id_actions.py \
             tests/bazarr/test_navigation_local_ids.py \
-            tests/bazarr/test_provider_blacklist_instance_scope.py \
             tests/bazarr/test_wanted_instance_scope.py \
-            tests/bazarr/test_movies_history_scoping.py \
-            tests/bazarr/test_series_identity_counts.py \
-            tests/bazarr/test_system_searches.py \
             tests/bazarr/test_api_utils_images.py \
-            tests/bazarr/test_threading_scope.py \
             tests/bazarr/test_blacklist_delete_scope.py \
-            tests/bazarr/test_content_metadata_scope.py \
-            tests/bazarr/test_episode_parser_scope.py \
-            tests/bazarr/test_files_browse_instance_scope.py \
-            tests/bazarr/test_path_mappings_instance.py \
             tests/bazarr/test_threading_followup.py \
-            tests/bazarr/test_mass_operations.py \
-            tests/bazarr/test_embedded_extraction_instance_scope.py \
-            tests/bazarr/test_ffprobe_cache_instance_scope.py \
-            tests/bazarr/test_triage_low_findings.py \
             tests/bazarr/test_indexer_owner_scope.py \
             tests/bazarr/test_indexer_path_mapping_owner.py \
-            tests/bazarr/test_provider_hub_worker_reaper.py \
-            tests/bazarr/test_provider_hub_worker_errors.py \
-            tests/bazarr/test_job_module_identity.py \
-            tests/bazarr/test_sonarr_sync_memory.py \
             tests/bazarr/test_anilist_index.py \
-            tests/bazarr/test_image_memory_config.py \
             tests/bazarr/test_package_info_location.py \
             tests/bazarr/test_translate_owner_threading.py \
+            tests/bazarr/test_sports_library_lookup_pg.py ; do
+            echo "::group::$f"
+            pytest "$f" -p no:cacheprovider -q
+            echo "::endgroup::"
+          done
+
+  backend-isolation-2:
+    name: Backend isolation 2/5 (Python ${{ matrix.python-version }})
+    needs: [changes, frontend-build]
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy: *python-matrix
+    services: *postgres
+    steps:
+      - *backend-checkout
+      - *setup-python
+      - *install-ui
+      - *system-packages
+      - *python-dependencies
+      - *dev-dependencies
+
+      - name: pytest cross-instance isolation guards 2/5 (isolated per file)
+        env: *postgres-url
+        run: |
+          set -e
+          pip install "psycopg[binary]"
+          for f in \
+            tests/bazarr/test_discover_metadata.py \
+            tests/bazarr/test_discover_feeds.py \
+            tests/bazarr/test_discover_fallback.py \
+            tests/bazarr/test_discover_library.py \
+            tests/bazarr/test_seerr_settings.py \
+            tests/bazarr/test_sportarr_manual.py \
+            tests/bazarr/test_sportarr_notifications.py \
+            tests/bazarr/test_sportarr_upgrade_cleanup.py \
+            tests/bazarr/test_editor_translation_job.py \
+            tests/bazarr/test_waveform_peaks_job.py \
+            tests/bazarr/test_history_metrics.py \
+            tests/bazarr/test_local_id_actions.py \
+            tests/bazarr/test_content_metadata_scope.py \
+            tests/bazarr/test_subtitle_jobs_fail_honestly.py \
+            tests/bazarr/test_ffprobe_cache_instance_scope.py \
+            tests/bazarr/test_triage_low_findings.py \
+            tests/bazarr/test_provider_hub_worker_reaper.py \
             tests/bazarr/test_embedded_track_eligibility.py \
-            tests/bazarr/test_parser_owner_threading.py \
-            tests/bazarr/test_embedded_translate_api_scope.py \
-            tests/bazarr/test_history_wanted_indexes.py \
-            tests/bazarr/test_release_type_mismatch_migration.py \
-            tests/bazarr/test_upstream_db_adoption.py \
             tests/bazarr/test_upstream_db_adoption_pg.py ; do
             echo "::group::$f"
             pytest "$f" -p no:cacheprovider -q
             echo "::endgroup::"
           done
 
-      - name: Unit Tests
+  backend-isolation-3:
+    name: Backend isolation 3/5 (Python ${{ matrix.python-version }})
+    needs: [changes, frontend-build]
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy: *python-matrix
+    services: *postgres
+    steps:
+      - *backend-checkout
+      - *setup-python
+      - *install-ui
+      - *system-packages
+      - *python-dependencies
+      - *dev-dependencies
+
+      - name: pytest cross-instance isolation guards 3/5 (isolated per file)
+        env: *postgres-url
         run: |
-          bash '${{ env.SCRIPTS_DIRECTORY }}/build_test.sh'
+          set -e
+          pip install "psycopg[binary]"
+          for f in \
+            tests/bazarr/test_discover_download.py \
+            tests/bazarr/test_seerr_operations.py \
+            tests/bazarr/test_seerr_api.py \
+            tests/bazarr/test_media_server_instances_pg.py \
+            tests/bazarr/test_arr_instances_autocommit.py \
+            tests/bazarr/test_sportarr_review_callbacks.py \
+            tests/bazarr/test_sportarr_review_findings.py \
+            tests/bazarr/test_sportarr_blacklist_recovery.py \
+            tests/bazarr/test_sportarr_indexer.py \
+            tests/bazarr/test_sportarr_sse.py \
+            tests/bazarr/test_sportarr_subtitle_upload.py \
+            tests/bazarr/test_provider_blacklist_instance_scope.py \
+            tests/bazarr/test_series_identity_counts.py \
+            tests/bazarr/test_system_searches.py \
+            tests/bazarr/test_mass_operations.py \
+            tests/bazarr/test_embedded_extraction_instance_scope.py \
+            tests/bazarr/test_sonarr_sync_memory.py \
+            tests/bazarr/test_image_memory_config.py \
+            tests/bazarr/test_history_wanted_indexes.py \
+            tests/bazarr/test_release_type_mismatch_migration.py \
+            tests/bazarr/test_upgrade_translated_loop.py ; do
+            echo "::group::$f"
+            pytest "$f" -p no:cacheprovider -q
+            echo "::endgroup::"
+          done
+
+  backend-isolation-4:
+    name: Backend isolation 4/5 (Python ${{ matrix.python-version }})
+    needs: [changes, frontend-build]
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy: *python-matrix
+    services: *postgres
+    steps:
+      - *backend-checkout
+      - *setup-python
+      - *install-ui
+      - *system-packages
+      - *python-dependencies
+      - *dev-dependencies
+
+      - name: pytest cross-instance isolation guards 4/5 (isolated per file)
+        env: *postgres-url
+        run: |
+          set -e
+          pip install "psycopg[binary]"
+          for f in \
+            tests/bazarr/test_discover_episodes.py \
+            tests/bazarr/test_discover_search.py \
+            tests/bazarr/test_discover_preview.py \
+            tests/bazarr/test_seerr_client.py \
+            tests/bazarr/test_api_job_responses.py \
+            tests/bazarr/test_sportarr_kind_migration.py \
+            tests/bazarr/test_sportarr_events.py \
+            tests/bazarr/test_sportarr_profile_hooks.py \
+            tests/bazarr/test_subtitle_ownership_revision.py \
+            tests/bazarr/test_sportarr_artifact_migration.py \
+            tests/bazarr/test_sportarr_settings.py \
+            tests/bazarr/test_sportarr_download_settings.py \
+            tests/bazarr/test_sportarr_wanted_translate.py \
+            tests/bazarr/test_sportarr_subtitle_delete.py \
+            tests/bazarr/test_editor_instance_scope.py \
+            tests/bazarr/test_editor_hls_encoders.py \
+            tests/bazarr/test_episode_parser_scope.py \
+            tests/bazarr/test_files_browse_instance_scope.py \
+            tests/bazarr/test_provider_hub_worker_errors.py \
+            tests/bazarr/test_provider_hub_ai_events.py \
+            tests/bazarr/test_ai_translated_history.py \
+            tests/bazarr/test_embedded_translate_api_scope.py \
+            tests/bazarr/test_upstream_db_adoption.py ; do
+            echo "::group::$f"
+            pytest "$f" -p no:cacheprovider -q
+            echo "::endgroup::"
+          done
+
+  backend-isolation-5:
+    name: Backend isolation 5/5 (Python ${{ matrix.python-version }})
+    needs: [changes, frontend-build]
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy: *python-matrix
+    services: *postgres
+    steps:
+      - *backend-checkout
+      - *setup-python
+      - *install-ui
+      - *system-packages
+      - *python-dependencies
+      - *dev-dependencies
+
+      - name: pytest cross-instance isolation guards 5/5 (isolated per file)
+        env: *postgres-url
+        run: |
+          set -e
+          pip install "psycopg[binary]"
+          for f in \
+            tests/bazarr/test_discover_copy_matching.py \
+            tests/bazarr/test_discover_raw_query.py \
+            tests/bazarr/test_discover_summary.py \
+            tests/bazarr/test_arr_atomicity_secrets.py \
+            tests/bazarr/test_arr_pg_cutover_migration.py \
+            tests/bazarr/test_ai_translated_history_migration.py \
+            tests/bazarr/test_sportarr_library_migration.py \
+            tests/bazarr/test_sportarr_review_guards.py \
+            tests/bazarr/test_sportarr_output.py \
+            tests/bazarr/test_sportarr_indexer_cancellation.py \
+            tests/bazarr/test_sportarr_scheduler_gate.py \
+            tests/bazarr/test_sportarr_observability.py \
+            tests/bazarr/test_sportarr_release_mismatch.py \
+            tests/bazarr/test_sportarr_manual_toolbox.py \
+            tests/bazarr/test_history_blacklist_scope.py \
+            tests/bazarr/test_history_metrics_postgres.py \
+            tests/bazarr/test_movies_history_scoping.py \
+            tests/bazarr/test_threading_scope.py \
+            tests/bazarr/test_path_mappings_instance.py \
+            tests/bazarr/test_job_module_identity.py \
+            tests/bazarr/test_parser_owner_threading.py ; do
+            echo "::group::$f"
+            pytest "$f" -p no:cacheprovider -q
+            echo "::endgroup::"
+          done
+
+  ci-ok:
+    # The one check to require. It runs whatever happened above, and it is red
+    # unless every job either passed or was skipped because Plan decided the
+    # change did not need it. A job skipped for any other reason, such as a
+    # failed dependency, turns it red too.
+    name: ci-ok
+    if: ${{ always() }}
+    needs:
+      - changes
+      - docs
+      - frontend-build
+      - frontend-checks
+      - frontend-tests
+      - frontend-coverage
+      - backend-core
+      - backend-suites
+      - backend-isolation-1
+      - backend-isolation-2
+      - backend-isolation-3
+      - backend-isolation-4
+      - backend-isolation-5
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every job passed, or was not needed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'EOF'
+          import json
+          import os
+
+          needs = json.loads(os.environ["NEEDS"])
+          plan = needs["changes"]
+          outputs = plan.get("outputs") or {}
+          problems = []
+          if plan["result"] != "success":
+              problems.append(f"Plan finished as {plan['result']}")
+          wanted = {"docs": outputs.get("docs") == "true"}
+          for name in needs:
+              if name not in ("changes", "docs"):
+                  wanted[name] = outputs.get("code") == "true"
+          for name, required in sorted(wanted.items()):
+              result = needs[name]["result"]
+              expected = "success" if required else "skipped"
+              print(f"{name}: {result} (expected {expected})")
+              if result != expected:
+                  problems.append(f"{name} finished as {result}, expected {expected}")
+          if problems:
+              print("\n".join(["", "CI is red:"] + problems))
+              raise SystemExit(1)
+          print("\nCI is green.")
+          EOF

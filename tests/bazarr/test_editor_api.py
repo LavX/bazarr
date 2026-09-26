@@ -15,7 +15,7 @@ from collections import namedtuple
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch, mock_open  # noqa: F401
 
-import pytest  # noqa: F401
+import pytest
 
 _SYS_BEFORE = dict(sys.modules)
 
@@ -216,11 +216,11 @@ class TestResolveVideoPath:
 
     def test_invalid_media_type(self):
         result = _resolve_video_path('podcast', 1)
-        assert result == ('Invalid media type, must be "episode" or "movie"', 400)
+        assert result == ('mediaType must be one of "episode", "movie", "sports"', 400)
 
     def test_invalid_media_type_empty(self):
         result = _resolve_video_path('', 1)
-        assert result == ('Invalid media type, must be "episode" or "movie"', 400)
+        assert result == ('mediaType must be one of "episode", "movie", "sports"', 400)
 
 
 # ---------------------------------------------------------------------------
@@ -427,13 +427,27 @@ class TestValidateParams:
             result = _validate_params()
             assert result == ('movie', 7)
 
+    def test_media_type_is_the_canonical_constant(self):
+        # A real request carries its own string object. Validation must hand
+        # back the MEDIA_TYPES entry instead, so nothing request-derived rides
+        # along in the tuple _resolve_or_abort may return.
+        request_value = ''.join(['spo', 'rts'])
+        assert request_value is not editor_module.MEDIA_TYPES[2]
+        mock_request = MagicMock()
+        mock_request.args.get = lambda key: {'mediaType': request_value, 'mediaId': '3'}.get(key)
+
+        with patch.object(editor_module, 'request', mock_request):
+            result = _validate_params()
+        assert result == ('sports', 3)
+        assert result[0] is editor_module.MEDIA_TYPES[2]
+
     def test_missing_media_type(self):
         mock_request = MagicMock()
         mock_request.args.get = lambda key: {'mediaId': '1'}.get(key)
 
         with patch.object(editor_module, 'request', mock_request):
             result = _validate_params()
-            assert result == ('mediaType must be "episode" or "movie"', 400)
+            assert result == ('mediaType must be one of "episode", "movie", "sports"', 400)
 
     def test_invalid_media_type(self):
         mock_request = MagicMock()
@@ -441,7 +455,7 @@ class TestValidateParams:
 
         with patch.object(editor_module, 'request', mock_request):
             result = _validate_params()
-            assert result == ('mediaType must be "episode" or "movie"', 400)
+            assert result == ('mediaType must be one of "episode", "movie", "sports"', 400)
 
     def test_missing_media_id(self):
         mock_request = MagicMock()
@@ -510,6 +524,22 @@ class TestResolveOrAbort:
 # run_editor_sync
 # ---------------------------------------------------------------------------
 
+class _JobCancelled(Exception):
+    """Stands in for app.jobs_queue.JobCancelled, which the worker catches."""
+
+
+class _JobFailed(Exception):
+    """Stands in for app.jobs_queue.JobFailed, which fails the sync's job."""
+
+
+def _run_expecting_failure(**kwargs):
+    """A failed editor sync fails its job as well as the side store."""
+    with pytest.raises(_JobFailed) as raised:
+        run_editor_sync(**kwargs)
+    assert str(raised.value).startswith('Editor sync failed: ')
+    return raised.value
+
+
 class TestRunEditorSync:
     """Tests for the background sync worker function."""
 
@@ -538,7 +568,7 @@ class TestRunEditorSync:
         with patch('api.editor.editor.SubSyncer', mock_subsync_cls, create=True), \
              patch.dict('sys.modules', {'subtitles.tools.subsyncer': MagicMock(SubSyncer=mock_subsync_cls)}), \
              patch('api.editor.editor.jobs_queue', mock_jobs_queue, create=True), \
-             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue)}), \
+             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled, JobFailed=_JobFailed)}), \
              patch('threading.Timer'):  # prevent cleanup timer
 
             run_editor_sync(
@@ -585,7 +615,7 @@ class TestRunEditorSync:
         with patch('api.editor.editor.SubSyncer', mock_subsync_cls, create=True), \
              patch.dict('sys.modules', {'subtitles.tools.subsyncer': MagicMock(SubSyncer=mock_subsync_cls)}), \
              patch('api.editor.editor.jobs_queue', mock_jobs_queue, create=True), \
-             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue)}), \
+             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled, JobFailed=_JobFailed)}), \
              patch('threading.Timer'):
 
             run_editor_sync(
@@ -625,9 +655,9 @@ class TestRunEditorSync:
         with patch('api.editor.editor.SubSyncer', mock_subsync_cls, create=True), \
              patch.dict('sys.modules', {'subtitles.tools.subsyncer': MagicMock(SubSyncer=mock_subsync_cls)}), \
              patch('api.editor.editor.jobs_queue', mock_jobs_queue, create=True), \
-             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue)}), \
+             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled, JobFailed=_JobFailed)}), \
              patch('threading.Timer'):
-            run_editor_sync(
+            _run_expecting_failure(
                 job_key=job_key,
                 video_path='/video/test.mkv',
                 tmp_in=tmp_in,
@@ -667,9 +697,9 @@ class TestRunEditorSync:
         with patch('api.editor.editor.SubSyncer', mock_subsync_cls, create=True), \
              patch.dict('sys.modules', {'subtitles.tools.subsyncer': MagicMock(SubSyncer=mock_subsync_cls)}), \
              patch('api.editor.editor.jobs_queue', mock_jobs_queue, create=True), \
-             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue)}), \
+             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled, JobFailed=_JobFailed)}), \
              patch('threading.Timer'):
-            run_editor_sync(
+            _run_expecting_failure(
                 job_key=job_key,
                 video_path='/video/test.mkv',
                 tmp_in=tmp_in,
@@ -710,9 +740,9 @@ class TestRunEditorSync:
         with patch('api.editor.editor.SubSyncer', mock_subsync_cls, create=True), \
              patch.dict('sys.modules', {'subtitles.tools.subsyncer': MagicMock(SubSyncer=mock_subsync_cls)}), \
              patch('api.editor.editor.jobs_queue', mock_jobs_queue, create=True), \
-             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue)}), \
+             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled, JobFailed=_JobFailed)}), \
              patch('threading.Timer'):
-            run_editor_sync(
+            _run_expecting_failure(
                 job_key=job_key,
                 video_path='/video/test.mkv',
                 tmp_in=tmp_in,
@@ -747,7 +777,7 @@ class TestRunEditorSync:
         with patch('api.editor.editor.SubSyncer', mock_subsync_cls, create=True), \
              patch.dict('sys.modules', {'subtitles.tools.subsyncer': MagicMock(SubSyncer=mock_subsync_cls)}), \
              patch('api.editor.editor.jobs_queue', mock_jobs_queue, create=True), \
-             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue)}), \
+             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled, JobFailed=_JobFailed)}), \
              patch('threading.Timer'):
             run_editor_sync(
                 job_key=job_key,
@@ -763,6 +793,29 @@ class TestRunEditorSync:
 
         # Should have called update_job_progress multiple times
         assert mock_jobs_queue.update_job_progress.call_count >= 3
+
+    def test_a_cancelled_sync_stays_cancelled(self, tmp_path):
+        """Cancellation is re-raised as itself, so the queue files it under
+        cancelled rather than turning it into a failure."""
+        tmp_in = str(tmp_path / 'input.srt')
+        with open(tmp_in, 'w') as f:
+            f.write('dummy content')
+        job_key = 'test_sync_cancel'
+        _editor_sync_jobs[job_key] = {'status': 'running', 'content': None, 'message': ''}
+        mock_subsync_cls = MagicMock()
+        mock_jobs_queue = MagicMock()
+        mock_jobs_queue.update_job_progress.side_effect = _JobCancelled('stop')
+
+        with patch.dict('sys.modules', {'subtitles.tools.subsyncer': MagicMock(SubSyncer=mock_subsync_cls)}), \
+             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled, JobFailed=_JobFailed)}), \
+             patch('threading.Timer'):
+            with pytest.raises(_JobCancelled):
+                run_editor_sync(job_key=job_key, video_path='/video/test.mkv', tmp_in=tmp_in,
+                                tmp_out=str(tmp_path / 'input.synced.srt'), encoding='utf-8',
+                                max_offset='120', gss=False, reference='a:0', job_id=5)
+
+        assert _editor_sync_jobs[job_key]['status'] == 'failed'
+        assert _editor_sync_jobs[job_key]['message'] == 'Cancelled by user'
 
     def test_sync_empty_output_fails(self, tmp_path):
         """An empty synced file should be treated as a failure."""
@@ -785,9 +838,9 @@ class TestRunEditorSync:
         with patch('api.editor.editor.SubSyncer', mock_subsync_cls, create=True), \
              patch.dict('sys.modules', {'subtitles.tools.subsyncer': MagicMock(SubSyncer=mock_subsync_cls)}), \
              patch('api.editor.editor.jobs_queue', mock_jobs_queue, create=True), \
-             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue)}), \
+             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled, JobFailed=_JobFailed)}), \
              patch('threading.Timer'):
-            run_editor_sync(
+            _run_expecting_failure(
                 job_key=job_key,
                 video_path='/video/test.mkv',
                 tmp_in=tmp_in,
@@ -920,7 +973,7 @@ class TestEditorSyncPost:
 
         with patch.object(editor_module, 'request', mock_request):
             result = sync_resource.post()
-        assert result == ('mediaType must be "episode" or "movie"', 400)
+        assert result == ('mediaType must be one of "episode", "movie", "sports"', 400)
 
     def test_invalid_media_type(self):
         mock_request = self._make_post_request({
@@ -930,7 +983,7 @@ class TestEditorSyncPost:
 
         with patch.object(editor_module, 'request', mock_request):
             result = sync_resource.post()
-        assert result == ('mediaType must be "episode" or "movie"', 400)
+        assert result == ('mediaType must be one of "episode", "movie", "sports"', 400)
 
     def test_missing_media_id(self):
         mock_request = self._make_post_request({
@@ -1019,6 +1072,24 @@ class TestEditorSyncPost:
             # Should get past VAD validation (fails on resolve instead)
             assert result != ('Invalid vad option', 400), f'vad={vad} was incorrectly rejected'
 
+    def test_unknown_encoding_is_refused_before_any_workspace_exists(self):
+        """A bogus codec name is a bad request, not a temporary directory nobody frees."""
+        from subtitles.tools import subsync_engines
+
+        mock_request = self._make_post_request({
+            'mediaType': 'episode', 'mediaId': '1', 'content': 'data', 'encoding': 'not-a-codec',
+        })
+        sync_resource = editor_module.EditorSync()
+        registered = set(subsync_engines._preview_workspaces)
+
+        with patch.object(editor_module, 'request', mock_request), \
+             patch.object(editor_module, '_resolve_video_path') as mock_resolve:
+            result = sync_resource.post()
+
+        assert result == ('Invalid encoding', 400)
+        mock_resolve.assert_not_called()
+        assert set(subsync_engines._preview_workspaces) == registered
+
     def test_successful_post_starts_job(self):
         mock_request = self._make_post_request({
             'mediaType': 'episode', 'mediaId': '1', 'content': 'subtitle data',
@@ -1034,12 +1105,12 @@ class TestEditorSyncPost:
              patch('tempfile.mkstemp', return_value=(99, '/tmp/bazarr_sync_xyz.srt')), \
              patch('os.write'), \
              patch('os.close'), \
-             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue)}), \
+             patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled, JobFailed=_JobFailed)}), \
              patch('api.editor.editor.jobs_queue', mock_jobs_queue, create=True), \
              patch('threading.Thread') as mock_thread:  # noqa: F841
 
             # Need to also patch the import inside the method
-            with patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue)}):
+            with patch.dict('sys.modules', {'app.jobs_queue': MagicMock(jobs_queue=mock_jobs_queue, JobCancelled=_JobCancelled, JobFailed=_JobFailed)}):
                 result = sync_resource.post()
 
             body, status = result
@@ -1067,7 +1138,7 @@ class TestEditorSyncPost:
 
         with patch.object(editor_module, 'request', mock_request):
             result = sync_resource.post()
-        assert result == ('mediaType must be "episode" or "movie"', 400)
+        assert result == ('mediaType must be one of "episode", "movie", "sports"', 400)
 
 
 # ---------------------------------------------------------------------------

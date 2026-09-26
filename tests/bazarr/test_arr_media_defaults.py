@@ -882,7 +882,50 @@ def test_the_health_check_still_reports_a_genuinely_missing_default(schema_sessi
     assert health.series_default_profile_is_missing() is True
 
 
-def test_the_apply_endpoint_queues_the_reindex_instead_of_running_it(monkeypatch):
+def test_sports_health_check_accepts_an_instance_override(schema_session, monkeypatch):
+    """Sports mirrors the Series escape hatch: a Sportarr instance that settles
+    its own default means the empty global is not a misconfiguration."""
+    from app.config import settings
+    from utilities import health
+
+    monkeypatch.setattr(settings.general, "sports_default_enabled", True)
+    monkeypatch.setattr(settings.general, "sports_default_profile", "")
+    monkeypatch.setattr(health, "database", schema_session)
+
+    _profile(schema_session, 2, "Anime")
+    _instance(schema_session, "sportarr", "Sports", 1867,
+              {"default_enabled": True, "default_profile": 2})
+
+    assert health.sports_default_profile_is_missing() is False
+
+
+def test_sports_health_check_reports_a_genuinely_missing_default(schema_session, monkeypatch):
+    from app.config import settings
+    from utilities import health
+
+    monkeypatch.setattr(settings.general, "sports_default_enabled", True)
+    monkeypatch.setattr(settings.general, "sports_default_profile", "")
+    monkeypatch.setattr(health, "database", schema_session)
+
+    _instance(schema_session, "sportarr", "Plain", 1867)
+
+    assert health.sports_default_profile_is_missing() is True
+
+
+def test_sports_health_check_is_quiet_when_the_global_names_a_profile(schema_session, monkeypatch):
+    from app.config import settings
+    from utilities import health
+
+    monkeypatch.setattr(settings.general, "sports_default_enabled", True)
+    monkeypatch.setattr(settings.general, "sports_default_profile", 1)
+    monkeypatch.setattr(health, "database", schema_session)
+
+    _instance(schema_session, "sportarr", "Plain", 1867)
+
+    assert health.sports_default_profile_is_missing() is False
+
+
+def test_the_apply_endpoint_queues_the_reindex_instead_of_running_it(monkeypatch, scheduler_runtime):
     """A library of a few thousand unprofiled series means a few thousand
     index passes, each scanning every episode and emitting events. Doing that
     inside the request holds a web worker for minutes and can outlive a proxy
@@ -988,7 +1031,7 @@ def test_an_override_naming_a_deleted_profile_does_not_count(schema_session, mon
     assert health.series_default_profile_is_missing() is True
 
 
-def test_a_failed_reindex_enqueue_does_not_fail_the_apply(monkeypatch):
+def test_a_failed_reindex_enqueue_does_not_fail_the_apply(monkeypatch, scheduler_runtime):
     """The profiles are committed before the queue is touched. Raising here
     tells the client Apply failed while the library was in fact mutated, which
     invites a retry that then finds nothing left to do."""

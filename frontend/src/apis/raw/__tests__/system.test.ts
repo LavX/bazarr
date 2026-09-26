@@ -141,19 +141,20 @@ describe("SystemApi.login", () => {
     vi.restoreAllMocks();
   });
 
-  it("returns the response data on successful login", async () => {
-    const payload = { upgrade_hash: false };
+  it("resolves without handing the caller any response body", async () => {
+    // The endpoint answers 204. Nothing about the account may travel back to
+    // the browser, so login deliberately returns nothing at all.
     vi.spyOn(client.axios, "post").mockResolvedValue({
-      data: payload,
-      status: 200,
-      statusText: "OK",
+      data: "",
+      status: 204,
+      statusText: "No Content",
       headers: {},
       config: { headers: {} } as AxiosResponse["config"],
     });
 
     const result = await systemApi.login("admin", "secret");
 
-    expect(result).toEqual(payload);
+    expect(result).toBeUndefined();
   });
 
   it("sends credentials as form fields with action=login", async () => {
@@ -173,5 +174,37 @@ describe("SystemApi.login", () => {
     // action is sent as a query param, not form body.
     const params = postSpy.mock.calls[0][2] as Record<string, unknown>;
     expect(params?.params).toEqual({ action: "login" });
+  });
+});
+
+describe("SystemApi.settings", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function answer(data: unknown): AxiosResponse<unknown> {
+    return { ...okResponse(), data } as AxiosResponse<unknown>;
+  }
+
+  it("returns the settings object", async () => {
+    const settings = { general: { theme: "auto" }, discover: {} };
+    vi.spyOn(client.axios, "get").mockResolvedValue(answer(settings));
+    await expect(systemApi.settings()).resolves.toEqual(settings);
+  });
+
+  // A 2xx that is not the settings object used to be cached as one. The
+  // settings query never goes stale on its own, so every computed field
+  // (Discover's TMDB flag among them) then read as missing until a reload.
+  it.each([
+    ["an HTML page", "<!doctype html><html><body>Login</body></html>"],
+    ["an empty body", ""],
+    ["null", null],
+    ["an array", []],
+    ["an object without the general section", { discover: {} }],
+  ])("refuses %s as settings", async (_name, body) => {
+    vi.spyOn(client.axios, "get").mockResolvedValue(answer(body));
+    await expect(systemApi.settings()).rejects.toThrow(
+      "The settings response could not be read.",
+    );
   });
 });

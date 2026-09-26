@@ -1,3 +1,5 @@
+import { renderSubtitleHtml } from "@/utilities/subtitleText";
+export { renderSubtitleHtml } from "@/utilities/subtitleText";
 import {
   type CSSProperties,
   forwardRef,
@@ -69,35 +71,6 @@ const containerStyle: CSSProperties = {
   width: "100%",
   flexShrink: 0,
 };
-
-// Convert subtitle text with tags into safe display HTML
-export function renderSubtitleHtml(text: string): string {
-  // Strip ASS override tags like {\i1}, {\b1}, {\an8}, {\pos(x,y)}, etc.
-  let html = text.replace(/\{\\[^}]*\}/g, "");
-  // Allow basic HTML formatting tags, escape everything else
-  // First escape HTML entities
-  html = html
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-  // Restore safe tags
-  html = html
-    .replace(/&lt;i&gt;/gi, "<i>")
-    .replace(/&lt;\/i&gt;/gi, "</i>")
-    .replace(/&lt;b&gt;/gi, "<b>")
-    .replace(/&lt;\/b&gt;/gi, "</b>")
-    .replace(/&lt;u&gt;/gi, "<u>")
-    .replace(/&lt;\/u&gt;/gi, "</u>")
-    .replace(/&lt;s&gt;/gi, "<s>")
-    .replace(/&lt;\/s&gt;/gi, "</s>");
-  // Strip font tags (render as plain text)
-  html = html
-    .replace(/&lt;font[^&]*&gt;/gi, "")
-    .replace(/&lt;\/font&gt;/gi, "");
-  // Convert newlines to <br>
-  html = html.replace(/\n/g, "<br>");
-  return html;
-}
 
 const subtitleOverlayStyle: CSSProperties = {
   position: "absolute",
@@ -347,14 +320,21 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
       });
     }, [audioTrack]);
 
+    // Identifies this player to the backend, so a new session replaces this
+    // player's previous encoder and leaves other tabs on the same file alone.
+    const [playerId] = useState(() => Math.random().toString(36).slice(2, 12));
+
     // HLS playlist URL is path-based so segments resolve correctly via relative
     // URLs in the manifest. startSec is part of the path so segment URLs inherit
     // the same session.
-    const hlsUrl = hasMedia
+    const scopedHlsUrl = hasMedia
       ? appendArrInstanceParam(
           `${Environment.baseUrl}/api/editor/hls/${encodeURIComponent(mediaType)}/${mediaId}/${hlsSession.audioTrack}/${hlsSession.startSec.toFixed(3)}/playlist.m3u8`,
           arrInstanceId,
         )
+      : "";
+    const hlsUrl = scopedHlsUrl
+      ? `${scopedHlsUrl}${scopedHlsUrl.includes("?") ? "&" : "?"}player=${playerId}`
       : "";
 
     // Set up hls.js (or native HLS on Safari) on the video element. Re-runs when

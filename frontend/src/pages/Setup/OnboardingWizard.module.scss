@@ -2,14 +2,19 @@
 // tokens (defined in assets/_bazarr.scss) so it stays dark/light consistent
 // without depending on any other feature's styles.
 
+// A centred flex item in a scroll container starts its overflow ABOVE the
+// scroll origin, and everything above the origin is unreachable: measured 312px
+// of the card cut off at 1920x1080 and 571px at 320x844. Aligning to the start
+// and centring with auto margins keeps the card centred while it fits and lets
+// it scroll from the top once it does not.
 .root {
   position: fixed;
   inset: 0;
   z-index: 200;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
-  padding: 32px 16px;
+  padding: 24px 16px;
   overflow-y: auto;
   background: radial-gradient(
     120% 120% at 50% 0%,
@@ -19,12 +24,17 @@
   color: var(--bz-text-primary);
 }
 
+// 720px was a reading measure, and a first run is not prose. At 1920 it used
+// 37.5% of the width, left about 600px dead on each side, and still ran the
+// tallest media server screens nearly 900px off the bottom of the window.
+// 1120px is what lets a step be two columns (StepLayout.module.scss) and fit.
 .shell {
   width: 100%;
-  max-width: 720px;
+  max-width: 1120px;
+  margin: auto;
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 16px;
 }
 
 .header {
@@ -53,9 +63,11 @@
   color: var(--bz-text-secondary);
 }
 
-// Compact single-row progress rail: numbered dots joined by connectors. Labels
-// are intentionally omitted (the card heading names the current step) so eight
-// steps never wrap. The current step name also shows in the header.
+// The rail counts the four phases, not the steps. A step rail could not be
+// honest: it held twelve dots before the intent was answered and eight after,
+// and the media server segment now grows as servers are ticked. Sixteen dots
+// and their connectors also need about 378px, which does not fit a 288px
+// content box at 320. Four phases fit, and they never move.
 .rail {
   display: flex;
   align-items: center;
@@ -65,11 +77,30 @@
 .railNode {
   display: flex;
   align-items: center;
-  flex: 1 1 0;
+  flex: 1 1 auto;
+  min-width: 0;
 
   &:last-child {
     flex: 0 0 auto;
   }
+}
+
+.railLabelGroup {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.railLabel {
+  font-size: 13px;
+  color: var(--bz-text-tertiary);
+  white-space: nowrap;
+}
+
+.railLabelActive {
+  color: var(--bz-text-primary);
+  font-weight: 600;
 }
 
 .dot {
@@ -123,5 +154,68 @@
   border: 1px solid var(--bz-border-card);
   border-radius: var(--bz-radius-xl);
   box-shadow: var(--bz-shadow-float);
-  padding: 32px;
+  padding: 28px;
+}
+
+// The shell's own skip control and the one-line note a step that cannot be
+// skipped shows instead. Both sit under the card, outside it, so there is
+// visibly one place where skipping lives.
+.stepSkip {
+  display: flex;
+  justify-content: center;
+}
+
+.stepNote {
+  font-size: 13px;
+  text-align: center;
+  color: var(--bz-text-tertiary);
+}
+
+// Four labelled nodes still do not fit a phone, so the labels go first and the
+// dots shrink. The header names the phase in words either way, so nothing is
+// lost by dropping them.
+// Every vertical pixel outside the card is budget the step does not get. A
+// 24px outer gutter is a phone's margin, not a desktop's: on a wide display
+// the card has 28px of padding of its own, so the gutter goes where there is
+// space for it instead.
+@media (min-width: 1200px) {
+  .root {
+    padding: 16px 32px;
+  }
+}
+
+@media (max-width: 720px) {
+  .railLabel {
+    display: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .dot {
+    width: 24px;
+    height: 24px;
+    font-size: 12px;
+  }
+
+  .connector {
+    min-width: 8px;
+    margin: 0 6px;
+  }
+}
+
+@media (max-width: 440px) {
+  .dot {
+    width: 20px;
+    height: 20px;
+    font-size: 11px;
+  }
+
+  .connector {
+    min-width: 4px;
+    margin: 0 4px;
+  }
+
+  .card {
+    padding: 20px;
+  }
 }

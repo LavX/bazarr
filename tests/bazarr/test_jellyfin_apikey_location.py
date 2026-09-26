@@ -52,3 +52,38 @@ def test_the_body_is_still_accepted(resource):
         f"{resource.__name__} must still accept the key from a JSON or "
         f"form-encoded body, got {sorted(locations)}"
     )
+
+
+@pytest.mark.parametrize('mode', [None, 'false', 'true'])
+@pytest.mark.parametrize('body_type', ['json', 'data'])
+def test_libraries_endpoint_unfiltered_contract(monkeypatch, mode, body_type):
+    from flask import Flask
+    from jellyfin import operations
+    from types import SimpleNamespace
+
+    upstream = [
+        {'ItemId': 'movies', 'Name': 'Movies', 'CollectionType': 'movies'},
+        {'ItemId': 'series', 'Name': 'Series', 'CollectionType': 'tvshows'},
+        {'ItemId': 'mixed', 'Name': 'Mixed', 'CollectionType': None},
+        {'ItemId': 'home', 'Name': 'Home videos', 'CollectionType': 'homevideos'},
+        {'ItemId': 'untyped', 'Name': 'Untyped'},
+    ]
+    monkeypatch.setattr(operations, 'get_jellyfin_client',
+                        lambda *a, **kw: SimpleNamespace(get_libraries=lambda: upstream))
+    body = {'url': 'http://fixture', 'apikey': 'fixture'}
+    if mode is not None:
+        body['include_all'] = mode
+    with Flask(__name__).test_request_context('/jellyfin/libraries', method='POST', **{body_type: body}):
+        response, status = JellyfinLibraries.post.__wrapped__(JellyfinLibraries())
+    expected = [
+        {'id': 'movies', 'name': 'Movies', 'type': 'movies'},
+        {'id': 'series', 'name': 'Series', 'type': 'tvshows'},
+    ]
+    if mode == 'true':
+        expected += [
+            {'id': 'mixed', 'name': 'Mixed', 'type': ''},
+            {'id': 'home', 'name': 'Home videos', 'type': 'homevideos'},
+            {'id': 'untyped', 'name': 'Untyped', 'type': ''},
+        ]
+    assert status == 200
+    assert response == {'data': expected, 'error_code': None}

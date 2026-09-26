@@ -38,7 +38,12 @@ import {
 } from "@/apis/hooks/subtitles";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
-import client from "@/apis/raw/client";
+import { useSearchSource } from "@/contexts/UniversalSearch";
+import {
+  readStoredValue,
+  removeStoredValue,
+  writeStoredValue,
+} from "@/utilities/browserStorage";
 import { Environment } from "@/utilities/env";
 import { saveBlobAs } from "@/utilities/files";
 import { isCombinedOutputLanguageKey } from "@/utilities/subtitles";
@@ -60,12 +65,23 @@ import {
   subtitleDocumentReducer,
 } from "./document";
 import EditableCueTable from "./EditableCueTable";
-import { buildEditorAutosaveKey, buildEditorSubtitlesUrl } from "./editorScope";
+import {
+  isTerminalJob,
+  queueEditorTranslation,
+  readEditorTranslation,
+  useEditorJob,
+} from "./editorJobs";
+import {
+  buildEditorAutosaveKey,
+  buildEditorSubtitlesUrl,
+  editorBreadcrumb,
+} from "./editorScope";
 import EditorToolbar from "./EditorToolbar";
 import JumpToCue from "./JumpToCue";
 import { detectFormat, getParser } from "./parsers";
 import QCPanel from "./QCPanel";
 import SearchReplace from "./SearchReplace";
+import { createSubtitleSearchSource } from "./searchSource";
 import { getSerializer } from "./serializers";
 import ShortcutSheet from "./ShortcutSheet";
 import StatusBar from "./StatusBar";
@@ -200,7 +216,7 @@ export default function EditorPage() {
           metadata: parseResult?.metadata ?? { format },
           cues: docState.cues,
         });
-        localStorage.setItem(
+        writeStoredValue(
           autoSaveKey,
           JSON.stringify({
             content: serialized,
@@ -233,7 +249,7 @@ export default function EditorPage() {
   useEffect(() => {
     if (!autoSaveKey || !loaded) return;
     try {
-      const raw = localStorage.getItem(autoSaveKey);
+      const raw = readStoredValue(autoSaveKey);
       if (!raw) return;
       const saved = JSON.parse(raw);
       const age = Date.now() - saved.timestamp;
@@ -241,10 +257,10 @@ export default function EditorPage() {
         // Less than 24 hours old
         setRecoveryAvailable(saved);
       } else {
-        localStorage.removeItem(autoSaveKey);
+        removeStoredValue(autoSaveKey);
       }
     } catch {
-      localStorage.removeItem(autoSaveKey!);
+      removeStoredValue(autoSaveKey!);
     }
   }, [autoSaveKey, loaded]);
 
@@ -260,12 +276,12 @@ export default function EditorPage() {
       /* ignore */
     }
     setRecoveryAvailable(null);
-    if (autoSaveKey) localStorage.removeItem(autoSaveKey);
+    if (autoSaveKey) removeStoredValue(autoSaveKey);
   }, [recoveryAvailable, autoSaveKey]);
 
   const handleDismissRecovery = useCallback(() => {
     setRecoveryAvailable(null);
-    if (autoSaveKey) localStorage.removeItem(autoSaveKey);
+    if (autoSaveKey) removeStoredValue(autoSaveKey);
   }, [autoSaveKey]);
 
   // Keep etagRef in sync whenever the query result changes (initial load,
@@ -302,6 +318,10 @@ export default function EditorPage() {
     string | undefined
   >();
   const [referenceOpen, setReferenceOpen] = useState(false);
+  const [lineTranslationJob, setLineTranslationJob] = useState<{
+    jobId: number;
+    targetIdx: number;
+  } | null>(null);
   const [translatingLineIdx, setTranslatingLineIdx] = useState<number | null>(
     null,
   );
@@ -521,7 +541,7 @@ export default function EditorPage() {
             setCreatedSuccessfully(true); // Switch from create to edit mode
             if (autoSaveKey) {
               try {
-                localStorage.removeItem(autoSaveKey);
+                removeStoredValue(autoSaveKey);
               } catch {
                 /* ignore */
               }
@@ -581,7 +601,7 @@ export default function EditorPage() {
             }
             if (autoSaveKey) {
               try {
-                localStorage.removeItem(autoSaveKey);
+                removeStoredValue(autoSaveKey);
               } catch {
                 /* ignore */
               }
@@ -616,7 +636,7 @@ export default function EditorPage() {
                     }
                     if (autoSaveKey) {
                       try {
-                        localStorage.removeItem(autoSaveKey);
+                        removeStoredValue(autoSaveKey);
                       } catch {
                         /* ignore */
                       }
@@ -1031,6 +1051,12 @@ export default function EditorPage() {
     setSelectedIndex(cueIndex);
   }, []);
 
+  const subtitleSearch = useMemo(
+    () => createSubtitleSearchSource(docState.cues, handleSearchNavigate),
+    [docState.cues, handleSearchNavigate],
+  );
+  useSearchSource(subtitleSearch);
+
   const handleJumpToCue = useCallback((index: number) => {
     setSelectedIndex(index);
   }, []);
@@ -1363,43 +1389,18 @@ export default function EditorPage() {
 
     setTranslatingLineIdx(targetIdx);
     try {
-      const sourceLangName = referenceLanguage || "";
-      const result = await client.axios.post("/translator/jobs", {
+      const queuedJobId = await queueEditorTranslation({
         lines: [{ position: 0, line: sourceText }],
-        sourceLanguage: sourceLangName,
+        sourceLanguage: referenceLanguage || "",
         targetLanguage: language || "",
         title: data?.mediaTitle || "",
         mediaType: mediaType || "",
       });
-      const jobResult = result.data;
-      if (!jobResult.jobId) {
+      if (queuedJobId) {
+        setLineTranslationJob({ jobId: queuedJobId, targetIdx });
+      } else {
         setTranslatingLineIdx(null);
-        return;
       }
-      const poll = async () => {
-        for (let i = 0; i < 120; i++) {
-          await new Promise((r) => setTimeout(r, 2000));
-          const resp = await client.axios.get(
-            `/translator/jobs/${jobResult.jobId}`,
-          );
-          const job = resp.data;
-          if (job.status === "completed" || job.status === "partial") {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const lines = (job.result as any)?.lines;
-            if (lines?.[0]?.line) {
-              dispatch({
-                type: "APPLY_OP",
-                op: createEditText(targetIdx, lines[0].line),
-              });
-            }
-            break;
-          } else if (job.status === "failed" || job.status === "cancelled") {
-            break;
-          }
-        }
-        setTranslatingLineIdx(null);
-      };
-      poll();
     } catch {
       setTranslatingLineIdx(null);
     }
@@ -1413,6 +1414,33 @@ export default function EditorPage() {
     data,
     mediaType,
   ]);
+
+  // The single-line translation is a queued job like the panel's. Its end
+  // arrives through the jobs cache, and only then is the result read.
+  const lineJob = useEditorJob(lineTranslationJob?.jobId);
+  const lineJobFinished = isTerminalJob(lineJob);
+  useEffect(() => {
+    if (!lineTranslationJob || !lineJobFinished) return;
+    let active = true;
+    const { jobId, targetIdx } = lineTranslationJob;
+    readEditorTranslation(jobId)
+      .then((state) => {
+        const line = state.status === "completed" ? state.lines?.[0]?.line : "";
+        if (active && line) {
+          dispatch({ type: "APPLY_OP", op: createEditText(targetIdx, line) });
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (active) {
+          setLineTranslationJob(null);
+          setTranslatingLineIdx(null);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [lineTranslationJob, lineJobFinished]);
 
   // Clear auto-focus flag after it fires
   useEffect(() => {
@@ -1775,14 +1803,11 @@ export default function EditorPage() {
   }
 
   // Breadcrumb links
-  const isSeries = mediaType === "episode" || mediaType === "series";
-  const listPath = isSeries ? "/series" : "/movies";
-  const listLabel = isSeries ? "Series" : "Movies";
-  const detailPath = data?.mediaId
-    ? isSeries
-      ? `/series/${data.mediaId}`
-      : `/movies/${data.mediaId}`
-    : undefined;
+  const { listPath, listLabel, detailPath } = editorBreadcrumb(
+    mediaType,
+    data?.mediaId,
+    scopedArrInstanceId,
+  );
 
   const selectedCue =
     selectedIndex >= 0 && selectedIndex < docState.cues.length

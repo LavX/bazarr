@@ -26,14 +26,14 @@ from app.requirements import ensure_requirements  # noqa: E402
 
 ensure_requirements(args.no_update)
 
-from app.check_update import apply_update, check_releases, check_if_new_update  # noqa: E402
+from app.check_update import install_downloaded_update, check_releases, check_if_new_update  # noqa: E402
 from app.config import settings, configure_proxy_func, base_url  # noqa: E402, F401
 from init import *  # noqa: E402, F403
 import logging  # noqa: E402
 
-# Install downloaded update
+# Install downloaded update, unless updating is somebody else's job
 if bazarr_version != '':
-    apply_update()
+    install_downloaded_update()
 
 # Check for new update and install latest
 if args.no_update or not settings.general.auto_update:
@@ -89,6 +89,11 @@ jobs_queue_thread.daemon = True
 jobs_queue_thread.start()
 logging.info("Interactive jobs queue started and waiting for tasks")
 
+# Drop editor preview sessions left by the previous run and start the reaper
+# that stops preview encoders once nothing is watching them.
+from api.editor.editor import start_hls_housekeeping  # noqa: E402
+start_hls_housekeeping()
+
 if not args.no_signalr:
     # Fan out one SignalR client per enabled instance (#156); a single default
     # instance keeps the legacy scalar client (byte-identical).
@@ -96,6 +101,8 @@ if not args.no_signalr:
         start_sonarr_signalr()
     if settings.general.use_radarr:
         start_radarr_signalr()
+    from sportarr.sse_client import refresh_sportarr_clients
+    refresh_sportarr_clients()
 
 
 if __name__ == "__main__":

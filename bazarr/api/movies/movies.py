@@ -5,11 +5,12 @@ from flask_restx import Resource, Namespace, reqparse, fields, marshal
 from arr_instances.resolution import scoped
 from app.database import TableMovies, database, update, select, func
 from radarr.sync.movies import update_one_movie, update_one_movie_for_instance
-from subtitles.indexer.movies import list_missing_subtitles_movies, movies_scan_subtitles
+from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
+from subtitles.indexer.movies import movies_scan_disk
 from app.event_handler import event_stream
 from subtitles.wanted import wanted_search_missing_subtitles_movies, wanted_scan_subtitles_movies
 from subtitles.mass_download import movies_download_subtitles
-from api.swaggerui import subtitles_model, subtitles_language_model, audio_language_model
+from api.swaggerui import subtitles_model, subtitles_language_model, audio_language_model, job_queued_model
 
 from api.utils import authenticate, None_Keys, postprocess
 
@@ -153,6 +154,7 @@ class Movies(Resource):
         arrInstanceIdList = args.get('arr_instance_id')
         profileIdList = args.get('profileid')
         targetList = localIdList if localIdList else radarrIdList
+        changed = []
 
         for idx in range(len(targetList)):
             profileId = profileIdList[idx]
@@ -207,11 +209,12 @@ class Movies(Resource):
                         arr_instance_id,
                     ))
 
-            list_missing_subtitles_movies(no=radarrId, arr_instance_id=arr_instance_id)
-
+            changed.append((radarrId, arr_instance_id))
             event_stream(type='movie', payload=radarrId)
-            event_stream(type='movie-wanted', payload=radarrId)
-        event_stream(type='badges')
+
+        # Recalculated by a queued job, which announces the wanted rows and the
+        # badges once it has, so the save no longer waits for it.
+        queue_missing_subtitles_recalculation(movies=changed)
 
         return '', 204
 
@@ -222,9 +225,12 @@ class Movies(Resource):
     patch_request_parser.add_argument('action', type=str, required=False, help='Action to perform from ["scan-disk", '
                                                                                '"search-missing", "search-wanted", "sync"]')
 
+    patch_job_model = api_ns_movies.model('JobQueued', job_queued_model)
+
     @authenticate
     @api_ns_movies.doc(parser=patch_request_parser)
-    @api_ns_movies.response(204, 'Success')
+    @api_ns_movies.response(202, 'scan-disk queued as a job', patch_job_model)
+    @api_ns_movies.response(204, 'Success for every other action')
     @api_ns_movies.response(400, 'Unknown action')
     @api_ns_movies.response(401, 'Not Authenticated')
     @api_ns_movies.response(500, 'Movie file not found. Path mapping issue?')
@@ -235,8 +241,8 @@ class Movies(Resource):
         arr_instance_id = args.get('arr_instance_id')
         action = args.get('action')
         if action == "scan-disk":
-            movies_scan_subtitles(radarrid, arr_instance_id=arr_instance_id)
-            return '', 204
+            job_id = movies_scan_disk(radarrid, arr_instance_id=arr_instance_id)
+            return {'job_id': job_id or None}, 202
         elif action == "search-missing":
             try:
                 movies_download_subtitles(radarrid, arr_instance_id=arr_instance_id)

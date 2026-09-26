@@ -1,10 +1,14 @@
 interface Badge {
   episodes: number;
   movies: number;
+  sports?: number;
   providers: number;
   status: number;
   sonarr_signalr: string;
   radarr_signalr: string;
+  /** Live state of the Sportarr event stream, the sports counterpart of the
+   *  SignalR indicators above. */
+  sportarr_sse?: string;
   announcements: number;
 }
 
@@ -246,11 +250,14 @@ declare namespace History {
     MonitoredType &
     Partial<ItemHistoryType> & {
       action: number;
+      ai_translated?: boolean;
       blacklisted: boolean;
       score?: string;
       subs_id?: string;
       parsed_timestamp: string;
       timestamp: string;
+      history_id?: number;
+      timestamp_iso?: string | null;
       description: string;
       upgradable: boolean;
       matches: string[];
@@ -273,6 +280,49 @@ declare namespace History {
   type Stat = {
     movies: StatItem[];
     series: StatItem[];
+    sports?: StatItem[];
+  };
+
+  type MetricsTotals = {
+    downloads: number;
+    series: number;
+    movies: number;
+    sports: number;
+    dailyAverage: number;
+    /** Local calendar date of the busiest day, or null when nothing matched. */
+    peakDate: string | null;
+    peakCount: number;
+    /** Share of downloads that arrived without anyone clicking search. */
+    automaticPct: number;
+  };
+
+  type MetricsProvider = {
+    provider: string;
+    count: number;
+    /** Mean match quality, normalised per media type. May exceed 100 on a hash match. */
+    avgScorePct: number | null;
+  };
+
+  type MetricsReliability = {
+    provider: string;
+    downloads: number;
+    blacklisted: number;
+    ratePct: number;
+  };
+
+  type MetricsLanguage = { language: string; count: number };
+  type MetricsAction = { action: number; count: number };
+  /** bucket 0-9 are ten-point bands; 10 is ">= 100%", where hash matches land. */
+  type MetricsBucket = { bucket: number; count: number };
+
+  type Metrics = {
+    totals: MetricsTotals;
+    byProvider: MetricsProvider[];
+    /** Null with an action filter set: an exclusion does not record which kind of download it undid. */
+    providerReliability: MetricsReliability[] | null;
+    byLanguage: MetricsLanguage[];
+    byAction: MetricsAction[];
+    scoreHistogram: MetricsBucket[];
   };
 
   type TimeFrameOptions = "week" | "month" | "trimester" | "year";
@@ -447,6 +497,11 @@ type ItemSearchResult = Partial<SeriesIdType> &
     title: string;
     year: string;
     poster: string | null;
+    id?: number;
+    arr_instance_id?: number;
+    /** Present on a sports league. A league has a sport, not a year. */
+    sportarrLeagueId?: number;
+    sport?: string | null;
   };
 
 type BackendError = {
@@ -461,7 +516,16 @@ declare namespace Api {
   }
 
   interface CombineResult {
-    status: "built" | "skipped" | "failed" | "batch_complete" | "not_found";
+    status:
+      | "built"
+      | "skipped"
+      | "failed"
+      | "batch_complete"
+      | "not_found"
+      | "queued";
+    // A series or league combine is queued as one job and reports through it.
+    // null when an identical combine is already queued.
+    job_id?: number | null;
     path?: string;
     alignment?: string;
     reason?: string;
@@ -469,6 +533,9 @@ declare namespace Api {
     built?: number;
     skipped?: number;
     failed?: number;
+    // Built, but a follow-up step (most often the index refresh) failed. Part
+    // of `built`, not a fourth outcome: the file is on disk either way.
+    warnings?: number;
     details?: Array<{
       episodeId: number;
       status: string;

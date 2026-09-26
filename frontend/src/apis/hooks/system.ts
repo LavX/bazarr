@@ -1,9 +1,15 @@
 import { useMemo } from "react";
 import { showNotification } from "@mantine/notifications";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
+import { isAxiosError } from "axios";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
-import { notification } from "@/modules/task";
+import { notification } from "@/modules/notification";
 import { Environment } from "@/utilities";
 import { setAuthenticated } from "@/utilities/event";
 
@@ -18,11 +24,12 @@ export function useBadges() {
 }
 
 export function useFileSystem(
-  type: "bazarr" | "sonarr" | "radarr",
+  type: "bazarr" | "sonarr" | "radarr" | "sportarr",
   path: string,
   enabled: boolean,
-  // instanceId (#156) routes a sonarr/radarr browse at the owning instance's
-  // server. Undefined => default server (the legacy single-instance behaviour).
+  // instanceId (#156) routes a sonarr/radarr/sportarr browse at the owning
+  // instance's server. Undefined => default server (the legacy
+  // single-instance behaviour, which for sportarr means the default instance).
   instanceId?: number,
 ) {
   return useQuery({
@@ -35,6 +42,8 @@ export function useFileSystem(
         return api.files.radarr(path, instanceId);
       } else if (type === "sonarr") {
         return api.files.sonarr(path, instanceId);
+      } else if (type === "sportarr") {
+        return api.files.sportarr(path, instanceId);
       }
 
       return [];
@@ -60,15 +69,52 @@ export function useSystemJobs() {
   });
 }
 
-export function useSettingsMutation() {
+export function isMetadataFollowupError(error: unknown): boolean {
+  return (
+    isAxiosError(error) &&
+    error.response?.status === 503 &&
+    error.response.data?.code === "discover_settings_refresh_failed"
+  );
+}
+
+export function useSettingsMutation(retryingMetadataRefresh = false) {
   const client = useQueryClient();
+  const retireMetadata = (changes: LooseObject, retrying = false) => {
+    const names = Object.keys(changes);
+    const tmdbChanged =
+      retrying ||
+      names.some(
+        (key) =>
+          key.startsWith("settings-discover-") ||
+          key === "settings-general-metadata_language",
+      );
+    const omdbChanged = names.includes("settings-omdb-apikey");
+    if (!tmdbChanged && !omdbChanged) return;
+    const filters = {
+      queryKey: [QueryKeys.Discover, "metadata"],
+      predicate: (query: { queryKey: readonly unknown[] }) => {
+        const source = query.queryKey[6];
+        if (source === "local") return false;
+        if (source === "omdb") return omdbChanged;
+        if (source === "all" || query.queryKey[2] === "fallback-configuration")
+          return true;
+        return tmdbChanged;
+      },
+    };
+    void client.cancelQueries(filters);
+    client.removeQueries(filters);
+  };
   return useMutation({
     mutationKey: [QueryKeys.System, QueryKeys.Settings],
     mutationFn: (data: LooseObject) => api.system.updateSettings(data),
 
-    onSuccess: () => {
+    onSuccess: (_, changes) => {
+      retireMetadata(changes, retryingMetadataRefresh);
       void client.invalidateQueries({
         queryKey: [QueryKeys.System],
+      });
+      void client.invalidateQueries({
+        queryKey: [QueryKeys.ProviderHub],
       });
 
       void client.invalidateQueries({
@@ -87,6 +133,14 @@ export function useSettingsMutation() {
         queryKey: [QueryKeys.Wanted],
       });
 
+      // The sports wanted rows are computed live against the exclusion and
+      // monitoring settings, so saving them refreshes the cached sports
+      // queries (wanted included) the same way the ones above do for series
+      // and movies.
+      void client.invalidateQueries({
+        queryKey: [QueryKeys.Sports],
+      });
+
       void client.invalidateQueries({
         queryKey: [QueryKeys.Badges],
       });
@@ -101,7 +155,23 @@ export function useSettingsMutation() {
       );
     },
 
-    onError: () => {
+    onError: (error, changes) => {
+      if (isMetadataFollowupError(error) || retryingMetadataRefresh) {
+        retireMetadata(changes, retryingMetadataRefresh);
+        void client.invalidateQueries({
+          queryKey: [QueryKeys.System, QueryKeys.Settings],
+        });
+        void client.invalidateQueries({
+          queryKey: [QueryKeys.ProviderHub],
+        });
+        showNotification(
+          notification.error(
+            "Settings saved; application refresh failed",
+            "Your saved settings are kept. Retry application refresh or leave with the saved settings.",
+          ),
+        );
+        return;
+      }
       showNotification(
         notification.error(
           "Save failed",
@@ -120,12 +190,44 @@ export function useServerSearch(query: string, enabled: boolean) {
   });
 }
 
-export function useSystemLogs() {
+export interface SystemLogsPage {
+  page: number;
+  pageSize: number;
+  level?: System.LogLevel;
+  contains?: string;
+  baselineTotal?: number;
+}
+
+// One page of the log at a time. Pages count back from the newest entry, so
+// only the newest page refreshes itself: it is a small read of the end of the
+// file. An older page is read against the total paging started from, so the
+// lines that arrive meanwhile do not shift its rows under the reader. The
+// Refresh button still refreshes whatever is shown.
+export function useSystemLogs({
+  page,
+  pageSize,
+  level,
+  contains,
+  baselineTotal,
+}: SystemLogsPage) {
+  const newest = page === 0;
   return useQuery({
-    queryKey: [QueryKeys.System, QueryKeys.Logs],
-    queryFn: () => api.system.logs(),
-    refetchOnWindowFocus: "always",
-    refetchInterval: 1000 * 60,
+    queryKey: [
+      QueryKeys.System,
+      QueryKeys.Logs,
+      { page, pageSize, level, contains, baselineTotal },
+    ],
+    queryFn: () =>
+      api.system.logs({
+        limit: pageSize,
+        offset: page * pageSize,
+        level,
+        contains,
+        baselineTotal,
+      }),
+    placeholderData: keepPreviousData,
+    refetchOnWindowFocus: newest ? "always" : false,
+    refetchInterval: newest ? 1000 * 60 : false,
     staleTime: 1000 * 10,
   });
 }
@@ -231,7 +333,12 @@ export function useRestoreBackups() {
     mutationKey: [QueryKeys.System, QueryKeys.Backups],
     mutationFn: (filename: string) => api.system.restoreBackups(filename),
 
-    onSuccess: () => {
+    onSuccess: (data) => {
+      const message =
+        data && typeof data === "object" && typeof data.message === "string"
+          ? data.message
+          : "Restore staged; Bazarr will restart to apply it";
+      showNotification(notification.info("Backup restored", message));
       void client.invalidateQueries({
         queryKey: [QueryKeys.System, QueryKeys.Backups],
       });
@@ -296,16 +403,7 @@ export function useSystem() {
     mutationFn: (param: { username: string; password: string }) =>
       api.system.login(param.username, param.password),
 
-    onSuccess: (data) => {
-      if (
-        data &&
-        typeof data === "object" &&
-        "upgrade_token" in data &&
-        data.upgrade_token
-      ) {
-        // Store opaque token (not password) for upgrade prompt
-        sessionStorage.setItem("password_upgrade_token", data.upgrade_token);
-      }
+    onSuccess: () => {
       // TODO: Hard-coded value
       window.location.replace(getPostLoginRedirectTarget());
     },

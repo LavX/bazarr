@@ -1,19 +1,11 @@
-import {
-  FunctionComponent,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { FunctionComponent, useEffect, useRef, useState } from "react";
 import { Outlet, useNavigate } from "react-router";
 import {
   Alert,
   AppShell,
-  Button,
   Center,
   Group,
   Loader,
-  Modal,
   Stack,
   Text,
 } from "@mantine/core";
@@ -29,14 +21,13 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSystemSettings } from "@/apis/hooks";
 import { QueryKeys } from "@/apis/queries/keys";
-import api from "@/apis/raw";
 import AppNavbar from "@/App/Navbar";
 import logoSrc from "@/assets/images/logo_no_orb128.png";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import { useWhatsNewAutoOpen } from "@/components/modals/useWhatsNewAutoOpen";
 import NavbarProvider from "@/contexts/Navbar";
 import OnlineProvider from "@/contexts/Online";
-import { notification } from "@/modules/task";
+import { notification } from "@/modules/notification";
 import CriticalError from "@/pages/errors/CriticalError";
 import { useOnboardingState } from "@/pages/Setup/useOnboardingState";
 import { RouterNames } from "@/Router/RouterNames";
@@ -44,7 +35,7 @@ import { Environment } from "@/utilities";
 import { consumeRestartReloadPending } from "@/utilities/restart";
 import { registerAppNavigate } from "@/utilities/whatsNew";
 import AppHeader from "./Header";
-import styleVars from "@/assets/_variables.module.scss";
+import shellStyles from "./AppShell.module.scss";
 
 interface SupervisorStatus {
   state: "starting" | "running" | "crashed" | "stopping";
@@ -145,9 +136,6 @@ const App: FunctionComponent = () => {
     }
   }, [hasConnected, online, queryClient]);
 
-  const [upgradeModalOpen, setUpgradeModalOpen] = useState(false);
-  const [upgrading, setUpgrading] = useState(false);
-
   useEffect(() => {
     if (Environment.hasUpdate) {
       showNotification(
@@ -157,41 +145,6 @@ const App: FunctionComponent = () => {
         ),
       );
     }
-  }, []);
-
-  useEffect(() => {
-    const token = sessionStorage.getItem("password_upgrade_token");
-    if (token) {
-      setUpgradeModalOpen(true);
-    }
-  }, []);
-
-  const handleUpgradeAccept = useCallback(async () => {
-    const token = sessionStorage.getItem("password_upgrade_token");
-    if (!token) return;
-    setUpgrading(true);
-    try {
-      await api.system.upgradePasswordHash(token);
-      showNotification(
-        notification.info(
-          "Password upgraded",
-          "Your password hash has been upgraded to PBKDF2-SHA256",
-        ),
-      );
-    } catch {
-      showNotification(
-        notification.warn("Upgrade failed", "Could not upgrade password hash"),
-      );
-    } finally {
-      sessionStorage.removeItem("password_upgrade_token");
-      setUpgradeModalOpen(false);
-      setUpgrading(false);
-    }
-  }, []);
-
-  const handleUpgradeDecline = useCallback(() => {
-    sessionStorage.removeItem("password_upgrade_token");
-    setUpgradeModalOpen(false);
   }, []);
 
   if (criticalError !== null) {
@@ -284,17 +237,19 @@ const App: FunctionComponent = () => {
       <NavbarProvider value={{ showed: navbar, show: setNavbar }}>
         <OnlineProvider value={{ online, setOnline }}>
           <AppShell
+            className={shellStyles.shell}
+            layout="alt"
             navbar={{
-              width: styleVars.navBarWidth,
+              width: 72,
               breakpoint: "sm",
-              collapsed: { mobile: !navbar },
+              collapsed: { mobile: true },
             }}
-            header={{ height: { base: styleVars.headerHeight } }}
+            header={{ height: { base: 134, sm: 82 } }}
             padding={0}
           >
-            <AppHeader></AppHeader>
+            <AppHeader />
             <AppNavbar></AppNavbar>
-            <AppShell.Main>
+            <AppShell.Main className={shellStyles.main}>
               {!online && hasConnected && (
                 <Alert
                   color="yellow"
@@ -308,34 +263,9 @@ const App: FunctionComponent = () => {
                   </Text>
                 </Alert>
               )}
-              <Outlet></Outlet>
+              <Outlet />
             </AppShell.Main>
           </AppShell>
-          <Modal
-            opened={upgradeModalOpen}
-            onClose={handleUpgradeDecline}
-            title="Upgrade Password Security"
-            centered
-          >
-            <Stack>
-              <Text size="sm">
-                Your password is currently stored using a weak MD5 hash. Would
-                you like to upgrade to PBKDF2-SHA256 for better security?
-              </Text>
-              <Text size="xs" c="var(--bz-text-tertiary)">
-                Note: After upgrading, reverting to upstream Bazarr will require
-                resetting your password via the config file.
-              </Text>
-              <Group justify="flex-end">
-                <Button variant="default" onClick={handleUpgradeDecline}>
-                  Not now
-                </Button>
-                <Button onClick={handleUpgradeAccept} loading={upgrading}>
-                  Upgrade
-                </Button>
-              </Group>
-            </Stack>
-          </Modal>
         </OnlineProvider>
       </NavbarProvider>
     </ErrorBoundary>

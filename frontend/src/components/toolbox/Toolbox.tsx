@@ -1,16 +1,44 @@
 import { FunctionComponent, PropsWithChildren } from "react";
-import { Group } from "@mantine/core";
+import { Group, GroupProps } from "@mantine/core";
+import clsx from "clsx";
 import ToolboxButton, { ToolboxMutateButton } from "./Button";
 import styles from "./Toolbox.module.scss";
 
-declare type ToolboxComp = FunctionComponent<PropsWithChildren> & {
+type ToolboxProps = PropsWithChildren<
+  Pick<GroupProps, "className"> & {
+    // On a phone the band is one row that scrolls sideways. A band with more
+    // buttons than a phone can show wraps onto more rows instead, so none of
+    // them sits past the edge.
+    wrapOnPhone?: boolean;
+    // Lets a caller key its own layout to the band's state, as ItemView does
+    // with what its left side is holding, without the band knowing why.
+    [data: `data-${string}`]: string | undefined;
+  }
+>;
+
+declare type ToolboxComp = FunctionComponent<ToolboxProps> & {
   Button: typeof ToolboxButton;
   MutateButton: typeof ToolboxMutateButton;
 };
 
-const Toolbox: ToolboxComp = ({ children }) => {
+const Toolbox: ToolboxComp = ({
+  children,
+  className,
+  wrapOnPhone = false,
+  ...data
+}) => {
   return (
-    <Group p={12} justify="space-between" className={styles.group}>
+    /* 12px all round put roughly 40px of chrome around a single 36px input,
+       which on a table whose left half is empty until something is selected
+       read as a band of nothing. The horizontal inset is what separates the
+       controls from the table edges; the vertical is not carrying anything. */
+    <Group
+      py={6}
+      px={12}
+      justify="space-between"
+      className={clsx(styles.group, wrapOnPhone && styles.wraps, className)}
+      {...data}
+    >
       {children}
     </Group>
   );

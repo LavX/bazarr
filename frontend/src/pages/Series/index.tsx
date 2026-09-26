@@ -34,7 +34,7 @@ import { ColumnDef } from "@tanstack/react-table";
 import { uniqBy } from "lodash";
 import { useSeriesModification, useSeriesPagination } from "@/apis/hooks";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
-import { useInstanceName } from "@/apis/hooks/site";
+import { useAppTitle } from "@/apis/hooks/site";
 import { useUpgradableItems } from "@/apis/hooks/subtitles";
 import { BatchAction, BatchItem } from "@/apis/raw/subtitles";
 import { Toolbox } from "@/components";
@@ -578,7 +578,7 @@ const SeriesView: FunctionComponent = () => {
     );
   }, [selections, modals]);
 
-  useDocumentTitle(`Series - ${useInstanceName()}`);
+  useDocumentTitle(`Series - ${useAppTitle()}`);
 
   return (
     <Container px={0} fluid>
@@ -598,6 +598,7 @@ const SeriesView: FunctionComponent = () => {
         onSelectionChanged={setSelections}
         selectionToolbar={selectionToolbar}
         profileToolbar={profileToolbar}
+        itemNoun={{ one: "series", other: "series" }}
       ></ItemView>
     </Container>
   );
