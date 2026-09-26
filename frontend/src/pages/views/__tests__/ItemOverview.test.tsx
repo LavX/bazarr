@@ -88,12 +88,14 @@ describe("ItemOverview, detail badge rendering", () => {
 // ---------------------------------------------------------------------------
 
 describe("ItemOverview, file-path badge", () => {
-  it("renders the item file path as a badge", async () => {
+  it("renders only the file name as a badge (full path in the tooltip)", async () => {
     customRender(<ItemOverview item={makeItem()} />);
 
     await waitFor(() => {
-      expect(screen.getByText("/media/test.mkv")).toBeInTheDocument();
+      expect(screen.getByText("test.mkv")).toBeInTheDocument();
     });
+    // The full path is not shown inline; it only appears in the hover tooltip.
+    expect(screen.queryByText("/media/test.mkv")).not.toBeInTheDocument();
   });
 });
 

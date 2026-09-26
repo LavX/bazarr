@@ -6,6 +6,7 @@ import {
   Row,
   Table as TableInstance,
 } from "@tanstack/react-table";
+import clsx from "clsx";
 import { useIsLoading } from "@/contexts";
 import { usePageSize } from "@/utilities/storage";
 import styles from "@/components/tables/BaseTable.module.scss";
@@ -13,6 +14,7 @@ import styles from "@/components/tables/BaseTable.module.scss";
 export type BaseTableProps<T extends object> = {
   instance: TableInstance<T>;
   tableStyles?: TableStyleProps<T>;
+  className?: string;
 };
 
 export interface TableStyleProps<T extends object> {
@@ -29,7 +31,11 @@ function DefaultHeaderRenderer<T extends object>(
   headers: Header<T, unknown>[],
 ): React.JSX.Element[] {
   return headers.map((header) => (
-    <Table.Th style={{ whiteSpace: "nowrap" }} key={header.id}>
+    <Table.Th
+      className={header.column.columnDef.meta?.className}
+      style={{ whiteSpace: "nowrap" }}
+      key={header.id}
+    >
       {flexRender(header.column.columnDef.header, header.getContext())}
     </Table.Th>
   ));
@@ -41,7 +47,10 @@ function DefaultRowRenderer<T extends object>(
   return (
     <Table.Tr key={row.id}>
       {row.getVisibleCells().map((cell) => (
-        <Table.Td key={cell.id}>
+        <Table.Td
+          className={cell.column.columnDef.meta?.className}
+          key={cell.id}
+        >
           {flexRender(cell.column.columnDef.cell, cell.getContext())}
         </Table.Td>
       ))}
@@ -50,7 +59,7 @@ function DefaultRowRenderer<T extends object>(
 }
 
 export default function BaseTable<T extends object>(props: BaseTableProps<T>) {
-  const { instance, tableStyles } = props;
+  const { instance, tableStyles, className } = props;
 
   const headersRenderer = tableStyles?.headersRenderer ?? DefaultHeaderRenderer;
   const rowRenderer = tableStyles?.rowRenderer ?? DefaultRowRenderer;
@@ -98,7 +107,7 @@ export default function BaseTable<T extends object>(props: BaseTableProps<T>) {
 
   return (
     <Box className={styles.container}>
-      <Table className={styles.table}>
+      <Table className={clsx(styles.table, className)}>
         <Table.Thead hidden={tableStyles?.hideHeader}>
           {instance.getHeaderGroups().map((headerGroup) => (
             <Table.Tr key={headerGroup.id}>

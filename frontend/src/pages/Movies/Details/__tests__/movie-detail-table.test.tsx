@@ -63,9 +63,9 @@ function setupApiMocks() {
 
 describe("MovieDetailTable", () => {
   // -------------------------------------------------------------------------
-  // 1. External subtitle: path shown verbatim in the path column
+  // 1. External subtitle: file name shown in the path column (full path in tooltip)
   // -------------------------------------------------------------------------
-  it("renders the file path for an external subtitle track", async () => {
+  it("renders the file name for an external subtitle track", async () => {
     setupApiMocks();
 
     const external: Subtitle = {
@@ -81,8 +81,10 @@ describe("MovieDetailTable", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText("/movies/test.en.srt")).toBeInTheDocument();
+      expect(screen.getByText("test.en.srt")).toBeInTheDocument();
     });
+    // The full path is not shown inline; it only appears in the hover tooltip.
+    expect(screen.queryByText("/movies/test.en.srt")).not.toBeInTheDocument();
   });
 
   // -------------------------------------------------------------------------

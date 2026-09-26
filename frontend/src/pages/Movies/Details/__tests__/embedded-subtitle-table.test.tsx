@@ -200,11 +200,11 @@ describe("Movies Detail Table, embedded track path display", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Test 4: External subtitle shows file path in path cell
+// Test 4: External subtitle shows file name in path cell
 // ---------------------------------------------------------------------------
 
 describe("Movies Detail Table, external subtitle path display", () => {
-  it("shows the file path for external subtitle tracks", async () => {
+  it("shows the file name for external subtitle tracks", async () => {
     setupApiMocks();
 
     const external: Subtitle = {
@@ -220,8 +220,10 @@ describe("Movies Detail Table, external subtitle path display", () => {
     customRender(<Table movie={movie} profile={undefined} history={[]} />);
 
     await waitFor(() => {
-      expect(screen.getByText("/movies/test.en.srt")).toBeInTheDocument();
+      expect(screen.getByText("test.en.srt")).toBeInTheDocument();
     });
+    // The full path is not shown inline; it only appears in the hover tooltip.
+    expect(screen.queryByText("/movies/test.en.srt")).not.toBeInTheDocument();
   });
 });
 

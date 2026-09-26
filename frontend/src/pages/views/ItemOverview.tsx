@@ -30,6 +30,7 @@ import {
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { Language } from "@/components/bazarr";
 import { BuildKey } from "@/utilities";
+import { basename } from "@/utilities/files";
 import {
   normalizeAudioLanguage,
   useLanguageProfileBy,
@@ -62,10 +63,12 @@ const ItemOverview: FunctionComponent<Props> = (props) => {
           <Tooltip
             label={item.path}
             multiline
+            w={480}
+            maw="90vw"
             style={{ overflowWrap: "anywhere" }}
             events={{ hover: true, focus: false, touch: true }}
           >
-            <span>{item.path}</span>
+            <span>{basename(item.path)}</span>
           </Tooltip>
         </ItemBadge>,
       );

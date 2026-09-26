@@ -23,6 +23,7 @@ import SyncOutputCompareModal from "@/components/modals/SyncOutputCompareModal";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
 import SimpleTable from "@/components/tables/SimpleTable";
 import { filterSubtitleBy, toPython } from "@/utilities";
+import { basename } from "@/utilities/files";
 import { useProfileItemsToLanguages } from "@/utilities/languages";
 import {
   buildSubtitleLanguageKey,
@@ -35,6 +36,7 @@ import {
   isSyncOutputSubtitle,
   sortSyncOutputSubtitles,
 } from "@/utilities/subtitles";
+import styles from "./table.module.scss";
 
 const missingText = "Missing Subtitles";
 const syncAction = 5;
@@ -570,6 +572,7 @@ const Table: FunctionComponent<Props> = ({
       {
         header: "Subtitle Path",
         accessorKey: "path",
+        meta: { className: styles.pathCell },
         cell: ({
           row: {
             original: { path },
@@ -590,13 +593,28 @@ const Table: FunctionComponent<Props> = ({
               </Text>
             );
           } else {
-            return <Text {...props}>{path}</Text>;
+            // Real file rows: show only the file name and reveal the full path
+            // in a hover tooltip. The .pathCell ellipsis still handles very long
+            // file names.
+            return (
+              <Tooltip
+                label={path}
+                multiline
+                w={480}
+                maw="90vw"
+                style={{ overflowWrap: "anywhere" }}
+                events={{ hover: true, focus: false, touch: true }}
+              >
+                <Text {...props}>{basename(path!)}</Text>
+              </Tooltip>
+            );
           }
         },
       },
       {
         header: "Language",
         accessorKey: "name",
+        meta: { className: styles.fixedCell },
         cell: ({ row }) => {
           return (
             <SubtitleLanguageBadges
@@ -609,6 +627,7 @@ const Table: FunctionComponent<Props> = ({
       {
         id: "score",
         header: "Score",
+        meta: { className: styles.fixedCell },
         cell: ({ row: { original } }) => {
           const record = !isSubtitleTrack(original.path)
             ? historyMap.get(original.path!)
@@ -619,6 +638,7 @@ const Table: FunctionComponent<Props> = ({
       {
         id: "provider",
         header: "Provider",
+        meta: { className: styles.fixedCell },
         cell: ({ row: { original } }) => {
           const record = !isSubtitleTrack(original.path)
             ? historyMap.get(original.path!)
@@ -635,6 +655,7 @@ const Table: FunctionComponent<Props> = ({
       {
         id: "status",
         header: "Status",
+        meta: { className: styles.fixedCell },
         cell: ({ row: { original } }) => {
           const actions = !isSubtitleTrack(original.path)
             ? statusMap.get(
@@ -662,6 +683,7 @@ const Table: FunctionComponent<Props> = ({
       },
       {
         id: "code2",
+        meta: { className: styles.fixedCell },
         cell: ({ row: { original } }) => {
           return <CodeCell item={original} />;
         },
@@ -695,6 +717,7 @@ const Table: FunctionComponent<Props> = ({
   return (
     <>
       <SimpleTable
+        className={styles.table}
         columns={columns}
         data={data}
         getRowId={(sub) => {
