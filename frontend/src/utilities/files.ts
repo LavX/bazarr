@@ -45,6 +45,20 @@ export function filenameFromContentDisposition(
 }
 
 /**
+ * Return the final segment (file name) of a path. Handles both POSIX (`/`) and
+ * Windows (`\`) separators and ignores trailing separators. A value without a
+ * separator is returned unchanged.
+ */
+export function basename(path: string): string {
+  const trimmed = path.replace(/[/\\]+$/, "");
+  const separator = Math.max(
+    trimmed.lastIndexOf("/"),
+    trimmed.lastIndexOf("\\"),
+  );
+  return separator === -1 ? trimmed : trimmed.slice(separator + 1);
+}
+
+/**
  * Hand a blob to the browser as a file download.
  */
 export function saveBlobAs(blob: Blob, filename: string): void {

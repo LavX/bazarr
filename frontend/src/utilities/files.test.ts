@@ -1,4 +1,4 @@
-import { filenameFromContentDisposition } from "./files";
+import { basename, filenameFromContentDisposition } from "./files";
 
 describe("filenameFromContentDisposition", () => {
   it("parses the plain quoted form", () => {
@@ -69,5 +69,27 @@ describe("filenameFromContentDisposition", () => {
         "fallback",
       ),
     ).toBe("plain.srt");
+  });
+});
+
+describe("basename", () => {
+  it("returns the last segment of a POSIX path", () => {
+    expect(basename("/movies/Ace Ventura (1994)/Ace.Ventura.mkv")).toBe(
+      "Ace.Ventura.mkv",
+    );
+  });
+
+  it("returns the last segment of a Windows path", () => {
+    expect(basename("C:\\Movies\\Ace Ventura\\Ace.Ventura.mkv")).toBe(
+      "Ace.Ventura.mkv",
+    );
+  });
+
+  it("ignores trailing separators", () => {
+    expect(basename("/movies/folder/")).toBe("folder");
+  });
+
+  it("returns the input unchanged when there is no separator", () => {
+    expect(basename("Ace.Ventura.mkv")).toBe("Ace.Ventura.mkv");
   });
 });
