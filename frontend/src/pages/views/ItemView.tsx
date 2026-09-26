@@ -37,9 +37,14 @@ import styles from "./ItemView.module.scss";
 
 // Subtitle-completeness filter. "any" does not filter; "complete" keeps rows
 // with nothing missing; "missing" keeps rows still missing something. What
-// counts as complete differs by kind, so the page supplies `subtitlesComplete`
+// counts as complete differs by kind, so the page supplies `subtitlesStatus`
 // to classify a row.
 export type SubtitlesFilter = "any" | "complete" | "missing";
+
+// How a row sits against the completeness filter. "untracked" rows have no
+// subtitles to complete (no language profile, or nothing that can be missing),
+// so they belong to neither group and drop out whenever the filter narrows.
+export type SubtitlesStatus = "complete" | "missing" | "untracked";
 
 const SUBTITLES_FILTER_OPTIONS: { value: SubtitlesFilter; label: string }[] = [
   { value: "any", label: "Any" },
@@ -57,10 +62,10 @@ interface Props<T extends Item.Base = Item.Base> {
   excludeLanguages?: string[];
   onExcludeLanguagesChange?: (values: string[]) => void;
   // Subtitle-completeness filter: only wired when the page supplies both the
-  // change handler and `subtitlesComplete`.
+  // change handler and `subtitlesStatus`.
   subtitlesFilter?: SubtitlesFilter;
   onSubtitlesFilterChange?: (value: SubtitlesFilter) => void;
-  subtitlesComplete?: (item: T) => boolean;
+  subtitlesStatus?: (item: T) => SubtitlesStatus;
   // Instance filter (#156): options are this kind's instances; values are the
   // selected arr_instance_ids (as strings). Only wired when >1 instance exists.
   instanceOptions?: { value: string; label: string }[];
@@ -87,7 +92,7 @@ function ItemView<T extends Item.Base>({
   onExcludeLanguagesChange,
   subtitlesFilter = "any",
   onSubtitlesFilterChange,
-  subtitlesComplete,
+  subtitlesStatus,
   instanceOptions,
   instanceValues = [],
   onInstanceValuesChange,
@@ -102,7 +107,7 @@ function ItemView<T extends Item.Base>({
     instanceOptions !== undefined &&
     instanceOptions.length > 1;
   const showSubtitlesFilter =
-    onSubtitlesFilterChange !== undefined && subtitlesComplete !== undefined;
+    onSubtitlesFilterChange !== undefined && subtitlesStatus !== undefined;
   const { data: audioLangs = [] } = useAudioLanguages();
   const [filtersOpen, setFiltersOpen] = useState(false);
 
@@ -143,12 +148,10 @@ function ItemView<T extends Item.Base>({
           return false;
         }
       }
-      if (subtitlesFilter !== "any" && subtitlesComplete) {
-        const complete = subtitlesComplete(item);
-        if (subtitlesFilter === "complete" && !complete) {
-          return false;
-        }
-        if (subtitlesFilter === "missing" && complete) {
+      if (subtitlesFilter !== "any" && subtitlesStatus) {
+        // "untracked" matches neither group, so it is dropped whenever the
+        // filter narrows to "complete" or "missing".
+        if (subtitlesStatus(item) !== subtitlesFilter) {
           return false;
         }
       }
@@ -160,7 +163,7 @@ function ItemView<T extends Item.Base>({
       excludeLanguages,
       instanceValues,
       subtitlesFilter,
-      subtitlesComplete,
+      subtitlesStatus,
     ],
   );
 

@@ -50,7 +50,10 @@ import {
 } from "@/components/forms/MassTranslateForm";
 import { SUBTITLE_TOOL_ACTIONS } from "@/constants/batch";
 import { useModals } from "@/modules/modals";
-import ItemView, { SubtitlesFilter } from "@/pages/views/ItemView";
+import ItemView, {
+  SubtitlesFilter,
+  SubtitlesStatus,
+} from "@/pages/views/ItemView";
 import { BuildKey, GetItemId } from "@/utilities";
 
 function upgradableKey(upstreamId: number, arrInstanceId?: number | null) {
@@ -74,11 +77,13 @@ const MovieView: FunctionComponent = () => {
     options: instanceOptions,
   } = useArrInstanceLabels("radarr");
 
-  // A movie is complete when nothing is missing.
-  const subtitlesComplete = useCallback(
-    (movie: Item.Movie) => movie.missing_subtitles.length === 0,
-    [],
-  );
+  // A movie with no language profile has nothing to complete, so it is
+  // untracked and belongs to neither group. Otherwise it is complete when
+  // nothing is missing.
+  const subtitlesStatus = useCallback((movie: Item.Movie): SubtitlesStatus => {
+    if (movie.profileId == null) return "untracked";
+    return movie.missing_subtitles.length === 0 ? "complete" : "missing";
+  }, []);
 
   const query = useMoviesPagination(true);
   const { data: upgradableData } = useUpgradableItems();
@@ -574,7 +579,7 @@ const MovieView: FunctionComponent = () => {
         onExcludeLanguagesChange={setExcludeLanguages}
         subtitlesFilter={subtitlesFilter}
         onSubtitlesFilterChange={setSubtitlesFilter}
-        subtitlesComplete={subtitlesComplete}
+        subtitlesStatus={subtitlesStatus}
         instanceOptions={multiInstance ? instanceOptions : undefined}
         instanceValues={instanceFilter}
         onInstanceValuesChange={setInstanceFilter}

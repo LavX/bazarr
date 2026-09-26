@@ -191,17 +191,20 @@ function seriesWith(
   title: string,
   episodeFileCount: number,
   episodeMissingCount: number,
+  profileId: number | null = 1,
 ): Item.Series {
   return {
     ...series(id, title),
+    profileId,
     episodeFileCount,
     episodeMissingCount,
   };
 }
 
 // The Subtitles filter keeps rows whose completeness matches the choice. A
-// series is complete when no episode is missing; one with no episode files has
-// nothing that can be missing, so it counts as complete too.
+// profiled series with episode files is complete when no episode is missing and
+// missing otherwise; one with no language profile, or with no episode files,
+// has nothing to complete, so it is untracked and belongs to neither group.
 describe("Series subtitles filter", () => {
   const complete = seriesWith(1, "Northern Light", 10, 0);
   const missing = seriesWith(2, "The Long Shore", 10, 3);
@@ -277,25 +280,64 @@ describe("Series subtitles filter", () => {
     ).toBeInTheDocument();
   });
 
-  it("counts a series with no episode files as complete", async () => {
+  it("excludes a series with no episode files from both Complete and Missing some", async () => {
     const user = userEvent.setup();
     customRender(<SeriesView />);
+    // Present under the default Any filter.
     await screen.findByRole("link", { name: "Glass Harbour" });
 
     await openFilters(user);
-    // Nothing can be missing, so it stays under Complete...
+    // Nothing to complete, so it is untracked and falls out under Complete...
     await pickSubtitles(user, "Complete");
     await waitFor(() =>
-      expect(screen.queryByRole("link", { name: "The Long Shore" })).toBeNull(),
+      expect(screen.queryByRole("link", { name: "Glass Harbour" })).toBeNull(),
     );
     expect(
-      screen.getByRole("link", { name: "Glass Harbour" }),
+      screen.getByRole("link", { name: "Northern Light" }),
     ).toBeInTheDocument();
 
-    // ...and drops out under Missing some.
+    // ...and also under Missing some.
     await pickSubtitles(user, "Missing some");
     await waitFor(() =>
       expect(screen.queryByRole("link", { name: "Glass Harbour" })).toBeNull(),
+    );
+    expect(
+      screen.getByRole("link", { name: "The Long Shore" }),
+    ).toBeInTheDocument();
+  });
+
+  // A series without a language profile has nothing to complete either, so it
+  // shows under Any but falls out of both Complete and Missing some.
+  it("excludes a series with no profile from both Complete and Missing some", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get("/api/series", () =>
+        HttpResponse.json({
+          data: [
+            complete,
+            missing,
+            seriesWith(4, "Untracked Bay", 10, 2, null),
+          ],
+          total: 3,
+        }),
+      ),
+    );
+    customRender(<SeriesView />);
+    // Present under the default Any filter.
+    await screen.findByRole("link", { name: "Untracked Bay" });
+
+    await openFilters(user);
+    await pickSubtitles(user, "Complete");
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "Untracked Bay" })).toBeNull(),
+    );
+    expect(
+      screen.getByRole("link", { name: "Northern Light" }),
+    ).toBeInTheDocument();
+
+    await pickSubtitles(user, "Missing some");
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "Untracked Bay" })).toBeNull(),
     );
     expect(
       screen.getByRole("link", { name: "The Long Shore" }),
