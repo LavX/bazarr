@@ -89,6 +89,11 @@ jobs_queue_thread.daemon = True
 jobs_queue_thread.start()
 logging.info("Interactive jobs queue started and waiting for tasks")
 
+# Drop editor preview sessions left by the previous run and start the reaper
+# that stops preview encoders once nothing is watching them.
+from api.editor.editor import start_hls_housekeeping  # noqa: E402
+start_hls_housekeeping()
+
 if not args.no_signalr:
     # Fan out one SignalR client per enabled instance (#156); a single default
     # instance keeps the legacy scalar client (byte-identical).

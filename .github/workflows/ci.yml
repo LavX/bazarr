@@ -722,6 +722,7 @@ jobs:
             tests/bazarr/test_sportarr_wanted_translate.py \
             tests/bazarr/test_sportarr_subtitle_delete.py \
             tests/bazarr/test_editor_instance_scope.py \
+            tests/bazarr/test_editor_hls_encoders.py \
             tests/bazarr/test_episode_parser_scope.py \
             tests/bazarr/test_files_browse_instance_scope.py \
             tests/bazarr/test_provider_hub_worker_errors.py \
