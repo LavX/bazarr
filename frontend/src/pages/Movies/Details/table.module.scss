@@ -33,8 +33,12 @@
   width: auto;
   max-width: 0;
 
+  // The global .table-primary rule sets `min-width: 12rem` on phones. Here the
+  // cell may be narrower than that, so drop the minimum or the text paints
+  // over the Language column instead of truncating.
   :global(.table-primary) {
     display: block;
+    min-width: 0;
     max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
