@@ -843,6 +843,7 @@ jobs:
             tests/bazarr/test_sportarr_review_guards.py \
             tests/bazarr/test_sportarr_output.py \
             tests/bazarr/test_sportarr_indexer_cancellation.py \
+            tests/bazarr/test_subtitle_entries.py \
             tests/bazarr/test_sportarr_scheduler_gate.py \
             tests/bazarr/test_sportarr_observability.py \
             tests/bazarr/test_sportarr_release_mismatch.py \
