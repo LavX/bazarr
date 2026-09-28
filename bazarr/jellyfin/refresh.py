@@ -14,6 +14,7 @@ from urllib3.exceptions import ReadTimeoutError
 from media_servers import resolution
 from media_servers.http import MediaServerError
 from media_servers.libraries import _SERVER_WIDE
+from media_servers.paths import file_name
 
 # Jellyfin refreshes a movie item, a series item or an episode item the same
 # way. Which one an identity rung resolves is all that differs.
@@ -213,7 +214,7 @@ class JellyfinRefreshClient:
             raise failure
         return {'status': 'requested'}
 
-    def locate(self, media_type, metadata):
+    def locate(self, media_type, metadata, video_path=None):
         """The id of the item a library row names, with nothing refreshed.
 
         The identifier rung and then the exact title and year, in the libraries
@@ -222,6 +223,8 @@ class JellyfinRefreshClient:
         and it ends the lookup as it ends the refresh's walk: a lower rung
         could only settle it by picking one of the items that tied.
         """
+        if media_type == 'sports':
+            return self._locate_recording(video_path)
         scope = {'movie': 'movie', 'episode': 'episode', 'series': 'episode'}.get(media_type)
         if scope is None:
             raise MediaServerError('internal_error')
@@ -247,3 +250,27 @@ class JellyfinRefreshClient:
                     raise MediaServerError('invalid_response')
                 return item_id
         return None
+
+    def _locate_recording(self, video_path):
+        """The one item in the sports libraries whose file has this recording's name.
+
+        A recording has no identifiers to ask by, and Jellyfin keeps no path
+        mapping, so its path and Bazarr's can differ in everything but the
+        file name. Two files of that name are a tie, reported as nothing.
+        """
+        name = file_name(video_path)
+        if name is None:
+            return None
+        matches = []
+        for library_id in self._libraries('sports'):
+            result = translated(self.client.get_items, {'parentId': library_id, 'recursive': 'true',
+                                                        'mediaTypes': 'Video', 'fields': 'Path'})
+            if not isinstance(result, list) or any(not isinstance(item, dict) for item in result):
+                raise MediaServerError('invalid_response')
+            matches += [item for item in result if file_name(item.get('Path')) == name]
+        if len(matches) != 1:
+            return None
+        item_id = matches[0].get('Id')
+        if not isinstance(item_id, str) or not item_id:
+            raise MediaServerError('invalid_response')
+        return item_id

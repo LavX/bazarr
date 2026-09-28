@@ -52,6 +52,14 @@ def is_media_path(value) -> bool:
     return True
 
 
+def file_name(value):
+    """The last segment of a media path in its own flavor, or None."""
+    try:
+        return _media_path(value).name or None
+    except MediaServerError:
+        return None
+
+
 def map_media_path(video_path: str, mappings: list[dict], *, require_library: bool = False) -> dict:
     path = _media_path(video_path)
     validate_path_mappings(mappings)

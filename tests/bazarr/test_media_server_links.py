@@ -260,3 +260,15 @@ def test_plex_links_to_the_hosted_app_unless_a_browser_url_is_saved(monkeypatch)
     local = replace(hosted, revision=2, external_url='http://plex.lan:32400')
     assert links.resolve(hosted.id, 'movie', 7, native(local))['url'].startswith(
         'http://plex.lan:32400/web/index.html#!/server/m1/details')
+
+
+def sports_row(path='/media/NHL/Game 12.mkv'):
+    from media_servers.resolution import LibraryRow, MediaMetadata
+    return LibraryRow(MediaMetadata(title='Game 12', season=2026, episode=12), path, 3)
+
+
+def test_a_recording_is_never_offered_on_silo_and_needs_a_sports_library_elsewhere():
+    from media_servers.links import candidates
+    configuration = native(snap('emby', 'A', **EMBY_A), snap('silo', 'S', **SILO_A), snap('jellyfin', 'J'),
+                           snap('plex', 'P', options={'movie_libraries': ['Movies'], 'sports_libraries': ['Sports']}))
+    assert [target.snapshot.kind for target in candidates(sports_row(), 'sports', configuration)] == ['emby', 'plex']

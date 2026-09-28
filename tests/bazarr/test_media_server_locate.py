@@ -150,3 +150,42 @@ def test_a_plex_server_that_stops_answering_is_a_refusal_not_a_miss(monkeypatch,
             client.locate('movie', MediaMetadata(imdb_id='tt1'))
     # Exactly what the refresh reports for the same refusal.
     assert error.value.code == code
+
+
+# ------------------------------------------------------------------- sports
+
+
+def test_jellyfin_finds_a_recording_by_file_name_in_its_sports_libraries(jellyfin_server):
+    from jellyfin.refresh import JellyfinRefreshClient
+    from media_servers.resolution import MediaMetadata
+    from test_media_server_convergence import SPORTS_LIBRARY
+    jellyfin_server.items[SPORTS_LIBRARY] = [{'Id': 'a' * 32, 'Path': '/jf/NHL/Game 11.mkv'},
+                                             {'Id': 'b' * 32, 'Path': '/jf/NHL/Game 12.mkv'}]
+    options = {'sports_library_ids': [SPORTS_LIBRARY]}
+    with JellyfinRefreshClient(snap('jellyfin', 'J', url=jellyfin_server.url, options=options)) as client:
+        assert client.locate('sports', MediaMetadata(title='Game 12'), '/media/NHL/Game 12.mkv') == 'b' * 32
+        jellyfin_server.items[SPORTS_LIBRARY].append({'Id': 'c' * 32, 'Path': '/jf/Other/Game 12.mkv'})
+        assert client.locate('sports', MediaMetadata(title='Game 12'), '/media/NHL/Game 12.mkv') is None
+    assert not [call for call in jellyfin_server.calls if call[0] == 'POST']
+
+
+def test_plex_finds_a_recording_by_title_and_confirms_it_by_file_name(monkeypatch):
+    from media_servers.resolution import MediaMetadata
+    from plex import operations
+    from plex.refresh import PlexRefreshClient
+
+    def recording(*files):
+        return SimpleNamespace(iterParts=lambda: [SimpleNamespace(file=path) for path in files])
+    wrong, right = recording('/plex/NHL/Game 11.mkv'), recording('/plex/NHL/Game 12.mkv')
+
+    class Sports:
+        type = 'show'
+
+        def search(self, title=None, libtype=None):
+            assert (title, libtype) == ('Game 12', 'episode')
+            return [wrong, right]
+    monkeypatch.setattr(operations, 'plex_server_for', lambda *_args: SimpleNamespace(
+        library=SimpleNamespace(section=lambda name: Sports())))
+    client = PlexRefreshClient(snap('plex', 'P', options={'sports_libraries': ['Sports']}))
+    assert client.locate('sports', MediaMetadata(title='Game 12'), '/media/NHL/Game 12.mkv') is right
+    assert client.locate('sports', MediaMetadata(title='Game 12'), '/media/NHL/Game 13.mkv') is None

@@ -54,3 +54,9 @@ def test_a_resolve_without_a_destination_is_refused_and_an_unknown_row_is_404(li
     assert links_api.get(ROOT + '/candidates?media_type=movie&id=404', headers=HEADERS).status_code == 404
     assert links_api.get(ROOT + '/resolve?instance_id=emby-A&media_type=movie&id=404',
                          headers=HEADERS).status_code == 404
+
+
+def test_a_sports_recording_is_a_row_the_endpoints_accept(links_api):
+    assert links_api.get(ROOT + '/candidates?media_type=sports&id=4', headers=HEADERS).status_code == 200
+    assert links_api.get(ROOT + '/resolve?instance_id=emby-A&media_type=sports&id=4',
+                         headers=HEADERS).status_code == 200

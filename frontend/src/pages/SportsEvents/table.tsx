@@ -20,7 +20,11 @@ import {
   faSync,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { ColumnDef, Table as TableInstance } from "@tanstack/react-table";
+import {
+  CellContext,
+  ColumnDef,
+  Table as TableInstance,
+} from "@tanstack/react-table";
 import {
   useEmbeddedTrackVisibility,
   useLanguages,
@@ -39,6 +43,7 @@ import {
 import HiddenTracks from "@/components/HiddenTracks";
 import { SportsSearchModal } from "@/components/modals/SportsSearchModal";
 import SyncOutputCompareModal from "@/components/modals/SyncOutputCompareModal";
+import PlayOnMenu from "@/components/PlayOnMenu";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
 import TextPopover from "@/components/TextPopover";
 import { useModals } from "@/modules/modals";
@@ -585,6 +590,18 @@ const EventRowActions: FunctionComponent<{
   );
 };
 
+// Its own column, with a cell defined once at module scope like the other
+// cells, so a menu open in it stays mounted while the table re-renders.
+const SportsEventPlayCell = ({ row }: CellContext<SportsEvent, unknown>) => (
+  <PlayOnMenu
+    mediaType="sports"
+    id={row.original.id}
+    itemLabel={row.original.title}
+    variant="action"
+    className={tableStyles.actionIcon}
+  />
+);
+
 const columns: ColumnDef<SportsEvent>[] = [
   {
     // The real monitored state, which is what gates automatic search.
@@ -691,6 +708,7 @@ const columns: ColumnDef<SportsEvent>[] = [
     header: "Actions",
     cell: ({ row: { original } }) => <EventRowActions event={original} />,
   },
+  { id: "play", cell: SportsEventPlayCell },
 ];
 
 // The local event id, so a row keeps its id, and its mounted cells, when an

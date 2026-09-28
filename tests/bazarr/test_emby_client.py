@@ -660,3 +660,12 @@ def test_server_id_comes_from_system_info(http_fixture):
     with EmbyClient(base, "synthetic-key") as client:
         assert client.server_id() == "5a69"
     assert records[0]["path"] == "/System/Info"
+
+
+def test_locate_a_recording_by_its_exact_file_of_any_type(http_fixture):
+    from emby.client import EmbyClient
+    from media_servers.resolution import MediaMetadata
+    base, records = http_fixture([(200, _items({"Id": "v1", "Type": "Video", "Path": "/e/NHL/Game 12.mkv"}), {})])
+    with EmbyClient(base, "synthetic-key") as client:
+        assert client.locate("sports", MediaMetadata(title="Game 12"), "/e/NHL/Game 12.mkv") == "v1"
+    assert "IncludeItemTypes" not in _query(records[0]) and _query(records[0])["Path"] == ["/e/NHL/Game 12.mkv"]

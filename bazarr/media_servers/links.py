@@ -27,7 +27,7 @@ from .resolution import media_metadata_for
 logger = logging.getLogger(__name__)
 
 KIND_NAMES = {'emby': 'Emby', 'jellyfin': 'Jellyfin', 'plex': 'Plex', 'silo': 'Silo'}
-MEDIA_TYPES = ('movie', 'series', 'episode')
+MEDIA_TYPES = ('movie', 'series', 'episode', 'sports')
 CACHE_SECONDS = 900
 # Per request to the server, where the client lets it be set.
 HTTP_TIMEOUT = (3, 4)
@@ -109,6 +109,10 @@ def candidates(row, media_type, native):
     """
     targets = []
     for snapshot, display_name in destinations(native):
+        if media_type == 'sports' and snapshot.kind == 'silo':
+            # Silo's native API has no path lookup, and a recording it never
+            # matched carries a hashed id nothing here can derive.
+            continue
         mapped = None
         if snapshot.kind in LIBRARY_KEYS:
             if not snapshot.libraries(media_type):
@@ -255,12 +259,12 @@ def _lookup(target, media_type, row):
         from jellyfin.refresh import JellyfinRefreshClient
         with JellyfinRefreshClient(snapshot) as client:
             client.client.timeout = HTTP_TIMEOUT
-            item_id = client.locate(media_type, row.metadata)
+            item_id = client.locate(media_type, row.metadata, row.video_path)
             return None if item_id is None else jellyfin_url(_browser_base(snapshot), item_id)
     if snapshot.kind == 'plex':
         from plex.refresh import PlexRefreshClient
         with PlexRefreshClient(snapshot) as client:
-            item = client.locate(media_type, row.metadata)
+            item = client.locate(media_type, row.metadata, row.video_path)
             return None if item is None else item.getWebURL(base=plex_web_base(snapshot))
     from silo.client import SiloClient
     with SiloClient(snapshot.url, snapshot.apikey, snapshot.verify_ssl) as client:

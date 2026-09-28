@@ -376,3 +376,33 @@ it.each(["change", "clear"])(
     });
   },
 );
+
+it("offers each recording on the media servers, asking about the event's local id", async () => {
+  owners();
+  let asked = "";
+  server.use(
+    http.get("/api/sports/history", () =>
+      HttpResponse.json({ data: [record], total: 1 }),
+    ),
+    http.get("/api/system/media-server-links/destinations", () =>
+      HttpResponse.json({
+        data: [
+          { instance_id: "e1", kind: "emby", display_name: "Emby" },
+          { instance_id: "j1", kind: "jellyfin", display_name: "Jellyfin" },
+        ],
+      }),
+    ),
+    http.get("/api/system/media-server-links/candidates", ({ request }) => {
+      asked = new URL(request.url).search;
+      return HttpResponse.json({ data: [] });
+    }),
+  );
+  customRender(<SportsHistoryView />);
+  const trigger = await screen.findByRole(
+    "button",
+    { name: "Play Final on a media server" },
+    { timeout: 8000 },
+  );
+  trigger.focus();
+  await waitFor(() => expect(asked).toBe("?media_type=sports&id=11"));
+});

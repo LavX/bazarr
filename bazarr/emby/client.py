@@ -20,7 +20,11 @@ _COLLECTION_TYPES = {"movie": "movies", "episode": "tvshows", "sports": None}
 
 
 def _accepted_items(result, item_type):
-    """The items of one type from a lookup, or nothing this can vouch for."""
+    """The items of one type from a lookup, or nothing this can vouch for.
+
+    ``item_type`` None accepts every type, for a sports recording, which Emby
+    files under whatever the library holding it makes of it.
+    """
     if not isinstance(result, dict) or not isinstance(result.get("Items"), list):
         raise MediaServerError("invalid_response")
     items = result["Items"]
@@ -32,7 +36,7 @@ def _accepted_items(result, item_type):
     for item in items:
         if not isinstance(item, dict):
             raise MediaServerError("invalid_response")
-        if item.get("Type") == item_type:
+        if item_type is None or item.get("Type") == item_type:
             accepted.append(item)
     return accepted
 
@@ -306,6 +310,9 @@ class EmbyClient:
         file of its own to look up by path. A tie is not a resolution here
         either: it is reported as nothing found.
         """
+        if media_type == "sports":
+            # No identifiers and no numbers Emby knows, so only the file itself.
+            return self._locate_file(video_path, None)
         parent_type = {"movie": "movie", "episode": "episode", "series": "episode"}.get(media_type)
         if parent_type is None:
             raise MediaServerError("internal_error")
@@ -336,9 +343,10 @@ class EmbyClient:
         """The one item at exactly this file, or nothing."""
         if not is_media_path(video_path):
             return None
-        items = _accepted_items(self.http.request_json("GET", "/Items", params={
-            "Path": video_path, "IncludeItemTypes": item_type, "Recursive": "true",
-            "Fields": "Path,MediaSources"}), item_type)
+        params = {"Path": video_path, "Recursive": "true", "Fields": "Path,MediaSources"}
+        if item_type is not None:
+            params["IncludeItemTypes"] = item_type
+        items = _accepted_items(self.http.request_json("GET", "/Items", params=params), item_type)
         matches = [item for item in items
                    if any(media_paths_equal(path, video_path) for path in _item_paths(item))]
         return _raw_id(matches[0]) if len(matches) == 1 else None

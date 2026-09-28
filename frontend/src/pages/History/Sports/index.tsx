@@ -19,7 +19,7 @@ import {
   faRecycle,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { ColumnDef } from "@tanstack/react-table";
+import { CellContext, ColumnDef } from "@tanstack/react-table";
 import { useArrInstanceLabels } from "@/apis/hooks/arrInstances";
 import {
   SportsActivityRow,
@@ -34,6 +34,7 @@ import {
 } from "@/components/bazarr";
 import HistoryProvider from "@/components/bazarr/HistoryProvider";
 import Language from "@/components/bazarr/Language";
+import PlayOnMenu from "@/components/PlayOnMenu";
 import StateIcon from "@/components/StateIcon";
 import TextPopover from "@/components/TextPopover";
 import HistoryView from "@/pages/views/HistoryView";
@@ -58,6 +59,18 @@ const EXCLUDE_PROMPT =
   "Exclude this provider release for this instance and search for a replacement? " +
   "The saved subtitle is deleted only when it still matches this download. " +
   "An unproven or newer file is preserved.";
+
+// Defined once, so the columns being rebuilt never remount an open menu.
+const SportsPlayCell = ({
+  row: { original },
+}: CellContext<SportsActivityRow, unknown>) => (
+  <PlayOnMenu
+    mediaType="sports"
+    id={original.event_id}
+    itemLabel={original.title}
+    variant="action"
+  />
+);
 
 const SportsHistoryView: FunctionComponent = () => {
   const { enabled, isLoading } = useSportsAvailability();
@@ -117,6 +130,7 @@ const SportsHistoryView: FunctionComponent = () => {
           </Anchor>
         ),
       },
+      { id: "play", cell: SportsPlayCell },
       ...(multiInstance
         ? [
             {
