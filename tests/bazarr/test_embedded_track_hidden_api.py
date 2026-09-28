@@ -56,8 +56,8 @@ def hidden_api(hidden_db, monkeypatch, tmp_path):  # noqa: F811
     (tmp_path / "tv" / "e01-e02.mkv").write_bytes(b"video")
     session.add_all([
         TableMovies(id=1, arr_instance_id=2, radarrId=7, title="M", path="/movies/m.mkv", tmdbId="1",
-                    # A four-element entry is what the codec slice stores; a
-                    # three-element one is what every index before it stored.
+                    # A four-element entry carries the track's codec; a
+                    # three-element one is what older indexes stored.
                     subtitles=str([["en", None, None, "subrip"], ["fr", None, None],
                                    ["de", "/movies/m.de.srt", 10]])),
         TableMovies(id=3, arr_instance_id=2, radarrId=9, title="Gone", path="/movies/gone.mkv", tmdbId="3",

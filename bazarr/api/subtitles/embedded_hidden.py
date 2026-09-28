@@ -239,8 +239,9 @@ class EmbeddedHiddenTracks(Resource):
             # than record a hide the page would not show.
             if not os.path.exists(mapped):
                 return 'The video file cannot be read right now, so the track was not hidden.', 409
-            # Every codec the hide covers, for the disclosure. Stored entries
-            # carry one from the codec slice on; before it, there is none.
+            # Every codec the hide covers, for the disclosure. A stored entry
+            # carries its codec as a fourth element once the indexer records
+            # one; older three-element entries have none.
             codecs = sorted({entry[3] for entry in entries
                              if len(entry) > 3 and isinstance(entry[3], str) and entry[3]})
             recorded = hide_track(database, media_type, media_id, owner, key, ', '.join(codecs) or None)
