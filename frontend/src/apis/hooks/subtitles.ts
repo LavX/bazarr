@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { showNotification } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AxiosError } from "axios";
@@ -747,6 +748,16 @@ export function useSubtitleArchiveDownload() {
 
 const hiddenTracksKey = [QueryKeys.Subtitles, "embedded-hidden"];
 
+// Declared once rather than inline: TanStack Query then regroups the listing
+// only when it changes, not on every render of every row that reads it.
+function tracksByMediaId(tracks: EmbeddedHiddenTrack[]) {
+  const byId = new Map<number, EmbeddedHiddenTrack[]>();
+  tracks.forEach((track) => {
+    byId.set(track.media_id, [...(byId.get(track.media_id) ?? []), track]);
+  });
+  return byId;
+}
+
 /**
  * The embedded tracks hidden on these media rows, keyed by local id. One
  * query for a whole series or league page rather than one per row; the client
@@ -756,18 +767,12 @@ export function useEmbeddedHiddenTracks(
   mediaType: HiddenTrackMediaType,
   mediaIds: number[],
 ) {
-  const ids = [...mediaIds].sort((a, b) => a - b);
+  const ids = useMemo(() => [...mediaIds].sort((a, b) => a - b), [mediaIds]);
   return useQuery({
     queryKey: [...hiddenTracksKey, mediaType, ...ids],
     queryFn: () => api.subtitles.hiddenTracks(mediaType, ids),
     enabled: ids.length > 0,
-    select: (tracks) => {
-      const byId = new Map<number, EmbeddedHiddenTrack[]>();
-      tracks.forEach((track) => {
-        byId.set(track.media_id, [...(byId.get(track.media_id) ?? []), track]);
-      });
-      return byId;
-    },
+    select: tracksByMediaId,
   });
 }
 
