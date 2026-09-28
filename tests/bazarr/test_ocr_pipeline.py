@@ -6,8 +6,10 @@ import io
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import threading
+import time
 from contextlib import contextmanager
 
 import pysubs2
@@ -394,6 +396,74 @@ def test_a_tesseract_call_that_never_returns_is_killed(fake_tesserocr, monkeypat
             read(Image.new("L", (40, 20), 255))
     assert workers[0].process.returncode is not None
 
+
+# Starts a worker whose Tesseract call never returns and is then killed, as
+# Bazarr+ can be while that call runs: the worker never sees its input end.
+DYING_PARENT = """
+import subprocess, sys, time
+
+worker = subprocess.Popen([sys.executable, "-P", "-B", sys.argv[1]], stdin=subprocess.PIPE,
+                          stdout=subprocess.PIPE, start_new_session=True)
+worker.stdin.write(b'{"op": "open", "tessdata": ".", "language": "eng"}\\n{"op": "read", "bmp": ""}\\n')
+worker.stdin.flush()
+worker.stdout.readline()  # the greeting
+worker.stdout.readline()  # the pack is open, and the read is on its way
+print(worker.pid, flush=True)
+time.sleep(600)
+"""
+
+
+def _running(pid):
+    """Whether the process exists and has not exited (a zombie has)."""
+    try:
+        with open(f"/proc/{pid}/stat") as handle:
+            return handle.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except FileNotFoundError:
+        return False
+
+
+def test_a_hung_worker_ends_when_the_process_that_started_it_is_gone(fake_tesserocr):
+    fake_tesserocr("hang")
+    parent = subprocess.Popen([sys.executable, "-c", DYING_PARENT, tesseract.WORKER_PATH],
+                              stdout=subprocess.PIPE, text=True)
+    worker = None
+    try:
+        worker = int(parent.stdout.readline())
+        parent.kill()
+        parent.wait()
+        deadline = time.monotonic() + 15
+        while _running(worker) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not _running(worker), "the worker outlived the process that started it"
+    finally:
+        parent.kill()
+        parent.wait()
+        parent.stdout.close()
+        if worker and _running(worker):
+            os.kill(worker, signal.SIGKILL)
+
+def _blocked_signals(pid, thread):
+    with open(f"/proc/{pid}/task/{thread}/status") as handle:
+        for line in handle:
+            if line.startswith("SigBlk:"):
+                return int(line.split()[1], 16)
+
+
+def test_signals_sent_to_the_worker_still_reach_its_main_thread(fake_tesserocr):
+    """cysignals must take a signal in the thread that is inside Tesseract,
+    which is the main one; the thread that watches the parent blocks them."""
+    fake_tesserocr()
+    worker = tesseract.TesseractWorker()
+    try:
+        pid = worker.process.pid
+        others = [int(thread) for thread in os.listdir(f"/proc/{pid}/task") if int(thread) != pid]
+        assert len(others) == 1
+        assert _blocked_signals(pid, pid) == 0
+        blocked = _blocked_signals(pid, others[0])
+        for number in (signal.SIGINT, signal.SIGHUP, signal.SIGALRM, signal.SIGTERM, signal.SIGQUIT):
+            assert blocked & (1 << (number - 1)), signal.Signals(number).name
+    finally:
+        worker.close()
 
 def test_a_cancelled_run_stops_its_worker(media, packs, ffmpeg, tmp_path, monkeypatch):
     workers = []

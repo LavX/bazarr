@@ -14,16 +14,48 @@ an OCR plugin later without changes. One JSON object per line:
 A failure answers {"ok": false, "error": "unavailable" or "failed",
 "message": "..."}, and the process then exits. "unavailable" replaces the
 greeting when tesserocr cannot be imported. The process also exits when its
-input closes.
+input closes, or when the process that started it is gone.
 """
 
 import base64
 import json
 import os
+import signal
 import sys
+import threading
+import time
+
+# How often the worker checks that the process that started it is still there.
+PARENT_CHECK_SECONDS = 1
+
+
+def watch_parent(parent):
+    # The loop in main() stops when Bazarr+ closes the worker's input, but it
+    # reads that only between requests. If Bazarr+ exits, restarts or is
+    # killed while a Tesseract call never returns, only this thread ends the
+    # worker: tesserocr releases the GIL inside Recognize and GetUTF8Text, so
+    # it runs during that call.
+    while os.getppid() == parent:
+        time.sleep(PARENT_CHECK_SECONDS)
+    os._exit(1)
+
+
+def start_parent_watch():
+    watch = threading.Thread(target=watch_parent, args=(os.getppid(),), name="parent-watch", daemon=True)
+    if not hasattr(signal, "pthread_sigmask"):
+        watch.start()
+        return
+    # The thread starts with every signal blocked, so a signal sent to the
+    # worker still lands in the main thread, where cysignals expects it.
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, signal.valid_signals())
+    try:
+        watch.start()
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
 
 
 def main():
+    start_parent_watch()
     # Answers go out on a copy of stdout, and stdout itself then points at
     # stderr, so text that Tesseract, Leptonica or Python prints cannot break
     # an answer.
