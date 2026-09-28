@@ -18,6 +18,7 @@ import {
   useMediaServerLinkAnswers,
   useMediaServerLinkCandidates,
   useMediaServerLinkDestinations,
+  useStopMediaServerLinkAnswers,
 } from "@/apis/hooks/mediaServerLinks";
 import type {
   LinkMediaType,
@@ -120,6 +121,7 @@ const PlayOnMenu: FunctionComponent<Props> = ({
   const candidates = useMediaServerLinkCandidates(mediaType, id, warm);
   const targets = candidates.data ?? [];
   const answers = useMediaServerLinkAnswers(targets, mediaType, id, warm);
+  const stop = useStopMediaServerLinkAnswers(targets, mediaType, id);
 
   // Opening the menu, a resting pointer, or focus on the single link asks
   // again wherever the last answer is stale: at once for a server that did
@@ -204,7 +206,15 @@ const PlayOnMenu: FunctionComponent<Props> = ({
   const triggerWarmth = { ...warmth, onFocus: start };
   const pending = answers.filter((answer) => isChecking(answer)).length;
   return (
-    <Menu shadow="md" width={260} position="bottom-end" onOpen={ask}>
+    // A closed menu gives back the connections its rows still hold; opening
+    // it again asks those rows again.
+    <Menu
+      shadow="md"
+      width={260}
+      position="bottom-end"
+      onOpen={ask}
+      onClose={stop}
+    >
       <Menu.Target>
         {variant === "toolbox" ? (
           <Button

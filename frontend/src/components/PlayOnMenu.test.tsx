@@ -1,7 +1,8 @@
 /* eslint-disable camelcase */
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import api from "@/apis/raw";
 import { customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import PlayOnMenu, { NO_CANDIDATE } from "./PlayOnMenu";
@@ -366,5 +367,88 @@ describe("PlayOnMenu", () => {
       new Set(["Play on Emby", "Checking Plex", "Not found on Silo"]),
     );
     finishPlex?.();
+  });
+  // A lookup the page no longer waits for lets go of its connection: a
+  // server that hangs holds each one for up to two of its budgets, and a
+  // browser has only a few connections to Bazarr.
+  function hangingPlex() {
+    const resolve = vi.spyOn(api.mediaServerLinks, "resolve");
+    let release: () => void = () => undefined;
+    serve([EMBY, PLEX], [EMBY, PLEX], {
+      e1: { state: "not_found", url: null },
+      p1: () =>
+        new Promise((done) => {
+          release = () => done({ state: "not_found", url: null });
+        }),
+    });
+    const plexSignal = () =>
+      resolve.mock.calls.find(([instance]) => instance === "p1")?.[3];
+    return { resolve, plexSignal, release: () => release() };
+  }
+
+  it("lets go of a lookup still running when its row goes away", async () => {
+    const { resolve, plexSignal, release } = hangingPlex();
+    const user = userEvent.setup();
+    const { unmount } = customRender(
+      <PlayOnMenu
+        mediaType="movie"
+        id={1}
+        itemLabel="Metropolis"
+        variant="toolbox"
+      />,
+    );
+    try {
+      await user.click(
+        await screen.findByRole("button", {
+          name: "Play Metropolis on a media server",
+        }),
+      );
+      await screen.findByRole("menuitem", {
+        name: "Checking Plex",
+        hidden: true,
+      });
+      expect(plexSignal()?.aborted).toBe(false);
+      unmount();
+      await waitFor(() => expect(plexSignal()?.aborted).toBe(true));
+    } finally {
+      release();
+      resolve.mockRestore();
+    }
+  });
+
+  it("lets go of a lookup still running when its menu closes, and asks again on the next open", async () => {
+    const { resolve, plexSignal, release } = hangingPlex();
+    const user = userEvent.setup();
+    customRender(
+      <PlayOnMenu
+        mediaType="movie"
+        id={2}
+        itemLabel="Metropolis"
+        variant="toolbox"
+      />,
+    );
+    try {
+      const trigger = await screen.findByRole("button", {
+        name: "Play Metropolis on a media server",
+      });
+      await user.click(trigger);
+      await screen.findByRole("menuitem", {
+        name: "Checking Plex",
+        hidden: true,
+      });
+      await user.keyboard("{Escape}");
+      await waitFor(() =>
+        expect(trigger).toHaveAttribute("aria-expanded", "false"),
+      );
+      await waitFor(() => expect(plexSignal()?.aborted).toBe(true));
+      const askedPlex = () =>
+        resolve.mock.calls.filter(([instance]) => instance === "p1").length;
+      expect(askedPlex()).toBe(1);
+      await user.click(trigger);
+      await waitFor(() => expect(askedPlex()).toBe(2));
+    } finally {
+      release();
+      resolve.mockRestore();
+    }
   });
 });

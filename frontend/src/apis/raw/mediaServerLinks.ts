@@ -1,6 +1,7 @@
 /* eslint-disable camelcase */
 
 import BaseApi from "./base";
+import client from "./client";
 import { MEDIA_SERVER_KINDS, MediaServerKind } from "./mediaServers";
 
 export type LinkMediaType = "movie" | "series" | "episode" | "sports";
@@ -60,16 +61,22 @@ class MediaServerLinksApi extends BaseApi {
     );
   }
 
+  // Past BaseApi.get, which takes no signal: a server that hangs holds this
+  // request for up to two of its budgets, and a page that stops waiting for
+  // it has to give the browser its connection back.
   async resolve(
     instanceId: string,
     mediaType: LinkMediaType,
     id: number,
+    signal?: AbortSignal,
   ): Promise<MediaServerLinkAnswer> {
-    const data = await this.get<MediaServerLinkAnswer>("/resolve", {
-      instance_id: instanceId,
-      media_type: mediaType,
-      id,
-    });
+    const { data } = await client.axios.get<MediaServerLinkAnswer>(
+      `${this.prefix}/resolve`,
+      {
+        params: { instance_id: instanceId, media_type: mediaType, id },
+        signal,
+      },
+    );
     if (data?.state === "resolved" && isWebUrl(data.url)) {
       return { instance_id: instanceId, state: "resolved", url: data.url };
     }

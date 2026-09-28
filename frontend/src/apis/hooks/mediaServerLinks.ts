@@ -1,4 +1,9 @@
-import { Query, useQueries, useQuery } from "@tanstack/react-query";
+import {
+  Query,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import api from "@/apis/raw";
 import type {
   LinkMediaType,
@@ -47,6 +52,10 @@ export function useMediaServerLinkCandidates(
   });
 }
 
+function answerKey(instanceId: string, mediaType: LinkMediaType, id: number) {
+  return [...mediaServerLinksKey, "resolve", instanceId, mediaType, id];
+}
+
 /** One answer per destination, each on its own request and its own time. */
 export function useMediaServerLinkAnswers(
   targets: MediaServerLinkTarget[],
@@ -56,15 +65,10 @@ export function useMediaServerLinkAnswers(
 ) {
   return useQueries({
     queries: targets.map((target) => ({
-      queryKey: [
-        ...mediaServerLinksKey,
-        "resolve",
-        target.instance_id,
-        mediaType,
-        id,
-      ],
-      queryFn: () =>
-        api.mediaServerLinks.resolve(target.instance_id, mediaType, id),
+      queryKey: answerKey(target.instance_id, mediaType, id),
+      // A row that goes away lets go of its lookups.
+      queryFn: ({ signal }: { signal: AbortSignal }) =>
+        api.mediaServerLinks.resolve(target.instance_id, mediaType, id, signal),
       enabled,
       staleTime: answerStaleTime,
       gcTime: ANSWER_MS,
@@ -72,4 +76,21 @@ export function useMediaServerLinkAnswers(
       refetchOnWindowFocus: false,
     })),
   });
+}
+
+/** Lets go of this row's lookups still running, as when its menu closes. */
+export function useStopMediaServerLinkAnswers(
+  targets: MediaServerLinkTarget[],
+  mediaType: LinkMediaType,
+  id: number,
+) {
+  const client = useQueryClient();
+  return () => {
+    for (const target of targets) {
+      void client.cancelQueries({
+        queryKey: answerKey(target.instance_id, mediaType, id),
+        exact: true,
+      });
+    }
+  };
 }
