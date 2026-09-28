@@ -462,20 +462,23 @@ def test_an_instance_keeps_its_options_and_toggles_across_a_save(schema_session)
 
 
 class _FakeSection:
-    """Only what `plex_refresh_item` ever asked a section for."""
+    """Only what the Plex refresh asks a section for."""
+
+    agent, language = 'tv.plex.agents.movie', 'en-US'
 
     def __init__(self, title, guids, calls, refusal=None):
         self.title, self.type, self._guids, self._calls = title, 'movie', guids, calls
         self._refusal = refusal
 
-    # plexapi's own spelling, which the real sections answer to.
-    def getGuid(self, guid):
-        from plexapi.exceptions import NotFound
+    # What plexapi's getGuid asks a real section: a sample item, whose agent
+    # match turns the external id into a plex:// guid, then that guid.
+    def search(self, maxresults=None, guid=None):
         if self._refusal is not None:
             raise self._refusal
-        if guid not in self._guids:
-            raise NotFound(guid)
-        return self._guids[guid]
+        if guid is None:
+            return [SimpleNamespace(matches=lambda agent, title: [SimpleNamespace(guid=f'plex://{title}')])]
+        external = guid.removeprefix('plex://').replace('-', '://', 1)
+        return [self._guids[external]] if external in self._guids else []
 
     def update(self):
         self._calls.append(('section-update', self.title))

@@ -67,6 +67,7 @@ class _Sample:
         self.section = section
 
     def matches(self, agent, title):
+        assert '://' not in title, 'plexapi hands the agent an id as imdb-tt1'
         external = title.replace('-', '://', 1)
         self.section.log.append(('match', agent, external))
         # The online agent knows every id but these.
@@ -78,7 +79,8 @@ class PlexSection:
 
     A sample item has the section's agent match the external id to a plex://
     guid, and the section is searched for that guid. The real ``getGuid`` runs
-    over it, so the refresh, which asks through it, runs plexapi's own code.
+    over it too, so the lookup the refresh and the link share can be held to
+    plexapi's own answer.
     """
 
     getGuid = __import__('plexapi.library', fromlist=['LibrarySection']).LibrarySection.getGuid
@@ -160,6 +162,45 @@ def test_plex_locate_asks_each_agent_once_per_guid_whatever_the_sections(monkeyp
         ('Old', plex_guid('tmdb://19', LEGACY_AGENT))]
 
 
+def test_plex_refresh_asks_each_agent_once_whatever_the_sections(monkeypatch):
+    # The refresh after a subtitle walks every configured section for the
+    # IMDB guid. A miss asked the agent in each of them; it is asked once
+    # per agent now, and every section is still searched in order.
+    from media_servers.resolution import MediaMetadata
+    log = []
+    sections = {'Films': PlexSection('Films', log=log), 'Movies': PlexSection('Movies', log=log),
+                'Old': PlexSection('Old', agent=LEGACY_AGENT, log=log)}
+    options = {'movie_libraries': ['Films', 'Movies', 'Old']}
+    with _plex(monkeypatch, sections, options=options) as client:
+        assert client.refresh_by_provider_id('movie', MediaMetadata(imdb_id='tt1', tmdb_id='19')) is None
+    assert [entry for entry in log if entry[0] == 'match'] == [
+        ('match', MOVIE_AGENT, 'imdb://tt1'), ('match', LEGACY_AGENT, 'imdb://tt1')]
+    assert [entry[1:] for entry in log if entry[0] == 'search'] == [
+        ('Films', plex_guid('imdb://tt1')), ('Movies', plex_guid('imdb://tt1')),
+        ('Old', plex_guid('imdb://tt1', LEGACY_AGENT))]
+
+
+@pytest.mark.parametrize('held, guid, empty', [({'imdb://tt1'}, 'imdb://tt1', False),
+                                               ({'imdb://tt1'}, 'imdb://tt2', False),
+                                               (set(), 'imdb://tt1', True),
+                                               ({'imdb://unknown1'}, 'imdb://unknown1', False)],
+                         ids=['found', 'missing', 'empty section', 'unknown to the agent'])
+def test_one_match_per_agent_finds_what_plexapi_getguid_finds(held, guid, empty):
+    # Neither the refresh nor the link calls getGuid, so the lookup they
+    # share has to answer exactly as plexapi's own does.
+    from plex.refresh import _by_guid
+    from plexapi.exceptions import NotFound
+    movie = SimpleNamespace(name='Metropolis')
+    section = PlexSection('Movies', {external: movie for external in held}, empty=empty)
+
+    def answer(lookup):
+        try:
+            return lookup()
+        except NotFound:
+            return NotFound
+    assert answer(lambda: _by_guid(section, guid, {})) is answer(lambda: section.getGuid(guid))
+
+
 def test_plex_locate_passes_an_empty_section_and_an_id_its_agent_does_not_know(monkeypatch):
     from media_servers.resolution import MediaMetadata
     movie, log = SimpleNamespace(name='Metropolis'), []
@@ -181,7 +222,7 @@ def test_plex_locate_finds_the_item_the_refresh_refreshes(monkeypatch):
     movie = SimpleNamespace(refresh=lambda: refreshed.append('Metropolis'))
     with _plex(monkeypatch, {'Movies': PlexSection('Movies', {'imdb://tt1': movie})}) as client:
         metadata = MediaMetadata(imdb_id='tt1', tmdb_id='19')
-        # The refresh asks through plexapi's own getGuid; the link does not.
+        # The refresh and the link go through one lookup and find one item.
         assert client.refresh_by_provider_id('movie', metadata) == {'status': 'requested'}
         assert client.locate('movie', metadata) is movie
     assert refreshed == ['Metropolis']

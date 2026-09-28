@@ -80,17 +80,17 @@ def _by_guid(section, guid, matched):
     return items[0]
 
 
-def _item_for(section, guid, media_type, metadata, matched=None):
+def _item_for(section, guid, media_type, metadata, matched):
     """The item one guid names in one section, down to the episode, or nothing.
 
     The refresh and the link lookup both come through here, so a guid finds
-    the same item for either. ``getGuid`` has the Plex agent match an
-    external id, which can leave the LAN; a lookup across several sections
-    passes ``matched`` so each agent is asked once. Only a lookup miss is
-    nothing; anything else is the server refusing, in the shared vocabulary.
+    the same item for either. Each keeps one ``matched`` for its whole walk
+    over the sections, so an agent is asked once per guid rather than once
+    per section. Only a lookup miss is nothing; anything else is the server
+    refusing, in the shared vocabulary.
     """
     try:
-        item = section.getGuid(guid) if matched is None else _by_guid(section, guid, matched)
+        item = _by_guid(section, guid, matched)
         if media_type == 'episode':
             item = item.episode(season=metadata.season, episode=metadata.episode)
     except NotFound:
@@ -135,7 +135,10 @@ class PlexRefreshClient:
         return self._server
 
     def refresh_by_provider_id(self, media_type, metadata, *, ensure_current=None):
-        """The IMDB guid, across the configured sections of this type."""
+        """The IMDB guid, across the configured sections of this type.
+
+        Each agent matches the guid once for the whole walk, as in ``locate``.
+        """
         if media_type not in ('movie', 'episode'):
             raise MediaServerError('internal_error')
         if not metadata.imdb_id or not metadata.locatable(media_type):
@@ -146,10 +149,11 @@ class PlexRefreshClient:
             # callback runs, so the guard runs first: a configuration change
             # must stop the refresh before the credential is sent anywhere.
             ensure_current()
+        guid, matched = f'imdb://{metadata.imdb_id}', {}
         for name, section in _sections(self.server, libraries):
             if ensure_current:
                 ensure_current()
-            item = _item_for(section, f'imdb://{metadata.imdb_id}', media_type, metadata)
+            item = _item_for(section, guid, media_type, metadata, matched)
             if item is None:
                 logger.debug('Plex section %r holds no item for this publication', name)
                 continue
