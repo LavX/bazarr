@@ -1,5 +1,13 @@
 import { FunctionComponent, ReactElement, useCallback, useMemo } from "react";
-import { Divider, List, Menu, MenuProps, ScrollArea } from "@mantine/core";
+import {
+  Divider,
+  List,
+  Menu,
+  MenuProps,
+  ScrollArea,
+  Stack,
+  Text,
+} from "@mantine/core";
 import {
   faAlignJustify,
   faClock,
@@ -8,6 +16,7 @@ import {
   faDownload,
   faExchangeAlt,
   faEye,
+  faEyeSlash,
   faFaceGrinStars,
   faFilm,
   faImage,
@@ -165,7 +174,8 @@ interface Props {
       | "edit"
       | "compare-sync"
       | "rebuild"
-      | "download",
+      | "download"
+      | "hide",
   ) => void;
   canCompareSyncOutputs?: boolean;
   // When true: hide the editing tool groups (sync, cleanup, style) and show
@@ -181,9 +191,18 @@ interface Props {
   arrInstanceId?: number;
   /**
    * True when the selection refers to an embedded (in-container) track.
-   * Only translate is meaningful; sync/mods/delete require a file on disk.
+   * Only translate is meaningful; sync/mods require a file on disk, and the
+   * red slot hides the track instead of deleting a file.
    */
   embeddedTrack?: boolean;
+  /** How the Hide track confirmation names the track, "English (HI)". */
+  trackLabel?: string;
+  /**
+   * Every embedded track the Hide takes, one label each. Tracks are told
+   * apart by language, HI and forced only, so an SRT and a PGS English track
+   * go together. Defaults to the one track.
+   */
+  coveredTracks?: string[];
 }
 
 const SubtitleToolsMenu: FunctionComponent<Props> = ({
@@ -201,6 +220,8 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
   mediaType,
   arrInstanceId,
   embeddedTrack = false,
+  trackLabel,
+  coveredTracks,
 }) => {
   const { mutate, mutateAsync } = useSubtitleAction();
   // The translate-from items call the mutation directly, so a closed gate has
@@ -440,39 +461,85 @@ const SubtitleToolsMenu: FunctionComponent<Props> = ({
             Search
           </Menu.Item>
         )}
-        <Menu.Item
-          disabled={
-            selections.length === 0 ||
-            onAction === undefined ||
-            isTranslateOnlyMode
-          }
-          color="red"
-          leftSection={<FontAwesomeIcon icon={faTrash}></FontAwesomeIcon>}
-          onClick={() => {
-            modals.openConfirmModal({
-              title: "The following subtitles will be deleted",
-              size: "lg",
-              children: (
-                <ScrollArea style={{ maxHeight: "20rem" }}>
-                  <List>
-                    {selections.map((s) => (
-                      <List.Item my="md" key={s.path}>
-                        {s.path}
-                      </List.Item>
-                    ))}
-                  </List>
-                </ScrollArea>
-              ),
-              onConfirm: () => {
-                onAction?.("delete");
-              },
-              labels: { confirm: "Delete", cancel: "Cancel" },
-              confirmProps: { color: "red" },
-            });
-          }}
-        >
-          Delete...
-        </Menu.Item>
+        {isTranslateOnlyMode && (
+          // Bazarr+ never rewrites a media file, so on an embedded row the red
+          // slot hides the track rather than deleting anything.
+          <Menu.Item
+            disabled={selections.length === 0 || onAction === undefined}
+            color="red"
+            leftSection={<FontAwesomeIcon icon={faEyeSlash}></FontAwesomeIcon>}
+            onClick={() => {
+              const language =
+                trackLabel ?? selections[0]?.language ?? "this language";
+              const tracks = coveredTracks ?? [language];
+              modals.openConfirmModal({
+                title: "Hide this embedded track?",
+                size: "lg",
+                children: (
+                  <Stack gap="sm">
+                    <Text size="sm">
+                      Bazarr+ will stop listing this track for this title and
+                      will treat {language} as wanted again. The media file is
+                      not changed.
+                    </Text>
+                    <List>
+                      {tracks.map((track, index) => (
+                        <List.Item
+                          key={`${index}:${track}`}
+                        >{`${track} (embedded track)`}</List.Item>
+                      ))}
+                    </List>
+                    {tracks.length > 1 && (
+                      <Text size="sm" c="dimmed">
+                        Bazarr+ tells embedded tracks apart only by language, HI
+                        and forced, so these {tracks.length} tracks are hidden
+                        together.
+                      </Text>
+                    )}
+                  </Stack>
+                ),
+                onConfirm: () => {
+                  onAction?.("hide");
+                },
+                labels: { confirm: "Hide track", cancel: "Cancel" },
+                confirmProps: { color: "red" },
+              });
+            }}
+          >
+            Hide track...
+          </Menu.Item>
+        )}
+        {!isTranslateOnlyMode && (
+          <Menu.Item
+            disabled={selections.length === 0 || onAction === undefined}
+            color="red"
+            leftSection={<FontAwesomeIcon icon={faTrash}></FontAwesomeIcon>}
+            onClick={() => {
+              modals.openConfirmModal({
+                title: "The following subtitles will be deleted",
+                size: "lg",
+                children: (
+                  <ScrollArea style={{ maxHeight: "20rem" }}>
+                    <List>
+                      {selections.map((s) => (
+                        <List.Item my="md" key={s.path}>
+                          {s.path}
+                        </List.Item>
+                      ))}
+                    </List>
+                  </ScrollArea>
+                ),
+                onConfirm: () => {
+                  onAction?.("delete");
+                },
+                labels: { confirm: "Delete", cancel: "Cancel" },
+                confirmProps: { color: "red" },
+              });
+            }}
+          >
+            Delete...
+          </Menu.Item>
+        )}
       </Menu.Dropdown>
     </Menu>
   );

@@ -1,3 +1,5 @@
+import type { HideTrackResult } from "@/apis/raw/subtitles";
+
 const syncEngineLabels: Record<string, string> = {
   "sync-ffsubsync": "FFsubsync",
   "sync-autosubsync": "Autosubsync",
@@ -33,6 +35,66 @@ export function buildSubtitleLanguageKey(subtitle: Subtitle): string {
   if (subtitle.forced) key += ":forced";
   if (subtitle.modifier) key += `:${subtitle.modifier}`;
   return key;
+}
+
+/**
+ * How the Hide track confirmation and the hidden-tracks list name a track:
+ * the language, then its variant, "English (HI)". Sports rows carry the code
+ * as their name, which reads the same way.
+ */
+export function embeddedTrackLabel(
+  subtitle: Pick<Subtitle, "code2" | "name" | "hi" | "forced">,
+): string {
+  const variant = [subtitle.hi && "HI", subtitle.forced && "forced"]
+    .filter(Boolean)
+    .join(", ");
+  const name = subtitle.name || subtitle.code2;
+  return variant ? `${name} (${variant})` : name;
+}
+
+/**
+ * Every embedded track one Hide on `track` takes. Bazarr+ tells embedded
+ * tracks apart by language, HI and forced only, so an SRT and a PGS English
+ * track on one remux are hidden together.
+ */
+export function embeddedTracksSharingKey(
+  track: Subtitle,
+  listing: Subtitle[],
+): Subtitle[] {
+  const same = listing.filter(
+    (subtitle) =>
+      !subtitle.path &&
+      subtitle.code2 === track.code2 &&
+      subtitle.hi === track.hi &&
+      subtitle.forced === track.forced,
+  );
+  return same.length > 0 ? same : [track];
+}
+
+/**
+ * What to tell the user after a hide that did not make the language wanted,
+ * or null when it did. The wanted computation counts an HI track as good as
+ * a normal one and counts subtitle files too, so hiding the plain English
+ * track can leave English satisfied, and a language the profile does not ask
+ * for is never wanted.
+ */
+export function hiddenTrackOutcome(result: HideTrackResult): string | null {
+  if (result.wanted) {
+    return null;
+  }
+  const language = embeddedTrackLabel(result.hidden);
+  if (result.covered_by.length > 0) {
+    const covering = result.covered_by
+      .map(
+        (subtitle) =>
+          `${embeddedTrackLabel(subtitle)} (${
+            subtitle.embedded ? "embedded track" : "subtitle file"
+          })`,
+      )
+      .join(", ");
+    return `${language} is still covered by ${covering}, so Bazarr+ will not search for it.`;
+  }
+  return `${language} is not wanted for this title under its languages profile, so Bazarr+ will not search for it.`;
 }
 
 export function buildComparableSubtitleVariantKey(subtitle: Subtitle): string {
