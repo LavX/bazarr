@@ -802,31 +802,33 @@ export function useEmbeddedTrackVisibility() {
 
   // The client shows no toast for a 409, it leaves that to the caller. Here
   // it is the refusal the user needs to see: the video file cannot be read,
-  // or the sports re-index failed and the hide was taken back.
+  // or the re-index could not apply the hide, which was then taken back.
   const refused = (title: string) => (error: Error) => {
     if (error instanceof AxiosError && error.response?.status === 409) {
       showNotification(notification.error(title, error.message));
     }
   };
 
+  // Refreshed after an error too: a hide whose re-index failed part way can
+  // still have changed the row, and the page must show what is really there.
   const hide = useMutation({
     mutationKey: [...hiddenTracksKey, "hide"],
     mutationFn: (form: EmbeddedTrackForm) => api.subtitles.hideTrack(form),
-    onSuccess: (result, form) => {
-      refresh(form);
+    onSuccess: (result) => {
       const outcome = hiddenTrackOutcome(result);
       if (outcome) {
         showNotification(notification.info("Track hidden", outcome));
       }
     },
     onError: refused("Track not hidden"),
+    onSettled: (_result, _error, form) => refresh(form),
   });
 
   const unhide = useMutation({
     mutationKey: [...hiddenTracksKey, "unhide"],
     mutationFn: (form: EmbeddedTrackForm) => api.subtitles.unhideTrack(form),
-    onSuccess: (_, form) => refresh(form),
     onError: refused("Track not unhidden"),
+    onSettled: (_result, _error, form) => refresh(form),
   });
 
   return { hide, unhide };

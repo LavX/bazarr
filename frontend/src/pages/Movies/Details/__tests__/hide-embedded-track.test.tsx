@@ -176,7 +176,7 @@ describe("Movies Detail Table, Hide track", () => {
   });
 
   it("shows why the backend refused the hide", async () => {
-    mockCommon([], () =>
+    const requests = mockCommon([], () =>
       HttpResponse.json(
         "The video file cannot be read right now, so the track was not hidden.",
         { status: 409 },
@@ -191,6 +191,8 @@ describe("Movies Detail Table, Hide track", () => {
     await user.click(
       await screen.findByRole("menuitem", { name: "Hide track..." }),
     );
+    const listings = () => requests.filter((r) => r.method === "GET").length;
+    const before = listings();
     await user.click(
       within(
         await screen.findByRole("dialog", {
@@ -205,6 +207,9 @@ describe("Movies Detail Table, Hide track", () => {
         "The video file cannot be read right now, so the track was not hidden.",
       ),
     ).toBeInTheDocument();
+    // A hide that failed part way may still have changed the row, so the page
+    // reads it again after an error as well.
+    await waitFor(() => expect(listings()).toBeGreaterThan(before));
   });
 
   it("lists hidden tracks under the table and unhides one", async () => {
