@@ -25,6 +25,7 @@ from sportarr.settings import get_sports_settings
 from sportarr.sync.leagues import notify, require_sportarr
 from subtitles.adaptive_searching import is_search_given_up
 from subtitles.mismatch import prune_mismatches_for_media
+from subtitles.indexer.entries import embedded_entry
 from subtitles.indexer.utils import (add_combined_outputs, add_sync_engine_outputs, get_external_subtitles_path,
                                      guess_external_subtitles, normalize_subtitle_language_variant,
                                      subtitle_language_with_combined_modifier, subtitle_language_with_sync_modifier)
@@ -247,7 +248,7 @@ def store_subtitles_sports(event_id, arr_instance_id=None, *, use_cache=None, ow
                 code = alpha2_from_alpha3(language)
                 if code:
                     code = normalize_subtitle_language_variant(code, forced=forced, hi=hi)
-                    actual.append([code, None, None])
+                    actual.append(embedded_entry(code, codec))
                     embedded_codes.append(code)
         actual.extend(_external(context, mappings, ownership_index, cancel))
         with sports_transaction(database) as session:
