@@ -27,6 +27,7 @@ from sonarr.history import history_log
 from app.jobs_queue import jobs_queue
 from subtitles.adaptive_searching import is_search_given_up
 from subtitles.mismatch import prune_mismatches_for_media
+from subtitles.embedded_hidden import hidden_languages
 from arr_instances.resolution import scoped
 
 gc.enable()
@@ -73,6 +74,12 @@ def store_subtitles(original_path, reversed_path, use_cache=True, arr_instance_i
             if not item:
                 logging.exception(f"BAZARR error when trying to select this episode from database: {reversed_path}")  # noqa: G004
             else:
+                # Every row sharing this file gets the listing written below, so
+                # a track hidden on any of them is skipped for the file.
+                sharing_file = database.execute(
+                    scoped(select(TableEpisodes.id).where(TableEpisodes.path == original_path),
+                           TableEpisodes.arr_instance_id, owner_instance_id)).scalars().all()
+                hidden = hidden_languages(database, 'episode', sharing_file, owner_instance_id)
                 try:
                     subtitle_languages = embedded_subs_reader(reversed_path,
                                                               file_size=item.file_size,
@@ -95,6 +102,9 @@ def store_subtitles(original_path, reversed_path, use_cache=True, arr_instance_i
                                     alpha2_from_alpha3(subtitle_language),
                                     forced=subtitle_forced,
                                     hi=subtitle_hi)
+                                if lang in hidden:
+                                    logging.debug("BAZARR skipping hidden embedded subtitles: %s", lang)
+                                    continue
                                 logging.debug(f"BAZARR embedded subtitles detected: {lang}")  # noqa: G004
                                 actual_subtitles.append(embedded_entry(lang, subtitle_codec))
                                 embedded_languages.append(lang)
