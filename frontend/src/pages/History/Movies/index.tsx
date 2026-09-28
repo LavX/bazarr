@@ -8,15 +8,26 @@ import {
   faRecycle,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { ColumnDef } from "@tanstack/react-table";
+import { CellContext, ColumnDef } from "@tanstack/react-table";
 import { useMovieAddBlacklist, useMovieHistoryPagination } from "@/apis/hooks";
 import { MutateAction } from "@/components/async";
 import { HistoryIcon } from "@/components/bazarr";
 import HistoryProvider from "@/components/bazarr/HistoryProvider";
 import Language from "@/components/bazarr/Language";
+import PlayOnMenu from "@/components/PlayOnMenu";
 import StateIcon from "@/components/StateIcon";
 import TextPopover from "@/components/TextPopover";
 import HistoryView from "@/pages/views/HistoryView";
+
+// Defined once, so the columns being rebuilt never remount an open menu.
+const MoviePlayCell = ({ row }: CellContext<History.Movie, unknown>) => (
+  <PlayOnMenu
+    mediaType="movie"
+    id={row.original.id}
+    itemLabel={row.original.title}
+    variant="action"
+  />
+);
 
 const MoviesHistoryView: FunctionComponent = () => {
   const addToBlacklist = useMovieAddBlacklist();
@@ -41,6 +52,7 @@ const MoviesHistoryView: FunctionComponent = () => {
           );
         },
       },
+      { id: "play", cell: MoviePlayCell },
       {
         header: "Language",
         accessorKey: "language",

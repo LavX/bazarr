@@ -48,6 +48,7 @@ import { MovieUploadModal } from "@/components/forms/MovieUploadForm";
 import { SubtitleDownloadModal } from "@/components/forms/SubtitleDownloadForm";
 import { MovieHistoryModal, SubtitleToolsModal } from "@/components/modals";
 import { MovieSearchModal } from "@/components/modals/ManualSearchModal";
+import PlayOnMenu from "@/components/PlayOnMenu";
 import { useModals } from "@/modules/modals";
 import { notification } from "@/modules/notification";
 import ItemOverview from "@/pages/views/ItemOverview";
@@ -269,6 +270,14 @@ const MovieDetailView: FunctionComponent = () => {
             >
               Combine Subtitles
             </Toolbox.Button>
+            {movie && (
+              <PlayOnMenu
+                mediaType="movie"
+                id={movie.id}
+                itemLabel={movie.title}
+                variant="toolbox"
+              />
+            )}
           </Group>
           <Group gap="xs">
             <Toolbox.Button

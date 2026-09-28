@@ -8,7 +8,7 @@ import {
   faRecycle,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { ColumnDef } from "@tanstack/react-table";
+import { CellContext, ColumnDef } from "@tanstack/react-table";
 import {
   useEpisodeAddBlacklist,
   useEpisodeHistoryPagination,
@@ -17,9 +17,22 @@ import { MutateAction } from "@/components/async";
 import { HistoryIcon } from "@/components/bazarr";
 import HistoryProvider from "@/components/bazarr/HistoryProvider";
 import Language from "@/components/bazarr/Language";
+import PlayOnMenu from "@/components/PlayOnMenu";
 import StateIcon from "@/components/StateIcon";
 import TextPopover from "@/components/TextPopover";
 import HistoryView from "@/pages/views/HistoryView";
+
+// Defined once, so the columns being rebuilt never remount an open menu.
+const EpisodePlayCell = ({
+  row: { original },
+}: CellContext<History.Episode, unknown>) => (
+  <PlayOnMenu
+    mediaType="episode"
+    id={original.id}
+    itemLabel={`${original.seriesTitle} ${original.episode_number}`}
+    variant="action"
+  />
+);
 
 const SeriesHistoryView: FunctionComponent = () => {
   const addToBlacklist = useEpisodeAddBlacklist();
@@ -53,6 +66,7 @@ const SeriesHistoryView: FunctionComponent = () => {
         header: "Episode",
         accessorKey: "episode_number",
       },
+      { id: "play", cell: EpisodePlayCell },
       {
         header: "Title",
         accessorKey: "episodeTitle",
