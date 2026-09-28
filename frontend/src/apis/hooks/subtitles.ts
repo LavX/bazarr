@@ -753,7 +753,12 @@ const hiddenTracksKey = [QueryKeys.Subtitles, "embedded-hidden"];
 function tracksByMediaId(tracks: EmbeddedHiddenTrack[]) {
   const byId = new Map<number, EmbeddedHiddenTrack[]>();
   tracks.forEach((track) => {
-    byId.set(track.media_id, [...(byId.get(track.media_id) ?? []), track]);
+    const group = byId.get(track.media_id);
+    if (group) {
+      group.push(track);
+    } else {
+      byId.set(track.media_id, [track]);
+    }
   });
   return byId;
 }
