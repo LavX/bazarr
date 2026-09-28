@@ -56,16 +56,41 @@ def _sections(server, names):
         yield name, section
 
 
-def _item_for(section, guid, media_type, metadata):
+def _by_guid(section, guid, matched):
+    """What ``section.getGuid(guid)`` returns, with the agent asked once per lookup.
+
+    ``getGuid`` has the section's agent match the external id to a plex://
+    guid on every call, a match that can leave the LAN, and then searches the
+    section for that guid. The match depends on the agent and its language,
+    not on the section, so ``matched`` keeps it for the rest of one lookup and
+    each further section is only searched. A miss raises NotFound, as there.
+    """
+    key = (section.agent, getattr(section, 'language', None), guid)
+    if key not in matched:
+        sample = section.search(maxresults=1)
+        if not sample:
+            # An empty section holds nothing and has no item to match with;
+            # the next section of this agent asks instead.
+            raise NotFound(guid)
+        found = sample[0].matches(agent=section.agent, title=guid.replace('://', '-'))
+        matched[key] = found[0].guid if found else None
+    items = section.search(guid=matched[key]) if matched[key] else None
+    if not items:
+        raise NotFound(guid)
+    return items[0]
+
+
+def _item_for(section, guid, media_type, metadata, matched=None):
     """The item one guid names in one section, down to the episode, or nothing.
 
     The refresh and the link lookup both come through here, so a guid finds
     the same item for either. ``getGuid`` has the Plex agent match an
-    external id, which can leave the LAN. Only a lookup miss is nothing;
-    anything else is the server refusing, in the shared vocabulary.
+    external id, which can leave the LAN; a lookup across several sections
+    passes ``matched`` so each agent is asked once. Only a lookup miss is
+    nothing; anything else is the server refusing, in the shared vocabulary.
     """
     try:
-        item = section.getGuid(guid)
+        item = section.getGuid(guid) if matched is None else _by_guid(section, guid, matched)
         if media_type == 'episode':
             item = item.episode(season=metadata.season, episode=metadata.episode)
     except NotFound:
@@ -192,9 +217,10 @@ class PlexRefreshClient:
         if not guids:
             return None
         sections = list(_sections(self.server, self.snapshot.libraries(media_type)))
+        matched = {}
         for guid in guids:
             for _name, section in sections:
-                item = _item_for(section, guid, media_type, metadata)
+                item = _item_for(section, guid, media_type, metadata, matched)
                 if item is not None:
                     return item
         return None

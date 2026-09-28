@@ -52,23 +52,51 @@ def test_jellyfin_locate_descends_to_the_episode_the_numbers_name(jellyfin_serve
     assert not [call for call in jellyfin_server.calls if call[0] == 'POST']
 
 
-class _Section:
-    """A Plex section that answers ``getGuid``, the one lookup the refresh uses."""
+MOVIE_AGENT, SERIES_AGENT, LEGACY_AGENT = 'tv.plex.agents.movie', 'tv.plex.agents.series', 'com.plexapp.agents.imdb'
 
-    def __init__(self, by_guid=None, refusal=None):
-        self.by_guid, self.refusal, self.calls = by_guid or {}, refusal, []
 
-    def getGuid(self, guid):
-        from plexapi.exceptions import NotFound
-        self.calls.append(guid)
+def plex_guid(external, agent=MOVIE_AGENT):
+    """The plex:// guid an agent gives an external id, in these fakes."""
+    return f'plex://{agent}/{external}'
+
+
+class _Sample:
+    """The item plexapi's ``getGuid`` borrows to have the agent match an id."""
+
+    def __init__(self, section):
+        self.section = section
+
+    def matches(self, agent, title):
+        external = title.replace('-', '://', 1)
+        self.section.log.append(('match', agent, external))
+        # The online agent knows every id but these.
+        return [] if 'unknown' in external else [SimpleNamespace(guid=plex_guid(external, agent))]
+
+
+class PlexSection:
+    """A Plex section as plexapi's own ``getGuid`` asks it.
+
+    A sample item has the section's agent match the external id to a plex://
+    guid, and the section is searched for that guid. The real ``getGuid`` runs
+    over it, so the refresh, which asks through it, runs plexapi's own code.
+    """
+
+    getGuid = __import__('plexapi.library', fromlist=['LibrarySection']).LibrarySection.getGuid
+    language = 'en-US'
+
+    def __init__(self, name='Movies', by_guid=None, refusal=None, agent=MOVIE_AGENT, log=None, empty=False):
+        self.name, self.by_guid, self.refusal, self.agent = name, by_guid or {}, refusal, agent
+        self.log = [] if log is None else log
+        self.empty = empty
+
+    def search(self, maxresults=None, guid=None, **filters):
         if self.refusal is not None:
             raise self.refusal
-        if guid not in self.by_guid:
-            raise NotFound(guid)
-        return self.by_guid[guid]
-
-    def search(self, *_args, **_filters):
-        pytest.fail('an identifier lookup goes through getGuid, as the refresh does')
+        if guid is None:
+            assert (maxresults, filters) == (1, {}), 'an identifier lookup never searches by title'
+            return [] if self.empty else [_Sample(self)]
+        self.log.append(('search', self.name, guid))
+        return [item for external, item in self.by_guid.items() if plex_guid(external, self.agent) == guid]
 
     def update(self):
         pytest.fail('a lookup must never scan the section')
@@ -91,24 +119,69 @@ def test_plex_locate_asks_the_imdb_guid_in_every_section_before_any_other(monkey
     from media_servers.resolution import MediaMetadata
     options = {'movie_libraries': ['Films', 'Movies']}
     by_imdb, by_tmdb = SimpleNamespace(name='by imdb'), SimpleNamespace(name='by tmdb')
-    films, movies = _Section(by_guid={'tmdb://19': by_tmdb}), _Section(by_guid={'imdb://tt1': by_imdb})
+    log = []
+    films = PlexSection('Films', {'tmdb://19': by_tmdb}, log=log)
+    movies = PlexSection('Movies', {'imdb://tt1': by_imdb}, log=log)
     with _plex(monkeypatch, {'Films': films, 'Movies': movies}, options=options) as client:
         # The refresh's order: the IMDB guid across the sections first.
         assert client.locate('movie', MediaMetadata(imdb_id='tt1', tmdb_id='19')) is by_imdb
-    assert (films.calls, movies.calls) == (['imdb://tt1'], ['imdb://tt1'])
-    films, movies = _Section(by_guid={'tmdb://19': by_tmdb}), _Section()
+    assert log == [('match', MOVIE_AGENT, 'imdb://tt1'), ('search', 'Films', plex_guid('imdb://tt1')),
+                   ('search', 'Movies', plex_guid('imdb://tt1'))]
+    log.clear()
+    films, movies = PlexSection('Films', {'tmdb://19': by_tmdb}, log=log), PlexSection('Movies', log=log)
     with _plex(monkeypatch, {'Films': films, 'Movies': movies}, options=options) as client:
         # Then the TMDB guid, which the refresh never asks and a link still can.
         assert client.locate('movie', MediaMetadata(imdb_id='tt1', tmdb_id='19')) is by_tmdb
-    assert (films.calls, movies.calls) == (['imdb://tt1', 'tmdb://19'], ['imdb://tt1'])
+    assert log == [('match', MOVIE_AGENT, 'imdb://tt1'), ('search', 'Films', plex_guid('imdb://tt1')),
+                   ('search', 'Movies', plex_guid('imdb://tt1')),
+                   ('match', MOVIE_AGENT, 'tmdb://19'), ('search', 'Films', plex_guid('tmdb://19'))]
+
+
+def test_plex_locate_asks_each_agent_once_per_guid_whatever_the_sections(monkeypatch):
+    # getGuid has the agent match the id on every call, which can leave the
+    # LAN. A miss, the usual answer from a server without the item, asked it
+    # once per section per guid; the agent's answer is the same in every
+    # section it serves, so it is asked once per guid.
+    from media_servers.resolution import MediaMetadata
+    log = []
+    sections = {'Films': PlexSection('Films', log=log), 'Movies': PlexSection('Movies', log=log),
+                'Old': PlexSection('Old', agent=LEGACY_AGENT, log=log)}
+    options = {'movie_libraries': ['Films', 'Movies', 'Old']}
+    with _plex(monkeypatch, sections, options=options) as client:
+        assert client.locate('movie', MediaMetadata(imdb_id='tt1', tmdb_id='19')) is None
+    assert [entry for entry in log if entry[0] == 'match'] == [
+        ('match', MOVIE_AGENT, 'imdb://tt1'), ('match', LEGACY_AGENT, 'imdb://tt1'),
+        ('match', MOVIE_AGENT, 'tmdb://19'), ('match', LEGACY_AGENT, 'tmdb://19')]
+    # Every section is still searched for every guid, in the refresh's order.
+    assert [entry[1:] for entry in log if entry[0] == 'search'] == [
+        ('Films', plex_guid('imdb://tt1')), ('Movies', plex_guid('imdb://tt1')),
+        ('Old', plex_guid('imdb://tt1', LEGACY_AGENT)),
+        ('Films', plex_guid('tmdb://19')), ('Movies', plex_guid('tmdb://19')),
+        ('Old', plex_guid('tmdb://19', LEGACY_AGENT))]
+
+
+def test_plex_locate_passes_an_empty_section_and_an_id_its_agent_does_not_know(monkeypatch):
+    from media_servers.resolution import MediaMetadata
+    movie, log = SimpleNamespace(name='Metropolis'), []
+    sections = {'Empty': PlexSection('Empty', empty=True, log=log),
+                'Movies': PlexSection('Movies', {'imdb://tt1': movie}, log=log)}
+    with _plex(monkeypatch, sections, options={'movie_libraries': ['Empty', 'Movies']}) as client:
+        # An empty section has no item to match with, so the next one asks.
+        assert client.locate('movie', MediaMetadata(imdb_id='tt1')) is movie
+        assert log == [('match', MOVIE_AGENT, 'imdb://tt1'), ('search', 'Movies', plex_guid('imdb://tt1'))]
+        log.clear()
+        # An id the agent does not know is in no section, and none is searched.
+        assert client.locate('movie', MediaMetadata(imdb_id='unknown1')) is None
+        assert log == [('match', MOVIE_AGENT, 'imdb://unknown1')]
 
 
 def test_plex_locate_finds_the_item_the_refresh_refreshes(monkeypatch):
     from media_servers.resolution import MediaMetadata
     refreshed = []
     movie = SimpleNamespace(refresh=lambda: refreshed.append('Metropolis'))
-    with _plex(monkeypatch, {'Movies': _Section(by_guid={'imdb://tt1': movie})}) as client:
+    with _plex(monkeypatch, {'Movies': PlexSection('Movies', {'imdb://tt1': movie})}) as client:
         metadata = MediaMetadata(imdb_id='tt1', tmdb_id='19')
+        # The refresh asks through plexapi's own getGuid; the link does not.
         assert client.refresh_by_provider_id('movie', metadata) == {'status': 'requested'}
         assert client.locate('movie', metadata) is movie
     assert refreshed == ['Metropolis']
@@ -116,10 +189,10 @@ def test_plex_locate_finds_the_item_the_refresh_refreshes(monkeypatch):
 
 def test_plex_locate_misses_without_a_scan(monkeypatch):
     from media_servers.resolution import MediaMetadata
-    section = _Section()
-    with _plex(monkeypatch, {'Movies': section, 'Shows': _Section()}) as client:
+    section = PlexSection('Movies')
+    with _plex(monkeypatch, {'Movies': section, 'Shows': PlexSection('Shows', agent=SERIES_AGENT)}) as client:
         assert client.locate('movie', MediaMetadata(imdb_id='tt1')) is None
-    assert section.calls == ['imdb://tt1']
+    assert section.log == [('match', MOVIE_AGENT, 'imdb://tt1'), ('search', 'Movies', plex_guid('imdb://tt1'))]
 
 
 def test_plex_locate_descends_to_the_episode_and_a_missing_one_is_nothing(monkeypatch):
@@ -132,7 +205,8 @@ def test_plex_locate_descends_to_the_episode_and_a_missing_one_is_nothing(monkey
             raise NotFound('no such episode')
         return episode
     show = SimpleNamespace(episode=lambda season, episode: pick(season, episode))
-    with _plex(monkeypatch, {'Shows': _Section(by_guid={'tvdb://78874': show})}) as client:
+    shows = PlexSection('Shows', {'tvdb://78874': show}, agent=SERIES_AGENT)
+    with _plex(monkeypatch, {'Shows': shows}) as client:
         assert client.locate('episode', MediaMetadata(tvdb_id=78874, season=1, episode=2)) is episode
         assert client.locate('episode', MediaMetadata(tvdb_id=78874, season=1, episode=3)) is None
         assert client.locate('series', MediaMetadata(tvdb_id=78874)) is show
@@ -145,7 +219,7 @@ def test_a_plex_server_that_stops_answering_is_a_refusal_not_a_miss(monkeypatch,
     from media_servers.resolution import MediaMetadata
     from plexapi.exceptions import BadRequest
     error_type = {'timeout': requests.exceptions.ConnectTimeout, 'bad request': BadRequest}[refusal]
-    with _plex(monkeypatch, {'Movies': _Section(refusal=error_type(refusal))}) as client:
+    with _plex(monkeypatch, {'Movies': PlexSection(refusal=error_type(refusal))}) as client:
         with pytest.raises(MediaServerError) as error:
             client.locate('movie', MediaMetadata(imdb_id='tt1'))
     # Exactly what the refresh reports for the same refusal.

@@ -11,7 +11,7 @@ import pytest
 from test_media_server_convergence import jellyfin_server as jellyfin_server
 from test_media_server_convergence import SERIES_ITEM, SERIES_LIBRARY
 from test_media_server_http import http_fixture as http_fixture
-from test_media_server_locate import snap
+from test_media_server_locate import PlexSection, snap
 
 MASTERS = SimpleNamespace(general=SimpleNamespace(use_emby=True, use_silo=True, use_jellyfin=True, use_plex=True))
 
@@ -244,14 +244,8 @@ def test_plex_links_to_the_hosted_app_unless_a_browser_url_is_saved(monkeypatch)
         def getWebURL(self, base=None):
             return f"{base or 'https://app.plex.tv/desktop/'}#!/server/m1/details?key=%2Flibrary%2Fmetadata%2F42"
 
-    class Section:
-        def getGuid(self, guid):
-            from plexapi.exceptions import NotFound
-            if guid != 'imdb://tt0017136':
-                raise NotFound(guid)
-            return Item()
-
-    server = SimpleNamespace(library=SimpleNamespace(section=lambda name: Section()))
+    server = SimpleNamespace(library=SimpleNamespace(
+        section=lambda name: PlexSection(name, {'imdb://tt0017136': Item()})))
     monkeypatch.setattr(operations, 'plex_server_for', lambda *_args: server)
     _stub_row(monkeypatch)
     hosted = snap('plex', 'P')
