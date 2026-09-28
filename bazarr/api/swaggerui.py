@@ -18,7 +18,9 @@ subtitles_model = {
         "path": fields.String(),
         "forced": fields.Boolean(),
         "hi": fields.Boolean(),
-        "file_size": fields.Integer()
+        "file_size": fields.Integer(),
+        # Embedded tracks only: the lowercased knowit format, or null.
+        "codec": fields.String()
     }
 
 subtitles_language_model = {

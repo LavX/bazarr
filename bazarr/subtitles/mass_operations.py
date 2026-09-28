@@ -72,8 +72,9 @@ def _item_display_name(item):
 def _parse_subtitles_column(subtitles_raw, include_embedded=False):
     """Parse the subtitles TEXT column into a list of (lang_string, path) tuples.
 
-    The indexer records an in-container track as ``[language, None, None]``, so
-    an entry without a path is an embedded track rather than a broken row.
+    The indexer records an in-container track with no path (``[language, None,
+    None, codec]``, three elements on rows indexed before the codec was stored),
+    so an entry without a path is an embedded track rather than a broken row.
     Those are left out by default, because most callers want a file they can
     open. Translation does not: it can extract the track first, which is the
     only way to translate a release whose only subtitles are embedded.

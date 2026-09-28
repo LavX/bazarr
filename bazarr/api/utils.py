@@ -16,6 +16,7 @@ from app.config import settings, base_url
 from languages.get_languages import language_from_alpha2, alpha3_from_alpha2
 from app.database import get_audio_profile_languages, get_desired_languages, select
 from utilities.path_mappings import path_mappings
+from subtitles.indexer.entries import entry_codec
 
 None_Keys = ['null', 'undefined', '', None]
 
@@ -377,7 +378,8 @@ def postprocess(item):
                                     "modifier": language["modifier"],
                                     "forced": language["forced"],
                                     "hi": language["hi"],
-                                    "file_size": file_size}
+                                    "file_size": file_size,
+                                    "codec": entry_codec(subs)}
         if settings.general.embedded_subs_show_desired and item.get('profileId'):
             desired_lang_list = get_desired_languages(item['profileId'])
             item['subtitles'] = [x for x in item['subtitles'] if x['code2'] in desired_lang_list or x['path']]

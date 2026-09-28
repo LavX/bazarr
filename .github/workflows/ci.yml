@@ -705,6 +705,7 @@ jobs:
             tests/bazarr/test_provider_hub_worker_reaper.py \
             tests/bazarr/test_embedded_track_eligibility.py \
             tests/bazarr/test_settings_profile_deletion.py \
+            tests/bazarr/test_subtitle_entry_readers.py \
             tests/bazarr/test_upstream_db_adoption_pg.py ; do
             echo "::group::$f"
             pytest "$f" -p no:cacheprovider -q
