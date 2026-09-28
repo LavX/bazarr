@@ -265,21 +265,24 @@ def test_a_reindex_that_fails_takes_the_hide_back(hidden_api, monkeypatch):
     assert _hidden(session) == []
 
 
-def test_a_reindex_that_fails_after_writing_the_listing_keeps_the_hide(hidden_api, monkeypatch):
-    """When the re-index stops after it wrote the listing, the hide took effect:
-    the record stays, so the disclosure can still undo it."""
+def test_a_reindex_that_fails_after_writing_the_listing_reports_the_hide(hidden_api, monkeypatch):
+    """When the re-index stops after it wrote the listing, the hide took effect.
+    The record stays and the answer says so, or the page would keep showing a
+    track that is gone and could neither hide it again nor undo the hide."""
     import subtitles.indexer.movies as mv
 
     client, session, _calls = hidden_api
 
     def _writes_then_fails(*_args, **_kwargs):
         session.execute(sa.update(TableMovies).where(TableMovies.id == 1).values(
-            subtitles=str([["fr", None, None], ["de", "/movies/m.de.srt", 10]])))
-        raise RuntimeError("could not push the event")
+            subtitles=str([["fr", None, None], ["de", "/movies/m.de.srt", 10]]), missing_subtitles=str(["en"])))
+        raise RuntimeError("could not record the history")
 
     monkeypatch.setattr(mv, "store_subtitles_movie", _writes_then_fails)
     form = {"media_type": "movie", "media_id": 1, "language": "en"}
-    assert client.post(ROOT, data=form, headers=HEADERS).status_code == 500
+    hidden = client.post(ROOT, data=form, headers=HEADERS)
+    assert hidden.status_code == 200
+    assert hidden.json["data"]["wanted"] is True
     assert _hidden(session) == [("movie", 1, 2, "en", "subrip")]
 
 

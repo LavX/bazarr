@@ -268,11 +268,14 @@ class EmbeddedHiddenTracks(Resource):
                 # The engine autocommits, so reconcile by hand. A re-index that
                 # stopped before it wrote the listing leaves the track listed,
                 # and the hide is taken back rather than surprise the user at
-                # the next index. One that stopped after has applied the hide,
-                # which then stays so the disclosure can undo it.
-                if recorded and _still_listed(media_type, media_id, key):
-                    unhide_track(database, media_type, [media_id], owner, key)
-                raise
+                # the next index.
+                if _still_listed(media_type, media_id, key):
+                    if recorded:
+                        unhide_track(database, media_type, [media_id], owner, key)
+                    raise
+                # One that stopped after has applied the hide. Report it as
+                # done, so the page shows the hide and can undo it.
+                logging.exception('BAZARR hid an embedded track, but its re-index failed after listing')
         except _Refused as refused:
             return refused.message, refused.status
         return {'data': _outcome(media_type, media_id, key)}, 200
