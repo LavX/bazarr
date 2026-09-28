@@ -376,6 +376,7 @@ jobs:
             tests/bazarr/test_emby_api.py \
             tests/bazarr/test_silo_api.py \
             tests/bazarr/test_media_server_instances_api.py \
+            tests/bazarr/test_media_server_links_api.py \
             tests/bazarr/test_provider_hub.py \
             tests/bazarr/test_provider_pool_config_reload.py \
             tests/bazarr/test_rar_extraction_production_config.py \
