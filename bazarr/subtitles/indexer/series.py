@@ -66,20 +66,18 @@ def store_subtitles(original_path, reversed_path, use_cache=True, arr_instance_i
     if os.path.exists(reversed_path):
         if settings.general.use_embedded_subs:
             logging.debug("BAZARR is trying to index embedded subtitles.")
-            item = database.execute(
-                scoped(select(TableEpisodes.episode_file_id, TableEpisodes.file_size)
+            # Every row sharing this file, read once: the first gives the file
+            # details, and all of them get the listing written below.
+            sharing_file = database.execute(
+                scoped(select(TableEpisodes.id, TableEpisodes.episode_file_id, TableEpisodes.file_size)
                        .where(TableEpisodes.path == original_path),
-                       TableEpisodes.arr_instance_id, owner_instance_id))\
-                .first()
+                       TableEpisodes.arr_instance_id, owner_instance_id)).all()
+            item = sharing_file[0] if sharing_file else None
             if not item:
                 logging.exception(f"BAZARR error when trying to select this episode from database: {reversed_path}")  # noqa: G004
             else:
-                # Every row sharing this file gets the listing written below, so
-                # a track hidden on any of them is skipped for the file.
-                sharing_file = database.execute(
-                    scoped(select(TableEpisodes.id).where(TableEpisodes.path == original_path),
-                           TableEpisodes.arr_instance_id, owner_instance_id)).scalars().all()
-                hidden = hidden_languages(database, 'episode', sharing_file, owner_instance_id)
+                # A track hidden on any row sharing the file is skipped for the file.
+                hidden = hidden_languages(database, 'episode', [row.id for row in sharing_file], owner_instance_id)
                 try:
                     subtitle_languages = embedded_subs_reader(reversed_path,
                                                               file_size=item.file_size,
