@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { mediaServerLinksKey } from "@/apis/hooks/mediaServerLinks";
 import api from "@/apis/raw";
 import type {
   ConnectionOverrides,
@@ -91,6 +92,8 @@ export function useSaveMediaServerInstance(
       });
     },
     onSuccess: (_data, variables) => {
+      // A saved name, URL or switch changes what a Play on menu offers.
+      void client.invalidateQueries({ queryKey: mediaServerLinksKey });
       const target = (variables ? variables().kind : undefined) ?? kind;
       if (!target) return;
       void client.invalidateQueries({
@@ -114,6 +117,8 @@ export function useDeleteMediaServerInstance(
       void client.invalidateQueries({
         queryKey: mediaServerInstancesKey(kind),
       });
+      // A removed destination is no longer one a Play on menu can offer.
+      void client.invalidateQueries({ queryKey: mediaServerLinksKey });
     },
   });
 }

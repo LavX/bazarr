@@ -18,6 +18,11 @@ const server = setupServer(
   http.get("/api/subtitles/embedded-hidden", () =>
     HttpResponse.json({ data: [] }),
   ),
+  // Library pages draw a Play on control, which first asks which media
+  // servers exist. None, unless a test says otherwise.
+  http.get("/api/system/media-server-links/destinations", () =>
+    HttpResponse.json({ data: [] }),
+  ),
 );
 
 export default server;
