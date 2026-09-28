@@ -72,6 +72,14 @@ def _encoded_id(item, key="Id"):
         raise MediaServerError("invalid_response") from None
 
 
+def _raw_id(item):
+    """The item's own id as Emby sent it, for a link rather than a path segment."""
+    item_id = item.get("Id") if isinstance(item, dict) else None
+    if not isinstance(item_id, str) or not item_id:
+        raise MediaServerError("invalid_response")
+    return item_id
+
+
 class EmbyClient:
     # Emby answers every rung: /Items filters on AnyProviderIdEquals and on
     # NameStartsWith plus Years, resolves an exact Path, and /Library/VirtualFolders
@@ -135,8 +143,8 @@ class EmbyClient:
                    and type(item.get("ParentIndexNumber")) is int and item["ParentIndexNumber"] == season]
         return matches[0] if len(matches) == 1 else None
 
-    def _refresh_resolved(self, media_type, parent, metadata, ensure_current, *, video_path=None):
-        """Refresh what a rung resolved, or nothing when it did not prove it.
+    def _resolve(self, media_type, parent, metadata, ensure_current, *, video_path=None):
+        """The item a rung resolved, or nothing when it did not prove it.
 
         ``video_path`` is the mapped file the publication is about, and it is
         passed only by the weak title rung. The identifier rung leaves it out
@@ -148,12 +156,19 @@ class EmbyClient:
             return None
         if video_path is not None and not _holds_path(parent, video_path):
             return None
-        if media_type == "movie":
-            return self._refresh(_encoded_id(parent), ensure_current)
+        if media_type in ("movie", "series"):
+            return parent
         episode = self._find_episode(parent, metadata.season, metadata.episode, ensure_current)
         if episode is None or (video_path is not None and not _holds_path(episode, video_path)):
             return None
-        return self._refresh(_encoded_id(episode), ensure_current)
+        return episode
+
+    def _refresh_resolved(self, media_type, parent, metadata, ensure_current, *, video_path=None):
+        """Refresh what a rung resolved, or nothing when it did not prove it."""
+        item = self._resolve(media_type, parent, metadata, ensure_current, video_path=video_path)
+        if item is None:
+            return None
+        return self._refresh(_encoded_id(item), ensure_current)
 
     def refresh_by_provider_id(self, media_type, metadata, *,
                                ensure_current: Callable[[], None] | None = None) -> dict | None:
@@ -273,3 +288,57 @@ class EmbyClient:
                 continue
             self._refresh(encoded_id, ensure_current, recursive=True)
         return {"status": "requested"}
+
+    def server_id(self) -> str:
+        """The id Emby's web client routes by, from the call a connection test makes."""
+        info = self.http.request_json("GET", "/System/Info")
+        if not isinstance(info, dict) or not isinstance(info.get("Id"), str) or not info["Id"]:
+            raise MediaServerError("invalid_response")
+        return info["Id"]
+
+    def locate(self, media_type: str, metadata, video_path: str | None) -> str | None:
+        """The id of the item a library row names, with nothing refreshed.
+
+        The same rungs the refresh climbs, in the same order: the identifiers,
+        the exact file, then an exact title and year that must also hold the
+        file. The library rung is left out because it names a folder, not an
+        item. A series is found the way an episode's series is, and has no
+        file of its own to look up by path. A tie is not a resolution here
+        either: it is reported as nothing found.
+        """
+        parent_type = {"movie": "movie", "episode": "episode", "series": "episode"}.get(media_type)
+        if parent_type is None:
+            raise MediaServerError("internal_error")
+        if not metadata.locatable(media_type):
+            return None
+        for provider, value in metadata.provider_ids(media_type):
+            if "," in value:
+                continue
+            parent = self._find_parent(parent_type, {"AnyProviderIdEquals": f"{provider}.{value}"}, None)
+            item = self._resolve(media_type, parent, metadata, None)
+            if item is not None:
+                return _raw_id(item)
+        if media_type != "series":
+            item_id = self._locate_file(video_path, _ITEM_TYPES[media_type])
+            if item_id is not None:
+                return item_id
+        if metadata.title and metadata.year:
+            parent = self._find_parent(parent_type, {"NameStartsWith": metadata.title,
+                                                     "Years": str(metadata.year)},
+                                       None, name=metadata.title)
+            item = self._resolve(media_type, parent, metadata, None,
+                                 video_path=video_path if is_media_path(video_path) else None)
+            if item is not None:
+                return _raw_id(item)
+        return None
+
+    def _locate_file(self, video_path, item_type):
+        """The one item at exactly this file, or nothing."""
+        if not is_media_path(video_path):
+            return None
+        items = _accepted_items(self.http.request_json("GET", "/Items", params={
+            "Path": video_path, "IncludeItemTypes": item_type, "Recursive": "true",
+            "Fields": "Path,MediaSources"}), item_type)
+        matches = [item for item in items
+                   if any(media_paths_equal(path, video_path) for path in _item_paths(item))]
+        return _raw_id(matches[0]) if len(matches) == 1 else None
