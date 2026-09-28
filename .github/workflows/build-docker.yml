@@ -195,9 +195,11 @@ jobs:
             type=ref,event=branch
           labels: |
             org.opencontainers.image.title=Bazarr+
-            org.opencontainers.image.description=Bazarr+ - enhanced subtitle management
+            org.opencontainers.image.description=Self-hosted subtitles for movies, TV and sports, with or without Sonarr, Radarr or Sportarr. Search on demand, or automate downloads, sync and AI translation. No tracking.
             org.opencontainers.image.vendor=LavX
             org.opencontainers.image.version=${{ steps.version.outputs.fork_version }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.documentation=https://lavx.github.io/bazarr/guides/getting-started.html
 
       - name: Build and Push Docker Image
         id: push
@@ -209,6 +211,10 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          annotations: |
+            index,manifest:org.opencontainers.image.description=Self-hosted subtitles for movies, TV and sports, with or without Sonarr, Radarr or Sportarr. Search on demand, or automate downloads, sync and AI translation. No tracking.
+            index,manifest:org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            index,manifest:org.opencontainers.image.documentation=https://lavx.github.io/bazarr/guides/getting-started.html
           # Use GHA cache with separate scopes for different layers
           cache-from: |
             type=gha,scope=bazarr-deps

@@ -91,3 +91,15 @@ codename, and adjust:
   exact same PNG can be regenerated from the source.
 - Works inside the `site/` folder which is already part of the GitHub
   Pages source.
+
+## GitHub social preview
+
+`github-social-preview.html` is a fixed 1280 by 640 card built from the project's
+own logo, font and standalone Discover screenshot. Serve `site/` locally, open
+the page at exactly 1280 by 640 CSS pixels, and capture the page without browser
+chrome to `site/screenshots/github-social-preview.png`.
+
+The card is meant for the repository's Social preview setting and for short
+community announcements. Its accessible description is: "Bazarr+ standalone
+Discover subtitle search beside the text Any film, any show, no library
+required."
