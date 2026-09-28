@@ -6,6 +6,7 @@ tracks through the normal indexer and pushes the events a Delete pushes. Every
 case runs on SQLite and on PostgreSQL, both on an AUTOCOMMIT engine, because
 the undo after a failed re-index is hand-written for that engine.
 """
+import ast
 from types import SimpleNamespace
 
 import pytest
@@ -34,9 +35,10 @@ def hidden_api(hidden_db, monkeypatch, tmp_path):  # noqa: F811
     monkeypatch.setattr(api_mod, "language_from_alpha2", {"en": "English", "fr": "French"}.get)
     monkeypatch.setattr(api_mod.path_mappings, "path_replace_instance",
                         lambda path, owner, kind: str(tmp_path) + path)
-    # "indexed" stands in for what the real indexer writes back; a test that
-    # reads the POST's answer sets it.
-    calls = {"reindex": [], "events": [], "indexed": lambda: None}
+    # "indexed" stands in for what the real indexer writes back. By default it
+    # applies the recorded hides to the listings; a test that reads the POST's
+    # answer, or needs the indexer to misbehave, sets its own.
+    calls = {"reindex": [], "events": [], "indexed": lambda: _apply_hides(session)}
     monkeypatch.setattr(api_mod, "event_stream", lambda **kw: calls["events"].append(kw))
 
     def reindexed(*call):
@@ -75,6 +77,29 @@ def hidden_api(hidden_db, monkeypatch, tmp_path):  # noqa: F811
     app = Flask(__name__)
     app.register_blueprint(api_bp)
     return app.test_client(), session, calls
+
+
+def _apply_hides(session):
+    """What the real indexers do with a hide: the embedded track leaves the
+    listing of its row, and of every episode row sharing the file."""
+    from app.database import TableSportsEvents
+    from subtitles.embedded_hidden import applicable_owners, episode_file_siblings
+
+    tables = {"movie": TableMovies, "episode": TableEpisodes, "sports": TableSportsEvents}
+    records = session.execute(sa.select(TableEmbeddedTrackHidden.media_type, TableEmbeddedTrackHidden.media_id,
+                                        TableEmbeddedTrackHidden.arr_instance_id,
+                                        TableEmbeddedTrackHidden.language)).all()
+    for media_type, media_id, owner, language in records:
+        table = tables[media_type]
+        ids = (episode_file_siblings(session, [media_id])[media_id] if media_type == "episode"
+               else {media_id})
+        for row in session.execute(sa.select(table.id, table.arr_instance_id, table.subtitles)
+                                   .where(table.id.in_(ids))).all():
+            if owner not in applicable_owners(row.arr_instance_id):
+                continue
+            kept = [entry for entry in ast.literal_eval(row.subtitles or "[]")
+                    if not (entry[0] == language and not (len(entry) > 1 and entry[1]))]
+            session.execute(sa.update(table).where(table.id == row.id).values(subtitles=str(kept)))
 
 
 def _indexes_as(session, table, row_id, subtitles, missing):
@@ -265,25 +290,47 @@ def test_a_reindex_that_fails_takes_the_hide_back(hidden_api, monkeypatch):
     assert _hidden(session) == []
 
 
-def test_a_reindex_that_fails_after_writing_the_listing_reports_the_hide(hidden_api, monkeypatch):
-    """When the re-index stops after it wrote the listing, the hide took effect.
-    The record stays and the answer says so, or the page would keep showing a
-    track that is gone and could neither hide it again nor undo the hide."""
+def test_a_reindex_that_fails_after_writing_the_listing_keeps_the_hide(hidden_api, monkeypatch):
+    """When the re-index stops after it wrote the listing, the hide took effect
+    and the record stays, so the page, which refreshes after an error too,
+    shows the hide and can undo it. The request still fails: what is wanted now
+    was not recomputed, so there is no outcome to report."""
     import subtitles.indexer.movies as mv
 
     client, session, _calls = hidden_api
 
     def _writes_then_fails(*_args, **_kwargs):
         session.execute(sa.update(TableMovies).where(TableMovies.id == 1).values(
-            subtitles=str([["fr", None, None], ["de", "/movies/m.de.srt", 10]]), missing_subtitles=str(["en"])))
-        raise RuntimeError("could not record the history")
+            subtitles=str([["fr", None, None], ["de", "/movies/m.de.srt", 10]])))
+        raise RuntimeError("could not recompute the missing subtitles")
 
     monkeypatch.setattr(mv, "store_subtitles_movie", _writes_then_fails)
     form = {"media_type": "movie", "media_id": 1, "language": "en"}
-    hidden = client.post(ROOT, data=form, headers=HEADERS)
-    assert hidden.status_code == 200
-    assert hidden.json["data"]["wanted"] is True
+    assert client.post(ROOT, data=form, headers=HEADERS).status_code == 500
     assert _hidden(session) == [("movie", 1, 2, "en", "subrip")]
+
+
+def test_a_reindex_that_leaves_the_track_listed_takes_the_hide_back(hidden_api):
+    """A re-index can return without applying the hide: the file went away
+    after the check, or the hidden lookup failed and listed the track. The
+    track is still listed, so the hide is taken back and the request says so."""
+    client, session, calls = hidden_api
+    calls["indexed"] = lambda: None
+    form = {"media_type": "movie", "media_id": 1, "language": "en"}
+    assert client.post(ROOT, data=form, headers=HEADERS).status_code == 409
+    assert _hidden(session) == []
+
+
+def test_an_unreadable_listing_counts_as_still_listed(hidden_api, monkeypatch):
+    """When the listing cannot be read back, the hide must not stay behind."""
+    from api.subtitles import embedded_hidden as api_mod
+
+    class Broken:
+        def execute(self, *_args, **_kwargs):
+            raise sa.exc.OperationalError("SELECT", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(api_mod, "database", Broken())
+    assert api_mod._still_listed("movie", 1, "en") is True
 
 
 def test_unhide_succeeds_when_the_reindex_fails(hidden_api, monkeypatch):
@@ -350,6 +397,9 @@ def test_sports_resolves_the_owned_event_and_reindexes_it(hidden_api, monkeypatc
     # read the file lists the track again.
     assert client.delete(ROOT, data=form, headers=HEADERS).status_code == 204
     assert _hidden(session) == []
+    # That next index, standing in for the one that failed here.
+    session.execute(sa.update(TableSportsEvents).where(TableSportsEvents.id == 61).values(
+        subtitles=str([["fr", None, None]])))
     # Hide refuses instead, and takes its record back, since the track would
     # stay listed.
     assert client.post(ROOT, data=form, headers=HEADERS).status_code == 409

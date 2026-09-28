@@ -101,9 +101,14 @@ def _table(media_type):
 
 
 def _still_listed(media_type, media_id, key):
-    """True when the row's stored listing still carries an embedded ``key``."""
+    """True when the row's stored listing still carries an embedded ``key``,
+    or when the listing cannot be read: a hide must not stay behind unseen."""
     table = _table(media_type)
-    stored = database.execute(select(table.subtitles).where(table.id == media_id)).scalar()
+    try:
+        stored = database.execute(select(table.subtitles).where(table.id == media_id)).scalar()
+    except Exception:
+        logging.exception('BAZARR could not read back the subtitles of %s %s', media_type, media_id)
+        return True
     return bool(_embedded_entries(stored, key))
 
 
@@ -262,20 +267,31 @@ class EmbeddedHiddenTracks(Resource):
             codecs = sorted({entry[3] for entry in entries
                              if len(entry) > 3 and isinstance(entry[3], str) and entry[3]})
             recorded = hide_track(database, media_type, media_id, owner, key, ', '.join(codecs) or None)
+            failure = None
             try:
                 _reindex(media_type, media_id, original, mapped, owner, ids)
-            except Exception:
-                # The engine autocommits, so reconcile by hand. A re-index that
-                # stopped before it wrote the listing leaves the track listed,
-                # and the hide is taken back rather than surprise the user at
-                # the next index.
-                if _still_listed(media_type, media_id, key):
-                    if recorded:
+            except Exception as error:
+                failure = error
+            # The engine autocommits, so reconcile the record by hand with the
+            # listing the re-index actually left.
+            if _still_listed(media_type, media_id, key):
+                # Still listed: the re-index failed before it wrote the listing,
+                # or returned without applying the hide (the file went away
+                # after the check above, or the hidden lookup failed). Take the
+                # hide back rather than surprise the user at the next index.
+                if recorded:
+                    try:
                         unhide_track(database, media_type, [media_id], owner, key)
-                    raise
-                # One that stopped after has applied the hide. Report it as
-                # done, so the page shows the hide and can undo it.
-                logging.exception('BAZARR hid an embedded track, but its re-index failed after listing')
+                    except Exception:
+                        logging.exception('BAZARR could not take back a hide it could not apply')
+                if failure is not None:
+                    raise failure
+                return 'The track could not be hidden right now, so nothing changed.', 409
+            if failure is not None:
+                # Applied, but a later step failed, so what is wanted now is
+                # unknown. The record stays; the page refreshes after an error
+                # too, so it shows the hide and can undo it.
+                raise failure
         except _Refused as refused:
             return refused.message, refused.status
         return {'data': _outcome(media_type, media_id, key)}, 200
