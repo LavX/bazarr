@@ -55,8 +55,14 @@ class MediaMetadata:
         return [(name, str(value)) for name, value in pairs if value not in (None, '')]
 
     def locatable(self, media_type):
-        """Whether an identifier or title match can reach the published file."""
-        return media_type == 'movie' or (self.season is not None and self.episode is not None)
+        """Whether an identifier or title match can reach the published file.
+
+        A series is the item its identifiers name, so it needs no numbers. The
+        refresh path never asks about one: a publication is always a file.
+        """
+        if media_type in ('movie', 'series'):
+            return True
+        return self.season is not None and self.episode is not None
 
 
 def walk(steps):
@@ -145,3 +151,85 @@ def media_metadata(media_type, video_path, arr_instance_id):
                              title=row.title, year=_year(row.year))
     return MediaMetadata(imdb_id=row.imdbId, tvdb_id=row.tvdbId, title=row.title,
                          year=_year(row.year), season=row.season, episode=row.episode)
+
+
+@dataclass(frozen=True)
+class LibraryRow:
+    """One library row, as a media server would be asked about it."""
+
+    metadata: MediaMetadata
+    # Bazarr-visible, the same space a publication's video_path is in, so the
+    # destination path mappings apply to it unchanged. None when the stored
+    # path could not be mapped, which only rules out the path-keyed kinds.
+    video_path: str | None
+    arr_instance_id: int | None
+
+
+# Which arr path mapping a row's stored path goes through.
+_PATH_TYPES = {'movie': 'movie', 'episode': 'series', 'series': 'series', 'sports': 'sports'}
+
+
+def _visible_path(path, arr_instance_id, media_type):
+    if not path:
+        return None
+    try:
+        from utilities.path_mappings import path_mappings
+        return path_mappings.path_replace_instance(path, arr_instance_id, _PATH_TYPES[media_type])
+    except Exception:
+        # A sports owner that is gone or disabled raises rather than degrading.
+        logging.debug('BAZARR could not map a library row path for a media server link', exc_info=True)
+        return None
+
+
+def media_metadata_for(media_type, local_id):
+    """What Bazarr stores about one library row, read by its own primary key.
+
+    The link path starts from a row, not from a published file, so nothing is
+    turned back into a path and reverse-mapped: the row is read by id and its
+    stored path goes forward through the owning arr instance's mapping.
+    Returns a LibraryRow, or None for an unknown type, a row that does not
+    exist, or any failure reading the database.
+    """
+    if media_type not in _PATH_TYPES or type(local_id) is not int or local_id <= 0:
+        return None
+    try:
+        from app.database import TableEpisodes, TableMovies, TableShows, TableSportsEvents, select
+        with _reader() as session:
+            if media_type == 'movie':
+                row = session.execute(
+                    select(TableMovies.imdbId, TableMovies.tmdbId, TableMovies.title, TableMovies.year,
+                           TableMovies.path, TableMovies.arr_instance_id)
+                    .where(TableMovies.id == local_id)).first()
+                metadata = row and MediaMetadata(imdb_id=row.imdbId, tmdb_id=row.tmdbId,
+                                                 title=row.title, year=_year(row.year))
+            elif media_type == 'episode':
+                row = session.execute(
+                    select(TableEpisodes.season, TableEpisodes.episode, TableEpisodes.path,
+                           TableEpisodes.arr_instance_id, TableShows.imdbId, TableShows.tvdbId,
+                           TableShows.title, TableShows.year)
+                    .join(TableShows, TableShows.id == TableEpisodes.series_id)
+                    .where(TableEpisodes.id == local_id)).first()
+                metadata = row and MediaMetadata(imdb_id=row.imdbId, tvdb_id=row.tvdbId, title=row.title,
+                                                 year=_year(row.year), season=row.season,
+                                                 episode=row.episode)
+            elif media_type == 'series':
+                row = session.execute(
+                    select(TableShows.imdbId, TableShows.tvdbId, TableShows.title, TableShows.year,
+                           TableShows.path, TableShows.arr_instance_id)
+                    .where(TableShows.id == local_id)).first()
+                metadata = row and MediaMetadata(imdb_id=row.imdbId, tvdb_id=row.tvdbId,
+                                                 title=row.title, year=_year(row.year))
+            else:
+                # A sports event has no provider identity, only its own title
+                # and the numbers Sportarr gave it.
+                row = session.execute(
+                    select(TableSportsEvents.title, TableSportsEvents.season, TableSportsEvents.episode,
+                           TableSportsEvents.path, TableSportsEvents.arr_instance_id)
+                    .where(TableSportsEvents.id == local_id)).first()
+                metadata = row and MediaMetadata(title=row.title, season=row.season, episode=row.episode)
+    except Exception:
+        logging.debug('BAZARR could not read a library row for a media server link', exc_info=True)
+        return None
+    if row is None:
+        return None
+    return LibraryRow(metadata, _visible_path(row.path, row.arr_instance_id, media_type), row.arr_instance_id)

@@ -193,3 +193,80 @@ def test_a_broken_database_read_is_never_fatal_to_a_refresh(monkeypatch):
     from media_servers import resolution
     monkeypatch.setattr(resolution, "_reader", lambda: (_ for _ in ()).throw(RuntimeError("no database")))
     assert resolution.media_metadata("movie", "/movies/A.mkv", 2) is None
+
+
+# ------------------------------------------------------------ rows by local id
+
+
+def test_a_series_is_locatable_without_episode_numbers():
+    from media_servers.resolution import MediaMetadata
+    assert MediaMetadata(tvdb_id=78874).locatable("series") is True
+    assert MediaMetadata(tvdb_id=78874, imdb_id="tt1").provider_ids("series") == [
+        ("imdb", "tt1"), ("tvdb", "78874")]
+
+
+def test_a_movie_row_is_read_by_id_with_its_path_as_bazarr_sees_it(stored):
+    from media_servers.resolution import media_metadata_for
+    row = media_metadata_for("movie", 1)
+    assert (row.metadata.imdb_id, row.metadata.tmdb_id, row.metadata.title, row.metadata.year) == (
+        "tt0017136", "19", "Metropolis", 1927)
+    assert (row.video_path, row.arr_instance_id) == ("/movies/A.mkv", 2)
+
+
+def test_an_episode_row_carries_the_series_identifiers_and_its_numbers(stored):
+    from media_servers.resolution import media_metadata_for
+    row = media_metadata_for("episode", 9)
+    assert (row.metadata.tvdb_id, row.metadata.imdb_id, row.metadata.season, row.metadata.episode) == (
+        78874, "tt0303461", 1, 2)
+    assert row.video_path == "/movies/Firefly/S01E02.mkv"
+    assert row.metadata.locatable("episode")
+
+
+def test_a_series_row_is_its_folder_with_no_episode_numbers(stored):
+    from media_servers.resolution import media_metadata_for
+    row = media_metadata_for("series", 5)
+    assert (row.metadata.tvdb_id, row.metadata.season, row.metadata.episode) == (78874, None, None)
+    assert row.video_path == "/movies/Firefly"
+
+
+@pytest.mark.parametrize(("media_type", "local_id"), [
+    ("movie", 404), ("episode", 404), ("series", 404), ("sports", 404),
+    ("bogus", 1), ("movie", 0), ("movie", "1"), ("movie", True)])
+def test_an_unknown_row_or_a_bad_id_is_nothing(stored, media_type, local_id):
+    from media_servers.resolution import media_metadata_for
+    assert media_metadata_for(media_type, local_id) is None
+
+
+def test_a_row_whose_path_cannot_be_mapped_keeps_its_identifiers(stored, monkeypatch):
+    from media_servers.resolution import media_metadata_for
+    from utilities.path_mappings import path_mappings
+
+    def refuse(*_args):
+        raise ValueError("Enabled Sportarr path owner not found")
+    monkeypatch.setattr(path_mappings, "path_replace_instance", refuse)
+    row = media_metadata_for("movie", 1)
+    assert row.video_path is None and row.metadata.imdb_id == "tt0017136"
+
+
+def test_a_broken_database_read_is_never_fatal_to_a_link(monkeypatch):
+    from media_servers import resolution
+    monkeypatch.setattr(resolution, "_reader", lambda: (_ for _ in ()).throw(RuntimeError("no database")))
+    assert resolution.media_metadata_for("movie", 1) is None
+
+
+def test_a_sports_row_is_its_recording_with_no_provider_identity(stored, monkeypatch):
+    from app.database import TableArrInstances, TableSportsEvents, TableSportsLeagues
+    from media_servers.resolution import media_metadata_for
+    from utilities import path_mappings as module
+    monkeypatch.setattr(module, "_sports_instance_mapping", lambda _owner: [["/sportarr", "/sports"]])
+    stored.add(TableArrInstances(id=3, kind="sportarr", stable_key="s3", name="Sportarr", port=1867))
+    stored.flush()
+    stored.add(TableSportsLeagues(id=1, arr_instance_id=3, sportarrLeagueId=9, title="NHL"))
+    stored.flush()
+    stored.add(TableSportsEvents(id=4, arr_instance_id=3, league_id=1, sportarrEventId=77, file_id=5,
+                                 season=2026, episode=12, path="/sportarr/NHL/Game12.mkv", title="Game 12"))
+    stored.flush()
+    row = media_metadata_for("sports", 4)
+    assert (row.metadata.title, row.metadata.season, row.metadata.episode) == ("Game 12", 2026, 12)
+    assert row.metadata.provider_ids("sports") == []
+    assert (row.video_path, row.arr_instance_id) == ("/sports/NHL/Game12.mkv", 3)
