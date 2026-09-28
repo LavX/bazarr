@@ -18,7 +18,6 @@ import {
   useMediaServerLinkAnswers,
   useMediaServerLinkCandidates,
   useMediaServerLinkDestinations,
-  useStopMediaServerLinkAnswers,
 } from "@/apis/hooks/mediaServerLinks";
 import type {
   LinkMediaType,
@@ -63,11 +62,24 @@ function answerText(name: string, answer: Answer | undefined) {
 
 function useWarm() {
   const [warm, setWarm] = useState(false);
+  // A closed menu hands focus back to its trigger, which warms it; that is
+  // no reason to look its rows up again. Asking is.
+  const [closed, setClosed] = useState(false);
   const timer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(timer.current), []);
   return {
     warm,
+    // While this is true the control waits for its rows' answers.
+    looking: warm && !closed,
     start: () => setWarm(true),
+    // Asking answers a resting pointer too, so its pending intent is dropped:
+    // it would look the rows up again after a menu closed quickly.
+    look: () => {
+      window.clearTimeout(timer.current);
+      setWarm(true);
+      setClosed(false);
+    },
+    close: () => setClosed(true),
     intend: (then: () => void) => {
       window.clearTimeout(timer.current);
       timer.current = window.setTimeout(then, HOVER_INTENT_MS);
@@ -76,6 +88,7 @@ function useWarm() {
     cool: () => {
       window.clearTimeout(timer.current);
       setWarm(false);
+      setClosed(false);
     },
   };
 }
@@ -121,19 +134,19 @@ const PlayOnMenu: FunctionComponent<Props> = ({
   className,
 }) => {
   const destinations = useMediaServerLinkDestinations();
-  const { warm, start, intend, cool } = useWarm();
+  const { warm, looking, start, look, close, intend, cool } = useWarm();
   const opened = useRef(false);
   const candidates = useMediaServerLinkCandidates(mediaType, id, warm);
   const targets = candidates.data ?? [];
-  const answers = useMediaServerLinkAnswers(targets, mediaType, id, warm);
-  const stop = useStopMediaServerLinkAnswers(targets, mediaType, id);
+  // A control that stops looking lets go of the lookups it still runs.
+  const answers = useMediaServerLinkAnswers(targets, mediaType, id, looking);
 
   // Opening the menu, a resting pointer, or focus on the single link asks
   // again wherever the last answer is stale: at once for a server that did
   // not answer, after fifteen minutes for a found or missing item, as the
   // server's own cache does.
   const ask = () => {
-    start();
+    look();
     if (candidates.isError) void candidates.refetch();
     for (const answer of answers) {
       if (answer.isStale && !answer.isFetching) void answer.refetch();
@@ -141,15 +154,19 @@ const PlayOnMenu: FunctionComponent<Props> = ({
   };
 
   const configured = destinations.data ?? [];
+  const menuShown = configured.length > 1;
+  // A menu that goes away open, when the destinations drop to one or none,
+  // never closes, so it is no longer counted as open.
+  useEffect(() => {
+    if (!menuShown) opened.current = false;
+  }, [menuShown]);
   if (configured.length === 0) return null;
 
   // A pointer that moves on before anything opened was passing by, on its
   // way across a table as often as not. The lookups it began let go of their
   // connections, so a server that hangs cannot hold them.
   const leave = () => {
-    if (opened.current) return;
-    cool();
-    stop();
+    if (!opened.current) cool();
   };
   const warmth = {
     onMouseEnter: () => intend(ask),
@@ -239,7 +256,7 @@ const PlayOnMenu: FunctionComponent<Props> = ({
       }}
       onClose={() => {
         opened.current = false;
-        stop();
+        close();
       }}
     >
       <Menu.Target>

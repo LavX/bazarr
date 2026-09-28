@@ -2,6 +2,8 @@
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
+import { mediaServerLinksKey } from "@/apis/hooks/mediaServerLinks";
+import queryClient from "@/apis/queries";
 import api from "@/apis/raw";
 import { customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
@@ -484,6 +486,37 @@ describe("PlayOnMenu", () => {
     }
   });
 
+  it("asks nothing more for a menu opened and closed before the pointer came to rest", async () => {
+    const { resolve, plexSignal, askedPlex, release } = hangingPlex();
+    const user = userEvent.setup();
+    customRender(
+      <PlayOnMenu
+        mediaType="movie"
+        id={10}
+        itemLabel="Metropolis"
+        variant="toolbox"
+      />,
+    );
+    try {
+      const trigger = await screen.findByRole("button", {
+        name: "Play on a media server: Metropolis",
+      });
+      await user.click(trigger);
+      await screen.findByRole("menuitem", {
+        name: "Checking Plex",
+        hidden: true,
+      });
+      await user.keyboard("{Escape}");
+      await waitFor(() => expect(plexSignal()?.aborted).toBe(true));
+      // Longer than a pointer takes to come to rest on the trigger.
+      await new Promise((settle) => setTimeout(settle, 400));
+      expect(askedPlex()).toBe(1);
+    } finally {
+      release();
+      resolve.mockRestore();
+    }
+  });
+
   // A pointer resting on a row on its way across a table warms it; once it
   // moves on without opening anything, nobody is waiting for the answer.
   it("lets go of a lookup the pointer began when it leaves without opening the menu", async () => {
@@ -563,6 +596,146 @@ describe("PlayOnMenu", () => {
       expect(
         screen.getByRole("menuitem", { name: "Checking Plex", hidden: true }),
       ).toBeInTheDocument();
+    } finally {
+      release();
+      resolve.mockRestore();
+    }
+  });
+
+  // A History page shows one control per event, so several controls for the
+  // same item share its lookups.
+  it("keeps a lookup an open menu shows while the pointer crosses another control for the same item", async () => {
+    const { resolve, plexSignal, askedPlex, release } = hangingPlex();
+    const user = userEvent.setup();
+    customRender(
+      <>
+        <PlayOnMenu
+          mediaType="movie"
+          id={7}
+          itemLabel="Metropolis"
+          variant="action"
+        />
+        <PlayOnMenu
+          mediaType="movie"
+          id={7}
+          itemLabel="Metropolis"
+          variant="action"
+        />
+      </>,
+    );
+    try {
+      const [first, second] = await screen.findAllByRole("button", {
+        name: "Play Metropolis on a media server",
+      });
+      await user.click(first);
+      await screen.findByRole("menuitem", {
+        name: "Checking Plex",
+        hidden: true,
+      });
+      const settle = () => new Promise((done) => setTimeout(done, 300));
+      // Passing over it, then resting on it before moving on.
+      await user.hover(second);
+      await user.unhover(second);
+      await settle();
+      expect(plexSignal()?.aborted).toBe(false);
+      await user.hover(second);
+      await settle();
+      await user.unhover(second);
+      await settle();
+      expect(plexSignal()?.aborted).toBe(false);
+      expect(first).toHaveAttribute("aria-expanded", "true");
+      release();
+      expect(
+        await screen.findByRole("menuitem", {
+          name: "Not found on Plex",
+          hidden: true,
+        }),
+      ).toBeInTheDocument();
+      expect(askedPlex()).toBe(1);
+    } finally {
+      release();
+      resolve.mockRestore();
+    }
+  });
+
+  it("keeps a lookup another control for the same item still waits for when a menu closes", async () => {
+    const { resolve, plexSignal, release } = hangingPlex();
+    const user = userEvent.setup();
+    customRender(
+      <>
+        <PlayOnMenu
+          mediaType="movie"
+          id={8}
+          itemLabel="Metropolis"
+          variant="action"
+        />
+        <PlayOnMenu
+          mediaType="movie"
+          id={8}
+          itemLabel="Metropolis"
+          variant="action"
+        />
+      </>,
+    );
+    try {
+      const [first, second] = await screen.findAllByRole("button", {
+        name: "Play Metropolis on a media server",
+      });
+      await user.click(first);
+      await screen.findByRole("menuitem", {
+        name: "Checking Plex",
+        hidden: true,
+      });
+      const settle = () => new Promise((done) => setTimeout(done, 300));
+      // The pointer rests on the other control, which waits for the answer.
+      await user.hover(second);
+      await settle();
+      await user.keyboard("{Escape}");
+      await waitFor(() =>
+        expect(first).toHaveAttribute("aria-expanded", "false"),
+      );
+      await settle();
+      expect(plexSignal()?.aborted).toBe(false);
+      // Once nothing waits for it, it lets go.
+      await user.unhover(second);
+      await waitFor(() => expect(plexSignal()?.aborted).toBe(true));
+    } finally {
+      release();
+      resolve.mockRestore();
+    }
+  });
+
+  it("lets go of the one link's lookup when the pointer leaves it after the menu it replaced went away open", async () => {
+    const destinations = [EMBY, PLEX];
+    const { resolve, plexSignal, release } = hangingPlex(destinations);
+    const user = userEvent.setup();
+    customRender(
+      <PlayOnMenu
+        mediaType="movie"
+        id={9}
+        itemLabel="Metropolis"
+        variant="action"
+      />,
+    );
+    try {
+      await user.click(
+        await screen.findByRole("button", {
+          name: "Play Metropolis on a media server",
+        }),
+      );
+      await screen.findByRole("menuitem", {
+        name: "Checking Plex",
+        hidden: true,
+      });
+      // Emby is removed while the menu is open: the menu goes away open and
+      // the one link takes its place.
+      destinations.splice(0, 1);
+      void queryClient.invalidateQueries({ queryKey: mediaServerLinksKey });
+      const link = await screen.findByLabelText("Play Metropolis on Plex");
+      expect(plexSignal()?.aborted).toBe(false);
+      await user.hover(link);
+      await user.unhover(link);
+      await waitFor(() => expect(plexSignal()?.aborted).toBe(true));
     } finally {
       release();
       resolve.mockRestore();

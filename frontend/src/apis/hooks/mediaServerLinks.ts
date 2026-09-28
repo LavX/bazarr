@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import {
   Query,
   useQueries,
@@ -56,14 +57,22 @@ function answerKey(instanceId: string, mediaType: LinkMediaType, id: number) {
   return [...mediaServerLinksKey, "resolve", instanceId, mediaType, id];
 }
 
-/** One answer per destination, each on its own request and its own time. */
+/**
+ * One answer per destination, each on its own request and its own time.
+ * When `enabled` turns false the control has stopped waiting: its menu
+ * closed, or the pointer left it without opening it. Each lookup still
+ * running then lets go of its connection, unless another control still
+ * waits for it. Controls for the same item share their lookups: a History
+ * page shows one per event.
+ */
 export function useMediaServerLinkAnswers(
   targets: MediaServerLinkTarget[],
   mediaType: LinkMediaType,
   id: number,
   enabled: boolean,
 ) {
-  return useQueries({
+  const client = useQueryClient();
+  const answers = useQueries({
     queries: targets.map((target) => ({
       queryKey: answerKey(target.instance_id, mediaType, id),
       // A row that goes away lets go of its lookups.
@@ -76,24 +85,20 @@ export function useMediaServerLinkAnswers(
       refetchOnWindowFocus: false,
     })),
   });
-}
-
-/**
- * Lets go of this row's lookups still running: its menu closed, or the
- * pointer left it without opening it.
- */
-export function useStopMediaServerLinkAnswers(
-  targets: MediaServerLinkTarget[],
-  mediaType: LinkMediaType,
-  id: number,
-) {
-  const client = useQueryClient();
-  return () => {
-    for (const target of targets) {
-      void client.cancelQueries({
-        queryKey: answerKey(target.instance_id, mediaType, id),
-        exact: true,
-      });
+  const waited = useRef(enabled);
+  // Declared after useQueries, so this runs once its own effect has disabled
+  // this control's lookups: an active one is another control's.
+  useEffect(() => {
+    if (waited.current && !enabled) {
+      for (const target of targets) {
+        const queryKey = answerKey(target.instance_id, mediaType, id);
+        const query = client.getQueryCache().find({ queryKey, exact: true });
+        if (query && !query.isActive()) {
+          void client.cancelQueries({ queryKey, exact: true });
+        }
+      }
     }
-  };
+    waited.current = enabled;
+  });
+  return answers;
 }
