@@ -273,12 +273,15 @@ class EmbeddedHiddenTracks(Resource):
             except Exception as error:
                 failure = error
             # The engine autocommits, so reconcile the record by hand with the
-            # listing the re-index actually left.
-            if _still_listed(media_type, media_id, key):
-                # Still listed: the re-index failed before it wrote the listing,
-                # or returned without applying the hide (the file went away
-                # after the check above, or the hidden lookup failed). Take the
-                # hide back rather than surprise the user at the next index.
+            # listing the re-index actually left. A refusal means the file
+            # could not be read, and the sports indexer empties the listing
+            # before it probes, so an empty listing proves nothing there.
+            if isinstance(failure, _Refused) or _still_listed(media_type, media_id, key):
+                # Not applied: the re-index could not read the file, failed
+                # before it wrote the listing, or returned without applying the
+                # hide (the file went away after the check above, or the hidden
+                # lookup failed). Take the hide back rather than surprise the
+                # user at the next index.
                 if recorded:
                     try:
                         unhide_track(database, media_type, [media_id], owner, key)

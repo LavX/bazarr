@@ -397,6 +397,19 @@ def test_sports_resolves_the_owned_event_and_reindexes_it(hidden_api, monkeypatc
     # read the file lists the track again.
     assert client.delete(ROOT, data=form, headers=HEADERS).status_code == 204
     assert _hidden(session) == []
+    # A sports index whose probe fails has already emptied the listing, so an
+    # empty listing does not mean the hide applied: a refusal takes it back.
+    def _empties_then_fails(event_id, owner, **kw):
+        session.execute(sa.update(TableSportsEvents).where(TableSportsEvents.id == event_id).values(
+            subtitles="[]"))
+        raise OSError("Could not analyze sports video")
+
+    monkeypatch.setattr(sp, "store_subtitles_sports", _empties_then_fails)
+    session.execute(sa.update(TableSportsEvents).where(TableSportsEvents.id == 61).values(
+        subtitles=str([["fr", None, None]])))
+    assert client.post(ROOT, data=form, headers=HEADERS).status_code == 409
+    assert _hidden(session) == []
+    monkeypatch.setattr(sp, "store_subtitles_sports", _fails)
     # That next index, standing in for the one that failed here.
     session.execute(sa.update(TableSportsEvents).where(TableSportsEvents.id == 61).values(
         subtitles=str([["fr", None, None]])))
