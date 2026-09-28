@@ -106,7 +106,11 @@ def candidates(row, media_type, native):
     the scoping the refresh uses. Emby and Silo hold a file only where a path
     mapping covers it; a row no mapping covers is not on that server at all,
     which is different from a server that was asked and did not find it.
+    A recording is found by its file on every kind, so one whose path could
+    not be mapped is on none of them.
     """
+    if media_type == 'sports' and row.video_path is None:
+        return []
     targets = []
     for snapshot, display_name in destinations(native):
         if media_type == 'sports' and snapshot.kind == 'silo':
@@ -161,7 +165,10 @@ def resolve(instance_id, media_type, local_id, native=None):
                    if target.snapshot.id == instance_id), None)
     if target is None:
         return {'instance_id': instance_id, 'state': 'not_found', 'url': None}
-    key = f'{instance_id}:{target.snapshot.revision}:{media_type}:{local_id}:{target.mapped_path}'
+    # The file the answer depends on. Jellyfin and Plex map no path, but they
+    # find a recording by its file name, so a replaced recording is asked again.
+    path = target.mapped_path or (row.video_path if media_type == 'sports' else None)
+    key = f'{instance_id}:{target.snapshot.revision}:{media_type}:{local_id}:{path}'
     return links_region.get_or_create(key, lambda: _answer(target, media_type, row),
                                       should_cache_fn=lambda answer: answer['state'] != 'unreachable')
 

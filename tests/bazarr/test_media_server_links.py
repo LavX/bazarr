@@ -272,3 +272,35 @@ def test_a_recording_is_never_offered_on_silo_and_needs_a_sports_library_elsewhe
     configuration = native(snap('emby', 'A', **EMBY_A), snap('silo', 'S', **SILO_A), snap('jellyfin', 'J'),
                            snap('plex', 'P', options={'movie_libraries': ['Movies'], 'sports_libraries': ['Sports']}))
     assert [target.snapshot.kind for target in candidates(sports_row(), 'sports', configuration)] == ['emby', 'plex']
+
+
+def test_a_recording_whose_path_could_not_be_mapped_is_offered_nowhere():
+    # Every kind finds a recording by its file, so a recording without a path
+    # has no destination to ask, rather than a Jellyfin or Plex row that can
+    # only ever answer "Not found".
+    from media_servers.links import candidates
+    configuration = native(snap('emby', 'A', **EMBY_A),
+                           snap('jellyfin', 'J', options={'sports_library_ids': ['sports']}),
+                           snap('plex', 'P', options={'sports_libraries': ['Sports']}))
+    assert [target.snapshot.kind for target in candidates(sports_row(), 'sports', configuration)] == [
+        'emby', 'jellyfin', 'plex']
+    assert candidates(sports_row(path=None), 'sports', configuration) == []
+
+
+def test_a_recording_is_asked_again_once_its_file_changes(monkeypatch):
+    from media_servers import links
+    rows = iter([sports_row('/media/NHL/Game 12.mkv'), sports_row('/media/NHL/Game 12.mkv'),
+                 sports_row('/media/NHL/Game 12 Proper.mkv')])
+    monkeypatch.setattr(links, 'media_metadata_for', lambda media_type, local_id: next(rows))
+    asked = []
+
+    def lookup(target, media_type, row):
+        asked.append(row.video_path)
+        return f'http://j/{len(asked)}'
+    monkeypatch.setattr(links, '_lookup', lookup)
+    jellyfin = snap('jellyfin', 'J', options={'sports_library_ids': ['sports']})
+    urls = [links.resolve(jellyfin.id, 'sports', 4, native(jellyfin))['url'] for _ in range(3)]
+    # Jellyfin keeps no path mapping, but it finds a recording by its file
+    # name, so a replaced file is a new question rather than a cached answer.
+    assert urls == ['http://j/1', 'http://j/1', 'http://j/2']
+    assert asked == ['/media/NHL/Game 12.mkv', '/media/NHL/Game 12 Proper.mkv']
