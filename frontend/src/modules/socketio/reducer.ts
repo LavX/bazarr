@@ -7,9 +7,19 @@ import {
   skipScoredRangeQueries,
 } from "@/apis/queries/subtitleScores";
 import api from "@/apis/raw";
+import type { HiddenTrackMediaType } from "@/apis/raw/subtitles";
 import { notifyJobOutcome, resetJobNotifications } from "@/modules/jobs";
 import { LOG } from "@/utilities/console";
 import { setOnlineStatus } from "@/utilities/event";
+
+// A hide or unhide re-indexes the row, and the event that refreshes the row
+// refreshes the hidden embedded tracks of that media type too. Another tab
+// then shows the Hidden tracks disclosure together with the row it explains.
+function invalidateHiddenTracks(mediaType: HiddenTrackMediaType) {
+  void queryClient.invalidateQueries({
+    queryKey: [QueryKeys.Subtitles, QueryKeys.EmbeddedHidden, mediaType],
+  });
+}
 
 export function createDefaultReducer(): SocketIO.Reducer[] {
   return [
@@ -18,6 +28,7 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       any: () => {
         void queryClient.invalidateQueries({ queryKey: [QueryKeys.Sports] });
         void queryClient.invalidateQueries({ queryKey: [QueryKeys.Badges] });
+        invalidateHiddenTracks("sports");
       },
     },
     {
@@ -66,6 +77,7 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
           queryKey: [QueryKeys.Series],
           predicate: skipScoredRangeQueries,
         });
+        invalidateHiddenTracks("episode");
       },
       delete: (ids) => {
         LOG("info", "Invalidating series", ids);
@@ -77,6 +89,7 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
         void queryClient.invalidateQueries({
           queryKey: [QueryKeys.Series],
         });
+        invalidateHiddenTracks("episode");
       },
     },
     {
@@ -98,6 +111,7 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
           queryKey: [QueryKeys.Movies],
           predicate: skipScoredRangeQueries,
         });
+        invalidateHiddenTracks("movie");
       },
       delete: (ids) => {
         LOG("info", "Invalidating movies", ids);
@@ -109,6 +123,7 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
         void queryClient.invalidateQueries({
           queryKey: [QueryKeys.Movies],
         });
+        invalidateHiddenTracks("movie");
       },
     },
     {

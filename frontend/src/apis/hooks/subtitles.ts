@@ -746,7 +746,9 @@ export function useSubtitleArchiveDownload() {
   });
 }
 
-const hiddenTracksKey = [QueryKeys.Subtitles, "embedded-hidden"];
+// The socket handlers refresh this listing per media type, under
+// [...hiddenTracksKey, mediaType], along with the rows the tracks left.
+const hiddenTracksKey = [QueryKeys.Subtitles, QueryKeys.EmbeddedHidden];
 
 // Declared once rather than inline: TanStack Query then regroups the listing
 // only when it changes, not on every render of every row that reads it.
