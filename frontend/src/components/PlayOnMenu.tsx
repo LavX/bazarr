@@ -167,7 +167,12 @@ const PlayOnMenu: FunctionComponent<Props> = ({
       target: "_blank",
       rel: "noopener noreferrer",
       tabIndex: 0,
-      "aria-label": `Play ${itemLabel} on ${name}`,
+      // A name begins with the words a control shows, so speech input can
+      // reach it by them. The icon-only row action shows none.
+      "aria-label":
+        variant === "toolbox"
+          ? `Play on ${name}: ${itemLabel}`
+          : `Play ${itemLabel} on ${name}`,
       "aria-disabled": url ? undefined : true,
       onClick: (event: React.MouseEvent) => {
         if (!url) {
@@ -200,7 +205,10 @@ const PlayOnMenu: FunctionComponent<Props> = ({
     );
   }
 
-  const label = `Play ${itemLabel} on a media server`;
+  const label =
+    variant === "toolbox"
+      ? `Play on a media server: ${itemLabel}`
+      : `Play ${itemLabel} on a media server`;
   // Focus only warms the menu trigger: the menu hands focus back to it each
   // time it closes, which is no reason to ask again. Opening it is.
   const triggerWarmth = { ...warmth, onFocus: start };

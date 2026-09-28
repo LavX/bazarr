@@ -129,6 +129,38 @@ describe("PlayOnMenu", () => {
     ]);
   });
 
+  // Speech input reaches a control by the words on it, so a toolbox name
+  // starts with them; the item still follows for a screen reader.
+  it("names the one toolbox link with the words it shows first", async () => {
+    serve([EMBY], [EMBY], {});
+    customRender(
+      <PlayOnMenu
+        mediaType="movie"
+        id={1}
+        itemLabel="Metropolis"
+        variant="toolbox"
+      />,
+    );
+    const link = await screen.findByLabelText("Play on Emby: Metropolis");
+    expect(link).toHaveTextContent("Play on Emby");
+  });
+
+  it("names the toolbox menu with the words it shows first", async () => {
+    serve([EMBY, PLEX], [EMBY, PLEX], {});
+    customRender(
+      <PlayOnMenu
+        mediaType="movie"
+        id={1}
+        itemLabel="Metropolis"
+        variant="toolbox"
+      />,
+    );
+    const trigger = await screen.findByRole("button", {
+      name: "Play on a media server: Metropolis",
+    });
+    expect(trigger).toHaveTextContent("Play on");
+  });
+
   it("says so when no destination can hold the file", async () => {
     serve([EMBY, PLEX], [], {});
     const user = userEvent.setup();
@@ -142,7 +174,7 @@ describe("PlayOnMenu", () => {
     );
     await user.click(
       await screen.findByRole("button", {
-        name: "Play Metropolis on a media server",
+        name: "Play on a media server: Metropolis",
       }),
     );
     expect(await screen.findByText(NO_CANDIDATE)).toBeInTheDocument();
@@ -161,7 +193,7 @@ describe("PlayOnMenu", () => {
         variant="toolbox"
       />,
     );
-    const link = await screen.findByLabelText("Play Metropolis on Silo");
+    const link = await screen.findByLabelText("Play on Silo: Metropolis");
     expect(link.tagName).toBe("A");
     expect(link).toHaveAttribute("aria-disabled", "true");
     expect(link).not.toHaveAttribute("href");
@@ -215,7 +247,7 @@ describe("PlayOnMenu", () => {
       />,
     );
     const trigger = await screen.findByRole("button", {
-      name: "Play Metropolis on a media server",
+      name: "Play on a media server: Metropolis",
     });
     const settle = () => new Promise((resolve) => setTimeout(resolve, 400));
     await user.hover(trigger);
@@ -253,7 +285,7 @@ describe("PlayOnMenu", () => {
       />,
     );
     const trigger = await screen.findByRole("button", {
-      name: "Play Metropolis on a media server",
+      name: "Play on a media server: Metropolis",
     });
     await user.click(trigger);
     await screen.findByRole("menuitem", {
@@ -302,7 +334,7 @@ describe("PlayOnMenu", () => {
         <button type="button">Elsewhere</button>
       </>,
     );
-    const link = await screen.findByLabelText("Play Metropolis on Silo");
+    const link = await screen.findByLabelText("Play on Silo: Metropolis");
     await user.tab();
     await screen.findByText("Silo is unreachable");
     await user.tab();
@@ -348,7 +380,7 @@ describe("PlayOnMenu", () => {
       />,
     );
     await screen.findByRole("button", {
-      name: "Play Metropolis on a media server",
+      name: "Play on a media server: Metropolis",
     });
     await user.tab();
     await user.keyboard("{Enter}");
@@ -400,7 +432,7 @@ describe("PlayOnMenu", () => {
     try {
       await user.click(
         await screen.findByRole("button", {
-          name: "Play Metropolis on a media server",
+          name: "Play on a media server: Metropolis",
         }),
       );
       await screen.findByRole("menuitem", {
@@ -429,7 +461,7 @@ describe("PlayOnMenu", () => {
     );
     try {
       const trigger = await screen.findByRole("button", {
-        name: "Play Metropolis on a media server",
+        name: "Play on a media server: Metropolis",
       });
       await user.click(trigger);
       await screen.findByRole("menuitem", {
