@@ -1,17 +1,23 @@
 # coding=utf-8
 """The OCR run end to end: real ffmpeg, real Tesseract, and a stand-in engine."""
 
+import ast
+import io
 import os
 import shutil
+import signal
+import sys
+import threading
 from contextlib import contextmanager
 
 import pysubs2
 import pytest
+from PIL import Image, ImageDraw, ImageFont
 
 from ocr_fixtures import BLACK, FAINT, FIXTURES, box_rows, build_sup, mux_mkv
-from subtitles.tools.ocr import pipeline
-from subtitles.tools.ocr.errors import LanguagePackError, TooLittleText
-from subtitles.tools.ocr.tesseract import TesseractEngine, fix_bars, load_tesserocr
+from subtitles.tools.ocr import pipeline, tesseract
+from subtitles.tools.ocr.errors import LanguagePackError, OcrError, OcrUnavailable, TooLittleText
+from subtitles.tools.ocr.tesseract import TesseractEngine, fix_bars
 
 HUNGARIAN_LETTERS = "áéíóöőúüűÁÉÍÓÖŐÚÜŰ"
 
@@ -225,32 +231,231 @@ def test_recognised_text_is_capped_at_two_lines(raw, clean):
     assert pipeline.clean_text(raw) == clean
 
 
-def test_tesserocr_import_sets_one_openmp_thread(monkeypatch):
-    monkeypatch.setenv("OMP_THREAD_LIMIT", "unset below, restored after the test")
-    monkeypatch.delenv("OMP_THREAD_LIMIT")
+# A stand-in for tesserocr, put first on the worker's path, to drive the
+# worker protocol without Tesseract: it chatters on stdout, crashes, hangs or
+# raises what cysignals raises when told to, and answers with what it was
+# given.
+FAKE_TESSEROCR = """
+import os, signal, time
 
-    load_tesserocr()
+MODE = os.environ.get("FAKE_TESSEROCR", "")
+if MODE == "missing":
+    raise ImportError("No module named 'cysignals'")
+__version__ = "0.0"
 
-    assert os.environ["OMP_THREAD_LIMIT"] == "1"
+
+class SignalError(BaseException):
+    pass
 
 
-def test_missing_tesserocr_reports_ocr_unavailable(monkeypatch):
-    import builtins
+def tesseract_version():
+    return "tesseract 0.0.0\\n leptonica-0.0.0"
 
-    from subtitles.tools.ocr.errors import OcrUnavailable
-    from subtitles.tools.ocr.tesseract import ocr_available
 
-    real_import = builtins.__import__
+class PSM:
+    SINGLE_BLOCK = 6
 
-    def no_tesserocr(name, *args, **kwargs):
-        if name == "tesserocr":
-            raise ImportError("No module named 'tesserocr'")
-        return real_import(name, *args, **kwargs)
 
-    monkeypatch.setattr(builtins, "__import__", no_tesserocr)
+class OEM:
+    LSTM_ONLY = 1
+
+
+class PyTessBaseAPI:
+    def __init__(self, path, lang, psm, oem):
+        self.lang = lang
+
+    def SetImageBytesBmp(self, data):
+        self.size = len(data)
+
+    def GetUTF8Text(self):
+        if MODE == "crash":
+            os.kill(os.getpid(), signal.SIGSEGV)
+        if MODE == "hang":
+            time.sleep(600)
+        # What cysignals raises once it has jumped out of a call that crashed.
+        if MODE == "segfault":
+            raise SignalError("Segmentation fault")
+        if MODE == "abort":
+            raise RuntimeError("Aborted")
+        print("chatter from Python")
+        os.write(1, b"chatter from C\\n")
+        return " ".join([self.lang, str(self.size), os.environ.get("OMP_THREAD_LIMIT", "-"),
+                         os.environ.get("CYSIGNALS_CRASH_NDEBUG", "-")])
+
+    def End(self):
+        # A Tesseract interrupted mid-call can hang or crash when ended.
+        if MODE in ("segfault", "abort"):
+            time.sleep(600)
+"""
+
+
+@pytest.fixture
+def fake_tesserocr(monkeypatch, tmp_path):
+    folder = tmp_path / "fake"
+    folder.mkdir()
+    (folder / "tesserocr.py").write_text(FAKE_TESSEROCR)
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(filter(None, [str(folder), os.environ.get("PYTHONPATH")])))
+    engine = TesseractEngine(str(tmp_path))
+    engine.pack = "eng"
+
+    def use(mode=""):
+        monkeypatch.setenv("FAKE_TESSEROCR", mode)
+        return engine
+    return use
+
+
+def _bmp_size(image):
+    buffer = io.BytesIO()
+    image.save(buffer, "BMP")
+    return len(buffer.getvalue())
+
+
+def _caught_signals():
+    for line in open("/proc/self/status"):
+        if line.startswith("SigCgt:"):
+            return int(line.split()[1], 16)
+    return None
+
+
+def test_the_worker_answers_through_its_own_channel_in_its_own_environment(fake_tesserocr, monkeypatch):
+    monkeypatch.delenv("OMP_THREAD_LIMIT", raising=False)
+    monkeypatch.delenv("CYSIGNALS_CRASH_NDEBUG", raising=False)
+    image = Image.new("L", (40, 20), 255)
+
+    with fake_tesserocr().session() as read:
+        # Both kinds of stdout chatter went to stderr, not into the answers,
+        # and the worker, only the worker, runs with both variables set.
+        assert read(image) == f"eng {_bmp_size(image)} 1 1"
+        assert read(image) == f"eng {_bmp_size(image)} 1 1"
+    assert "OMP_THREAD_LIMIT" not in os.environ and "CYSIGNALS_CRASH_NDEBUG" not in os.environ
+
+
+def test_a_worker_that_cannot_import_tesserocr_reports_ocr_unavailable(fake_tesserocr):
+    with pytest.raises(OcrUnavailable, match="not available on this installation.*cysignals"):
+        with fake_tesserocr("missing").session():
+            pass
+
+
+def test_missing_tesserocr_reports_ocr_unavailable_before_anything_starts(monkeypatch, tmp_path):
+    real_find_spec = tesseract.importlib.util.find_spec
+    monkeypatch.setattr(tesseract.importlib.util, "find_spec",
+                        lambda name, *args: None if name == "tesserocr" else real_find_spec(name, *args))
+    monkeypatch.setattr(tesseract, "TesseractWorker", None)  # never reached
+
+    assert tesseract.ocr_available() is False
     with pytest.raises(OcrUnavailable, match="not available on this installation"):
-        load_tesserocr()
-    assert ocr_available() is False
+        TesseractEngine(str(tmp_path)).prepare("eng")
+
+
+def test_a_crash_in_tesseract_fails_the_run_and_not_bazarr(fake_tesserocr):
+    # Outside the calls cysignals guards, a crash kills the worker.
+    with pytest.raises(OcrError, match="Tesseract stopped with signal 11"):
+        with fake_tesserocr("crash").session() as read:
+            read(Image.new("L", (40, 20), 255))
+
+
+@pytest.mark.parametrize("mode,error", [
+    ("segfault", "SignalError: Segmentation fault"),  # SIGSEGV; SignalError is a BaseException
+    ("abort", "RuntimeError: Aborted"),               # SIGABRT
+])
+def test_a_crash_inside_a_guarded_call_ends_the_worker_without_ending_tesseract(fake_tesserocr, monkeypatch,
+                                                                               mode, error):
+    workers = []
+    real_worker = tesseract.TesseractWorker
+
+    def recording_worker():
+        workers.append(real_worker())
+        return workers[-1]
+
+    monkeypatch.setattr(tesseract, "TesseractWorker", recording_worker)
+    monkeypatch.setattr(tesseract, "ANSWER_TIMEOUT", 10)
+
+    with pytest.raises(OcrError, match=f"Tesseract failed: {error}"):
+        with fake_tesserocr(mode).session() as read:
+            read(Image.new("L", (40, 20), 255))
+    # It answered and left without End(), which hangs here, so close() did
+    # not have to kill it.
+    assert workers[0].process.returncode == 1
+
+
+def test_a_tesseract_call_that_never_returns_is_killed(fake_tesserocr, monkeypatch):
+    workers = []
+    real_worker = tesseract.TesseractWorker
+
+    def recording_worker():
+        workers.append(real_worker())
+        return workers[-1]
+
+    monkeypatch.setattr(tesseract, "TesseractWorker", recording_worker)
+    monkeypatch.setattr(tesseract, "ANSWER_TIMEOUT", 2)
+
+    with pytest.raises(OcrError, match="did not answer within 2 s"):
+        with fake_tesserocr("hang").session() as read:
+            read(Image.new("L", (40, 20), 255))
+    assert workers[0].process.returncode is not None
+
+
+def test_a_cancelled_run_stops_its_worker(media, packs, ffmpeg, tmp_path, monkeypatch):
+    workers = []
+    real_worker = tesseract.TesseractWorker
+
+    def recording_worker():
+        workers.append(real_worker())
+        return workers[-1]
+
+    def cancel(step, value, maximum):
+        if step == "recognise":
+            raise RuntimeError("job cancelled")
+
+    monkeypatch.setattr(tesseract, "TesseractWorker", recording_worker)
+    with pytest.raises(RuntimeError, match="job cancelled"):
+        pipeline.run_ocr(media["pgs"], 0, "eng", TesseractEngine(packs), parent=str(tmp_path), ffmpeg=ffmpeg,
+                         progress=cancel)
+    # One worker checked the pack in prepare(), one read the cues.
+    assert len(workers) == 2
+    assert all(worker.process.returncode is not None for worker in workers)
+    assert os.listdir(tmp_path) == []
+
+
+def test_a_job_thread_reads_with_the_latest_tesserocr_without_loading_it_into_bazarr(packs):
+    image = Image.new("L", (700, 130), 255)
+    ImageDraw.Draw(image).text((20, 20), "HELLO WORLD", fill=0, font=ImageFont.load_default(72))
+    handler, caught = signal.getsignal(signal.SIGINT), _caught_signals()
+    result = {}
+
+    def job():
+        try:
+            engine = TesseractEngine(packs)
+            engine.prepare("eng")
+            with engine.session() as read:
+                result["text"] = read(image).strip()
+        except BaseException as error:
+            result["error"] = repr(error)
+
+    thread = threading.Thread(target=job)
+    thread.start()
+    thread.join()
+
+    assert result == {"text": "HELLO WORLD"}
+    # tesserocr 2.10+ loads cysignals, which would have failed in this thread
+    # and taken over the process's signal handlers had it loaded here.
+    assert "tesserocr" not in sys.modules and "cysignals" not in sys.modules
+    assert signal.getsignal(signal.SIGINT) is handler
+    assert _caught_signals() == caught
+
+
+def test_the_worker_imports_nothing_but_the_standard_library_and_tesserocr():
+    """It must run without Bazarr+ on its path, as an OCR plugin's worker will."""
+    with open(tesseract.WORKER_PATH, encoding="utf-8") as handle:
+        tree = ast.parse(handle.read())
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            assert node.level == 0, "no relative imports in the worker"
+            imported.add(node.module.split(".")[0])
+    assert imported <= set(sys.stdlib_module_names) | {"tesserocr"}, imported
 
 
 @pytest.mark.parametrize("raw,fixed", [

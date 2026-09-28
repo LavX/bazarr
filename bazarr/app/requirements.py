@@ -175,13 +175,17 @@ WINDOWS_RUNTIME_REQUIREMENTS = {
     "win32con": ("pywin32", ">=312"),
 }
 
-# Native wheels one feature needs and startup does not. They are never probed,
-# so a missing one does not trigger an install, and when requirements are
-# installed they go in after the required set, each on its own, and a failure
-# is logged instead of stopping Bazarr+: a platform without the wheel runs
-# without that feature, which then reports itself unavailable.
+# Native packages one feature needs and startup does not. They are never
+# probed, so a missing one does not trigger an install, and when requirements
+# are installed they go in after the required set, each on its own, and a
+# failure is logged instead of stopping Bazarr+: a platform that cannot
+# install them runs without that feature, which then reports itself
+# unavailable.
 OPTIONAL_RUNTIME_REQUIREMENTS = {
-    "tesserocr": ("tesserocr", "==2.9.2"),  # OCR of bitmap subtitle tracks
+    # OCR of bitmap subtitle tracks. tesserocr 2.11.0 needs cysignals 1.12.6
+    # or later without saying so (see requirements.txt).
+    "cysignals": ("cysignals", ">=1.12.6"),
+    "tesserocr": ("tesserocr", "==2.11.0"),
 }
 
 REPO_ROOT = Path(__file__).resolve().parents[2]

@@ -69,19 +69,25 @@ six==1.17.0
 sqlalchemy==2.1.4
 srt==3.5.3
 subliminal[rar]==2.6.0
-# OCR of bitmap subtitle tracks. Pinned below 2.10.0, which added cysignals:
-# importing it calls signal.signal(), which raises outside the main thread
-# where OCR jobs run, and takes over the process's SIGINT, SIGHUP and crash
-# signal handlers. 2.9.2 bundles the same Tesseract 5.5.1 build.
+# OCR of bitmap subtitle tracks. Only the OCR worker process imports tesserocr
+# (bazarr/subtitles/tools/ocr/tesseract_worker.py): since 2.10.0 it loads
+# cysignals, which must be imported in a main thread and takes over the
+# SIGINT, SIGHUP, SIGALRM and crash signal handlers of its process.
 # Wheels exist for Linux x86_64 and aarch64 (glibc 2.27+, musl on x86_64 only)
 # and macOS 15+; the sdist needs Tesseract's headers. The marker cannot test
 # the macOS version: platform_release is a kernel string on Linux, and pip
 # 24.2 to 25.3 raise InvalidVersion when a marker compares it. Nor can it see
 # musl or a 32-bit userland on a 64-bit ARM kernel, so a hand-run pip install
-# on those stops at this line (README gives the fallback).
-# bazarr/app/requirements.py installs this line after the required set and
-# carries on without OCR if it fails.
-tesserocr==2.9.2; sys_platform == "linux" and (platform_machine == "x86_64" or platform_machine == "aarch64") --only-binary=tesserocr
+# on those stops at these lines (README gives the fallback).
+# tesserocr 2.11.0 asks for any cysignals but imports a C function that only
+# 1.12.6 and later export, hence the floor. 1.12.6 has Linux wheels for x86_64
+# only, so on aarch64 pip compiles it, which needs a C compiler and the Python
+# headers (the image's builder stage has both). No --only-binary on this line:
+# pip applies that option to the whole install, whatever the marker says.
+# bazarr/app/requirements.py installs these lines after the required set and
+# carries on without OCR if they fail.
+cysignals>=1.12.6; sys_platform == "linux" and (platform_machine == "x86_64" or platform_machine == "aarch64")
+tesserocr==2.11.0; sys_platform == "linux" and (platform_machine == "x86_64" or platform_machine == "aarch64") --only-binary=tesserocr
 textdistance==4.6.3
 tld==0.13.2
 tomlkit>=0.15.1

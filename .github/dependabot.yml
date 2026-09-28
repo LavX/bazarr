@@ -37,8 +37,3 @@ updates:
       prefix: "[bot]"
     open-pull-requests-limit: 5
     target-branch: "development"
-    ignore:
-      # 2.10.0 and later depend on cysignals, which cannot be imported outside
-      # the main thread. See the tesserocr note in requirements.txt.
-      - dependency-name: "tesserocr"
-        versions: [">=2.10.0"]

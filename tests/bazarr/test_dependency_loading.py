@@ -664,28 +664,19 @@ def test_tesserocr_marker_limits_it_to_platforms_with_wheels(platform, machine, 
     assert line.endswith("--only-binary=tesserocr")
 
 
-def test_tesserocr_imports_in_a_worker_thread_without_touching_signal_handlers():
-    """tesserocr 2.10+ pulls in cysignals, whose import calls signal.signal().
+def test_cysignals_is_held_at_the_release_tesserocr_can_import():
+    """tesserocr 2.11.0 asks for any cysignals, but imports a C function that
+    only 1.12.6 and later export: with 1.12.5, the last release with aarch64
+    wheels, it does not import."""
+    line = _requirement_line("cysignals")
+    # No --only-binary: aarch64 has no wheel of 1.12.6, so pip builds it there,
+    # and pip would apply the option to the whole file.
+    assert "--" not in line
+    requirement = Requirement(line)
+    tesserocr = Requirement(re.split(r"\s+--", _requirement_line("tesserocr"), maxsplit=1)[0])
 
-    That raises in any thread but the main one, which is where OCR jobs run.
-    A fresh interpreter, so an import earlier in this process cannot mask it.
-    """
-    probe = (
-        "import signal, sys, threading\n"
-        "result = {}\n"
-        "def job():\n"
-        "    try:\n"
-        "        import tesserocr\n"
-        "        result['version'] = tesserocr.__version__\n"
-        "    except BaseException as error:\n"
-        "        result['error'] = repr(error)\n"
-        "thread = threading.Thread(target=job); thread.start(); thread.join()\n"
-        "assert 'error' not in result, result\n"
-        "assert signal.getsignal(signal.SIGINT) is signal.default_int_handler\n"
-        "assert 'cysignals' not in sys.modules\n"
-    )
-    completed = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=120)
-    assert completed.returncode == 0, completed.stderr
+    assert "1.12.5" not in requirement.specifier and "1.12.6" in requirement.specifier
+    assert str(requirement.marker) == str(tesserocr.marker)
 
 
 def test_requirements_split_keeps_optional_lines_apart():
@@ -693,9 +684,9 @@ def test_requirements_split_keeps_optional_lines_apart():
 
     required, optional = split_requirement_lines(
         "Pillow>=12.3.0 --only-binary=Pillow\n# tesserocr is optional\n"
-        'tesserocr==2.9.2; sys_platform == "linux" --only-binary=tesserocr\nsix==1.17.0\n')
+        'tesserocr==2.11.0; sys_platform == "linux" --only-binary=tesserocr\nsix==1.17.0\n')
 
-    assert optional == ['tesserocr==2.9.2; sys_platform == "linux" --only-binary=tesserocr']
+    assert optional == ['tesserocr==2.11.0; sys_platform == "linux" --only-binary=tesserocr']
     assert required == ["Pillow>=12.3.0 --only-binary=Pillow", "# tesserocr is optional", "six==1.17.0"]
 
 
@@ -707,7 +698,9 @@ def _capture_installs(monkeypatch, requirements, fail_on=()):
         if "-r" in command:
             body = Path(command[command.index("-r") + 1]).read_text()
         calls.append((command, body))
-        if any(marker in body or marker in " ".join(command) for marker in fail_on):
+        # Comments, and command[0], the interpreter's path, may contain any name.
+        lines = "\n".join(line for line in body.splitlines() if not line.startswith("#"))
+        if any(marker in lines or marker in " ".join(command[1:]) for marker in fail_on):
             raise subprocess.CalledProcessError(1, command, output="no wheel for this platform")
         return b""
 
@@ -728,10 +721,12 @@ def test_optional_requirement_failure_does_not_stop_startup(monkeypatch, caplog)
 
     assert exits == []
     required_body = calls[0][1]
-    assert "Pillow" in required_body and "tesserocr==" not in required_body
+    assert "Pillow" in required_body and "tesserocr==" not in required_body and "cysignals>=" not in required_body
     assert calls[1][0][-1] == "signalrcore==1.0.2"
-    assert calls[2][1].startswith("tesserocr==2.9.2;")
-    assert "could not install the optional requirement tesserocr==2.9.2" in caplog.text
+    # Each optional line on its own, in file order.
+    assert [re.match(r"[\w.-]+", body).group() for _, body in calls[2:]] == ["cysignals", "tesserocr"]
+    assert "could not install the optional requirement tesserocr==" in caplog.text
+    assert "optional requirement cysignals" not in caplog.text
 
 
 def test_required_requirement_failure_still_exits_before_optional_ones(monkeypatch):
