@@ -215,3 +215,58 @@ export function getSubtitleSyncStatusPresentation(
     label: "Sync",
   };
 }
+
+// Mirrors bitmap_codecs in extract_embedded_subtitle()
+// (bazarr/subtitles/tools/translate/batch.py). The indexer stores knowit's
+// format lowercased, so pgs, vobsub and dvbsub are the values that occur; the
+// other three keep the two lists identical.
+export const BITMAP_SUBTITLE_CODECS = [
+  "pgs",
+  "vobsub",
+  "dvd_subtitle",
+  "dvbsub",
+  "hdmv_pgs_subtitle",
+  "dvd",
+] as const;
+
+const subtitleCodecLabels: Record<string, string> = {
+  pgs: "PGS",
+  vobsub: "VobSub",
+  dvbsub: "DVB",
+  subrip: "SRT",
+  ass: "ASS",
+  ssa: "SSA",
+  "mov text": "MOV Text",
+};
+
+// An unknown codec is text: rows indexed before the codec was stored have
+// none, and they must keep behaving as they did until the next index.
+export function isBitmapCodec(codec: string | null | undefined): boolean {
+  if (!codec) {
+    return false;
+  }
+  return (BITMAP_SUBTITLE_CODECS as readonly string[]).includes(
+    codec.toLowerCase(),
+  );
+}
+
+export function subtitleCodecLabel(
+  codec: string | null | undefined,
+): string | null {
+  if (!codec) {
+    return null;
+  }
+  const key = codec.toLowerCase();
+  return subtitleCodecLabels[key] ?? key.toUpperCase();
+}
+
+export function describeEmbeddedTrack(
+  prefix: string,
+  codec: string | null | undefined,
+): string {
+  const label = subtitleCodecLabel(codec);
+  if (!label) {
+    return prefix;
+  }
+  return `${prefix} (${label}${isBitmapCodec(codec) ? ", image-based" : ""})`;
+}

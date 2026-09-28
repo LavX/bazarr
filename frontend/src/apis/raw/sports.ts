@@ -55,7 +55,14 @@ export interface SportsEvent extends SportsEventReference {
   profileId: number | null;
   /** Audio languages the indexer read off the file, as bare codes. */
   audio_language: string[];
-  subtitles: [language: string, path: string | null, size: number | null][];
+  /** An embedded track carries a fourth element, its codec; rows indexed
+   * before the codec was stored, and every external file, have three. */
+  subtitles: [
+    language: string,
+    path: string | null,
+    size: number | null,
+    codec?: string | null,
+  ][];
   missing_subtitles: string[];
   sync_status?: Record<string, SubtitleSyncStatus>;
 }
