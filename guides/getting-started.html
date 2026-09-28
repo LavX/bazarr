@@ -118,7 +118,7 @@
       <p>That is the whole requirement, because there are two ways to run Bazarr+. You can connect Sonarr, Radarr or Sportarr and have it fetch subtitles for the library you already have, or you can run it with no library at all and search any film or show by name. Both start from the same install below. If you do run a media stack, keep its host, port and API key to hand for the connection step.</p>
 
       <h2 id="one-liner-install">One-liner install</h2>
-      <p>The fastest way to get running. This script creates a <code>bazarr</code> directory, writes a <code>docker-compose.yml</code>, and starts the containers.</p>
+      <p>The fastest way to get running. This script creates a directory (default: <code>./bazarr-plus</code>), writes a <code>docker-compose.yml</code>, and starts the containers.</p>
 
       <div class="code">
         <div class="code-head">
@@ -128,10 +128,10 @@
         <pre><code>curl -fsSL https://lavx.github.io/bazarr/install.sh | bash</code></pre>
       </div>
 
-      <p>The script is interactive. It will ask for your media paths, timezone, and whether you want to enable the AI translation service. You can review the script source <a href="https://github.com/LavX/bazarr/blob/gh-pages/install.sh" target="_blank" rel="noopener">on GitHub</a> before running it.</p>
+      <p>The script asks for optional movie, TV and sports folders, and whether to add FlareSolverr or the AI translator. It detects your timezone and user/group IDs automatically. Leave all media paths empty and skip library connections for standalone Discover. Connect Sonarr, Radarr or Sportarr later under <strong>Settings &gt; Connections</strong>. You can <a href="https://github.com/LavX/bazarr/blob/gh-pages/install.sh" target="_blank" rel="noopener">review the script</a> before running it.</p>
 
       <h2 id="docker-compose-setup">Docker Compose setup</h2>
-      <p>If you prefer to set things up manually, create a <code>docker-compose.yml</code> with the following content. Adjust the volume paths to match your media library locations.</p>
+      <p>For a minimal standalone install, use the <a href="../#start">homepage Compose example</a>. The example below includes FlareSolverr and the AI translator; remove either service if you do not need it. Uncomment only the movie, TV or sports mounts you use and replace their host paths. Standalone Discover needs only <code>/config</code>.</p>
 
       <div class="code">
         <div class="code-head">
@@ -151,8 +151,10 @@
       - TZ=UTC
     volumes:
       - ./config:/config
-      - /path/to/movies:/movies
-      - /path/to/tv:/tv
+      # Optional: uncomment only the media folders you use.
+      # - /path/to/movies:/movies
+      # - /path/to/tv:/tv
+      # - /path/to/sports:/sports
     read_only: true
     tmpfs:
       - /tmp:size=512m
@@ -235,8 +237,6 @@
   -p 6767:6767 \
   -e PUID=1000 -e PGID=1000 -e TZ=UTC \
   -v ./config:/config \
-  -v /path/to/movies:/movies \
-  -v /path/to/tv:/tv \
   ghcr.io/lavx/bazarr:latest</code></pre>
       </div>
 
