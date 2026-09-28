@@ -112,19 +112,34 @@ function scoreInfoFromHistory(
   };
 }
 
-interface SubtitlesContextValue {
+// What the cells read from the table. The cells and the columns live at module
+// scope and take these from here: a cell component declared inside the
+// table's render is a new component type on every render, so each refetch
+// remounted every cell and closed any badge menu an episode had open, even on
+// an episode whose own subtitles had not changed.
+interface EpisodesTableValue {
+  disabled?: boolean;
   onlyDesired: boolean;
   profileItems: ReturnType<typeof useProfileItemsToLanguages>;
   historyMap: Map<string, History.Episode>;
   embeddedScoreMap: Map<string, History.Episode>;
+  download: (item: Item.Episode, result: SearchResultType) => Promise<void>;
 }
 
-const SubtitlesContext = createContext<SubtitlesContextValue | null>(null);
+const EpisodesTableContext = createContext<EpisodesTableValue | null>(null);
+
+function useEpisodesTable(): EpisodesTableValue {
+  const value = useContext(EpisodesTableContext);
+  if (value === null) {
+    throw new Error("Episode cells render only inside the episodes table");
+  }
+  return value;
+}
 
 const SubtitlesCell = React.memo(({ row }: { row: Row<Item.Episode> }) => {
   const episode = row.original;
   const { onlyDesired, profileItems, historyMap, embeddedScoreMap } =
-    useContext(SubtitlesContext)!;
+    useEpisodesTable();
   const seriesId = episode.sonarrSeriesId;
 
   const elements = useMemo(() => {
@@ -226,6 +241,153 @@ const SubtitlesCell = React.memo(({ row }: { row: Row<Item.Episode> }) => {
   );
 });
 
+const ActionsCell = ({ episode }: { episode: Item.Episode }) => {
+  const { disabled, download } = useEpisodesTable();
+  const modals = useModals();
+
+  const episodeAvailableLangs = Array.from(
+    new Set(
+      (episode.subtitles ?? [])
+        .filter(
+          (s) =>
+            s.path && !isSyncOutputSubtitle(s) && !isCombinedOutputSubtitle(s),
+        )
+        .map((s) => s.code2),
+    ),
+  );
+  return (
+    <Group gap="xs" wrap="nowrap">
+      <Action
+        label="Manual Search"
+        disabled={disabled}
+        className={tableStyles.actionIcon}
+        onClick={() => {
+          modals.openContextModal(EpisodeSearchModal, {
+            item: episode,
+            download,
+            query: useEpisodesProvider,
+          });
+        }}
+        icon={faMagnifyingGlass}
+      ></Action>
+      <Action
+        label="Combine Subtitles"
+        disabled={disabled || episodeAvailableLangs.length < 2}
+        className={tableStyles.actionIcon}
+        onClick={() => {
+          modals.openContextModal(CombineModal, {
+            scope: {
+              kind: "episode",
+              episodeId: episode.sonarrEpisodeId,
+              arrInstanceId: episode.arr_instance_id ?? undefined,
+            },
+            availableLanguages: episodeAvailableLangs,
+          });
+        }}
+        icon={faLayerGroup}
+      ></Action>
+      <Action
+        label="History"
+        disabled={disabled}
+        className={tableStyles.actionIcon}
+        onClick={() => {
+          modals.openContextModal(
+            EpisodeHistoryModal,
+            {
+              episode,
+            },
+            {
+              title: `History - ${episode.title}`,
+            },
+          );
+        }}
+        icon={faHistory}
+      ></Action>
+    </Group>
+  );
+};
+
+const columns: ColumnDef<Item.Episode>[] = [
+  {
+    id: "monitored",
+    cell: ({
+      row: {
+        original: { monitored },
+      },
+    }) => {
+      return (
+        <Tooltip
+          label={monitored ? "Monitored in Sonarr" : "Unmonitored in Sonarr"}
+        >
+          <FontAwesomeIcon icon={monitored ? faBookmark : farBookmark} />
+        </Tooltip>
+      );
+    },
+  },
+  {
+    header: "",
+    accessorKey: "season",
+    cell: ({
+      row: {
+        original: { season },
+      },
+    }) => {
+      return <Text span>Season {season}</Text>;
+    },
+  },
+  {
+    header: "Episode",
+    accessorKey: "episode",
+    cell: ({
+      row: {
+        original: { episode },
+      },
+    }) => {
+      return <span className={tableStyles.episodeNumber}>{episode}</span>;
+    },
+  },
+  {
+    header: "Title",
+    accessorKey: "title",
+    cell: ({
+      row: {
+        original: { sceneName, title },
+      },
+    }) => {
+      return (
+        <TextPopover text={sceneName}>
+          <Text className={`table-primary ${tableStyles.episodeTitle}`}>
+            {title}
+          </Text>
+        </TextPopover>
+      );
+    },
+  },
+  {
+    header: "Audio",
+    accessorKey: "audio_language",
+    cell: ({
+      row: {
+        original: { audio_language: audioLanguage },
+      },
+    }) => <AudioList audios={audioLanguage}></AudioList>,
+  },
+  {
+    header: "Subtitles",
+    accessorKey: "missing_subtitles",
+    cell: SubtitlesCell,
+  },
+  {
+    header: "Actions",
+    cell: ({ row: { original } }) => <ActionsCell episode={original} />,
+  },
+];
+
+// The local episode id, so a row keeps its id, and its mounted cells, when an
+// episode sorted before it is added or removed. The default is the position
+// in the list.
+const getEpisodeRowId = (episode: Item.Episode) => String(episode.id);
+
 const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
   ({ episodes, history, profile, disabled, onAllRowsExpandedChanged }, ref) => {
     const onlyDesired = useShowOnlyDesired();
@@ -282,8 +444,6 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
 
     const { mutateAsync } = useDownloadEpisodeSubtitles();
 
-    const modals = useModals();
-
     const download = useCallback(
       async (item: Item.Episode, result: SearchResultType) => {
         const {
@@ -316,151 +476,6 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
       [mutateAsync],
     );
 
-    const columns = useMemo<ColumnDef<Item.Episode>[]>(
-      () => [
-        {
-          id: "monitored",
-          cell: ({
-            row: {
-              original: { monitored },
-            },
-          }) => {
-            return (
-              <Tooltip
-                label={
-                  monitored ? "Monitored in Sonarr" : "Unmonitored in Sonarr"
-                }
-              >
-                <FontAwesomeIcon icon={monitored ? faBookmark : farBookmark} />
-              </Tooltip>
-            );
-          },
-        },
-        {
-          header: "",
-          accessorKey: "season",
-          cell: ({
-            row: {
-              original: { season },
-            },
-          }) => {
-            return <Text span>Season {season}</Text>;
-          },
-        },
-        {
-          header: "Episode",
-          accessorKey: "episode",
-          cell: ({
-            row: {
-              original: { episode },
-            },
-          }) => {
-            return <span className={tableStyles.episodeNumber}>{episode}</span>;
-          },
-        },
-        {
-          header: "Title",
-          accessorKey: "title",
-          cell: ({
-            row: {
-              original: { sceneName, title },
-            },
-          }) => {
-            return (
-              <TextPopover text={sceneName}>
-                <Text className={`table-primary ${tableStyles.episodeTitle}`}>
-                  {title}
-                </Text>
-              </TextPopover>
-            );
-          },
-        },
-        {
-          header: "Audio",
-          accessorKey: "audio_language",
-          cell: ({
-            row: {
-              original: { audio_language: audioLanguage },
-            },
-          }) => <AudioList audios={audioLanguage}></AudioList>,
-        },
-        {
-          header: "Subtitles",
-          accessorKey: "missing_subtitles",
-          cell: SubtitlesCell,
-        },
-        {
-          header: "Actions",
-          cell: ({ row }) => {
-            const episodeAvailableLangs = Array.from(
-              new Set(
-                (row.original.subtitles ?? [])
-                  .filter(
-                    (s) =>
-                      s.path &&
-                      !isSyncOutputSubtitle(s) &&
-                      !isCombinedOutputSubtitle(s),
-                  )
-                  .map((s) => s.code2),
-              ),
-            );
-            return (
-              <Group gap="xs" wrap="nowrap">
-                <Action
-                  label="Manual Search"
-                  disabled={disabled}
-                  className={tableStyles.actionIcon}
-                  onClick={() => {
-                    modals.openContextModal(EpisodeSearchModal, {
-                      item: row.original,
-                      download,
-                      query: useEpisodesProvider,
-                    });
-                  }}
-                  icon={faMagnifyingGlass}
-                ></Action>
-                <Action
-                  label="Combine Subtitles"
-                  disabled={disabled || episodeAvailableLangs.length < 2}
-                  className={tableStyles.actionIcon}
-                  onClick={() => {
-                    modals.openContextModal(CombineModal, {
-                      scope: {
-                        kind: "episode",
-                        episodeId: row.original.sonarrEpisodeId,
-                        arrInstanceId:
-                          row.original.arr_instance_id ?? undefined,
-                      },
-                      availableLanguages: episodeAvailableLangs,
-                    });
-                  }}
-                  icon={faLayerGroup}
-                ></Action>
-                <Action
-                  label="History"
-                  disabled={disabled}
-                  className={tableStyles.actionIcon}
-                  onClick={() => {
-                    modals.openContextModal(
-                      EpisodeHistoryModal,
-                      {
-                        episode: row.original,
-                      },
-                      {
-                        title: `History - ${row.original.title}`,
-                      },
-                    );
-                  }}
-                  icon={faHistory}
-                ></Action>
-              </Group>
-            );
-          },
-        },
-      ],
-      [disabled, download, modals],
-    );
-
     const maxSeason = useMemo(
       () =>
         episodes?.reduce<number>(
@@ -474,17 +489,31 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
       tableRef?.current?.setExpanded(() => ({ [`season:${maxSeason}`]: true }));
     }, [tableRef, maxSeason]);
 
-    const subtitlesContext = useMemo(
-      () => ({ onlyDesired, profileItems, historyMap, embeddedScoreMap }),
-      [onlyDesired, profileItems, historyMap, embeddedScoreMap],
+    const tableValue = useMemo<EpisodesTableValue>(
+      () => ({
+        disabled,
+        onlyDesired,
+        profileItems,
+        historyMap,
+        embeddedScoreMap,
+        download,
+      }),
+      [
+        disabled,
+        onlyDesired,
+        profileItems,
+        historyMap,
+        embeddedScoreMap,
+        download,
+      ],
     );
 
     return (
-      <SubtitlesContext.Provider value={subtitlesContext}>
+      <EpisodesTableContext.Provider value={tableValue}>
         <GroupTable
           columns={columns}
           data={episodes ?? []}
-          getRowId={(episode) => String(episode.id)}
+          getRowId={getEpisodeRowId}
           instanceRef={tableRef}
           onAllRowsExpandedChanged={onAllRowsExpandedChanged}
           initialState={{
@@ -496,7 +525,7 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
           }}
           tableStyles={{ emptyText: "No Episode Found For This Series" }}
         ></GroupTable>
-      </SubtitlesContext.Provider>
+      </EpisodesTableContext.Provider>
     );
   },
 );
