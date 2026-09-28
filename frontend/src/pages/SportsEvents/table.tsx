@@ -23,6 +23,7 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { ColumnDef, Table as TableInstance } from "@tanstack/react-table";
 import {
   useEmbeddedTrackVisibility,
+  useLanguages,
   useSubtitleFileDownload,
 } from "@/apis/hooks";
 import { useCombineSubtitles } from "@/apis/hooks/combine";
@@ -167,6 +168,18 @@ const EventSubtitleBadge: FunctionComponent<{
   const fileDownload = useSubtitleFileDownload();
   const { remove } = useSportsSubtitleModification();
   const { hide } = useEmbeddedTrackVisibility();
+  const { data: languages } = useLanguages();
+
+  // A sports tuple carries only the language code. The hidden-tracks list
+  // and the toast after a hide name the language as the server does,
+  // "French", so the Hide confirmation names it the same way.
+  const hideLabel = (track: Subtitle) =>
+    embeddedTrackLabel({
+      ...track,
+      name:
+        languages?.find((language) => language.code2 === track.code2)?.name ||
+        track.code2,
+    });
 
   const isEmbedded = !subtitle.path;
   const isCombinedOutput = !missing && isCombinedOutputSubtitle(subtitle);
@@ -252,11 +265,11 @@ const EventSubtitleBadge: FunctionComponent<{
         mediaType="sports"
         arrInstanceId={event.arr_instance_id}
         embeddedTrack={isEmbedded}
-        trackLabel={embeddedTrackLabel(subtitle)}
+        trackLabel={hideLabel(subtitle)}
         coveredTracks={
           isEmbedded
             ? embeddedTracksSharingKey(subtitle, availableSubtitles).map(
-                (track) => embeddedTrackLabel(track),
+                hideLabel,
               )
             : undefined
         }

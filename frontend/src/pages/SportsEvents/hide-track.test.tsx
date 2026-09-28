@@ -62,12 +62,24 @@ async function hideThroughMenu(
     await screen.findByRole("dialog", { name: "Hide this embedded track?" }),
   );
   expect(dialog.getByText(`${label} (embedded track)`)).toBeInTheDocument();
+  expect(
+    dialog.getByText(new RegExp(`will treat ${label} as wanted again`)),
+  ).toBeInTheDocument();
   await user.click(dialog.getByRole("button", { name: "Hide track" }));
 }
 
 describe("Hide track on a sports event", () => {
   it("hides a sports track by the event's local id and owner", async () => {
     const posted = capturePosts();
+    // A sports tuple carries only the code. The confirm must name the
+    // language as the hidden-tracks list and the toast do.
+    server.use(
+      http.get("/api/system/languages", () =>
+        HttpResponse.json([
+          { code2: "fr", code3: "fra", name: "French", enabled: true },
+        ]),
+      ),
+    );
     const event: SportsEvent = {
       id: 61,
       arr_instance_id: 3,
@@ -101,7 +113,7 @@ describe("Hide track on a sports event", () => {
       />,
     );
 
-    await hideThroughMenu(() => screen.findByTitle("Embedded"), "fr");
+    await hideThroughMenu(() => screen.findByTitle("Embedded"), "French");
     await waitFor(() =>
       expect(posted).toEqual([
         {

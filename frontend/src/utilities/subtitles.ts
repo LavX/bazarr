@@ -39,8 +39,8 @@ export function buildSubtitleLanguageKey(subtitle: Subtitle): string {
 
 /**
  * How the Hide track confirmation and the hidden-tracks list name a track:
- * the language, then its variant, "English (HI)". Sports rows carry the code
- * as their name, which reads the same way.
+ * the language, then its variant, "English (HI)". A sports row carries only
+ * the code, so the sports page looks the name up before it calls this.
  */
 export function embeddedTrackLabel(
   subtitle: Pick<Subtitle, "code2" | "name" | "hi" | "forced">,
