@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Alert, Button, Paper, Stack, Text, Title } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { useQueryClient } from "@tanstack/react-query";
+import { mediaServerLinksKey } from "@/apis/hooks/mediaServerLinks";
 import {
   usePlexAuthValidationQuery,
   usePlexLogoutMutation,
@@ -52,6 +53,9 @@ const AuthSection = () => {
       void queryClient.invalidateQueries({
         queryKey: [QueryKeys.Plex, "selectedServer"],
       });
+      // Signing in switches the account's destination back on, so a Play on
+      // menu can offer it again.
+      void queryClient.invalidateQueries({ queryKey: mediaServerLinksKey });
     }
   }, [pinData?.authenticated, isPolling, refetchAuth, queryClient]);
 

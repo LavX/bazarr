@@ -2,6 +2,8 @@
 
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mediaServerLinksKey } from "@/apis/hooks/mediaServerLinks";
+import queryClient from "@/apis/queries";
 import { customRender, screen, waitFor, within } from "@/tests";
 import AuthSection from "./AuthSection";
 
@@ -12,6 +14,7 @@ const createPin = vi.fn();
 const notify = vi.fn();
 const logout = vi.fn();
 let auth: Record<string, unknown> = { valid: false, auth_method: null };
+let pinCheck: { authenticated: boolean } | undefined;
 
 // Only `notifications.show` is replaced. The module also exports the
 // <Notifications /> component that the shared test providers render, so a bare
@@ -30,7 +33,7 @@ vi.mock("@/apis/hooks/plex", () => ({
   }),
   usePlexPinMutation: () => ({ mutateAsync: createPin }),
   usePlexLogoutMutation: () => ({ mutate: logout, isPending: false }),
-  usePlexPinCheckQuery: () => ({ data: undefined }),
+  usePlexPinCheckQuery: () => ({ data: pinCheck }),
 }));
 
 const startAuth = async () => {
@@ -45,7 +48,25 @@ describe("Plex AuthSection", () => {
     notify.mockReset();
     logout.mockReset();
     auth = { valid: false, auth_method: null };
+    pinCheck = undefined;
     vi.spyOn(window, "open").mockReturnValue({} as Window);
+  });
+
+  it("has Play on menus ask again once a sign-in completes", async () => {
+    // A completed sign-in switches the account's Plex destination back on.
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const close = vi.fn();
+    vi.spyOn(window, "open").mockReturnValue({ close } as unknown as Window);
+    createPin.mockResolvedValue({
+      data: { pinId: 1, code: "ABCD", authUrl: "https://plex.tv/link" },
+    });
+    pinCheck = { authenticated: true };
+
+    await startAuth();
+
+    await waitFor(() => expect(close).toHaveBeenCalled());
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: mediaServerLinksKey });
+    invalidate.mockRestore();
   });
 
   it("explains a Plex request that never answered instead of throwing", async () => {

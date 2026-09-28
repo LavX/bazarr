@@ -6,7 +6,8 @@ import type {
   MediaServerLinkTarget,
 } from "@/apis/raw/mediaServerLinks";
 
-// Under the media server keys, so a saved destination refreshes these too.
+// Asked again by whatever changes a destination: an instance saved or
+// deleted, a Plex sign-in, sign-out or server choice, and a settings save.
 export const mediaServerLinksKey = ["media-servers", "links"];
 // The server keeps a found or missing item for fifteen minutes; so does the
 // page. It never keeps a server that did not answer, and neither does this:
