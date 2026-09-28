@@ -13,6 +13,7 @@ import {
 import { faMinus, faPlus } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
+  useEmbeddedTrackVisibility,
   useEpisodeSubtitleModification,
   useSubtitleFileDownload,
 } from "@/apis/hooks";
@@ -27,6 +28,8 @@ import {
   canSynchronizeSubtitle,
   combineRequestForSubtitle,
   describeEmbeddedTrack,
+  embeddedTrackLabel,
+  embeddedTracksSharingKey,
   getSyncEngineLabel,
   isCombinedOutputSubtitle,
   isCompatibleSyncOutputSubtitle,
@@ -47,6 +50,9 @@ export interface SubtitleScoreInfo {
 interface Props {
   seriesId: number;
   episodeId: number;
+  // The episode's LOCAL id, which is what a hidden embedded track is
+  // recorded against. episodeId above is the upstream sonarrEpisodeId.
+  localEpisodeId: number;
   // Owning Sonarr instance for this episode (#156); scopes subtitle
   // download/delete to the correct instance on multi-instance setups.
   arrInstanceId?: number;
@@ -150,6 +156,7 @@ function subtitleEditorUrl(
 export const Subtitle: FunctionComponent<Props> = ({
   seriesId,
   episodeId,
+  localEpisodeId,
   arrInstanceId,
   missing = false,
   subtitle,
@@ -158,6 +165,7 @@ export const Subtitle: FunctionComponent<Props> = ({
 }) => {
   const navigate = useNavigate();
   const { remove, download } = useEpisodeSubtitleModification();
+  const { hide } = useEmbeddedTrackVisibility();
   const combine = useCombineSubtitles();
   const fileDownload = useSubtitleFileDownload();
 
@@ -386,6 +394,14 @@ export const Subtitle: FunctionComponent<Props> = ({
         }}
         selections={selections}
         embeddedTrack={isEmbedded}
+        trackLabel={embeddedTrackLabel(subtitle)}
+        coveredTracks={
+          isEmbedded
+            ? embeddedTracksSharingKey(subtitle, availableSubtitles ?? []).map(
+                (track) => embeddedTrackLabel(track),
+              )
+            : undefined
+        }
         canSync={canSynchronizeSubtitle(subtitle)}
         missingLanguage={missing ? subtitle : undefined}
         translationSources={missing ? translationSources : undefined}
@@ -445,6 +461,19 @@ export const Subtitle: FunctionComponent<Props> = ({
                 forced: subtitle.forced,
                 path: subtitle.path,
               },
+            });
+          } else if (action === "hide" && isEmbedded) {
+            // mutate, not mutateAsync: the hook reports a refusal, and the
+            // menu does not await this callback.
+            hide.mutate({
+              /* eslint-disable camelcase */
+              media_type: "episode",
+              media_id: localEpisodeId,
+              arr_instance_id: arrInstanceId,
+              /* eslint-enable camelcase */
+              language: subtitle.code2,
+              hi: toPython(subtitle.hi),
+              forced: toPython(subtitle.forced),
             });
           }
         }}

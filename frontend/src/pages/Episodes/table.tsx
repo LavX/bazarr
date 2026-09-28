@@ -21,6 +21,7 @@ import { useShowOnlyDesired } from "@/apis/hooks/site";
 import { Action, GroupTable } from "@/components";
 import { AudioList } from "@/components/bazarr";
 import { CombineModal } from "@/components/forms/CombineForm";
+import HiddenTracks from "@/components/HiddenTracks";
 import { EpisodeHistoryModal } from "@/components/modals";
 import { EpisodeSearchModal } from "@/components/modals/ManualSearchModal";
 import TextPopover from "@/components/TextPopover";
@@ -119,6 +120,9 @@ function scoreInfoFromHistory(
 // an episode whose own subtitles had not changed.
 interface EpisodesTableValue {
   disabled?: boolean;
+  // Every episode's disclosure asks with this same list, so the page makes
+  // one request for all of them.
+  episodeIds: number[];
   onlyDesired: boolean;
   profileItems: ReturnType<typeof useProfileItemsToLanguages>;
   historyMap: Map<string, History.Episode>;
@@ -138,8 +142,14 @@ function useEpisodesTable(): EpisodesTableValue {
 
 const SubtitlesCell = React.memo(({ row }: { row: Row<Item.Episode> }) => {
   const episode = row.original;
-  const { onlyDesired, profileItems, historyMap, embeddedScoreMap } =
-    useEpisodesTable();
+  const {
+    disabled,
+    episodeIds,
+    onlyDesired,
+    profileItems,
+    historyMap,
+    embeddedScoreMap,
+  } = useEpisodesTable();
   const seriesId = episode.sonarrSeriesId;
 
   const elements = useMemo(() => {
@@ -183,6 +193,7 @@ const SubtitlesCell = React.memo(({ row }: { row: Row<Item.Episode> }) => {
         key={subtitleKey(val, "missing")}
         seriesId={seriesId}
         episodeId={episodeId}
+        localEpisodeId={episode.id}
         arrInstanceId={episode.arr_instance_id}
         subtitle={val}
         availableSubtitles={episode.subtitles}
@@ -205,6 +216,7 @@ const SubtitlesCell = React.memo(({ row }: { row: Row<Item.Episode> }) => {
         key={subtitleKey(val, kind)}
         seriesId={seriesId}
         episodeId={episodeId}
+        localEpisodeId={episode.id}
         arrInstanceId={episode.arr_instance_id}
         subtitle={val}
         availableSubtitles={episode.subtitles}
@@ -237,6 +249,12 @@ const SubtitlesCell = React.memo(({ row }: { row: Row<Item.Episode> }) => {
           {elements.slice(MAX_CELL_SUBTITLES)}
         </SubtitlesOverflow>
       )}
+      <HiddenTracks
+        mediaType="episode"
+        mediaId={episode.id}
+        batchIds={episodeIds}
+        disabled={disabled}
+      />
     </Group>
   );
 });
@@ -444,6 +462,11 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
 
     const { mutateAsync } = useDownloadEpisodeSubtitles();
 
+    const episodeIds = useMemo(
+      () => (episodes ?? []).map((episode) => episode.id),
+      [episodes],
+    );
+
     const download = useCallback(
       async (item: Item.Episode, result: SearchResultType) => {
         const {
@@ -492,6 +515,7 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
     const tableValue = useMemo<EpisodesTableValue>(
       () => ({
         disabled,
+        episodeIds,
         onlyDesired,
         profileItems,
         historyMap,
@@ -500,6 +524,7 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
       }),
       [
         disabled,
+        episodeIds,
         onlyDesired,
         profileItems,
         historyMap,
