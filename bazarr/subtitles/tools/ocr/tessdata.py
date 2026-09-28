@@ -22,10 +22,11 @@ logger = logging.getLogger(__name__)
 DOWNLOAD_TIMEOUT = (10, 60)
 _CHUNK = 1 << 16
 
-# Bazarr's own three-letter codes (languages/custom_lang.py) and the one ISO
-# code whose Tesseract pack has another name.
+# Bazarr's own three-letter codes (languages/custom_lang.py) and the ISO codes
+# whose Tesseract pack has another name. Norwegian Bokmal and Nynorsk share
+# tessdata's one Norwegian pack.
 _OFFICIAL_ALPHA3 = {"pob": "por", "spl": "spa", "zht": "zho"}
-_PACK_NAMES = {"zho": "chi_sim", "zht": "chi_tra"}
+_PACK_NAMES = {"zho": "chi_sim", "zht": "chi_tra", "nob": "nor", "nno": "nor"}
 
 
 def tessdata_dir():

@@ -61,6 +61,12 @@ def test_language_codes_map_to_tessdata_pack_names(fake_table, code, pack):
     assert tessdata.pack_name(code) == pack
 
 
+@pytest.mark.parametrize("code", ["nob", "nno", "nor"])
+def test_bokmal_and_nynorsk_tracks_read_with_the_norwegian_pack(code):
+    # Bazarr offers both written standards; tessdata_fast has one Norwegian pack.
+    assert tessdata.pack_name(code) == "nor"
+
+
 @pytest.mark.parametrize("code", ["xxx", "", None, "und", "tlh"])
 def test_unknown_language_fails_before_any_download(fake_table, no_network, tmp_path, code):
     with pytest.raises(LanguagePackError, match="No OCR language pack"):
