@@ -745,13 +745,33 @@ const Table: FunctionComponent<Props> = ({
     return [...subtitles, ...missing];
   }, [movie, onlyDesired, profileItems]);
 
+  // One file can carry two tracks with the same key, an SRT and a PGS English
+  // track on a remux. Numbering only the tracks that share a key keeps them
+  // apart, while a row added or removed elsewhere leaves a track's id, and so
+  // its mounted row, unchanged.
+  const embeddedRowIds = useMemo(() => {
+    const seen = new Map<string, number>();
+    const ids = new Map<Subtitle, string>();
+    for (const sub of data) {
+      if (!isSubtitleTrack(sub.path)) continue;
+      const key = buildLanguageKey(sub);
+      const count = seen.get(key) ?? 0;
+      seen.set(key, count + 1);
+      ids.set(
+        sub,
+        count === 0 ? `embedded-${key}` : `embedded-${key}-${count}`,
+      );
+    }
+    return ids;
+  }, [data]);
+
   return (
     <>
       <SimpleTable
         className={styles.table}
         columns={columns}
         data={data}
-        getRowId={(sub, index) => {
+        getRowId={(sub) => {
           // Missing rows all share the sentinel path "Missing Subtitles" and
           // embedded tracks have an empty path, so both must be keyed by their
           // language (code2[:hi][:forced]) to stay unique. Only real on-disk
@@ -760,9 +780,7 @@ const Table: FunctionComponent<Props> = ({
             return `missing-${buildLanguageKey(sub)}`;
           }
           if (isSubtitleTrack(sub.path)) {
-            // One file can carry two tracks with the same key, an SRT and a
-            // PGS English track on a remux, so the position keeps them apart.
-            return `embedded-${index}-${buildLanguageKey(sub)}`;
+            return embeddedRowIds.get(sub)!;
           }
           return sub.path!;
         }}

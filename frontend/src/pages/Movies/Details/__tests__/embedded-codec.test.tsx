@@ -1,8 +1,11 @@
 /* eslint-disable camelcase */
+import { useEffect, useState } from "react";
+import { createMemoryRouter, RouterProvider } from "react-router";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
 import Table from "@/pages/Movies/Details/table";
-import { customRender, screen } from "@/tests";
+import { AllProviders } from "@/providers";
+import { act, customRender, rawRender, screen } from "@/tests";
 import server from "@/tests/mocks/node";
 
 function makeMovie(subtitles: Subtitle[]): Item.Movie {
@@ -114,5 +117,44 @@ describe("Movies Detail Table, embedded track codec", () => {
       ),
     ).toEqual([]);
     consoleError.mockRestore();
+  });
+
+  it("keeps a track's row mounted when a row is added before it", async () => {
+    server.use(
+      http.get("/api/subtitles/sync-status", () =>
+        HttpResponse.json({ data: null }),
+      ),
+      http.get("/api/system/languages", () => HttpResponse.json([])),
+    );
+    const track = embedded("en", "pgs");
+    const danish: Subtitle = {
+      code2: "da",
+      name: "Danish",
+      hi: false,
+      forced: false,
+      path: "/movies/test.da.srt",
+    };
+    let setSubtitles!: (subtitles: Subtitle[]) => void;
+    function Harness() {
+      const [subtitles, set] = useState<Subtitle[]>([track]);
+      useEffect(() => {
+        setSubtitles = set;
+      }, [set]);
+      return (
+        <Table movie={makeMovie(subtitles)} profile={undefined} history={[]} />
+      );
+    }
+    const router = createMemoryRouter([{ path: "/", element: <Harness /> }]);
+
+    rawRender(
+      <AllProviders>
+        <RouterProvider router={router} />
+      </AllProviders>,
+    );
+
+    const before = (await screen.findByText("PGS")).closest("tr");
+    await act(async () => setSubtitles([danish, track]));
+    await screen.findByText("test.da.srt");
+    expect(screen.getByText("PGS").closest("tr")).toBe(before);
   });
 });
