@@ -650,6 +650,38 @@ class TableReleaseTypeMismatch(Base):
     detected_at = mapped_column(DateTime, nullable=False, default=datetime.now)
 
 
+class TableEmbeddedTrackHidden(Base):
+    """An embedded subtitle track the user hid on one media row.
+
+    The indexers skip a hidden track, so it is neither listed nor counted as
+    satisfying its language, and that language becomes wanted again. The media
+    file itself is never touched.
+
+    ``media_id`` is the LOCAL id of a movie, episode or sports event row, and
+    ``arr_instance_id`` its owner, stored as 0 when the row has none so the
+    unique index covers every row (NULL never equals NULL). ``language`` is
+    the key the indexer stores for the track (``en``, ``en:hi``,
+    ``en:forced``, ``en:hi:forced``). ``codec`` records what the track was
+    when it was hidden, for display only.
+    """
+
+    __tablename__ = 'table_embedded_track_hidden'
+    __table_args__ = (
+        Index('ux_embedded_track_hidden_item',
+              'media_type', 'media_id', 'arr_instance_id', 'language', unique=True),
+        CheckConstraint("media_type IN ('movie', 'episode', 'sports')",
+                        name='ck_embedded_track_hidden_media_type'),
+    )
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True)
+    media_type = mapped_column(Text, nullable=False)
+    media_id = mapped_column(Integer, nullable=False)
+    arr_instance_id = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    language = mapped_column(Text, nullable=False)
+    codec = mapped_column(Text)
+    hidden_at = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
 class TableSettingsLanguages(Base):
     __tablename__ = 'table_settings_languages'
 
