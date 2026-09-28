@@ -205,6 +205,47 @@ jobs:
         id: stamp
         run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
+      # tesserocr is a native wheel. Build each platform once, load it and read
+      # a line of text inside it before anything is pushed, so a missing or
+      # broken wheel stops the release here. The push below reuses the layers.
+      - name: Build the OCR smoke image (linux/amd64)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: bazarr-ocr-smoke:amd64
+          cache-from: |
+            type=gha,scope=bazarr-deps
+            type=gha,scope=bazarr-main
+          build-args: |
+            BAZARR_VERSION=${{ steps.version.outputs.fork_version }}
+            BUILD_DATE=${{ steps.stamp.outputs.date }}
+            VCS_REF=${{ github.sha }}
+
+      - name: OCR smoke test (linux/amd64)
+        run: docker run --rm -i --platform linux/amd64 --entrypoint python bazarr-ocr-smoke:amd64 - < .github/scripts/ocr_image_smoke.py
+
+      - name: Build the OCR smoke image (linux/arm64)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/arm64
+          load: true
+          tags: bazarr-ocr-smoke:arm64
+          cache-from: |
+            type=gha,scope=bazarr-deps
+            type=gha,scope=bazarr-main
+          build-args: |
+            BAZARR_VERSION=${{ steps.version.outputs.fork_version }}
+            BUILD_DATE=${{ steps.stamp.outputs.date }}
+            VCS_REF=${{ github.sha }}
+
+      - name: OCR smoke test (linux/arm64)
+        run: docker run --rm -i --platform linux/arm64 --entrypoint python bazarr-ocr-smoke:arm64 - < .github/scripts/ocr_image_smoke.py
+
       - name: Build and Push Docker Image
         id: push
         uses: docker/build-push-action@v7
