@@ -55,6 +55,25 @@ def _sections(server, names):
         yield name, section
 
 
+def _item_for(section, guid, media_type, metadata):
+    """The item one guid names in one section, down to the episode, or nothing.
+
+    The refresh and the link lookup both come through here, so a guid finds
+    the same item for either. ``getGuid`` has the Plex agent match an
+    external id, which can leave the LAN. Only a lookup miss is nothing;
+    anything else is the server refusing, in the shared vocabulary.
+    """
+    try:
+        item = section.getGuid(guid)
+        if media_type == 'episode':
+            item = item.episode(season=metadata.season, episode=metadata.episode)
+    except NotFound:
+        return None
+    except Exception as error:
+        raise _refusal(error) from None
+    return item
+
+
 class PlexRefreshClient:
     REFRESH_STEPS = (resolution.PROVIDER_ID, resolution.LIBRARY)
 
@@ -104,15 +123,10 @@ class PlexRefreshClient:
         for name, section in _sections(self.server, libraries):
             if ensure_current:
                 ensure_current()
-            try:
-                item = section.getGuid(f'imdb://{metadata.imdb_id}')
-                if media_type != 'movie':
-                    item = item.episode(season=metadata.season, episode=metadata.episode)
-            except NotFound:
+            item = _item_for(section, f'imdb://{metadata.imdb_id}', media_type, metadata)
+            if item is None:
                 logger.debug('Plex section %r holds no item for this publication', name)
                 continue
-            except Exception as error:
-                raise _refusal(error) from None
             try:
                 item.refresh()
             except Exception as error:
@@ -158,3 +172,26 @@ class PlexRefreshClient:
         # Nothing was asked of Plex at all, so this rung did not answer and the
         # walk reports the publication as unresolved rather than as requested.
         return {'status': 'requested'} if updated else None
+
+    def locate(self, media_type, metadata):
+        """The Plex item a library row names, with nothing refreshed.
+
+        Through the refresh's own lookup, and in its order: the IMDB guid in
+        every configured section first, so an item the refresh finds is the
+        item found here. Only then the TMDB or TVDB guid, which the refresh
+        never asks and a link still can. A miss is never turned into a scan.
+        """
+        if media_type not in ('movie', 'episode', 'series'):
+            raise MediaServerError('internal_error')
+        if not metadata.locatable(media_type):
+            return None
+        guids = [f'{provider}://{value}' for provider, value in metadata.provider_ids(media_type)]
+        if not guids:
+            return None
+        sections = list(_sections(self.server, self.snapshot.libraries(media_type)))
+        for guid in guids:
+            for _name, section in sections:
+                item = _item_for(section, guid, media_type, metadata)
+                if item is not None:
+                    return item
+        return None

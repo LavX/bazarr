@@ -72,6 +72,8 @@ class JellyfinClient:
     def __init__(self, url: str, api_key: str, verify_ssl: bool | None = None):
         self.base_url = url.rstrip('/')
         self.api_key = api_key
+        # Per client, so an interactive lookup can wait less than a refresh.
+        self.timeout = _DEFAULT_TIMEOUT
         self.session = requests.Session()
         # Default to verifying TLS. Users with self-signed certs flip the
         # opt-out validator (`jellyfin.verify_ssl=false`). Never silently
@@ -100,7 +102,7 @@ class JellyfinClient:
 
     def get(self, path: str, params: dict = None) -> requests.Response:
         response = self.session.get(self._url(path), params=params,
-                                    timeout=_DEFAULT_TIMEOUT, stream=True)
+                                    timeout=self.timeout, stream=True)
         # `stream=True` keeps the underlying connection open until the body
         # is fully consumed. If raise_for_status() (4xx/5xx) or _bounded_body
         # (>16 MiB hostile payload) raises, the connection would leak back
@@ -118,7 +120,7 @@ class JellyfinClient:
 
     def post(self, path: str, json: dict = None, params: dict = None) -> requests.Response:
         response = self.session.post(self._url(path), json=json, params=params,
-                                     timeout=_DEFAULT_TIMEOUT)
+                                     timeout=self.timeout)
         response.raise_for_status()
         return response
 
