@@ -6,8 +6,10 @@ from importlib import metadata
 import logging
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
+import tempfile
 
 from literals import ENV_RESTARTFILE, EXIT_NORMAL, EXIT_REQUIREMENTS_ERROR
 
@@ -173,6 +175,15 @@ WINDOWS_RUNTIME_REQUIREMENTS = {
     "win32con": ("pywin32", ">=312"),
 }
 
+# Native wheels one feature needs and startup does not. They are never probed,
+# so a missing one does not trigger an install, and when requirements are
+# installed they go in after the required set, each on its own, and a failure
+# is logged instead of stopping Bazarr+: a platform without the wheel runs
+# without that feature, which then reports itself unavailable.
+OPTIONAL_RUNTIME_REQUIREMENTS = {
+    "tesserocr": ("tesserocr", "==2.9.2"),  # OCR of bitmap subtitle tracks
+}
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FORBIDDEN_RUNTIME_ORIGINS = (
     REPO_ROOT / "custom_libs",
@@ -274,6 +285,44 @@ def missing_runtime_requirements():
     return sorted(missing)
 
 
+def _canonical_name(name):
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def split_requirement_lines(text):
+    """requirements.txt as (required lines, optional lines)."""
+    optional_names = {_canonical_name(distribution) for distribution, _ in OPTIONAL_RUNTIME_REQUIREMENTS.values()}
+    required, optional = [], []
+    for line in text.splitlines():
+        match = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", line)
+        if match and _canonical_name(match.group(1)) in optional_names:
+            optional.append(line)
+        else:
+            required.append(line)
+    return required, optional
+
+
+def _requirements_file(lines):
+    handle = tempfile.NamedTemporaryFile("w", suffix=".txt", prefix="bazarr-requirements-", delete=False,
+                                         encoding="utf-8")
+    with handle:
+        handle.write("\n".join(lines) + "\n")
+    return handle.name
+
+
+def _install_optional_requirements(lines, base_command):
+    for line in lines:
+        path = _requirements_file([line])
+        try:
+            subprocess.check_output(base_command + ["-r", path], stderr=subprocess.STDOUT)
+        except subprocess.CalledProcessError as error:
+            logging.warning("BAZARR could not install the optional requirement %s, so the feature that "
+                            "needs it stays unavailable on this system: %s",
+                            line.split(";", 1)[0].strip(), error.stdout)
+        finally:
+            os.remove(path)
+
+
 def install_requirements(missing_modules=None):
     if importlib.util.find_spec("pip") is None:
         logging.info("BAZARR unable to install requirements because pip is not installed.")
@@ -285,7 +334,10 @@ def install_requirements(missing_modules=None):
 
     logging.info("BAZARR installing requirements. Missing imports: %s", ", ".join(missing_modules or []))
 
-    pip_command = [
+    requirements_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "requirements.txt")
+    with open(requirements_path, encoding="utf-8") as handle:
+        required_lines, optional_lines = split_requirement_lines(handle.read())
+    base_command = [
         sys.executable,
         "-m",
         "pip",
@@ -293,11 +345,11 @@ def install_requirements(missing_modules=None):
         "--upgrade",
         "-qq",
         "--disable-pip-version-check",
-        "-r",
-        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "requirements.txt"),
     ]
     if not is_virtualenv():
-        pip_command.insert(4, "--user")
+        base_command.insert(4, "--user")
+    required_path = _requirements_file(required_lines)
+    pip_command = base_command + ["-r", required_path]
 
     # signalrcore is kept out of requirements.txt because its metadata hard-pins
     # the vulnerable msgpack==1.1.2 (GHSA-6v7p-g79w-8964), which the resolver
@@ -325,7 +377,10 @@ def install_requirements(missing_modules=None):
     except subprocess.CalledProcessError as e:
         logging.exception("BAZARR requirements.txt installation result: %s", e.stdout)
         os._exit(EXIT_REQUIREMENTS_ERROR)
+    finally:
+        os.remove(required_path)
 
+    _install_optional_requirements(optional_lines, base_command)
     logging.info("BAZARR requirements installed.")
     return True
 

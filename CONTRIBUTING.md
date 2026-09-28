@@ -156,6 +156,11 @@ cd bazarr
 
 # Backend
 pip install -r requirements.txt
+# pip stops at the tesserocr line (OCR) where that package has no wheel:
+# Alpine or another musl Linux on ARM64, or a 32-bit ARM system on a 64-bit
+# kernel. Install the rest instead, and OCR stays unavailable:
+#   grep -v '^tesserocr' requirements.txt > /tmp/requirements-no-ocr.txt
+#   pip install -r /tmp/requirements-no-ocr.txt
 # Only when testing against PostgreSQL: the driver is kept in a separate file
 pip install -r postgres-requirements.txt
 python bazarr.py --no-update --config ./config

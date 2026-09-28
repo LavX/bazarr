@@ -197,6 +197,13 @@ cd bazarr
 
 # Install Python dependencies
 pip install -r requirements.txt
+# tesserocr (OCR of image-based subtitles) has wheels only for glibc Linux on
+# x86_64 and ARM64 and musl Linux on x86_64. Where it has none, for example
+# Alpine on ARM64 or 32-bit Raspberry Pi OS on a 64-bit kernel, pip stops at
+# that line. Install everything else instead, and Bazarr+ runs with OCR
+# unavailable:
+#   grep -v '^tesserocr' requirements.txt > /tmp/requirements-no-ocr.txt
+#   pip install -r /tmp/requirements-no-ocr.txt
 # Only if you use PostgreSQL instead of the default SQLite: its driver is
 # kept in a separate file
 pip install -r postgres-requirements.txt

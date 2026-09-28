@@ -69,6 +69,19 @@ six==1.17.0
 sqlalchemy==2.1.4
 srt==3.5.3
 subliminal[rar]==2.6.0
+# OCR of bitmap subtitle tracks. Pinned below 2.10.0, which added cysignals:
+# importing it calls signal.signal(), which raises outside the main thread
+# where OCR jobs run, and takes over the process's SIGINT, SIGHUP and crash
+# signal handlers. 2.9.2 bundles the same Tesseract 5.5.1 build.
+# Wheels exist for Linux x86_64 and aarch64 (glibc 2.27+, musl on x86_64 only)
+# and macOS 15+; the sdist needs Tesseract's headers. The marker cannot test
+# the macOS version: platform_release is a kernel string on Linux, and pip
+# 24.2 to 25.3 raise InvalidVersion when a marker compares it. Nor can it see
+# musl or a 32-bit userland on a 64-bit ARM kernel, so a hand-run pip install
+# on those stops at this line (README gives the fallback).
+# bazarr/app/requirements.py installs this line after the required set and
+# carries on without OCR if it fails.
+tesserocr==2.9.2; sys_platform == "linux" and (platform_machine == "x86_64" or platform_machine == "aarch64") --only-binary=tesserocr
 textdistance==4.6.3
 tld==0.13.2
 tomlkit>=0.15.1
