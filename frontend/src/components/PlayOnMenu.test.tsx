@@ -403,10 +403,10 @@ describe("PlayOnMenu", () => {
   // A lookup the page no longer waits for lets go of its connection: a
   // server that hangs holds each one for up to two of its budgets, and a
   // browser has only a few connections to Bazarr.
-  function hangingPlex() {
+  function hangingPlex(destinations: object[] = [EMBY, PLEX]) {
     const resolve = vi.spyOn(api.mediaServerLinks, "resolve");
     let release: () => void = () => undefined;
-    serve([EMBY, PLEX], [EMBY, PLEX], {
+    serve(destinations, destinations, {
       e1: { state: "not_found", url: null },
       p1: () =>
         new Promise((done) => {
@@ -415,7 +415,9 @@ describe("PlayOnMenu", () => {
     });
     const plexSignal = () =>
       resolve.mock.calls.find(([instance]) => instance === "p1")?.[3];
-    return { resolve, plexSignal, release: () => release() };
+    const askedPlex = () =>
+      resolve.mock.calls.filter(([instance]) => instance === "p1").length;
+    return { resolve, plexSignal, askedPlex, release: () => release() };
   }
 
   it("lets go of a lookup still running when its row goes away", async () => {
@@ -449,7 +451,7 @@ describe("PlayOnMenu", () => {
   });
 
   it("lets go of a lookup still running when its menu closes, and asks again on the next open", async () => {
-    const { resolve, plexSignal, release } = hangingPlex();
+    const { resolve, plexSignal, askedPlex, release } = hangingPlex();
     const user = userEvent.setup();
     customRender(
       <PlayOnMenu
@@ -473,8 +475,6 @@ describe("PlayOnMenu", () => {
         expect(trigger).toHaveAttribute("aria-expanded", "false"),
       );
       await waitFor(() => expect(plexSignal()?.aborted).toBe(true));
-      const askedPlex = () =>
-        resolve.mock.calls.filter(([instance]) => instance === "p1").length;
       expect(askedPlex()).toBe(1);
       await user.click(trigger);
       await waitFor(() => expect(askedPlex()).toBe(2));
@@ -482,5 +482,135 @@ describe("PlayOnMenu", () => {
       release();
       resolve.mockRestore();
     }
+  });
+
+  // A pointer resting on a row on its way across a table warms it; once it
+  // moves on without opening anything, nobody is waiting for the answer.
+  it("lets go of a lookup the pointer began when it leaves without opening the menu", async () => {
+    const { resolve, plexSignal, askedPlex, release } = hangingPlex();
+    const user = userEvent.setup();
+    customRender(
+      <PlayOnMenu
+        mediaType="movie"
+        id={3}
+        itemLabel="Metropolis"
+        variant="action"
+      />,
+    );
+    try {
+      const trigger = await screen.findByRole("button", {
+        name: "Play Metropolis on a media server",
+      });
+      await user.hover(trigger);
+      await waitFor(() => expect(plexSignal()?.aborted).toBe(false));
+      await user.unhover(trigger);
+      await waitFor(() => expect(plexSignal()?.aborted).toBe(true));
+      // Resting there again asks again.
+      await user.hover(trigger);
+      await waitFor(() => expect(askedPlex()).toBe(2));
+    } finally {
+      release();
+      resolve.mockRestore();
+    }
+  });
+
+  it("lets go of the one link's lookup when the pointer leaves it", async () => {
+    const { resolve, plexSignal, release } = hangingPlex([PLEX]);
+    const user = userEvent.setup();
+    customRender(
+      <PlayOnMenu
+        mediaType="movie"
+        id={4}
+        itemLabel="Metropolis"
+        variant="toolbox"
+      />,
+    );
+    try {
+      const link = await screen.findByLabelText("Play on Plex: Metropolis");
+      await user.hover(link);
+      await waitFor(() => expect(plexSignal()?.aborted).toBe(false));
+      await user.unhover(link);
+      await waitFor(() => expect(plexSignal()?.aborted).toBe(true));
+    } finally {
+      release();
+      resolve.mockRestore();
+    }
+  });
+
+  it("keeps the lookups when the pointer leaves the trigger for its open menu", async () => {
+    const { resolve, plexSignal, release } = hangingPlex();
+    const user = userEvent.setup();
+    customRender(
+      <PlayOnMenu
+        mediaType="movie"
+        id={5}
+        itemLabel="Metropolis"
+        variant="action"
+      />,
+    );
+    try {
+      const trigger = await screen.findByRole("button", {
+        name: "Play Metropolis on a media server",
+      });
+      await user.click(trigger);
+      await screen.findByRole("menuitem", {
+        name: "Checking Plex",
+        hidden: true,
+      });
+      await user.unhover(trigger);
+      await new Promise((settle) => setTimeout(settle, 300));
+      expect(plexSignal()?.aborted).toBe(false);
+      expect(
+        screen.getByRole("menuitem", { name: "Checking Plex", hidden: true }),
+      ).toBeInTheDocument();
+    } finally {
+      release();
+      resolve.mockRestore();
+    }
+  });
+
+  it("starts no lookup for a pointer that left before the destinations came back", async () => {
+    let listCandidates: () => void = () => undefined;
+    let candidatesAsked = false;
+    const asked: string[] = [];
+    server.use(
+      http.get(`${ROOT}/destinations`, () =>
+        HttpResponse.json({ data: [EMBY, PLEX] }),
+      ),
+      http.get(`${ROOT}/candidates`, () => {
+        candidatesAsked = true;
+        return new Promise<Response>((done) => {
+          listCandidates = () =>
+            done(HttpResponse.json({ data: [EMBY, PLEX] }));
+        });
+      }),
+      http.get(`${ROOT}/resolve`, ({ request }) => {
+        const instance = new URL(request.url).searchParams.get("instance_id")!;
+        asked.push(instance);
+        return HttpResponse.json({
+          instance_id: instance,
+          state: "not_found",
+          url: null,
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    customRender(
+      <PlayOnMenu
+        mediaType="movie"
+        id={6}
+        itemLabel="Metropolis"
+        variant="action"
+      />,
+    );
+    const trigger = await screen.findByRole("button", {
+      name: "Play Metropolis on a media server",
+    });
+    await user.hover(trigger);
+    await waitFor(() => expect(candidatesAsked).toBe(true));
+    await user.unhover(trigger);
+    listCandidates();
+    await new Promise((settle) => setTimeout(settle, 300));
+    expect(asked).toEqual([]);
   });
 });

@@ -78,7 +78,10 @@ export function useMediaServerLinkAnswers(
   });
 }
 
-/** Lets go of this row's lookups still running, as when its menu closes. */
+/**
+ * Lets go of this row's lookups still running: its menu closed, or the
+ * pointer left it without opening it.
+ */
 export function useStopMediaServerLinkAnswers(
   targets: MediaServerLinkTarget[],
   mediaType: LinkMediaType,

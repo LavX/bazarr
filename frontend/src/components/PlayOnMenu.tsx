@@ -72,7 +72,11 @@ function useWarm() {
       window.clearTimeout(timer.current);
       timer.current = window.setTimeout(then, HOVER_INTENT_MS);
     },
-    cancel: () => window.clearTimeout(timer.current),
+    // Nothing waits for an answer any more, so nothing new is asked.
+    cool: () => {
+      window.clearTimeout(timer.current);
+      setWarm(false);
+    },
   };
 }
 
@@ -117,7 +121,8 @@ const PlayOnMenu: FunctionComponent<Props> = ({
   className,
 }) => {
   const destinations = useMediaServerLinkDestinations();
-  const { warm, start, intend, cancel } = useWarm();
+  const { warm, start, intend, cool } = useWarm();
+  const opened = useRef(false);
   const candidates = useMediaServerLinkCandidates(mediaType, id, warm);
   const targets = candidates.data ?? [];
   const answers = useMediaServerLinkAnswers(targets, mediaType, id, warm);
@@ -138,9 +143,17 @@ const PlayOnMenu: FunctionComponent<Props> = ({
   const configured = destinations.data ?? [];
   if (configured.length === 0) return null;
 
+  // A pointer that moves on before anything opened was passing by, on its
+  // way across a table as often as not. The lookups it began let go of their
+  // connections, so a server that hangs cannot hold them.
+  const leave = () => {
+    if (opened.current) return;
+    cool();
+    stop();
+  };
   const warmth = {
     onMouseEnter: () => intend(ask),
-    onMouseLeave: cancel,
+    onMouseLeave: leave,
     onFocus: ask,
   };
 
@@ -220,8 +233,14 @@ const PlayOnMenu: FunctionComponent<Props> = ({
       shadow="md"
       width={260}
       position="bottom-end"
-      onOpen={ask}
-      onClose={stop}
+      onOpen={() => {
+        opened.current = true;
+        ask();
+      }}
+      onClose={() => {
+        opened.current = false;
+        stop();
+      }}
     >
       <Menu.Target>
         {variant === "toolbox" ? (
