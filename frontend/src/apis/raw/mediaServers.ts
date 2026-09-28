@@ -59,6 +59,8 @@ export type MediaServerInstance = {
   refresh_movies: boolean;
   refresh_episodes: boolean;
   options: MediaServerOptions;
+  /** Where a browser opens this server; empty means the server URL. */
+  external_url: string;
   /** The signed-in Plex account's own row, removed by disconnecting from Plex. */
   account_owned?: boolean;
 };
@@ -73,6 +75,7 @@ export type MediaServerUpdate = Partial<
     | "refresh_movies"
     | "refresh_episodes"
     | "options"
+    | "external_url"
   >
 > & { api_key?: string; clear_api_key?: boolean };
 export type MediaServerCreate = MediaServerUpdate & {
@@ -137,6 +140,7 @@ function safeInstance(row: MediaServerInstance): MediaServerInstance {
     typeof row.api_key_set !== "boolean" ||
     typeof row.refresh_movies !== "boolean" ||
     typeof row.refresh_episodes !== "boolean" ||
+    !(row.external_url === undefined || typeof row.external_url === "string") ||
     !row.options ||
     typeof row.options !== "object" ||
     Array.isArray(row.options) ||
@@ -182,6 +186,7 @@ function safeInstance(row: MediaServerInstance): MediaServerInstance {
     refresh_movies: row.refresh_movies,
     refresh_episodes: row.refresh_episodes,
     options: row.options,
+    external_url: row.external_url ?? "",
     ...(row.account_owned === true ? { account_owned: true } : {}),
   };
 }

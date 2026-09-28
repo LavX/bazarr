@@ -36,6 +36,7 @@ function instance(
     refresh_movies: true,
     refresh_episodes: true,
     options: {},
+    external_url: "",
     ...overrides,
   };
 }
@@ -659,6 +660,7 @@ it.each(["emby", "silo"] as const)(
         refresh_movies: true,
         refresh_episodes: true,
         options: {},
+        external_url: "",
       },
     ]);
   },
@@ -860,3 +862,35 @@ it.each([
     await screen.findByRole("link", { name: "Read the media servers guide" }),
   ).toHaveAttribute("href", href);
 });
+
+it.each(["emby", "plex"] as const)(
+  "saves the %s browser URL typed into the instance form, and refuses one that is not a web address",
+  async (kind) => {
+    const writes: Record<string, unknown>[] = [];
+    setup(kind);
+    server.use(
+      http.patch(item, async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        writes.push(body);
+        return HttpResponse.json({ ...instance(kind), ...body });
+      }),
+    );
+    const form = within(await edit());
+    const field = form.getByLabelText("Browser URL");
+    await userEvent.type(field, "ftp://media.example");
+    await userEvent.click(form.getByRole("button", { name: "Save instance" }));
+    expect(
+      await form.findByText(
+        "Enter a full HTTP or HTTPS URL without credentials, query or fragment",
+      ),
+    ).toBeInTheDocument();
+    expect(writes).toEqual([]);
+    await userEvent.clear(field);
+    await userEvent.type(field, "https://media.example.com");
+    await userEvent.click(form.getByRole("button", { name: "Save instance" }));
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0]).toMatchObject({
+      external_url: "https://media.example.com",
+    });
+  },
+);
