@@ -110,6 +110,19 @@ def test_a_row_without_an_owner_is_stored_under_the_sentinel(hidden_db):
     assert hidden_languages(hidden_db, "episode", [9], None) == {"fr"}
 
 
+def test_a_hide_made_before_the_row_had_an_owner_keeps_applying(hidden_db):
+    """A row the startup backfill has not stamped yet has no owner, so its hide
+    is stored under the sentinel. Once the backfill stamps the row, the hide
+    must still apply and Unhide must still remove it, or the track comes back
+    and the disclosure keeps an entry nothing can clear."""
+    from subtitles.embedded_hidden import hidden_languages, hide_track, list_hidden, unhide_track
+
+    hide_track(hidden_db, "movie", 4, None, "en")
+    assert hidden_languages(hidden_db, "movie", [4], 2) == {"en"}
+    assert unhide_track(hidden_db, "movie", [4], 2, "en") == 1
+    assert list_hidden(hidden_db, "movie", [4]) == []
+
+
 def test_unhide_removes_only_that_language_on_those_rows(hidden_db):
     from subtitles.embedded_hidden import hidden_languages, hide_track, unhide_track
 

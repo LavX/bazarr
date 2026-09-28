@@ -217,6 +217,54 @@ def test_the_listing_takes_a_whole_long_series(hidden_api):
     assert [(r["media_id"], r["language"]) for r in listed.json["data"]] == [(1, "fr"), (2, "fr")]
 
 
+def test_a_hide_made_before_the_row_had_an_owner_survives_the_owner_stamp(hidden_api, tmp_path):
+    """The hide of a row without an owner is stored under the sentinel. When the
+    startup backfill later stamps the row, the hide is still listed and Unhide
+    still removes it."""
+    client, session, _calls = hidden_api
+    (tmp_path / "movies" / "unowned.mkv").write_bytes(b"video")
+    session.add(TableMovies(id=4, arr_instance_id=None, radarrId=11, title="Unowned", path="/movies/unowned.mkv",
+                            tmdbId="4", subtitles=str([["en", None, None]])))
+    session.commit()
+    form = {"media_type": "movie", "media_id": 4, "language": "en"}
+    assert client.post(ROOT, data=form, headers=HEADERS).status_code == 200
+    assert _hidden(session) == [("movie", 4, 0, "en", None)]
+
+    session.execute(sa.update(TableMovies).where(TableMovies.id == 4).values(arr_instance_id=2))
+    listed = client.get(ROOT + "?media_type=movie&media_id[]=4", headers=HEADERS).json["data"]
+    assert [(r["media_id"], r["language"], r["arr_instance_id"]) for r in listed] == [(4, "en", None)]
+    assert client.delete(ROOT, data=form, headers=HEADERS).status_code == 204
+    assert _hidden(session) == []
+
+
+def test_the_listing_leaves_out_a_record_of_another_owner(hidden_api):
+    """A record under another owner belongs to a deleted row whose local id was
+    reused. The indexer ignores it, so the disclosure must not show it."""
+    from subtitles.embedded_hidden import hide_track
+
+    client, session, _calls = hidden_api
+    hide_track(session, "movie", 1, 9, "fr")
+    hide_track(session, "movie", 1, 2, "en")
+    listed = client.get(ROOT + "?media_type=movie&media_id[]=1", headers=HEADERS).json["data"]
+    assert [(r["language"], r["arr_instance_id"]) for r in listed] == [("en", 2)]
+
+
+def test_a_reindex_that_fails_takes_the_hide_back(hidden_api, monkeypatch):
+    """Whatever stops the re-index, the listing still shows the track, so the
+    hide is taken back instead of surprising the user at the next index."""
+    import subtitles.indexer.movies as mv
+
+    client, session, _calls = hidden_api
+
+    def _fails(*_args, **_kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(mv, "store_subtitles_movie", _fails)
+    form = {"media_type": "movie", "media_id": 1, "language": "en"}
+    assert client.post(ROOT, data=form, headers=HEADERS).status_code == 500
+    assert _hidden(session) == []
+
+
 def test_unhide_is_idempotent_and_scoped(hidden_api):
     client, session, _calls = hidden_api
     client.post(ROOT, data={"media_type": "movie", "media_id": 1, "language": "en"}, headers=HEADERS)

@@ -16,8 +16,8 @@ from flask_restx import Namespace, Resource, reqparse
 from app.database import TableEpisodes, TableMovies, database, select
 from app.event_handler import event_stream
 from languages.get_languages import language_from_alpha2
-from subtitles.embedded_hidden import (MEDIA_TYPES, episode_file_siblings, hide_track, language_key,
-                                       list_hidden, unhide_track)
+from subtitles.embedded_hidden import (MEDIA_TYPES, applicable_owners, episode_file_siblings, hide_track,
+                                       language_key, list_hidden, media_owners, unhide_track)
 from utilities.path_mappings import path_mappings
 
 from ..utils import authenticate
@@ -197,14 +197,21 @@ class EmbeddedHiddenTracks(Resource):
         groups = (episode_file_siblings(database, requested) if media_type == 'episode'
                   else {media_id: {media_id} for media_id in requested})
         rows = list_hidden(database, media_type, sorted(set().union(*groups.values())) if groups else [])
+        owners = media_owners(database, media_type, requested)
         data = []
         for media_id in requested:
+            if media_id not in owners:
+                continue
+            # Only what the indexer applies to this row: a record under
+            # another owner belongs to a deleted row whose id was reused.
+            applicable = applicable_owners(owners[media_id])
             seen = set()
             for row in rows:
-                if row.media_id not in groups[media_id] or row.language in seen:
+                if (row.media_id not in groups[media_id] or row.arr_instance_id not in applicable
+                        or row.language in seen):
                     continue
                 seen.add(row.language)
-                base, *variants = row.language.split(':')
+                base, hi, forced = _variant(row.language)
                 data.append({
                     'media_type': media_type,
                     'media_id': media_id,
@@ -212,8 +219,8 @@ class EmbeddedHiddenTracks(Resource):
                     'language': row.language,
                     'code2': base,
                     'name': _language_name(base),
-                    'hi': 'hi' in variants,
-                    'forced': 'forced' in variants,
+                    'hi': hi,
+                    'forced': forced,
                     'codec': row.codec,
                     'hidden_at': row.hidden_at.isoformat() if row.hidden_at else None,
                 })
@@ -247,9 +254,10 @@ class EmbeddedHiddenTracks(Resource):
             recorded = hide_track(database, media_type, media_id, owner, key, ', '.join(codecs) or None)
             try:
                 _reindex(media_type, media_id, original, mapped, owner, ids)
-            except _Refused:
-                # The engine autocommits, so undo by hand: a hide the listing
-                # does not show would only surprise the user later.
+            except Exception:
+                # The engine autocommits, so undo by hand whatever stopped the
+                # re-index: a hide the listing does not show yet would only
+                # surprise the user at the next index.
                 if recorded:
                     unhide_track(database, media_type, [media_id], owner, key)
                 raise

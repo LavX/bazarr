@@ -16,7 +16,7 @@ from datetime import datetime
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import aliased
 
-from app.database import TableEmbeddedTrackHidden, TableEpisodes
+from app.database import TableEmbeddedTrackHidden, TableEpisodes, TableMovies, TableSportsEvents
 from subtitles.indexer.utils import normalize_subtitle_language_variant
 from utilities.sql_limits import in_chunks
 
@@ -35,6 +35,17 @@ def owner_key(arr_instance_id):
     return UNOWNED if arr_instance_id is None else int(arr_instance_id)
 
 
+def applicable_owners(arr_instance_id):
+    """The stored owners whose records apply to a row with this owner.
+
+    Its own, and the sentinel: a row the startup backfill has not stamped yet
+    has no owner, so its hide is stored under UNOWNED, and it must keep
+    applying (and stay removable) once the backfill stamps the row. A record
+    under any other owner belongs to a deleted row whose local id was reused.
+    """
+    return sorted({owner_key(arr_instance_id), UNOWNED})
+
+
 def language_key(code2, hi=False, forced=False):
     """The key the indexer stores for an embedded track with these flags.
 
@@ -49,7 +60,8 @@ def language_key(code2, hi=False, forced=False):
 
 
 def hidden_languages(session, media_type, media_ids, arr_instance_id):
-    """Language keys hidden on any of ``media_ids`` for this owner.
+    """Language keys hidden on any of ``media_ids`` for this owner (see
+    ``applicable_owners``).
 
     Several episode rows can share one file and the indexer writes one listing
     to all of them, so the caller passes every row sharing the file and a track
@@ -66,7 +78,7 @@ def hidden_languages(session, media_type, media_ids, arr_instance_id):
                 select(TableEmbeddedTrackHidden.language)
                 .where(TableEmbeddedTrackHidden.media_type == media_type,
                        TableEmbeddedTrackHidden.media_id.in_(chunk),
-                       TableEmbeddedTrackHidden.arr_instance_id == owner_key(arr_instance_id))
+                       TableEmbeddedTrackHidden.arr_instance_id.in_(applicable_owners(arr_instance_id)))
             ).scalars().all())
         return found
     except Exception:
@@ -108,14 +120,15 @@ def hide_track(session, media_type, media_id, arr_instance_id, language, codec=N
 
 
 def unhide_track(session, media_type, media_ids, arr_instance_id, language):
-    """Forget the record on every row in ``media_ids``. Returns how many went."""
+    """Forget the record on every row in ``media_ids``, under this owner or
+    the sentinel (see ``applicable_owners``). Returns how many went."""
     removed = 0
     for chunk in in_chunks([media_id for media_id in media_ids if media_id is not None]):
         removed += session.execute(
             delete(TableEmbeddedTrackHidden)
             .where(TableEmbeddedTrackHidden.media_type == media_type,
                    TableEmbeddedTrackHidden.media_id.in_(chunk),
-                   TableEmbeddedTrackHidden.arr_instance_id == owner_key(arr_instance_id),
+                   TableEmbeddedTrackHidden.arr_instance_id.in_(applicable_owners(arr_instance_id)),
                    TableEmbeddedTrackHidden.language == language)).rowcount or 0
     return removed
 
@@ -146,6 +159,20 @@ def forget_hidden(session, media_type, media_ids):
             delete(TableEmbeddedTrackHidden)
             .where(TableEmbeddedTrackHidden.media_type == media_type,
                    TableEmbeddedTrackHidden.media_id.in_(chunk)))
+
+
+def media_owners(session, media_type, media_ids):
+    """The owner of each of ``media_ids`` that still has a row, by local id.
+
+    The listing uses it to show only the records the indexer applies to each
+    row (see ``applicable_owners``).
+    """
+    table = {'movie': TableMovies, 'episode': TableEpisodes, 'sports': TableSportsEvents}[media_type]
+    owners = {}
+    for chunk in in_chunks([media_id for media_id in media_ids if media_id is not None]):
+        owners.update(session.execute(
+            select(table.id, table.arr_instance_id).where(table.id.in_(chunk))).tuples().all())
+    return owners
 
 
 def episode_file_siblings(session, episode_ids):
