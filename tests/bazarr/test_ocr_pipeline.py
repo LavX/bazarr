@@ -179,6 +179,35 @@ def test_empty_fade_steps_do_not_count_against_the_guard(ffmpeg, tmp_path):
     assert (result.cues, result.dropped) == (2, 0)
 
 
+def _fade_in(start, text_ms):
+    """Three 100 ms repaint steps, then the line itself for ``text_ms``."""
+    steps = [(start + 100 * i, start + 100 * (i + 1), 100, 900, box_rows(100 + 20 * i, 40)) for i in range(3)]
+    return steps + [(start + 300, start + 300 + text_ms, 100, 900, box_rows(160, 40))]
+
+
+@pytest.mark.parametrize("middle,fails", [
+    (["", ""], True),             # two of four lines lost: over the limit
+    (["Middle", ""], False),      # one of four: at the limit, kept
+])
+def test_readable_fade_steps_count_once_against_the_guard(ffmpeg, tmp_path, middle, fails):
+    # Four lines on screen. The first and last fade in and every step reads
+    # as the line itself, so each is one cue for the guard, not four.
+    cues = (_fade_in(1000, 1700) + [(4000, 6000, 100, 900, box_rows(200, 40)),
+                                    (7000, 9000, 100, 900, box_rows(220, 40))] + _fade_in(10000, 1700))
+    sup = tmp_path / "fades.sup"
+    sup.write_bytes(build_sup((1920, 1080), cues))
+    video = mux_mkv(ffmpeg, str(tmp_path / "fades.mkv"), [(str(sup), "copy", "eng")], seconds=13)
+    engine = FakeEngine(["Hello"] * 4 + middle + ["World"] * 4)
+
+    if fails:
+        with pytest.raises(TooLittleText):
+            pipeline.run_ocr(video, 0, "eng", engine, parent=str(tmp_path / "w"), ffmpeg=ffmpeg)
+    else:
+        result = pipeline.run_ocr(video, 0, "eng", engine, parent=str(tmp_path / "w"), ffmpeg=ffmpeg)
+        assert _texts(result.srt) == ["Hello", "Middle", "World"]
+        assert (result.cues, result.dropped) == (3, 1)
+
+
 def test_a_run_of_only_short_empty_cues_still_fails(ffmpeg, tmp_path):
     # Every cue is under SHORT_CUE_MS and reads as nothing: none is counted,
     # but there is no text at all, so the run must not return an empty SRT.

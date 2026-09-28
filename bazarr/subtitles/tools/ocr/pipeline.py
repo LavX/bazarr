@@ -94,13 +94,15 @@ def run_ocr(video_path, stream_index, language, engine, *, progress=None, canvas
             for index, cue in enumerate(cues, 1):
                 text = clean_text(read(cue.image()))
                 if text and timed and timed[-1][2] == text and cue.start_ms <= timed[-1][1]:
-                    # The same line repainted (a fade or a palette change): one cue.
+                    # The same line repainted (a fade or a palette change): one
+                    # cue, already counted when it first appeared.
                     timed[-1] = (timed[-1][0], cue.end_ms, text)
                 elif text:
                     timed.append((cue.start_ms, cue.end_ms, text))
-                if text or cue.end_ms - cue.start_ms >= SHORT_CUE_MS:
                     counted += 1
-                    dropped += not text
+                elif cue.end_ms - cue.start_ms >= SHORT_CUE_MS:
+                    counted += 1
+                    dropped += 1
                 report("recognise", index, len(cues))
 
     # No text at all fails even when every empty cue was too short to count.
