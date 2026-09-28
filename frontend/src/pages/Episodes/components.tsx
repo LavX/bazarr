@@ -26,6 +26,7 @@ import {
   buildSubtitleLanguageKey,
   canSynchronizeSubtitle,
   combineRequestForSubtitle,
+  describeEmbeddedTrack,
   getSyncEngineLabel,
   isCombinedOutputSubtitle,
   isCompatibleSyncOutputSubtitle,
@@ -245,7 +246,7 @@ export const Subtitle: FunctionComponent<Props> = ({
   const badgeTitle = missing
     ? "Missing"
     : isEmbedded
-      ? "Embedded in the video file"
+      ? describeEmbeddedTrack("Embedded in the video file", subtitle.codec)
       : `File: ${subtitle.path!.split(/[\\/]/).pop()}`;
 
   const languageBadge = (

@@ -41,6 +41,7 @@ import {
   buildSubtitleLanguageKey,
   canSynchronizeSubtitle,
   combineRequestForSubtitle,
+  describeEmbeddedTrack,
   getSubtitleSyncStatusPresentation,
   isCombinedOutputSubtitle,
   isCompatibleSyncOutputSubtitle,
@@ -70,6 +71,8 @@ type SportsSubtitleTuple = SportsEvent["subtitles"][number];
 export function toSportsSubtitle([
   language,
   path,
+  ,
+  codec,
 ]: SportsSubtitleTuple): Subtitle {
   const [code2, ...modifiers] = language.split(":");
   const lower = modifiers.map((modifier) => modifier.toLowerCase());
@@ -85,6 +88,7 @@ export function toSportsSubtitle([
     forced: lower.includes("forced"),
     hi: lower.includes("hi"),
     path,
+    codec: codec ?? null,
   };
 }
 
@@ -194,7 +198,7 @@ const EventSubtitleBadge: FunctionComponent<{
     <Badge
       variant="light"
       style={{ cursor: "pointer", whiteSpace: "nowrap" }}
-      title={subtitle.path || "Embedded"}
+      title={subtitle.path || describeEmbeddedTrack("Embedded", subtitle.codec)}
     >
       {subtitle.language ?? subtitle.code2}
     </Badge>

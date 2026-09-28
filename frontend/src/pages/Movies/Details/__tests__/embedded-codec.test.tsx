@@ -1,0 +1,118 @@
+/* eslint-disable camelcase */
+import { http, HttpResponse } from "msw";
+import { describe, expect, it, vi } from "vitest";
+import Table from "@/pages/Movies/Details/table";
+import { customRender, screen } from "@/tests";
+import server from "@/tests/mocks/node";
+
+function makeMovie(subtitles: Subtitle[]): Item.Movie {
+  return {
+    id: 1,
+    radarrId: 1,
+    title: "Test Movie",
+    path: "/movies/test.mkv",
+    profileId: 1,
+    fanart: "",
+    overview: "",
+    imdbId: "tt0000001",
+    alternativeTitles: [],
+    poster: "",
+    year: "2024",
+    monitored: true,
+    tags: [],
+    audio_language: [],
+    subtitles,
+    missing_subtitles: [],
+  };
+}
+
+const embedded = (code2: string, codec?: string | null): Subtitle => ({
+  code2,
+  name: code2,
+  hi: false,
+  forced: false,
+  path: null,
+  codec,
+});
+
+describe("Movies Detail Table, embedded track codec", () => {
+  it("names the codec next to the track and marks bitmap tracks", async () => {
+    server.use(
+      http.get("/api/subtitles/sync-status", () =>
+        HttpResponse.json({ data: null }),
+      ),
+      http.get("/api/system/languages", () => HttpResponse.json([])),
+    );
+
+    customRender(
+      <Table
+        movie={makeMovie([embedded("en", "pgs"), embedded("fr", "subrip")])}
+        profile={undefined}
+        history={[]}
+      />,
+    );
+
+    const pgs = await screen.findByText("PGS");
+    expect(pgs.closest("[title]")).toHaveAttribute(
+      "title",
+      "Subtitle format (PGS, image-based)",
+    );
+    expect(screen.getByText("SRT").closest("[title]")).toHaveAttribute(
+      "title",
+      "Subtitle format (SRT)",
+    );
+    expect(screen.getAllByText("Video File Subtitle Track")).toHaveLength(2);
+  });
+
+  it("shows no codec for a track indexed before the codec was stored", async () => {
+    server.use(
+      http.get("/api/subtitles/sync-status", () =>
+        HttpResponse.json({ data: null }),
+      ),
+      http.get("/api/system/languages", () => HttpResponse.json([])),
+    );
+
+    customRender(
+      <Table
+        movie={makeMovie([embedded("en"), embedded("de", null)])}
+        profile={undefined}
+        history={[]}
+      />,
+    );
+
+    expect(
+      await screen.findAllByText("Video File Subtitle Track"),
+    ).toHaveLength(2);
+    expect(screen.queryByTitle(/^Subtitle format/)).not.toBeInTheDocument();
+  });
+
+  it("keeps two same-language tracks with different codecs apart", async () => {
+    server.use(
+      http.get("/api/subtitles/sync-status", () =>
+        HttpResponse.json({ data: null }),
+      ),
+      http.get("/api/system/languages", () => HttpResponse.json([])),
+    );
+    const consoleError = vi.spyOn(console, "error");
+
+    customRender(
+      <Table
+        movie={makeMovie([embedded("en", "subrip"), embedded("en", "pgs")])}
+        profile={undefined}
+        history={[]}
+      />,
+    );
+
+    expect(
+      await screen.findAllByText("Video File Subtitle Track"),
+    ).toHaveLength(2);
+    expect(screen.getAllByText("SRT")).toHaveLength(1);
+    expect(screen.getAllByText("PGS")).toHaveLength(1);
+    expect(
+      consoleError.mock.calls.filter((call) =>
+        String(call[0]).includes("same key"),
+      ),
+    ).toEqual([]);
+    consoleError.mockRestore();
+  });
+});

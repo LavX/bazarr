@@ -29,12 +29,15 @@ import {
   buildSubtitleLanguageKey,
   canSynchronizeSubtitle,
   combineRequestForSubtitle,
+  describeEmbeddedTrack,
   getSubtitleSyncStatusPresentation,
   getSyncEngineLabel,
+  isBitmapCodec,
   isCombinedOutputSubtitle,
   isCompatibleSyncOutputSubtitle,
   isSyncOutputSubtitle,
   sortSyncOutputSubtitles,
+  subtitleCodecLabel,
 } from "@/utilities/subtitles";
 import styles from "./table.module.scss";
 
@@ -590,7 +593,7 @@ const Table: FunctionComponent<Props> = ({
         meta: { className: styles.pathCell },
         cell: ({
           row: {
-            original: { path },
+            original: { path, codec },
           },
         }) => {
           const props: TextProps = {
@@ -598,8 +601,21 @@ const Table: FunctionComponent<Props> = ({
           };
 
           if (isSubtitleTrack(path)) {
+            const codecLabel = subtitleCodecLabel(codec);
             return (
-              <Text className="table-primary">Video File Subtitle Track</Text>
+              <Group gap={6} wrap="nowrap">
+                <Text className="table-primary">Video File Subtitle Track</Text>
+                {codecLabel && (
+                  <Badge
+                    size="xs"
+                    variant="light"
+                    color={isBitmapCodec(codec) ? "gray" : undefined}
+                    title={describeEmbeddedTrack("Subtitle format", codec)}
+                  >
+                    {codecLabel}
+                  </Badge>
+                )}
+              </Group>
             );
           } else if (isSubtitleMissing(path)) {
             return (
@@ -735,7 +751,7 @@ const Table: FunctionComponent<Props> = ({
         className={styles.table}
         columns={columns}
         data={data}
-        getRowId={(sub) => {
+        getRowId={(sub, index) => {
           // Missing rows all share the sentinel path "Missing Subtitles" and
           // embedded tracks have an empty path, so both must be keyed by their
           // language (code2[:hi][:forced]) to stay unique. Only real on-disk
@@ -744,7 +760,9 @@ const Table: FunctionComponent<Props> = ({
             return `missing-${buildLanguageKey(sub)}`;
           }
           if (isSubtitleTrack(sub.path)) {
-            return `embedded-${buildLanguageKey(sub)}`;
+            // One file can carry two tracks with the same key, an SRT and a
+            // PGS English track on a remux, so the position keeps them apart.
+            return `embedded-${index}-${buildLanguageKey(sub)}`;
           }
           return sub.path!;
         }}
