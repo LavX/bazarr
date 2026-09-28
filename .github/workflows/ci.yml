@@ -743,6 +743,7 @@ jobs:
             tests/bazarr/test_sportarr_review_findings.py \
             tests/bazarr/test_sportarr_blacklist_recovery.py \
             tests/bazarr/test_sportarr_indexer.py \
+            tests/bazarr/test_embedded_codec_indexer.py \
             tests/bazarr/test_sportarr_sse.py \
             tests/bazarr/test_sportarr_subtitle_upload.py \
             tests/bazarr/test_provider_blacklist_instance_scope.py \
