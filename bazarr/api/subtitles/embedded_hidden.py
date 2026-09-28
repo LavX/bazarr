@@ -93,6 +93,20 @@ def _variant(key):
     return base, 'hi' in variants, 'forced' in variants
 
 
+def _table(media_type):
+    if media_type == 'sports':
+        from app.database import TableSportsEvents
+        return TableSportsEvents
+    return TableMovies if media_type == 'movie' else TableEpisodes
+
+
+def _still_listed(media_type, media_id, key):
+    """True when the row's stored listing still carries an embedded ``key``."""
+    table = _table(media_type)
+    stored = database.execute(select(table.subtitles).where(table.id == media_id)).scalar()
+    return bool(_embedded_entries(stored, key))
+
+
 def _outcome(media_type, media_id, key):
     """What the hide changed, read back from the row the re-index wrote.
 
@@ -103,11 +117,7 @@ def _outcome(media_type, media_id, key):
     ask for the language at all. The page tells the user either way, since the
     confirmation promised the language would be wanted again.
     """
-    if media_type == 'sports':
-        from app.database import TableSportsEvents
-        table = TableSportsEvents
-    else:
-        table = TableMovies if media_type == 'movie' else TableEpisodes
+    table = _table(media_type)
     row = database.execute(select(table.subtitles, table.missing_subtitles)
                            .where(table.id == media_id)).first()
     base, hi, forced = _variant(key)
@@ -255,10 +265,12 @@ class EmbeddedHiddenTracks(Resource):
             try:
                 _reindex(media_type, media_id, original, mapped, owner, ids)
             except Exception:
-                # The engine autocommits, so undo by hand whatever stopped the
-                # re-index: a hide the listing does not show yet would only
-                # surprise the user at the next index.
-                if recorded:
+                # The engine autocommits, so reconcile by hand. A re-index that
+                # stopped before it wrote the listing leaves the track listed,
+                # and the hide is taken back rather than surprise the user at
+                # the next index. One that stopped after has applied the hide,
+                # which then stays so the disclosure can undo it.
+                if recorded and _still_listed(media_type, media_id, key):
                     unhide_track(database, media_type, [media_id], owner, key)
                 raise
         except _Refused as refused:
@@ -278,15 +290,17 @@ class EmbeddedHiddenTracks(Resource):
             targets = (episode_file_siblings(database, [media_id])[media_id] if media_type == 'episode'
                        else {media_id})
             unhide_track(database, media_type, sorted(targets), owner, key)
-            # A file that cannot be read now lists the track at its next
-            # successful index. The record is gone either way, so this is not
-            # an error for the request.
+            # A file that cannot be read now, or a re-index that fails, lists
+            # the track at the next successful index. The record is gone
+            # either way, so this is not an error for the request.
             if os.path.exists(mapped):
                 try:
                     _reindex(media_type, media_id, original, mapped, owner, ids)
                 except _Refused as refused:
                     logging.warning('BAZARR unhid an embedded track but could not re-index: %s',
                                     refused.message)
+                except Exception:
+                    logging.exception('BAZARR unhid an embedded track but could not re-index it')
         except _Refused as refused:
             return refused.message, refused.status
         return '', 204

@@ -265,6 +265,42 @@ def test_a_reindex_that_fails_takes_the_hide_back(hidden_api, monkeypatch):
     assert _hidden(session) == []
 
 
+def test_a_reindex_that_fails_after_writing_the_listing_keeps_the_hide(hidden_api, monkeypatch):
+    """When the re-index stops after it wrote the listing, the hide took effect:
+    the record stays, so the disclosure can still undo it."""
+    import subtitles.indexer.movies as mv
+
+    client, session, _calls = hidden_api
+
+    def _writes_then_fails(*_args, **_kwargs):
+        session.execute(sa.update(TableMovies).where(TableMovies.id == 1).values(
+            subtitles=str([["fr", None, None], ["de", "/movies/m.de.srt", 10]])))
+        raise RuntimeError("could not push the event")
+
+    monkeypatch.setattr(mv, "store_subtitles_movie", _writes_then_fails)
+    form = {"media_type": "movie", "media_id": 1, "language": "en"}
+    assert client.post(ROOT, data=form, headers=HEADERS).status_code == 500
+    assert _hidden(session) == [("movie", 1, 2, "en", "subrip")]
+
+
+def test_unhide_succeeds_when_the_reindex_fails(hidden_api, monkeypatch):
+    """Unhide has deleted the record by the time it re-indexes, and the next
+    index lists the track again, so a failed re-index is logged, not returned."""
+    import subtitles.indexer.movies as mv
+    from subtitles.embedded_hidden import hide_track
+
+    client, session, _calls = hidden_api
+    hide_track(session, "movie", 1, 2, "en")
+
+    def _fails(*_args, **_kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(mv, "store_subtitles_movie", _fails)
+    form = {"media_type": "movie", "media_id": 1, "language": "en"}
+    assert client.delete(ROOT, data=form, headers=HEADERS).status_code == 204
+    assert _hidden(session) == []
+
+
 def test_unhide_is_idempotent_and_scoped(hidden_api):
     client, session, _calls = hidden_api
     client.post(ROOT, data={"media_type": "movie", "media_id": 1, "language": "en"}, headers=HEADERS)
