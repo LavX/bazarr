@@ -59,7 +59,10 @@ def test_pg_upgrade_and_create_all_have_same_columns_and_constraints(pg_engine, 
         columns = {column['name']: column for column in inspector.get_columns('media_server_instances')}
         assert {'id', 'kind', 'name', 'enabled', 'url', 'api_key', 'verify_ssl',
                 'path_mappings', 'revision'} <= set(columns)
-        assert all(column['nullable'] is False for column in columns.values())
+        # The browser URL is the one optional column. Only a metadata-fresh
+        # schema has it here; an upgraded one gets it from its own revision.
+        assert all(column['nullable'] is False for name, column in columns.items() if name != 'external_url')
+        assert columns.get('external_url', {'nullable': True})['nullable'] is True
         assert {'ck_media_server_kind', 'ck_media_server_enabled', 'ck_media_server_verify_ssl'} <= {
             row['name'] for row in inspector.get_check_constraints('media_server_instances')}
         assert inspector.get_pk_constraint('media_server_instances')['constrained_columns'] == ['id']
@@ -198,3 +201,13 @@ def test_pg_the_startup_import_creates_no_plex_row_it_cannot_record(pg_session, 
     assert backfill_instances(pg_session, config)['plex']['error_code'] == 'migration_failed'
     assert _plex_rows(pg_engine) == []
     assert config.plex.instance_id == ''
+
+
+def test_pg_the_browser_url_round_trips_and_clears(pg_session, pg_engine):
+    from media_servers.repository import MediaServerInstanceRepository, to_safe_dict
+    repo = MediaServerInstanceRepository(pg_session)
+    row = repo.create(**payload('emby', external_url='https://emby.example.com/'))
+    with sessionmaker(bind=pg_engine)() as restarted:
+        assert MediaServerInstanceRepository(restarted).get(row.id).external_url == 'https://emby.example.com'
+    repo.update(row.id, external_url='')
+    assert to_safe_dict(repo.get(row.id))['external_url'] == ''

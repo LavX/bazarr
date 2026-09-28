@@ -215,6 +215,10 @@ class TableMediaServerInstances(Base):
     # through path_mappings and leave this empty.
     options = mapped_column(Text, nullable=False, default='{}', server_default='{}')
     revision = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    # The address a browser opens this server at, when it is not ``url``: a
+    # container name Bazarr reaches is not one a browser can. Every kind has
+    # one, so it is a column rather than an option. NULL means use ``url``.
+    external_url = mapped_column(Text, nullable=True)
 
 
 class TableMediaServerImports(Base):

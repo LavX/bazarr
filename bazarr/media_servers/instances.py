@@ -11,7 +11,7 @@ from .paths import validate_path_mappings
 
 VALID_KINDS = ('emby', 'jellyfin', 'plex', 'silo')
 FIELDS = {'name', 'enabled', 'url', 'verify_ssl', 'api_key', 'clear_api_key', 'path_mappings',
-          'refresh_movies', 'refresh_episodes', 'options'}
+          'refresh_movies', 'refresh_episodes', 'options', 'external_url'}
 PROBE_FIELDS = {'url', 'verify_ssl', 'api_key', 'clear_api_key'}
 TOGGLES = ('refresh_movies', 'refresh_episodes')
 
@@ -97,6 +97,7 @@ class ConnectionSnapshot:
     # decided by the destination rule rather than by the user's switches. Kept
     # apart from `enabled` so a held refresh is not read as a disabled instance.
     sendable: bool = True
+    external_url: str = ''
 
     @property
     def enabled(self):
@@ -134,13 +135,18 @@ class ConnectionSnapshot:
         return True
 
 
+def normalized_external_url(value):
+    """The stored form: None for empty, otherwise the validated URL."""
+    return validate_server_url(value) if value else None
+
+
 def validate_fields(body, *, create=False, probe=False):
     allowed = PROBE_FIELDS if probe else FIELDS | ({'kind'} if create else set())
     if not isinstance(body, dict) or set(body) - allowed:
         raise MediaServerError('invalid_settings')
     if create and body.get('kind') not in VALID_KINDS:
         raise MediaServerError('invalid_kind')
-    for name in ('name', 'url', 'api_key'):
+    for name in ('name', 'url', 'api_key', 'external_url'):
         if name in body and not isinstance(body[name], str):
             raise MediaServerError('invalid_settings')
     for name in ('enabled', 'verify_ssl', 'clear_api_key', *TOGGLES):
@@ -152,6 +158,9 @@ def validate_fields(body, *, create=False, probe=False):
         raise MediaServerError('invalid_name')
     if 'url' in body:
         validate_server_url(body['url'])
+    if body.get('external_url'):
+        # Empty clears it. Anything else is held to the rules a server URL is.
+        validate_server_url(body['external_url'])
     if 'path_mappings' in body:
         validate_path_mappings(body['path_mappings'])
     if 'options' in body:
