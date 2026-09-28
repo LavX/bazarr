@@ -1,11 +1,19 @@
 # coding=utf-8
 """Native Silo authentication, library selection and observed file scans."""
 
+import re
+
 from media_servers import resolution
 from media_servers.http import MediaServerError, MediaServerHTTP
 from typing import Callable
 
 from .scans import refresh_file, refresh_library
+
+# Silo anchors a content id on the first provider tag it holds, in a frozen
+# precedence per type. Series ids from Bazarr carry no tmdb, so tvdb and imdb.
+_ANCHORS = {"movie": ("tmdb", "imdb"), "series": ("tvdb", "imdb"), "episode": ("tvdb", "imdb")}
+# Only ids that cannot change the shape of a content id or its URL path.
+_ID_SHAPES = {"tmdb": re.compile(r"[0-9]+"), "tvdb": re.compile(r"[0-9]+"), "imdb": re.compile(r"tt[0-9]+")}
 
 
 class SiloClient:
@@ -64,3 +72,38 @@ class SiloClient:
                         ensure_current: Callable[[], None] | None = None,
                         coalesce: Callable[[str], bool] | None = None) -> dict:
         return refresh_library(self.http, library_id, ensure_current=ensure_current, coalesce=coalesce)
+
+    def catalog_item_exists(self, content_id: str) -> bool:
+        status, _body = self.http.request_result("GET", f"/api/v1/catalog/items/{content_id}")
+        if status == 200:
+            return True
+        if status == 404:
+            return False
+        raise MediaServerError({401: "unauthorized", 403: "forbidden"}.get(
+            status, "server_error" if status >= 500 else "request_rejected"))
+
+    def locate(self, media_type: str, metadata) -> str | None:
+        """The native content id of the item a library row names, confirmed.
+
+        Content ids are natural keys, so every candidate can be built without a
+        search and is confirmed with one GET, in Silo's own precedence. An item
+        Silo never matched carries a hashed local id nothing here can derive,
+        so it is reported as not found.
+        """
+        anchors = _ANCHORS.get(media_type)
+        if anchors is None:
+            raise MediaServerError("internal_error")
+        if not metadata.locatable(media_type):
+            return None
+        values = {"tmdb": metadata.tmdb_id, "tvdb": metadata.tvdb_id, "imdb": metadata.imdb_id}
+        for provider in anchors:
+            value = values[provider]
+            if value in (None, "") or not _ID_SHAPES[provider].fullmatch(str(value)):
+                continue
+            if media_type == "episode":
+                content_id = f"episode-{provider}-{value}-{metadata.season}-{metadata.episode}"
+            else:
+                content_id = f"{media_type}-{provider}-{value}"
+            if self.catalog_item_exists(content_id):
+                return content_id
+        return None
