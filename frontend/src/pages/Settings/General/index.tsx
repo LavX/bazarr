@@ -193,6 +193,11 @@ const SettingsGeneralView: FunctionComponent = () => {
           placeholder="6767"
           settingKey="settings-general-port"
         ></Number>
+        <Message>
+          In Docker, a new port applies when the container restarts, not on a
+          restart from here, and the container side of your port mapping must
+          match it.
+        </Message>
         <Text
           label="Base URL"
           leftSection="/"

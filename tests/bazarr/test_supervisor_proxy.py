@@ -3,8 +3,8 @@ import json
 from pathlib import Path
 
 import pytest
-from aiohttp import web
-from aiohttp.test_utils import make_mocked_request
+from aiohttp import WSMsgType, WSServerHandshakeError, web
+from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 
 
 _SUPERVISOR_PATH = Path(__file__).resolve().parents[2] / "docker" / "supervisor.py"
@@ -133,3 +133,175 @@ auth:
 
     assert defaults["baseUrl"] == "/bazarr"
     assert defaults["apiKey"] == ""
+
+
+@pytest.mark.asyncio
+async def test_the_proxy_follows_the_current_backend_port_and_hides_the_identity_header(monkeypatch):
+    # The backend port is picked per launch, so the proxy has to read it at
+    # request time. The identity header is between the supervisor and its own
+    # backend; a browser has no use for it.
+    async def status(request):
+        return web.json_response(
+            {"data": {"ok": True}},
+            headers={"X-Bazarr-Supervisor-Token": "per-boot-secret", "X-Other": "kept"},
+        )
+
+    backend_app = web.Application()
+    backend_app.router.add_get("/api/system/status", status)
+    backend_runner = web.AppRunner(backend_app, access_log=None)
+    await backend_runner.setup()
+    backend_site = web.TCPSite(backend_runner, "127.0.0.1", 0)
+    await backend_site.start()
+    backend_port = backend_site._server.sockets[0].getsockname()[1]
+
+    monkeypatch.setattr(supervisor, "BACKEND_PORT", backend_port)
+    monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "per-boot-secret")
+
+    front = web.Application()
+    front.router.add_route("*", "/api/{path:.*}", supervisor.proxy_handler)
+    server = TestServer(front)
+    client = TestClient(server)
+    await client.start_server()
+    try:
+        response = await client.get("/api/system/status")
+        body = await response.json()
+    finally:
+        await client.close()
+        await backend_runner.cleanup()
+
+    assert response.status == 200
+    assert body == {"data": {"ok": True}}
+    assert response.headers.get("X-Other") == "kept"
+    assert "X-Bazarr-Supervisor-Token" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_the_proxy_relays_nothing_until_a_backend_port_is_verified(monkeypatch):
+    # Before the readiness poll has seen this supervisor's token on a port,
+    # whatever answers there may be another instance's backend. API calls and
+    # websocket upgrades both get the startup answer instead.
+    monkeypatch.setattr(supervisor, "BACKEND_PORT", None)
+    monkeypatch.setattr(supervisor, "BACKEND_TOKEN", None)
+
+    front = web.Application()
+    front.router.add_route("*", "/api/{path:.*}", supervisor.proxy_handler)
+    client = TestClient(TestServer(front))
+    await client.start_server()
+    try:
+        response = await client.get("/api/system/status")
+        body = await response.json()
+        with pytest.raises(WSServerHandshakeError) as handshake:
+            await client.ws_connect("/api/socket.io/?EIO=4&transport=websocket")
+    finally:
+        await client.close()
+
+    assert response.status == 503
+    assert body == {"error": "Backend is starting up"}
+    assert handshake.value.status == 503
+
+
+# --- every relayed answer is checked, not only the first one ------------------
+#
+# The readiness poll opens the proxy once this supervisor's backend has
+# answered with its token. When that backend dies without closing cleanly,
+# bazarr.py only notices on its next check a few seconds later, and until then
+# the port stays open in the proxy. On a shared network namespace another
+# instance can bind the freed port in that window, so each answer has to carry
+# the token too.
+
+async def _start_backend(headers):
+    async def status(request):
+        return web.json_response({"data": {"bazarr_version": "neighbour"}}, headers=headers)
+
+    async def socket(request):
+        ws = web.WebSocketResponse()
+        ws.headers.update(headers)
+        await ws.prepare(request)
+        async for msg in ws:
+            if msg.type == WSMsgType.TEXT:
+                await ws.send_str("echo:" + msg.data)
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/api/system/status", status)
+    app.router.add_get("/api/socket.io/", socket)
+    runner = web.AppRunner(app, access_log=None)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    return runner, site._server.sockets[0].getsockname()[1]
+
+
+async def _proxy_client():
+    front = web.Application()
+    front.router.add_route("*", "/api/{path:.*}", supervisor.proxy_handler)
+    client = TestClient(TestServer(front))
+    await client.start_server()
+    return client
+
+
+_FOREIGN_ANSWERS = [
+    pytest.param({}, "mine", id="no-token"),
+    pytest.param({"X-Bazarr-Supervisor-Token": "somebody-elses-token"}, "mine", id="another-token"),
+    pytest.param({"X-Bazarr-Supervisor-Token": "mine"}, None, id="no-verified-token"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend_headers, verified_token", _FOREIGN_ANSWERS)
+async def test_the_proxy_refuses_an_answer_that_is_not_from_its_own_backend(
+        monkeypatch, backend_headers, verified_token):
+    runner, port = await _start_backend(backend_headers)
+    monkeypatch.setattr(supervisor, "BACKEND_PORT", port)
+    monkeypatch.setattr(supervisor, "BACKEND_TOKEN", verified_token)
+    client = await _proxy_client()
+    try:
+        response = await client.get("/api/system/status")
+        body = await response.json()
+    finally:
+        await client.close()
+        await runner.cleanup()
+
+    assert response.status == 503
+    assert body == {"error": "Backend is starting up"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend_headers, verified_token", _FOREIGN_ANSWERS)
+async def test_the_proxy_refuses_a_websocket_that_is_not_from_its_own_backend(
+        monkeypatch, backend_headers, verified_token):
+    runner, port = await _start_backend(backend_headers)
+    monkeypatch.setattr(supervisor, "BACKEND_PORT", port)
+    monkeypatch.setattr(supervisor, "BACKEND_TOKEN", verified_token)
+    client = await _proxy_client()
+    try:
+        with pytest.raises(WSServerHandshakeError) as handshake:
+            ws = await client.ws_connect("/api/socket.io/?EIO=4&transport=websocket")
+            # Reached only when the proxy let the socket through.
+            await ws.send_str("hello")
+            await ws.receive(timeout=2)
+            await ws.close()
+    finally:
+        await client.close()
+        await runner.cleanup()
+
+    assert handshake.value.status == 503
+
+
+@pytest.mark.asyncio
+async def test_the_proxy_relays_a_websocket_from_its_own_backend(monkeypatch):
+    runner, port = await _start_backend({"X-Bazarr-Supervisor-Token": "mine"})
+    monkeypatch.setattr(supervisor, "BACKEND_PORT", port)
+    monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "mine")
+    client = await _proxy_client()
+    try:
+        ws = await client.ws_connect("/api/socket.io/?EIO=4&transport=websocket")
+        await ws.send_str("hello")
+        msg = await ws.receive(timeout=5)
+        await ws.close()
+    finally:
+        await client.close()
+        await runner.cleanup()
+
+    assert msg.type == WSMsgType.TEXT
+    assert msg.data == "echo:hello"

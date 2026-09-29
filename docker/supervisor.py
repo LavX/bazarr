@@ -13,6 +13,11 @@ auto-restarts independently.
 
 Usage:
     python supervisor.py [--config /config] [--no-update] [--port 6767]
+
+The listen port is --port when given, otherwise general.port from config.yaml,
+otherwise 6767. The backend gets a free loopback port picked at each launch.
+config.yaml is the one the backend reads: under -c/--config when given,
+otherwise BAZARR_CONFIG_DIR, otherwise the data directory beside the code.
 """
 
 import asyncio
@@ -21,11 +26,14 @@ import html
 import json
 import mimetypes
 import os
+import secrets
 import signal
+import socket
 import sys
+import tempfile
 from pathlib import Path
 
-from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
+from aiohttp import ClientSession, ClientTimeout, TraceConfig, WSMsgType, web
 
 APP_DIR = Path(__file__).resolve().parent.parent
 import yaml  # noqa: E402
@@ -43,11 +51,35 @@ def print(*args, **kwargs):
 # ---------------------------------------------------------------------------
 STATIC_DIR = APP_DIR / "frontend" / "build"
 BACKEND_HOST = "127.0.0.1"
-BACKEND_PORT = 6768  # internal port for bazarr backend
-DEFAULT_PORT = 6767  # external port users connect to
+# The loopback port proxy_handler forwards to. BackendManager picks a free
+# port at every launch, and the readiness poll sets it here only after the
+# backend on it has answered with this supervisor's token. It goes back to
+# None when that backend exits or restarts from inside the app. On a network
+# namespace shared with another instance (network_mode: host, or one VPN
+# container) an unverified port can be that instance's backend.
+BACKEND_PORT = None
+# The token that backend proved itself with. The proxy checks it on every
+# answer it relays as well, since a backend that crashes without closing its
+# listener leaves BACKEND_PORT set until bazarr.py notices, a few seconds on,
+# and on a shared network namespace another instance can bind the port then.
+BACKEND_TOKEN = None
+DEFAULT_PORT = 6767  # external port users connect to, unless general.port says otherwise
+# The port the front listener bound, for the container health check. /tmp is a
+# tmpfs under read_only, and it is private to the container even when the
+# network namespace is shared.
+PORT_FILE = Path("/tmp/bazarr-supervisor.port")
+# The backend stamps this header on its responses with the token the supervisor
+# gave it, so the readiness poll can tell its own backend from a neighbour's.
+TOKEN_HEADER = "X-Bazarr-Supervisor-Token"
 
 # Paths that get proxied to the backend
 PROXY_PREFIXES = ("/api/", "/images/", "/test/", "/system/backup/download/", "/bazarr.log")
+
+
+def _set_backend_port(port, token=None) -> None:
+    global BACKEND_PORT, BACKEND_TOKEN
+    BACKEND_PORT = port
+    BACKEND_TOKEN = token if port is not None else None
 
 
 # ---------------------------------------------------------------------------
@@ -83,25 +115,46 @@ class BackendManager:
         ("SignalR client for", 6),                      # Connecting to Sonarr/Radarr
     ]
 
+    # bazarr.py prints this each time it starts bazarr/main.py. The first time
+    # in a launch is the child the startup poll checks; any later one is an
+    # in-app restart on the same port.
+    _CHILD_START_MARKER = "starting child process"
+    # bazarr/app/server.py prints this line just before it closes its listener.
+    _LISTENER_CLOSE_LINE = "Closing webserver..."
+
     def __init__(self, bazarr_args: list[str]):
         self.bazarr_args = bazarr_args
+        self.token = secrets.token_hex(16)
         self.process = None
+        self.port = None  # the loopback port of the current launch
         self._should_run = True
         self.state = self.STATE_STARTING
         self._stage_index = 0  # index into STAGES
         self._last_exit_code = None
+        self._child_starts = 0
+        self._ready_task = None
 
     async def run(self):
         """Start bazarr as a subprocess, auto-restart on crash."""
         bazarr_py = str(APP_DIR / "bazarr.py")
         env = os.environ.copy()
+        # Loopback only, whatever general.ip says: the supervisor is the only
+        # client, and under host networking '*' published the backend too.
+        env["BAZARR_BACKEND_HOST"] = BACKEND_HOST
+        env["BAZARR_SUPERVISOR_TOKEN"] = self.token
 
         while self._should_run:
             self.state = self.STATE_STARTING
             self._stage_index = 0
-            cmd = [sys.executable, bazarr_py, "--port", str(BACKEND_PORT)] + self.bazarr_args
-            print(f"[supervisor] Starting backend: {' '.join(cmd)}")
+            self._child_starts = 0
+            _set_backend_port(None)
             try:
+                # A fresh port per launch. If something takes it before the
+                # backend binds, the backend exits and the next launch picks
+                # another one.
+                self.port = _pick_backend_port()
+                cmd = [sys.executable, bazarr_py, "--port", str(self.port)] + self.bazarr_args
+                print(f"[supervisor] Starting backend: {' '.join(cmd)}")
                 self.process = await asyncio.create_subprocess_exec(
                     *cmd, env=env,
                     stdout=asyncio.subprocess.PIPE,
@@ -110,8 +163,9 @@ class BackendManager:
                 # Read stdout in background to detect stages and forward to our stdout
                 reader_task = asyncio.create_task(self._read_stdout())
                 # Wait for backend to actually accept connections
-                asyncio.create_task(self._wait_for_ready())
+                self._ready_task = asyncio.create_task(self._wait_for_ready())
                 code = await self.process.wait()
+                _set_backend_port(None)
                 reader_task.cancel()
                 self._last_exit_code = code
                 if self._should_run:
@@ -121,6 +175,7 @@ class BackendManager:
             except asyncio.CancelledError:
                 break
             except Exception as e:
+                _set_backend_port(None)
                 self._last_exit_code = -1
                 if self._should_run:
                     self.state = self.STATE_CRASHED
@@ -137,6 +192,7 @@ class BackendManager:
                 text = line.decode("utf-8", errors="replace").rstrip()
                 # Forward to supervisor's stdout
                 print(text, flush=True)
+                self._watch_for_restart(text)
                 # Check for stage markers (only advance forward)
                 if self.state == self.STATE_STARTING:
                     for marker, idx in self._STAGE_MARKERS:
@@ -146,10 +202,34 @@ class BackendManager:
         except asyncio.CancelledError:
             pass
 
-    async def _wait_for_ready(self):
-        """Poll the backend until it responds, then set state to RUNNING.
+    def _watch_for_restart(self, text: str) -> None:
+        """Hold the proxy while an in-app restart swaps the backend.
 
-        Poll for as long as the backend process is alive and still starting,
+        bazarr.py starts a new bazarr/main.py on the same port while this
+        supervisor's process keeps running, so the port is free from the
+        moment the old listener closes until the new one binds. The proxy
+        waits for the new child to answer with this supervisor's token, as
+        it did at startup. The state stays as it is, so the health check
+        does not count a restart from the UI as an outage.
+        """
+        if text.strip() == self._LISTENER_CLOSE_LINE:
+            _set_backend_port(None)
+        elif self._CHILD_START_MARKER in text:
+            self._child_starts += 1
+            if self._child_starts > 1:
+                _set_backend_port(None)
+                if self._ready_task is None or self._ready_task.done():
+                    self._ready_task = asyncio.create_task(self._wait_for_ready())
+
+    async def _wait_for_ready(self):
+        """Poll the backend until it answers as this supervisor's own, then
+        let the proxy through to it and, at startup, set state to RUNNING.
+
+        Only an answer carrying this supervisor's token counts. Anything else
+        on the port is not our backend, and trusting it would put this UI in
+        front of another instance.
+
+        Poll for as long as the backend process is alive and unverified,
         rather than giving up after a fixed number of attempts. A long first-boot
         migration (e.g. auto-installing providers that build dependency venvs) can
         delay the backend binding past a fixed window; abandoning the poll would
@@ -157,18 +237,28 @@ class BackendManager:
         about to bind. Process exit is handled by run() (which flips state to
         CRASHED); the dead-process guard below also ends this loop.
         """
-        url = f"http://{BACKEND_HOST}:{BACKEND_PORT}/api/system/status"
+        process, port = self.process, self.port
+        url = f"http://{BACKEND_HOST}:{port}/api/system/status"
         timeout = ClientTimeout(total=2, connect=1)
-        while self.state == self.STATE_STARTING:
-            if self.process is None or self.process.returncode is not None:
+
+        def launch_is_current():
+            return process is not None and process.returncode is None and self.process is process
+
+        while self._should_run and BACKEND_PORT is None:
+            if not launch_is_current():
                 return
             try:
                 async with ClientSession(timeout=timeout) as session:
                     async with session.get(url) as resp:
-                        if resp.status < 500:
-                            self.state = self.STATE_RUNNING
-                            self._stage_index = len(self.STAGES) - 1
-                            print("[supervisor] Backend is ready")
+                        if (resp.status < 500 and resp.headers.get(TOKEN_HEADER) == self.token
+                                and launch_is_current()):
+                            _set_backend_port(port, self.token)
+                            if self.state == self.STATE_STARTING:
+                                self.state = self.STATE_RUNNING
+                                self._stage_index = len(self.STAGES) - 1
+                                print("[supervisor] Backend is ready")
+                            else:
+                                print("[supervisor] Backend is ready again after a restart")
                             return
             except Exception:
                 pass
@@ -202,13 +292,34 @@ class BackendManager:
 # ---------------------------------------------------------------------------
 # Frontend server with API proxy
 # ---------------------------------------------------------------------------
+def _backend_starting_response() -> web.Response:
+    return web.json_response(
+        {"error": "Backend is starting up"},
+        status=503,
+    )
+
+
+def _from_own_backend(headers, token, port) -> bool:
+    """Whether an answer carries this supervisor's token. Anything else on the
+    port is not this instance's backend and is never relayed."""
+    if headers is not None and headers.get(TOKEN_HEADER) == token:
+        return True
+    print(f"[supervisor] Refused an answer on port {port} that did not come from this instance's backend")
+    return False
+
+
 async def proxy_handler(request: web.Request) -> web.StreamResponse:
     """Proxy API/image requests to the backend."""
-    target_url = f"http://{BACKEND_HOST}:{BACKEND_PORT}{request.path_qs}"
+    port, token = BACKEND_PORT, BACKEND_TOKEN
+    if port is None or token is None:
+        # No backend has proved itself yet, so nothing is relayed, not even a
+        # websocket upgrade.
+        return _backend_starting_response()
+    target_url = f"http://{BACKEND_HOST}:{port}{request.path_qs}"
 
     # WebSocket upgrade
     if request.headers.get("Upgrade", "").lower() == "websocket":
-        return await _proxy_websocket(request, target_url)
+        return await _proxy_websocket(request, target_url, token, port)
 
     try:
         timeout = ClientTimeout(total=300, connect=5)
@@ -226,7 +337,7 @@ async def proxy_handler(request: web.Request) -> web.StreamResponse:
             forwarded_headers = {k: v for k, v in request.headers.items()
                                  if k.lower() not in _drop}
             # Advertise the CLIENT-facing URL to the backend. Without
-            # these, Flask's request.host is the internal 127.0.0.1:6768
+            # these, Flask's request.host is the internal loopback address
             # and any absolute URL it builds (download links, base_url,
             # etc.) is unreachable from the outside. If an outer reverse
             # proxy already set these, preserve them; otherwise fill
@@ -255,10 +366,13 @@ async def proxy_handler(request: web.Request) -> web.StreamResponse:
                 data=await request.read(),
                 allow_redirects=False,
             ) as resp:
+                if not _from_own_backend(resp.headers, token, port):
+                    return _backend_starting_response()
                 response = web.StreamResponse(
                     status=resp.status,
                     headers={k: v for k, v in resp.headers.items()
-                             if k.lower() not in ("transfer-encoding", "content-encoding", "content-length")},
+                             if k.lower() not in ("transfer-encoding", "content-encoding", "content-length",
+                                                  TOKEN_HEADER.lower())},
                 )
                 await response.prepare(request)
                 async for chunk in resp.content.iter_any():
@@ -266,21 +380,34 @@ async def proxy_handler(request: web.Request) -> web.StreamResponse:
                 await response.write_eof()
                 return response
     except Exception:
-        return web.json_response(
-            {"error": "Backend is starting up"},
-            status=503,
-        )
+        return _backend_starting_response()
 
 
-async def _proxy_websocket(request: web.Request, target_url: str) -> web.WebSocketResponse:
-    """Proxy WebSocket connections to the backend."""
-    ws_client = web.WebSocketResponse()
-    await ws_client.prepare(request)
+async def _proxy_websocket(request: web.Request, target_url: str, token: str,
+                           port: int) -> web.StreamResponse:
+    """Proxy WebSocket connections to the backend.
 
+    The backend's handshake has to carry this supervisor's token before the
+    browser's upgrade is accepted, the same check every HTTP answer gets.
+    aiohttp only hands the handshake response to trace hooks.
+    """
+    handshake = {}
+
+    async def remember_handshake(session, context, params):
+        handshake["headers"] = params.response.headers
+
+    trace = TraceConfig()
+    trace.on_request_end.append(remember_handshake)
+
+    ws_client = None
     ws_url = target_url.replace("http://", "ws://")
     try:
-        async with ClientSession() as session:
+        async with ClientSession(trace_configs=[trace]) as session:
             async with session.ws_connect(ws_url) as ws_server:
+                if not _from_own_backend(handshake.get("headers"), token, port):
+                    return _backend_starting_response()
+                ws_client = web.WebSocketResponse()
+                await ws_client.prepare(request)
 
                 async def forward(src, dst):
                     async for msg in src:
@@ -298,6 +425,10 @@ async def _proxy_websocket(request: web.Request, target_url: str) -> web.WebSock
     except Exception:
         pass
 
+    if ws_client is None:
+        # The backend refused the socket or could not be reached, so the
+        # browser's upgrade was never accepted.
+        return _backend_starting_response()
     return ws_client
 
 
@@ -315,6 +446,164 @@ def _read_bazarr_config(config_dir: str) -> dict:
     except Exception as e:
         print(f"[supervisor] Warning: could not read config: {e}")
     return defaults
+
+
+def _config_yaml(config_dir: str) -> Path:
+    return Path(config_dir) / "config" / "config.yaml"
+
+
+def _split_listen_port(args: list[str]) -> tuple[int | None, list[str]]:
+    """The listen port from the command line, and the arguments without it.
+
+    Takes every spelling the backend's parser accepts for -p/--port ("-p N",
+    "-pN", "-p=N", "--port N", "--port=N" or an abbreviation such as
+    "--po N"), the last one winning. None of them may reach the backend: it is
+    started with its own loopback port first, and a later port option would
+    override that one while the readiness poll waits on it.
+    """
+    port = None
+    rest = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        value = None
+        if arg.startswith("--"):
+            name, has_value, attached = arg.partition("=")
+            # No other backend option starts with "--p".
+            if len(name) >= 3 and "--port".startswith(name):
+                if has_value:
+                    value = attached
+                elif i + 1 < len(args):
+                    value = args[i + 1]
+                    i += 1
+        elif arg.startswith("-p"):
+            if len(arg) > 2:
+                value = arg[3:] if arg[2] == "=" else arg[2:]
+            elif i + 1 < len(args):
+                value = args[i + 1]
+                i += 1
+        if value is None:
+            rest.append(arg)
+        else:
+            port = int(value)
+        i += 1
+    return port, rest
+
+
+def _backend_config_dir(bazarr_args: list[str], environ=os.environ) -> str:
+    """The configuration directory the backend will use with these arguments.
+
+    Follows bazarr/app/get_args.py, so the listen port and index.html come
+    from the same config.yaml the backend reads: the last -c/--config wins,
+    in any form argparse accepts ("-c DIR", "-cDIR", "-c=DIR", "--config DIR",
+    "--config=DIR" or an abbreviation such as "--conf DIR"), then
+    BAZARR_CONFIG_DIR, then the data directory beside the code.
+    """
+    config_dir = None
+    i = 0
+    while i < len(bazarr_args):
+        arg = bazarr_args[i]
+        if arg.startswith("--"):
+            name, has_value, value = arg.partition("=")
+            # "--c" alone is ambiguous to the backend, which also has
+            # --create-db-revision, and refuses to start.
+            if len(name) >= 4 and "--config".startswith(name):
+                if has_value:
+                    config_dir = value
+                elif i + 1 < len(bazarr_args):
+                    config_dir = bazarr_args[i + 1]
+                    i += 1
+        elif arg.startswith("-c"):
+            if len(arg) > 2:
+                config_dir = arg[3:] if arg[2] == "=" else arg[2:]
+            elif i + 1 < len(bazarr_args):
+                config_dir = bazarr_args[i + 1]
+                i += 1
+        i += 1
+    if config_dir is not None:
+        return config_dir
+    return environ.get("BAZARR_CONFIG_DIR", "").strip() or str(APP_DIR / "data")
+
+
+def _configured_listen_port(config_dir: str) -> tuple[int, str]:
+    """general.port from config.yaml, or DEFAULT_PORT when unset or invalid,
+    with "general.port" or "default" to say which.
+
+    Kept apart from _read_bazarr_config, whose result is injected into
+    index.html. Accepts what the backend's validator accepts, an int in
+    1..65535, because the backend resets anything else to 6767.
+    """
+    default = (DEFAULT_PORT, "default")
+    config_path = _config_yaml(config_dir)
+    try:
+        if not config_path.is_file():
+            return default
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f) or {}
+        general = cfg.get("general") if isinstance(cfg, dict) else None
+        value = general.get("port") if isinstance(general, dict) else None
+    except Exception as e:
+        print(f"[supervisor] Warning: could not read the port from config: {e}")
+        return default
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535:
+        print(f"[supervisor] Warning: general.port {value!r} is not a port number, using {DEFAULT_PORT}")
+        return default
+    return value, "general.port"
+
+
+def _bind_failure_message(port: int, source: str, config_dir: str, error: OSError) -> str:
+    """One line that says which setting chose the port and how to recover.
+
+    By the time this prints the UI is unreachable, so this line is the only
+    place an operator learns what to change.
+    """
+    config_path = _config_yaml(config_dir)
+    if source == "--port":
+        origin, fix = "from --port", "Pass a free port to --port, or free this one."
+    elif source == "general.port":
+        origin = f"from general.port in {config_path}"
+        fix = "Change general.port there, or free the port."
+    else:
+        origin = "the default"
+        fix = f"Free the port, or set general.port in {config_path} to a free one."
+    return f"Cannot listen on port {port} ({origin}): {error}. {fix}"
+
+
+def _pick_backend_port() -> int:
+    """A loopback port nothing holds right now, chosen by the kernel."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((BACKEND_HOST, 0))
+        return sock.getsockname()[1]
+
+
+def _write_port_file(port: int, path: Path) -> None:
+    """Record the bound port for the health check. Best effort.
+
+    Written to a temporary file and renamed into place, so the health check
+    never reads a half-written file and a symlink planted at the path is
+    replaced rather than followed. It is left in place on shutdown: the
+    container, and its /tmp, go with the supervisor, and an empty /tmp would
+    send the health check to 6767, which may be another instance.
+    """
+    try:
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(f"{port}\n")
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, path)
+        except BaseException:
+            os.unlink(tmp)
+            raise
+    except Exception as e:
+        consequence = ""
+        if port != DEFAULT_PORT:
+            consequence = (f" Without it the container health check probes port {DEFAULT_PORT}, not {port},"
+                           " and on a shared network that can be another instance. Under read_only,"
+                           " mount a tmpfs on /tmp.")
+        print(f"[supervisor] Warning: could not write {path}: {e}.{consequence}")
 
 
 def _get_index_html(config_dir: str) -> str:
@@ -681,35 +970,35 @@ def create_app(config_dir: str, backend: BackendManager) -> web.Application:
 # ---------------------------------------------------------------------------
 async def main():
     # Parse our args, pass the rest to bazarr
-    port = DEFAULT_PORT
-    config_dir = "/config"
-    bazarr_args = []
-    args = sys.argv[1:]
-    i = 0
-    while i < len(args):
-        if args[i] == "--port" and i + 1 < len(args):
-            port = int(args[i + 1])
-            i += 2
-        elif args[i] == "--config" and i + 1 < len(args):
-            config_dir = args[i + 1]
-            bazarr_args.extend([args[i], args[i + 1]])
-            i += 2
-        else:
-            bazarr_args.append(args[i])
-            i += 1
+    port, bazarr_args = _split_listen_port(sys.argv[1:])
+    config_dir = _backend_config_dir(bazarr_args)
 
-    # Start backend manager
+    if port is None:
+        port, source = _configured_listen_port(config_dir)
+    else:
+        source = "--port"
+
     backend = BackendManager(bazarr_args)
-    backend_task = asyncio.create_task(backend.run())
 
-    # Start frontend server
+    # Bind the front listener before launching the backend, so a port that is
+    # already taken fails here and does not leave a backend starting up.
     app = create_app(config_dir, backend)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    print(f"[supervisor] Frontend serving on http://0.0.0.0:{port}")
-    print(f"[supervisor] Backend will start on internal port {BACKEND_PORT}")
+    try:
+        await site.start()
+    except OSError as e:
+        # No fallback to 6767: on a shared network that is the collision this
+        # listener exists to avoid.
+        print(f"[supervisor] {_bind_failure_message(port, source, config_dir, e)}")
+        await runner.cleanup()
+        return 1
+    origin = "(default)" if source == "default" else f"(from {source})"
+    print(f"[supervisor] Frontend serving on http://0.0.0.0:{port} {origin}")
+    _write_port_file(port, PORT_FILE)
+
+    backend_task = asyncio.create_task(backend.run())
 
     # Wait for shutdown
     stop_event = asyncio.Event()
@@ -727,4 +1016,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.exit(asyncio.run(main()))

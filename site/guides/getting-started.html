@@ -165,7 +165,7 @@
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:6767/_supervisor/status | grep -q '\"running\"'"]
+      test: ["CMD-SHELL", "port=$$(cat /tmp/bazarr-supervisor.port 2>/dev/null || echo 6767); case \"$$port\" in \"\"|*[!0-9]*) exit 1 ;; esac; curl -sf \"http://localhost:$$port/_supervisor/status\" | grep -q '\"running\"'"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -211,6 +211,10 @@
           <button class="copy" data-copy="docker compose up -d" aria-label="Copy docker compose command">Copy</button>
         </div>
         <pre><code>docker compose up -d</code></pre>
+      </div>
+
+      <div class="note">
+        <strong>Changing the port:</strong> Bazarr+ listens on the <strong>Port</strong> under <strong>Settings &gt; General</strong>, 6767 unless you change it. A new port applies when the container restarts, and the container side of the <code>ports</code> mapping has to match it, for example <code>6868:6868</code>. Two instances that share a network, with <code>network_mode: host</code> or behind one VPN container, each need a port of their own.
       </div>
 
       <h2 id="container-hardening">Container hardening</h2>
