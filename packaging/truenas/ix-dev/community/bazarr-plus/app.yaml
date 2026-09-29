@@ -1,0 +1,44 @@
+annotations:
+  min_scale_version: 24.10.2.2
+app_version: 2.7.0
+capabilities:
+  - description: Bazarr+ changes ownership of its persistent config during startup.
+    name: CHOWN
+  - description: Bazarr+ drops to the configured group after startup.
+    name: SETGID
+  - description: Bazarr+ drops to the configured user after startup.
+    name: SETUID
+categories:
+  - media
+changelog_url: https://github.com/LavX/bazarr/releases/tag/v2.7.0
+date_added: '2026-09-28'
+description: Bazarr+ manages subtitles for movies, TV, and sports, with or without Sonarr, Radarr, or Sportarr.
+home: https://lavx.github.io/bazarr/
+host_mounts: []
+icon: https://lavx.github.io/bazarr/screenshots/logo128.png
+keywords:
+  - subtitles
+  - media
+  - movies
+  - television
+  - sports
+lib_version: 2.3.14
+lib_version_hash: 6038f48d2190e05399cd824410204c3eba22568c1150470f3d9f8815a6dd241a
+maintainers:
+  - email: dev@truenas.com
+    name: truenas
+    url: https://www.truenas.com/
+name: bazarr-plus
+run_as_context:
+  - description: Container [bazarr_plus] starts as root to prepare /config, then runs as the configured non-root user and group.
+    gid: 0
+    group_name: Host group is [root] during startup
+    uid: 0
+    user_name: Host user is [root] during startup
+screenshots: []
+sources:
+  - https://github.com/LavX/bazarr
+  - https://ghcr.io/lavx/bazarr
+title: Bazarr+
+train: community
+version: 1.0.0

@@ -1,0 +1,136 @@
+name: Platform packages
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published stable release tag, for example v2.7.0
+        required: true
+        type: string
+  pull_request:
+    paths:
+      - packaging/**
+      - .github/workflows/platform-packages.yml
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: platform-packages-${{ github.event.release.tag_name || inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.event_name != 'release' || (!github.event.release.draft && !github.event.release.prerelease)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout package sources
+        uses: actions/checkout@v7
+        with:
+          # Historical releases can predate this tooling. Record source provenance.
+          ref: ${{ github.event_name == 'release' && github.event.repository.default_branch || github.ref }}
+          persist-credentials: false
+
+      - name: Install package test dependency
+        run: python3 -m pip install PyYAML==6.0.3
+
+      - name: Test generation and bootstrap
+        run: |
+          python3 packaging/test_release.py
+          python3 packaging/stack/test_bootstrap.py
+
+      - name: Prepare offline PR candidate
+        if: github.event_name == 'pull_request'
+        run: |
+          python3 packaging/release.py --tag v2.7.0 \
+            --lock packaging/releases/2.7.0.json \
+            --output "${RUNNER_TEMP}/platform-packages"
+
+      - name: Verify published release and prepare packages
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo 'Expected a final stable tag such as v2.7.0' >&2
+            exit 1
+          fi
+          python3 packaging/release.py --tag "$RELEASE_TAG" \
+            --lock "packaging/releases/${RELEASE_TAG#v}.json" \
+            --output "${RUNNER_TEMP}/platform-packages" --verify-live
+
+      - name: Validate generated package formats
+        env:
+          AppID: bazarr-plus
+          APP_DATA_DIR: /tmp/bazarr-package-app
+          ROOT_FOLDER_HOST: /tmp/bazarr-package-media
+          TZ: UTC
+        run: |
+          set -euo pipefail
+          generated="${RUNNER_TEMP}/platform-packages/rendered"
+          docker compose -f "$generated/stack/compose.yaml" config --quiet
+          docker compose -f "$generated/casaos/Apps/BazarrPlus/docker-compose.yml" config --quiet
+          docker compose -f "$generated/casaos/Apps/BazarrPlusStack/docker-compose.yml" config --quiet
+          docker compose -f "$generated/runtipi/bazarr-plus/docker-compose.yml" config --quiet
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          import yaml
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "platform-packages/rendered"
+          for path in (root / "unraid").rglob("*.xml"):
+              ET.parse(path)
+          json.loads((root / "runtipi/bazarr-plus/config.json").read_text())
+          for name in ("app.yaml", "questions.yaml", "ix_values.yaml"):
+              yaml.safe_load((root / "truenas/ix-dev/community/bazarr-plus" / name).read_text())
+          print("Generated Compose, XML, JSON and TrueNAS metadata parse successfully.")
+          PY
+          (cd "${RUNNER_TEMP}/platform-packages" && sha256sum --check SHA256SUMS)
+
+      - name: Render TrueNAS templates with pinned platform tooling
+        run: |
+          set -euo pipefail
+          validation="${RUNNER_TEMP}/truenas-package-validation"
+          cp -a "${RUNNER_TEMP}/platform-packages/rendered/truenas" "$validation"
+          cp -a packaging/truenas/ix-dev/community/bazarr-plus/templates/test_values \
+            "$validation/ix-dev/community/bazarr-plus/templates/test_values"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import yaml
+
+          app = Path(os.environ["RUNNER_TEMP"]) / "truenas-package-validation/ix-dev/community/bazarr-plus"
+          metadata = yaml.safe_load((app / "app.yaml").read_text())
+          item = {"icon_url": metadata.get("icon", ""), "categories": metadata.get("categories", []),
+                  "screenshots": metadata.get("screenshots", []), "tags": metadata.get("keywords", [])}
+          (app / "item.yaml").write_text(yaml.safe_dump(item))
+          PY
+          for values in basic-values.yaml media-host-paths.yaml; do
+            docker run --rm --network none --user "$(id -u):$(id -g)" -e FAKE_ENV=1 \
+              -v "$validation:/workspace" \
+              ghcr.io/truenas/apps_validation@sha256:3f38cdaa6ed9c54e5c9c43ec15790aabc0028631dd3f0c28129832a69fd1f30c \
+              apps_render_app render --path /workspace/ix-dev/community/bazarr-plus \
+              --values "/workspace/ix-dev/community/bazarr-plus/templates/test_values/$values"
+            docker compose -f "$validation/ix-dev/community/bazarr-plus/templates/rendered/docker-compose.yaml" config --quiet
+          done
+
+      - name: Upload reviewable packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: platform-packages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/platform-packages/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publication boundary
+        run: |
+          echo 'Packages are workflow artifacts, not release assets or catalog listings.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Follow packaging/RELEASING.md after review.' >> "$GITHUB_STEP_SUMMARY"
