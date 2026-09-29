@@ -12,11 +12,13 @@ import importlib.util
 import json
 import pathlib
 import subprocess
+import sys
 
 import pytest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PLANNER = REPO_ROOT / ".github" / "scripts" / "ci_plan.py"
+DOCS_CHECK = REPO_ROOT / ".github" / "scripts" / "docs_check.py"
 
 
 def _load():
@@ -59,6 +61,8 @@ def test_documentation_is_recognised(path):
         "README.md",
         "site/install.sh",
         "site/guides/getting-started.html",
+        # Its backup and restore commands are run by tests/bazarr/test_installer_backup.py.
+        "site/guides/migration.html",
         # Test input and source trees, whatever the file is called.
         "tests/bazarr/fixtures/notes.md",
         "custom_libs/subliminal_patch/providers/README.md",
@@ -96,6 +100,13 @@ def test_one_code_file_runs_everything():
 def test_a_code_only_pull_request_needs_no_docs_job():
     decision = _plan("pull_request", "development", ["bazarr/main.py"])
     assert decision == {"code": True, "docs": False, "python": ["3.14"]}
+
+
+@pytest.mark.parametrize("path", sorted(ci_plan.TESTED_DOCUMENTS))
+def test_a_document_a_test_reads_runs_the_suites_and_the_docs_job(path):
+    """It counts as code for the suites, and it is still prose for the dash check."""
+    decision = _plan("pull_request", "development", [path])
+    assert decision == {"code": True, "docs": True, "python": ["3.14"]}
 
 
 @pytest.mark.parametrize("base", ["development", "feature/stacked-on-something"])
@@ -220,3 +231,28 @@ def test_main_writes_the_outputs_the_workflow_reads(tmp_path, monkeypatch):
     assert written["docs"] == "false"
     assert json.loads(written["python"]) == FULL
     assert "CI plan" in summary.read_text()
+
+
+@pytest.mark.parametrize("path", sorted(ci_plan.TESTED_DOCUMENTS))
+def test_the_docs_check_still_checks_a_document_a_test_reads(tmp_path, monkeypatch, capsys, path):
+    """The Docs job runs .github/scripts/docs_check.py, which picks its files through the planner.
+
+    Every document that schedules the job is scanned, the installer included: it
+    prints what it says to the user, and a job that skipped it would pass unread.
+    """
+    spec = importlib.util.spec_from_file_location("_docs_check_under_test", DOCS_CHECK)
+    docs_check = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(docs_check)
+    document = tmp_path / path
+    document.parent.mkdir(parents=True, exist_ok=True)
+    document.write_text("<p>Before.</p>\n")
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-q", "-m", "one")
+    # Spelled as a code point so this file does not contain the character the check bans.
+    document.write_text("<p>Before.</p>\n<p>Added " + chr(0x2014) + " here.</p>\n")
+    monkeypatch.setattr(docs_check, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["docs_check.py", "--base", "HEAD"])
+
+    assert docs_check.main() == 1
+    assert f"{path}:2: adds an em dash" in capsys.readouterr().out

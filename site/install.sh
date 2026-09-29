@@ -415,11 +415,27 @@ dump_postgres() {
   return 1
 }
 
+# Removes the folder a failed backup was being built in, so no half-finished copy is left
+# to be taken for a backup, and a disk the copy filled is freed. Only do_backup's own
+# backup_<ts>.partial folder qualifies, and sudo is needed because the config was copied
+# with sudo.
+discard_backup() {
+  local partial="$1"
+  [[ "$partial" == */backup_*.partial && -d "$partial" ]] || return 0
+  if sudo rm -rf -- "$partial"; then
+    info "Removed the incomplete backup $partial"
+  else
+    warn "Could not remove the incomplete backup $partial. It is not a usable backup: delete it yourself."
+  fi
+}
+
 # Ends the script after a failed backup step, starting the old containers again first.
+# The incomplete backup goes before they start, so a full disk is not full for them.
 # `start`, not `up -d`: after the upgrade's pull, `up -d` would recreate the services on
 # the new images, which is the upgrade this backup was supposed to protect.
 restart_and_fail() {
-  local compose="$1" why="$2"
+  local compose="$1" why="$2" partial="$3"
+  discard_backup "$partial"
   if run_with_spinner "Starting the old services again" sudo docker compose -f "$compose" start; then
     fatal "$why Nothing was upgraded or reinstalled, and the old services were started again."
   fi
@@ -431,9 +447,13 @@ restart_and_fail() {
 # compose stack is dumped once Bazarr+ has stopped. Any failed step ends the script before
 # anything is upgraded or reinstalled, with the old services started again. The summary
 # names only what was actually backed up.
+# The backup is built in backup_<ts>.partial and only renamed to backup_<ts> once every
+# step has worked, so a folder with the final name is always complete. A failed step
+# removes the .partial folder; a run that is killed leaves it, named for what it is.
 do_backup() {
   local dir="$1" ts; ts=$(date +%Y%m%d_%H%M%S)
   local backup="${dir}/backup_${ts}" compose="${dir}/docker-compose.yml"
+  local partial="${dir}/backup_${ts}.partial"
   local saved=("docker-compose.yml") database_item="" list i config_item
   detect_database "$dir"
   config_item="$CONFIG_DIR"; [[ "$CONFIG_DIR" == "$dir/config" ]] && config_item="./config"
@@ -443,11 +463,16 @@ do_backup() {
     confirm "Continue without a database backup?" \
       || { info "Nothing was upgraded or reinstalled. Back up the database, then run the installer again."; exit 0; }
   fi
+  # A folder already there under either name is not this run's, so it is neither written
+  # into nor removed: backup_<ts> is checked here, and mkdir without -p refuses the other.
+  [[ -e "$backup" ]] && fatal "$backup already exists and was left as it is. Nothing was changed."
   # 0700: the backup holds .env, config.yaml and possibly a database dump, all with secrets.
-  ( umask 077 && mkdir -p "$backup" ) || fatal "Cannot create backup directory: $backup"
-  cp -a "$compose" "$backup/" || fatal "Could not back up docker-compose.yml. Nothing was changed."
+  ( umask 077 && mkdir "$partial" ) || fatal "Cannot create backup directory: $partial. Nothing was changed."
+  cp -a "$compose" "$partial/" \
+    || { discard_backup "$partial"; fatal "Could not back up docker-compose.yml. Nothing was changed."; }
   if [[ -f "$dir/.env" ]]; then
-    cp -a "$dir/.env" "$backup/" || fatal "Could not back up .env. Nothing was changed."
+    cp -a "$dir/.env" "$partial/" \
+      || { discard_backup "$partial"; fatal "Could not back up .env. Nothing was changed."; }
     saved+=(".env")
   fi
 
@@ -455,19 +480,19 @@ do_backup() {
     if (( ${#DB_OTHER_SERVICES[@]} )); then
       run_with_spinner "Stopping Bazarr+ for the database dump" \
         sudo docker compose -f "$compose" stop "${DB_OTHER_SERVICES[@]}" \
-        || restart_and_fail "$compose" "Could not stop the services, so the database was not dumped."
+        || restart_and_fail "$compose" "Could not stop the services, so the database was not dumped." "$partial"
     fi
     run_with_spinner "Dumping the PostgreSQL database" \
-      dump_postgres "$compose" "$DB_SERVICE" "$DB_NAME" "$backup/bazarr_postgres.dump" \
-      || restart_and_fail "$compose" "Dumping the PostgreSQL database failed, so there is no database backup."
+      dump_postgres "$compose" "$DB_SERVICE" "$DB_NAME" "$partial/bazarr_postgres.dump" \
+      || restart_and_fail "$compose" "Dumping the PostgreSQL database failed, so there is no database backup." "$partial"
     database_item="the PostgreSQL database (bazarr_postgres.dump)"
   fi
 
   if [[ -d "$CONFIG_DIR" ]]; then
     run_with_spinner "Stopping services for the backup" sudo docker compose -f "$compose" stop \
-      || restart_and_fail "$compose" "Could not stop the services, so $config_item was not backed up."
-    run_with_spinner "Backing up $config_item" sudo cp -a "$CONFIG_DIR" "$backup/config" \
-      || restart_and_fail "$compose" "Backing up $config_item failed."
+      || restart_and_fail "$compose" "Could not stop the services, so $config_item was not backed up." "$partial"
+    run_with_spinner "Backing up $config_item" sudo cp -a "$CONFIG_DIR" "$partial/config" \
+      || restart_and_fail "$compose" "Backing up $config_item failed." "$partial"
     saved+=("$config_item")
     if [[ "$DB_ENGINE" == sqlite && -f "$CONFIG_DIR/db/bazarr.db" ]]; then
       database_item="the SQLite database inside it"
@@ -476,6 +501,11 @@ do_backup() {
     warn "The config directory $CONFIG_DIR does not exist, so it was not backed up."
   fi
   [[ -n "$database_item" ]] && saved+=("$database_item")
+  # Checked again: a backup_<ts> that appeared since would take this folder inside it.
+  # -T makes one that appears between the check and the rename a failure too.
+  if [[ -e "$backup" ]] || ! mv -T -- "$partial" "$backup"; then
+    restart_and_fail "$compose" "Could not rename $partial to $backup." "$partial"
+  fi
 
   list="${saved[0]}"
   for (( i = 1; i < ${#saved[@]}; i++ )); do
