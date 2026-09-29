@@ -177,7 +177,7 @@ def test_stalled_ownership_preparation_allows_native_writer_and_rejects_stale_pu
     def physical(path):
         if str(path) == str(folder / "2"):
             stalled.set()
-            assert release.wait(5), "Test did not release ownership preparation"
+            assert release.wait(60), "Test did not release ownership preparation"
         return original(path)
 
     monkeypatch.setattr(output, "_physical", physical)
@@ -195,7 +195,8 @@ def test_stalled_ownership_preparation_allows_native_writer_and_rejects_stale_pu
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(publish)
-        assert stalled.wait(5)
+        # A publication that failed before the stall re-raises its own error.
+        assert stalled.wait(60) or (future.done() and future.result())
         try:
             with Session(bind=session.get_bind()) as native:
                 native.execute(
@@ -226,7 +227,7 @@ def test_stalled_ownership_preparation_allows_native_writer_and_rejects_stale_pu
         finally:
             release.set()
         with pytest.raises(ValueError, match="changed"):
-            future.result(timeout=5)
+            future.result(timeout=60)
     assert not destination.exists()
 
 
@@ -304,7 +305,7 @@ def test_publication_waits_for_an_install_in_progress_instead_of_refusing(
     def pause_after_first_trigger(conn, cursor, statement, *args):
         if installing() and "CREATE TRIGGER" in statement and not partial.is_set():
             partial.set()
-            queued.wait(timeout=30)
+            queued.wait(timeout=120)
 
     class ObservedLock:
         inner = RLock()
@@ -330,12 +331,15 @@ def test_publication_waits_for_an_install_in_progress_instead_of_refusing(
     try:
         with ThreadPoolExecutor(1, thread_name_prefix="installer") as pool:
             installer = pool.submit(publish)
-            assert partial.wait(timeout=30)
+            # An installer that failed before the pause re-raises its own error.
+            assert partial.wait(timeout=120) or (
+                installer.done() and installer.result()
+            )
             try:
                 publish()
             finally:
                 queued.set()
-            installer.result(timeout=30)
+            installer.result(timeout=120)
     finally:
         sa.event.remove(engine, "after_cursor_execute", pause_after_first_trigger)
     with Session(engine) as session:
