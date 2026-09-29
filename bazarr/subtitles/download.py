@@ -57,6 +57,13 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
         return None
 
     if video:
+        # The caller's value wins over the database refiner's, which reverses
+        # the path through the global mapping and can miss the row of an
+        # instance with a mapping of its own. A provider failure reports the
+        # video's ids, and an exclusion the provider demands is recorded under
+        # the instance they name.
+        if arr_instance_id is not None:
+            video.arr_instance_id = arr_instance_id
         minimum_score = settings.general.minimum_score
         minimum_score_movie = settings.general.minimum_score_movie
         min_score, max_score, scores = _get_scores(media_type, minimum_score_movie, minimum_score)

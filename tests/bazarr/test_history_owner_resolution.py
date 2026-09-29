@@ -1,7 +1,9 @@
 # coding=utf-8
 """History ownership must survive missing media rows (LavX/bazarr#404)."""
 
+import ast
 import logging
+import pathlib
 from datetime import datetime
 from functools import partial
 from types import SimpleNamespace
@@ -225,3 +227,33 @@ def test_explicit_owner_keeps_history_fields_and_scoped_refs(history, history_se
     assert row.upgradedFromId == 9
     assert before <= row.timestamp <= datetime.now()
     assert history.events == [{'type': f'{history.kind}-history'}]
+
+
+def _called_name(node):
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def test_every_history_write_names_the_instance_it_is_for():
+    """Without an instance the item is looked up by its upstream id in every
+    instance of the kind. Two instances can share one, and the entry then goes
+    to the default's item, or to another instance's item with the same id
+    once its own is gone with its library. Every caller knows the instance it
+    works for, so it passes it. Asserted over the source: a missing keyword is
+    visible in the call itself, and the writers are too many to reach each
+    one behaviourally."""
+    bazarr = pathlib.Path(__file__).resolve().parents[2] / 'bazarr'
+    offenders = []
+    for source in sorted(bazarr.rglob('*.py')):
+        tree = ast.parse(source.read_text(), filename=str(source))
+        offenders.extend(
+            f'{source.relative_to(bazarr.parent)}:{node.lineno}' for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and _called_name(node) in {'history_log', 'history_log_movie'}
+            and not any(keyword.arg == 'arr_instance_id' for keyword in node.keywords))
+
+    assert not offenders, 'these history writes name no instance:\n  ' + '\n  '.join(offenders)

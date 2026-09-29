@@ -127,6 +127,21 @@ def test_partial_translation_writes_ordered_cues_and_records_warning(service, ev
     assert 'malformed response' in service.partial_error
 
 
+@pytest.mark.parametrize('media_type', ['episode', 'movie'])
+def test_the_history_names_the_instance_the_translation_is_for(service, events, monkeypatch, media_type):
+    """Without it the entry went to whichever instance's item has the same
+    upstream id: the default's, or another instance's once the item's own
+    instance was deleted with its library while the translation ran."""
+    service.media_type = media_type
+    service.radarr_id = 3 if media_type == 'movie' else None
+    service.arr_instance_id = 4
+    _response(monkeypatch, 'completed', [{'position': index, 'line': line}
+                                       for index, line in enumerate(['Egy', 'Kettő', 'Három'])])
+
+    assert service.translate(job_id='bazarr-job') == service.dest_srt_file
+    assert [entry.get('arr_instance_id') for entry in events.history] == [4]
+
+
 @pytest.mark.parametrize('lines', [
     [], [{'position': 0}], [{'position': -1, 'line': 'Invalid'}],
     [{'position': 3, 'line': 'Invalid'}], [{'position': True, 'line': 'Invalid'}],

@@ -308,10 +308,17 @@ describe("deleting the last instance of a kind", () => {
     vi.mocked(showNotification).mockClear();
   });
 
+  const refusals = {
+    sync_in_progress:
+      "A library sync of this instance is running or queued. Wait for it to finish, then delete the instance again.",
+    job_in_progress:
+      "A subtitle job for this instance is running. Wait for it to finish, then delete the instance again.",
+  };
+
   function serve(
     kind: "sonarr" | "radarr",
     withSibling: boolean,
-    syncRunning = false,
+    busy?: keyof typeof refusals,
   ) {
     let saved = [
       makeInstance({ id: 7, kind, name: "Only", display_name: "Only" }),
@@ -330,13 +337,9 @@ describe("deleting the last instance of a kind", () => {
       }),
       http.get("/api/system/arr-instances", () => HttpResponse.json(saved)),
       http.delete("/api/system/arr-instances/7", () => {
-        if (syncRunning) {
+        if (busy) {
           return HttpResponse.json(
-            {
-              error: "sync_in_progress",
-              message:
-                "A library sync of this instance is running or queued. Wait for it to finish, then delete the instance again.",
-            },
+            { error: busy, message: refusals[busy] },
             { status: 409 },
           );
         }
@@ -406,7 +409,7 @@ describe("deleting the last instance of a kind", () => {
 
   it("keeps an instance with no library while its sync refuses a plain delete", async () => {
     const user = userEvent.setup();
-    serve("sonarr", true, true);
+    serve("sonarr", true, "sync_in_progress");
     customRender(<SettingsConnectionsView />);
 
     const modal = await openDelete(user);
@@ -428,6 +431,27 @@ describe("deleting the last instance of a kind", () => {
     expect(
       within(dialog).getByRole("button", { name: "Delete instance" }),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "More actions for Only" }),
+    ).toBeInTheDocument();
+  });
+
+  it("says a running subtitle job is why a plain delete waits", async () => {
+    const user = userEvent.setup();
+    serve("sonarr", true, "job_in_progress");
+    customRender(<SettingsConnectionsView />);
+
+    const modal = await openDelete(user);
+    await user.click(
+      within(modal).getByRole("button", { name: "Delete instance" }),
+    );
+
+    expect(
+      await screen.findByText(/A subtitle job for this instance is running/),
+    ).toBeInTheDocument();
+    const dialog = screen.getByRole("dialog", { name: "Delete instance" });
+    expect(dialog).toHaveTextContent("Subtitle job in progress");
+    expect(dialog).not.toHaveTextContent("Library sync in progress");
     expect(
       screen.getByRole("button", { name: "More actions for Only" }),
     ).toBeInTheDocument();

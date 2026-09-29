@@ -700,6 +700,20 @@ def search(monkeypatch):
                            module=download_module, monkeypatch=monkeypatch)
 
 
+@pytest.mark.parametrize("refined", [None, 5])
+def test_the_searched_video_names_the_instance_the_search_is_for(search, refined):
+    """A provider failure reports the video's ids, and an exclusion a provider
+    demands is recorded under the instance they name. The refiner can miss the
+    row of an instance with path mappings of its own, so the video carries the
+    instance the caller searches for."""
+    search.video.arr_instance_id = refined
+
+    search.run()
+
+    (video,) = search.calls.searches[0]["videos"]
+    assert video.arr_instance_id == 2
+
+
 def test_the_search_hands_its_rejected_candidates_to_the_detector(search):
     reports = []
     search.monkeypatch.setattr(search.module, "report_release_type_mismatch",
