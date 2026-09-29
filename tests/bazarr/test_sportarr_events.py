@@ -2,6 +2,9 @@
 
 import copy
 import json
+import os
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -1257,3 +1260,181 @@ def test_recording_index_races_do_not_starve_later_files(library, monkeypatch, t
     monkeypatch.setattr(hash_index, 'recording_hash', original_hash)
     hash_index.refresh_recording_index(1, session=session)
     assert session.get(TableSportsFileIndex, 1, populate_existing=True).moviehash is not None
+
+
+def _recordings(session, tmp_path, count):
+    from app.database import TableArrInstances, TableSportsEvents
+
+    folder = tmp_path / 'media'
+    folder.mkdir()
+    for number in range(1, count + 1):
+        (folder / f'file-{number}.mkv').write_bytes(bytes([number]) + b'\0' * 131071)
+        session.execute(sa.insert(TableSportsEvents).values(id=number, arr_instance_id=1, league_id=51,
+            sportarrEventId=number, file_id=number, path=f'/sports/file-{number}.mkv', title='Recording'))
+    session.execute(sa.update(TableArrInstances).where(TableArrInstances.id == 1).values(
+        path_mappings=json.dumps([['/sports', str(folder)]])))
+
+
+def _queued_sync(owner, order):
+    """A sync thread for ``owner`` that records when it gets the lock."""
+    from sportarr.connection import owner_sync_lock
+
+    started, errors = threading.Event(), []
+
+    def run():
+        started.set()
+        try:
+            with owner_sync_lock(owner, timeout=5):
+                order.append('sync')
+        except Exception as exc:
+            errors.append(exc)
+
+    return threading.Thread(target=run, daemon=True), started, errors
+
+
+def _until_queued(owner, seconds=2):
+    """Give a sync time to miss its first acquire and queue for the lock.
+
+    Without waiter counts there is nothing to see, so the wait runs out, well
+    inside the sync's own 5 s timeout, and the order check fails instead.
+    """
+    from sportarr import connection
+
+    deadline = time.monotonic() + seconds
+    while not getattr(connection, '_waiting', {}).get(owner) and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
+def _watchdog(seconds=10):
+    """Cancel a stuck scheduled scan, so a regression fails instead of hanging the run."""
+    cancel = threading.Event()
+    timer = threading.Timer(seconds, cancel.set)
+    timer.daemon = True
+    timer.start()
+    return cancel, timer
+
+
+def test_a_scheduled_index_steps_aside_for_a_waiting_sync_and_resumes(library, monkeypatch, tmp_path):
+    """A startup sync waited behind the recording index for up to half an hour.
+
+    The scheduled index held the owner lock across its whole scan, so a sync
+    that queued behind it only ran once every recording had been hashed. It
+    now finishes the recording in hand, lets the sync through and resumes
+    after it, without hashing the finished recording again.
+    """
+    from app.config import settings
+    from app.database import TableSportsFileIndex
+    from sportarr import connection, hash_index
+
+    session, _ = library
+    _recordings(session, tmp_path, 3)
+    monkeypatch.setattr(settings.general, 'use_sportarr', True)
+    original = hash_index.recording_hash
+    order = []
+    sync, started, errors = _queued_sync(1, order)
+
+    def hashing(path, stamp, cancel=None):
+        order.append(os.path.basename(path))
+        if not started.is_set():
+            sync.start()
+            assert started.wait(5)
+            _until_queued(1)
+        return original(path, stamp, cancel)
+
+    refresh, refreshed = hash_index.refresh_recording, []
+
+    def counting(event_id, *args, **kwargs):
+        refreshed.append(event_id)
+        return refresh(event_id, *args, **kwargs)
+
+    lock, queued_on_entry = hash_index.owner_sync_lock, []
+
+    def entering(owner, *args, **kwargs):
+        queued_on_entry.append(bool(getattr(connection, '_waiting', {}).get(owner)))
+        return lock(owner, *args, **kwargs)
+
+    monkeypatch.setattr(hash_index, 'recording_hash', hashing)
+    monkeypatch.setattr(hash_index, 'refresh_recording', counting)
+    monkeypatch.setattr(hash_index, 'owner_sync_lock', entering)
+    cancel, timer = _watchdog()
+    hash_index.refresh_recording_index(1, session=session, cancel=cancel, scheduled=True)
+    timer.cancel()
+    sync.join(10)
+    assert not errors
+    assert order == ['file-1.mkv', 'sync', 'file-2.mkv', 'file-3.mkv']
+    # The scan resumes after the recording it finished, not from the start.
+    assert refreshed == [1, 2, 3]
+    # It takes the lock back once, after the sync has it. Grabbing it while the
+    # sync is still queued would only make the scan step aside again, over and
+    # over, until the sync happened to win the race.
+    assert queued_on_entry == [False, False]
+    for number in (1, 2, 3):
+        assert session.get(TableSportsFileIndex, number, populate_existing=True).moviehash is not None
+
+
+def test_a_scheduled_index_waiting_behind_a_sync_does_not_count_as_one(library, monkeypatch, tmp_path):
+    """Syncs step ahead of the index, never the other way round."""
+    from app.config import settings
+    from app.database import TableSportsFileIndex
+    from sportarr import hash_index
+    from sportarr.connection import owner_sync_lock, sync_waiting
+
+    session, _ = library
+    _recordings(session, tmp_path, 1)
+    monkeypatch.setattr(settings.general, 'use_sportarr', True)
+    errors, seen = [], []
+
+    def index():
+        try:
+            hash_index.refresh_recording_index(1, session=session, scheduled=True)
+        except Exception as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=index, daemon=True)
+    with owner_sync_lock(1):
+        worker.start()
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            seen.append(sync_waiting(1))
+            time.sleep(0.02)
+    worker.join(10)
+    assert not errors
+    assert seen and not any(seen)
+    assert session.get(TableSportsFileIndex, 1, populate_existing=True).moviehash is not None
+
+
+def test_the_index_a_sync_runs_for_its_own_events_does_not_step_aside(library, monkeypatch, tmp_path):
+    """Only the scheduled scan yields.
+
+    The index a sync runs for the events it just wrote takes the owner lock
+    re-entrantly. Stepping aside there could not release the lock, and it
+    would then wait forever for the queued sync it was yielding to.
+    """
+    from app.database import TableSportsFileIndex
+    from sportarr import hash_index
+    from sportarr.connection import owner_sync_lock, sync_waiting
+
+    session, _ = library
+    _recordings(session, tmp_path, 3)
+    original = hash_index.recording_hash
+    order = []
+    sync, started, errors = _queued_sync(1, order)
+
+    def hashing(path, stamp, cancel=None):
+        order.append(os.path.basename(path))
+        return original(path, stamp, cancel)
+
+    monkeypatch.setattr(hash_index, 'recording_hash', hashing)
+    with owner_sync_lock(1):
+        sync.start()
+        deadline = time.monotonic() + 5
+        while not sync_waiting(1):
+            assert time.monotonic() < deadline, 'the second sync never queued'
+            time.sleep(0.01)
+        hash_index.refresh_recording_index(1, [1, 2, 3], session=session)
+        order.append('indexed')
+    sync.join(10)
+    assert not errors
+    assert order == ['file-1.mkv', 'file-2.mkv', 'file-3.mkv', 'indexed', 'sync']
+    for number in (1, 2, 3):
+        assert session.get(TableSportsFileIndex, number, populate_existing=True).moviehash is not None

@@ -8,6 +8,7 @@ shape fails here rather than in someone's install.
 
 import inspect
 import threading
+import time
 
 import pytest
 import sqlalchemy as sa
@@ -58,6 +59,150 @@ def test_the_owner_sync_lock_wait_can_be_bounded():
     # is done the same call succeeds.
     with owner_sync_lock(owner, timeout=5):
         pass
+
+
+def _until(predicate, seconds=5):
+    deadline = time.monotonic() + seconds
+    while not predicate():
+        assert time.monotonic() < deadline, "the lock never reached the expected state"
+        time.sleep(0.01)
+
+
+def _hold(owner):
+    """Hold the owner lock on another thread until the returned event is set."""
+    from sportarr.connection import owner_sync_lock
+
+    holding, release = threading.Event(), threading.Event()
+
+    def hold():
+        with owner_sync_lock(owner):
+            holding.set()
+            release.wait(10)
+
+    thread = threading.Thread(target=hold, daemon=True)
+    thread.start()
+    assert holding.wait(5), "the holder never acquired the lock"
+    return release, thread
+
+
+def test_a_waiting_sync_is_counted_until_it_holds_the_lock():
+    """A long background holder can only step aside for a sync it can see.
+
+    The scheduled recording index held the owner lock for its whole scan and
+    nothing told it that a sync had queued behind it, so a startup sync waited
+    until every recording was hashed. A waiter counts from its first failed
+    acquire until it holds the lock, and each waiter counts separately.
+    """
+    from sportarr import connection
+    from sportarr.connection import owner_sync_lock, sync_waiting
+
+    owner = 987655
+    release, holder = _hold(owner)
+    assert not sync_waiting(owner)
+    entered, first_done = [], threading.Event()
+
+    def sync(name, done=None):
+        with owner_sync_lock(owner, timeout=10):
+            entered.append(name)
+            if done is not None:
+                done.wait(10)
+
+    first = threading.Thread(target=sync, args=('first', first_done), daemon=True)
+    first.start()
+    _until(lambda: sync_waiting(owner))
+    second = threading.Thread(target=sync, args=('second',), daemon=True)
+    second.start()
+    _until(lambda: connection._waiting.get(owner) == 2)
+    try:
+        release.set()
+        holder.join(10)
+        _until(lambda: entered == ['first'])
+        # The first sync holds the lock now; the second is still queued.
+        assert sync_waiting(owner)
+    finally:
+        release.set()
+        first_done.set()
+        first.join(10)
+        second.join(10)
+    assert entered == ['first', 'second']
+    assert not sync_waiting(owner)
+    assert owner not in connection._waiting
+
+
+def test_a_waiter_that_gives_up_or_does_not_count_leaves_no_trace():
+    """Cancelled and timed-out waits stop counting, and the index's own wait never counts.
+
+    A stale count would leave the index waiting for a sync that is no longer
+    there. A counted index wait would let one scan make another step aside,
+    and the two would keep yielding to each other.
+    """
+    from sportarr.connection import SportsSyncBusy, owner_sync_lock, sync_waiting
+
+    owner = 987656
+    release, holder = _hold(owner)
+    try:
+        with pytest.raises(SportsSyncBusy):
+            with owner_sync_lock(owner, timeout=0.3):
+                pytest.fail("acquired a lock another thread was holding")
+        assert not sync_waiting(owner)
+
+        cancel = threading.Event()
+        timer = threading.Timer(0.3, cancel.set)
+        timer.start()
+        with pytest.raises(ValueError, match='stopped'):
+            with owner_sync_lock(owner, cancel=cancel):
+                pytest.fail("acquired a lock another thread was holding")
+        timer.join(5)
+        assert not sync_waiting(owner)
+
+        outcome, seen = [], []
+
+        def quiet():
+            try:
+                with owner_sync_lock(owner, timeout=0.5, count_waiter=False):
+                    outcome.append('entered')
+            except SportsSyncBusy:
+                outcome.append('busy')
+
+        waiter = threading.Thread(target=quiet, daemon=True)
+        waiter.start()
+        while waiter.is_alive():
+            seen.append(sync_waiting(owner))
+            time.sleep(0.02)
+        assert outcome == ['busy']
+        assert seen and not any(seen)
+    finally:
+        release.set()
+        holder.join(10)
+
+
+def test_the_log_tells_the_index_wait_apart_from_a_sync_wait(caplog):
+    """A wait line followed by a long gap has to say who was waiting.
+
+    The scheduled recording index waits for the owner lock again when it
+    resumes after stepping aside, and that wait lasts as long as the sync. With
+    one shared line, a sync stuck behind the index and the index queued behind
+    a sync read the same in the log.
+    """
+    import logging
+    from sportarr.connection import SportsSyncBusy, owner_sync_lock
+
+    owner = 987657
+    release, holder = _hold(owner)
+    try:
+        with caplog.at_level(logging.DEBUG):
+            for count_waiter in (True, False):
+                with pytest.raises(SportsSyncBusy):
+                    with owner_sync_lock(owner, timeout=0.3, count_waiter=count_waiter):
+                        pytest.fail("acquired a lock another thread was holding")
+    finally:
+        release.set()
+        holder.join(10)
+    waits = [record.getMessage() for record in caplog.records if 'sync lock' in record.getMessage()]
+    assert waits == [
+        f'Waiting for the Sportarr sync lock on instance {owner}.',
+        f'The Sports recording index is waiting for the Sportarr sync lock on instance {owner}.',
+    ]
 
 
 def test_sports_sync_busy_is_not_a_value_error():

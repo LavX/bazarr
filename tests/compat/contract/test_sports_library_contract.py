@@ -1194,12 +1194,16 @@ def test_recording_races_keep_hub_pending_until_a_stable_scan(library, monkeypat
     assert_stream(library, link(download(library, token, file_id(response))))
 
 
+@pytest.mark.parametrize('scheduled', [False, True], ids=['after-sync', 'scheduled'])
 @pytest.mark.parametrize('failure', ['connection', 'mapping', 'disabled', 'metadata', 'reassigned', 'cancel'])
-def test_recording_races_do_not_hide_owner_or_cancellation_failures(library, monkeypatch, failure):
+def test_recording_races_do_not_hide_owner_or_cancellation_failures(library, monkeypatch, failure, scheduled):
     from threading import Event
+    from app.config import settings
     from app.database import delete, update, TableArrInstances, TableSportsEvents, TableSportsFileIndex
     from sportarr import hash_index
 
+    # The scheduled scan checks that local serving is still on before each step.
+    monkeypatch.setattr(settings.compat_endpoint, 'enabled', True)
     early = library.root / '101/Alpha.Final.2026.mkv'
     early.write_bytes(b'\x01' + b'\0' * 131071)
     original = hash_index.recording_hash
@@ -1226,8 +1230,72 @@ def test_recording_races_do_not_hide_owner_or_cancellation_failures(library, mon
 
     monkeypatch.setattr(hash_index, 'recording_hash', changing)
     with pytest.raises(ValueError):
-        hash_index.refresh_recording_index(101, session=library.db, cancel=cancel)
+        hash_index.refresh_recording_index(101, session=library.db, cancel=cancel, scheduled=scheduled)
     assert len(calls) == 1
     indexed = library.db.get(TableSportsFileIndex, 1011, populate_existing=True)
     assert indexed is None if failure == 'reassigned' else indexed.moviehash == HASH
     assert library.db.get(TableSportsFileIndex, 2021, populate_existing=True).moviehash == HASH
+
+
+def test_an_owner_disabled_while_the_index_stepped_aside_still_stops_it(library, monkeypatch):
+    """The scheduled index lets a waiting sync through between recordings.
+
+    It resumes under the same checks it started with: a sync that disables the
+    owner in that gap ends the scan, and the recording indexed before the gap
+    keeps its fresh hash while the one after it is never read.
+    """
+    import threading
+    import time
+    from app.config import settings
+    from app.database import insert, update, TableArrInstances, TableSportsEvents, TableSportsFileIndex
+    from sportarr import connection, hash_index
+    from sportarr.connection import owner_sync_lock
+
+    monkeypatch.setattr(settings.compat_endpoint, 'enabled', True)
+    early = library.root / '101/Alpha.Final.2026.mkv'
+    early.write_bytes(b'\x01' + b'\0' * 131071)
+    (library.root / '101/Later.mkv').write_bytes(b'\x02' + b'\0' * 131071)
+    library.db.execute(insert(TableSportsEvents).values(id=1012, arr_instance_id=101, league_id=101,
+        sportarrEventId=52, file_id=78, path='/recordings/Later.mkv', title='Later'))
+    original = hash_index.recording_hash
+    calls, started, errors = [], threading.Event(), []
+
+    def disable():
+        started.set()
+        try:
+            with owner_sync_lock(101, timeout=5):
+                library.db.execute(update(TableArrInstances).where(TableArrInstances.id == 101).values(enabled=0))
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            library.db.remove()
+
+    sync = threading.Thread(target=disable, daemon=True)
+
+    def hashing(path, stamp, cancel=None):
+        calls.append(os.path.basename(path))
+        if not started.is_set():
+            sync.start()
+            assert started.wait(5)
+            # Until the sync misses its first 0.1 s acquire and queues. Without
+            # waiter counts the wait runs out, inside the sync's 5 s timeout,
+            # and the scan never stops for it.
+            deadline = time.monotonic() + 2
+            while not getattr(connection, '_waiting', {}).get(101) and time.monotonic() < deadline:
+                time.sleep(0.01)
+        return original(path, stamp, cancel)
+
+    monkeypatch.setattr(hash_index, 'recording_hash', hashing)
+    # A stuck scan is cancelled, which fails the match below instead of hanging.
+    watchdog = threading.Event()
+    timer = threading.Timer(10, watchdog.set)
+    timer.daemon = True
+    timer.start()
+    with pytest.raises(ValueError, match='Enabled Sportarr instance not found'):
+        hash_index.refresh_recording_index(101, session=library.db, cancel=watchdog, scheduled=True)
+    timer.cancel()
+    sync.join(10)
+    assert not errors
+    assert calls == ['Alpha.Final.2026.mkv']
+    assert library.db.get(TableSportsFileIndex, 1011, populate_existing=True).moviehash == OTHER_HASH
+    assert library.db.get(TableSportsFileIndex, 1012, populate_existing=True) is None
