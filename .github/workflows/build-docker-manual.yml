@@ -290,12 +290,17 @@ jobs:
           tags: ${{ steps.version.outputs.tags }}
           labels: |
             org.opencontainers.image.title=Bazarr+
-            org.opencontainers.image.description=Bazarr+ - enhanced subtitle management
+            org.opencontainers.image.description=Self-hosted subtitles for movies, TV and sports, with or without Sonarr, Radarr or Sportarr. Search on demand, or automate downloads, sync and AI translation. No tracking.
             org.opencontainers.image.vendor=LavX
             org.opencontainers.image.version=${{ steps.version.outputs.fork_version }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.created=${{ steps.version.outputs.build_date }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.documentation=https://lavx.github.io/bazarr/guides/getting-started.html
+          annotations: |
+            index,manifest:org.opencontainers.image.description=Self-hosted subtitles for movies, TV and sports, with or without Sonarr, Radarr or Sportarr. Search on demand, or automate downloads, sync and AI translation. No tracking.
+            index,manifest:org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            index,manifest:org.opencontainers.image.documentation=https://lavx.github.io/bazarr/guides/getting-started.html
           cache-from: |
             type=gha,scope=bazarr-deps
             type=gha,scope=bazarr-main
