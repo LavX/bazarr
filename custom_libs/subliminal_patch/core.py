@@ -311,24 +311,42 @@ def _adapt_throttle_callback(callback):
     return legacy
 
 
-def _detach_chained_error(exc, error):
-    """Cut every link to error out of the exception chain a traceback of exc
-    would print, leaving the rest of the chain in place."""
+def _format_callback_failure(exc, error):
+    """Render the traceback of exc and of the exceptions chained to it, with
+    their types and raise sites but none of their messages or notes.
+
+    exc was raised by a throttle callback that was handed error, and the
+    callback may have copied error's text into its own message, a note, an
+    exception group or a wrapping error (a database error quoting the row it
+    failed to write, say). No message in the chain can be trusted to be free of
+    it, so none is printed. The chain stops at error, which the pool's handlers
+    log where they want it.
+    """
+    chain = []
     seen = set()
-    link = exc
+    link, connector = exc, None
     while link is not None and link is not error and id(link) not in seen:
         seen.add(id(link))
-        if link.__cause__ is error:
-            # Also sets __suppress_context__, as `raise ... from` does.
-            link.__cause__ = None
-        if link.__context__ is error:
-            link.__suppress_context__ = True
+        chain.append((link, connector))
         if link.__cause__ is not None:
-            link = link.__cause__
+            link, connector = link.__cause__, "The above exception was the direct cause of the following exception:"
         elif not link.__suppress_context__:
-            link = link.__context__
+            link, connector = link.__context__, "During handling of the above exception, another exception occurred:"
         else:
             link = None
+
+    lines = []
+    for link, connector in reversed(chain):
+        lines.append("Traceback (most recent call last):\n")
+        lines.extend(traceback.format_tb(link.__traceback__))
+        exc_type = type(link)
+        module = exc_type.__module__
+        qualname = exc_type.__qualname__
+        lines.append((qualname if module in ("builtins", "__main__") else f"{module}.{qualname}") + "\n")
+        if connector:
+            lines.append(f"\n{connector}\n\n")
+    return "".join(lines)
+
 
 class SZProviderPool(ProviderPool):
     @staticmethod
@@ -496,14 +514,10 @@ class SZProviderPool(ProviderPool):
                 logger.error('Throttle callback failed for provider %r by re-raising the %s it was recording',
                              name, type(error).__name__)
                 return
-            # The callback ran while that error was being handled, so Python
-            # chained it to the callback's exception and the traceback would
-            # print it in full; cut it out there too. The handlers that want
-            # it logged have already done so. The callback's exception ends
-            # here, so nothing else sees the change.
-            _detach_chained_error(callback_error, error)
-            logger.exception('Throttle callback failed for provider %r while recording %s',
-                             name, type(error).__name__)
+            # No exc_info: a formatter would print every message in the
+            # callback's chain, and any of them can quote the provider error.
+            logger.error('Throttle callback failed for provider %r while recording %s, messages left out:\n%s',
+                         name, type(error).__name__, _format_callback_failure(callback_error, error).rstrip())
 
     def retire_provider(self, name):
         """Terminate an initialized provider without throttling its name.

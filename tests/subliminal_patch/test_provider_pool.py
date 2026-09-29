@@ -267,7 +267,10 @@ def test_raising_throttle_callback_keeps_the_search_failure(monkeypatch, caplog,
     assert len(searches) == 1
     failures = _callback_failures(caplog)
     assert len(failures) == 1
-    assert isinstance(failures[0].exc_info[1], TypeError)
+    # The record carries no exc_info, since a formatter would print the
+    # messages from it; the callback's exception type is in the text instead.
+    assert failures[0].exc_info is None
+    assert failures[0].getMessage().rstrip().endswith("TypeError")
 
 
 def test_raising_throttle_callback_still_discards_the_failed_search_provider(monkeypatch):
@@ -324,42 +327,65 @@ def test_raising_throttle_callback_keeps_the_download_outcome(monkeypatch, caplo
         assert subtitle.download_error is error
 
 
+# Kept out of the raising lines, which the callback failure log prints, so
+# these texts can only reach the log as exception messages.
+_CALLBACK_MESSAGE = "callback fixture failure"
+_INNER_MESSAGE = "inner fixture failure"
+
+
 def _raise_plain(exc):
-    raise _CallbackBroke("callback fixture failure")
+    raise _CallbackBroke(_CALLBACK_MESSAGE)
 
 
 def _raise_while_handling_its_own_error(exc):
     try:
-        raise KeyError("inner fixture failure")
+        raise KeyError(_INNER_MESSAGE)
     except KeyError:
-        raise _CallbackBroke("callback fixture failure")
+        raise _CallbackBroke(_CALLBACK_MESSAGE)
 
 
 def _raise_from_its_own_error(exc):
     # The shape of a database error wrapped by its driver layer.
     try:
-        raise KeyError("inner fixture failure")
+        raise KeyError(_INNER_MESSAGE)
     except KeyError as inner:
-        raise _CallbackBroke("callback fixture failure") from inner
+        raise _CallbackBroke(_CALLBACK_MESSAGE) from inner
 
 
 def _raise_from_the_provider_error(exc):
-    raise _CallbackBroke("callback fixture failure") from exc
+    raise _CallbackBroke(_CALLBACK_MESSAGE) from exc
+
+
+def _raise_with_the_provider_message(exc):
+    raise _CallbackBroke(f"recording failed: {exc}")
+
+
+def _raise_with_the_provider_message_in_a_note(exc):
+    callback_error = _CallbackBroke(_CALLBACK_MESSAGE)
+    callback_error.add_note(f"while recording {exc}")
+    raise callback_error
+
+
+def _raise_a_group_holding_the_provider_error(exc):
+    raise ExceptionGroup(_CALLBACK_MESSAGE, [exc])
 
 
 def _reraise_the_provider_error(exc):
     raise exc
 
 
-@pytest.mark.parametrize("raise_from_callback, callback_logged, inner_logged", [
-    (_raise_plain, True, False),
-    (_raise_while_handling_its_own_error, True, True),
-    (_raise_from_its_own_error, True, True),
-    (_raise_from_the_provider_error, True, False),
-    (_reraise_the_provider_error, False, False),
+@pytest.mark.parametrize("raise_from_callback, logged_types", [
+    (_raise_plain, ["_CallbackBroke"]),
+    (_raise_while_handling_its_own_error, ["KeyError", "_CallbackBroke"]),
+    (_raise_from_its_own_error, ["KeyError", "_CallbackBroke"]),
+    (_raise_from_the_provider_error, ["_CallbackBroke"]),
+    (_raise_with_the_provider_message, ["_CallbackBroke"]),
+    (_raise_with_the_provider_message_in_a_note, ["_CallbackBroke"]),
+    (_raise_a_group_holding_the_provider_error, ["ExceptionGroup"]),
+    (_reraise_the_provider_error, []),
 ])
 def test_raising_throttle_callback_log_leaves_out_the_provider_message(monkeypatch, caplog, raise_from_callback,
-                                                                        callback_logged, inner_logged):
+                                                                        logged_types):
     from types import SimpleNamespace
 
     # The connection error handler names only the provider, so the callback
@@ -381,10 +407,20 @@ def test_raising_throttle_callback_log_leaves_out_the_provider_message(monkeypat
     with caplog.at_level("ERROR", logger=core.logger.name):
         assert pool.download_subtitle(subtitle) is False
 
-    assert len(_callback_failures(caplog)) == 1
+    failures = _callback_failures(caplog)
+    assert len(failures) == 1
+    assert failures[0].exc_info is None
     assert "fixture-secret" not in caplog.text
-    assert ("callback fixture failure" in caplog.text) is callback_logged
-    assert ("inner fixture failure" in caplog.text) is inner_logged
+    # A callback can copy the provider message into its own, so no message
+    # in the callback's chain is logged; its types and raise sites are.
+    assert _CALLBACK_MESSAGE not in caplog.text
+    assert _INNER_MESSAGE not in caplog.text
+    logged = failures[0].getMessage()
+    assert "ConnectionError" in logged
+    for name in logged_types:
+        assert name in logged
+    if logged_types:
+        assert f"in {raise_from_callback.__name__}" in logged
     # The provider error the pool keeps is left as it was raised.
     assert subtitle.download_error is error
     assert str(error) == "https://example.invalid/sub?token=fixture-secret"
