@@ -876,8 +876,9 @@ class JobsQueue:
                 payload["progress_message"] = job.progress_message
             event_stream(type='jobs', action='update', payload=payload)
 
-            logging.debug(f"Running job {job.job_name} (id {job.job_id}): "  # noqa: G004
-                          f"{job.module}.{job.func}({job.args}, {job.kwargs})")
+            # Never the arguments: they can hold API keys or a whole uploaded
+            # package, and an f-string formatted them even with debug off.
+            logging.debug("Running job %s (id %s): %s.%s", job.job_name, job.job_id, job.module, job.func)
             
             # Use import lock to prevent deadlocks
             with self._import_lock:
