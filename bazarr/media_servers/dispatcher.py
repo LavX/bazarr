@@ -17,8 +17,8 @@ _OPERATIONS = {"download", "upload", "delete", "sync", "translate", "combine", "
 _ERROR_CODES = {
     "configuration_changed", "connection_disabled", "connection_error", "internal_error", "invalid_response",
     "invalid_url", "invalid_verify_ssl", "missing_credentials", "unauthorized", "forbidden", "not_found",
-    "request_rejected", "redirect_denied", "response_too_large", "timeout", "tls_error", "item_missing",
-    "item_ambiguous", "path_invalid", "mapping_invalid", "mapping_missing", "mapping_ambiguous",
+    "request_rejected", "server_error", "redirect_denied", "response_too_large", "timeout", "tls_error",
+    "item_missing", "item_ambiguous", "path_invalid", "mapping_invalid", "mapping_missing", "mapping_ambiguous",
     "library_missing", "library_invalid", "sidecar_unsupported", "observation_incomplete", "stream_disconnected",
     "scan_incomplete", "scan_failed", "scan_cancelled", "queue_overflow",
 }

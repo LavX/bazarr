@@ -79,10 +79,13 @@ def refresh_libraries(instance_id):
     A rung that answers nothing for one scope is that scope holding no such
     library, not a failure, so it is skipped and the rest still run. A scope the
     server refuses does not stop the rest either: it is counted, and the run
-    fails only when nothing was accepted. A server that cannot be reached, or
-    will not accept the credentials, stops the run at once.
+    fails only when nothing was accepted. A scope that fails without a known
+    refusal code is a fault, and is counted the same way, as internal_error. A
+    server that cannot be reached, or will not accept the credentials, stops
+    the run at once.
     """
-    from .dispatcher import _client, _coalescer, get_native_configuration, running_dispatcher
+    from .dispatcher import (_ERROR_CODES, _client, _coalescer, _refusal_code,
+                             get_native_configuration, running_dispatcher)
     configuration = get_native_configuration()
     revision, snapshot, _changing = configuration.read(instance_id)
     if not supports_library_refresh(snapshot.kind):
@@ -108,31 +111,37 @@ def refresh_libraries(instance_id):
     dropped = workers.dropped(instance_id) if workers else 0
     requested = 0
     refused = []
-    complete = True
     with _client(snapshot.kind, snapshot) as client:
         for scope, call in scopes:
             try:
                 if call(client, ensure_current=guard, coalesce=coalesce) is not None:
                     requested += 1
-            except MediaServerError as error:
+            except Exception as error:
+                # Classified by the code, not the class: see _refusal_code.
+                code = _refusal_code(error)
+                if code not in _ERROR_CODES:
+                    # Nothing the server said: a response the client did not
+                    # expect, or a bug, including one whose exception carries
+                    # a code of its own, as SQLAlchemy's do. It still failed,
+                    # so it is counted, and the traceback is what finds it.
+                    logging.warning('BAZARR could not rescan %s on a media server destination: '
+                                    'unexpected error', scope, exc_info=True)
+                    refused.append(MediaServerError('internal_error'))
+                    continue
                 # A destination edited, switched off or deleted under the run is
                 # not one scope's refusal either, so nothing more is asked of it.
-                if error.code in _SERVER_WIDE or error.code == 'configuration_changed':
+                if code in _SERVER_WIDE or code == 'configuration_changed':
                     raise
                 logging.warning('BAZARR could not rescan %s on a media server destination: %s',
-                                scope, error.code)
+                                scope, code)
                 refused.append(error)
-            except Exception:
-                complete = False
-                logging.debug('BAZARR could not rescan %s on a media server destination',
-                              scope, exc_info=True)
     if not requested:
         if refused:
             raise refused[0]
         # Every scope answered nothing, so the server holds no library the
         # instance is pointed at. Saying so beats reporting a scan that ran.
         raise MediaServerError('library_missing')
-    if complete and not refused and workers:
+    if not refused and workers:
         # Every library the destination is scoped to was just asked to rescan,
         # which covers the mutations the full queue dropped before this began.
         workers.covered(instance_id, dropped)
