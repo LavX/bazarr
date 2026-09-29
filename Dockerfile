@@ -64,12 +64,13 @@ ARG BUILD_DATE
 ARG VCS_REF
 
 LABEL org.opencontainers.image.title="Bazarr+" \
-      org.opencontainers.image.description="Bazarr+ - enhanced subtitle management" \
+      org.opencontainers.image.description="Self-hosted subtitles for movies, TV and sports, with or without Sonarr, Radarr or Sportarr. Search on demand, or automate downloads, sync and AI translation. No tracking." \
       org.opencontainers.image.version="${BAZARR_VERSION}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.url="https://github.com/LavX/bazarr" \
       org.opencontainers.image.source="https://github.com/LavX/bazarr" \
+      org.opencontainers.image.documentation="https://lavx.github.io/bazarr/guides/getting-started.html" \
       org.opencontainers.image.vendor="LavX" \
       org.opencontainers.image.licenses="GPL-3.0"
 
