@@ -15,6 +15,7 @@ from subtitles.upload import manual_upload_subtitle
 from subtitles.mass_download.series import episode_download_specific_subtitles
 from subtitles.download import generate_subtitles  # noqa: F401
 from subtitles.tools.delete import delete_subtitles
+from subtitles.tools.delete_ownership import SubtitleDeletionError, resolve_subtitle_for_deletion
 from subtitles.tools.combine.main import try_combine_for_video
 from app.jobs_queue import jobs_queue  # noqa: F401
 from app.event_handler import event_stream  # noqa: F401
@@ -131,41 +132,34 @@ class EpisodesSubtitles(Resource):
     @api_ns_episodes_subtitles.doc(parser=delete_request_parser)
     @api_ns_episodes_subtitles.response(204, 'Success')
     @api_ns_episodes_subtitles.response(401, 'Not Authenticated')
+    @api_ns_episodes_subtitles.response(403, "Subtitle is not one of this episode's current subtitles")
     @api_ns_episodes_subtitles.response(404, 'Episode not found')
+    @api_ns_episodes_subtitles.response(409, 'Owning instance is ambiguous, or ownership changed before deletion')
     @api_ns_episodes_subtitles.response(500, 'Subtitles file not found or permission issue.')
     def delete(self):
         """Delete an episode subtitles"""
         args = self.delete_request_parser.parse_args()
-        sonarrSeriesId = args.get('seriesid')
         sonarrEpisodeId = args.get('episodeid')
-        arr_instance_id = args.get('arr_instance_id')
-        episodeInfo = database.execute(scoped(
-            select(TableEpisodes.path)
-            .where(TableEpisodes.sonarrEpisodeId == sonarrEpisodeId),
-            TableEpisodes.arr_instance_id, arr_instance_id)) \
-            .first()
 
-        if not episodeInfo:
-            return 'Episode not found', 404
+        try:
+            # The path only selects one of this episode's indexed subtitles; the
+            # file removed is that entry, mapped through the owning instance.
+            target = resolve_subtitle_for_deletion('series', sonarrEpisodeId, args.get('path'),
+                                                   args.get('arr_instance_id'), session=database)
+            removed = delete_subtitles(media_type='series',
+                                       language=args.get('language'),
+                                       forced=args.get('forced'),
+                                       hi=args.get('hi'),
+                                       media_path=target.media_path,
+                                       subtitles_path=target.stored_path,
+                                       sonarr_series_id=target.row.sonarrSeriesId,
+                                       sonarr_episode_id=sonarrEpisodeId,
+                                       arr_instance_id=target.row.arr_instance_id,
+                                       revalidate=target.revalidate)
+        except SubtitleDeletionError as exc:
+            return str(exc), exc.status
 
-        episodePath = path_mappings.path_replace(episodeInfo.path)
-
-        language = args.get('language')
-        forced = args.get('forced')
-        hi = args.get('hi')
-        subtitlesPath = args.get('path')
-
-        subtitlesPath = path_mappings.path_replace_reverse(subtitlesPath)
-
-        if delete_subtitles(media_type='series',
-                            language=language,
-                            forced=forced,
-                            hi=hi,
-                            media_path=episodePath,
-                            subtitles_path=subtitlesPath,
-                            sonarr_series_id=sonarrSeriesId,
-                            sonarr_episode_id=sonarrEpisodeId,
-                            arr_instance_id=arr_instance_id):
+        if removed:
             return '', 204
         else:
             return 'Subtitles file not found or permission issue.', 500

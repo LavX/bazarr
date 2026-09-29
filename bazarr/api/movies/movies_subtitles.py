@@ -15,6 +15,7 @@ from subtitles.upload import manual_upload_subtitle
 from subtitles.mass_download.movies import movie_download_specific_subtitles
 from subtitles.download import generate_subtitles  # noqa: F401
 from subtitles.tools.delete import delete_subtitles
+from subtitles.tools.delete_ownership import SubtitleDeletionError, resolve_subtitle_for_deletion
 from subtitles.tools.combine.main import try_combine_for_video
 from app.event_handler import event_stream  # noqa: F401
 from app.config import settings  # noqa: F401
@@ -127,39 +128,33 @@ class MoviesSubtitles(Resource):
     @api_ns_movies_subtitles.doc(parser=delete_request_parser)
     @api_ns_movies_subtitles.response(204, 'Success')
     @api_ns_movies_subtitles.response(401, 'Not Authenticated')
+    @api_ns_movies_subtitles.response(403, "Subtitle is not one of this movie's current subtitles")
     @api_ns_movies_subtitles.response(404, 'Movie not found')
+    @api_ns_movies_subtitles.response(409, 'Owning instance is ambiguous, or ownership changed before deletion')
     @api_ns_movies_subtitles.response(500, 'Subtitles file not found or permission issue.')
     def delete(self):
         """Delete a movie subtitles"""
         args = self.delete_request_parser.parse_args()
         radarrId = args.get('radarrid')
-        arr_instance_id = args.get('arr_instance_id')
-        movieInfo = database.execute(scoped(
-            select(TableMovies.path)
-            .where(TableMovies.radarrId == radarrId),
-            TableMovies.arr_instance_id, arr_instance_id)) \
-            .first()
 
-        if not movieInfo:
-            return 'Movie not found', 404
+        try:
+            # The path only selects one of this movie's indexed subtitles; the
+            # file removed is that entry, mapped through the owning instance.
+            target = resolve_subtitle_for_deletion('movie', radarrId, args.get('path'),
+                                                   args.get('arr_instance_id'), session=database)
+            removed = delete_subtitles(media_type='movie',
+                                       language=args.get('language'),
+                                       forced=args.get('forced'),
+                                       hi=args.get('hi'),
+                                       media_path=target.media_path,
+                                       subtitles_path=target.stored_path,
+                                       radarr_id=radarrId,
+                                       arr_instance_id=target.row.arr_instance_id,
+                                       revalidate=target.revalidate)
+        except SubtitleDeletionError as exc:
+            return str(exc), exc.status
 
-        moviePath = path_mappings.path_replace_movie(movieInfo.path)
-
-        language = args.get('language')
-        forced = args.get('forced')
-        hi = args.get('hi')
-        subtitlesPath = args.get('path')
-
-        subtitlesPath = path_mappings.path_replace_reverse_movie(subtitlesPath)
-
-        if delete_subtitles(media_type='movie',
-                            language=language,
-                            forced=forced,
-                            hi=hi,
-                            media_path=moviePath,
-                            subtitles_path=subtitlesPath,
-                            radarr_id=radarrId,
-                            arr_instance_id=arr_instance_id):
+        if removed:
             return '', 204
         else:
             return 'Subtitles file not found or permission issue.', 500

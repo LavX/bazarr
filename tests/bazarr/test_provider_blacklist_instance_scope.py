@@ -225,16 +225,26 @@ def test_movie_blacklist_post_keeps_instance_scope(schema_session, tmp_path, mon
         path=str(movie_path),
         title="Movie",
         tmdbId="1001",
+        subtitles="[['en', '/subs/movie.en.srt', 10]]",
     ))
     schema_session.flush()
 
+    from subtitles.tools import delete_ownership
+
     delete_calls = []
     download_calls = []
+    logged = []
     monkeypatch.setattr(blacklist, "database", schema_session)
-    monkeypatch.setattr(blacklist.path_mappings, "path_replace_movie", lambda value: value)
-    monkeypatch.setattr(blacklist, "blacklist_log_movie", lambda **kwargs: None)
+    monkeypatch.setattr(delete_ownership.path_mappings, "path_replace_instance", lambda value, *args: value)
+    monkeypatch.setattr(blacklist, "blacklist_log_movie", lambda **kwargs: logged.append(kwargs))
     monkeypatch.setattr(blacklist, "event_stream", lambda **kwargs: None)
-    monkeypatch.setattr(blacklist, "delete_subtitles", lambda **kwargs: delete_calls.append(kwargs) or True)
+
+    def delete_with_callback(**kwargs):
+        delete_calls.append(kwargs)
+        kwargs["after_delete"]()
+        return True
+
+    monkeypatch.setattr(blacklist, "delete_subtitles", delete_with_callback)
     monkeypatch.setattr(blacklist, "movies_download_subtitles", lambda *args, **kwargs: download_calls.append((args, kwargs)))
 
     app = Flask(__name__)
@@ -247,6 +257,7 @@ def test_movie_blacklist_post_keeps_instance_scope(schema_session, tmp_path, mon
 
     assert result == ("", 200)
     assert delete_calls[0]["arr_instance_id"] == 9
+    assert [call["arr_instance_id"] for call in logged] == [9]
     assert download_calls == [((3,), {"arr_instance_id": 9})]
 
 
@@ -275,16 +286,26 @@ def test_episode_blacklist_post_keeps_instance_scope(schema_session, tmp_path, m
         title="Pilot",
         season=1,
         episode=1,
+        subtitles="[['en', '/subs/episode.en.srt', 10]]",
     ))
     schema_session.flush()
 
+    from subtitles.tools import delete_ownership
+
     delete_calls = []
     download_calls = []
+    logged = []
     monkeypatch.setattr(blacklist, "database", schema_session)
-    monkeypatch.setattr(blacklist.path_mappings, "path_replace", lambda value: value)
-    monkeypatch.setattr(blacklist, "blacklist_log", lambda **kwargs: None)
+    monkeypatch.setattr(delete_ownership.path_mappings, "path_replace_instance", lambda value, *args: value)
+    monkeypatch.setattr(blacklist, "blacklist_log", lambda **kwargs: logged.append(kwargs))
     monkeypatch.setattr(blacklist, "event_stream", lambda **kwargs: None)
-    monkeypatch.setattr(blacklist, "delete_subtitles", lambda **kwargs: delete_calls.append(kwargs) or True)
+
+    def delete_with_callback(**kwargs):
+        delete_calls.append(kwargs)
+        kwargs["after_delete"]()
+        return True
+
+    monkeypatch.setattr(blacklist, "delete_subtitles", delete_with_callback)
     monkeypatch.setattr(blacklist, "episode_download_subtitles", lambda *args, **kwargs: download_calls.append((args, kwargs)))
 
     app = Flask(__name__)
@@ -297,4 +318,5 @@ def test_episode_blacklist_post_keeps_instance_scope(schema_session, tmp_path, m
 
     assert result == ("", 200)
     assert delete_calls[0]["arr_instance_id"] == 10
+    assert [call["arr_instance_id"] for call in logged] == [10]
     assert download_calls == [((), {"no": 5, "arr_instance_id": 10})]
