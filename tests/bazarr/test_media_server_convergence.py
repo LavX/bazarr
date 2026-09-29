@@ -1202,6 +1202,29 @@ def test_a_refusal_is_read_by_its_code_not_its_class(monkeypatch):
     assert client.calls == [('movie',)]
 
 
+def test_a_code_that_is_not_a_refusal_is_still_a_fault(monkeypatch, caplog):
+    """Only a code the dispatcher knows is a refusal. Other exceptions carry
+    codes of their own, as SQLAlchemy's do, and one of those was counted as a
+    refusal and logged without the traceback that finds the fault."""
+    import logging
+    from media_servers.http import MediaServerError
+    client = _Rescanner('plex', answers={('movie',): _ForeignRefusal('e3q8'),
+                                         ('episode',): {'status': 'requested'}})
+    with caplog.at_level(logging.WARNING):
+        assert _rescan(monkeypatch, snapshot('plex'), client) == {'requested': 1, 'failed': 1}
+    record, = [record for record in caplog.records if 'movie' in record.getMessage()]
+    assert record.levelno == logging.WARNING
+    assert 'unexpected error' in record.getMessage()
+    assert record.exc_info and record.exc_info[0] is _ForeignRefusal
+
+    client = _Rescanner('plex', answers={('movie',): _ForeignRefusal('e3q8'),
+                                         ('episode',): _ForeignRefusal('e3q8')})
+    with pytest.raises(MediaServerError) as error:
+        _rescan(monkeypatch, snapshot('plex'), client)
+    assert error.value.code == 'internal_error'
+    assert client.calls == [('movie',), ('episode',), ('sports',)]
+
+
 # --- The real OAuth handlers, against a faked Plex ---------------------------
 
 @pytest.fixture

@@ -61,12 +61,35 @@ describe("Plex WebhookSelector", () => {
       screen.queryByText(/Webhooks require a Plex Pass subscription/),
     ).not.toBeInTheDocument();
   });
+
+  // plex.tv can still refuse an account the listing read as entitled. The
+  // client shows the server's Plex Pass reason for the 403 on its own.
+  it("shows one toast when plex.tv refuses Add for want of Plex Pass", async () => {
+    const reason =
+      'Plex Pass subscription required. The "webhooks" feature requires Plex Pass.';
+    server.use(
+      http.post("/api/plex/webhook/create", () =>
+        HttpResponse.json({ error: reason }, { status: 403 }),
+      ),
+    );
+    plexAccount({ active: true, has_webhooks_feature: true, plan: "lifetime" });
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole("button", { name: "Add" }));
+
+    expect(await screen.findByText(reason)).toBeInTheDocument();
+    expect(
+      screen.queryByText("Failed to create webhook"),
+    ).not.toBeInTheDocument();
+  });
 });
 
 // Bazarr holds no Plex token, while the panel still reads a signed-in account
 // from before. The webhook calls answer that with a 409 and its own code. The
 // app shell sends the reader to the login page on any 401, so these run the
 // panel inside that shell and watch the Bazarr session, not only the panel.
+// Read again, the account answers as signed out, as the server does once the
+// token is gone.
 describe("Plex WebhookSelector without a Plex sign-in", () => {
   const PAGE = "/settings/connections";
   const signInRequired = () =>
@@ -118,7 +141,11 @@ describe("Plex WebhookSelector without a Plex sign-in", () => {
       http.get("/api/plex/oauth/validate", () => {
         validations += 1;
         return HttpResponse.json({
-          data: { valid: true, auth_method: "oauth", username: "someone" },
+          data: {
+            valid: validations === 1,
+            auth_method: "oauth",
+            username: "someone",
+          },
         });
       }),
     );
@@ -128,6 +155,25 @@ describe("Plex WebhookSelector without a Plex sign-in", () => {
     window.removeEventListener("app-auth-changed", onAuth);
     localStorage.removeItem(WHATS_NEW_SEEN_KEY);
   });
+
+  // Once the account above reads as signed out, the panel still says why.
+  async function expectSignedOut() {
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryData<Plex.ValidationResult>([
+          QueryKeys.Plex,
+          "auth",
+          "validate",
+        ])?.valid,
+      ).toBe(false),
+    );
+    expect(
+      screen.getByText(/Sign in to Plex above to manage webhooks/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Enable Plex OAuth above/),
+    ).not.toBeInTheDocument();
+  }
 
   function renderPage() {
     const router = createMemoryRouter(
@@ -170,6 +216,7 @@ describe("Plex WebhookSelector without a Plex sign-in", () => {
     ).not.toBeInTheDocument();
     // The panel above read a sign-in that is gone, so it reads it again.
     await waitFor(() => expect(validations).toBeGreaterThan(1));
+    await expectSignedOut();
     expect(sessionChanges).not.toContain(false);
     expect(router.state.location.pathname).toBe(PAGE);
   });
@@ -208,6 +255,7 @@ describe("Plex WebhookSelector without a Plex sign-in", () => {
     expect(
       await screen.findByText(/Sign in to Plex above to manage webhooks/),
     ).toBeInTheDocument();
+    await expectSignedOut();
     expect(sessionChanges).not.toContain(false);
     expect(router.state.location.pathname).toBe(PAGE);
   });

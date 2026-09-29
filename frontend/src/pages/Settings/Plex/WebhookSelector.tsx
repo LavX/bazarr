@@ -1,6 +1,7 @@
 import { FunctionComponent, useState } from "react";
 import { Alert, Button, Group, Select, Stack, Text } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
+import { isAxiosError } from "axios";
 import {
   isPlexSignInRequired,
   usePlexAuthValidationQuery,
@@ -12,6 +13,11 @@ import { useInstanceName } from "@/apis/hooks/site";
 import styles from "@/pages/Settings/Plex/WebhookSelector.module.scss";
 
 const signInMessage = "Sign in to Plex to manage webhooks.";
+
+// The client already shows the server's reason for any 403, which here is the
+// Plex Pass notice, so a vaguer second toast would only repeat it.
+const isShownRefusal = (error: unknown) =>
+  isAxiosError(error) && error.response?.status === 403;
 
 export type WebhookSelectorProps = {
   label: string;
@@ -87,6 +93,9 @@ const WebhookSelector: FunctionComponent<WebhookSelectorProps> = (props) => {
       });
       await refetch();
     } catch (err) {
+      if (isShownRefusal(err)) {
+        return;
+      }
       notifications.show({
         title: "Error",
         message: isPlexSignInRequired(err)
@@ -111,6 +120,9 @@ const WebhookSelector: FunctionComponent<WebhookSelectorProps> = (props) => {
       }
       await refetch();
     } catch (err) {
+      if (isShownRefusal(err)) {
+        return;
+      }
       notifications.show({
         title: "Error",
         message: isPlexSignInRequired(err)
@@ -120,6 +132,21 @@ const WebhookSelector: FunctionComponent<WebhookSelectorProps> = (props) => {
       });
     }
   };
+
+  // Ahead of the signed-out state: the refusal makes the account above read
+  // as signed out too, and this says why the webhooks went with it.
+  if (signInRequired) {
+    return (
+      <Stack gap="xs" className={styles.webhookSelector}>
+        <Text fw={500} className={styles.labelText}>
+          {label}
+        </Text>
+        <Alert color="brand" variant="light" className={styles.alertMessage}>
+          Plex is signed out. Sign in to Plex above to manage webhooks.
+        </Alert>
+      </Stack>
+    );
+  }
 
   if (!isAuthenticated) {
     return (
@@ -144,19 +171,6 @@ const WebhookSelector: FunctionComponent<WebhookSelectorProps> = (props) => {
           disabled
           className={styles.loadingField}
         />
-      </Stack>
-    );
-  }
-
-  if (signInRequired) {
-    return (
-      <Stack gap="xs" className={styles.webhookSelector}>
-        <Text fw={500} className={styles.labelText}>
-          {label}
-        </Text>
-        <Alert color="brand" variant="light" className={styles.alertMessage}>
-          Plex is signed out. Sign in to Plex above to manage webhooks.
-        </Alert>
       </Stack>
     );
   }
