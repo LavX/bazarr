@@ -2,7 +2,9 @@
 """The release_type_mismatches table lands on SQLite and on PostgreSQL alike.
 
 PostgreSQL is a first-class Bazarr+ backend, so the migration is exercised
-against a real server (skipped only when none is reachable; CI provides one).
+against a real server (skipped only when BAZARR_PG_TEST_URL is unset and the
+dev container does not answer; with the variable set, as CI sets it, an unusable
+server or a missing driver fails).
 Both backends are also run twice: an upgrade that has already been applied must
 be a no-op, never a failure.
 """
@@ -21,7 +23,7 @@ _MIGRATION_PATH = os.path.join(
 
 _PG_URL = os.environ.get(
     "BAZARR_PG_TEST_URL",
-    "postgresql+psycopg://postgres:test@127.0.0.1:55432/bazarr")
+    "postgresql+psycopg2://postgres:test@127.0.0.1:55432/bazarr")
 
 
 def _load_migration():
@@ -73,8 +75,10 @@ def pg_engine():
         engine = sa.create_engine(_PG_URL)
         with engine.connect() as conn:
             conn.execute(sa.text("SELECT 1"))
-    except Exception:
-        pytest.skip(f"Postgres not reachable at {_PG_URL}")
+    except Exception as exc:  # driver missing or server unreachable
+        if os.environ.get("BAZARR_PG_TEST_URL"):
+            pytest.fail(f"BAZARR_PG_TEST_URL is set, but PostgreSQL is not usable: {exc}")
+        pytest.skip(f"Postgres not reachable at the default URL: {exc}")
     with engine.begin() as conn:
         conn.execute(sa.text("DROP SCHEMA public CASCADE; CREATE SCHEMA public"))
     try:

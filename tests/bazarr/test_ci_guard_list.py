@@ -138,10 +138,10 @@ workflow can reach, and no amount of parsing gets to them:
   for that reason, not overlooked.
 - A test file that skips itself. Coverage here means a path was handed to
   pytest, and a module-level skip, or a fixture calling pytest.skip, leaves that
-  true while nothing is asserted. The one case the workflow says enough about to
-  check is encoded in _REQUIRES_SERVICE: the Postgres cutover suite skips unless
-  the job really defines the service it connects to. Nothing catches the next
-  one automatically.
+  true while nothing is asserted. The cases the workflow says enough about to
+  check are encoded in _REQUIRES_SERVICE: five Postgres suites skip when the
+  job leaves BAZARR_PG_TEST_URL unset, and fail when it sets the variable but
+  defines no service behind it. Nothing catches the next one automatically.
 - A conftest.py that empties the run. It is Python the guard does not execute,
   and one module-level skip leaves a green run with nothing in it.
 - A test file that has been emptied, or whose assertions stopped asserting.
@@ -578,18 +578,21 @@ _PULL_REQUEST_SAFE_KEYS = {"branches", "branches-ignore"}
 # job and step `env:`, and a leading assignment on the command itself.
 _NEUTERING_ENV_NAMES = frozenset({"PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME"})
 # Files that are handed to pytest and still assert nothing unless something
-# outside pytest is up. Each one calls pytest.skip when its dependency is
-# unreachable, so the coverage this guard counts, a path handed to pytest, is
-# not enough on its own.
+# outside pytest is up. Each one calls pytest.skip when BAZARR_PG_TEST_URL is
+# unset and nothing answers at its default URL, so the coverage this guard
+# counts, a path handed to pytest, is not enough on its own.
 #
-# tests/bazarr/test_arr_pg_cutover_migration.py is the whole list: all five of
-# its cases take the pg_bind fixture, which calls pytest.skip when nothing
-# answers on the URL. Deleting the `services:` block was therefore a one-line
-# edit that turned the native-Postgres cutover suite into five skips, with the
-# file still enumerated and the guard still green. The general case, a file that
-# skips itself for a reason the workflow does not mention, is outside what
-# reading a workflow can reach and is listed under "What this cannot see"; this
-# is the one instance the workflow does say enough about to check.
+# These five are the files that fall back to a default URL of their own. All
+# five cases in the cutover suite take the pg_bind fixture, so deleting the
+# `services:` block was a one-line edit that turned the native-Postgres cutover
+# suite into five skips, with the file still enumerated and the guard still
+# green. With the variable set, each of them fails instead of skipping when the
+# server does not answer or the driver is missing, which
+# test_a_suite_promised_postgres_fails_rather_than_skips holds. The general
+# case, a file that skips itself for a reason the workflow does not mention, is
+# outside what reading a workflow can reach and is listed under "What this
+# cannot see"; these are the instances the workflow does say enough about to
+# check.
 #
 # name -> (environment variable naming the service, image prefix, port inside
 # the container, what happens when it is not there).
@@ -598,9 +601,40 @@ _REQUIRES_SERVICE = {
         "BAZARR_PG_TEST_URL",
         "postgres",
         5432,
-        "every case takes the pg_bind fixture, which calls pytest.skip when no "
-        "Postgres answers, so the file is collected, reports five skips and "
-        "asserts nothing at all",
+        "every case takes the pg_bind fixture, which calls pytest.skip when "
+        "nothing answers at the file's default URL, so the file is collected, "
+        "reports five skips and asserts nothing at all",
+    ),
+    "tests/bazarr/test_history_metrics_postgres.py": (
+        "BAZARR_PG_TEST_URL",
+        "postgres",
+        5432,
+        "every case takes the pg_session fixture, which calls pytest.skip when "
+        "nothing answers at the file's default URL, so the file reports only "
+        "skips",
+    ),
+    "tests/bazarr/test_release_type_mismatch_migration.py": (
+        "BAZARR_PG_TEST_URL",
+        "postgres",
+        5432,
+        "the PostgreSQL half takes the pg_engine fixture, which calls "
+        "pytest.skip when nothing answers at the file's default URL, so only "
+        "SQLite is asserted",
+    ),
+    "tests/bazarr/test_upgrade_translated_loop.py": (
+        "BAZARR_PG_TEST_URL",
+        "postgres",
+        5432,
+        "the postgres parametrisation calls pytest.skip when nothing answers "
+        "at the file's default URL, so only SQLite is asserted",
+    ),
+    "tests/bazarr/test_upstream_db_adoption_pg.py": (
+        "BAZARR_PG_TEST_URL",
+        "postgres",
+        5432,
+        "every PostgreSQL case takes the pg_engine fixture, which calls "
+        "pytest.skip when nothing answers at the file's default URL, so they "
+        "report only skips",
     ),
 }
 # The only `env:` key a job or step that runs tests needs in this repo. An env
@@ -1553,8 +1587,9 @@ def _service_problem(job_name: str, job: dict, steps: list, name: str) -> str:
         if not matching:
             return (
                 f"{label}. {variable} points at port {port}, and the job "
-                f"defines no {image} service publishing {wanted}. Removing the "
-                "service leaves the file enumerated, collected and silent"
+                f"defines no {image} service publishing {wanted}. With the "
+                "variable set the file fails rather than skips, but only once it "
+                "runs; this names the missing service before the run does"
             )
     return ""
 
@@ -2725,7 +2760,7 @@ def test_the_one_allowed_test_environment_key_still_counts(constructed_workflow)
     constructed_workflow(
         _one_job(
             {
-                "env": {"BAZARR_PG_TEST_URL": "postgresql+psycopg://postgres@localhost/x"},
+                "env": {"BAZARR_PG_TEST_URL": "postgresql+psycopg2://postgres@localhost/x"},
                 "run": f"pytest {_REAL}\n",
             }
         )
@@ -3193,7 +3228,7 @@ def test_the_committed_planner_is_trusted():
 
 
 _PG_FILE = "tests/bazarr/test_arr_pg_cutover_migration.py"
-_PG_URL = "postgresql+psycopg://postgres:postgres@localhost:5432/bazarr_test"
+_PG_URL = "postgresql+psycopg2://postgres:postgres@localhost:5432/bazarr_test"
 _PG_SERVICE = {
     "postgres": {"image": "postgres:16-alpine", "ports": ["5432:5432"]}
 }
@@ -3257,6 +3292,215 @@ def test_the_url_must_point_at_this_job_s_service(constructed_workflow):
     covered, problems = _read_workflow()
     assert _PG_FILE not in covered
     assert any("db.example.com" in problem for problem in problems)
+
+
+# ---------------------------------------------------------------------------
+# The PostgreSQL driver the lanes run.
+#
+# The image installs postgres-requirements.txt and nothing else for PostgreSQL,
+# so a PostgreSQL lane on any other driver tests something no install runs.
+# From v2.5.0 every lane and the local mirror installed psycopg 3 by hand while
+# the image shipped psycopg2, and a Sportarr retry that read only the psycopg 3
+# spelling of the SQLSTATE shipped in v2.7.0 with every lane green.
+#
+# So a job that sets BAZARR_PG_TEST_URL has to install that file, and the URL
+# has to name the driver the file installs. A bare `postgresql://` is refused
+# too: it means whatever SQLAlchemy's default driver is, which is psycopg2 on
+# 2.0 and psycopg 3 from 2.1 on. A pull request that changes the image driver
+# therefore has to switch the lanes in the same change, or this goes red.
+# ---------------------------------------------------------------------------
+
+POSTGRES_REQUIREMENTS = "postgres-requirements.txt"
+LOCAL_MIRROR = pathlib.Path("scripts/ci/run-local.sh")
+LOCAL_ORCHESTRATOR = pathlib.Path("scripts/ci/local_ci.py")
+
+# Distribution name -> the SQLAlchemy driver it provides.
+_POSTGRES_DRIVERS = {
+    "psycopg2": "psycopg2",
+    "psycopg2-binary": "psycopg2",
+    "psycopg": "psycopg",
+    "psycopg-binary": "psycopg",
+}
+_INSTALLS_THE_IMAGE_DRIVER = f"pip install -r {POSTGRES_REQUIREMENTS}"
+# A hand-written install of psycopg 3, in any spelling pip accepts.
+_INSTALLS_PSYCOPG_3 = re.compile(r"\binstall\b[^\n]*\bpsycopg(?![\w-]*2)", re.IGNORECASE)
+
+
+def _image_driver() -> str:
+    """The SQLAlchemy driver name of what postgres-requirements.txt installs."""
+    names = [
+        re.split(r"[<>=!~;\[\s]", line.strip(), maxsplit=1)[0].lower()
+        for line in (REPO_ROOT / POSTGRES_REQUIREMENTS).read_text().splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    drivers = {_POSTGRES_DRIVERS.get(name) for name in names}
+    assert len(names) == 1 and None not in drivers, (
+        f"{POSTGRES_REQUIREMENTS} names {names}; this guard knows the drivers "
+        f"{sorted(_POSTGRES_DRIVERS)}. Teach it the new one, and switch the "
+        "PostgreSQL lanes to it in the same change"
+    )
+    return drivers.pop()
+
+
+def _postgres_lane_problems(workflow: dict, driver: str) -> tuple:
+    """(names of the jobs that set BAZARR_PG_TEST_URL, what is wrong with them)."""
+    lanes, problems = [], []
+    for name, job in (workflow.get("jobs") or {}).items():
+        steps = [step for step in job.get("steps") or [] if isinstance(step, dict)]
+        scopes = [job.get("env") or {}] + [step.get("env") or {} for step in steps]
+        urls = [str(scope["BAZARR_PG_TEST_URL"]) for scope in scopes if "BAZARR_PG_TEST_URL" in scope]
+        if not urls:
+            continue
+        lanes.append(name)
+        for url in urls:
+            scheme = url.split("://", 1)[0]
+            if scheme != f"postgresql+{driver}":
+                problems.append(
+                    f"job {name!r} connects with {scheme}://, but the image installs "
+                    f"{driver} from {POSTGRES_REQUIREMENTS}; name it as postgresql+{driver}://"
+                )
+        scripts = [str(step.get("run") or "") for step in steps]
+        if not any(
+            " ".join(line.split()) == _INSTALLS_THE_IMAGE_DRIVER
+            for script in scripts
+            for line in script.splitlines()
+        ):
+            problems.append(
+                f"job {name!r} sets BAZARR_PG_TEST_URL but never runs "
+                f"`{_INSTALLS_THE_IMAGE_DRIVER}`, so its driver is not the image's"
+            )
+        if any(_INSTALLS_PSYCOPG_3.search(script) for script in scripts):
+            problems.append(f"job {name!r} installs psycopg 3, which the image does not ship")
+    return lanes, problems
+
+
+def test_the_postgres_lanes_run_the_driver_the_image_ships():
+    lanes, problems = _postgres_lane_problems(_workflow(), _image_driver())
+    assert lanes, "no job sets BAZARR_PG_TEST_URL, so no PostgreSQL suite asserts anything"
+    assert not problems, "\n".join(problems)
+
+
+def test_the_image_driver_is_psycopg2():
+    """What the Dockerfile installs today; the lanes above follow it."""
+    assert "postgres-requirements.txt" in (REPO_ROOT / "Dockerfile").read_text()
+    assert _image_driver() == "psycopg2"
+
+
+_LANE = {"BAZARR_PG_TEST_URL": _PG_URL}
+_INSTALL = {"run": f"{_INSTALLS_THE_IMAGE_DRIVER}\n"}
+
+
+@pytest.mark.parametrize(
+    "case,steps,expected",
+    [
+        (
+            "the psycopg 3 URL the lanes used to have",
+            [_INSTALL, {"env": {"BAZARR_PG_TEST_URL": _PG_URL.replace("+psycopg2", "+psycopg")},
+                        "run": f"pytest {_PG_FILE}\n"}],
+            "connects with postgresql+psycopg://",
+        ),
+        (
+            "a bare URL, whose driver SQLAlchemy picks",
+            [_INSTALL, {"env": {"BAZARR_PG_TEST_URL": _PG_URL.replace("+psycopg2", "")},
+                        "run": f"pytest {_PG_FILE}\n"}],
+            "connects with postgresql://",
+        ),
+        (
+            "the hand-written psycopg 3 install the lanes used to have",
+            [{"env": _LANE, "run": f'set -e\npip install "psycopg[binary]"\npytest {_PG_FILE}\n'}],
+            "never runs",
+        ),
+        (
+            "psycopg 3 installed next to the image driver",
+            [_INSTALL, {"env": _LANE, "run": f"pip install psycopg-binary\npytest {_PG_FILE}\n"}],
+            "installs psycopg 3",
+        ),
+    ],
+)
+def test_a_lane_on_another_driver_is_reported(case, steps, expected):
+    workflow = _one_job(*steps, services=_PG_SERVICE)
+    lanes, problems = _postgres_lane_problems(workflow, "psycopg2")
+    assert lanes == ["backend"]
+    assert any(expected in problem for problem in problems), (case, problems)
+
+
+def test_a_lane_on_the_image_driver_is_not_reported():
+    workflow = _one_job(
+        {"run": f"set -e\n{_INSTALLS_THE_IMAGE_DRIVER}\npytest {_PG_FILE}\n", "env": _LANE},
+        services=_PG_SERVICE,
+    )
+    assert _postgres_lane_problems(workflow, "psycopg2") == (["backend"], [])
+
+
+def test_the_local_mirror_installs_the_image_driver_and_nothing_else():
+    """run-local.sh builds the one virtualenv every mirrored job runs in.
+
+    The loop steps' own `pip install` lines are not run by the mirror, which
+    unrolls only their pytest calls, so the virtualenv has to hold what those
+    lines install. Its stamp has to cover the file too, or a driver change
+    keeps running on the cached virtualenv of the old one.
+    """
+    script = (REPO_ROOT / LOCAL_MIRROR).read_text()
+    code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+    installs = [line for line in code.splitlines() if re.search(r"\bpip\b.*\binstall\b", line)]
+    assert any(POSTGRES_REQUIREMENTS in line and " -r " in line for line in installs), installs
+    assert not _INSTALLS_PSYCOPG_3.search(code), "the local mirror installs psycopg 3"
+    stamp = next(line for line in code.splitlines() if line.lstrip().startswith("VENV_STAMP="))
+    assert POSTGRES_REQUIREMENTS in stamp
+
+
+def _load_local_orchestrator():
+    path = REPO_ROOT / LOCAL_ORCHESTRATOR
+    spec = importlib.util.spec_from_file_location("_local_ci_under_guard", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_local_mirror_connects_with_the_step_s_own_driver():
+    """Only where the URL points changes locally, never which driver it names.
+
+    The mirror used to write its own postgresql+psycopg:// URL over the step's,
+    so it ran psycopg 3 whatever ci.yml said.
+    """
+    local_ci = _load_local_orchestrator()
+    url = local_ci._local_database_url(_PG_URL, 40123, "bazarr_test_3")
+    assert url == "postgresql+psycopg2://postgres:postgres@127.0.0.1:40123/bazarr_test_3"
+    other = local_ci._local_database_url("postgresql+example://someone@db.invalid:5432/x", 1, "y")
+    assert other == "postgresql+example://someone@127.0.0.1:1/y"
+    source = (REPO_ROOT / LOCAL_ORCHESTRATOR).read_text()
+    assert "postgresql+" not in source, "local_ci.py names a driver of its own"
+
+
+def test_neither_ci_nor_the_local_mirror_installs_psycopg_3():
+    for path in (WORKFLOW, REPO_ROOT / LOCAL_MIRROR, REPO_ROOT / LOCAL_ORCHESTRATOR):
+        code = "\n".join(
+            line for line in path.read_text().splitlines() if not line.lstrip().startswith("#")
+        )
+        assert not _INSTALLS_PSYCOPG_3.search(code), f"{path.name} installs psycopg 3"
+
+
+@pytest.mark.parametrize("path", sorted(_REQUIRES_SERVICE))
+def test_a_suite_promised_postgres_fails_rather_than_skips(path):
+    """BAZARR_PG_TEST_URL set is the run promising PostgreSQL.
+
+    These files used to catch every exception, a missing driver included, and
+    skip. With the lanes switched to another driver, a driver that failed to
+    install would have turned them into skips on a green job. Pointed at a port
+    where nothing listens, each has to fail instead.
+    """
+    import subprocess
+
+    env = dict(os.environ)
+    env["BAZARR_PG_TEST_URL"] = "postgresql+psycopg2://postgres@127.0.0.1:1/nothing_listens"
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", path, "-p", "no:cacheprovider", "-q", "-rs"],
+        cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=600,
+    )
+    summary = (result.stdout.strip().splitlines() or [""])[-1]
+    assert result.returncode == 1, (result.returncode, summary)
+    assert "failed" in summary or "error" in summary, summary
+    assert "skipped" not in summary, summary
 
 
 @pytest.mark.parametrize(

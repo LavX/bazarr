@@ -231,8 +231,9 @@ def _postgres_server_major(connection):
     Best effort and only used to word a warning, so every failure here is
     answered with None rather than an exception.
 
-    The image ships psycopg 2 (postgres-requirements.txt) and the test
-    environment installs psycopg 3, so whichever is present answers.
+    The image ships psycopg 2 (postgres-requirements.txt), and CI installs the
+    same file. psycopg 3 answers only where psycopg 2 is missing, as on a
+    source install that chose it.
     """
     try:
         arguments = dict(host=connection['host'] or None,

@@ -56,23 +56,26 @@ EPISODE_TRANSLATED_SCORE = 180
 # PostgreSQL is first class, and this loop was reported against a real library:
 # the fix reads back the history rows it wrote, so both row-timestamp ordering
 # and the NULL owner comparison have to hold on the backend that ships. The
-# postgres half skips when nothing is reachable, the way the other PG tests
-# here do; CI provides a service so it does not skip there.
+# postgres half skips when BAZARR_PG_TEST_URL is unset and the dev container
+# does not answer. With the variable set, as CI sets it, an unusable server or
+# a missing driver fails, so the lane cannot go quietly green.
 _PG_URL = os.environ.get(
     "BAZARR_PG_TEST_URL",
-    "postgresql+psycopg://postgres:test@127.0.0.1:55432/bazarr")
+    "postgresql+psycopg2://postgres:test@127.0.0.1:55432/bazarr")
 
 
 def _fresh_engine(backend):
     if backend == "sqlite":
         engine = create_engine("sqlite:///:memory:")
     else:
-        engine = create_engine(_PG_URL)
         try:
+            engine = create_engine(_PG_URL)
             with engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
         except Exception as exc:  # pragma: no cover - environment dependent
-            pytest.skip(f"PostgreSQL not reachable at {_PG_URL}: {exc}")
+            if os.environ.get("BAZARR_PG_TEST_URL"):
+                pytest.fail(f"BAZARR_PG_TEST_URL is set, but PostgreSQL is not usable: {exc}")
+            pytest.skip(f"PostgreSQL not reachable at the default URL: {exc}")
         # Fresh schema per test so repeated runs do not accumulate rows.
         with engine.begin() as conn:
             conn.execute(text("DROP SCHEMA public CASCADE"))

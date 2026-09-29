@@ -777,6 +777,7 @@ def test_checked_subtitle_writes_lock_owner_until_commit(
 ):
     import threading
     from app.database import TableArrInstances
+    from sportarr.db import error_sqlstate
 
     session, _ = indexed_library
     module = sports(monkeypatch, session)
@@ -806,7 +807,7 @@ def test_checked_subtitle_writes_lock_owner_until_commit(
                     assert (
                         error.orig.sqlite_errorcode == 5
                         if engine.dialect.name == "sqlite"
-                        else error.orig.sqlstate == "55P03"
+                        else error_sqlstate(error) == "55P03"
                     )
                     connection.rollback()
                     results.append("blocked")

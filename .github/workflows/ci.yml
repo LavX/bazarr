@@ -260,6 +260,7 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             dev-requirements.txt
+            postgres-requirements.txt
 
       - &install-ui
         name: Install UI
@@ -561,11 +562,13 @@ jobs:
 
       - name: pytest cross-instance isolation guards 1/5 (isolated per file)
         env: &postgres-url
-          # Same throwaway credentials, in URL form.
-          BAZARR_PG_TEST_URL: postgresql+psycopg://postgres:postgres@localhost:5432/bazarr_test  # pragma: allowlist secret
+          # Same throwaway credentials, in URL form. The driver is the one the
+          # image installs from postgres-requirements.txt, named explicitly:
+          # a bare postgresql:// means psycopg 3 from SQLAlchemy 2.1 on.
+          BAZARR_PG_TEST_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/bazarr_test  # pragma: allowlist secret
         run: |
           set -e
-          pip install "psycopg[binary]"
+          pip install -r postgres-requirements.txt
           for f in \
             tests/bazarr/test_discover_digital_releases.py \
             tests/bazarr/test_discover_recent_episodes.py \
@@ -612,7 +615,7 @@ jobs:
         env: *postgres-url
         run: |
           set -e
-          pip install "psycopg[binary]"
+          pip install -r postgres-requirements.txt
           for f in \
             tests/bazarr/test_discover_metadata.py \
             tests/bazarr/test_discover_feeds.py \
@@ -658,7 +661,7 @@ jobs:
         env: *postgres-url
         run: |
           set -e
-          pip install "psycopg[binary]"
+          pip install -r postgres-requirements.txt
           for f in \
             tests/bazarr/test_discover_download.py \
             tests/bazarr/test_seerr_operations.py \
@@ -706,7 +709,7 @@ jobs:
         env: *postgres-url
         run: |
           set -e
-          pip install "psycopg[binary]"
+          pip install -r postgres-requirements.txt
           for f in \
             tests/bazarr/test_discover_episodes.py \
             tests/bazarr/test_discover_search.py \
@@ -757,7 +760,7 @@ jobs:
         env: *postgres-url
         run: |
           set -e
-          pip install "psycopg[binary]"
+          pip install -r postgres-requirements.txt
           for f in \
             tests/bazarr/test_discover_copy_matching.py \
             tests/bazarr/test_discover_raw_query.py \
@@ -779,7 +782,8 @@ jobs:
             tests/bazarr/test_threading_scope.py \
             tests/bazarr/test_path_mappings_instance.py \
             tests/bazarr/test_job_module_identity.py \
-            tests/bazarr/test_parser_owner_threading.py ; do
+            tests/bazarr/test_parser_owner_threading.py \
+            tests/bazarr/test_postgres_driver_pin.py ; do
             echo "::group::$f"
             pytest "$f" -p no:cacheprovider -q
             echo "::endgroup::"

@@ -405,6 +405,7 @@ def test_owner_changes_serialize_after_checked_sports_writes(library, monkeypatc
     import threading
     from app.database import TableArrInstances, TableSportsLeagues
     from sportarr import library as sports_library
+    from sportarr.db import error_sqlstate
 
     session, leagues = library
     engine = session.get_bind()
@@ -434,7 +435,7 @@ def test_owner_changes_serialize_after_checked_sports_writes(library, monkeypatc
                     if engine.dialect.name == 'sqlite':
                         assert exc.orig.sqlite_errorcode == 5
                     else:
-                        assert exc.orig.sqlstate == '55P03'
+                        assert error_sqlstate(exc) == '55P03'
                     connection.rollback()
                     outcome['first_write'] = 'blocked'
                 attempted.set()
