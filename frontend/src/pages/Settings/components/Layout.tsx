@@ -23,6 +23,7 @@ import { faFloppyDisk } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   isMetadataFollowupError,
+  isSettingsFollowupError,
   useSettingsMutation,
   useSystemSettings,
 } from "@/apis/hooks";
@@ -66,19 +67,22 @@ const Layout: FunctionComponent<Props> = (props) => {
     mutateAsync,
     isPending: isMutating,
   } = useSettingsMutation(metadataRefreshFailed && totalStagedCount === 0);
-  const handleSaveError = useCallback((error: unknown) => {
-    if (isMetadataFollowupError(error)) {
-      formRef.current.reset();
-      setMetadataRefreshFailed(true);
-    }
-  }, []);
-
   // A settings refetch has several causes: the refresh the app runs when the
   // socket first reports online, the one it runs again on every reconnect, and
   // the reload that follows a save. Only the save is meant to clear the form.
   // Resetting on every refetch threw away whatever the user had staged while a
   // response was in flight, took the Save control with it, and posted nothing.
   const savedRef = useRef(false);
+
+  const handleSaveError = useCallback((error: unknown) => {
+    if (isMetadataFollowupError(error)) {
+      formRef.current.reset();
+      setMetadataRefreshFailed(true);
+    } else if (isSettingsFollowupError(error)) {
+      // Written all the same, so its reload clears the form as a save does.
+      savedRef.current = true;
+    }
+  }, []);
 
   useOnValueChange(isRefetching, (value) => {
     if (value || !savedRef.current) {
@@ -139,7 +143,10 @@ const Layout: FunctionComponent<Props> = (props) => {
         savedRef.current = true;
       } catch (error) {
         handleSaveError(error);
-        throw error;
+        // Written all the same: leaving loses nothing.
+        if (!isSettingsFollowupError(error)) {
+          throw error;
+        }
       }
     }
   }, [form.values, mutateAsync, metadataRefreshFailed, handleSaveError]);

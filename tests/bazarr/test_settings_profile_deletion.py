@@ -185,22 +185,32 @@ def test_a_refused_save_writes_no_database_rows(schema_session, post_settings, m
     assert _rows(schema_session) == before, "a refused save kept part of what it submitted"
 
 
-def test_a_save_whose_refresh_fails_still_writes_its_rows(schema_session, post_settings, monkeypatch):
-    """The configuration reached the disk there, so the rows go with it."""
+@pytest.mark.parametrize("error_name, code", [
+    ("MetadataFollowupError", "discover_settings_refresh_failed"),
+    ("SettingsFollowupError", "settings_refresh_failed"),
+])
+def test_a_save_whose_refresh_fails_still_writes_its_rows(schema_session, post_settings, monkeypatch,
+                                                          error_name, code):
+    """The configuration reached the disk there, so the rows go with it.
+
+    That holds for any save, not only one that changed the metadata settings.
+    """
     import sys
-    from app.config import MetadataFollowupError
+    from app import config
 
     endpoint = sys.modules["api.system.settings"]
     _seed_rows(schema_session)
 
     def saved_then_failed(_items):
-        raise MetadataFollowupError("synthetic")
+        raise getattr(config, error_name)("synthetic")
 
     monkeypatch.setattr(endpoint, "save_settings", saved_then_failed)
 
-    _body, status = post_settings(dict(_ROW_FORM))
+    body, status = post_settings(dict(_ROW_FORM))
 
     assert status == 503
+    assert body["code"] == code
+    assert "synthetic" not in body["message"]
     assert _rows(schema_session) == {"profiles": [(4, "New")], "languages": [1],
                                      "notifiers": [(1, "discord://token")]}
 

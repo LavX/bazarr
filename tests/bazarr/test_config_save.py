@@ -698,17 +698,32 @@ def test_metadata_durable_write_survives_followup_failure(metadata_save_environm
 
 
 @pytest.mark.parametrize("token", ["***", "5ecafe00cafe00cafe00cafe00cafe00", None])
-def test_unchanged_metadata_and_legacy_save_preserve_followup_exception(metadata_save_environment, monkeypatch, token):
+def test_unchanged_metadata_and_ordinary_save_report_a_followup_failure_as_saved(
+    metadata_save_environment, monkeypatch, caplog, token,
+):
+    """A save without new metadata is on disk too when what follows it fails.
+
+    The failure used to escape as it was, so the settings endpoint could not tell
+    the save had been written: it answered 500 and left the languages, profiles and
+    notifiers sent with it unwritten, while the file already held the new settings.
+    """
+    import yaml
+
     env = metadata_save_environment
     before = env.config.get_settings()["discover"]
     def fail(statement):
         raise RuntimeError("legacy-followup-error")
     monkeypatch.setattr(sys.modules["app.database"].database, "execute", fail)
-    items = [("settings-general-page_size", ["50"])]
+    items = [("settings-general-page_size", ["51"])]
     if token is not None:
         items.append(("settings-discover-tmdb_access_token", [token]))
-    with pytest.raises(RuntimeError, match="legacy-followup-error"):
+    with pytest.raises(env.config.SettingsFollowupError) as error:
         env.config.save_settings(items)
+    assert not isinstance(error.value, env.config.MetadataFollowupError)
+    assert "legacy-followup-error" not in str(error.value)
+    assert "legacy-followup-error" in caplog.text
+    assert yaml.safe_load(env.path.read_text())["general"]["page_size"] == 51
+    assert env.settings.general.page_size == 51
     assert env.config.get_settings()["discover"] == before
 
 
@@ -1176,6 +1191,44 @@ def test_a_written_metadata_save_keeps_its_values_when_a_follow_up_fails(
     assert env.config.get_settings()["discover"]["metadata_revision"] != before["metadata_revision"]
 
 
+@pytest.mark.parametrize("failing", ["clear os_token", "throttled providers", "sports scan",
+                                     "sonarr sync", "missing subtitles recalculation"])
+def test_a_written_save_whose_follow_up_fails_is_reported_as_saved(
+    metadata_save_environment, monkeypatch, failing,
+):
+    """A login reset or a library job that fails once the save is on disk is a refresh failure.
+
+    Reported as the plain failure, the settings endpoint took the save for an unsaved
+    one, and the languages, profiles and notifiers of the same request were not written.
+    """
+    import yaml
+    from secret_store import decrypt_settings_dict
+
+    env = metadata_save_environment
+    env.settings.general.parse_embedded_audio_track = False
+    env.settings.general.use_embedded_subs = True
+    env.settings.opensubtitles.username = "before"
+    for name in ("use_sonarr", "use_radarr", "use_sportarr"):
+        setattr(env.settings.general, name, True)
+    assert env.config.write_config() is True
+    effects = _record_save_side_effects(monkeypatch, fail=failing)
+
+    with pytest.raises(env.config.SettingsFollowupError) as error:
+        env.config.save_settings([
+            ("settings-general-parse_embedded_audio_track", ["true"]),
+            ("settings-general-use_embedded_subs", ["false"]),
+            ("settings-opensubtitles-username", ["after"]),
+        ])
+
+    assert not isinstance(error.value, env.config.MetadataFollowupError)
+    assert effects[-1] == failing
+    stored = decrypt_settings_dict(yaml.safe_load(env.path.read_text()))
+    assert stored["general"]["parse_embedded_audio_track"] is True
+    assert stored["opensubtitles"]["username"] == "after"
+    assert env.settings.general.parse_embedded_audio_track is True
+    assert env.settings.opensubtitles.username == "after"
+
+
 def test_a_written_master_switch_save_keeps_the_switch_when_a_follow_up_fails(
     metadata_save_environment, monkeypatch,
 ):
@@ -1191,7 +1244,7 @@ def test_a_written_master_switch_save_keeps_the_switch_when_a_follow_up_fails(
     monkeypatch.setattr(dispatcher, "_configuration", dispatcher.NativeConfiguration(env.settings))
     effects = _record_save_side_effects(monkeypatch, fail="sports scan")
 
-    with pytest.raises(RuntimeError, match="synthetic follow-up failure"):
+    with pytest.raises(env.config.SettingsFollowupError):
         env.config.save_settings([("settings-general-use_silo", ["true"]),
                                   ("settings-general-parse_embedded_audio_track", ["true"])])
 

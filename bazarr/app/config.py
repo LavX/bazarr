@@ -924,7 +924,11 @@ class MetadataPersistenceError(Exception):
     """The requested metadata configuration could not be persisted."""
 
 
-class MetadataFollowupError(Exception):
+class SettingsFollowupError(Exception):
+    """Settings were persisted, but subsequent application work failed."""
+
+
+class MetadataFollowupError(SettingsFollowupError):
     """Metadata settings were persisted, but subsequent application work failed."""
 
 
@@ -1324,18 +1328,18 @@ NATIVE_MASTER_KEYS = {'settings-general-use_' + kind
                       for kind in ('emby', 'jellyfin', 'plex', 'silo')}
 
 
-def _save_settings_with_native(settings_items, *, strict_metadata=False, on_metadata_persisted=None):
+def _save_settings_with_native(settings_items, *, strict_metadata=False, on_persisted=None):
     """Apply the media-server master-switch handling around a settings save."""
     with _native_settings_save_lock:
         if not any(key in NATIVE_MASTER_KEYS for key, _value in settings_items):
             return _save_settings(settings_items, strict_metadata=strict_metadata,
-                                  on_metadata_persisted=on_metadata_persisted)
+                                  on_persisted=on_persisted)
         from media_servers.dispatcher import get_native_configuration
         native = get_native_configuration()
         with native.lock:
             try:
                 return _save_settings(settings_items, native, strict_metadata=strict_metadata,
-                                      on_metadata_persisted=on_metadata_persisted)
+                                      on_persisted=on_persisted)
             finally:
                 for kind, enabled in native.masters.items():
                     _settings_mapping(settings, 'general')['use_' + kind] = enabled
@@ -1362,43 +1366,54 @@ def save_settings(settings_items):
 
     from discover.metadata import CONFIG_LOCK, invalidate_metadata
     with CONFIG_LOCK:
-        if not any(key.startswith("settings-discover-") or key == "settings-general-metadata_language"
-                   for key, _ in items):
-            return _save_settings_with_native(items)
-        previous = dict(settings.discover)
-        previous_language = settings.get("general.metadata_language", "")
-        effective_language = previous_language
-        effective = dict(previous)
-        for key, values in items:
-            if key == "settings-general-metadata_language":
-                effective_language = values[0]
-            if key.startswith("settings-discover-"):
-                field = key.removeprefix("settings-discover-")
-                if field != "tmdb_access_token" or values[0] != "***":
-                    effective[field] = values[0]
-        changed = effective != previous or effective_language != previous_language
+        metadata_submitted = any(key.startswith("settings-discover-") or key == "settings-general-metadata_language"
+                                 for key, _ in items)
+        changed = False
+        if metadata_submitted:
+            previous = dict(settings.discover)
+            previous_language = settings.get("general.metadata_language", "")
+            effective_language = previous_language
+            effective = dict(previous)
+            for key, values in items:
+                if key == "settings-general-metadata_language":
+                    effective_language = values[0]
+                if key.startswith("settings-discover-"):
+                    field = key.removeprefix("settings-discover-")
+                    if field != "tmdb_access_token" or values[0] != "***":
+                        effective[field] = values[0]
+            changed = effective != previous or effective_language != previous_language
         persisted = False
 
-        def metadata_persisted():
+        def settings_persisted():
             nonlocal persisted
             persisted = True
-            invalidate_metadata()
+            if changed:
+                invalidate_metadata()
 
         try:
-            _save_settings_with_native(items, strict_metadata=changed,
-                                       on_metadata_persisted=metadata_persisted if changed else None)
+            _save_settings_with_native(items, strict_metadata=changed, on_persisted=settings_persisted)
         except Exception:
             if persisted:
-                raise MetadataFollowupError(
-                    "Metadata settings were saved, but application refresh failed. Reload settings before retrying."
+                # The save is on disk and only what follows it failed, so the
+                # caller keeps what goes with a written save rather than taking
+                # it for an unsaved one. The cause stays in the log, not in the
+                # message the caller passes on.
+                logging.exception("Settings were saved, but applying them failed")
+                if changed:
+                    raise MetadataFollowupError(
+                        "Metadata settings were saved, but application refresh failed. Reload settings before retrying."
+                    ) from None
+                raise SettingsFollowupError(
+                    "Settings were saved, but applying them failed. Reload settings before retrying."
                 ) from None
-            settings.set("discover", previous)
-            settings.set("general.metadata_language", previous_language)
+            if metadata_submitted:
+                settings.set("discover", previous)
+                settings.set("general.metadata_language", previous_language)
             raise
 
 
 def _save_settings(settings_items, native_configuration=None, *, strict_metadata=False,
-                   on_metadata_persisted=None):
+                   on_persisted=None):
     # Validate repeated form values before applying any changes, including the
     # single-value and empty-list representations used by the settings editor.
     #
@@ -1771,8 +1786,8 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
         if native_configuration is not None:
             native_configuration.publish_masters(settings)
 
-        if on_metadata_persisted is not None:
-            on_metadata_persisted()
+        if on_persisted is not None:
+            on_persisted()
 
         # Only now that the save has been written: naming new subtitles with the
         # hearing-impaired extension, clearing provider logins, resetting the
