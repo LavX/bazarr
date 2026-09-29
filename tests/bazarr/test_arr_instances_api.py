@@ -285,6 +285,101 @@ def test_test_connection_rejects_invalid_port():
     assert body["ok"] is False
 
 
+# ----------------------------------------------- booleans are not whole numbers
+# Python counts True as the integer 1, so every check above let it through: as a
+# one second timeout, or as port 1.
+
+@pytest.mark.parametrize("kind", ["sonarr", "radarr"])
+@pytest.mark.parametrize("value", [True, False])
+def test_the_scalar_timeout_refuses_a_boolean(kind, value):
+    from dynaconf import Dynaconf
+    from dynaconf.validator import ValidationError
+
+    from app import config as app_config
+
+    validator = next(v for v in app_config.validators if v.names == (f"{kind}.http_timeout",))
+
+    with pytest.raises(ValidationError):
+        validator.validate(Dynaconf(**{kind.upper(): {"http_timeout": value}}))
+    validator.validate(Dynaconf(**{kind.upper(): {"http_timeout": 30}}))
+
+
+@pytest.mark.parametrize("kind", ["sonarr", "radarr"])
+def test_a_settings_save_of_a_true_timeout_is_refused(monkeypatch, scalar_snapshot, kind):
+    """The settings form sends 'true' as text, and a save turns that into True."""
+    import sys
+    from types import SimpleNamespace
+
+    from dynaconf.validator import ValidationError
+
+    from app import config as app_config
+
+    writes = []
+    monkeypatch.setattr(app_config, "write_config", lambda **_kwargs: writes.append(True) or True)
+    monkeypatch.setattr(app_config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(app_config, "restore_persisted_settings", lambda: None)
+    monkeypatch.setitem(sys.modules, "app.database", SimpleNamespace(
+        database=SimpleNamespace(execute=lambda statement: None),
+        update=lambda _model: _FakeUpdate(), System=object))
+    setattr(getattr(app_config.settings, kind), "http_timeout", 60)
+
+    with pytest.raises(ValidationError):
+        app_config.save_settings([(f"settings-{kind}-http_timeout", ["true"])])
+
+    assert writes == []
+
+
+@pytest.mark.parametrize("field", ["http_timeout", "port"])
+def test_the_instance_service_refuses_a_boolean(schema_session, field):
+    from arr_instances import service
+
+    created, _ = service.create_instance(
+        schema_session, {"kind": "sonarr", "name": "Main", "api_key": "k"})
+
+    for body, status in (
+            service.create_instance(schema_session, {"kind": "sonarr", "name": "X", field: True}),
+            service.update_instance(schema_session, created["id"], {field: True}),
+            service.test_connection({"kind": "sonarr", field: True}),
+            service.test_connection_for_instance(schema_session, created["id"], {field: True})):
+        assert status == 400
+        assert body["error"] == "invalid"
+    assert service.get_instance(schema_session, created["id"])[0][field] != 1
+
+
+_INSTANCE_PARSERS = ("_create_parser", "_update_parser", "_test_parser", "_test_by_id_parser")
+
+
+@pytest.mark.parametrize("parser", _INSTANCE_PARSERS)
+@pytest.mark.parametrize("field", ["http_timeout", "port"])
+@pytest.mark.parametrize("value", [True, False, 1.9])
+def test_the_instance_api_refuses_a_boolean_or_a_fraction(parser, field, value):
+    """The request parsers used int(), which read JSON true as 1 and 1.9 as 1."""
+    from flask import Flask
+    from werkzeug.exceptions import BadRequest
+
+    import api.system.arr_instances as endpoint_module
+
+    body = {"kind": "sonarr", "name": "X", field: value}
+    with Flask(__name__).test_request_context(json=body):
+        with pytest.raises(BadRequest):
+            getattr(endpoint_module, parser).parse_args()
+
+
+@pytest.mark.parametrize("parser", _INSTANCE_PARSERS)
+@pytest.mark.parametrize("value, expected", [(30, 30), ("30", 30), (30.0, 30), (None, None)])
+def test_the_instance_api_still_reads_a_whole_number(parser, value, expected):
+    from flask import Flask
+
+    import api.system.arr_instances as endpoint_module
+
+    body = {"kind": "sonarr", "name": "X", "http_timeout": value, "port": value}
+    with Flask(__name__).test_request_context(json=body):
+        args = getattr(endpoint_module, parser).parse_args()
+
+    assert args["http_timeout"] == expected
+    assert args["port"] == expected
+
+
 def test_create_maps_integrity_error_to_409(schema_session, monkeypatch):
     # A unique-constraint violation (realistically a concurrent create racing
     # the check-then-insert) must surface as 409, not an unhandled 500.
