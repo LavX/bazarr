@@ -137,14 +137,6 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
         sports_history_log(0, sports_event_id, arr_instance_id, result)
         event_stream(type='sports', action='update', payload=sports_event_id)
 
-        # One whole-library Sportarr rescan per affected owner, behind the
-        # per-instance transport and non-blocking; Sportarr exposes only that
-        # untargeted scan. The media servers refresh their configured sports
-        # libraries through the deletion this path already published, instead
-        # of an item the event carries no identifier for.
-        from sportarr.notify import notify_rescan
-        notify_rescan(arr_instance_id)
-
         call_external_webhook(
             subtitle_path=subtitles_path,
             media_path=media_path,

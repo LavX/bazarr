@@ -38,6 +38,27 @@ def test_the_replaced_file_is_deleted(tmp_path, remove_superseded, monkeypatch):
     assert new.exists()
 
 
+def test_replaced_file_notifies_media_servers(tmp_path, remove_superseded, monkeypatch):
+    old = tmp_path / "race.en.srt"
+    new = tmp_path / "race.en.ass"
+    old.write_text("old")
+    new.write_text("new")
+    events = []
+    import contextlib
+
+    monkeypatch.setattr(
+        "subtitles.tools.subsync_engines.subtitle_mutation",
+        lambda *a, **k: contextlib.nullcontext(),
+    )
+    monkeypatch.setattr("media_servers.events.notify_subtitle_mutation", events.append)
+
+    remove_superseded(str(tmp_path / "race.mkv"), (str(old), "proof"), [str(new)], True, 7)
+
+    assert [(item.operation, item.arr_instance_id, item.subtitle_path) for item in events] == [
+        ("delete", 7, str(old)),
+    ]
+
+
 def test_a_rewrite_in_place_is_not_a_replacement(tmp_path, remove_superseded, monkeypatch):
     """Deleting here would destroy the subtitle that was just written."""
     same = tmp_path / "race.en.srt"

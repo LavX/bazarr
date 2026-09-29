@@ -705,7 +705,7 @@ def test_mass_sports_mod_refreshes_once_for_successful_files(sports_toolbox, spo
     from subtitles.indexer import sports as indexer
 
     endpoint, session, folder = sports_toolbox
-    refreshed, publications = sports_refresh_targets
+    publications = sports_refresh_targets
     monkeypatch.setattr(mass_operations, 'database', session)
     monkeypatch.setattr(mass_operations, 'event_stream', lambda **kwargs: None)
     indexer.store_subtitles_sports(62, 2)
@@ -741,12 +741,6 @@ def test_mass_sports_mod_refreshes_once_for_successful_files(sports_toolbox, spo
     assert not (folder / '1' / 'event.en.hi.srt').exists()
     if end != 'success':
         assert sibling.read_bytes() == original
-    # One Sportarr rescan per affected owner, however many files the batch
-    # touched. The media servers coalesce their own scans on their own workers,
-    # off one publication per file that was actually rewritten, which is what
-    # the media-server assertions used to stand in for.
-    assert refreshed.count(('sportarr', 1)) == 1
-    assert refreshed.count(('sportarr', 2)) == (1 if end == 'success' else 0)
     assert [(event.media_type, event.arr_instance_id) for event in publications] == (
         [('sports', 1), ('sports', 2)] if end == 'success' else [('sports', 1)])
 
@@ -761,7 +755,7 @@ def test_mass_mod_cancellation_preserves_only_completed_publications(
     from subtitles.tools import mods
 
     _, session, folder = sports_toolbox
-    refreshed, publications = sports_refresh_targets
+    publications = sports_refresh_targets
     monkeypatch.setattr(mass_operations, 'database', session)
     monkeypatch.setattr(mass_operations, 'event_stream', lambda **kwargs: None)
     stopped = False
@@ -806,14 +800,12 @@ def test_mass_mod_cancellation_preserves_only_completed_publications(
     if when == 'before_write':
         assert source.read_bytes() == original
         assert not (folder / '1' / 'event.en.srt').exists()
-        assert refreshed == []
         # Nothing was written, so nothing was published to any media server.
         assert published_outputs == publications == []
     else:
         assert not source.exists()
         assert (folder / '1' / 'event.en.srt').exists()
         assert ['en', '/sports/event.en.srt'] in [entry[:2] for entry in indexed]
-        assert refreshed.count(('sportarr', 1)) == 1
         # The written output was published exactly once, which is every media
         # server's refresh for it.
         assert published_outputs == [('sports', str(folder / '1' / 'event.en.srt'))]

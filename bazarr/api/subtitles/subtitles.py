@@ -661,25 +661,12 @@ def postprocess_subtitles(subtitles_path, video_path, media_type, metadata, id, 
                 subtitles_path)
 
     if media_type == "sports":
-        from sportarr.notify import notify_rescan
         from subtitles.indexer.sports import store_subtitles_sports
 
         try:
-            # Best effort, the way every other re-index that runs after a
-            # completed write is. The mod or sync has already been published by
-            # here, and this indexer raises a bare OSError on a probe failure or
-            # its analysis timeout, which surfaced as 409 "Unable to edit
-            # subtitles file" for work that succeeded and left the UI on the
-            # old state.
-            try:
-                store_subtitles_sports(id, arr_instance_id)
-            except Exception:
-                logging.exception('BAZARR could not reindex sports event %s after a subtitle action', id)
-        finally:
-            # Sync and mods already dispatched the individual file publication,
-            # which is every media server's refresh. Only Sportarr still needs
-            # its own untargeted rescan from here.
-            notify_rescan(arr_instance_id)
+            store_subtitles_sports(id, arr_instance_id)
+        except Exception:
+            logging.exception('BAZARR could not reindex sports event %s after a subtitle action', id)
         event_stream(type="sports", payload=id)
         return
 

@@ -28,7 +28,7 @@ def manual_library(indexed_library, monkeypatch, tmp_path):
     )
     from app.config import settings
     from arr_instances.resolution import clear_subtitle_settings_cache
-    from sportarr import notify, profile_hooks, subtitles as service
+    from sportarr import profile_hooks, subtitles as service
     from subtitles import pool
     from subliminal import Movie, Episode
     from subzero.language import Language
@@ -39,9 +39,6 @@ def manual_library(indexed_library, monkeypatch, tmp_path):
     sports(monkeypatch, session)
     monkeypatch.setattr(service, "database", session)
     monkeypatch.setattr(profile_hooks, "database", session)
-    # This provider fixture publishes real local files, but has no Sportarr
-    # HTTP service. Notification tests install their own transport recorder.
-    monkeypatch.setattr(notify, "_rescan_request", lambda owner, **kwargs: None)
     monkeypatch.setattr(settings.general, "use_embedded_subs", False)
     monkeypatch.setattr(settings.general, "use_postprocessing", False)
     monkeypatch.setattr(settings.subsync, "use_subsync", False)
@@ -320,6 +317,14 @@ def test_owner_mods_postprocessing_and_no_native_notifications(
     from subtitles import processing
 
     service, session, folder = manual_library
+    published = []
+
+    def record_publication(media_type, video_path, operation, owner):
+        return lambda subtitle_path: published.append(
+            (media_type, video_path, operation, owner, subtitle_path)
+        )
+
+    monkeypatch.setattr(processing, "publication_callback", record_publication)
     script = folder / "postprocess.py"
     script.write_text(
         'import sys\nfrom pathlib import Path\np=Path(sys.argv[1])\ns=p.read_text()\nassert "<i>" not in s\nassert sys.argv[2:] == ["", ""]\np.write_text(s.replace("Sporting event", "Owner A processed"))\n'
@@ -355,6 +360,12 @@ def test_owner_mods_postprocessing_and_no_native_notifications(
     assert "Owner A processed" in (folder / "1/event.en.srt").read_text()
     assert "Sporting event" in (folder / "2/event.en.srt").read_text()
     assert "Owner A processed" not in (folder / "2/event.en.srt").read_text()
+    assert published == [
+        (
+            "sports", str(folder / "1/event.mkv"), "download", 1,
+            str(folder / "1/event.en.srt"),
+        )
+    ]
 
 
 @pytest.mark.parametrize("phase", ["worker", "writer"])

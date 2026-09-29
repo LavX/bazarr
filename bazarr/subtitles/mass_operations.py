@@ -9,7 +9,6 @@ from app.event_handler import event_stream
 from app.database import (TableArrInstances, TableEpisodes, TableMovies, TableHistory, TableHistoryMovie,
                           TableHistorySports, TableShows, TableSportsEvents, database, select)
 from app.jobs_queue import JobCancelled, JobFailed, jobs_queue
-from sportarr.notify import rescan_batch
 from subtitles.sync import sync_subtitles
 from subtitles.tools.subsync_engines import is_sync_engine_output
 from subtitles.tools.mods import subtitles_apply_mods
@@ -1040,14 +1039,10 @@ def _process_subtitle_item(item, action, options, job_id):
         if item.get('sports_event_id'):
             if not output_path:
                 return False
-            from sportarr.notify import notify_rescan
             from subtitles.indexer.sports import store_subtitles_sports
 
             owner = item['arr_instance_id']
-            try:
-                store_subtitles_sports(item['sports_event_id'], owner)
-            finally:
-                notify_rescan(owner)
+            store_subtitles_sports(item['sports_event_id'], owner)
             try:
                 event_stream(type='sports', payload=item['sports_event_id'])
             except Exception:
@@ -1279,7 +1274,6 @@ def _process_media_action(items, action, job_id):
     return {'queued': queued, 'skipped': skipped, 'errors': errors}
 
 
-@rescan_batch()
 def mass_batch_operation(items=None, action='sync', options=None, job_id=None):
     """Main entry point for all batch operations on subtitles.
 
