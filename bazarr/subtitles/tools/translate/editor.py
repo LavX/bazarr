@@ -52,9 +52,8 @@ def _retained_result(job_id):
 def editor_translation_label(title, source_language, target_language, line_count):
     """The job name, in the queue's "Translating <what> (<from> to <to>)" form.
 
-    It has to start with "Translating": the queue counts a job against the
-    translation concurrency lane by that word, and the completion rename below
-    swaps it for "Translated".
+    It has to start with "Translating", because the completion rename below
+    swaps that word for "Translated".
     """
     languages = f'{source_language or "auto-detected"} to {target_language}'
     if line_count == 1:

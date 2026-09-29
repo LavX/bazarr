@@ -61,6 +61,21 @@ class JobFailed(Exception):
 UNEXPECTED_JOB_ERROR = {"reason": "unexpected_error",
                         "message": "The job failed unexpectedly. Check the logs for details."}
 
+# The jobs that call the AI Subtitle Translator, by the module and function
+# they run: a library translation and an editor translation. They share the
+# translation lane. A job's name cannot decide that: it carries titles and
+# filenames, so a download for "Lost in Translation" read as a translation,
+# and it changes while the job runs.
+TRANSLATION_JOBS = frozenset({
+    ('subtitles.tools.translate.main', 'translate_subtitles_file'),
+    ('subtitles.tools.translate.editor', 'translate_editor_lines'),
+})
+
+
+def is_translation_job(job) -> bool:
+    """Whether ``job`` runs in the translation lane."""
+    return (job.module, job.func) in TRANSLATION_JOBS
+
 
 class Job:
     """
@@ -776,19 +791,25 @@ class JobsQueue:
         sub-limit inside it, not a parallel gate: the settings field says
         "Number of concurrent jobs allowed in the jobs manager", and a
         translation admitted purely against its own lane meant a translation
-        plus a general job ran under a configured limit of 1.
+        plus a general job ran under a configured limit of 1. Which jobs are
+        translations is decided by ``is_translation_job``.
         """
         if len(self.jobs_running_queue) >= settings.general.concurrent_jobs:
             return False
 
-        if 'translat' not in (job.job_name or '').lower():
+        if not is_translation_job(job):
             return True
 
-        running_translations = sum(
-            1 for running in self.jobs_running_queue
-            if 'translat' in (running.job_name or '').lower()
-        )
+        running_translations = sum(1 for running in self.jobs_running_queue if is_translation_job(running))
         return running_translations < settings.translator.openrouter_max_concurrent
+
+    def translation_lane_counts(self) -> dict:
+        """The translations waiting and the ones holding a lane slot, counted the way the lane counts them."""
+        with self._queue_lock:
+            return {
+                'pending': sum(1 for job in self.jobs_pending_queue if is_translation_job(job)),
+                'running': sum(1 for job in self.jobs_running_queue if is_translation_job(job)),
+            }
 
     def _reserve_next_job(self):
         """Take the next runnable job off pending and put it on running, or None.
