@@ -10,6 +10,7 @@ from app.database import database
 from arr_instances.resolution import client_for_instance, default_instance_id
 
 from ..utils import authenticate
+from .directories import directory_rows
 
 api_ns_files_sportarr = Namespace('Files Browser for Sportarr',
                                   description='Browse content of file system as seen by '
@@ -55,13 +56,11 @@ class BrowseSportarrFS(Resource):
             if roots:
                 return marshal(roots, self.get_response_model)
         arr_client = client_for_instance(database, instance_id, enabled_only=False) if instance_id is not None else None
-        data = []
         try:
             result = browse_sportarr_filesystem(path, arr_client=arr_client)
-            if result is None:
+            data = directory_rows(result, 'Sportarr')
+            if data is None:
                 raise ValueError
         except Exception:
             return []
-        for item in result['directories']:
-            data.append({'name': item['name'], 'children': True, 'path': item['path']})  # noqa: PERF401
         return marshal(data, self.get_response_model)
