@@ -119,7 +119,9 @@ def main() -> int:
                 detail = (result.stderr or result.stdout).strip()
                 problems.append(f"{path}: does not render cleanly\n    {detail}")
 
-        if not path.endswith((".md", ".html", ".txt")):
+        # .sh is site/install.sh, a document a test reads: what it prints is
+        # text the user reads, so it gets the dash check like a page does.
+        if not path.endswith((".md", ".html", ".txt", ".sh")):
             continue
         for number, text in added_lines(base, head, path):
             for dash, name in DASHES.items():

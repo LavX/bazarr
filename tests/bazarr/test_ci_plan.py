@@ -233,11 +233,13 @@ def test_main_writes_the_outputs_the_workflow_reads(tmp_path, monkeypatch):
     assert "CI plan" in summary.read_text()
 
 
-@pytest.mark.parametrize(
-    "path", sorted(path for path in ci_plan.TESTED_DOCUMENTS if path.endswith((".md", ".html")))
-)
+@pytest.mark.parametrize("path", sorted(ci_plan.TESTED_DOCUMENTS))
 def test_the_docs_check_still_checks_a_document_a_test_reads(tmp_path, monkeypatch, capsys, path):
-    """The Docs job runs .github/scripts/docs_check.py, which picks its files through the planner."""
+    """The Docs job runs .github/scripts/docs_check.py, which picks its files through the planner.
+
+    Every document that schedules the job is scanned, the installer included: it
+    prints what it says to the user, and a job that skipped it would pass unread.
+    """
     spec = importlib.util.spec_from_file_location("_docs_check_under_test", DOCS_CHECK)
     docs_check = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(docs_check)
