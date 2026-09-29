@@ -24,7 +24,12 @@ api_ns_system_settings = Namespace('systemSettings', description='System setting
 
 
 def _write_settings_rows(enabled_languages, profiles, notifications):
-    """Write the database part of a settings save, once its configuration is saved."""
+    """Write the database part of a settings save, once its configuration is saved.
+
+    The rows only. The events and the queued work that follow them are left to
+    _after_settings_rows, so an event that cannot go out no longer stops the
+    rows after it.
+    """
     if len(enabled_languages) != 0:
         database.execute(
             update(TableSettingsLanguages)
@@ -34,7 +39,6 @@ def _write_settings_rows(enabled_languages, profiles, notifications):
                 update(TableSettingsLanguages)
                 .values(enabled=1)
                 .where(TableSettingsLanguages.code2 == code))
-        event_stream("languages")
 
     deleted_profile_ids = []
     if profiles is not None:
@@ -93,8 +97,6 @@ def _write_settings_rows(enabled_languages, profiles, notifications):
         # invalidate cache
         update_profile_id_list.invalidate()
 
-        event_stream("languages")
-
     # Update Notification
     for item in notifications:
         database.execute(
@@ -117,13 +119,40 @@ def _write_settings_rows(enabled_languages, profiles, notifications):
     # back on.
     forget_deleted_language_profiles(deleted_profile_ids)
 
+
+def _best_effort(action, *args):
+    """Run one step that follows a written save, and report whether it went through."""
+    try:
+        action(*args)
+    except Exception:
+        logging.exception("Settings were saved, but a step after saving them failed")
+        return False
+    return True
+
+
+def _after_settings_rows(enabled_languages, profiles):
+    """Announce a save whose configuration and rows are written, and queue its work.
+
+    Every step runs whichever other one fails, and none raises: the save is kept
+    by now, and Socket.IO refuses every event while its transport is down, which
+    must not replace the answer that says so. Returns whether all of them went
+    through.
+    """
+    done = []
+    if len(enabled_languages) != 0 or profiles is not None:
+        done.append(_best_effort(event_stream, "languages"))
+
     # Recalculated by a queued job, not here: a library-wide pass inside the
     # request is what made the save slow enough for a proxy to time it out
     # and report a save that went through as "Save failed". After the
     # settings, so the job reads the arr toggles this same save may have
     # changed. The response does not wait for it.
     if profiles is not None:
-        queue_missing_subtitles_recalculation()
+        done.append(_best_effort(queue_missing_subtitles_recalculation))
+
+    # Other open pages reload the settings, as they do after any written save.
+    done.append(_best_effort(event_stream, "settings"))
+    return all(done)
 
 
 @api_ns_system_settings.hide
@@ -174,34 +203,32 @@ class SystemSettings(Resource):
         notifications = [json.loads(item) for item in request.form.getlist('notifications-providers')]
 
         try:
-            try:
-                save_settings(zip(request.form.keys(), request.form.listvalues()))
-            except SettingsFollowupError:
-                # The configuration did reach the disk; only the refresh after
-                # it failed. Its rows follow it, and other open pages hear of
-                # it, as they do for any saved change.
-                _write_settings_rows(enabled_languages, profiles, notifications)
-                try:
-                    event_stream("settings")
-                except Exception:
-                    # Best effort: the answer still has to say it was saved.
-                    logging.exception("Unable to announce the saved settings")
-                raise
+            save_settings(zip(request.form.keys(), request.form.listvalues()))
         except MetadataPersistenceError:
             return "Metadata settings could not be saved. Try again.", 503
-        except MetadataFollowupError:
+        except ValidationError as e:
+            try:
+                event_stream("settings")
+            except Exception:
+                # Best effort: nothing was saved, and the answer has to say so.
+                logging.exception("Settings were refused, and announcing that failed")
+            return e.message, 406
+        except SettingsFollowupError as error:
+            # The configuration did reach the disk; only the refresh after it
+            # failed. Its rows follow it, as they do for any saved change.
+            refresh_error = error
+        else:
+            refresh_error = None
+
+        _write_settings_rows(enabled_languages, profiles, notifications)
+        applied = _after_settings_rows(enabled_languages, profiles)
+        if isinstance(refresh_error, MetadataFollowupError):
             return {"code": "discover_settings_refresh_failed",
                     "message": "Metadata settings were saved, but application refresh failed. Reload settings before retrying."}, 503
-        except SettingsFollowupError:
+        if refresh_error is not None or not applied:
             return {"code": "settings_refresh_failed",
                     "message": "Settings were saved, but applying them failed. Reload settings before retrying."}, 503
-        except ValidationError as e:
-            event_stream("settings")
-            return e.message, 406
-        else:
-            _write_settings_rows(enabled_languages, profiles, notifications)
-            event_stream("settings")
-            return '', 204
+        return '', 204
 
 
 @api_ns_system_settings.route('system/webhooks/test')
