@@ -335,6 +335,16 @@ class TableArrInstances(Base):
         return {column.name: getattr(self, column.name) for column in self.__table__.columns}
 
 
+class TableArrInstanceRetiredIds(Base):
+    # The id of every deleted arr_instances row. SQLite hands the highest id
+    # out again once its row is gone, and a write already in flight when the
+    # delete committed can still land afterwards, naming it. The repository
+    # picks new ids above these, so no instance ever takes over such a row.
+    __tablename__ = 'arr_instance_retired_ids'
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=False)
+
+
 class TableCompatApiKeys(Base):
     # Distribution Hub: named API keys for the OpenSubtitles-compat endpoint.
     # The full token is never stored - only its sha256 (key_hash) and an

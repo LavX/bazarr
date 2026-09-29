@@ -12,8 +12,11 @@ the cleanup switches the default off, the form puts the new profile id back, and
 the user ends up with a default profile selected and defaults disabled.
 """
 import json
+import os
+import uuid
 
 import pytest
+import sqlalchemy as sa
 from sqlalchemy import insert
 
 from app.database import TableLanguagesProfiles
@@ -30,8 +33,7 @@ def _profile_payload(profile_id, name):
             "tag": None}
 
 
-@pytest.fixture
-def post_settings(schema_session, monkeypatch):
+def _settings_endpoint(session, monkeypatch):
     """Drive the real endpoint with a form, the way the frontend submits one."""
     import importlib.util
     from pathlib import Path
@@ -52,18 +54,19 @@ def post_settings(schema_session, monkeypatch):
         endpoint = importlib.util.module_from_spec(spec)
         monkeypatch.setitem(sys.modules, name, endpoint)
         spec.loader.exec_module(endpoint)
-    monkeypatch.setattr(db_module, 'database', schema_session)
-    monkeypatch.setattr(sports, 'database', schema_session)
+    monkeypatch.setattr(db_module, 'database', session)
+    monkeypatch.setattr(sports, 'database', session)
     monkeypatch.setattr(sports, 'notify', lambda *a: None)
 
-    monkeypatch.setattr(endpoint, "database", schema_session)
+    monkeypatch.setattr(endpoint, "database", session)
     monkeypatch.setattr(endpoint, "event_stream", lambda *a, **kw: None)
-    monkeypatch.setattr(endpoint, "queue_missing_subtitles_recalculation", lambda *a, **kw: None)
+    # A job id, as the real helper returns for a queued recalculation.
+    monkeypatch.setattr(endpoint, "queue_missing_subtitles_recalculation", lambda *a, **kw: 1)
     monkeypatch.setattr(endpoint.TableLanguagesProfiles, "__table__",
                         endpoint.TableLanguagesProfiles.__table__)
 
     from arr_instances import resolution
-    monkeypatch.setattr(resolution, "database", schema_session, raising=False)
+    monkeypatch.setattr(resolution, "database", session, raising=False)
 
     def _call(form):
         from flask import Flask
@@ -73,6 +76,55 @@ def post_settings(schema_session, monkeypatch):
             return endpoint.SystemSettings.post.__wrapped__(object())
 
     return _call
+
+
+@pytest.fixture
+def post_settings(schema_session, monkeypatch):
+    return _settings_endpoint(schema_session, monkeypatch)
+
+
+@pytest.fixture(params=["sqlite", "postgresql"])
+def app_session(request, tmp_path):
+    """A database on each engine the app runs on, opened in AUTOCOMMIT as the app opens it.
+
+    Every statement commits by itself there, so rows written before a failure
+    stay written, which is what the cases using this look at.
+    """
+    from sqlalchemy.orm import scoped_session, sessionmaker
+    from sqlalchemy.pool import NullPool
+    from app.database import Base
+
+    admin = schema = None
+    if request.param == "postgresql":
+        url = os.environ.get("BAZARR_PG_TEST_URL")
+        if not url:
+            pytest.skip("Set BAZARR_PG_TEST_URL to exercise PostgreSQL")
+        schema = "settings_rows_" + uuid.uuid4().hex
+        admin = sa.create_engine(url, isolation_level="AUTOCOMMIT", hide_parameters=True)
+        with admin.connect() as connection:
+            connection.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
+        engine = sa.create_engine(url, isolation_level="AUTOCOMMIT", hide_parameters=True,
+                                  connect_args={"options": f"-csearch_path={schema}"})
+    else:
+        engine = sa.create_engine(f"sqlite:///{tmp_path / 'bazarr.db'}", poolclass=NullPool,
+                                  isolation_level="AUTOCOMMIT")
+
+        @sa.event.listens_for(engine, "connect")
+        def _enforce_foreign_keys(dbapi_connection, _record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+    session = scoped_session(sessionmaker(bind=engine, expire_on_commit=False))
+    try:
+        Base.metadata.create_all(engine)
+        yield session
+    finally:
+        session.remove()
+        engine.dispose()
+        if schema:
+            with admin.connect() as connection:
+                connection.exec_driver_sql(f'DROP SCHEMA "{schema}" CASCADE')
+            admin.dispose()
 
 
 def test_replacing_the_default_profile_while_deleting_the_old_one(
@@ -260,3 +312,181 @@ def test_a_saved_request_writes_its_rows(schema_session, post_settings, monkeypa
     assert post_settings(dict(_ROW_FORM)) == ('', 204)
     assert _rows(schema_session) == {"profiles": [(4, "New")], "languages": [1],
                                      "notifiers": [(1, "discord://token")]}
+
+
+# ---------------------------------------------------------------------------
+# A notification that fails once the rows are being written
+#
+# Socket.IO refuses every event while its transport is down. The languages
+# event used to go out between the language and the profile writes, so it
+# stopped the rest of the rows there and took the place of the answer that says
+# the save was kept.
+# ---------------------------------------------------------------------------
+
+_ALL_ROWS = {"profiles": [(4, "New")], "languages": [1], "notifiers": [(1, "discord://token")]}
+
+
+def _refusing_events(monkeypatch, endpoint, refused):
+    """Refuse the named events, or every one for None, and record the rest."""
+    sent = []
+
+    def emit(kind=None, *_args, **_kwargs):
+        if refused is None or kind in refused:
+            raise RuntimeError("synthetic transport failure")
+        sent.append(kind)
+
+    monkeypatch.setattr(endpoint, "event_stream", emit)
+    return sent
+
+
+def _recording_queue(monkeypatch, endpoint, fails=False):
+    queued = []
+
+    def queue(*_args, **_kwargs):
+        queued.append(True)
+        if fails:
+            raise RuntimeError("synthetic queue failure")
+        return len(queued)
+
+    monkeypatch.setattr(endpoint, "queue_missing_subtitles_recalculation", queue)
+    return queued
+
+
+@pytest.mark.parametrize("error_name, code", [
+    ("MetadataFollowupError", "discover_settings_refresh_failed"),
+    ("SettingsFollowupError", "settings_refresh_failed"),
+])
+def test_a_saved_failure_keeps_its_answer_and_rows_while_events_fail(app_session, monkeypatch,
+                                                                     error_name, code):
+    import sys
+    from app import config
+
+    post = _settings_endpoint(app_session, monkeypatch)
+    endpoint = sys.modules["api.system.settings"]
+    _seed_rows(app_session)
+
+    def saved_then_failed(_items):
+        raise getattr(config, error_name)("synthetic")
+
+    monkeypatch.setattr(endpoint, "save_settings", saved_then_failed)
+    _refusing_events(monkeypatch, endpoint, None)
+    queued = _recording_queue(monkeypatch, endpoint)
+
+    body, status = post(dict(_ROW_FORM))
+
+    assert status == 503
+    assert body["code"] == code
+    assert _rows(app_session) == _ALL_ROWS, "a failed event stopped the rows after it"
+    assert queued == [True], "the recalculation for the saved profiles was never queued"
+
+
+@pytest.mark.parametrize("refused, queue_fails", [
+    (None, False),
+    ({"languages"}, False),
+    ({"settings"}, False),
+    (set(), True),
+], ids=["every-event", "languages-event", "settings-event", "recalculation-queue"])
+def test_a_save_whose_announcement_fails_is_reported_as_saved(app_session, monkeypatch,
+                                                             refused, queue_fails):
+    """The configuration and every row are written, so the answer says so.
+
+    Each step after the rows runs whichever other one fails, as the refresh after
+    the configuration does.
+    """
+    import sys
+
+    post = _settings_endpoint(app_session, monkeypatch)
+    endpoint = sys.modules["api.system.settings"]
+    _seed_rows(app_session)
+    monkeypatch.setattr(endpoint, "save_settings", lambda _items: None)
+    sent = _refusing_events(monkeypatch, endpoint, refused)
+    queued = _recording_queue(monkeypatch, endpoint, fails=queue_fails)
+
+    body, status = post(dict(_ROW_FORM))
+
+    assert status == 503
+    assert body["code"] == "settings_refresh_failed"
+    assert "synthetic" not in body["message"]
+    assert _rows(app_session) == _ALL_ROWS
+    assert queued == [True]
+    assert sent == [kind for kind in ("languages", "settings") if refused is not None and kind not in refused]
+
+
+def test_a_refused_save_keeps_its_answer_while_events_fail(schema_session, post_settings, monkeypatch,
+                                                          caplog):
+    import logging
+    import sys
+    from dynaconf.validator import ValidationError
+
+    endpoint = sys.modules["api.system.settings"]
+    _seed_rows(schema_session)
+    before = _rows(schema_session)
+
+    def refuse(_items):
+        raise ValidationError("Unable to save settings to disk")
+
+    monkeypatch.setattr(endpoint, "save_settings", refuse)
+    _refusing_events(monkeypatch, endpoint, None)
+
+    with caplog.at_level(logging.ERROR):
+        assert post_settings(dict(_ROW_FORM)) == ("Unable to save settings to disk", 406)
+    assert _rows(schema_session) == before
+    # The failed event is logged, and the log does not contradict the answer.
+    logged = [record.getMessage() for record in caplog.records if record.levelno >= logging.ERROR]
+    assert logged, "the failed settings event was not logged"
+    assert not any("were saved" in message for message in logged), logged
+
+
+# ---------------------------------------------------------------------------
+# The recalculation queued through the real helper
+#
+# queue_missing_subtitles_recalculation() never raises: it logs a failure and
+# returns None instead of a job id. The answer has to hear of it all the same.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def real_recalculation(post_settings, monkeypatch):
+    """The endpoint queueing through the real helper, into a private queue."""
+    import sys
+    from app import jobs_queue as jobs_queue_module
+    from subtitles.indexer import missing_refresh
+
+    queue = jobs_queue_module.JobsQueue()
+    monkeypatch.setattr(missing_refresh, "jobs_queue", queue)
+    monkeypatch.setattr(jobs_queue_module, "event_stream", lambda **_kwargs: None)
+    endpoint = sys.modules["api.system.settings"]
+    monkeypatch.setattr(endpoint, "queue_missing_subtitles_recalculation",
+                        missing_refresh.queue_missing_subtitles_recalculation)
+    monkeypatch.setattr(endpoint, "save_settings", lambda _items: None)
+    return missing_refresh, queue
+
+
+def test_a_recalculation_the_queue_refused_is_reported(schema_session, post_settings,
+                                                       real_recalculation, monkeypatch):
+    _missing_refresh, queue = real_recalculation
+    _seed_rows(schema_session)
+
+    def refuse(*_args, **_kwargs):
+        raise RuntimeError("synthetic queue failure")
+
+    monkeypatch.setattr(queue, "feed_jobs_pending_queue", refuse)
+
+    body, status = post_settings(dict(_ROW_FORM))
+
+    assert status == 503
+    assert body["code"] == "settings_refresh_failed"
+    assert _rows(schema_session) == _ALL_ROWS
+
+
+def test_a_queued_or_folded_recalculation_is_reported_as_applied(schema_session, post_settings,
+                                                                 real_recalculation):
+    missing_refresh, queue = real_recalculation
+    _seed_rows(schema_session)
+
+    assert post_settings(dict(_ROW_FORM)) == ('', 204)
+    # A second save finds the first recalculation still pending and joins it.
+    assert post_settings(dict(_ROW_FORM)) == ('', 204)
+
+    [job] = list(queue.jobs_pending_queue)
+    assert (job.module, job.func) == (missing_refresh.JOB_MODULE, missing_refresh.JOB_FUNC)
+    assert _rows(schema_session) == _ALL_ROWS

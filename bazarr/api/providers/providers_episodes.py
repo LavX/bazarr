@@ -90,7 +90,8 @@ class ProviderEpisodes(Resource):
 
         providers_list = get_providers_sorted()
 
-        data = manual_search(episodePath, profileId, providers_list, sceneName, title, 'series')
+        data = manual_search(episodePath, profileId, providers_list, sceneName, title, 'series',
+                             arr_instance_id=episodeInfo.arr_instance_id)
         if isinstance(data, str):
             return data, 500
         return marshal(data, self.get_response_model, envelope='data')

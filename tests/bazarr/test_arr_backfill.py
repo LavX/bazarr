@@ -164,3 +164,41 @@ def test_backfill_with_the_kind_switched_off_still_adopts_rows_with_no_owner(sch
     assert summary["radarr"]["created"] is False
     owner = ArrInstanceRepository(schema_session).get_default("sonarr")
     assert schema_session.execute(select(TableShows.arr_instance_id)).scalar_one() == owner.id
+
+
+def test_backfill_run_by_the_cutover_takes_an_id_no_row_names():
+    # The cutover migration runs this backfill before the tables of later
+    # migrations exist. On SQLite the instance's id is chosen above every id a
+    # row in the tables that are there still names, so a row a writer left
+    # naming a deleted instance never becomes this instance's.
+    from sqlalchemy import create_engine
+    from sqlalchemy import inspect as sa_inspect
+    from sqlalchemy.orm import Session
+
+    from app.database import Base, TableHistory, TableShows
+    from arr_instances.backfill import _RADARR_TABLES, _SONARR_TABLES, backfill_default_instances
+
+    # Every owned table a later migration adds, the Sportarr library and the
+    # release-type mismatch flags, is left out.
+    owned = {model.__table__ for model in _SONARR_TABLES + _RADARR_TABLES}
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine, tables=[
+        table for table in Base.metadata.sorted_tables
+        if table in owned or "arr_instance_id" not in table.c])
+    assert "release_type_mismatches" not in sa_inspect(engine).get_table_names()
+    session = Session(bind=engine)
+    try:
+        session.execute(insert(TableShows).values(sonarrSeriesId=1, path="/tv/a", title="A"))
+        session.execute(insert(TableHistory).values(
+            arr_instance_id=7, sonarrSeriesId=9, sonarrEpisodeId=9, action=1,
+            description="Downloaded"))
+
+        summary = backfill_default_instances(session, _settings(use_radarr=False))
+
+        assert summary["sonarr"]["created"] is True
+        assert summary["sonarr"]["instance_id"] == 8
+        assert session.execute(select(TableShows.arr_instance_id)).scalar_one() == 8
+        assert session.execute(select(TableHistory.arr_instance_id)).scalar_one() == 7
+    finally:
+        session.close()
+        engine.dispose()

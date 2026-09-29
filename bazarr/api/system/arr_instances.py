@@ -136,7 +136,7 @@ class ArrInstanceItem(Resource):
     @api_ns_system_arr_instances.response(204, "Deleted")
     @api_ns_system_arr_instances.response(
         409, "Still owns synced rows (can_remove_library and library say what), "
-             "or its library sync is running")
+             "or its library sync or a subtitle job for it is running")
     def delete(self, instance_id):
         """Delete an instance.
 
@@ -147,7 +147,9 @@ class ArrInstanceItem(Resource):
         includes the rows of that kind no instance owns. Database rows only:
         no file on disk is touched. A Sonarr or Radarr delete, with or without
         it, is refused with 409 while a library sync of the instance, or of
-        its whole kind, is running or queued. Whether or not it is set,
+        its whole kind, is running or queued (sync_in_progress), or while a
+        subtitle job that may write for it is running (job_in_progress), such
+        as a search its sync queued. Whether or not it is set,
         deleting the last Sonarr or Radarr instance turns Use Sonarr or Use
         Radarr off. Sportarr ignores it.
         """

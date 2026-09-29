@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 
 from utilities.binaries import get_binary
 from radarr.history import history_log_movie
@@ -32,7 +33,6 @@ from utilities.path_mappings import path_mappings
 from utilities.video_analyzer import subtitles_sync_references
 from app.config import settings
 from app.database import TableMovies, TableShows, database, select
-from app.get_args import args
 from arr_instances.resolution import scoped, default_instance_id
 
 
@@ -124,7 +124,6 @@ class SubSyncer:
             self.vad = 'subs_then_auditok'
         else:
             self.vad = 'subs_then_webrtc'
-        self.log_dir_path = os.path.join(args.config_dir, 'log')
         self.progress_callback = None
         self.sync_result = None
         self.job_id = None
@@ -262,7 +261,7 @@ class SubSyncer:
 
     def _build_ffsubsync_args(self, output_path, no_fix_framerate, gss, reference=None,
                               sonarr_series_id=None, sonarr_episode_id=None, radarr_id=None, force_sync=False,
-                              arr_instance_id=None):
+                              arr_instance_id=None, log_dir_path=None):
         """Build the ffsubsync argument namespace.
 
         The configured maximum offset is deliberately NOT passed as
@@ -271,13 +270,22 @@ class SubSyncer:
         really have picked, so a subtitle that is further out than the maximum comes
         back looking synchronized. The engine searches unconstrained and the host
         applies the maximum afterwards, in ``validate_engine_result``.
+
+        ``log_dir_path`` is given for a subsync debug run only. ffsubsync then writes
+        its own ffsubsync.log there and makes a test case, which archives that log.
+        The two go together because a test case without a folder writes the log
+        into the working directory. Any other run gets neither: ffsubsync appends
+        to that file on every run and never rotates it, and its records already
+        reach bazarr.log.
         """
         from ffsubsync.ffsubsync import make_parser
 
         ffmpeg_path = self._ensure_ffmpeg_path()
         unparsed_args = [self.reference, '-i', self.srtin, '-o', str(output_path), '--ffmpegpath', ffmpeg_path,
-                         '--vad', self.vad, '--log-dir-path', self.log_dir_path, '--max-offset-seconds',
-                         str(UNCONSTRAINED_MAX_OFFSET_SECONDS), '--output-encoding', 'same']
+                         '--vad', self.vad, '--max-offset-seconds', str(UNCONSTRAINED_MAX_OFFSET_SECONDS),
+                         '--output-encoding', 'same']
+        if log_dir_path:
+            unparsed_args += ['--log-dir-path', log_dir_path, '--make-test-case']
 
         if no_fix_framerate:
             unparsed_args.append('--no-fix-framerate')
@@ -324,9 +332,6 @@ class SubSyncer:
             else:
                 logging.debug("BAZARR subsync: no original-language match; using ffsubsync default reference")
 
-        if settings.subsync.debug:
-            unparsed_args.append('--make-test-case')
-
         parser = make_parser()
         return parser.parse_args(args=unparsed_args)
 
@@ -335,18 +340,28 @@ class SubSyncer:
                               arr_instance_id=None):
         from ffsubsync.ffsubsync import run
 
-        self.args = self._build_ffsubsync_args(
-            output_path=output_path,
-            no_fix_framerate=no_fix_framerate,
-            gss=gss,
-            reference=reference,
-            sonarr_series_id=sonarr_series_id,
-            sonarr_episode_id=sonarr_episode_id,
-            radarr_id=radarr_id,
-            force_sync=force_sync,
-            arr_instance_id=arr_instance_id,
-        )
-        return run(self.args)
+        # The debug test case archives ffsubsync's log, so that run gets a folder
+        # of its own: the archive then holds this run's log alone, and nothing is
+        # left to grow in the log folder. Any other run needs no file at all. The
+        # setting is read once, since the folder and the test case go together.
+        log_dir_path = tempfile.mkdtemp(prefix='bazarr-ffsubsync-') if settings.subsync.debug else None
+        try:
+            self.args = self._build_ffsubsync_args(
+                output_path=output_path,
+                no_fix_framerate=no_fix_framerate,
+                gss=gss,
+                reference=reference,
+                sonarr_series_id=sonarr_series_id,
+                sonarr_episode_id=sonarr_episode_id,
+                radarr_id=radarr_id,
+                force_sync=force_sync,
+                arr_instance_id=arr_instance_id,
+                log_dir_path=log_dir_path,
+            )
+            return run(self.args)
+        finally:
+            if log_dir_path:
+                shutil.rmtree(log_dir_path, ignore_errors=True)
 
     def _run_external_engine(self, engine, output_path, video_path):
         if engine == 'autosubsync':

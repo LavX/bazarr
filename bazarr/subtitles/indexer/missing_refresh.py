@@ -63,7 +63,9 @@ def queue_missing_subtitles_recalculation(series=None, movies=None):
 
     Never raises: the save that called this has already been written, and
     failing its response now would report a save that did happen as one that
-    did not. The scheduled indexer picks up anything missed.
+    did not. The scheduled indexer picks up anything missed. A failure is
+    logged and returns None, as a scope with no items does; a job that was
+    queued, or a pending one it joins, returns its id.
     """
     try:
         series = _normalise(series)

@@ -462,13 +462,22 @@ def delete_instance(session, instance_id, remove_library=False):
     is refused while the instance's library sync is running or queued: the
     sync would write rows for an instance that is gone. That holds for an
     instance that owns nothing yet too, such as one whose first sync has built
-    its client and not written a row.
+    its client and not written a row. It is refused as well while a job that
+    names the instance is running, such as a search its sync queued, or while
+    a missing-subtitles search of one series, episode or movie of its kind
+    runs without naming one: that job has read its item and records what it
+    finds under it. Other jobs that name no instance are not waited for: the
+    wanted search, the upgrade run and the mass operations, which can run for
+    hours, and the search for one language or the manual download of a picked
+    subtitle. The item one of them is on when the delete commits is one more
+    inline write of the kind described next.
 
     Only queued jobs are covered. A single-item write (a download or upgrade,
     an exclusion, a SignalR event, a webhook, a one-series refresh) runs
     inline, so one already past its instance lookup when the delete commits
     still lands afterwards: that one item's rows, a history entry, say, or a
-    series with its episodes. Those rows stay.
+    series with its episodes. Those rows stay, naming an id no instance
+    added later takes: new ids are chosen above every deleted one.
 
     A row naming the gone instance does not bring it back. Deleting a kind's
     last instance through the API switches the kind off, after the commit
@@ -505,6 +514,10 @@ def delete_instance(session, instance_id, remove_library=False):
         if row is not None and _library_sync_active(row):
             return {"error": "sync_in_progress",
                     "message": "A library sync of this instance is running or queued. "
+                               "Wait for it to finish, then delete the instance again."}, 409
+        if row is not None and _subtitle_job_running(row):
+            return {"error": "job_in_progress",
+                    "message": "A subtitle job for this instance is running. "
                                "Wait for it to finish, then delete the instance again."}, 409
         body, status = _delete(repo, instance_id, remove_library=remove_library)
         if status < 400:
@@ -550,6 +563,38 @@ def _library_sync_active(row):
     jobs = list(jobs_queue.jobs_pending_queue) + list(jobs_queue.jobs_running_queue)
     return any(job.module == module and job.func in funcs
                and (job.kwargs or {}).get("arr_instance_id") in targets for job in jobs)
+
+
+# Subtitle searches that look their item up by its upstream id, in every
+# instance of the kind when they name none.
+_SUBTITLE_SEARCH_JOBS = {
+    "sonarr": ("subtitles.mass_download.series",
+               ("series_download_subtitles", "episode_download_subtitles")),
+    "radarr": ("subtitles.mass_download.movies", ("movies_download_subtitles",)),
+}
+
+
+def _subtitle_job_running(row):
+    """Whether a running job may still write rows naming this instance: one
+    that names it, such as a search the sync queued or a translation, or one
+    of the searches in _SUBTITLE_SEARCH_JOBS for its kind that names no
+    instance and may have read one of its items. Such a job has read its item
+    already, and once it finds a subtitle it records the history under the
+    instance it read, whether or not that instance is still there. A queued
+    search is no reason to wait: it reads its item when it starts, and finds
+    nothing once the instance is gone. A queued translation carries its ids
+    and still runs, so its history entry names the gone instance, an id no
+    later instance takes. Other jobs that name no instance are not
+    recognised; delete_instance says which and why.
+    Call it holding the job queue lock, or a job can start unseen."""
+    from app.jobs_queue import jobs_queue
+
+    module, funcs = _SUBTITLE_SEARCH_JOBS[row.kind]
+    for job in list(jobs_queue.jobs_running_queue):
+        owner = (job.kwargs or {}).get("arr_instance_id")
+        if owner == row.id or (owner is None and job.module == module and job.func in funcs):
+            return True
+    return False
 
 
 def after_instance_deleted(session, kind, removed_library=False):

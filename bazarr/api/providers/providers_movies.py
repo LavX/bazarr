@@ -88,7 +88,8 @@ class ProviderMovies(Resource):
 
         providers_list = get_providers_sorted()
 
-        data = manual_search(moviePath, profileId, providers_list, sceneName, title, 'movie')
+        data = manual_search(moviePath, profileId, providers_list, sceneName, title, 'movie',
+                             arr_instance_id=movieInfo.arr_instance_id)
         if isinstance(data, str):
             return data, 500
         return marshal(data, self.get_response_model, envelope='data')

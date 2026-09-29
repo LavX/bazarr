@@ -25,6 +25,14 @@ register_compat(app, base_url=base_url)
 app.register_blueprint(api_bp, url_prefix=base_url.rstrip('/') + '/api')
 app.register_blueprint(ui_bp, url_prefix=base_url.rstrip('/'))
 
+# Waitress spools a request body to disk before any route sees it, and its own
+# default ceiling is 1 GiB. The largest upload a route accepts is a 150 MiB
+# subtitle file, and each upload route refuses its own excess, so this is the
+# backstop for every other path, including a request that never authenticates.
+# In the image, docker/supervisor.py refuses a body at this ceiling in front of
+# it, because waitress's own refusal would not reach the page.
+MAX_REQUEST_BODY_SIZE = 256 * 1024 * 1024  # 256 MiB
+
 
 class Server:
     def __init__(self):
@@ -90,6 +98,7 @@ class Server:
                                         host=self.address,
                                         port=self.port,
                                         threads=settings.general.web_server_threads,
+                                        max_request_body_size=MAX_REQUEST_BODY_SIZE,
                                         **proxy_options)
             self.connected = True
         except OSError as error:

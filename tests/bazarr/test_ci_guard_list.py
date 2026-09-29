@@ -522,11 +522,13 @@ _PLAN_CHECKOUT = "actions/checkout@"
 _PLAN_CHECKOUT_INPUTS = {"fetch-depth", "persist-credentials"}
 # Files the guard knows a test reads that are not Python. A planner that calls
 # one of them documentation would skip the test that reads it.
-# tests/bazarr/test_container_hardening.py reads all three.
+# tests/bazarr/test_container_hardening.py reads the first three, and
+# tests/bazarr/test_installer_backup.py runs commands from the migration guide.
 _DOCUMENTS_TESTS_READ = frozenset({
     "README.md",
     "site/install.sh",
     "site/guides/getting-started.html",
+    "site/guides/migration.html",
 })
 # Files that decide what the suites install and run, whatever they are called.
 _FILES_THAT_DECIDE_A_RUN = frozenset({

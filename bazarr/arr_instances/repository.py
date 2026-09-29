@@ -11,9 +11,9 @@ import logging
 import re
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, inspect, select, union_all
 
-from app.database import TableArrInstances
+from app.database import Base, TableArrInstanceRetiredIds, TableArrInstances
 from media_servers.repository import atomic
 
 from .media_defaults import read_media_defaults
@@ -119,6 +119,15 @@ class ArrInstanceRepository:
 
         encrypted_key = encrypt_secret(api_key or "")
 
+        # An expression the INSERT evaluates, so the id is read under the
+        # INSERT's own write lock. Read earlier in the transaction, WAL mode
+        # SQLite would refuse the write at once, whatever the busy timeout,
+        # when another connection committed in between, as a library sync may
+        # well do while an instance is added. Read before the transaction, a
+        # create committing meanwhile would take the same id and fail this one
+        # as a duplicate.
+        new_id = self._unused_id() if self._session.get_bind().dialect.name == 'sqlite' else None
+
         # The demote + insert is one unit so a failed insert (e.g. a
         # stable_key conflict) cannot strand the kind with a demoted-but-not-
         # replaced default. The engine runs in AUTOCOMMIT, so session.rollback()
@@ -147,11 +156,44 @@ class ArrInstanceRepository:
                 path_mappings=path_mappings,
                 schedule=schedule,
             )
+            if new_id is not None:
+                row.id = new_id
             self._session.add(row)
             self._session.flush()
         if kind == 'sportarr':
             self._refresh_ownership_triggers()
         return row
+
+    def _unused_id(self):
+        """An SQL expression for an id above every one an instance has, had,
+        or a row still names.
+
+        SQLite gives a new row the highest id plus one, so the id of the
+        instance deleted last would go to the next one. A write that was past
+        its instance lookup when that delete committed can still land
+        afterwards, naming the deleted instance, and the next instance would
+        then own that row as its own. delete() keeps the ids it removes in
+        arr_instance_retired_ids, which covers a write landing at any time; the
+        ids rows still name cover the instances deleted before that table
+        existed. PostgreSQL takes ids from a sequence, which never hands one
+        out twice. Only the tables that exist are read: the startup backfill
+        also runs from a migration, before the later ones are created.
+        """
+        existing = set(inspect(self._session.connection()).get_table_names())
+        columns = [TableArrInstances.id]
+        if TableArrInstanceRetiredIds.__tablename__ in existing:
+            columns.append(TableArrInstanceRetiredIds.id)
+        columns += [table.c.arr_instance_id for table in Base.metadata.tables.values()
+                    if 'arr_instance_id' in table.c and table.name in existing]
+        highest = union_all(*(select(func.max(column).label('id')) for column in columns)).subquery()
+        return select(func.coalesce(func.max(highest.c.id), 0) + 1).scalar_subquery()
+
+    def _retire_id(self, session, instance_id):
+        """Keep a deleted instance's id, so no later instance takes it. Called
+        after the delete, once the transaction holds the write lock."""
+        if session.get(TableArrInstanceRetiredIds, instance_id) is None:
+            session.add(TableArrInstanceRetiredIds(id=instance_id))
+            session.flush()
 
     def update(self, instance_id, *, name=_UNSET, enabled=_UNSET,
                is_default=_UNSET, ip=_UNSET, port=_UNSET, base_url=_UNSET,
@@ -302,6 +344,7 @@ class ArrInstanceRepository:
                     _select(TableSportsLeagues.id).where(
                         TableSportsLeagues.arr_instance_id == instance_id)).scalars().all())
                 session.execute(delete(TableArrInstances).where(TableArrInstances.id == instance_id))
+                self._retire_id(session, instance_id)
                 ArrInstanceRepository(session)._reconcile_default('sportarr', demoted_id=instance_id)
                 session.flush()
             self._session.expire_all()
@@ -319,6 +362,7 @@ class ArrInstanceRepository:
                 self._remove_library(row)
             self._session.delete(row)
             self._session.flush()
+            self._retire_id(self._session, instance_id)
             self._reconcile_default(kind, demoted_id=instance_id)
         return True
 

@@ -2,6 +2,7 @@
 
 import os
 import ipaddress
+import logging
 import re
 import socket
 import time
@@ -25,6 +26,7 @@ from .auth import is_session_authenticated
 from .config import settings, base_url, get_ssl_verify
 from .database import database, System
 from .get_args import args
+from .logger import CoverStreamAborted
 
 frontend_build_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'frontend', 'build')
 
@@ -234,9 +236,45 @@ def _proxy_cover(kind, url, rewrite=None):
     if req.status_code != 200:
         req.close()
         return '', 404
-    return Response(stream_with_context(req.iter_content(2048)),
-                    content_type=req.headers.get('content-type', 'application/octet-stream'),
-                    headers={'Cache-Control': COVER_CACHE_CONTROL, **passthrough})
+    headers = {'Cache-Control': COVER_CACHE_CONTROL, **passthrough}
+    # The length the arr declared, when the bytes relayed are the bytes it
+    # counted: requests decodes a compressed body, and a chunked one ends where
+    # its chunks do, whatever length came with it. Without it, a reverse proxy
+    # that talks HTTP/1.0 to Bazarr, as nginx does by default, reads a dropped
+    # connection as the end of a whole image.
+    length = req.headers.get('Content-Length', '')
+    if (req.headers.get('Content-Encoding', 'identity').strip().lower() == 'identity'
+            and 'Transfer-Encoding' not in req.headers
+            and length.isascii() and length.isdigit()):
+        headers['Content-Length'] = length
+    response = Response(stream_with_context(_relay_cover(req)),
+                        content_type=req.headers.get('content-type', 'application/octet-stream'),
+                        headers=headers)
+    # A HEAD answer has no body, so _relay_cover never starts and its finally
+    # never runs. Closing on the response covers that path as well.
+    response.call_on_close(req.close)
+    return response
+
+
+def _relay_cover(req):
+    """The cover's bytes as the arr sends them, aborting if it stops partway.
+
+    Ending the body quietly would complete the response, and the browser would
+    keep a truncated poster for as long as COVER_CACHE_CONTROL allows. Raising
+    makes waitress drop the connection before the response is complete, and the
+    logger knows not to print a traceback for CoverStreamAborted outside debug.
+    A client can tell that drop from a finished image when the arr sent a length,
+    which _proxy_cover relays, or over HTTP/1.1 without one, where the last chunk
+    never comes. Over HTTP/1.0 with no length, the end of the connection is the
+    only end there is. Sonarr and Radarr send a length with their covers.
+    """
+    try:
+        yield from req.iter_content(2048)
+    except requests.exceptions.RequestException as error:
+        logging.debug('BAZARR cover transfer from the arr instance broke off: %s', error)
+        raise CoverStreamAborted(str(error)) from None
+    finally:
+        req.close()
 
 
 @ui_bp.route('/images/series/<path:url>', methods=['GET'])

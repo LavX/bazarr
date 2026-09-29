@@ -7,6 +7,7 @@ import {
   SegmentedControl,
   Stack,
 } from "@mantine/core";
+import { showNotification } from "@mantine/notifications";
 import {
   faSliders,
   faStore,
@@ -24,6 +25,7 @@ import type {
   ProviderHubCatalogEntry,
   ProviderHubInstallation,
 } from "@/apis/raw/providerHub";
+import { notification } from "@/modules/notification";
 import { CatalogCard } from "@/pages/Settings/Providers/hub/components/CatalogCard";
 import { EmptyState } from "@/pages/Settings/Providers/hub/components/EmptyState";
 import { SearchBar } from "@/pages/Settings/Providers/hub/components/SearchBar";
@@ -33,6 +35,11 @@ import {
   parseManifest,
 } from "@/pages/Settings/Providers/hub/utils";
 import styles from "@/pages/Settings/Providers/hub/hub.module.scss";
+
+// The backend refuses a larger package (MAX_LOCAL_PACKAGE_SIZE in
+// provider_hub/service.py); saying so here saves uploading it first.
+const MAX_LOCAL_PACKAGE_MIB = 100;
+const MAX_LOCAL_PACKAGE_SIZE = MAX_LOCAL_PACKAGE_MIB * 1024 * 1024;
 
 interface MarketplacePanelProps {
   catalog: ProviderHubCatalog | undefined;
@@ -241,7 +248,17 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
           <FileButton
             accept=".zip,application/zip"
             onChange={(file) => {
-              if (file) installLocal.mutate(file);
+              if (!file) return;
+              if (file.size > MAX_LOCAL_PACKAGE_SIZE) {
+                showNotification(
+                  notification.warn(
+                    "Package is too large",
+                    `${file.name} is larger than ${MAX_LOCAL_PACKAGE_MIB} MiB.`,
+                  ),
+                );
+                return;
+              }
+              installLocal.mutate(file);
             }}
           >
             {(props) => (

@@ -1,8 +1,10 @@
 /* eslint-disable camelcase */
 import { StrictMode } from "react";
 import { MantineProvider } from "@mantine/core";
+import { Notifications, notifications } from "@mantine/notifications";
 import { QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
@@ -12,6 +14,7 @@ import { MovieUploadModal } from "@/components/forms/MovieUploadForm";
 import { SeriesUploadModal } from "@/components/forms/SeriesUploadForm";
 import { ModalsProvider, useModals } from "@/modules/modals";
 import { fireEvent, rawRender, screen, waitFor, within } from "@/tests";
+import server from "@/tests/mocks/node";
 
 const baseItem = {
   id: 560,
@@ -113,6 +116,7 @@ function renderUpload(kind: MediaKind, file: File) {
     <StrictMode>
       <QueryClientProvider client={queryClient}>
         <MantineProvider env="test">
+          <Notifications />
           <ModalsProvider>
             <OpenUpload kind={kind} file={file} />
           </ModalsProvider>
@@ -172,7 +176,22 @@ beforeEach(() => {
   vi.spyOn(api.episodes, "uploadSubtitles").mockResolvedValue(undefined);
 });
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  notifications.clean();
+});
+
+// The API client answers every refused upload the same way: a notification
+// titled with the status, carrying the server's own message.
+async function expectErrorNotification(title: string, message: string) {
+  await waitFor(() => {
+    const notice = screen
+      .getAllByRole("alert")
+      .find((alert) => within(alert).queryByText(title));
+    expect(notice).toBeDefined();
+    expect(within(notice!).getByText(message)).toBeInTheDocument();
+  });
+}
 
 describe.each<MediaKind>(["movie", "series"])("%s upload Dropzone", (kind) => {
   it.each(["picker", "drop"])(
@@ -339,5 +358,77 @@ describe.each<MediaKind>(["movie", "series"])("%s upload Dropzone", (kind) => {
     expect(screen.queryByText(archive.name)).not.toBeInTheDocument();
     expect(api.movies.uploadSubtitles).not.toHaveBeenCalled();
     expect(api.episodes.uploadSubtitles).not.toHaveBeenCalled();
+  });
+
+  it("shows the server's too large answer for a subtitle file over its ceiling", async () => {
+    const user = userEvent.setup();
+    const route =
+      kind === "movie"
+        ? api.movies.uploadSubtitles
+        : api.episodes.uploadSubtitles;
+    vi.mocked(route).mockRestore();
+    server.use(
+      http.post(
+        `/api/${kind === "movie" ? "movies" : "episodes"}/subtitles`,
+        () =>
+          HttpResponse.json(
+            "Subtitle file is too large: the limit is 150 MiB.",
+            {
+              status: 413,
+            },
+          ),
+      ),
+    );
+    const file = subtitle(1);
+    renderUpload(kind, file);
+    await user.click(screen.getByRole("button", { name: "Open upload" }));
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() => {
+      expect(
+        within(fileRow(file.name)).getByDisplayValue("English"),
+      ).toBeInTheDocument();
+      if (kind === "series") {
+        expect(
+          within(fileRow(file.name)).getByDisplayValue("(1x1) Episode 1"),
+        ).toBeInTheDocument();
+      }
+    });
+
+    await user.click(within(dialog).getByRole("button", { name: /^Upload$/ }));
+
+    await expectErrorNotification(
+      "Error 413",
+      "Subtitle file is too large: the limit is 150 MiB.",
+    );
+  });
+
+  it("shows the server's too large answer for an archive over its ceiling", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.post("/api/subtitles/archive", () =>
+        HttpResponse.json("Archive is too large: the limit is 50 MiB.", {
+          status: 413,
+        }),
+      ),
+    );
+    const file = subtitle(1);
+    renderUpload(kind, file);
+    await user.click(screen.getByRole("button", { name: "Open upload" }));
+    const dialog = await screen.findByRole("dialog");
+    const archive = new File(["synthetic archive"], "subtitles.zip");
+    dropFiles(within(dialog).getByText(/Attach as many files as you like/), [
+      archive,
+    ]);
+
+    await expectErrorNotification(
+      "Error 413",
+      "Archive is too large: the limit is 50 MiB.",
+    );
+    await expectErrorNotification(
+      "Could not extract some archives",
+      archive.name,
+    );
+    expect(within(dialog).getAllByRole("row")).toHaveLength(2);
+    expect(fileRow(file.name)).toBeInTheDocument();
   });
 });

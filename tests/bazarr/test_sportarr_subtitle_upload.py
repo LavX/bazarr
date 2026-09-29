@@ -511,3 +511,120 @@ def test_upload_releases_captured_publications_when_the_saver_raises(upload_libr
         upload.manual_upload_subtitle(**submit())
     assert len(publications) == 1
     assert publications[0].state is None
+
+
+# --- the upload route bounds what it reads --------------------------------------
+#
+# It read the whole file part into memory before any size check, and the queued
+# upload kept it, exactly like the episode and movie routes it was copied from.
+
+@pytest.fixture
+def upload_route(monkeypatch, tmp_path):
+    """The sports upload route with the event lookup faked and the queued upload recorded."""
+    from types import SimpleNamespace
+
+    from api.sports import subtitles as route
+    from sportarr import identity
+    from subtitles import upload
+
+    video = tmp_path / 'event.mkv'
+    video.write_bytes(b'video')
+    context = SimpleNamespace(mapped_path=str(video), event_id=61, arr_instance_id=1)
+    row = SimpleNamespace(audio_language='[]')
+    queued = []
+    monkeypatch.setattr(route, 'require_sports_enabled', lambda: None)
+    monkeypatch.setattr(identity, 'resolve_event_in_session', lambda database, event_id, owner: context)
+    monkeypatch.setattr(route, 'database', SimpleNamespace(execute=lambda statement: SimpleNamespace(first=lambda: row)))
+    monkeypatch.setattr(upload, 'manual_upload_subtitle', lambda **kwargs: queued.append(kwargs))
+    return queued
+
+
+def _post_sports_upload(content, *, declared=None):
+    from flask import Flask
+
+    from api.sports import subtitles as route
+
+    resource = route.SportsEventSubtitleUpload
+    form = {'language': 'en', 'forced': 'false', 'hi': 'false', 'file': (BytesIO(content), 'event.en.sub')}
+    environ = {'CONTENT_LENGTH': str(declared)} if declared is not None else None
+    with Flask(__name__).test_request_context('/api/test', method='POST', data=form,
+                                              content_type='multipart/form-data',
+                                              environ_overrides=environ):
+        return resource.post.__wrapped__(resource(), 61)
+
+
+def test_the_sports_upload_shares_the_subtitle_ceiling():
+    from api import utils
+    from api.sports import subtitles as route
+
+    assert route.MAX_SUBTITLE_UPLOAD_SIZE == utils.MAX_SUBTITLE_UPLOAD_SIZE == 150 * 1024 * 1024
+
+
+def test_a_sports_upload_declared_over_the_ceiling_is_refused_before_it_is_parsed(upload_route):
+    from api.utils import MAX_SUBTITLE_UPLOAD_SIZE, UPLOAD_FORM_ALLOWANCE
+
+    body, status = _post_sports_upload(b'1\n', declared=MAX_SUBTITLE_UPLOAD_SIZE + UPLOAD_FORM_ALLOWANCE + 1)
+
+    assert status == 413
+    assert 'too large' in body['message']
+    assert upload_route == []
+
+
+def test_a_sports_file_over_the_ceiling_is_refused_and_never_queued(upload_route, monkeypatch):
+    from api.sports import subtitles as route
+
+    monkeypatch.setattr(route, 'MAX_SUBTITLE_UPLOAD_SIZE', 4096)
+
+    body, status = _post_sports_upload(b'x' * 4097)
+
+    assert status == 413
+    assert 'too large' in body['message']
+    assert upload_route == []
+
+
+def test_a_sports_file_at_the_ceiling_is_uploaded(upload_route, monkeypatch):
+    from api.sports import subtitles as route
+
+    monkeypatch.setattr(route, 'MAX_SUBTITLE_UPLOAD_SIZE', 4096)
+    content = b'x' * 4096
+
+    assert _post_sports_upload(content) == ('', 204)
+
+    [upload] = upload_route
+    assert upload['subtitle'].getvalue() == content
+    assert (upload['media_type'], upload['sportsEventId'], upload['arr_instance_id']) == ('sports', 61, 1)
+
+
+@pytest.mark.parametrize('refusal, status', [('sports off', 400), ('event', 404), ('media file', 500)])
+def test_a_sports_upload_that_is_not_queued_is_never_read_into_memory(upload_route, monkeypatch, tmp_path,
+                                                                      refusal, status):
+    # Only an upload that is queued needs its file part in memory; up to the
+    # ceiling of it is too much to load for an answer that refuses it anyway.
+    from api import utils
+    from api.sports import subtitles as route
+    from sportarr import identity
+    from sportarr.errors import SportsNotFound
+
+    reads = []
+
+    def recording(upload, limit):
+        reads.append(limit)
+        return utils.read_bounded_upload(upload, limit)
+
+    def sports_off():
+        raise ValueError('Sportarr is turned off.')
+
+    def no_event(database, event_id, owner):
+        raise SportsNotFound('Sports event not found')
+
+    monkeypatch.setattr(route, 'read_bounded_upload', recording)
+    if refusal == 'sports off':
+        monkeypatch.setattr(route, 'require_sports_enabled', sports_off)
+    elif refusal == 'event':
+        monkeypatch.setattr(identity, 'resolve_event_in_session', no_event)
+    else:
+        (tmp_path / 'event.mkv').unlink()
+
+    assert _post_sports_upload(b'1\n')[1] == status
+    assert reads == []
+    assert upload_route == []

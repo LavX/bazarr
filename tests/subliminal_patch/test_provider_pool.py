@@ -202,6 +202,65 @@ def test_provider_errors_keep_legacy_and_context_throttle_callbacks(monkeypatch,
     assert calls[0][-1] == ("owned fixture" if sports and callback_kind in ("context", "keyword_only", "kwargs") else None)
 
 
+@pytest.mark.parametrize("operation", ["search", "download"])
+def test_a_provider_failure_names_the_instance_of_its_video(monkeypatch, operation):
+    """The id dict tells the throttle callback which item a failure was for,
+    and a release a provider demands be excluded is recorded against it. It
+    names the item's instance as well, so the exclusion keeps its owner even
+    when the item's row is gone by the time it is recorded."""
+    from types import SimpleNamespace
+    from subzero.language import Language
+
+    language = Language("eng")
+    error = core.MustGetBlacklisted("fixture-id", "movie")
+
+    class Provider(_FakeProvider):
+        languages = {language}
+
+        def list_subtitles(self, video, languages):
+            raise error
+
+        def download_subtitle(self, subtitle):
+            raise error
+
+    monkeypatch.setattr(core, "provider_registry", {"alpha": Provider})
+    calls = []
+    pool = core.SZProviderPool(["alpha"], {}, throttle_callback=lambda name, exc, ids=None, language=None:
+                               calls.append(ids))
+    item = dict(radarrId=7, arr_instance_id=4, sports_context=None)
+    if operation == "search":
+        pool.list_subtitles_provider("alpha", SimpleNamespace(**item), {language}, detailed=True)
+    else:
+        pool.download_subtitle(SimpleNamespace(provider_name="alpha", language=language, **item))
+
+    assert calls == [{"radarrId": 7, "sonarrSeriesId": None, "sonarrEpisodeId": None,
+                      "arr_instance_id": 4}]
+
+
+def test_a_listed_subtitle_carries_the_instance_of_its_video(monkeypatch):
+    """The download of a listed subtitle builds its id dict from the subtitle,
+    so the listing copies the instance onto it with the other ids."""
+    from types import SimpleNamespace
+    from subzero.language import Language
+
+    language = Language("eng")
+    listed = SimpleNamespace(id="fixture-sub", language=language, hearing_impaired=False,
+                             provider_name="alpha", release_info="")
+
+    class Provider(_FakeProvider):
+        languages = {language}
+
+        def list_subtitles(self, video, languages):
+            return [listed]
+
+    monkeypatch.setattr(core, "provider_registry", {"alpha": Provider})
+    pool = core.SZProviderPool(["alpha"], {})
+    video = SimpleNamespace(radarrId=7, arr_instance_id=4, sports_context=None, fps=None)
+
+    assert pool.list_subtitles_provider("alpha", video, {language}) == [listed]
+    assert (listed.radarrId, listed.arr_instance_id) == (7, 4)
+
+
 def test_throttle_callback_internal_typeerror_is_not_retried():
     calls = []
     def callback(name, exc, ids=None, language=None):

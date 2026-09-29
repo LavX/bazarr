@@ -30,13 +30,18 @@ def test_provider_movie_missing_recompute_keeps_instance_scope(schema_session, t
         lambda **kwargs: calls.append(kwargs),
     )
     monkeypatch.setattr(providers_movies, "get_providers_sorted", lambda: [])
-    monkeypatch.setattr(providers_movies, "manual_search", lambda *args, **kwargs: [])
+    searches = []
+    monkeypatch.setattr(providers_movies, "manual_search",
+                        lambda *args, **kwargs: searches.append(kwargs) or [])
 
     app = Flask(__name__)
     with app.test_request_context("/api/providers/movies?radarrid=801"):
         providers_movies.ProviderMovies.get.__wrapped__(providers_movies.ProviderMovies())
 
     assert calls == [{"no": 1, "arr_instance_id": 7}]
+    # The search names the instance, so an exclusion a provider demands
+    # while it lists is recorded under it.
+    assert [search.get("arr_instance_id") for search in searches] == [7]
 
 
 def test_provider_episode_missing_recompute_keeps_instance_scope(schema_session, tmp_path, monkeypatch):
@@ -78,13 +83,16 @@ def test_provider_episode_missing_recompute_keeps_instance_scope(schema_session,
         lambda **kwargs: calls.append(kwargs),
     )
     monkeypatch.setattr(providers_episodes, "get_providers_sorted", lambda: [])
-    monkeypatch.setattr(providers_episodes, "manual_search", lambda *args, **kwargs: [])
+    searches = []
+    monkeypatch.setattr(providers_episodes, "manual_search",
+                        lambda *args, **kwargs: searches.append(kwargs) or [])
 
     app = Flask(__name__)
     with app.test_request_context("/api/providers/episodes?episodeid=902"):
         providers_episodes.ProviderEpisodes.get.__wrapped__(providers_episodes.ProviderEpisodes())
 
     assert calls == [{"epno": 2, "arr_instance_id": 8}]
+    assert [search.get("arr_instance_id") for search in searches] == [8]
 
 
 # F8 (#156): the manual-download POST passes the upstream radarrId straight to
