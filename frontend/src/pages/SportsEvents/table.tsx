@@ -385,8 +385,11 @@ const EventSubtitles: FunctionComponent<{
     [allPresentSubtitles, onlyDesired, profileItems],
   );
 
+  // One line, as wide as its content: the table sizes this column from the
+  // cell's minimum width, and without one a phone-width table squeezed the
+  // badges and the hidden-tracks trigger until their labels were cut off.
   return (
-    <Group gap="xs" wrap="nowrap">
+    <Group gap="xs" wrap="nowrap" miw="max-content">
       {event.missing_subtitles?.map((language, index) => (
         <EventSubtitleBadge
           key={BuildKey(index, language, "missing")}

@@ -141,6 +141,21 @@ describe("Sports events Table, hidden tracks", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("keeps the subtitles line as wide as its badges and trigger", async () => {
+    serveHidden([hiddenFrench(61)]);
+    mountTable([makeEvent(1)]);
+
+    const disclosure = await screen.findByRole("button", {
+      name: "Hidden tracks (1)",
+    });
+    // The line does not wrap, and the table sizes the column from the cell's
+    // minimum width. Without one, a phone-width table cut the labels off.
+    // eslint-disable-next-line testing-library/no-node-access
+    const line = disclosure.parentElement!;
+    expect(line).toContainElement(screen.getByTitle("/sports/event1.en.srt"));
+    expect(line.getAttribute("style")).toContain("min-width: max-content");
+  });
+
   it("keeps an open badge menu while a hide on another event changes its row", async () => {
     const hidden: EmbeddedHiddenTrack[] = [];
     serveHidden(hidden);
