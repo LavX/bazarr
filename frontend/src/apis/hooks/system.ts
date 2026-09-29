@@ -77,6 +77,16 @@ export function isMetadataFollowupError(error: unknown): boolean {
   );
 }
 
+// The settings reached the disk, and only what the backend does after the write
+// failed, such as resetting a provider login or queueing a library job.
+export function isSettingsFollowupError(error: unknown): boolean {
+  return (
+    isAxiosError(error) &&
+    error.response?.status === 503 &&
+    error.response.data?.code === "settings_refresh_failed"
+  );
+}
+
 export function useSettingsMutation(retryingMetadataRefresh = false) {
   const client = useQueryClient();
   const retireMetadata = (changes: LooseObject, retrying = false) => {
@@ -104,52 +114,55 @@ export function useSettingsMutation(retryingMetadataRefresh = false) {
     void client.cancelQueries(filters);
     client.removeQueries(filters);
   };
+  // Everything a written save can change, reloaded.
+  const reloadSaved = (changes: LooseObject) => {
+    retireMetadata(changes, retryingMetadataRefresh);
+    void client.invalidateQueries({
+      queryKey: [QueryKeys.System],
+    });
+    void client.invalidateQueries({
+      queryKey: [QueryKeys.ProviderHub],
+    });
+
+    void client.invalidateQueries({
+      queryKey: [QueryKeys.Series],
+    });
+
+    void client.invalidateQueries({
+      queryKey: [QueryKeys.Episodes],
+    });
+
+    void client.invalidateQueries({
+      queryKey: [QueryKeys.Movies],
+    });
+
+    void client.invalidateQueries({
+      queryKey: [QueryKeys.Wanted],
+    });
+
+    // The sports wanted rows are computed live against the exclusion and
+    // monitoring settings, so saving them refreshes the cached sports
+    // queries (wanted included) the same way the ones above do for series
+    // and movies.
+    void client.invalidateQueries({
+      queryKey: [QueryKeys.Sports],
+    });
+
+    void client.invalidateQueries({
+      queryKey: [QueryKeys.Badges],
+    });
+
+    // Invalidate Plex libraries when settings change (e.g., server configuration)
+    void client.invalidateQueries({
+      queryKey: [QueryKeys.Plex, "libraries"],
+    });
+  };
   return useMutation({
     mutationKey: [QueryKeys.System, QueryKeys.Settings],
     mutationFn: (data: LooseObject) => api.system.updateSettings(data),
 
     onSuccess: (_, changes) => {
-      retireMetadata(changes, retryingMetadataRefresh);
-      void client.invalidateQueries({
-        queryKey: [QueryKeys.System],
-      });
-      void client.invalidateQueries({
-        queryKey: [QueryKeys.ProviderHub],
-      });
-
-      void client.invalidateQueries({
-        queryKey: [QueryKeys.Series],
-      });
-
-      void client.invalidateQueries({
-        queryKey: [QueryKeys.Episodes],
-      });
-
-      void client.invalidateQueries({
-        queryKey: [QueryKeys.Movies],
-      });
-
-      void client.invalidateQueries({
-        queryKey: [QueryKeys.Wanted],
-      });
-
-      // The sports wanted rows are computed live against the exclusion and
-      // monitoring settings, so saving them refreshes the cached sports
-      // queries (wanted included) the same way the ones above do for series
-      // and movies.
-      void client.invalidateQueries({
-        queryKey: [QueryKeys.Sports],
-      });
-
-      void client.invalidateQueries({
-        queryKey: [QueryKeys.Badges],
-      });
-
-      // Invalidate Plex libraries when settings change (e.g., server configuration)
-      void client.invalidateQueries({
-        queryKey: [QueryKeys.Plex, "libraries"],
-      });
-
+      reloadSaved(changes);
       showNotification(
         notification.info("Settings saved", "Your changes have been saved"),
       );
@@ -157,17 +170,22 @@ export function useSettingsMutation(retryingMetadataRefresh = false) {
 
     onError: (error, changes) => {
       if (isMetadataFollowupError(error) || retryingMetadataRefresh) {
-        retireMetadata(changes, retryingMetadataRefresh);
-        void client.invalidateQueries({
-          queryKey: [QueryKeys.System, QueryKeys.Settings],
-        });
-        void client.invalidateQueries({
-          queryKey: [QueryKeys.ProviderHub],
-        });
+        // Written as well, other settings in the same request included.
+        reloadSaved(changes);
         showNotification(
           notification.error(
             "Settings saved; application refresh failed",
             "Your saved settings are kept. Retry application refresh or leave with the saved settings.",
+          ),
+        );
+        return;
+      }
+      if (isSettingsFollowupError(error)) {
+        reloadSaved(changes);
+        showNotification(
+          notification.error(
+            "Settings saved; applying them failed",
+            "Your changes are saved, but applying some of them failed. The system log has the details.",
           ),
         );
         return;

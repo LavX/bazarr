@@ -188,17 +188,29 @@ def refresh_runtime(kind, instance_id=None, removed=False):
             "BAZARR failed to refresh runtime after %s instance change", kind)
 
 
+def whole_number(value):
+    """Request parser type for a port or a timeout: a whole number, never a boolean.
+
+    int() read JSON true as 1 and 1.9 as 1, and both then passed the range checks
+    below as port 1 or a one second timeout.
+    """
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        raise ValueError("must be a whole number")
+    return int(value)
+
+
 def _connection_arg_error(args):
     """Return a validation message for out-of-range connection args, else None.
 
     Mirrors the scalar config validators (port 1-65535, positive timeout) so the
     API rejects bad values instead of storing them or silently coercing them.
+    A boolean is refused too, since Python counts True as 1.
     """
     port = args.get("port")
-    if port is not None and not (1 <= port <= 65535):
+    if port is not None and (isinstance(port, bool) or not (1 <= port <= 65535)):
         return "port must be between 1 and 65535"
     timeout = args.get("http_timeout")
-    if timeout is not None and timeout <= 0:
+    if timeout is not None and (isinstance(timeout, bool) or timeout <= 0):
         return "http_timeout must be a positive number of seconds"
     return None
 

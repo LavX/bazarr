@@ -1,4 +1,5 @@
 # coding=utf-8
+import os
 import sys
 from types import SimpleNamespace
 
@@ -9,6 +10,14 @@ from dynaconf.validator import ValidationError
 class _FakeUpdate:
     def values(self, **_kwargs):
         return self
+
+
+@pytest.fixture(autouse=True)
+def _no_unfinished_login_resets(monkeypatch):
+    """Each test starts without a provider login reset left over from another."""
+    from app import config
+
+    monkeypatch.setattr(config, "_unfinished_login_resets", {"caches": set(), "throttles": False})
 
 
 def test_save_settings_creates_missing_provider_section_for_hub_config(monkeypatch):
@@ -43,7 +52,7 @@ def test_save_settings_creates_missing_provider_section_for_hub_config(monkeypat
         assert config.settings[provider_id]["api_token"] == "token-value"
         assert executed
     finally:
-        config.settings.unset(provider_id.upper())
+        config.settings.unset(provider_id.upper(), force=True)
 
 
 def test_save_settings_resets_compat_pool_for_dynamic_provider_hub_config(monkeypatch):
@@ -91,7 +100,7 @@ def test_save_settings_resets_compat_pool_for_dynamic_provider_hub_config(monkey
         assert reset_calls == ["http://solver:8191"]
         assert executed
     finally:
-        config.settings.unset(provider_id.upper())
+        config.settings.unset(provider_id.upper(), force=True)
 
 
 def test_provider_hub_settings_saves_clear_runtime_quota(monkeypatch):
@@ -164,7 +173,7 @@ def test_provider_hub_settings_saves_clear_runtime_quota(monkeypatch):
     finally:
         runtime_status.clear()
         config.settings.general.enabled_providers = previous_enabled
-        config.settings.unset(provider_id.upper())
+        config.settings.unset(provider_id.upper(), force=True)
 
 
 def test_save_settings_invalidates_the_compat_cache_for_a_score_modifier(monkeypatch):
@@ -697,17 +706,32 @@ def test_metadata_durable_write_survives_followup_failure(metadata_save_environm
 
 
 @pytest.mark.parametrize("token", ["***", "5ecafe00cafe00cafe00cafe00cafe00", None])
-def test_unchanged_metadata_and_legacy_save_preserve_followup_exception(metadata_save_environment, monkeypatch, token):
+def test_unchanged_metadata_and_ordinary_save_report_a_followup_failure_as_saved(
+    metadata_save_environment, monkeypatch, caplog, token,
+):
+    """A save without new metadata is on disk too when what follows it fails.
+
+    The failure used to escape as it was, so the settings endpoint could not tell
+    the save had been written: it answered 500 and left the languages, profiles and
+    notifiers sent with it unwritten, while the file already held the new settings.
+    """
+    import yaml
+
     env = metadata_save_environment
     before = env.config.get_settings()["discover"]
     def fail(statement):
         raise RuntimeError("legacy-followup-error")
     monkeypatch.setattr(sys.modules["app.database"].database, "execute", fail)
-    items = [("settings-general-page_size", ["50"])]
+    items = [("settings-general-page_size", ["51"])]
     if token is not None:
         items.append(("settings-discover-tmdb_access_token", [token]))
-    with pytest.raises(RuntimeError, match="legacy-followup-error"):
+    with pytest.raises(env.config.SettingsFollowupError) as error:
         env.config.save_settings(items)
+    assert not isinstance(error.value, env.config.MetadataFollowupError)
+    assert "legacy-followup-error" not in str(error.value)
+    assert "legacy-followup-error" in caplog.text
+    assert yaml.safe_load(env.path.read_text())["general"]["page_size"] == 51
+    assert env.settings.general.page_size == 51
     assert env.config.get_settings()["discover"] == before
 
 
@@ -797,17 +821,19 @@ def test_sports_exclusion_save_emits_a_sports_event(monkeypatch):
         SimpleNamespace(event_stream=lambda **kwargs: events.append(kwargs)),
     )
 
-    try:
-        config.save_settings(
-            [
-                ("settings-sportarr-excluded_sports", ["Golf"]),
-                ("settings-sportarr-only_monitored", ["false"]),
-            ]
-        )
-        assert config.settings.sportarr["excluded_sports"] == ["Golf"]
-        assert config.settings.sportarr["only_monitored"] is False
-    finally:
-        config.settings.unset("sportarr")
+    # Only these two are put back afterwards. Removing the whole section would
+    # take every other sports setting away from the tests that run after this one.
+    monkeypatch.setattr(config.settings.sportarr, "excluded_sports", [])
+    monkeypatch.setattr(config.settings.sportarr, "only_monitored", True)
+
+    config.save_settings(
+        [
+            ("settings-sportarr-excluded_sports", ["Golf"]),
+            ("settings-sportarr-only_monitored", ["false"]),
+        ]
+    )
+    assert config.settings.sportarr["excluded_sports"] == ["Golf"]
+    assert config.settings.sportarr["only_monitored"] is False
 
     assert {"type": "badges"} in events
     assert {"type": "sports"} in events
@@ -983,3 +1009,469 @@ def test_a_missing_subtitles_input_queues_the_recalculation_only_once_saved(monk
         with pytest.raises(ValidationError):
             config.save_settings(items)
         assert queued == [], "a refused save queued a library-wide recalculation"
+
+
+# What a save sets off from the values it carries, keyed by the submitted setting.
+# Each value is (settings the save starts from, items submitted, effects expected
+# once the save is written).
+_SAVE_SIDE_EFFECT_CASES = {
+    "undefined embedded subtitles language": (
+        {"general": {"default_und_embedded_subtitles_lang": ""}},
+        [("settings-general-default_und_embedded_subtitles_lang", ["en"])],
+        ["series scan", "movies scan", "sports scan"]),
+    "embedded subtitles": (
+        {"general": {"use_embedded_subs": True}},
+        [("settings-general-use_embedded_subs", ["false"])],
+        ["sports scan", "missing subtitles recalculation"]),
+    "embedded subtitles parser": (
+        {"general": {"embedded_subtitles_parser": "ffprobe"}},
+        [("settings-general-embedded_subtitles_parser", ["mediainfo"])],
+        ["sports scan"]),
+    "audio track parsing": (
+        {"general": {"parse_embedded_audio_track": False}},
+        [("settings-general-parse_embedded_audio_track", ["true"])],
+        ["sports scan", "sonarr sync", "radarr sync"]),
+    "addic7ed login": (
+        {"addic7ed": {"username": "before"}},
+        [("settings-addic7ed-username", ["after"])],
+        ["clear addic7ed_data", "throttled providers", "compat pool"]),
+    "legendasdivx login": (
+        {"legendasdivx": {"password": "before"}},
+        [("settings-legendasdivx-password", ["after"])],
+        ["clear legendasdivx_cookies2", "throttled providers", "compat pool"]),
+    "opensubtitles login": (
+        {"opensubtitles": {"username": "before"}},
+        [("settings-opensubtitles-username", ["after"])],
+        ["clear os_token", "throttled providers", "compat pool"]),
+    "opensubtitles.com login": (
+        {"opensubtitlescom": {"password": "before"}},
+        [("settings-opensubtitlescom-password", ["after"])],
+        ["clear oscom_token", "throttled providers", "compat pool"]),
+    "titlovi login": (
+        {"titlovi": {"username": "before"}},
+        [("settings-titlovi-username", ["after"])],
+        ["clear titlovi_token", "throttled providers", "compat pool"]),
+    "subsource key": (
+        {"subsource": {"apikey": "before"}},
+        [("settings-subsource-apikey", ["after"])],
+        ["throttled providers", "compat pool"]),
+    "enabled providers": (
+        {"general": {"enabled_providers": []}},
+        [("settings-general-enabled_providers", ["subsource"])],
+        ["compat pool"]),
+    "fan-out pool size": (
+        {"compat_endpoint": {"fanout_max_workers": 32}},
+        [("settings-compat_endpoint-fanout_max_workers", ["48"])],
+        ["fanout pool"]),
+    "score modifiers": (
+        {"general": {"provider_score_modifiers": {}}},
+        [("settings-general-provider_score_modifiers", ['{"whisperai": 25}'])],
+        ["compat cache"]),
+    # Subtitles saved from then on are named with it.
+    "hearing-impaired extension": (
+        {"general": {"hi_extension": "hi"}},
+        [("settings-general-hi_extension", ["sdh"])],
+        ["hi extension sdh"]),
+    # The same login sent back unchanged is not a new login.
+    "unchanged opensubtitles login": (
+        {"opensubtitles": {"username": "same"}},
+        [("settings-opensubtitles-username", ["same"])],
+        []),
+}
+
+
+@pytest.mark.parametrize("outcome", ["saved", "invalid", "unwritable"])
+@pytest.mark.parametrize("case", sorted(_SAVE_SIDE_EFFECT_CASES))
+def test_a_refused_save_queues_no_library_job_and_resets_no_provider(monkeypatch, case, outcome):
+    """Library jobs, provider logins and provider pools follow a save only once it is written.
+
+    They used to be set off while the submitted values were still being applied,
+    before validation and before the write. A save refused for another field or by
+    the disk then still reindexed sports with the rejected audio mode, synced every
+    series and movie, signed providers out and rebuilt their pools, while the page
+    reported that nothing had been saved.
+    """
+    from app import config
+
+    starting, items, expected = _SAVE_SIDE_EFFECT_CASES[case]
+    for section, values in starting.items():
+        for name, value in values.items():
+            monkeypatch.setattr(getattr(config.settings, section), name, value)
+    for name in ("use_sonarr", "use_radarr", "use_sportarr"):
+        monkeypatch.setattr(config.settings.general, name, True)
+    monkeypatch.setenv("SZ_HI_EXTENSION", "hi")
+
+    effects = _record_save_side_effects(monkeypatch)
+    record = effects.append
+
+    def validate():
+        if outcome == "invalid":
+            raise ValidationError("synthetic invalid value")
+
+    restored = []
+    monkeypatch.setattr(config.settings.validators, "validate", validate)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config, "write_config", lambda: outcome != "unwritable")
+    monkeypatch.setattr(config, "restore_persisted_settings", lambda: restored.append(True))
+
+    if outcome == "saved":
+        config.save_settings(items)
+    else:
+        with pytest.raises(ValidationError):
+            config.save_settings(items)
+    if os.environ["SZ_HI_EXTENSION"] != "hi":
+        record(f"hi extension {os.environ['SZ_HI_EXTENSION']}")
+
+    if outcome == "saved":
+        assert sorted(effects) == sorted(expected)
+        assert restored == []
+    else:
+        assert effects == [], "a refused save acted on values it did not keep"
+        assert restored == [True]
+
+
+@pytest.mark.parametrize("kind", ["sonarr", "radarr"])
+def test_a_save_its_own_validators_refuse_starts_no_library_job(metadata_save_environment, monkeypatch, kind):
+    """The same, with the real validators: a boolean timeout sent beside a new audio setting.
+
+    On a settings file of its own, since validating replaces whole sections of the
+    settings it checks, and a value patched on the replaced section is never put back.
+    """
+    env = metadata_save_environment
+    env.settings.validators.register(*env.config.validators)
+    env.settings.general.parse_embedded_audio_track = False
+    getattr(env.settings, kind).http_timeout = 60
+    for name in ("use_sonarr", "use_radarr", "use_sportarr"):
+        setattr(env.settings.general, name, True)
+    assert env.config.write_config() is True
+    disk = env.path.read_bytes()
+    effects = _record_save_side_effects(monkeypatch)
+
+    with pytest.raises(ValidationError, match=f"{kind}.http_timeout"):
+        env.config.save_settings([("settings-general-parse_embedded_audio_track", ["true"]),
+                                  (f"settings-{kind}-http_timeout", ["true"])])
+
+    assert effects == []
+    assert env.path.read_bytes() == disk
+    assert env.settings.general.parse_embedded_audio_track is False
+    assert getattr(env.settings, kind).http_timeout == 60
+
+
+# Everything the saves below set off: a new OpenSubtitles.org login, audio track
+# parsing turned on and embedded subtitles turned off, with every arr in use.
+_EVERY_FOLLOW_UP = sorted(["clear os_token", "throttled providers", "compat pool", "sports scan",
+                           "sonarr sync", "radarr sync", "missing subtitles recalculation"])
+
+
+@pytest.mark.parametrize("failing", ["clear os_token", "throttled providers", "sports scan",
+                                     "sonarr sync", "radarr sync", "missing subtitles recalculation"])
+def test_a_written_metadata_save_keeps_its_values_when_a_follow_up_fails(
+    metadata_save_environment, monkeypatch, failing,
+):
+    """A login reset or a job that fails once the save is on disk undoes nothing.
+
+    The save is reported as written with a failed refresh, and the live settings keep
+    what the file holds. Treated as unsaved, the new TMDB token was taken back out of
+    the live settings only, and the next save of anything else wrote the old one to disk.
+    """
+    import yaml
+    from secret_store import decrypt_settings_dict
+
+    env = metadata_save_environment
+    env.settings.general.parse_embedded_audio_track = False
+    env.settings.general.use_embedded_subs = True
+    env.settings.opensubtitles.username = "before"
+    for name in ("use_sonarr", "use_radarr", "use_sportarr"):
+        setattr(env.settings.general, name, True)
+    assert env.config.write_config() is True
+    before = env.config.get_settings()["discover"]
+    effects = _record_save_side_effects(monkeypatch, fail=failing)
+    replacement = "5ecafe33cafe33cafe33cafe33cafe33"
+
+    with pytest.raises(env.config.MetadataFollowupError):
+        env.config.save_settings([
+            ("settings-discover-tmdb_access_token", [replacement]),
+            ("settings-general-parse_embedded_audio_track", ["true"]),
+            ("settings-general-use_embedded_subs", ["false"]),
+            ("settings-opensubtitles-username", ["after"]),
+        ])
+
+    # One that fails stops none of the others, which saving the same values
+    # again would not set off.
+    assert sorted(effects) == _EVERY_FOLLOW_UP
+    stored = decrypt_settings_dict(yaml.safe_load(env.path.read_text()))
+    assert stored["discover"]["tmdb_access_token"] == replacement
+    assert stored["general"]["parse_embedded_audio_track"] is True
+    assert env.settings.discover.tmdb_access_token == replacement
+    assert env.settings.general.parse_embedded_audio_track is True
+    assert env.config.get_settings()["discover"]["metadata_revision"] != before["metadata_revision"]
+
+
+@pytest.mark.parametrize("failing", ["clear os_token", "throttled providers", "sports scan",
+                                     "sonarr sync", "radarr sync", "missing subtitles recalculation"])
+def test_a_written_save_whose_follow_up_fails_is_reported_as_saved(
+    metadata_save_environment, monkeypatch, failing,
+):
+    """A login reset or a library job that fails once the save is on disk is a refresh failure.
+
+    Reported as the plain failure, the settings endpoint took the save for an unsaved
+    one, and the languages, profiles and notifiers of the same request were not written.
+    """
+    import yaml
+    from secret_store import decrypt_settings_dict
+
+    env = metadata_save_environment
+    env.settings.general.parse_embedded_audio_track = False
+    env.settings.general.use_embedded_subs = True
+    env.settings.opensubtitles.username = "before"
+    for name in ("use_sonarr", "use_radarr", "use_sportarr"):
+        setattr(env.settings.general, name, True)
+    assert env.config.write_config() is True
+    effects = _record_save_side_effects(monkeypatch, fail=failing)
+
+    with pytest.raises(env.config.SettingsFollowupError) as error:
+        env.config.save_settings([
+            ("settings-general-parse_embedded_audio_track", ["true"]),
+            ("settings-general-use_embedded_subs", ["false"]),
+            ("settings-opensubtitles-username", ["after"]),
+        ])
+
+    assert not isinstance(error.value, env.config.MetadataFollowupError)
+    # One that fails stops none of the others, which saving the same values
+    # again would not set off.
+    assert sorted(effects) == _EVERY_FOLLOW_UP
+    stored = decrypt_settings_dict(yaml.safe_load(env.path.read_text()))
+    assert stored["general"]["parse_embedded_audio_track"] is True
+    assert stored["opensubtitles"]["username"] == "after"
+    assert env.settings.general.parse_embedded_audio_track is True
+    assert env.settings.opensubtitles.username == "after"
+
+
+def test_a_metadata_refresh_that_fails_after_the_write_stops_no_other_follow_up(
+    metadata_save_environment, monkeypatch,
+):
+    """Refreshing the metadata configuration is one follow-up among the others.
+
+    It ran first and on its own, so a failure there skipped every other one, a login
+    reset included, which saving the same login again would not bring back.
+    """
+    from discover import metadata
+
+    env = metadata_save_environment
+    env.settings.general.parse_embedded_audio_track = False
+    env.settings.general.use_embedded_subs = True
+    env.settings.opensubtitles.username = "before"
+    for name in ("use_sonarr", "use_radarr", "use_sportarr"):
+        setattr(env.settings.general, name, True)
+    assert env.config.write_config() is True
+    effects = _record_save_side_effects(monkeypatch)
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("synthetic metadata refresh failure")
+
+    monkeypatch.setattr(metadata, "invalidate_metadata", fail)
+
+    with pytest.raises(env.config.MetadataFollowupError):
+        env.config.save_settings([
+            ("settings-discover-tmdb_access_token", ["5ecafe33cafe33cafe33cafe33cafe33"]),
+            ("settings-general-parse_embedded_audio_track", ["true"]),
+            ("settings-general-use_embedded_subs", ["false"]),
+            ("settings-opensubtitles-username", ["after"]),
+        ])
+
+    assert sorted(effects) == _EVERY_FOLLOW_UP
+    assert env.settings.discover.tmdb_access_token == "5ecafe33cafe33cafe33cafe33cafe33"
+
+
+@pytest.mark.parametrize("failing, retried", [
+    ("clear os_token", ["clear os_token", "compat pool"]),
+    ("throttled providers", ["compat pool", "throttled providers"]),
+])
+def test_a_login_reset_that_fails_after_the_write_is_retried_by_the_next_save(
+    metadata_save_environment, monkeypatch, failing, retried,
+):
+    """Saving the same login again finds nothing changed, so it could not retry the reset.
+
+    A cached login or a credential throttle a failed reset left in place kept the
+    provider on the old login. The next save that is written retries what is left,
+    whatever that save changes, and the one after that has nothing left to retry.
+    A refused save retries nothing.
+    """
+    env = metadata_save_environment
+    env.settings.opensubtitles.username = "before"
+    assert env.config.write_config() is True
+    _record_save_side_effects(monkeypatch, fail=failing)
+
+    with pytest.raises(env.config.SettingsFollowupError):
+        env.config.save_settings([("settings-opensubtitles-username", ["after"])])
+
+    effects = _record_save_side_effects(monkeypatch)
+    with monkeypatch.context() as refused:
+        refused.setattr(env.config, "write_config", lambda **_kwargs: False)
+        with pytest.raises(ValidationError):
+            env.config.save_settings([("settings-general-page_size", ["52"])])
+    assert effects == []
+
+    env.config.save_settings([("settings-opensubtitles-username", ["after"])])
+    assert sorted(effects) == retried
+
+    effects = _record_save_side_effects(monkeypatch)
+    env.config.save_settings([("settings-general-page_size", ["52"])])
+    assert effects == []
+
+
+def test_a_written_master_switch_save_keeps_the_switch_when_a_follow_up_fails(
+    metadata_save_environment, monkeypatch,
+):
+    """The media-server switch the file holds is the one left live after a failed job."""
+    import yaml
+    from media_servers import dispatcher
+
+    env = metadata_save_environment
+    env.settings.general.use_silo = False
+    env.settings.general.parse_embedded_audio_track = False
+    env.settings.general.use_sportarr = True
+    assert env.config.write_config() is True
+    monkeypatch.setattr(dispatcher, "_configuration", dispatcher.NativeConfiguration(env.settings))
+    effects = _record_save_side_effects(monkeypatch, fail="sports scan")
+
+    with pytest.raises(env.config.SettingsFollowupError):
+        env.config.save_settings([("settings-general-use_silo", ["true"]),
+                                  ("settings-general-parse_embedded_audio_track", ["true"])])
+
+    assert effects[-1] == "sports scan"
+    assert yaml.safe_load(env.path.read_text())["general"]["use_silo"] is True
+    assert env.settings.general.use_silo is True
+    assert dispatcher.get_native_configuration().masters["silo"] is True
+
+
+def _record_save_side_effects(monkeypatch, fail=None):
+    """Stand in for everything a save can set off, and list what it did, in order.
+
+    Each stand-in replaces a whole module, so nothing of the application is imported
+    for it, not even while a test has put a stand-in database in place. The one named
+    by `fail` raises once it has been recorded.
+    """
+    from app import config
+
+    effects = []
+
+    def record(effect):
+        effects.append(effect)
+        if effect == fail:
+            raise RuntimeError("synthetic follow-up failure")
+
+    monkeypatch.setitem(sys.modules, "subtitles.indexer.series", SimpleNamespace(
+        series_full_scan_subtitles=lambda **_kw: record("series scan")))
+    monkeypatch.setitem(sys.modules, "subtitles.indexer.movies", SimpleNamespace(
+        movies_full_scan_subtitles=lambda **_kw: record("movies scan")))
+    monkeypatch.setitem(sys.modules, "subtitles.indexer.sports", SimpleNamespace(
+        sports_full_scan_subtitles=lambda **_kw: record("sports scan")))
+    monkeypatch.setitem(sys.modules, "sonarr.sync.series", SimpleNamespace(
+        update_series=lambda: record("sonarr sync")))
+    monkeypatch.setitem(sys.modules, "radarr.sync.movies", SimpleNamespace(
+        update_movies=lambda: record("radarr sync")))
+    monkeypatch.setitem(sys.modules, "subtitles.indexer.missing_refresh", SimpleNamespace(
+        queue_missing_subtitles_recalculation=lambda *_a, **_kw: record("missing subtitles recalculation")))
+    monkeypatch.setattr(config, "region", SimpleNamespace(delete=lambda key: record(f"clear {key}")))
+    monkeypatch.setitem(sys.modules, "app.get_providers", SimpleNamespace(
+        reset_throttled_providers=lambda **_kw: record("throttled providers")))
+    monkeypatch.setitem(sys.modules, "subliminal_patch.core_persistent", SimpleNamespace(
+        reset_pool=lambda: record("fanout pool")))
+    monkeypatch.setitem(sys.modules, "compat.service", SimpleNamespace(
+        reset_compat_pool=lambda: record("compat pool")))
+    monkeypatch.setitem(sys.modules, "compat.cache", SimpleNamespace(
+        invalidate_all=lambda: record("compat cache")))
+    monkeypatch.setitem(sys.modules, "provider_hub.state", SimpleNamespace(
+        load_state=lambda: {"installations": {}}))
+    monkeypatch.setitem(sys.modules, "app.scheduler", SimpleNamespace(scheduler=None))
+    monkeypatch.setitem(sys.modules, "app.database", SimpleNamespace(
+        database=SimpleNamespace(execute=lambda _statement: None),
+        update=lambda _model: _FakeUpdate(), System=object,
+    ))
+    return effects
+
+
+def test_a_section_a_save_created_can_be_removed_for_good(metadata_save_environment):
+    """The startup cleanup of retired provider sections removes one a save created.
+
+    Dynaconf keeps a section created through set() as a default of its own: unset()
+    skipped it unless forced, and a later reload() put a forced one back. A save
+    creates a missing section, so a cleanup running after one left it in place.
+    """
+    import yaml
+
+    env = metadata_save_environment
+    env.config.save_settings([("settings-retiredhub-api_token", ["token-value"])])
+    assert yaml.safe_load(env.path.read_text())["retiredhub"] == {"api_token": "token-value"}
+
+    env.config.remove_settings_section("retiredhub")
+    env.config.write_config()
+
+    assert "RETIREDHUB" not in env.settings.store
+    assert "retiredhub" not in {key.lower() for key in env.settings.as_dict()}
+    assert "retiredhub" not in yaml.safe_load(env.path.read_text())
+    # A refused save reloads the settings from disk, which must not bring it back.
+    env.config.restore_persisted_settings()
+    assert env.settings.get("retiredhub") is None
+
+
+@pytest.mark.parametrize("assignment", ["set", "item", "attribute"])
+def test_a_section_code_added_can_be_removed_for_good(metadata_save_environment, assignment):
+    """A section added in code, not loaded from the file, is removed and stays removed.
+
+    Each of these assignments keeps the section as a Dynaconf default: unset() skipped
+    it unless forced, and a forced unset left the default behind for the next reload(),
+    such as the one that undoes a refused save, to put back with its old values.
+    """
+    env = metadata_save_environment
+    if assignment == "set":
+        env.settings.set("codehub", {"api_token": "token-value"})
+    elif assignment == "item":
+        env.settings["codehub"] = {"api_token": "token-value"}
+    else:
+        env.settings.codehub = {"api_token": "token-value"}
+    assert env.settings.codehub.api_token == "token-value"
+
+    env.config.remove_settings_section("codehub")
+
+    assert "CODEHUB" not in env.settings.store
+    assert "codehub" not in {key.lower() for key in env.settings.as_dict()}
+    env.config.restore_persisted_settings()
+    assert env.settings.get("codehub") is None
+    assert "codehub" not in {key.lower() for key in env.settings.as_dict()}
+
+
+@pytest.mark.parametrize("outcome", ["invalid", "unwritable"])
+def test_a_refused_save_keeps_no_section_it_created(metadata_save_environment, monkeypatch, outcome):
+    """A section that first appears in a refused save is gone again afterwards.
+
+    Reloading from disk is what undoes a refused save, and it kept a section the
+    save had created, so a new provider's rejected credentials stayed live and the
+    next save of anything else wrote them to disk.
+    """
+    env = metadata_save_environment
+    if outcome == "invalid":
+        def fail():
+            raise ValidationError("synthetic invalid value")
+        monkeypatch.setattr(env.settings.validators, "validate", fail)
+    else:
+        monkeypatch.setattr(env.config, "write_config", lambda: False)
+    disk = env.path.read_bytes()
+
+    with pytest.raises(ValidationError):
+        env.config.save_settings([("settings-newhub-api_token", ["rejected-token"])])
+
+    assert env.settings.get("newhub") is None
+    assert "newhub" not in {key.lower() for key in env.settings.as_dict()}
+    assert env.path.read_bytes() == disk
+    assert env.executed == env.resets == []
+
+
+def test_a_section_a_save_created_survives_the_reload_of_a_later_refused_save(metadata_save_environment):
+    env = metadata_save_environment
+    env.config.save_settings([("settings-newhub-api_token", ["kept-token"])])
+
+    env.config.restore_persisted_settings()
+
+    assert env.settings.newhub.api_token == "kept-token"
