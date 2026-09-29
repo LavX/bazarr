@@ -49,6 +49,7 @@ class NullableInteger(fields.Integer):
 # What a route that queues its work answers with. Follow the job through
 # system/jobs or the jobs socket.
 job_queued_model = {
-        "job_id": NullableInteger(description="Id of the queued job. Can be null when an identical job was "
-                                              "already pending or running, so nothing new was queued."),
+        "job_id": NullableInteger(description="Id of the queued job, or of the identical job already pending or "
+                                              "running on routes that follow it. Can be null on routes that do "
+                                              "not, when nothing new was queued."),
     }

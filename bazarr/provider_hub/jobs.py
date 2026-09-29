@@ -26,18 +26,6 @@ def _manifest_name(manifest):
     return "provider"
 
 
-def _existing_job_id(func, kwargs):
-    """The pending or running job the queue matched a duplicate against."""
-    for job in list(jobs_queue.jobs_pending_queue) + list(jobs_queue.jobs_running_queue):
-        if job.module != JOB_MODULE or job.func != func:
-            continue
-        job_kwargs = dict(job.kwargs)
-        job_kwargs.pop("job_id", None)
-        if job_kwargs == kwargs:
-            return job.job_id
-    return None
-
-
 def _checkpoint(job_id):
     """Report a step on the job, and stop there when Stop was pressed.
 
@@ -55,11 +43,12 @@ def _checkpoint(job_id):
 
 
 def _enqueue(label, func, kwargs):
-    job_id = jobs_queue.feed_jobs_pending_queue(
-        job_name=label, module=JOB_MODULE, func=func, kwargs=kwargs, is_progress=False)
-    # The queue answers False for an identical job that is already pending or
-    # running. The caller still wants something to follow, and that job is it.
-    return job_id or _existing_job_id(func, kwargs)
+    # An identical job that is already pending or running is what the caller
+    # follows instead. The queue names it in the same step that matches it, so
+    # it is not lost when that job finishes a moment later.
+    return jobs_queue.feed_jobs_pending_queue(
+        job_name=label, module=JOB_MODULE, func=func, kwargs=kwargs, is_progress=False,
+        return_existing=True)
 
 
 def queue_install(manifest):

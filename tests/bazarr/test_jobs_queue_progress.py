@@ -151,3 +151,30 @@ def test_the_jobs_list_sends_last_run_time_as_utc():
     job.last_run_time = naive
     sent = marshal([vars(job)], SystemJobs.get_response_model)[0]["last_run_time"]
     assert datetime.fromisoformat(sent.replace("Z", "+00:00")) == naive.astimezone(timezone.utc)
+
+
+def test_a_duplicate_is_refused_and_can_name_the_job_it_matched():
+    """A job identical to one pending or running is refused with False. A
+    caller that has to follow that job asks for its id instead, and gets it
+    from the same look, under the queue lock, so the job cannot finish in
+    between and leave the caller with nothing to follow."""
+    from pytest import MonkeyPatch
+    from test_sportarr_workflows import private_queue
+
+    def feed(**options):
+        return queue.feed_jobs_pending_queue("Example", "tests.fake", "work", kwargs={"index": 0}, **options)
+
+    with MonkeyPatch.context() as monkeypatch:
+        queue = private_queue(monkeypatch)
+        first = feed()
+
+        assert feed() is False
+        assert feed(return_existing=True) == first
+        queue.jobs_running_queue.append(queue.jobs_pending_queue.popleft())
+        assert feed(return_existing=True) == first
+        assert len(queue.jobs_pending_queue) == 0 and len(queue.jobs_running_queue) == 1
+
+        # A finished job is no longer a duplicate: the same call queues again.
+        queue.jobs_completed_queue.append(queue.jobs_running_queue.popleft())
+        second = feed(return_existing=True)
+        assert second not in (False, first)

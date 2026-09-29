@@ -444,6 +444,34 @@ def test_a_second_identical_install_follows_the_first_job(queue):
     assert len(pending(queue)) == 1
 
 
+def test_a_duplicate_install_follows_the_first_job_even_when_it_ends_at_once(queue, monkeypatch):
+    """The queue refuses the duplicate and names the job it matched in one step.
+
+    The id used to be looked up afterwards, in the pending and running queues
+    only. When the first install failed in between, the second request got a
+    null job id, and the page treated a request with no job to follow as a
+    success.
+    """
+    from provider_hub import jobs as hub_jobs
+
+    monkeypatch.setattr("app.jobs_queue.activity.finish", lambda *args, **kwargs: None)
+    manifest = {"provider_id": "examplehub", "name": "Example"}
+    first = hub_jobs.queue_install(manifest)
+    running = queue._reserve_next_job()
+    feed = queue.feed_jobs_pending_queue
+
+    def first_install_fails_right_after_the_answer(*args, **kwargs):
+        answer = feed(*args, **kwargs)
+        queue._mark_failed(running)
+        return answer
+
+    monkeypatch.setattr(queue, "feed_jobs_pending_queue", first_install_fails_right_after_the_answer)
+
+    assert hub_jobs.queue_install(manifest) == first
+    assert queue.list_jobs_from_queue(job_id=first)[0]["status"] == "failed"
+    assert pending(queue) == []
+
+
 def test_install_job_success_returns_the_installation(queue, monkeypatch):
     from provider_hub import jobs as hub_jobs
     from provider_hub import service
