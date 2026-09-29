@@ -145,10 +145,11 @@ class ArrInstanceItem(Resource):
         movies, history, exclusions and root folders Bazarr+ synced from the
         instance go with it, and for the last instance of its kind that
         includes the rows of that kind no instance owns. Database rows only:
-        no file on disk is touched. That removal is refused with 409 while a
-        library sync of the instance, or of its whole kind, is running or
-        queued. Whether or not it is set, deleting the last Sonarr or Radarr
-        instance turns Use Sonarr or Use Radarr off. Sportarr ignores it.
+        no file on disk is touched. A Sonarr or Radarr delete, with or without
+        it, is refused with 409 while a library sync of the instance, or of
+        its whole kind, is running or queued. Whether or not it is set,
+        deleting the last Sonarr or Radarr instance turns Use Sonarr or Use
+        Radarr off. Sportarr ignores it.
         """
         remove_library = self.delete_request_parser.parse_args()["remove_library"]
         # Capture the kind before the row is gone so the post-delete refresh can
@@ -159,8 +160,12 @@ class ArrInstanceItem(Resource):
                                                remove_library=remove_library)
         if status < 400:
             database.commit()
-            service.refresh_runtime(kind, instance_id=instance_id, removed=True)
+            # Switch a kind with no instance left off first: the refresh
+            # restarts the live feed, and with the kind still on and no
+            # instance it would start the fallback feed on the stored
+            # connection settings, which still describe the deleted server.
             service.after_instance_deleted(database, kind, removed_library=remove_library)
+            service.refresh_runtime(kind, instance_id=instance_id, removed=True)
         return body, status
 
 

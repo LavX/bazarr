@@ -446,13 +446,15 @@ def delete_instance(session, instance_id, remove_library=False):
     A Sonarr or Radarr instance that owns library rows is refused by default.
     The refusal says what it holds and that ``remove_library`` deletes it
     together with that library, so the caller can offer that as a separate,
-    explicit choice. That choice is itself refused while the instance's
-    library sync is running or queued: the sync would write rows for an
-    instance that is gone.
+    explicit choice. Any Sonarr or Radarr delete, with or without the library,
+    is refused while the instance's library sync is running or queued: the
+    sync would write rows for an instance that is gone. That holds for an
+    instance that owns nothing yet too, such as one whose first sync has built
+    its client and not written a row.
 
     Only queued jobs are covered. A single-item write (a download or upgrade,
     an exclusion, a SignalR event, a webhook, a one-series refresh) runs
-    inline, so one already past its instance lookup when the removal commits
+    inline, so one already past its instance lookup when the delete commits
     still lands afterwards: that one item's rows, a history entry, say, or a
     series with its episodes. Those rows stay.
 
@@ -462,17 +464,18 @@ def delete_instance(session, instance_id, remove_library=False):
     that name an instance. A row with no owner still counts: for that one it
     builds the instance again from the stored connection settings. Two
     writers can leave such a row after the removal. An exclusion whose
-    episode or movie row is already gone is stored without an owner, and an
-    unscoped one-item sync, such as the webhook URL without an instance key,
-    looks for the default instance, finds none and leaves the owner empty.
-    The unscoped sync is not limited to this window: it can do so at any
-    time afterwards.
+    episode or movie row is already gone is stored without an owner when its
+    caller names none, and an unscoped one-item sync, such as the webhook URL
+    without an instance key, that was already past its check for an enabled
+    default when the delete committed finds none and leaves the owner empty.
+    One that starts later writes nothing unless an enabled default owns it.
 
-    The flag only means something for Sonarr and Radarr. Any other kind takes
-    the plain delete, without holding up the job queue.
+    Only Sonarr and Radarr have a library sync to wait for or a library to
+    remove. Any other kind takes the plain delete, without holding up the job
+    queue.
     """
     repo = ArrInstanceRepository(session)
-    row = repo.get(instance_id) if remove_library else None
+    row = repo.get(instance_id)
     if row is None or row.kind not in _LIBRARY_SYNC_JOBS:
         return _delete(repo, instance_id, remove_library=False)
     from app.jobs_queue import jobs_queue
@@ -491,7 +494,7 @@ def delete_instance(session, instance_id, remove_library=False):
             return {"error": "sync_in_progress",
                     "message": "A library sync of this instance is running or queued. "
                                "Wait for it to finish, then delete the instance again."}, 409
-        body, status = _delete(repo, instance_id, remove_library=True)
+        body, status = _delete(repo, instance_id, remove_library=remove_library)
         if status < 400:
             session.commit()
         return body, status

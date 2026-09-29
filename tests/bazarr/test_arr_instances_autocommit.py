@@ -876,10 +876,10 @@ def _instance_row(engine, kind, *, enabled):
     (None, False, "nothing"),
     # A default instance owns it, even with the kind switched off.
     ("enabled", False, "default"),
-    # Only a disabled instance, so no default: written with no owner as it
-    # always was while the kind is on (the next start stamps it onto that
-    # instance), and not at all while the kind is off.
-    ("disabled", True, "ownerless"),
+    # Only a disabled instance, so no default: not written, whatever the
+    # switch says. The stored connection settings need not describe that
+    # instance, yet the next start would stamp a row with no owner onto it.
+    ("disabled", True, "nothing"),
     ("disabled", False, "nothing"),
 ])
 @pytest.mark.parametrize("writer", ["movie_webhook", "series_sync"])
@@ -894,8 +894,38 @@ def test_what_a_sync_naming_no_instance_writes(
 
     unscoped_syncs.run(writer, arr_api.client)
 
-    expected = {"nothing": [], "default": [(owner,)], "ownerless": [(None,)]}[outcome]
+    expected = {"nothing": [], "default": [(owner,)]}[outcome]
     assert late_rows(arr_engine, writer) == expected
+
+
+@pytest.mark.parametrize("writer", list(WRITER_KIND))
+def test_a_sync_naming_no_instance_writes_nothing_once_only_a_disabled_one_is_left(
+        arr_api, arr_engine, settings_saves, unscoped_syncs, monkeypatch, caplog, writer):
+    """The enabled default goes and a disabled sibling stays, so the kind
+    stays on with no default. The stored connection settings still describe
+    the deleted server, and the next start stamps a row with no owner onto the
+    only instance left, which is another server."""
+    from app import config as app_config
+
+    kind = WRITER_KIND[writer]
+    monkeypatch.setattr(app_config.settings.general, f"use_{kind}", True)
+    gone = seed_library(arr_engine, kind, "Gone", 1, default=True)
+    seed_library(arr_engine, kind, "Sibling", 2, default=False, enabled=False)
+    removed = arr_api.client.delete(f"{ROOT}/{gone}?remove_library=true", headers=HEADERS)
+    assert removed.status_code == 204, removed.json
+    assert getattr(app_config.settings.general, f"use_{kind}") is True
+    before = library_rows(arr_engine)
+
+    with caplog.at_level(logging.INFO):
+        response = unscoped_syncs.run(writer, arr_api.client)
+
+    if response is not None:
+        assert response.status_code == 200, response.json
+    assert skipped_syncs(caplog) == [
+        f"BAZARR skipping the {kind.capitalize()} sync of {WRITER_ITEM[writer]}: "
+        f"no {kind.capitalize()} instance is enabled"]
+    assert library_rows(arr_engine) == before
+    assert unscoped_syncs.searches == []
 
 
 @pytest.mark.parametrize("state", ["pending", "running"])
@@ -928,6 +958,71 @@ def test_library_removal_is_refused_while_that_instance_syncs(
     removed = arr_api.client.delete(f"{ROOT}/{target}?remove_library=true", headers=HEADERS)
     assert removed.status_code == 204, removed.json
     assert stored(arr_engine) == [(kind, "Sibling", 1, 1)]
+
+
+@pytest.mark.parametrize("state", ["pending", "running"])
+@pytest.mark.parametrize("kind", ["sonarr", "radarr"])
+def test_a_plain_delete_is_refused_while_that_instance_syncs(
+        arr_api, arr_engine, settings_saves, monkeypatch, kind, state):
+    """A first sync that has built its client and not written a row yet: the
+    instance owns nothing, so without this the delete went through and the
+    sync then wrote its whole library under an instance that is gone."""
+    from collections import deque
+
+    from app.jobs_queue import Job, jobs_queue
+
+    seed_library(arr_engine, kind, "Sibling", 2, default=True)
+    created = arr_api.client.post(ROOT, json={"kind": kind, "name": "New", "api_key": "k",
+                                              "port": 3}, headers=HEADERS)
+    assert created.status_code == 201, created.json
+    target = created.json["id"]
+    before = library_rows(arr_engine)
+    module, func = KIND_JOBS[kind]
+    job = Job(job_id=900004, job_name="Syncing", module=module, func=func,
+              kwargs={"arr_instance_id": target, "job_id": None, "wait_for_completion": True})
+    job.status = state
+    monkeypatch.setattr(jobs_queue, f"jobs_{state}_queue", deque([job]))
+
+    refused = arr_api.client.delete(f"{ROOT}/{target}", headers=HEADERS)
+
+    assert refused.status_code == 409, refused.json
+    assert refused.json["error"] == "sync_in_progress"
+    assert library_rows(arr_engine) == before
+    assert stored(arr_engine) == [(kind, "Sibling", 1, 1), (kind, "New", 1, 0)]
+
+    monkeypatch.setattr(jobs_queue, f"jobs_{state}_queue", deque())
+    deleted = arr_api.client.delete(f"{ROOT}/{target}", headers=HEADERS)
+    assert deleted.status_code == 204, deleted.json
+    assert stored(arr_engine) == [(kind, "Sibling", 1, 1)]
+
+
+@pytest.mark.parametrize("remove_library", [True, False])
+@pytest.mark.parametrize("kind", ["sonarr", "radarr"])
+def test_the_kind_is_off_before_the_feed_and_jobs_are_refreshed(
+        arr_api, arr_engine, settings_saves, monkeypatch, kind, remove_library):
+    """The refresh restarts the live feed. With the kind still on and no
+    instance left it started the fallback feed on the stored connection
+    settings, which still describe the server just deleted."""
+    from app import config as app_config
+    from arr_instances import service
+
+    monkeypatch.setattr(app_config.settings.general, f"use_{kind}", True)
+    refreshed = []
+    monkeypatch.setattr(service, "refresh_runtime",
+                        lambda refreshed_kind, instance_id=None, removed=False: refreshed.append(
+                            (refreshed_kind, instance_id, removed,
+                             getattr(app_config.settings.general, f"use_{kind}"))))
+    if remove_library:
+        target = seed_library(arr_engine, kind, "Only", 1, default=True)
+        path = f"{ROOT}/{target}?remove_library=true"
+    else:
+        target = _instance_row(arr_engine, kind, enabled=True)
+        path = f"{ROOT}/{target}"
+
+    deleted = arr_api.client.delete(path, headers=HEADERS)
+
+    assert deleted.status_code == 204, deleted.json
+    assert refreshed == [(kind, target, True, False)]
 
 
 def test_removing_the_old_sonarr_library_ends_the_sportarr_ownership_ambiguity(

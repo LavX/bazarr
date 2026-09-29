@@ -308,7 +308,11 @@ describe("deleting the last instance of a kind", () => {
     vi.mocked(showNotification).mockClear();
   });
 
-  function serve(kind: "sonarr" | "radarr", withSibling: boolean) {
+  function serve(
+    kind: "sonarr" | "radarr",
+    withSibling: boolean,
+    syncRunning = false,
+  ) {
     let saved = [
       makeInstance({ id: 7, kind, name: "Only", display_name: "Only" }),
       ...(withSibling
@@ -326,6 +330,16 @@ describe("deleting the last instance of a kind", () => {
       }),
       http.get("/api/system/arr-instances", () => HttpResponse.json(saved)),
       http.delete("/api/system/arr-instances/7", () => {
+        if (syncRunning) {
+          return HttpResponse.json(
+            {
+              error: "sync_in_progress",
+              message:
+                "A library sync of this instance is running or queued. Wait for it to finish, then delete the instance again.",
+            },
+            { status: 409 },
+          );
+        }
         saved = saved.filter((instance) => instance.id !== 7);
         // What the server does when the kind has no instance left.
         kindOn = saved.length > 0;
@@ -389,6 +403,35 @@ describe("deleting the last instance of a kind", () => {
       );
     },
   );
+
+  it("keeps an instance with no library while its sync refuses a plain delete", async () => {
+    const user = userEvent.setup();
+    serve("sonarr", true, true);
+    customRender(<SettingsConnectionsView />);
+
+    const modal = await openDelete(user);
+    await user.click(
+      within(modal).getByRole("button", { name: "Delete instance" }),
+    );
+
+    expect(
+      await screen.findByText(/A library sync of this instance is running/),
+    ).toBeInTheDocument();
+    const dialog = screen.getByRole("dialog", { name: "Delete instance" });
+    expect(dialog).toHaveTextContent("Library sync in progress");
+    // It owns no library, so there is nothing more to offer: it only waits.
+    expect(
+      within(dialog).queryByRole("button", {
+        name: "Delete with its synced library",
+      }),
+    ).toBeNull();
+    expect(
+      within(dialog).getByRole("button", { name: "Delete instance" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "More actions for Only" }),
+    ).toBeInTheDocument();
+  });
 
   it("says nothing about switching off while another instance remains", async () => {
     const user = userEvent.setup();
