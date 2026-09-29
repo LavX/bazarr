@@ -46,6 +46,13 @@ class NullableInteger(fields.Integer):
         return {**super().schema(), "x-nullable": True}
 
 
+class NullableRaw(fields.Raw):
+    """A JSON object that the response can also send as null, like NullableInteger."""
+
+    def schema(self):
+        return {**super().schema(), "x-nullable": True}
+
+
 # What a route that queues its work answers with. Follow the job through
 # system/jobs or the jobs socket.
 job_queued_model = {

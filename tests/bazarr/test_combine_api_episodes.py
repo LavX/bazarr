@@ -48,10 +48,22 @@ class _FakeResource:
     pass
 
 
+class _FakeField:
+    """Stands in for the field classes the API modules subclass.
+
+    A class statement on a MagicMock base makes a mock that answers one call
+    and then raises StopIteration, so the jobs model's second NullableRaw() broke
+    the import.
+    """
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+
 _fake_flask_restx = MagicMock()
 _fake_flask_restx.Namespace = _FakeNamespace
 _fake_flask_restx.Resource = _FakeResource
-_fake_flask_restx.fields = MagicMock()
+_fake_flask_restx.fields = MagicMock(Raw=_FakeField, Integer=_FakeField)
 _fake_flask_restx.reqparse = MagicMock()
 
 _api_utils_mock = MagicMock()
