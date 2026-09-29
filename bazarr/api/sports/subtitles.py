@@ -16,7 +16,8 @@ from sportarr.subtitles import manual_search_sports
 from sportarr.workflows import require_sports_enabled
 from .leagues import _body, _optional_owner, _owner
 from ..swaggerui import job_queued_model
-from ..utils import authenticate
+from ..utils import (MAX_SUBTITLE_UPLOAD_SIZE, UploadTooLarge, authenticate, read_bounded_upload,
+                     upload_declared_too_large, upload_too_large_message)
 from sportarr.errors import SportsNotFound
 
 api_ns_sports_subtitles = Namespace(
@@ -258,11 +259,15 @@ class SportsEventSubtitleUpload(Resource):
     @api_ns_sports_subtitles.response(204, 'Success')
     @api_ns_sports_subtitles.response(401, 'Not Authenticated')
     @api_ns_sports_subtitles.response(404, 'Sports event not found')
+    @api_ns_sports_subtitles.response(413, 'Subtitle file is too large')
     def post(self, event_id):
         """Upload a subtitle for a sports event."""
         from sportarr.identity import resolve_event_in_session
         from subtitles.upload import manual_upload_subtitle
 
+        # Refused from the declared length before the form is parsed.
+        if upload_declared_too_large(MAX_SUBTITLE_UPLOAD_SIZE):
+            return {"message": upload_too_large_message('Subtitle file', MAX_SUBTITLE_UPLOAD_SIZE)}, 413
         args = self.post_request_parser.parse_args()
         uploaded_file = args.get('file')
         _, ext = os.path.splitext(uploaded_file.filename)
@@ -287,12 +292,17 @@ class SportsEventSubtitleUpload(Resource):
                    TableSportsEvents.arr_instance_id == context.arr_instance_id)
         ).first()
 
+        try:
+            subtitle_content = BytesIO(read_bounded_upload(uploaded_file, MAX_SUBTITLE_UPLOAD_SIZE))
+        except UploadTooLarge:
+            return {"message": upload_too_large_message('Subtitle file', MAX_SUBTITLE_UPLOAD_SIZE)}, 413
+
         manual_upload_subtitle(path=context.mapped_path,
                                language=args.get('language'),
                                forced=args.get('forced') == 'true',
                                hi=args.get('hi') == 'true',
                                media_type='sports',
-                               subtitle=BytesIO(uploaded_file.read()),
+                               subtitle=subtitle_content,
                                filename=uploaded_file.filename,
                                audio_language=row.audio_language if row else '[]',
                                arr_instance_id=context.arr_instance_id,

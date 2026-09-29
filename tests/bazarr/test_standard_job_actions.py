@@ -714,6 +714,250 @@ def test_an_uninstall_stopped_before_it_ran_keeps_the_provider(queue, hub_state)
 
 
 # ---------------------------------------------------------------------------
+# Provider Hub local packages: a bounded upload, spooled to disk for the job
+# ---------------------------------------------------------------------------
+#
+# The route used to read the whole upload into memory before any size check and
+# queue the bytes as the job's argument, where they stayed until the job ran and
+# then in the finished-jobs history.
+
+@pytest.fixture
+def package_uploads(tmp_path, monkeypatch, queue):
+    """The Hub's upload spool, under a private state directory."""
+    from provider_hub import jobs as hub_jobs
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    monkeypatch.setattr(hub_jobs, "_queued_packages", set())
+    return tmp_path / "provider_hub" / "uploads"
+
+
+def spooled(directory):
+    return sorted(directory.iterdir()) if directory.exists() else []
+
+
+def post_package(content, filename="package.zip", declared=None):
+    """Post a package to the local install route as the browser sends it."""
+    from io import BytesIO
+
+    from api.provider_hub import provider_hub as endpoint
+
+    resource = endpoint.ProviderHubLocalInstallations
+    environ = {"CONTENT_LENGTH": str(declared)} if declared is not None else None
+    with Flask(__name__).test_request_context("/", method="POST",
+                                              data={"file": (BytesIO(content), filename)},
+                                              content_type="multipart/form-data",
+                                              environ_overrides=environ):
+        return resource.post.__wrapped__(resource())
+
+
+def small_package_ceiling(monkeypatch, size):
+    from provider_hub import service
+
+    monkeypatch.setattr(service, "MAX_LOCAL_PACKAGE_SIZE", size)
+
+
+def test_the_package_ceiling_is_100_mib():
+    from provider_hub import service
+
+    assert service.MAX_LOCAL_PACKAGE_SIZE == 100 * 1024 * 1024
+
+
+def test_a_package_declared_over_the_ceiling_is_refused_before_it_is_read(queue, package_uploads):
+    from api.utils import UPLOAD_FORM_ALLOWANCE
+    from provider_hub import service
+
+    # The declared length alone decides: parsing this body against that length
+    # would fail some other way, so a 413 shows nothing was read.
+    declared = service.MAX_LOCAL_PACKAGE_SIZE + UPLOAD_FORM_ALLOWANCE + 1
+    body, status = post_package(b"PK\x03\x04", declared=declared)
+
+    assert status == 413
+    assert "too large" in body
+    assert pending(queue) == []
+    assert spooled(package_uploads) == []
+
+
+def test_a_package_over_the_ceiling_is_refused_without_a_job_or_a_file(queue, package_uploads, monkeypatch):
+    small_package_ceiling(monkeypatch, 4096)
+
+    body, status = post_package(b"x" * 4097)
+
+    assert status == 413
+    assert pending(queue) == []
+    assert spooled(package_uploads) == []
+
+
+def test_a_package_at_the_ceiling_is_spooled_and_its_job_carries_only_the_path(
+        queue, package_uploads, monkeypatch):
+    small_package_ceiling(monkeypatch, 4096)
+    content = b"x" * 4096
+
+    body, status = post_package(content, filename="myplugin.zip")
+
+    [job] = pending(queue)
+    [spool] = spooled(package_uploads)
+    assert status == 202 and body == {"job_id": job.job_id}
+    assert job.job_name == "Installing provider package myplugin.zip"
+    assert (job.module, job.func) == ("provider_hub.jobs", "install_local_provider")
+    assert job.kwargs == {"package_path": str(spool), "filename": "myplugin.zip"}
+    assert not any(isinstance(value, (bytes, bytearray)) for value in job.kwargs.values())
+    assert spool.read_bytes() == content
+    # The job removes the file when it ends, so it must never be offered for retry.
+    assert job.retryable is False
+
+
+def test_an_empty_package_is_refused_and_leaves_no_file(queue, package_uploads):
+    assert post_package(b"") == ("uploaded package is empty", 400)
+    assert pending(queue) == []
+    assert spooled(package_uploads) == []
+
+
+def test_each_upload_gets_its_own_spooled_file(queue, package_uploads):
+    post_package(b"PK first")
+    post_package(b"PK first")
+
+    first, second = pending(queue)
+    assert first.kwargs["package_path"] != second.kwargs["package_path"]
+    assert len(spooled(package_uploads)) == 2
+
+
+@pytest.mark.parametrize("outcome", ["installed", "failed", "stopped"])
+def test_the_spooled_package_is_removed_when_its_install_ends(queue, package_uploads, monkeypatch, outcome):
+    from pathlib import Path
+
+    from provider_hub import service
+
+    read = []
+
+    def stage(package, checkpoint=None):
+        read.append(Path(package).read_bytes())
+        if outcome == "failed":
+            raise service.ProviderHubInstallError("uploaded package is not a valid .zip archive")
+        if outcome == "stopped":
+            raise service.ProviderHubStopped("Cancelled by user")
+        return {"provider_id": "localhub", "name": "Local"}
+
+    monkeypatch.setattr(service, "stage_install_local", stage)
+    post_package(b"PK package", filename="local.zip")
+    job = run_next(queue)
+
+    assert read == [b"PK package"]
+    assert job["status"] == ("failed" if outcome == "failed" else "completed")
+    if outcome == "failed":
+        assert job["error"]["message"] == ("Could not install local.zip: "
+                                           "uploaded package is not a valid .zip archive")
+    assert spooled(package_uploads) == []
+
+
+def test_a_package_whose_file_is_gone_fails_with_a_reason(queue, package_uploads):
+    post_package(b"PK package", filename="local.zip")
+    for spool in spooled(package_uploads):
+        spool.unlink()
+
+    job = run_next(queue)
+
+    assert job["status"] == "failed"
+    assert job["error"]["message"] == "Could not install local.zip: uploaded package could not be read"
+
+
+def test_a_real_package_installs_from_its_spooled_file(queue, package_uploads, tmp_path, monkeypatch):
+    from provider_hub.state import load_state
+    from test_provider_hub import _manifest, _patch_local_install_env, _provider_zip
+
+    content = b"class LocalProvider: pass\n"
+    manifest = _manifest(provider_id="spooledhub", name="Spooled Hub", provider_content=content,
+                         dependencies={"requirements": []})
+    _patch_local_install_env(monkeypatch, tmp_path)
+
+    assert post_package(_provider_zip(manifest, {"provider.py": content}), filename="spooled.zip")[1] == 202
+    job = run_next(queue)
+
+    assert job["status"] == "completed"
+    assert job["job_name"] == "Installing provider Spooled Hub"
+    installation = load_state()["installations"]["spooledhub"]
+    assert (installation["state"], installation["origin"], installation["trusted"]) == ("staged", "local", False)
+    assert spooled(package_uploads) == []
+
+
+def test_the_package_of_a_job_removed_before_it_ran_goes_with_the_next_upload(queue, package_uploads):
+    from pathlib import Path
+
+    post_package(b"PK first", filename="first.zip")
+    [first] = pending(queue)
+    assert queue.remove_job_from_pending_queue(first.job_id)
+
+    post_package(b"PK second", filename="second.zip")
+
+    [second] = pending(queue)
+    assert spooled(package_uploads) == [Path(second.kwargs["package_path"])]
+
+
+def test_the_packages_of_an_emptied_pending_queue_go_with_the_next_upload(queue, package_uploads):
+    from pathlib import Path
+
+    post_package(b"PK one")
+    post_package(b"PK two")
+    assert queue.empty_jobs_queue("pending")
+
+    post_package(b"PK three")
+
+    [job] = pending(queue)
+    assert spooled(package_uploads) == [Path(job.kwargs["package_path"])]
+
+
+def test_the_next_upload_keeps_the_packages_of_jobs_waiting_or_running(queue, package_uploads):
+    post_package(b"PK running")
+    assert queue._reserve_next_job() is not None
+    post_package(b"PK waiting")
+
+    post_package(b"PK third")
+
+    assert len(queue.jobs_running_queue) == 1 and len(pending(queue)) == 2
+    assert [spool.read_bytes() for spool in spooled(package_uploads)].count(b"PK running") == 1
+    assert len(spooled(package_uploads)) == 3
+
+
+def test_a_package_still_being_uploaded_is_never_taken_for_an_abandoned_one(queue, package_uploads):
+    # No job has been queued for it yet: its upload is still being copied in.
+    package_uploads.mkdir(parents=True)
+    in_progress = package_uploads / "package-in-progress.zip"
+    in_progress.write_bytes(b"PK partial")
+
+    post_package(b"PK other")
+
+    assert in_progress.read_bytes() == b"PK partial"
+
+
+def test_leftover_spooled_packages_are_discarded_at_startup(package_uploads):
+    from pathlib import Path
+
+    from provider_hub import service
+
+    package_uploads.mkdir(parents=True)
+    (package_uploads / "package-left.zip").write_bytes(b"PK left behind")
+    (package_uploads / "package-other.zip").write_bytes(b"PK another")
+
+    service.discard_local_package_uploads()
+
+    assert spooled(package_uploads) == []
+    # Pending jobs never survive a restart, so nothing still needs these files.
+    # A call, not text: a commented-out call would not count.
+    import ast
+
+    init = ast.parse((Path(__file__).resolve().parents[2] / "bazarr" / "init.py").read_text(encoding="utf-8"))
+    assert any(isinstance(node, ast.Call) and getattr(node.func, "id", None) == "discard_local_package_uploads"
+               for node in ast.walk(init))
+
+
+def test_the_startup_sweep_tolerates_a_missing_spool(package_uploads):
+    from provider_hub import service
+
+    service.discard_local_package_uploads()
+
+    assert spooled(package_uploads) == []
+
+
+# ---------------------------------------------------------------------------
 # Gap 8: sports manual download
 # ---------------------------------------------------------------------------
 

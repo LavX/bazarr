@@ -2,9 +2,10 @@
 # coding=utf-8
 """Checks for a change that touches documentation.
 
-The CI Docs job runs this on every pull request that changes a file
-.github/scripts/ci_plan.py classifies as documentation. It checks only what
-the change adds, so an old page is never failed for text nobody touched:
+The CI Docs job runs this on every pull request that changes documentation,
+or one of the documents a test reads, as .github/scripts/ci_plan.py's
+needs_docs_check decides. It checks only what the change adds, so an old page
+is never failed for text nobody touched:
 
 - Release notes under docs/release-notes/ render with pandoc GFM, through
   `scripts/release/notes.py check`, the same check the release process runs.
@@ -99,7 +100,7 @@ def main() -> int:
     documents = [
         path
         for path in changed(base, head)
-        if ci_plan.is_documentation(path) and (REPO_ROOT / path).is_file()
+        if ci_plan.needs_docs_check(path) and (REPO_ROOT / path).is_file()
     ]
     if not documents:
         print("No documentation in this change.")
@@ -118,7 +119,9 @@ def main() -> int:
                 detail = (result.stderr or result.stdout).strip()
                 problems.append(f"{path}: does not render cleanly\n    {detail}")
 
-        if not path.endswith((".md", ".html", ".txt")):
+        # .sh is site/install.sh, a document a test reads: what it prints is
+        # text the user reads, so it gets the dash check like a page does.
+        if not path.endswith((".md", ".html", ".txt", ".sh")):
             continue
         for number, text in added_lines(base, head, path):
             for dash, name in DASHES.items():
