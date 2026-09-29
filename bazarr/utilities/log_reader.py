@@ -9,11 +9,14 @@ one or two blocks, and entries are built only for the page that was asked for.
 
 The total is exact. Below the page, records are only counted, by the same pass
 over the same blocks, which holds one block and a few counters at a time.
-Because the log only ever grows at its end, the count below a known record is
-remembered per file and filter. The next request, typically a refresh of the
-newest page, counts only what was appended since and reads back only as far as
-its page reaches. For a filter that matches rarely, the page itself can reach
-far back: the newest 500 critical lines may span most of the file.
+Because the live file only grows at its end until it rolls or is emptied, the
+count below a known record is remembered per file and filter. The next request,
+typically a refresh of the newest page, counts only what was appended since and
+reads back only as far as its page reaches. Appends, truncation, rotation and
+replacement are detected; an edit made in place below that record by another
+program is not, until the file next rolls or Bazarr restarts (see CountCache).
+For a filter that matches rarely, the page itself can reach far back: the
+newest 500 critical lines may span most of the file.
 
 The file format is the one FileHandlerFormatter writes, one record per line:
 
@@ -145,8 +148,17 @@ class CountCache:
 
     An entry holds how many records, by level, lie below the record that starts
     at ``anchor``. It is used only after that record is found again at the
-    same offset with the same bytes, which fails for a file that was truncated
-    or replaced, and a failed check falls back to counting from the start.
+    same offset with the same bytes, and a failed check falls back to counting
+    from the start. The key carries the file's device and inode, so rotation,
+    Empty (a roll aside and a new file) and replacement by a new file never
+    reuse a count, and a truncation fails the check unless the anchor record
+    survives it byte for byte at the same offset. Appends leave a count valid.
+
+    What the check cannot see is a change below the anchor that leaves the
+    anchor record's bytes and offset alone, such as another program editing the
+    live file in place. The handler never does that. The old count is then used
+    until the file next rolls, Bazarr restarts, or the entry falls out of the
+    cache; catching it would mean counting the whole file on every request.
     """
 
     def __init__(self, size=16):
@@ -510,6 +522,12 @@ def read_log_page(path, limit=DEFAULT_LIMIT, offset=0, level=None, contains='', 
     ``baseline_total`` is the total a reader saw when they started paging.
     Entries that matched since are skipped, so an older page shows the same
     entries it would have shown then instead of shifting as new lines arrive.
+
+    With a ``cache``, the count below the newest complete record is remembered
+    and reused while that record is still in place, so a refresh counts only
+    what was appended. Truncation, rotation and replacement are detected and
+    counted again; an external in-place edit below that record is not, until
+    the next roll or a restart (see CountCache).
     """
     stored = stored if stored is not None else StoredFilter()
     minimum = LEVEL_NUMBERS[level.upper()] if level else None

@@ -11,9 +11,9 @@ import yaml
 from dynaconf.validator import ValidationError
 
 from app.config import settings
-from app.logger import (LOGGER_LEVELS, LOGGER_LEVEL_CEILINGS, SizeAndTimeRotatingFileHandler,
-                        UnwantedWaitressMessageFilter, configure_logging, empty_log, log_rotation_limits,
-                        resolve_logger_levels)
+from app.logger import (LOGGER_LEVELS, LOGGER_LEVEL_CEILINGS, CoverStreamAborted, ExpiredSocketSessionFilter,
+                        SizeAndTimeRotatingFileHandler, UnwantedWaitressMessageFilter, configure_logging,
+                        empty_log, log_rotation_limits, resolve_logger_levels)
 
 # The modules the names above came from. `from app import logger` is not always the
 # same module in a full run: a test file that imports under a mocked sys.modules and
@@ -35,6 +35,33 @@ def test_false_below_error():
 def test_true_above_error():
   record = logging.LogRecord("", logging.CRITICAL, "", 0, "", (), None)
   assert UnwantedWaitressMessageFilter().filter(record)
+
+
+def _serving_error(error):
+    """The record waitress logs when a response body raises partway through."""
+    try:
+        raise error
+    except Exception:
+        exc_info = sys.exc_info()
+    return logging.LogRecord("waitress", logging.ERROR, "", 0,
+                             "Exception while serving /images/series/MediaCover/1/poster-500.jpg", (), exc_info)
+
+
+def test_an_aborted_cover_is_not_logged_as_a_traceback_outside_debug():
+    assert not UnwantedWaitressMessageFilter(debug=False).filter(_serving_error(CoverStreamAborted()))
+    # Any other failure while serving a cover is still a traceback worth reading.
+    assert UnwantedWaitressMessageFilter(debug=False).filter(_serving_error(ValueError("broken")))
+    assert UnwantedWaitressMessageFilter(debug=True).filter(_serving_error(CoverStreamAborted()))
+
+
+def test_the_waitress_filter_follows_the_debug_it_was_configured_with(monkeypatch):
+    """--debug turns debug logging on without general.debug, and the filter has to
+    agree with the levels configure_logging set rather than read the setting."""
+    monkeypatch.setattr(settings.general, "debug", False)
+    below_error = logging.LogRecord("waitress", logging.INFO, "", 0, "", (), None)
+
+    assert UnwantedWaitressMessageFilter(debug=True).filter(below_error)
+    assert not UnwantedWaitressMessageFilter(debug=False).filter(below_error)
 
 
 def test_apikey_redaction_covers_apikey_and_bare_key():
@@ -99,6 +126,11 @@ LOAD_BEARING_LINES = [
 ]
 
 
+# The loggers configure_logging hangs a filter on, which a test must leave as it
+# found them.
+FILTERED_LOGGERS = ("waitress", "engineio.server")
+
+
 @contextmanager
 def _configured(monkeypatch, tmp_path, debug):
     """Run the real configure_logging, then put the process back as it was.
@@ -114,6 +146,7 @@ def _configured(monkeypatch, tmp_path, debug):
     root = logging.getLogger()
     saved_handlers, saved_level = list(root.handlers), root.level
     saved_graded = {name: logging.getLogger(name).level for name in LOGGER_LEVELS}
+    saved_filters = {name: list(logging.getLogger(name).filters) for name in FILTERED_LOGGERS}
     configure_logging(debug)
     installed = logger_module.fh
     try:
@@ -124,6 +157,8 @@ def _configured(monkeypatch, tmp_path, debug):
         root.setLevel(saved_level)
         for name, level in saved_graded.items():
             logging.getLogger(name).setLevel(level)
+        for name, filters in saved_filters.items():
+            logging.getLogger(name).filters = filters
 
 
 def _records_from(logger_name):
@@ -250,6 +285,155 @@ def test_terminating_a_provider_is_reported_at_its_call_site_with_debug_off(monk
             logging.getLogger("subliminal_patch").removeHandler(handler)
 
     assert "Terminating provider stub" in [record.getMessage() for record in records]
+
+
+# ---------------------------------------------------------------------------
+# Expected transport noise
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def real_app(monkeypatch):
+    """app.app.create_app, as the server calls it, with the Socket.IO state put back.
+
+    create_app initialises the module's one SocketIO object, which the rest of
+    the suite shares, so the server it builds must not outlive the test.
+    """
+    from app import app as app_module
+
+    socketio = app_module.socketio
+    for name in ("server", "sockio_mw", "async_mode"):
+        monkeypatch.setattr(socketio, name, getattr(socketio, name, None), raising=False)
+    monkeypatch.setattr(socketio, "server_options", dict(socketio.server_options))
+    return app_module.create_app
+
+
+def _log_text(tmp_path):
+    path = tmp_path / "bazarr.log"
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+@pytest.mark.parametrize("debug", [False, True], ids=["normal", "debug"])
+def test_a_poll_for_a_socket_session_the_server_dropped_is_logged_only_in_debug(monkeypatch, tmp_path, real_app,
+                                                                               debug):
+    """engineio logs the first poll for an unknown session at ERROR. A browser tab
+    that missed its pings on an overloaded host sends exactly that, so a normal
+    install's log must not read it as a fault.
+
+    The request goes through the real application rather than a made-up record,
+    so a change to engineio's wording fails here. general.debug stays off in the
+    debug case: --debug turns debug logging on without it, and the filter has to
+    follow what configure_logging was told.
+    """
+    monkeypatch.setattr(settings.general, "debug", False)
+    with _configured(monkeypatch, tmp_path, debug):
+        response = real_app().test_client().get("/api/socket.io/?EIO=4&transport=polling&sid=bogus")
+        # A real transport fault on the same logger still gets through.
+        logging.getLogger("engineio.server").error("post request handler error")
+        written = _log_text(tmp_path)
+
+    assert response.status_code == 400
+    assert "post request handler error" in written
+    if debug:
+        assert "Invalid session bogus" in written
+    else:
+        assert "Invalid session" not in written
+
+
+def _closed_but_not_yet_removed(eio):
+    """A session engineio closed for missing its pings, which stays among its
+    sockets until the next pass of its service task."""
+    from engineio.socket import Socket
+
+    session = Socket(eio, "closed")
+    session.closed = True
+    eio.sockets["closed"] = session
+    return "closed", "'Session is disconnected' closed"
+
+
+class _SessionsLosingOne(dict):
+    """engineio's sessions as a poll finds them when another thread drops the one
+    it asks for between the membership check and the lookup."""
+
+    def __init__(self, sessions, sid):
+        super().__init__(sessions)
+        self.sid = sid
+
+    def __contains__(self, sid):
+        return sid == self.sid or super().__contains__(sid)
+
+
+def _removed_between_check_and_lookup(eio):
+    eio.sockets = _SessionsLosingOne(eio.sockets, "gone")
+    return "gone", "'Session not found' gone"
+
+
+@pytest.mark.parametrize("session", [_closed_but_not_yet_removed, _removed_between_check_and_lookup],
+                         ids=["disconnected", "not-found"])
+@pytest.mark.parametrize("debug", [False, True], ids=["normal", "debug"])
+def test_a_poll_for_a_socket_session_the_server_has_closed_is_logged_only_in_debug(monkeypatch, tmp_path, real_app,
+                                                                                  session, debug):
+    """The same late poll reaches engineio's other wording when its session is
+    closed but still listed, which is how an overloaded host leaves it, or gone
+    by the time it is looked up. engineio logs either once at ERROR, under the
+    same key as the unknown session, so whichever comes first would take it."""
+    from app import app as app_module
+
+    monkeypatch.setattr(settings.general, "debug", False)
+    with _configured(monkeypatch, tmp_path, debug):
+        client = real_app().test_client()
+        sid, message = session(app_module.socketio.server.eio)
+        response = client.get(f"/api/socket.io/?EIO=4&transport=polling&sid={sid}")
+        written = _log_text(tmp_path)
+
+    assert response.status_code == 400
+    if debug:
+        assert message in written
+    else:
+        assert message not in written
+        assert "Session" not in written
+
+
+def test_reconfiguring_logging_does_not_stack_filters(monkeypatch, tmp_path):
+    """configure_logging runs again on every debug toggle, and each run used to add
+    another waitress filter. The last run's debug has to be the one that holds."""
+    with _configured(monkeypatch, tmp_path, debug=True):
+        for debug in (False, False, True):
+            logger_module.fh.close()
+            configure_logging(debug)
+        logger_module.fh.close()
+        waitress_filters = [f for f in logging.getLogger("waitress").filters
+                            if isinstance(f, UnwantedWaitressMessageFilter)]
+        session_filters = [f for f in logging.getLogger("engineio.server").filters
+                           if isinstance(f, ExpiredSocketSessionFilter)]
+
+    assert len(waitress_filters) == 1
+    assert len(session_filters) == 1
+    assert waitress_filters[0].debug is True
+    assert session_filters[0].debug is True
+
+
+def test_a_filter_from_an_earlier_import_of_the_logger_module_is_replaced(monkeypatch, tmp_path):
+    """The loggers outlive the module that filtered them. A test that imports the app
+    under a mocked sys.modules runs configure_logging with its own copy of this
+    module, then drops it, and that copy's filter stays on engineio.server. It is
+    an instance of a class that is no longer ExpiredSocketSessionFilter, so an
+    isinstance check keeps it, and set up without debug it drops the very record
+    the debug run is meant to keep."""
+    # The same name in the same module, and nothing else in common, which is what
+    # a dropped copy of the module leaves behind.
+    stale_class = type(ExpiredSocketSessionFilter.__name__, (logging.Filter,), {
+        "__module__": ExpiredSocketSessionFilter.__module__,
+        "__qualname__": ExpiredSocketSessionFilter.__qualname__,
+        "filter": lambda self, record: False,
+    })
+    session_logger = logging.getLogger("engineio.server")
+    monkeypatch.setattr(session_logger, "filters", [*session_logger.filters, stale_class()])
+
+    with _configured(monkeypatch, tmp_path, debug=True):
+        installed = [type(f) for f in session_logger.filters
+                     if type(f).__qualname__ == ExpiredSocketSessionFilter.__qualname__]
+
+    assert installed == [ExpiredSocketSessionFilter]
 
 
 # ---------------------------------------------------------------------------
@@ -600,6 +784,102 @@ def test_a_failed_roll_keeps_every_record_says_so_once_and_backs_off(tmp_path, c
     assert notices == 1
     written = [record for _, _, path in handler.rolled_files() for record in _records(path)]
     assert written + _records(tmp_path / "bazarr.log") == [f"record {n}" for n in range(12)]
+
+
+def test_a_rolled_file_that_cannot_be_deleted_is_reported_once_and_pruning_goes_on(monkeypatch, tmp_path,
+                                                                                    capsys):
+    """An old file pruning cannot delete used to be skipped in silence, so the
+    folder kept one file more than backup_count for good and nobody knew why."""
+    for day in ("2026-09-20", "2026-09-21", "2026-09-22"):
+        (tmp_path / f"bazarr.log.{day}").write_text(f"{day}\n", encoding="utf-8")
+    stuck = str(tmp_path / "bazarr.log.2026-09-20")
+    remove = os.remove
+
+    def refuse_the_oldest(path):
+        if path == stuck:
+            raise PermissionError(13, "Permission denied", path)
+        remove(path)
+
+    monkeypatch.setattr(logger_module.os, "remove", refuse_the_oldest)
+    handler = _rotating_handler(tmp_path, _Clock(DAY + 10 * HOUR), max_bytes=1000, backup_count=3)
+    handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+    live = tmp_path / "bazarr.log"
+    try:
+        _write(handler, 0)
+        handler.doRollover()
+        _write(handler, 1)
+        after_first_prune = live.read_text(encoding="utf-8")
+        handler.doRollover()
+        _write(handler, 2)
+        after_second_prune = live.read_text(encoding="utf-8")
+    finally:
+        handler.close()
+
+    # Both rolls happened, the stuck file is kept, and the second roll still
+    # pruned the next oldest.
+    assert _rolled(handler) == [
+        "bazarr.log.2026-09-20", "bazarr.log.2026-09-22", "bazarr.log.2026-09-25", "bazarr.log.2026-09-25.1",
+    ]
+    # Once on stderr, and once at the top of the live file that roll started.
+    assert capsys.readouterr().err.count("could not delete") == 1
+    first_lines = after_first_prune.splitlines()
+    assert first_lines[0].startswith("WARNING ")
+    assert "could not delete" in first_lines[0] and stuck in first_lines[0]
+    assert first_lines[1].startswith("INFO record 1")
+    assert "could not delete" not in after_second_prune
+    assert after_second_prune.startswith("INFO record 2")
+
+
+def test_an_unreadable_log_folder_is_reported_once_and_the_roll_still_happens(tmp_path, capsys):
+    handler = _rotating_handler(tmp_path, _Clock(DAY + 10 * HOUR), max_bytes=1000, backup_count=3)
+
+    def unreadable():
+        raise PermissionError(13, "Permission denied", str(tmp_path))
+
+    handler.getFilesToDelete = unreadable
+    try:
+        for number in range(3):
+            _write(handler, number)
+            handler.doRollover()
+    finally:
+        handler.close()
+
+    assert sorted(os.listdir(tmp_path)) == [
+        "bazarr.log.2026-09-25", "bazarr.log.2026-09-25.1", "bazarr.log.2026-09-25.2",
+    ]
+    assert capsys.readouterr().err.count("could not list") == 1
+    # The notice went into the file the first failed prune started.
+    assert "could not list" in (tmp_path / "bazarr.log.2026-09-25.1").read_text(encoding="utf-8")
+    assert "could not list" not in (tmp_path / "bazarr.log.2026-09-25.2").read_text(encoding="utf-8")
+
+
+def test_a_prune_failure_that_clears_and_comes_back_is_reported_again(tmp_path, capsys):
+    """Once a prune works, the failure it had is over. If the same trouble returns
+    later it is news again, and staying quiet about it would hide it for good."""
+    handler = _rotating_handler(tmp_path, _Clock(DAY + 10 * HOUR), max_bytes=1000, backup_count=3)
+    listing = handler.getFilesToDelete
+    # The first roll cannot list the folder, the second can, the third cannot.
+    unreadable_on_roll = iter([True, False, True])
+
+    def sometimes_unreadable():
+        if next(unreadable_on_roll):
+            raise PermissionError(13, "Permission denied", str(tmp_path))
+        return listing()
+
+    handler.getFilesToDelete = sometimes_unreadable
+    try:
+        for number in range(3):
+            _write(handler, number)
+            handler.doRollover()
+        # The notice waits for the next record to reach the live file.
+        _write(handler, 3)
+    finally:
+        handler.close()
+
+    assert capsys.readouterr().err.count("could not list") == 2
+    assert "could not list" in (tmp_path / "bazarr.log.2026-09-25.1").read_text(encoding="utf-8")
+    assert "could not list" not in (tmp_path / "bazarr.log.2026-09-25.2").read_text(encoding="utf-8")
+    assert "could not list" in (tmp_path / "bazarr.log").read_text(encoding="utf-8")
 
 
 def test_something_in_the_way_of_a_name_is_stepped_over(tmp_path):
