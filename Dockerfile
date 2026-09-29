@@ -167,9 +167,12 @@ VOLUME /config
 # Expose port
 EXPOSE 6767
 
-# Health check
+# Health check. The supervisor listens on general.port (6767 unless changed)
+# and writes the port it bound to /tmp/bazarr-supervisor.port, so the check
+# follows a changed port and never probes another instance that shares the
+# network namespace.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -sf http://localhost:6767/_supervisor/status | grep -q '"running"' || exit 1
+    CMD port=$(cat /tmp/bazarr-supervisor.port 2>/dev/null || echo 6767); curl -sf http://localhost:$port/_supervisor/status | grep -q '"running"' || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["python", "docker/supervisor.py", "--no-update", "--config", "/config"]

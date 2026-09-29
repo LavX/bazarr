@@ -569,6 +569,8 @@ volumes:
     container_name: bazarr
     restart: unless-stopped
 __BAZARR_DEPENDS__
+    # The right-hand side is the Port under Settings > General. Keep the two
+    # equal; a new port applies after a container restart.
     ports:
       - "__BAZARR_PORT__:6767"
     env_file:
@@ -589,7 +591,7 @@ __TV_VOLUME__
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:6767/_supervisor/status | grep -q '\''\"running\"'\''"]
+      test: ["CMD-SHELL", "port=$$(cat /tmp/bazarr-supervisor.port 2>/dev/null || echo 6767); curl -sf http://localhost:$$port/_supervisor/status | grep -q '\''\"running\"'\''"]
       interval: 30s
       timeout: 10s
       retries: 3

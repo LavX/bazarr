@@ -456,3 +456,131 @@ def test_a_writable_application_tree_survives_a_stale_release(monkeypatch, stage
     assert (staged_release.app_root / 'keep_me.txt').exists(), (
         'the upgrade leftover cleaner deleted a file that was never ours to delete')
     assert not any('unable to unzip' in record.message for record in caplog.records)
+
+
+# --- the health check follows the port the supervisor listens on -------------
+#
+# The supervisor listens on general.port now, so a health check pinned to
+# localhost:6767 would call a healthy instance on another port unhealthy, and
+# on a shared network namespace it would probe whichever neighbour holds 6767.
+# The supervisor writes the port it bound to /tmp/bazarr-supervisor.port (a
+# tmpfs under read_only) and every health check reads it, falling back to 6767
+# for the moment before the file exists.
+
+PORT_FILE = '/tmp/bazarr-supervisor.port'
+
+
+def _compose_command(raw, where):
+    """Undo Compose's $$ escape, after checking every $ in the file is escaped.
+
+    A bare $ is Compose interpolation: `${port}` would become an empty host
+    variable and `$(` is a parse error, so the shell would never see either.
+    """
+    assert '$' not in raw.replace('$$', ''), (
+        f'the health check in {where} has an unescaped $, which Compose interpolates: {raw}')
+    return raw.replace('$$', '$')
+
+
+def _dockerfile_healthcheck():
+    match = re.search(r'^HEALTHCHECK [^\n]*\\\n\s+CMD (.+)$', _dockerfile(), re.M)
+    assert match, 'the Dockerfile no longer has a HEALTHCHECK ... CMD <shell> instruction'
+    return match.group(1).strip()
+
+
+def _compose_healthcheck(service, where):
+    test = service['healthcheck']['test']
+    assert test[0] == 'CMD-SHELL', f'{where} no longer runs its health check through a shell'
+    return _compose_command(test[1], where)
+
+
+def _guide_compose():
+    import html as html_module
+
+    block = re.search(r'<pre id="compose-code"><code>(.*?)</code></pre>', _guide(), re.S)
+    assert block, 'the getting-started guide no longer has its compose-code block'
+    return yaml.safe_load(html_module.unescape(block.group(1)))
+
+
+def _healthchecks():
+    return {
+        'Dockerfile': _dockerfile_healthcheck(),
+        'docker-compose.yml': _compose_healthcheck(_compose()['services']['bazarr'], 'docker-compose.yml'),
+        'install.sh': _compose_healthcheck(_installer_compose()['services']['bazarr'], 'install.sh'),
+        'getting-started guide': _compose_healthcheck(_guide_compose()['services']['bazarr'],
+                                                     'the getting-started guide'),
+    }
+
+
+def _run_healthcheck(command, tmp_path, listening_port, port_file_content):
+    """Run a health check command with curl replaced by a stand-in.
+
+    The stand-in answers "running" only on `listening_port`, which plays the
+    instance that is up. Everything else is refused, as a dead port would be.
+    """
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir(exist_ok=True)
+    log = tmp_path / 'curl.log'
+    curl = bin_dir / 'curl'
+    curl.write_text(
+        '#!/bin/sh\n'
+        'for arg in "$@"; do url="$arg"; done\n'
+        'echo "$url" >> "$CURL_LOG"\n'
+        'if [ "$url" = "http://localhost:$HEALTHY_PORT/_supervisor/status" ]; then\n'
+        '  echo \'{"state": "running", "stage": "Ready"}\'\n'
+        '  exit 0\n'
+        'fi\n'
+        'exit 7\n')
+    curl.chmod(0o755)
+
+    port_file = tmp_path / 'supervisor.port'
+    if port_file.exists():
+        port_file.unlink()
+    if port_file_content is not None:
+        port_file.write_text(port_file_content)
+    if log.exists():
+        log.unlink()
+
+    assert PORT_FILE in command, f'the health check does not read {PORT_FILE}: {command}'
+    command = command.replace(PORT_FILE, str(port_file))
+    env = {'PATH': f'{bin_dir}:/usr/bin:/bin', 'CURL_LOG': str(log), 'HEALTHY_PORT': str(listening_port)}
+    result = subprocess.run(['sh', '-c', command], env=env, capture_output=True, text=True, timeout=30)
+    urls = log.read_text().split() if log.exists() else []
+    return result.returncode, urls
+
+
+@pytest.mark.parametrize('where', ['Dockerfile', 'docker-compose.yml', 'install.sh', 'getting-started guide'])
+def test_the_health_check_probes_the_port_the_supervisor_bound(where, tmp_path):
+    command = _healthchecks()[where]
+
+    rc, urls = _run_healthcheck(command, tmp_path, 6868, '6868\n')
+    assert rc == 0, f'{where}: an instance healthy on its configured port 6868 was reported unhealthy'
+    assert urls == ['http://localhost:6868/_supervisor/status']
+
+
+@pytest.mark.parametrize('where', ['Dockerfile', 'docker-compose.yml', 'install.sh', 'getting-started guide'])
+def test_a_neighbour_on_6767_does_not_make_a_dead_instance_look_healthy(where, tmp_path):
+    command = _healthchecks()[where]
+
+    rc, urls = _run_healthcheck(command, tmp_path, 6767, '6868\n')
+    assert rc != 0, (
+        f'{where}: this instance (6868) is down, but the check passed because another '
+        'instance answers on 6767')
+    assert urls == ['http://localhost:6868/_supervisor/status']
+
+
+@pytest.mark.parametrize('where', ['Dockerfile', 'docker-compose.yml', 'install.sh', 'getting-started guide'])
+def test_the_health_check_falls_back_to_6767_before_the_port_file_exists(where, tmp_path):
+    command = _healthchecks()[where]
+
+    rc, urls = _run_healthcheck(command, tmp_path, 6767, None)
+    assert rc == 0, f'{where}: a default install on 6767 is no longer reported healthy'
+    assert urls == ['http://localhost:6767/_supervisor/status']
+
+
+def test_no_health_check_is_pinned_to_6767_any_more():
+    for name in ('Dockerfile', 'docker-compose.yml', 'README.md',
+                 os.path.join('site', 'install.sh'), os.path.join('site', 'guides', 'getting-started.html')):
+        with open(os.path.join(ROOT, name)) as handle:
+            assert 'localhost:6767/_supervisor' not in handle.read(), (
+                f'{name} still probes a fixed port 6767, which is not this instance on a '
+                'non-default general.port')

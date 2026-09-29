@@ -38,6 +38,9 @@ services:
     depends_on:
       - flaresolverr
 
+    # The container side is the Port under Settings > General (general.port,
+    # 6767 unless changed). If you change that port, change the right-hand
+    # number here to match; the new port applies when the container restarts.
     ports:
       - "${BAZARR_PORT:-6767}:6767"
     
@@ -103,7 +106,9 @@ services:
       - SETGID
     
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:6767/_supervisor/status | grep -q '\"running\"'"]
+      # Reads the port the container listens on (general.port), so it keeps
+      # working after a port change. $$ is Compose's escape for a literal $.
+      test: ["CMD-SHELL", "port=$$(cat /tmp/bazarr-supervisor.port 2>/dev/null || echo 6767); curl -sf http://localhost:$$port/_supervisor/status | grep -q '\"running\"'"]
       interval: 30s
       timeout: 10s
       retries: 3
