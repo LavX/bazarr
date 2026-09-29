@@ -24,6 +24,7 @@ import pytest
 from sqlalchemy import select, update
 
 from app.database import TableEpisodes, TableMovies, TableShows
+from test_sportarr_kind_migration import migration_engine  # noqa: F401
 
 
 @pytest.fixture
@@ -552,3 +553,71 @@ def test_the_targeted_movie_scan_passes_the_owner_it_was_given(two_movie_rows, m
     mv.movies_scan_subtitles(7, arr_instance_id=2)
 
     assert calls == [('/movies/m.mkv', 2)]
+
+
+# ---------------------------------------------------- embedded track codecs
+
+# The codec each ignore switch filters, spelled the way the parser reports it.
+IGNORED_CODECS = {'ignore_pgs_subs': 'PGS', 'ignore_vobsub_subs': 'VobSub', 'ignore_ass_subs': 'ASS'}
+
+
+@pytest.fixture
+def embedded_track_rows(migration_engine, stub_indexing, monkeypatch):  # noqa: F811
+    """One episode and one movie on both engines, indexed with embedded subtitles on."""
+    from sqlalchemy.orm import sessionmaker
+
+    from app.database import Base
+
+    se, mv = stub_indexing
+    Base.metadata.create_all(migration_engine)
+    session = sessionmaker(bind=migration_engine)()
+    for module in (se, mv):
+        monkeypatch.setattr(module, 'database', session)
+        monkeypatch.setattr(module, 'get_language_set', lambda: set())
+        monkeypatch.setattr(module, 'alpha2_from_alpha3', {'eng': 'en', 'fre': 'fr'}.get)
+    monkeypatch.setattr(se.settings.general, 'use_embedded_subs', True)
+    for switch in IGNORED_CODECS:
+        monkeypatch.setattr(se.settings.general, switch, False)
+    session.add(TableShows(id=1, sonarrSeriesId=1, title='S', path='/tv/s', profileId=None))
+    session.flush()
+    session.add_all([
+        TableEpisodes(id=1, series_id=1, sonarrSeriesId=1, sonarrEpisodeId=11, title='E',
+                      path='/tv/s/e.mkv', season=1, episode=1, episode_file_id=500, file_size=111,
+                      subtitles='[]'),
+        TableMovies(id=1, radarrId=7, title='M', path='/movies/m.mkv', tmdbId='1',
+                    movie_file_id=700, file_size=111, subtitles='[]'),
+    ])
+    session.commit()
+    yield se, mv, session
+    session.close()
+
+
+@pytest.mark.parametrize('media_type', ['series', 'movie'])
+@pytest.mark.parametrize('switch', sorted(IGNORED_CODECS))
+@pytest.mark.parametrize('enabled', [True, False])
+def test_an_embedded_track_with_no_codec_name_is_indexed(embedded_track_rows, monkeypatch,
+                                                         media_type, switch, enabled):
+    """The parser reports no codec for a format it cannot name. No ignore switch
+    describes such a track, so it is indexed whichever switch is on, while the
+    track the enabled switch names is still skipped."""
+    se, mv, session = embedded_track_rows
+    monkeypatch.setattr(se.settings.general, switch, enabled)
+    tracks = [['eng', False, False, None], ['fre', False, False, IGNORED_CODECS[switch]]]
+    logged = []
+    if media_type == 'series':
+        monkeypatch.setattr(se, 'embedded_subs_reader', lambda *a, **kw: tracks)
+        monkeypatch.setattr(se, '_log_embedded_history',
+                            lambda series_id, episode_id, languages, *a, **kw: logged.extend(languages))
+        stored = se.store_subtitles('/tv/s/e.mkv', '/local/e.mkv')
+        table = TableEpisodes
+    else:
+        monkeypatch.setattr(mv, 'embedded_subs_reader', lambda *a, **kw: tracks)
+        monkeypatch.setattr(mv, '_log_embedded_history_movie',
+                            lambda radarr_id, languages, *a, **kw: logged.extend(languages))
+        stored = mv.store_subtitles_movie('/movies/m.mkv', '/local/m.mkv')
+        table = TableMovies
+
+    expected = [['en', None, None]] if enabled else [['en', None, None], ['fr', None, None]]
+    assert stored == expected
+    assert ast.literal_eval(_subs(session, table, 1)) == expected
+    assert logged == [language for language, _path, _size in expected]

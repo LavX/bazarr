@@ -517,18 +517,6 @@ def _ticket_key(scope, job_id):
     return (scope, "job", int(job_id))
 
 
-def _existing_job(result_id, search_id, scope):
-    from app.jobs_queue import jobs_queue
-    for status in ("pending", "running"):
-        for job in jobs_queue.list_jobs_from_queue(status=status):
-            kwargs = job.get("kwargs") or {}
-            if (job.get("module") == __name__ and job.get("func") == "run_download_job"
-                    and kwargs.get("result_id") == result_id and kwargs.get("search_id") == search_id
-                    and getattr(kwargs.get("authority"), "scope", None) == scope):
-                return job["job_id"]
-    return None
-
-
 def enqueue_download(result_id: str, search_id: str, *, authority: ResultAuthority) -> int:
     """Validate the exact result now and queue its retrieval as a standard job.
 
@@ -539,16 +527,14 @@ def enqueue_download(result_id: str, search_id: str, *, authority: ResultAuthori
     from app.jobs_queue import jobs_queue
     record = _record(result_id, search_id, authority)
     _require_current_copy(record["context"])
-    job_id = jobs_queue.feed_jobs_pending_queue(
+    # The job already queued or running for this click is named in the same
+    # step that matches it, so it is still there to follow if it has just
+    # finished.
+    return jobs_queue.feed_jobs_pending_queue(
         job_name=_job_label(record), module=__name__, func="run_download_job",
         kwargs={"result_id": result_id, "search_id": search_id, "authority": authority,
                 "provider": getattr(record["subtitle"], "provider_name", None), "filename": _filename(record)},
-        retryable=True)
-    if not job_id:
-        job_id = _existing_job(result_id, search_id, authority.scope)
-    if not job_id:
-        raise TimeoutError("Subtitle retrieval busy")
-    return job_id
+        retryable=True, return_existing=True)
 
 
 def _store_ticket(job_id, scope, artifact):

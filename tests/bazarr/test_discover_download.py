@@ -514,6 +514,30 @@ def test_download_is_a_standard_job_and_the_file_is_fetched_by_ticket(authentica
     assert choices[1] == ["forced"]
 
 
+def test_a_second_click_follows_the_first_job_even_when_it_ends_at_once(authenticated_client, choices, monkeypatch):
+    """The queue refuses the second click and names the job it matched in one
+    step. The job used to be looked up afterwards, and when it had finished in
+    between, the click was answered "busy" instead of with the job whose file
+    was already waiting."""
+    from app.jobs_queue import jobs_queue
+    row = next(row for row in post(authenticated_client, CONTEXT).json["results"] if row["scope"] == "full")
+    first = enqueue(authenticated_client, row).json["job_id"]
+    feed = jobs_queue.feed_jobs_pending_queue
+
+    def first_job_ends_right_after_the_answer(*args, **kwargs):
+        answer = feed(*args, **kwargs)
+        run_queued_job(first)
+        return answer
+
+    monkeypatch.setattr(jobs_queue, "feed_jobs_pending_queue", first_job_ends_right_after_the_answer)
+    queued = enqueue(authenticated_client, row)
+
+    assert queued.status_code == 202 and queued.json["job_id"] == first
+    assert jobs_queue.list_jobs_from_queue(job_id=first)[0]["status"] == "completed"
+    response = authenticated_client.get("/api/discover/download", query_string={"job": first}, headers=HEADERS)
+    assert response.status_code == 200 and response.data == FULL_SRT
+
+
 def test_a_ticket_is_bound_to_the_key_that_asked_and_expires(authenticated_client, choices, monkeypatch):
     from app.config import settings
     from discover import download

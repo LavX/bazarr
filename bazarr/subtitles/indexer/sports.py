@@ -134,7 +134,7 @@ def _missing(profile_id, subtitles, audio_language, failed_attempts, *, profile=
         return []
     audio = {item['code2'] for item in get_audio_profile_languages(audio_language)}
     actual = set()
-    for language, path, _ in subtitles:
+    for language, path, *_ in subtitles:
         if not path and not settings.general.use_embedded_subs:
             continue
         base, *variants = language.split(':')

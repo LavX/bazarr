@@ -61,6 +61,21 @@ class JobFailed(Exception):
 UNEXPECTED_JOB_ERROR = {"reason": "unexpected_error",
                         "message": "The job failed unexpectedly. Check the logs for details."}
 
+# The jobs that call the AI Subtitle Translator, by the module and function
+# they run: a library translation and an editor translation. They share the
+# translation lane. A job's name cannot decide that: it carries titles and
+# filenames, so a download for "Lost in Translation" read as a translation,
+# and it changes while the job runs.
+TRANSLATION_JOBS = frozenset({
+    ('subtitles.tools.translate.main', 'translate_subtitles_file'),
+    ('subtitles.tools.translate.editor', 'translate_editor_lines'),
+})
+
+
+def is_translation_job(job) -> bool:
+    """Whether ``job`` runs in the translation lane."""
+    return (job.module, job.func) in TRANSLATION_JOBS
+
 
 class Job:
     """
@@ -196,7 +211,7 @@ class JobsQueue:
 
     def feed_jobs_pending_queue(self, job_name, module, func, args: list = None, kwargs: dict = None,
                                 is_progress=False, is_signalr=False, progress_max: int = 0,
-                                retryable: bool = False, retry_of: int = None):
+                                retryable: bool = False, retry_of: int = None, return_existing: bool = False):
         """
         Adds a new job to the pending jobs queue with specified details and triggers an event
         to notify about the queue update. Each job is uniquely identified by a job ID,
@@ -223,7 +238,12 @@ class JobsQueue:
         :type retryable: bool
         :param retry_of: The id of the failed job this one retries.
         :type retry_of: int
-        :return: The unique job ID assigned to the newly queued job.
+        :param return_existing: When an identical job is already pending or running, return that job's ID
+            instead of False. It is read in the same look as the match, under the queue lock, so the caller
+            gets a job to follow even when that job finishes a moment later.
+        :type return_existing: bool
+        :return: The unique job ID assigned to the newly queued job, or False when an identical job is already
+            pending or running.
         :rtype: int | bool
         """
         if args is None:
@@ -232,9 +252,10 @@ class JobsQueue:
             kwargs = {}
 
         with self._queue_lock:
-            if self._is_an_existing_job(module, func, args, kwargs):
+            existing = self._find_existing_job(module, func, args, kwargs)
+            if existing is not None:
                 logging.debug(f"Task {job_name} already exists in pending and running queue")  # noqa: G004
-                return False
+                return existing.job_id if return_existing else False
 
             with self._job_id_lock:
                 new_job_id = self.current_job_id = self.current_job_id + 1
@@ -776,19 +797,25 @@ class JobsQueue:
         sub-limit inside it, not a parallel gate: the settings field says
         "Number of concurrent jobs allowed in the jobs manager", and a
         translation admitted purely against its own lane meant a translation
-        plus a general job ran under a configured limit of 1.
+        plus a general job ran under a configured limit of 1. Which jobs are
+        translations is decided by ``is_translation_job``.
         """
         if len(self.jobs_running_queue) >= settings.general.concurrent_jobs:
             return False
 
-        if 'translat' not in (job.job_name or '').lower():
+        if not is_translation_job(job):
             return True
 
-        running_translations = sum(
-            1 for running in self.jobs_running_queue
-            if 'translat' in (running.job_name or '').lower()
-        )
+        running_translations = sum(1 for running in self.jobs_running_queue if is_translation_job(running))
         return running_translations < settings.translator.openrouter_max_concurrent
+
+    def translation_lane_counts(self) -> dict:
+        """The translations waiting and the ones holding a lane slot, counted the way the lane counts them."""
+        with self._queue_lock:
+            return {
+                'pending': sum(1 for job in self.jobs_pending_queue if is_translation_job(job)),
+                'running': sum(1 for job in self.jobs_running_queue if is_translation_job(job)),
+            }
 
     def _reserve_next_job(self):
         """Take the next runnable job off pending and put it on running, or None.
@@ -849,8 +876,9 @@ class JobsQueue:
                 payload["progress_message"] = job.progress_message
             event_stream(type='jobs', action='update', payload=payload)
 
-            logging.debug(f"Running job {job.job_name} (id {job.job_id}): "  # noqa: G004
-                          f"{job.module}.{job.func}({job.args}, {job.kwargs})")
+            # Never the arguments: they can hold API keys or a whole uploaded
+            # package, and an f-string formatted them even with debug off.
+            logging.debug("Running job %s (id %s): %s.%s", job.job_name, job.job_id, job.module, job.func)
             
             # Use import lock to prevent deadlocks
             with self._import_lock:
@@ -936,6 +964,13 @@ class JobsQueue:
         :return: True if a matching job exists in pending or running queues, False otherwise.
         :rtype: bool
         """
+        return self._find_existing_job(module, func, args, kwargs) is not None
+
+    def _find_existing_job(self, module, func, args, kwargs):
+        """The pending or running job with the same module, function and arguments, or None.
+
+        A ``job_id`` in either set of keyword arguments is not part of the comparison.
+        """
         cleaned_kwargs = kwargs.copy()
         cleaned_kwargs.pop('job_id', None)
         with (self._queue_lock):
@@ -948,8 +983,8 @@ class JobsQueue:
                         job.func == func and
                         job.args == args and
                         cleaned_job_kwargs == cleaned_kwargs):
-                    return True
-            return False
+                    return job
+            return None
 
 
 jobs_queue = JobsQueue()
