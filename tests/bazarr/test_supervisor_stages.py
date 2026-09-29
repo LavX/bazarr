@@ -682,10 +682,12 @@ import waitress.server  # noqa: E402
 
 in_use = set()
 calls = []
+options = {}
 
 
 def fake_create_server(app, host, port, **kwargs):
     calls.append([host, port])
+    options.update(kwargs)
     if "*" in in_use or port in in_use:
         raise OSError(errno.EADDRINUSE, "Address already in use")
     return type("FakeServer", (), {"close": lambda self: None})()
@@ -750,6 +752,7 @@ results["custom_port_falls_back"] = scenario({}, 8080, {8080})
 results["supervised_busy"] = scenario(supervised, 41007, {"*"})
 results["default_port_busy"] = scenario({}, None, {"*"})
 results["custom_port_busy"] = scenario({}, 8080, {"*"})
+results["max_request_body_size"] = options.get("max_request_body_size")
 print("RESULTS " + json.dumps(results), flush=True)
 os._exit(0)
 '''
@@ -817,3 +820,16 @@ def test_the_event_stream_names_the_backend_to_its_supervisor_too(server_scenari
     # outside Flask or the event stream would be refused.
     assert server_scenarios["event_stream_status"] < 500
     assert server_scenarios["event_stream_header"] == "t0k3n"
+
+
+def test_the_backend_refuses_a_request_body_over_256_mib(server_scenarios):
+    # Waitress's own default is 1 GiB, which it spools to disk before any
+    # route sees the request. The largest upload a route accepts is a 150 MiB
+    # subtitle file, so 256 MiB leaves room for the form around it.
+    assert server_scenarios["max_request_body_size"] == 256 * 1024 * 1024
+
+
+def test_the_supervisor_and_the_backend_share_one_body_ceiling(server_scenarios):
+    sup = _load_supervisor()
+
+    assert sup.MAX_REQUEST_BODY_SIZE == server_scenarios["max_request_body_size"]

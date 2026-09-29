@@ -572,6 +572,60 @@ describe("Settings > Providers (Provider Hub)", () => {
     ).toBeInTheDocument();
   });
 
+  describe("installing a local package", () => {
+    const MiB = 1024 * 1024;
+
+    function packageOfSize(name: string, size: number) {
+      const file = new File(["PK"], name, { type: "application/zip" });
+      Object.defineProperty(file, "size", { value: size });
+      return file;
+    }
+
+    async function pickPackage(file: File) {
+      customRender(<SettingsProvidersView />);
+      await userEvent.click(screen.getByRole("tab", { name: /Marketplace/i }));
+      const panel = await screen.findByRole("tabpanel", {
+        name: /Marketplace/i,
+      });
+      // The package picker is a hidden native file input behind the button.
+      // eslint-disable-next-line testing-library/no-node-access
+      const input = panel.querySelector<HTMLInputElement>('input[type="file"]');
+      expect(input).not.toBeNull();
+      await userEvent.upload(input!, file);
+    }
+
+    it("refuses a package over 100 MiB without uploading it", async () => {
+      const uploadRequest = vi.fn();
+      server.use(
+        http.post("/api/provider-hub/installations/local", () => {
+          uploadRequest();
+          return HttpResponse.json({ job_id: null }, { status: 202 });
+        }),
+      );
+
+      await pickPackage(packageOfSize("large.zip", 100 * MiB + 1));
+
+      expect(
+        await screen.findByText(/large\.zip is larger than 100 MiB/i),
+      ).toBeInTheDocument();
+      expect(uploadRequest).not.toHaveBeenCalled();
+    });
+
+    it("uploads a package of exactly 100 MiB", async () => {
+      const uploadRequest = vi.fn();
+      server.use(
+        http.post("/api/provider-hub/installations/local", () => {
+          uploadRequest();
+          return HttpResponse.json({ job_id: null }, { status: 202 });
+        }),
+      );
+
+      await pickPackage(packageOfSize("plugin.zip", 100 * MiB));
+
+      await waitFor(() => expect(uploadRequest).toHaveBeenCalledTimes(1));
+    });
+  });
+
   it("preserves the trusted-source attribution when installing from catalog", async () => {
     const installRequest = vi.fn();
     server.use(
