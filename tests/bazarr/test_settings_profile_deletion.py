@@ -219,6 +219,37 @@ def test_a_save_whose_refresh_fails_still_writes_its_rows(schema_session, post_s
                                      "notifiers": [(1, "discord://token")]}
 
 
+def test_a_saved_failure_is_reported_as_saved_when_its_broadcast_fails(schema_session, post_settings,
+                                                                     monkeypatch):
+    """The settings event after a written save is best effort.
+
+    Raised through, it took the place of the saved-with-a-failed-refresh answer, and
+    the page reported a save that had reached the disk as failed.
+    """
+    import sys
+    from app.config import SettingsFollowupError
+
+    endpoint = sys.modules["api.system.settings"]
+    _seed_rows(schema_session)
+
+    def saved_then_failed(_items):
+        raise SettingsFollowupError("synthetic")
+
+    def broadcast(kind=None, *_args, **_kwargs):
+        if kind == "settings":
+            raise RuntimeError("synthetic broadcast failure")
+
+    monkeypatch.setattr(endpoint, "save_settings", saved_then_failed)
+    monkeypatch.setattr(endpoint, "event_stream", broadcast)
+
+    body, status = post_settings(dict(_ROW_FORM))
+
+    assert status == 503
+    assert body["code"] == "settings_refresh_failed"
+    assert _rows(schema_session) == {"profiles": [(4, "New")], "languages": [1],
+                                     "notifiers": [(1, "discord://token")]}
+
+
 def test_a_saved_request_writes_its_rows(schema_session, post_settings, monkeypatch):
     import sys
 

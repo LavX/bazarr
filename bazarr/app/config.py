@@ -1820,17 +1820,18 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
         if native_configuration is not None:
             native_configuration.publish_masters(settings)
 
+        # Each step from here on runs even when one before it failed.
+        follow_ups = _FollowUps()
+
         if on_persisted is not None:
-            on_persisted()
+            with follow_ups.step():
+                on_persisted()
 
         # Only now that the save has been written: naming new subtitles with the
         # hearing-impaired extension, clearing provider logins, resetting the
         # pools and queueing library-wide jobs all act on the submitted values,
         # and a job queued for a save that is then refused cannot be recalled.
-        # The sports reindex carries the audio mode with it. Each step runs
-        # even when one before it failed.
-        follow_ups = _FollowUps()
-
+        # The sports reindex carries the audio mode with it.
         if hi_extension_changed:
             with follow_ups.step():
                 os.environ["SZ_HI_EXTENSION"] = settings.general.hi_extension or ""

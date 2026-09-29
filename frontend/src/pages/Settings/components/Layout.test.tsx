@@ -604,6 +604,51 @@ describe("Settings layout refetch", () => {
     });
   });
 
+  it("keeps a metadata field staged while the save was in flight when only applying it failed", async () => {
+    cleanNotifications();
+    serveSettings();
+    let respond!: () => void;
+    const responded = new Promise<void>((resolve) => (respond = resolve));
+    let markReached!: () => void;
+    const reached = new Promise<void>((resolve) => (markReached = resolve));
+    server.use(
+      http.post("/api/system/settings", async () => {
+        markReached();
+        await responded;
+        return HttpResponse.json(savedButNotApplied, { status: 503 });
+      }),
+    );
+
+    const user = userEvent.setup();
+    customRender(
+      <Layout name="Test Settings">
+        <Check label="Use SSL" settingKey="settings-sonarr-ssl" />
+        <TextField label="Address" settingKey="settings-sonarr-ip" />
+        <TextField label="Locale" settingKey="settings-discover-locale" />
+      </Layout>,
+    );
+
+    await waitForHydration();
+
+    await user.click(screen.getByLabelText("Use SSL"));
+    await user.click(
+      await screen.findByRole("button", { name: "Save 1 pending change" }),
+    );
+    await reached;
+
+    // Staged after the request left, so it is neither submitted nor saved.
+    await user.type(screen.getByLabelText("Locale"), "hu-HU");
+    respond();
+
+    expect(
+      await screen.findByText("Settings saved; applying them failed"),
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(queryClient.isFetching()).toBe(0);
+    });
+    expect(screen.getByLabelText("Locale")).toHaveValue("hu-HU");
+  });
+
   it("leaves after Save and leave when only applying the save failed", async () => {
     cleanNotifications();
     serveSettings();

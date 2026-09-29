@@ -80,20 +80,23 @@ const Layout: FunctionComponent<Props> = (props) => {
   // response was in flight, took the Save control with it, and posted nothing.
   const savedRef = useRef(false);
 
-  const handleSaveError = useCallback((error: unknown) => {
-    if (isMetadataFollowupError(error)) {
-      formRef.current.reset();
-      setMetadataRefreshFailed(true);
-    } else if (isSettingsFollowupError(error)) {
-      // Written all the same, so the form is cleared as after a save: by the
-      // reload, or at once when a metadata field is staged, which the reload
-      // leaves alone.
-      savedRef.current = true;
-      if (Object.keys(formRef.current.values.settings).some(isMetadataKey)) {
+  const handleSaveError = useCallback(
+    (error: unknown, submitted: LooseObject) => {
+      if (isMetadataFollowupError(error)) {
         formRef.current.reset();
+        setMetadataRefreshFailed(true);
+      } else if (isSettingsFollowupError(error)) {
+        // Written all the same, so the form is cleared as after a save: by the
+        // reload, or at once when the save carried a metadata field, which the
+        // reload leaves alone.
+        savedRef.current = true;
+        if (Object.keys(submitted).some(isMetadataKey)) {
+          formRef.current.reset();
+        }
       }
-    }
-  }, []);
+    },
+    [],
+  );
 
   useOnValueChange(isRefetching, (value) => {
     if (value || !savedRef.current) {
@@ -123,7 +126,7 @@ const Layout: FunctionComponent<Props> = (props) => {
             if (Object.keys(settingsToSubmit).some(isMetadataKey))
               formRef.current.reset();
           },
-          onError: handleSaveError,
+          onError: (error) => handleSaveError(error, settingsToSubmit),
         });
       }
     },
@@ -141,7 +144,7 @@ const Layout: FunctionComponent<Props> = (props) => {
         setMetadataRefreshFailed(false);
         savedRef.current = true;
       } catch (error) {
-        handleSaveError(error);
+        handleSaveError(error, settingsToSubmit);
         // Written all the same: leaving loses nothing.
         if (!isSettingsFollowupError(error)) {
           throw error;

@@ -1247,6 +1247,42 @@ def test_a_written_save_whose_follow_up_fails_is_reported_as_saved(
     assert env.settings.opensubtitles.username == "after"
 
 
+def test_a_metadata_refresh_that_fails_after_the_write_stops_no_other_follow_up(
+    metadata_save_environment, monkeypatch,
+):
+    """Refreshing the metadata configuration is one follow-up among the others.
+
+    It ran first and on its own, so a failure there skipped every other one, a login
+    reset included, which saving the same login again would not bring back.
+    """
+    from discover import metadata
+
+    env = metadata_save_environment
+    env.settings.general.parse_embedded_audio_track = False
+    env.settings.general.use_embedded_subs = True
+    env.settings.opensubtitles.username = "before"
+    for name in ("use_sonarr", "use_radarr", "use_sportarr"):
+        setattr(env.settings.general, name, True)
+    assert env.config.write_config() is True
+    effects = _record_save_side_effects(monkeypatch)
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("synthetic metadata refresh failure")
+
+    monkeypatch.setattr(metadata, "invalidate_metadata", fail)
+
+    with pytest.raises(env.config.MetadataFollowupError):
+        env.config.save_settings([
+            ("settings-discover-tmdb_access_token", ["5ecafe33cafe33cafe33cafe33cafe33"]),
+            ("settings-general-parse_embedded_audio_track", ["true"]),
+            ("settings-general-use_embedded_subs", ["false"]),
+            ("settings-opensubtitles-username", ["after"]),
+        ])
+
+    assert sorted(effects) == _EVERY_FOLLOW_UP
+    assert env.settings.discover.tmdb_access_token == "5ecafe33cafe33cafe33cafe33cafe33"
+
+
 @pytest.mark.parametrize("failing, retried", [
     ("clear os_token", ["clear os_token", "compat pool"]),
     ("throttled providers", ["compat pool", "throttled providers"]),

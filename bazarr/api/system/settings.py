@@ -1,6 +1,7 @@
 # coding=utf-8
 
 import json
+import logging
 
 from flask import request, jsonify
 from flask_restx import Resource, Namespace
@@ -180,7 +181,11 @@ class SystemSettings(Resource):
                 # it failed. Its rows follow it, and other open pages hear of
                 # it, as they do for any saved change.
                 _write_settings_rows(enabled_languages, profiles, notifications)
-                event_stream("settings")
+                try:
+                    event_stream("settings")
+                except Exception:
+                    # Best effort: the answer still has to say it was saved.
+                    logging.exception("Unable to announce the saved settings")
                 raise
         except MetadataPersistenceError:
             return "Metadata settings could not be saved. Try again.", 503
