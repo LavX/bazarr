@@ -107,16 +107,34 @@ def get_online_announcements():
     try:
         with open(os.path.join(args.config_dir, 'config', 'announcements.json'), 'r', encoding='utf-8') as f:
             data = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return []
-    else:
-        for announcement in data['data']:
-            if 'enabled' not in announcement:
-                data['data'][announcement]['enabled'] = True
-            if 'dismissible' not in announcement:
-                data['data'][announcement]['dismissible'] = True
+    entries = data.get('data') if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        return []
+    # The file is stored as it was downloaded, so an entry with no text that can
+    # be hashed, or a timestamp pretty_date cannot handle, is skipped rather than
+    # failing the whole list. pretty_date dates an integer epoch (a millisecond
+    # epoch is past year 9999) and shows an empty timestamp as now.
+    online = []
+    for announcement in entries:
+        if not isinstance(announcement, dict) or not isinstance(announcement.get('text'), str) \
+                or 'timestamp' not in announcement:
+            continue
+        timestamp = announcement['timestamp']
+        if timestamp and type(timestamp) is not int:
+            continue
+        try:
+            announcement['text'].encode('UTF8')
+            if timestamp:
+                datetime.fromtimestamp(timestamp)
+        except (OverflowError, OSError, ValueError):
+            continue
+        announcement.setdefault('enabled', True)
+        announcement.setdefault('dismissible', True)
+        online.append(announcement)
 
-        return data['data']
+    return online
 
 
 def get_local_announcements():
