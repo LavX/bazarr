@@ -7,6 +7,7 @@
  * refresh with it rather than wait for its cache to go stale.
  */
 
+import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import queryClient from "@/apis/queries";
@@ -15,7 +16,7 @@ import type {
   HiddenTrackMediaType,
 } from "@/apis/raw/subtitles";
 import { createDefaultReducer } from "@/modules/socketio/reducer";
-import { customRender, screen, waitFor } from "@/tests";
+import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import HiddenTracks from "./HiddenTracks";
 
@@ -80,4 +81,96 @@ describe("HiddenTracks", () => {
       ).toBeInTheDocument();
     },
   );
+});
+
+describe("HiddenTracks disclosure", () => {
+  function serve(tracks: EmbeddedHiddenTrack[]) {
+    server.use(
+      http.get("/api/subtitles/embedded-hidden", () =>
+        HttpResponse.json({ data: tracks }),
+      ),
+    );
+  }
+
+  async function open(ui: React.ReactElement) {
+    const user = userEvent.setup();
+    customRender(ui);
+    const trigger = await screen.findByRole("button", {
+      name: "Hidden tracks (1)",
+    });
+    await user.click(trigger);
+    // jsdom lays nothing out, so the positioning code treats the trigger as
+    // off screen and hides the list from the accessibility tree.
+    const dialog = await screen.findByRole("dialog", { hidden: true });
+    return { trigger, dialog };
+  }
+
+  it("names each hidden codec the way the row badges do", async () => {
+    serve([{ ...frenchTrack("movie"), codec: "pgs, subrip" }]);
+    const { dialog } = await open(
+      <HiddenTracks mediaType="movie" mediaId={7} />,
+    );
+
+    const pgs = within(dialog).getByTitle("Subtitle format (PGS, image-based)");
+    expect(pgs).toHaveTextContent(/^PGS$/);
+    expect(
+      within(dialog).getByTitle("Subtitle format (SRT)"),
+    ).toHaveTextContent(/^SRT$/);
+    // Never the stored lowercase value.
+    expect(within(dialog).queryByText(/pgs|subrip/)).not.toBeInTheDocument();
+  });
+
+  it("shows no codec when none was recorded", async () => {
+    serve([frenchTrack("movie")]);
+    const { dialog } = await open(
+      <HiddenTracks mediaType="movie" mediaId={7} />,
+    );
+
+    expect(
+      within(dialog).queryByTitle(/^Subtitle format/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers Unhide as a quiet grey action, like its trigger", async () => {
+    serve([frenchTrack("movie")]);
+    const { trigger, dialog } = await open(
+      <HiddenTracks mediaType="movie" mediaId={7} />,
+    );
+
+    const unhide = within(dialog).getByRole("button", {
+      name: "Unhide French",
+      hidden: true,
+    });
+    expect(unhide).toHaveAttribute("data-variant", "subtle");
+    expect(trigger).toHaveAttribute("data-variant", "subtle");
+    // Mantine writes the colour into the button's style variables.
+    expect(unhide.getAttribute("style")).toBe(trigger.getAttribute("style"));
+  });
+
+  it("opens from the start of a trigger inside a row", async () => {
+    serve([frenchTrack("episode")]);
+    const { trigger, dialog } = await open(
+      <HiddenTracks mediaType="episode" mediaId={7} />,
+    );
+
+    expect(dialog).toHaveAttribute("data-position", "bottom-start");
+    expect(trigger.parentElement?.getAttribute("style") ?? "").not.toContain(
+      "flex-end",
+    );
+  });
+
+  it("sits at the end of its own line under a table and opens from there", async () => {
+    serve([frenchTrack("movie")]);
+    const { trigger, dialog } = await open(
+      <HiddenTracks mediaType="movie" mediaId={7} align="end" />,
+    );
+
+    expect(dialog).toHaveAttribute("data-position", "bottom-end");
+    // The trigger keeps its own width in a wrapper that pushes it to the end,
+    // so the list opens under the words the user clicked, not under the far
+    // edge of a button stretched across the page.
+    expect(trigger.parentElement?.getAttribute("style")).toContain(
+      "--group-justify: flex-end",
+    );
+  });
 });

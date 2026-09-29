@@ -9,6 +9,7 @@ import {
   getCombinedSecondaries,
   getSubtitleSyncStatusPresentation,
   getSyncEngineLabel,
+  hiddenTrackCodecs,
   hiddenTrackOutcome,
   isCombinedOutputSubtitle,
   isCompatibleSyncOutputSubtitle,
@@ -454,6 +455,22 @@ describe("embeddedTracksSharingKey", () => {
   it("falls back to the track itself when the listing lacks it", () => {
     const srt = track("en", false, null);
     expect(embeddedTracksSharingKey(srt, [])).toEqual([srt]);
+  });
+});
+
+describe("hiddenTrackCodecs", () => {
+  // A hide covers every track with the same language, HI and forced, so the
+  // server records all of their codecs in one field.
+  it("splits the codecs one hide recorded", () => {
+    expect(hiddenTrackCodecs("pgs, subrip")).toEqual(["pgs", "subrip"]);
+  });
+
+  it("takes a single codec as it is", () => {
+    expect(hiddenTrackCodecs("vobsub")).toEqual(["vobsub"]);
+  });
+
+  it.each([null, "", " , "])("has none for %j", (codec) => {
+    expect(hiddenTrackCodecs(codec)).toEqual([]);
   });
 });
 

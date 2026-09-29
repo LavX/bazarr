@@ -96,13 +96,29 @@ describe("Movies Detail Table, Hide track with codecs", () => {
     expect(
       await screen.findByTitle("Subtitle format (PGS, image-based)"),
     ).toHaveTextContent("PGS");
-    await user.click(
-      await screen.findByRole("button", { name: "Hidden tracks (1)" }),
-    );
+    const disclosure = await screen.findByRole("button", {
+      name: "Hidden tracks (1)",
+    });
+    await user.click(disclosure);
     expect(
       await screen.findByRole("button", { name: "Unhide English" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("pgs, subrip")).toBeInTheDocument();
+    // The hidden list names the codecs as the row badges do, not as stored.
+    // jsdom lays nothing out, so once the positioning code has run it counts
+    // the list as off screen and hides it from the accessibility tree.
+    const dialog = screen.getByRole("dialog", { hidden: true });
+    const list = within(dialog);
+    expect(
+      list.getByTitle("Subtitle format (PGS, image-based)"),
+    ).toHaveTextContent(/^PGS$/);
+    expect(list.getByTitle("Subtitle format (SRT)")).toHaveTextContent(/^SRT$/);
+    expect(screen.queryByText("pgs, subrip")).not.toBeInTheDocument();
+    // Under the table the trigger keeps its own width at the end of its line,
+    // so the list opens from the words the user clicked.
+    expect(disclosure.parentElement?.getAttribute("style")).toContain(
+      "--group-justify: flex-end",
+    );
+    expect(dialog).toHaveAttribute("data-position", "bottom-end");
   });
 
   it("hides both same-language tracks from the PGS row with one request", async () => {
@@ -117,8 +133,8 @@ describe("Movies Detail Table, Hide track with codecs", () => {
         history={[]}
       />,
     );
-    // The row cells are declared inside the table, so any query that settles
-    // after the first render remounts them. Open the menu once it is quiet.
+    // Let the page's queries settle first, so the click lands on the menu
+    // the final render shows.
     await screen.findByText("PGS");
     await waitFor(() => expect(queryClient.isFetching()).toBe(0));
 

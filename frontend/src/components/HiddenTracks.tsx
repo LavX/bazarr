@@ -1,5 +1,5 @@
 import { FunctionComponent } from "react";
-import { Button, Group, Popover, Stack, Text } from "@mantine/core";
+import { Badge, Button, Group, Popover, Stack, Text } from "@mantine/core";
 import { faEyeSlash } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
@@ -8,7 +8,13 @@ import {
 } from "@/apis/hooks";
 import { HiddenTrackMediaType } from "@/apis/raw/subtitles";
 import { toPython } from "@/utilities";
-import { embeddedTrackLabel } from "@/utilities/subtitles";
+import {
+  describeEmbeddedTrack,
+  embeddedTrackLabel,
+  hiddenTrackCodecs,
+  isBitmapCodec,
+  subtitleCodecLabel,
+} from "@/utilities/subtitles";
 
 interface Props {
   mediaType: HiddenTrackMediaType;
@@ -21,6 +27,12 @@ interface Props {
    */
   batchIds?: number[];
   disabled?: boolean;
+  /**
+   * "start", the default, for a disclosure that follows a row's badges.
+   * "end" for one on its own line under a table: the trigger sits at the end
+   * of that line and the list opens from there.
+   */
+  align?: "start" | "end";
 }
 
 /**
@@ -33,6 +45,7 @@ const HiddenTracks: FunctionComponent<Props> = ({
   mediaId,
   batchIds,
   disabled,
+  align = "start",
 }) => {
   const { data } = useEmbeddedHiddenTracks(mediaType, batchIds ?? [mediaId]);
   const { unhide } = useEmbeddedTrackVisibility();
@@ -42,8 +55,17 @@ const HiddenTracks: FunctionComponent<Props> = ({
     return null;
   }
 
-  return (
-    <Popover position="bottom-start" withArrow shadow="md" withinPortal>
+  const disclosure = (
+    <Popover
+      position={align === "end" ? "bottom-end" : "bottom-start"}
+      // The arrow follows the trigger even after the list is shifted to fit
+      // a narrow screen, and the list keeps the page's 16px gutter.
+      withArrow
+      arrowPosition="center"
+      middlewares={{ flip: true, shift: { padding: 16 } }}
+      shadow="md"
+      withinPortal
+    >
       <Popover.Target>
         <Button
           variant="subtle"
@@ -54,7 +76,7 @@ const HiddenTracks: FunctionComponent<Props> = ({
           Hidden tracks ({tracks.length})
         </Button>
       </Popover.Target>
-      <Popover.Dropdown>
+      <Popover.Dropdown maw="calc(100vw - 32px)">
         <Stack gap="xs" maw={360}>
           <Text size="xs" c="dimmed">
             Bazarr+ does not list these embedded tracks for this title. They are
@@ -67,18 +89,27 @@ const HiddenTracks: FunctionComponent<Props> = ({
                 key={`${track.media_id}:${track.language}`}
                 justify="space-between"
                 wrap="nowrap"
+                gap="sm"
               >
-                <Text size="sm">
-                  {label}
-                  {track.codec ? (
-                    <Text span size="xs" c="dimmed">
-                      {` ${track.codec}`}
-                    </Text>
-                  ) : null}
-                </Text>
+                <Group gap={6} wrap="wrap">
+                  <Text size="sm">{label}</Text>
+                  {/* The badge the movie row shows for the same track. */}
+                  {hiddenTrackCodecs(track.codec).map((codec) => (
+                    <Badge
+                      key={codec}
+                      size="xs"
+                      variant="light"
+                      color={isBitmapCodec(codec) ? "gray" : undefined}
+                      title={describeEmbeddedTrack("Subtitle format", codec)}
+                    >
+                      {subtitleCodecLabel(codec)}
+                    </Badge>
+                  ))}
+                </Group>
                 <Button
                   size="compact-xs"
-                  variant="light"
+                  variant="subtle"
+                  color="gray"
                   aria-label={`Unhide ${label}`}
                   disabled={disabled || unhide.isPending}
                   onClick={() =>
@@ -102,6 +133,17 @@ const HiddenTracks: FunctionComponent<Props> = ({
         </Stack>
       </Popover.Dropdown>
     </Popover>
+  );
+
+  // Under a table the parent stacks its children and would stretch the
+  // trigger across the page, leaving the list to open from the far edge. The
+  // padding matches the table cells', so the trigger lines up with the rows.
+  return align === "end" ? (
+    <Group justify="flex-end" px="sm">
+      {disclosure}
+    </Group>
+  ) : (
+    disclosure
   );
 };
 

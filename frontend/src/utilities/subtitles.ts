@@ -72,6 +72,18 @@ export function embeddedTracksSharingKey(
 }
 
 /**
+ * The codecs one hide recorded. A hide takes every track with the same
+ * language, HI and forced, so the server stores their codecs in one field,
+ * "pgs, subrip", and none at all for tracks indexed before codecs were kept.
+ */
+export function hiddenTrackCodecs(codec: string | null): string[] {
+  return (codec ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+}
+
+/**
  * What to tell the user after a hide that did not make the language wanted,
  * or null when it did. The wanted computation counts an HI track as good as
  * a normal one and counts subtitle files too, so hiding the plain English

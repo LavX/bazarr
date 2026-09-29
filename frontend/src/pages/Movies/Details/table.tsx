@@ -875,6 +875,7 @@ const Table: FunctionComponent<Props> = ({
           mediaType="movie"
           mediaId={movie.id}
           disabled={disabled}
+          align="end"
         />
       )}
       {movie && compareSelection && (
