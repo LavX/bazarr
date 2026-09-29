@@ -18,7 +18,8 @@ from app.event_handler import event_stream
 from subtitles.mismatch import forget_media_by_upstream
 from app.jobs_queue import jobs_queue
 from arr_instances.resolution import (client_for_instance, default_instance_id,
-                                      resolve_default_profile, scoped, stamp_owner)
+                                      resolve_default_profile, scoped, skip_unscoped_sync,
+                                      stamp_owner)
 
 from .episodes import sync_episodes
 from .parser import seriesParser
@@ -295,6 +296,13 @@ def update_one_series(series_id, action, is_signalr=False, series_data=None,
     the inline behavior.
     """
     logging.debug('BAZARR syncing this specific series from Sonarr: %s', series_id)
+
+    # Single-series callers only. The bulk sync always answers existing_in_db
+    # and runs only while Sonarr is switched on, when the startup backfill
+    # builds an instance for what it writes anyway.
+    if arr_instance_id is None and existing_in_db is None and skip_unscoped_sync(
+            database, 'sonarr', settings.general.use_sonarr, f'series {series_id}'):
+        return
 
     # Check if there's a row in database for this series ID. The
     # bulk caller already knows the answer from `current_shows_db`;

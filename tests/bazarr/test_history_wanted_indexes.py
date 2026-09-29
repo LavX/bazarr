@@ -123,3 +123,66 @@ def test_default_history_view_plans_through_the_events_index(schema_session):
         "ORDER BY timestamp DESC LIMIT 25")).all()
     plan_text = ' '.join(str(row) for row in plan)
     assert 'ix_table_history_events' in plan_text, plan_text
+
+
+# ------------------------------------------------ links into the library tables
+#
+# Deleting a series, episode, movie or history row makes the database look up
+# every row that points at it, once per deleted row, for the foreign key. With
+# no index on the pointing column each of those lookups reads the whole table,
+# so deleting an instance together with its library took minutes on a real
+# library and held the write lock all that time.
+
+_LIBRARY_PARENTS = ('table_shows', 'table_episodes', 'table_movies',
+                    'table_history', 'table_history_movie')
+
+
+def _load_link_migration():
+    path = (pathlib.Path(__file__).resolve().parents[2] / 'migrations' / 'versions'
+            / 'f8c3d1a7b926_library_link_indexes.py')
+    spec = importlib.util.spec_from_file_location('library_link_indexes_migration', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_every_link_into_a_library_table_starts_an_index():
+    """Guards the next foreign key into these tables as well as today's."""
+    from app.database import Base
+
+    unindexed = []
+    for table in Base.metadata.sorted_tables:
+        leading = [[column.name for column in index.columns] for index in table.indexes]
+        leading.append([column.name for column in table.primary_key.columns])
+        for constraint in table.foreign_key_constraints:
+            if constraint.referred_table.name not in _LIBRARY_PARENTS:
+                continue
+            columns = [column.name for column in constraint.columns]
+            if not any(names[:len(columns)] == columns for names in leading):
+                unindexed.append(f'{table.name}.{",".join(columns)}')
+    assert unindexed == []
+
+
+def test_the_link_index_migration_declares_what_the_metadata_does():
+    """A fresh install gets these from the metadata and an upgraded one from
+    the migration, so both lists have to name the same indexes."""
+    from app.database import Base
+
+    migration = _load_link_migration()
+    assert migration.down_revision == 'b2c9e741a605'
+    for name, table, column in migration.INDEXES:
+        declared = {index.name: [c.name for c in index.columns]
+                    for index in Base.metadata.tables[table].indexes}
+        assert declared.get(name) == [column], f'{name} not declared on {table}'
+
+
+def test_sqlite_finds_the_rows_pointing_at_a_deleted_one_through_an_index(schema_session):
+    """The lookup SQLite makes for every deleted parent row, planned."""
+    import sqlalchemy as sa
+
+    migration = _load_link_migration()
+    for name, table, column in migration.INDEXES:
+        plan = schema_session.execute(sa.text(
+            f'EXPLAIN QUERY PLAN SELECT 1 FROM {table} WHERE "{column}" = 1')).all()
+        plan_text = ' '.join(str(row) for row in plan)
+        assert name in plan_text, plan_text

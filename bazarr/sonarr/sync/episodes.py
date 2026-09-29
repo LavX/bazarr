@@ -21,7 +21,8 @@ from sonarr.info import get_sonarr_info
 from app.jobs_queue import jobs_queue
 from app.notifier import send_notifications
 from subtitles.adaptive_searching import is_search_active
-from arr_instances.resolution import client_for_instance, scoped, sonarr_series_owner, stamp_owner
+from arr_instances.resolution import (client_for_instance, scoped, skip_unscoped_sync,
+                                      sonarr_series_owner, stamp_owner)
 
 from .parser import episodeParser
 from .utils import get_episodes_from_sonarr_api, get_episodesFiles_from_sonarr_api
@@ -375,6 +376,9 @@ def sync_one_episode_for_instance(arr_instance_id, episode_id, **kwargs):
 def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
                      arr_instance_id=None, arr_client=None):
     logging.debug('BAZARR syncing this specific episode from Sonarr: %s', episode_id)
+    if arr_instance_id is None and skip_unscoped_sync(
+            database, 'sonarr', settings.general.use_sonarr, f'episode {episode_id}'):
+        return
     apikey_sonarr = settings.sonarr.apikey
 
     # Check if there's a row in database for this episode ID

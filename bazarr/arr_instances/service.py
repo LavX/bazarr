@@ -21,7 +21,7 @@ from utilities.sql_limits import in_chunks
 
 from .media_defaults import (instance_default_profile, merge_media_defaults_into_options,
                              read_media_defaults, validate_media_defaults)
-from .repository import VALID_KINDS, ArrInstanceRepository, to_safe_dict
+from .repository import VALID_KINDS, ArrInstanceRepository, InstanceOwnsRows, to_safe_dict
 from .subtitle_settings import merge_subtitle_settings_into_options, validate_subtitle_settings
 
 _CONFLICT_MESSAGE = "An instance with these connection properties already exists."
@@ -452,15 +452,144 @@ def update_instance(session, instance_id, args):
     return to_safe_dict(row), 200
 
 
-def delete_instance(session, instance_id):
+def delete_instance(session, instance_id, remove_library=False):
+    """Delete an instance, or refuse with 409.
+
+    A Sonarr or Radarr instance that owns library rows is refused by default.
+    The refusal says what it holds and that ``remove_library`` deletes it
+    together with that library, so the caller can offer that as a separate,
+    explicit choice. Any Sonarr or Radarr delete, with or without the library,
+    is refused while the instance's library sync is running or queued: the
+    sync would write rows for an instance that is gone. That holds for an
+    instance that owns nothing yet too, such as one whose first sync has built
+    its client and not written a row.
+
+    Only queued jobs are covered. A single-item write (a download or upgrade,
+    an exclusion, a SignalR event, a webhook, a one-series refresh) runs
+    inline, so one already past its instance lookup when the delete commits
+    still lands afterwards: that one item's rows, a history entry, say, or a
+    series with its episodes. Those rows stay.
+
+    A row naming the gone instance does not bring it back. Deleting a kind's
+    last instance through the API switches the kind off, after the commit
+    and best effort, and with the kind off the startup backfill ignores rows
+    that name an instance. A row with no owner still counts: for that one it
+    builds the instance again from the stored connection settings. Two
+    writers can leave such a row after the removal. An exclusion whose
+    episode or movie row is already gone is stored without an owner when its
+    caller names none, and an unscoped one-item sync, such as the webhook URL
+    without an instance key, that was already past its check for an enabled
+    default when the delete committed finds none and leaves the owner empty.
+    One that starts later writes nothing unless an enabled default owns it.
+
+    Only Sonarr and Radarr have a library sync to wait for or a library to
+    remove. Any other kind takes the plain delete, without holding up the job
+    queue.
+    """
     repo = ArrInstanceRepository(session)
+    row = repo.get(instance_id)
+    if row is None or row.kind not in _LIBRARY_SYNC_JOBS:
+        return _delete(repo, instance_id, remove_library=False)
+    from app.jobs_queue import jobs_queue
+
+    # One step for the job queue, from the check to the commit. Queueing a job
+    # and starting one both take this lock, so no sync of this instance can be
+    # queued or start in between. One that did would build its client while
+    # the instance still existed, then write rows naming it once it was gone.
+    # A sync queued meanwhile runs afterwards and finds no instance to sync.
+    # The removal is a few indexed statements, so the queue waits only briefly,
+    # and no job queues work from inside an open database transaction, so a
+    # writer never waits on this lock while holding what the removal needs.
+    with jobs_queue._queue_lock:
+        row = repo.get(instance_id)
+        if row is not None and _library_sync_active(row):
+            return {"error": "sync_in_progress",
+                    "message": "A library sync of this instance is running or queued. "
+                               "Wait for it to finish, then delete the instance again."}, 409
+        body, status = _delete(repo, instance_id, remove_library=remove_library)
+        if status < 400:
+            session.commit()
+        return body, status
+
+
+def _delete(repo, instance_id, remove_library):
     try:
-        ok = repo.delete(instance_id)
+        ok = repo.delete(instance_id, remove_library=remove_library)
+    except InstanceOwnsRows as exc:
+        row = repo.get(instance_id)
+        return {"error": "conflict", "message": str(exc), "can_remove_library": True,
+                "library": repo.owned_row_counts(instance_id),
+                "last_of_kind": row is not None and repo.last_of_kind(row)}, 409
     except ValueError as exc:
         return {"error": "conflict", "message": str(exc)}, 409
     if not ok:
         return {"error": "not_found"}, 404
     return "", 204
+
+
+# The bulk sync of one instance, and the whole-kind sync that carries no
+# instance id and writes to the kind's default.
+_LIBRARY_SYNC_JOBS = {
+    "sonarr": ("sonarr.sync.series", ("update_series_for_instance", "update_series")),
+    "radarr": ("radarr.sync.movies", ("update_movies_for_instance", "update_movies")),
+}
+
+
+def _library_sync_active(row):
+    """Whether a sync that may write this instance's library is queued or
+    running: its own, or a whole-kind sync of its kind. A whole-kind sync
+    resolves the default once, when it starts, so it counts for every
+    instance of the kind, whichever one is the default now. Call it holding
+    the job queue lock, or a job can move between the two queues unseen."""
+    if row.kind not in _LIBRARY_SYNC_JOBS:
+        return False
+    from app.jobs_queue import jobs_queue
+
+    module, funcs = _LIBRARY_SYNC_JOBS[row.kind]
+    targets = {row.id, None}
+    jobs = list(jobs_queue.jobs_pending_queue) + list(jobs_queue.jobs_running_queue)
+    return any(job.module == module and job.func in funcs
+               and (job.kwargs or {}).get("arr_instance_id") in targets for job in jobs)
+
+
+def after_instance_deleted(session, kind, removed_library=False):
+    """Follow a committed Sonarr or Radarr instance delete. Best effort: the
+    delete is already committed, so nothing here may fail the request."""
+    if kind not in ("sonarr", "radarr"):
+        return
+    if removed_library:
+        try:
+            event_stream(type="series" if kind == "sonarr" else "movie", action="delete")
+            event_stream(type="badges")
+        except Exception:
+            logging.exception("BAZARR failed to notify clients after removing a %s library", kind)
+    try:
+        switch_off_kind_without_instances(session, kind)
+    except Exception:
+        logging.exception("BAZARR failed to switch %s off after deleting its last instance", kind)
+
+
+def switch_off_kind_without_instances(session, kind):
+    """Turn ``use_<kind>`` off once a Sonarr or Radarr kind has no instance left.
+
+    Otherwise the startup backfill rebuilds an instance from the scalar
+    connection settings, which still describe the one just deleted, and syncs
+    its library straight back in. Written through save_settings, the same path
+    as the Settings page, so the scheduler and the SignalR feeds follow it.
+    Returns True when it switched the kind off.
+    """
+    if kind not in ("sonarr", "radarr"):
+        return False
+    if ArrInstanceRepository(session).list(kind=kind):
+        return False
+    from app import config
+
+    if not getattr(config.settings.general, f"use_{kind}"):
+        return False
+    config.save_settings([(f"settings-general-use_{kind}", ["false"])])
+    event_stream(type="settings")
+    logging.info("Switched %s off: its last instance was deleted", kind)
+    return True
 
 
 def _known_profile_ids(session):

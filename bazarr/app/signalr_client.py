@@ -515,6 +515,12 @@ def dispatcher(data):
             logging.debug(f'Event received from Sonarr for series: {series_title} ({series_year})')  # noqa: G004
             if episodesChanged:
                 # this will happen if a season's monitored status is changed.
+                # sync_episodes also serves the bulk sync, so this caller makes
+                # the check update_one_series and sync_one_episode make.
+                if arr_instance_id is None and resolution.skip_unscoped_sync(
+                        database, 'sonarr', settings.general.use_sonarr,
+                        f'the episodes of series {media_id}'):
+                    return
                 arr_client = client_for_instance(database, arr_instance_id) if arr_instance_id is not None else None
                 sync_episodes(series_id=media_id, defer_search=settings.sonarr.defer_search_signalr, is_signalr=True,
                               arr_instance_id=arr_instance_id, arr_client=arr_client)

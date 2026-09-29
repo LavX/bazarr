@@ -20,7 +20,7 @@ import logging
 
 from sqlalchemy import select
 
-from app.database import TableShows
+from app.database import TableArrInstances, TableShows
 
 from .repository import ArrInstanceRepository
 
@@ -33,6 +33,41 @@ def default_instance_id(session, kind):
     """
     row = ArrInstanceRepository(session).get_default(kind)
     return row.id if row is not None else None
+
+
+def skip_unscoped_sync(session, kind, kind_enabled, what):
+    """Whether a single-item sync that names no instance must write nothing.
+
+    The webhook URL without an instance key, the manual sync buttons and the
+    live feed that runs while no instance is enabled sync one item without
+    naming an instance, so the row is written under the enabled default. With
+    no default it gets no owner, and a row with no owner is what the startup
+    backfill acts on: it builds an instance for it when the kind has none, and
+    stamps it onto the only instance left otherwise. Such a sync reads the
+    stored connection settings, which follow the default and still describe
+    the last one after it is deleted or disabled. So the row can come from a
+    server that is gone and land on an unrelated instance, or bring a deleted
+    one back.
+
+    Such a sync is therefore skipped whenever the kind has no enabled default:
+    no instance at all, only disabled ones, or the kind switched off
+    (``kind_enabled`` False, which only picks the reason logged). With a
+    default it goes ahead as before. Logs the reason once per skipped sync.
+    """
+    if default_instance_id(session, kind) is not None:
+        return False
+    has_instance = session.execute(
+        select(TableArrInstances.id).where(TableArrInstances.kind == kind).limit(1)
+    ).first() is not None
+    name = kind.capitalize()
+    if not has_instance:
+        reason = f"there is no {name} instance to own it"
+    elif not kind_enabled:
+        reason = f"{name} is switched off"
+    else:
+        reason = f"no {name} instance is enabled"
+    logging.info("BAZARR skipping the %s sync of %s: %s", name, what, reason)
+    return True
 
 
 def scoped(stmt, column, arr_instance_id):

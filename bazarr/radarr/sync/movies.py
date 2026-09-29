@@ -20,7 +20,8 @@ from subtitles.mass_download import movies_download_subtitles  # noqa: F401
 from utilities.path_mappings import path_mappings
 from subtitles.adaptive_searching import is_search_active
 from arr_instances.resolution import (client_for_instance, default_instance_id,
-                                      resolve_default_profile, scoped, stamp_owner)
+                                      resolve_default_profile, scoped, skip_unscoped_sync,
+                                      stamp_owner)
 
 from sqlalchemy.exc import IntegrityError
 from .parser import movieParser
@@ -353,6 +354,10 @@ def update_one_movie_for_instance(arr_instance_id, movie_id, action, **kwargs):
 def update_one_movie(movie_id, action, defer_search=False, is_signalr=False,
                      arr_instance_id=None, arr_client=None):
     logging.debug('BAZARR syncing this specific movie from Radarr: %s', movie_id)
+
+    if arr_instance_id is None and skip_unscoped_sync(
+            database, 'radarr', settings.general.use_radarr, f'movie {movie_id}'):
+        return
 
     # Check if there's a row in the database for this movie ID
     existing_movie = database.execute(
