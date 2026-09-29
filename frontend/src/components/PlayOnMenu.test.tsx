@@ -163,6 +163,44 @@ describe("PlayOnMenu", () => {
     expect(trigger).toHaveTextContent("Play on");
   });
 
+  // A menu near the bottom of the page opens upward, under the tooltip of a
+  // pointer still resting on the row's trigger.
+  it("keeps the row trigger's tooltip off its open menu", async () => {
+    serve([EMBY, PLEX], [EMBY, PLEX], {
+      e1: { state: "not_found", url: null },
+      p1: { state: "not_found", url: null },
+    });
+    const user = userEvent.setup();
+    customRender(
+      <PlayOnMenu
+        mediaType="episode"
+        id={9}
+        itemLabel="S01E02"
+        variant="action"
+      />,
+    );
+    const trigger = await screen.findByRole("button", {
+      name: "Play S01E02 on a media server",
+    });
+    const tooltip = () =>
+      screen.queryByRole("tooltip", {
+        name: "Play S01E02 on a media server",
+        hidden: true,
+      });
+    await user.hover(trigger);
+    // A closed menu keeps its tooltip for a resting pointer.
+    await waitFor(() => expect(tooltip()).not.toBeNull(), { timeout: 3000 });
+    await user.click(trigger);
+    await screen.findByRole("menuitem", {
+      name: "Not found on Plex",
+      hidden: true,
+    });
+    await waitFor(() => expect(tooltip()).toBeNull());
+    // Still gone once the tooltip's delay has passed again.
+    await new Promise((settle) => setTimeout(settle, 1700));
+    expect(tooltip()).toBeNull();
+  });
+
   it("says so when no destination can hold the file", async () => {
     serve([EMBY, PLEX], [], {});
     const user = userEvent.setup();

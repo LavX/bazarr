@@ -136,6 +136,9 @@ const PlayOnMenu: FunctionComponent<Props> = ({
   const destinations = useMediaServerLinkDestinations();
   const { warm, looking, start, look, close, intend, cool } = useWarm();
   const opened = useRef(false);
+  // Whether the menu is open, kept as state as well so the trigger redraws:
+  // an open menu hides the trigger's tooltip.
+  const [menuOpen, setMenuOpen] = useState(false);
   const candidates = useMediaServerLinkCandidates(mediaType, id, warm);
   const targets = candidates.data ?? [];
   // A control that stops looking lets go of the lookups it still runs.
@@ -158,7 +161,10 @@ const PlayOnMenu: FunctionComponent<Props> = ({
   // A menu that goes away open, when the destinations drop to one or none,
   // never closes, so it is no longer counted as open.
   useEffect(() => {
-    if (!menuShown) opened.current = false;
+    if (!menuShown) {
+      opened.current = false;
+      setMenuOpen(false);
+    }
   }, [menuShown]);
   if (configured.length === 0) return null;
 
@@ -252,10 +258,12 @@ const PlayOnMenu: FunctionComponent<Props> = ({
       position="bottom-end"
       onOpen={() => {
         opened.current = true;
+        setMenuOpen(true);
         ask();
       }}
       onClose={() => {
         opened.current = false;
+        setMenuOpen(false);
         close();
       }}
     >
@@ -275,6 +283,9 @@ const PlayOnMenu: FunctionComponent<Props> = ({
             icon={faCirclePlay}
             label={label}
             className={className}
+            // A menu that opens upward, on the last rows of a table, would
+            // sit under the tooltip of a pointer still resting here.
+            tooltip={{ disabled: menuOpen }}
             {...triggerWarmth}
           />
         )}
