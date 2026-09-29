@@ -362,6 +362,10 @@ class TableBlacklist(Base):
     __table_args__ = (
         Index('ix_blacklist_instance_upstream_series', 'arr_instance_id', 'sonarr_series_id'),
         Index('ix_blacklist_instance_upstream_episode', 'arr_instance_id', 'sonarr_episode_id'),
+        # The media links, looked up once per deleted show or episode: see
+        # the comment on table_history.
+        Index('ix_table_blacklist_series_id', 'series_id'),
+        Index('ix_table_blacklist_episode_id', 'episode_id'),
     )
 
     # multi-instance additive columns (#156): nullable owner + local refs.
@@ -382,6 +386,7 @@ class TableBlacklistMovie(Base):
     # Composite instance-scoped index matches the Phase 1e cutover (fresh==upgraded).
     __table_args__ = (
         Index('ix_blacklist_movie_instance_upstream', 'arr_instance_id', 'radarr_id'),
+        Index('ix_table_blacklist_movie_movie_id', 'movie_id'),
     )
 
     # multi-instance additive columns (#156): nullable owner + local ref.
@@ -467,6 +472,12 @@ class TableHistory(Base):
               sqlite_where=text('action != 7'), postgresql_where=text('action != 7')),
         Index('ix_history_instance_upstream_series', 'arr_instance_id', 'sonarrSeriesId'),
         Index('ix_history_instance_upstream_episode', 'arr_instance_id', 'sonarrEpisodeId'),
+        # The media links and the upgrade chain: each deleted show, episode or
+        # history row looks up the rows pointing at it by these, so without
+        # them removing a library read this table once per deleted row.
+        Index('ix_table_history_series_id', 'series_id'),
+        Index('ix_table_history_episode_id', 'episode_id'),
+        Index('ix_table_history_upgraded_from_id', 'upgradedFromId'),
     )
 
     # multi-instance additive columns (#156): nullable owner + local refs.
@@ -505,6 +516,9 @@ class TableHistoryMovie(Base):
         Index('ix_table_history_movie_events', 'timestamp',
               sqlite_where=text('action != 7'), postgresql_where=text('action != 7')),
         Index('ix_history_movie_instance_upstream', 'arr_instance_id', 'radarrId'),
+        # Same as table_history: see the comment there.
+        Index('ix_table_history_movie_movie_id', 'movie_id'),
+        Index('ix_table_history_movie_upgraded_from_id', 'upgradedFromId'),
     )
 
     # multi-instance additive columns (#156): nullable owner + local ref.
