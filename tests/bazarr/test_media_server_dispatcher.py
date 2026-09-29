@@ -881,3 +881,24 @@ def test_a_sports_publication_accepts_either_mapped_silo_library_type(dispatch):
                                                subtitle_path='/movies/sports/Event.en.srt'))
         assert dispatch.dispatcher.wait_idle(3)
         assert dispatch.dispatcher.status(IDS['silo'])['state'] == 'confirmed'
+
+
+def test_publications_queued_together_reach_each_server_as_one_refresh(dispatch, monkeypatch):
+    """An upgrade that renames a subtitle publishes the new file and the one it
+    replaced for the same video. Queued one at a time, a worker could start on
+    the first and scan, and the second would ask for the same scan again."""
+    from media_servers import dispatcher as module
+    monkeypatch.setattr(module, '_get_dispatcher', lambda: dispatch.dispatcher)
+    download = movie_event(media_type='sports', operation='download',
+                           video_path='/movies/sports/Event.mkv',
+                           subtitle_path='/movies/sports/Event.en.srt')
+    delete = replace(download, operation='delete', subtitle_path='/movies/sports/Event.en.ass')
+    with module.queued_together():
+        module.notify_subtitle_mutation(download)
+        module.notify_subtitle_mutation(delete)
+        # No worker has started, so none can pick up the first on its own.
+        assert dispatch.dispatcher.worker_count == 0
+    dispatch.release.set()
+    assert dispatch.dispatcher.wait_idle(3)
+    assert dispatch.library_calls == [('emby', ('sports', '/media/sports/Event.mkv'))]
+    assert [path for path, _ in dispatch.calls['silo']] == ['/media/sports/Event.mkv']

@@ -306,13 +306,24 @@ def test_single_provider_publication_refreshes_even_when_processing_fails(manual
 
 
 def test_an_upgrade_reports_the_removed_file_once_the_save_let_go(manual_library, released_publications, monkeypatch):  # noqa: F811
+    from contextlib import contextmanager
+    from media_servers import dispatcher
+
     service, session, folder = manual_library
     replaced = folder / '1' / 'event.en.ass'
+    batches = []
 
     def remove_superseded(path, previous_artifact, written_paths, is_upgrade, on_publish=None):
         on_publish(str(replaced))
 
+    @contextmanager
+    def queued_together():
+        batches.append(len(released_publications))
+        yield
+        batches.append(len(released_publications))
+
     monkeypatch.setattr(service, '_remove_superseded_sports_subtitle', remove_superseded)
+    monkeypatch.setattr(dispatcher, 'queued_together', queued_together)
     result = service.manual_search_sports(61, 'en', arr_instance_id=1)[0]
     service.manual_download_sports(61, result, 1)
     video = str(folder / '1' / 'event.mkv')
@@ -321,3 +332,5 @@ def test_an_upgrade_reports_the_removed_file_once_the_save_let_go(manual_library
         ('sports', video, 'delete', 1, str(replaced)),
     ]
     assert [released for _, released in released_publications] == [True, True]
+    # Both queued as one batch, so each server refreshes the video once.
+    assert batches == [0, 2]
