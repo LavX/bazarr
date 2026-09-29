@@ -205,12 +205,16 @@ def test_a_save_whose_refresh_fails_still_writes_its_rows(schema_session, post_s
         raise getattr(config, error_name)("synthetic")
 
     monkeypatch.setattr(endpoint, "save_settings", saved_then_failed)
+    events = []
+    monkeypatch.setattr(endpoint, "event_stream", lambda *args, **_kwargs: events.append(args))
 
     body, status = post_settings(dict(_ROW_FORM))
 
     assert status == 503
     assert body["code"] == code
     assert "synthetic" not in body["message"]
+    # Other open pages reload the settings, as they do after any written save.
+    assert events[-1] == ("settings",)
     assert _rows(schema_session) == {"profiles": [(4, "New")], "languages": [1],
                                      "notifiers": [(1, "discord://token")]}
 

@@ -1321,6 +1321,12 @@ def restore_persisted_settings():
 
 _native_settings_save_lock = threading.RLock()
 
+# What a written save could not finish for the provider logins it changed: the
+# cached logins still to clear, and whether the credential throttles still need
+# their reset. Saving the same login again finds nothing changed, so the next
+# written save retries these, whatever it changes. Saves run one at a time.
+_unfinished_login_resets = {'caches': set(), 'throttles': False}
+
 # Every kind's master switch, so flipping one republishes that kind's saved
 # snapshots. A kind missing from here keeps refreshing after the user turned it
 # off, until the next restart.
@@ -1797,12 +1803,22 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
         if hi_extension_changed:
             os.environ["SZ_HI_EXTENSION"] = settings.general.hi_extension or ""
 
-        for cache_key in sorted(provider_caches_to_clear):
+        # Each one is recorded before it is tried and dropped once done, so one
+        # that fails here, or was left by an earlier save, is tried again now.
+        unfinished = _unfinished_login_resets
+        if unfinished['caches'] or unfinished['throttles']:
+            # The earlier save failed before its pool reset, too.
+            reset_compat_pool = True
+        unfinished['caches'].update(provider_caches_to_clear)
+        unfinished['throttles'] = unfinished['throttles'] or reset_providers
+        for cache_key in sorted(unfinished['caches']):
             region.delete(cache_key)
+            unfinished['caches'].discard(cache_key)
 
-        if reset_providers:
+        if unfinished['throttles']:
             from .get_providers import reset_throttled_providers
             reset_throttled_providers(only_auth_or_conf_error=True)
+            unfinished['throttles'] = False
 
         if reset_fanout_pool:
             # All in-loop assignments have committed by now, so the next

@@ -565,6 +565,45 @@ describe("Settings layout refetch", () => {
     expect(screen.getByLabelText("Use SSL")).toBeChecked();
   });
 
+  it("clears a staged metadata field too when only applying the save failed", async () => {
+    cleanNotifications();
+    serveSettings();
+    server.use(
+      http.post("/api/system/settings", () =>
+        HttpResponse.json(savedButNotApplied, { status: 503 }),
+      ),
+    );
+
+    const user = userEvent.setup();
+    customRender(
+      <Layout name="Test Settings">
+        <Check label="Use SSL" settingKey="settings-sonarr-ssl" />
+        <TextField label="Address" settingKey="settings-sonarr-ip" />
+        <TextField label="Locale" settingKey="settings-discover-locale" />
+      </Layout>,
+    );
+
+    await waitForHydration();
+
+    // A metadata field staged with the value it already holds, beside a
+    // change whose follow-up fails: the save is not a metadata change, and
+    // the reload that clears the form leaves staged metadata fields alone.
+    await user.type(screen.getByLabelText("Locale"), "en-US");
+    await user.click(screen.getByLabelText("Use SSL"));
+    await user.click(
+      await screen.findByRole("button", { name: "Save 2 pending changes" }),
+    );
+
+    expect(
+      await screen.findByText("Settings saved; applying them failed"),
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("button", { name: /save/i }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
   it("leaves after Save and leave when only applying the save failed", async () => {
     cleanNotifications();
     serveSettings();

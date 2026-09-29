@@ -45,6 +45,12 @@ interface Props {
   fluid?: boolean;
 }
 
+// A saved metadata field clears the form at once. The reload after a save
+// leaves a form holding one alone.
+const isMetadataKey = (key: string) =>
+  key.startsWith("settings-discover-") ||
+  key === "settings-general-metadata_language";
+
 const Layout: FunctionComponent<Props> = (props) => {
   const { children, fluid = false, name } = props;
 
@@ -79,8 +85,13 @@ const Layout: FunctionComponent<Props> = (props) => {
       formRef.current.reset();
       setMetadataRefreshFailed(true);
     } else if (isSettingsFollowupError(error)) {
-      // Written all the same, so its reload clears the form as a save does.
+      // Written all the same, so the form is cleared as after a save: by the
+      // reload, or at once when a metadata field is staged, which the reload
+      // leaves alone.
       savedRef.current = true;
+      if (Object.keys(formRef.current.values.settings).some(isMetadataKey)) {
+        formRef.current.reset();
+      }
     }
   }, []);
 
@@ -91,13 +102,7 @@ const Layout: FunctionComponent<Props> = (props) => {
 
     savedRef.current = false;
 
-    if (
-      !Object.keys(form.values.settings).some(
-        (key) =>
-          key.startsWith("settings-discover-") ||
-          key === "settings-general-metadata_language",
-      )
-    ) {
+    if (!Object.keys(form.values.settings).some(isMetadataKey)) {
       form.reset();
     }
   });
@@ -115,13 +120,7 @@ const Layout: FunctionComponent<Props> = (props) => {
             // The reload this save triggers is the refetch allowed to clear the
             // form.
             savedRef.current = true;
-            if (
-              Object.keys(settingsToSubmit).some(
-                (key) =>
-                  key.startsWith("settings-discover-") ||
-                  key === "settings-general-metadata_language",
-              )
-            )
+            if (Object.keys(settingsToSubmit).some(isMetadataKey))
               formRef.current.reset();
           },
           onError: handleSaveError,

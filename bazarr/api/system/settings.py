@@ -177,8 +177,10 @@ class SystemSettings(Resource):
                 save_settings(zip(request.form.keys(), request.form.listvalues()))
             except SettingsFollowupError:
                 # The configuration did reach the disk; only the refresh after
-                # it failed. Its rows follow it as they do for any saved change.
+                # it failed. Its rows follow it, and other open pages hear of
+                # it, as they do for any saved change.
                 _write_settings_rows(enabled_languages, profiles, notifications)
+                event_stream("settings")
                 raise
         except MetadataPersistenceError:
             return "Metadata settings could not be saved. Try again.", 503

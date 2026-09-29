@@ -12,6 +12,14 @@ class _FakeUpdate:
         return self
 
 
+@pytest.fixture(autouse=True)
+def _no_unfinished_login_resets(monkeypatch):
+    """Each test starts without a provider login reset left over from another."""
+    from app import config
+
+    monkeypatch.setattr(config, "_unfinished_login_resets", {"caches": set(), "throttles": False})
+
+
 def test_save_settings_creates_missing_provider_section_for_hub_config(monkeypatch):
     from app import config
 
@@ -1227,6 +1235,43 @@ def test_a_written_save_whose_follow_up_fails_is_reported_as_saved(
     assert stored["opensubtitles"]["username"] == "after"
     assert env.settings.general.parse_embedded_audio_track is True
     assert env.settings.opensubtitles.username == "after"
+
+
+@pytest.mark.parametrize("failing, retried", [
+    ("clear os_token", ["clear os_token", "compat pool", "throttled providers"]),
+    ("throttled providers", ["compat pool", "throttled providers"]),
+])
+def test_a_login_reset_that_fails_after_the_write_is_retried_by_the_next_save(
+    metadata_save_environment, monkeypatch, failing, retried,
+):
+    """Saving the same login again finds nothing changed, so it could not retry the reset.
+
+    A cached login or a credential throttle a failed reset left in place kept the
+    provider on the old login. The next save that is written retries what is left,
+    whatever that save changes, and the one after that has nothing left to retry.
+    A refused save retries nothing.
+    """
+    env = metadata_save_environment
+    env.settings.opensubtitles.username = "before"
+    assert env.config.write_config() is True
+    _record_save_side_effects(monkeypatch, fail=failing)
+
+    with pytest.raises(env.config.SettingsFollowupError):
+        env.config.save_settings([("settings-opensubtitles-username", ["after"])])
+
+    effects = _record_save_side_effects(monkeypatch)
+    with monkeypatch.context() as refused:
+        refused.setattr(env.config, "write_config", lambda **_kwargs: False)
+        with pytest.raises(ValidationError):
+            env.config.save_settings([("settings-general-page_size", ["52"])])
+    assert effects == []
+
+    env.config.save_settings([("settings-opensubtitles-username", ["after"])])
+    assert sorted(effects) == retried
+
+    effects = _record_save_side_effects(monkeypatch)
+    env.config.save_settings([("settings-general-page_size", ["52"])])
+    assert effects == []
 
 
 def test_a_written_master_switch_save_keeps_the_switch_when_a_follow_up_fails(
