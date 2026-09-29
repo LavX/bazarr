@@ -209,6 +209,97 @@ def test_a_port_that_cannot_be_bound_stops_the_supervisor_with_a_clear_message(
     assert "Traceback" not in out
 
 
+# The listen port comes from the config.yaml the backend reads, so the
+# supervisor has to reach the backend's configuration directory from the same
+# arguments and environment. It used to know only "--config DIR" and fell
+# back to /config, so "-c DIR" or BAZARR_CONFIG_DIR left it on 6767 whatever
+# general.port said.
+
+_CONFIG_DIR_FORMS = [
+    ["--no-update", "--config", "/srv/a"],
+    ["--no-update", "--config=/srv/a"],
+    ["--conf", "/srv/a"],
+    ["--co=/srv/a"],
+    ["-c", "/srv/a", "--no-update"],
+    ["-c/srv/a"],
+    ["-c=/srv/a"],
+    ["-c", "/srv/a", "--config", "/srv/b"],
+    ["--config", "/srv/a", "-c", "/srv/b"],
+    ["--no-update"],
+    [],
+]
+
+_BACKEND_CONFIG_DIRS = r'''
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(sys.argv[1], "bazarr"))
+from app.get_args import parser  # noqa: E402
+
+forms = json.loads(sys.argv[2])
+print("RESULTS " + json.dumps([parser.parse_args(form).config_dir for form in forms]), flush=True)
+'''
+
+
+@pytest.mark.parametrize("env_dir", [None, "/srv/env"])
+def test_the_supervisor_uses_the_config_directory_the_backend_parses(env_dir):
+    # Ask the backend's own parser, so a form it accepts cannot drift from
+    # what the supervisor reads.
+    sup = _load_supervisor()
+    env = {k: v for k, v in os.environ.items() if k not in ("BAZARR_CONFIG_DIR", "NO_UPDATE")}
+    env["NO_CLI"] = "true"
+    environ = {}
+    if env_dir is not None:
+        env["BAZARR_CONFIG_DIR"] = environ["BAZARR_CONFIG_DIR"] = env_dir
+    result = subprocess.run(
+        [sys.executable, "-c", _BACKEND_CONFIG_DIRS, str(ROOT), json.dumps(_CONFIG_DIR_FORMS)],
+        capture_output=True, text=True, timeout=120, env=env, cwd=str(ROOT))
+    lines = [line for line in result.stdout.splitlines() if line.startswith("RESULTS ")]
+    assert lines, f"the backend parser did not answer (rc {result.returncode}):\n{result.stderr[-4000:]}"
+    backend = json.loads(lines[-1][len("RESULTS "):])
+
+    supervisor = [sup._backend_config_dir(form, environ) for form in _CONFIG_DIR_FORMS]
+
+    assert [os.path.realpath(p) for p in supervisor] == [os.path.realpath(p) for p in backend]
+    # The forms with a flag really did name a directory, and the flag won.
+    assert supervisor[:9] == ["/srv/a"] * 7 + ["/srv/b"] * 2
+    if env_dir is not None:
+        assert supervisor[9:] == [env_dir, env_dir]
+
+
+@pytest.mark.parametrize("how", ["-c", "--config=", "BAZARR_CONFIG_DIR"])
+def test_main_listens_on_general_port_from_the_backends_config_directory(monkeypatch, tmp_path, capsys, how):
+    sup = _load_supervisor()
+    _write_general(tmp_path, "general:\n  port: 6868\n")
+    port_file = tmp_path / "supervisor.port"
+    monkeypatch.delenv("BAZARR_CONFIG_DIR", raising=False)
+    if how == "-c":
+        argv = ["--no-update", "-c", str(tmp_path)]
+    elif how == "--config=":
+        argv = ["--no-update", f"--config={tmp_path}"]
+    else:
+        monkeypatch.setenv("BAZARR_CONFIG_DIR", str(tmp_path))
+        argv = ["--no-update"]
+    forwarded = []
+    original_init = sup.BackendManager.__init__
+
+    def _recording_init(self, bazarr_args):
+        forwarded.append(list(bazarr_args))
+        original_init(self, bazarr_args)
+
+    monkeypatch.setattr(sup.BackendManager, "__init__", _recording_init)
+
+    bound, launched, result = _run_main(sup, monkeypatch, argv, port_file)
+
+    assert bound["address"] == ("0.0.0.0", 6868)
+    assert "(from general.port)" in capsys.readouterr().out
+    # The backend still gets the flag exactly as given.
+    assert forwarded == [argv]
+    assert launched == [True]
+    assert not result
+
+
 def test_the_port_file_is_replaced_atomically(tmp_path):
     sup = _load_supervisor()
     port_file = tmp_path / "supervisor.port"

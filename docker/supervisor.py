@@ -16,6 +16,8 @@ Usage:
 
 The listen port is --port when given, otherwise general.port from config.yaml,
 otherwise 6767. The backend gets a free loopback port picked at each launch.
+config.yaml is the one the backend reads: under -c/--config when given,
+otherwise BAZARR_CONFIG_DIR, otherwise the data directory beside the code.
 """
 
 import asyncio
@@ -448,6 +450,41 @@ def _read_bazarr_config(config_dir: str) -> dict:
 
 def _config_yaml(config_dir: str) -> Path:
     return Path(config_dir) / "config" / "config.yaml"
+
+
+def _backend_config_dir(bazarr_args: list[str], environ=os.environ) -> str:
+    """The configuration directory the backend will use with these arguments.
+
+    Follows bazarr/app/get_args.py, so the listen port and index.html come
+    from the same config.yaml the backend reads: the last -c/--config wins,
+    in any form argparse accepts ("-c DIR", "-cDIR", "-c=DIR", "--config DIR",
+    "--config=DIR" or an abbreviation such as "--conf DIR"), then
+    BAZARR_CONFIG_DIR, then the data directory beside the code.
+    """
+    config_dir = None
+    i = 0
+    while i < len(bazarr_args):
+        arg = bazarr_args[i]
+        if arg.startswith("--"):
+            name, has_value, value = arg.partition("=")
+            # "--c" alone is ambiguous to the backend, which also has
+            # --create-db-revision, and refuses to start.
+            if len(name) >= 4 and "--config".startswith(name):
+                if has_value:
+                    config_dir = value
+                elif i + 1 < len(bazarr_args):
+                    config_dir = bazarr_args[i + 1]
+                    i += 1
+        elif arg.startswith("-c"):
+            if len(arg) > 2:
+                config_dir = arg[3:] if arg[2] == "=" else arg[2:]
+            elif i + 1 < len(bazarr_args):
+                config_dir = bazarr_args[i + 1]
+                i += 1
+        i += 1
+    if config_dir is not None:
+        return config_dir
+    return environ.get("BAZARR_CONFIG_DIR", "").strip() or str(APP_DIR / "data")
 
 
 def _configured_listen_port(config_dir: str) -> tuple[int, str]:
@@ -896,7 +933,6 @@ def create_app(config_dir: str, backend: BackendManager) -> web.Application:
 async def main():
     # Parse our args, pass the rest to bazarr
     port = None
-    config_dir = "/config"
     bazarr_args = []
     args = sys.argv[1:]
     i = 0
@@ -904,13 +940,10 @@ async def main():
         if args[i] == "--port" and i + 1 < len(args):
             port = int(args[i + 1])
             i += 2
-        elif args[i] == "--config" and i + 1 < len(args):
-            config_dir = args[i + 1]
-            bazarr_args.extend([args[i], args[i + 1]])
-            i += 2
         else:
             bazarr_args.append(args[i])
             i += 1
+    config_dir = _backend_config_dir(bazarr_args)
 
     if port is None:
         port, source = _configured_listen_port(config_dir)
