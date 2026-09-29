@@ -3,6 +3,7 @@
 import hashlib  # noqa: F401
 import os
 import ast
+import contextlib
 import json
 import logging
 import re
@@ -410,7 +411,8 @@ validators = [
     Validator('sonarr.ssl', must_exist=True, default=False, is_type_of=bool),
     # Mirrored from the default arr instance, which accepts any whole number of
     # seconds from 1 up. A narrower rule here rejected every settings save.
-    Validator('sonarr.http_timeout', must_exist=True, default=60, is_type_of=int, gte=1),
+    Validator('sonarr.http_timeout', must_exist=True, default=60, is_type_of=int, gte=1,
+              condition=is_not_bool),
     Validator('sonarr.apikey', must_exist=True, default='', is_type_of=str),
     Validator('sonarr.full_update', must_exist=True, default='Daily', is_type_of=str,
               is_in=['Manually', 'Daily', 'Weekly']),
@@ -434,7 +436,8 @@ validators = [
     Validator('radarr.port', must_exist=True, default=7878, is_type_of=int, gte=1, lte=65535),
     Validator('radarr.base_url', must_exist=True, default='/', is_type_of=str),
     Validator('radarr.ssl', must_exist=True, default=False, is_type_of=bool),
-    Validator('radarr.http_timeout', must_exist=True, default=60, is_type_of=int, gte=1),
+    Validator('radarr.http_timeout', must_exist=True, default=60, is_type_of=int, gte=1,
+              condition=is_not_bool),
     Validator('radarr.apikey', must_exist=True, default='', is_type_of=str),
     Validator('radarr.full_update', must_exist=True, default='Daily', is_type_of=str,
               is_in=['Manually', 'Daily', 'Weekly']),
@@ -922,7 +925,11 @@ class MetadataPersistenceError(Exception):
     """The requested metadata configuration could not be persisted."""
 
 
-class MetadataFollowupError(Exception):
+class SettingsFollowupError(Exception):
+    """Settings were persisted, but subsequent application work failed."""
+
+
+class MetadataFollowupError(SettingsFollowupError):
     """Metadata settings were persisted, but subsequent application work failed."""
 
 
@@ -1009,6 +1016,19 @@ def migrate_retired_openrouter_model(settings) -> bool:
     return True
 
 
+def remove_settings_section(name):
+    """Drop a whole top-level section from the live settings, for good.
+
+    Dynaconf keeps a section added by a set() without a loader name, which is also
+    what an item or attribute assignment on the settings does, as a default of its
+    own. unset() skips a default unless forced, and a forced unset still leaves it
+    for the next reload() to put back, so the default is dropped as well.
+    """
+    key = name.upper()
+    settings.unset(key, force=True)
+    settings.__core__.config.defaults.pop(key, None)
+
+
 base_url = settings.general.base_url.rstrip('/')
 
 array_keys = ['excluded_tags',
@@ -1067,9 +1087,9 @@ if hasattr(settings.embeddedsubtitles, 'unknown_as_english'):
 
 # delete custom scores sections since we don't use this anymore
 if hasattr(settings, 'series_scores'):
-    settings.unset('SERIES_SCORES')
+    remove_settings_section('series_scores')
 if hasattr(settings, 'movie_scores'):
-    settings.unset('MOVIE_SCORES')
+    remove_settings_section('movie_scores')
 
 # backward compatibility: migrate gemini_key to gemini_keys
 if hasattr(settings.translator, 'gemini_key'):
@@ -1159,10 +1179,15 @@ def _settings_mapping(parent, key):
     try:
         mapping = parent[key]
     except KeyError:
-        parent[key] = {}
-        mapping = parent[key]
+        mapping = None
     if mapping is None:
-        parent[key] = {}
+        if parent is settings:
+            # Named, because Dynaconf keeps a section added by an unnamed set() as a
+            # default of its own: reload() then keeps it, so a refused save that
+            # created it would not be undone, and unset() skips it unless forced.
+            settings.set(key, {}, loader_identifier='settings_save')
+        else:
+            parent[key] = {}
         mapping = parent[key]
     return mapping
 
@@ -1297,6 +1322,39 @@ def restore_persisted_settings():
 
 _native_settings_save_lock = threading.RLock()
 
+# What a written save could not finish for the provider logins it changed: the
+# cached logins still to clear, and whether the credential throttles still need
+# their reset. Saving the same login again finds nothing changed, so the next
+# written save retries these, whatever it changes. Saves run one at a time.
+_unfinished_login_resets = {'caches': set(), 'throttles': False}
+
+
+class _FollowUps:
+    """Runs what a written save sets off, so that one step failing stops no other.
+
+    The save is on disk by then and every step acts on it by itself: a failed login
+    reset must not leave a library job unqueued, which saving the same values again
+    would not queue either. Once all have run, the first failure is raised and any
+    others are logged.
+    """
+
+    def __init__(self):
+        self.failures = []
+
+    @contextlib.contextmanager
+    def step(self):
+        try:
+            yield
+        except Exception as error:
+            self.failures.append(error)
+
+    def raise_first(self):
+        for error in self.failures[1:]:
+            logging.error('Settings were saved, but applying them also failed', exc_info=error)
+        if self.failures:
+            raise self.failures[0]
+
+
 # Every kind's master switch, so flipping one republishes that kind's saved
 # snapshots. A kind missing from here keeps refreshing after the user turned it
 # off, until the next restart.
@@ -1304,18 +1362,18 @@ NATIVE_MASTER_KEYS = {'settings-general-use_' + kind
                       for kind in ('emby', 'jellyfin', 'plex', 'silo')}
 
 
-def _save_settings_with_native(settings_items, *, strict_metadata=False, on_metadata_persisted=None):
+def _save_settings_with_native(settings_items, *, strict_metadata=False, on_persisted=None):
     """Apply the media-server master-switch handling around a settings save."""
     with _native_settings_save_lock:
         if not any(key in NATIVE_MASTER_KEYS for key, _value in settings_items):
             return _save_settings(settings_items, strict_metadata=strict_metadata,
-                                  on_metadata_persisted=on_metadata_persisted)
+                                  on_persisted=on_persisted)
         from media_servers.dispatcher import get_native_configuration
         native = get_native_configuration()
         with native.lock:
             try:
                 return _save_settings(settings_items, native, strict_metadata=strict_metadata,
-                                      on_metadata_persisted=on_metadata_persisted)
+                                      on_persisted=on_persisted)
             finally:
                 for kind, enabled in native.masters.items():
                     _settings_mapping(settings, 'general')['use_' + kind] = enabled
@@ -1342,43 +1400,54 @@ def save_settings(settings_items):
 
     from discover.metadata import CONFIG_LOCK, invalidate_metadata
     with CONFIG_LOCK:
-        if not any(key.startswith("settings-discover-") or key == "settings-general-metadata_language"
-                   for key, _ in items):
-            return _save_settings_with_native(items)
-        previous = dict(settings.discover)
-        previous_language = settings.get("general.metadata_language", "")
-        effective_language = previous_language
-        effective = dict(previous)
-        for key, values in items:
-            if key == "settings-general-metadata_language":
-                effective_language = values[0]
-            if key.startswith("settings-discover-"):
-                field = key.removeprefix("settings-discover-")
-                if field != "tmdb_access_token" or values[0] != "***":
-                    effective[field] = values[0]
-        changed = effective != previous or effective_language != previous_language
+        metadata_submitted = any(key.startswith("settings-discover-") or key == "settings-general-metadata_language"
+                                 for key, _ in items)
+        changed = False
+        if metadata_submitted:
+            previous = dict(settings.discover)
+            previous_language = settings.get("general.metadata_language", "")
+            effective_language = previous_language
+            effective = dict(previous)
+            for key, values in items:
+                if key == "settings-general-metadata_language":
+                    effective_language = values[0]
+                if key.startswith("settings-discover-"):
+                    field = key.removeprefix("settings-discover-")
+                    if field != "tmdb_access_token" or values[0] != "***":
+                        effective[field] = values[0]
+            changed = effective != previous or effective_language != previous_language
         persisted = False
 
-        def metadata_persisted():
+        def settings_persisted():
             nonlocal persisted
             persisted = True
-            invalidate_metadata()
+            if changed:
+                invalidate_metadata()
 
         try:
-            _save_settings_with_native(items, strict_metadata=changed,
-                                       on_metadata_persisted=metadata_persisted if changed else None)
+            _save_settings_with_native(items, strict_metadata=changed, on_persisted=settings_persisted)
         except Exception:
             if persisted:
-                raise MetadataFollowupError(
-                    "Metadata settings were saved, but application refresh failed. Reload settings before retrying."
+                # The save is on disk and only what follows it failed, so the
+                # caller keeps what goes with a written save rather than taking
+                # it for an unsaved one. The cause stays in the log, not in the
+                # message the caller passes on.
+                logging.exception("Settings were saved, but applying them failed")
+                if changed:
+                    raise MetadataFollowupError(
+                        "Metadata settings were saved, but application refresh failed. Reload settings before retrying."
+                    ) from None
+                raise SettingsFollowupError(
+                    "Settings were saved, but applying them failed. Reload settings before retrying."
                 ) from None
-            settings.set("discover", previous)
-            settings.set("general.metadata_language", previous_language)
+            if metadata_submitted:
+                settings.set("discover", previous)
+                settings.set("general.metadata_language", previous_language)
             raise
 
 
 def _save_settings(settings_items, native_configuration=None, *, strict_metadata=False,
-                   on_metadata_persisted=None):
+                   on_persisted=None):
     # Validate repeated form values before applying any changes, including the
     # single-value and empty-list representations used by the settings editor.
     #
@@ -1399,6 +1468,7 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
     _require_provider_order_for_custom_routing(settings_items)
     configure_debug = False
     configure_log_rotation = False
+    hi_extension_changed = False
     configure_captcha = False
     update_schedule = False
     sonarr_changed = False
@@ -1417,6 +1487,7 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
     audio_tracks_parsing_changed = False
     adaptive_searching_max_age_changed = False
     reset_providers = False
+    provider_caches_to_clear = set()
     reset_fanout_pool = False
     reset_compat_pool = False
     invalidate_compat_cache = False
@@ -1517,7 +1588,7 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             configure_log_rotation = True
 
         if key == 'settings-general-hi_extension':
-            os.environ["SZ_HI_EXTENSION"] = value or ""
+            hi_extension_changed = True
 
         if key in ['settings-general-anti_captcha_provider', 'settings-anticaptcha-anti_captcha_key',
                    'settings-deathbycaptcha-username', 'settings-deathbycaptcha-password',
@@ -1581,58 +1652,60 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
         if key in ['settings-radarr-excluded_tags', 'settings-radarr-only_monitored']:
             radarr_exclusion_updated = True
 
+        # The cached logins are cleared once the save has been written, below: a
+        # refused save keeps the old credentials, and their logins with them.
         if key == 'settings-addic7ed-username':
             if value != settings.addic7ed.username:
                 reset_providers = True
-                region.delete('addic7ed_data')
+                provider_caches_to_clear.add('addic7ed_data')
         elif key == 'settings-addic7ed-password':
             if value != settings.addic7ed.password:
                 reset_providers = True
-                region.delete('addic7ed_data')
+                provider_caches_to_clear.add('addic7ed_data')
 
         if key == 'settings-legendasdivx-username':
             if value != settings.legendasdivx.username:
                 reset_providers = True
-                region.delete('legendasdivx_cookies2')
+                provider_caches_to_clear.add('legendasdivx_cookies2')
         elif key == 'settings-legendasdivx-password':
             if value != settings.legendasdivx.password:
                 reset_providers = True
-                region.delete('legendasdivx_cookies2')
+                provider_caches_to_clear.add('legendasdivx_cookies2')
 
         if key == 'settings-opensubtitles-username':
-            if key != settings.opensubtitles.username:
+            if value != settings.opensubtitles.username:
                 reset_providers = True
-                region.delete('os_token')
+                provider_caches_to_clear.add('os_token')
         elif key == 'settings-opensubtitles-password':
-            if key != settings.opensubtitles.password:
+            if value != settings.opensubtitles.password:
                 reset_providers = True
-                region.delete('os_token')
+                provider_caches_to_clear.add('os_token')
         elif key == 'settings-opensubtitles-use_web_scraper':
-            if key != settings.opensubtitles.use_web_scraper:
+            if value != settings.opensubtitles.use_web_scraper:
                 reset_providers = True
-                region.delete('os_token')  # Clear any cached tokens
+                provider_caches_to_clear.add('os_token')  # Clear any cached tokens
         elif key == 'settings-opensubtitles-scraper_service_url':
-            if key != settings.opensubtitles.scraper_service_url:
+            if value != settings.opensubtitles.scraper_service_url:
                 reset_providers = True
 
 
         if key == 'settings-opensubtitlescom-username':
             if value != settings.opensubtitlescom.username:
                 reset_providers = True
-                region.delete('oscom_token')
+                provider_caches_to_clear.add('oscom_token')
         elif key == 'settings-opensubtitlescom-password':
             if value != settings.opensubtitlescom.password:
                 reset_providers = True
-                region.delete('oscom_token')
+                provider_caches_to_clear.add('oscom_token')
 
         if key == 'settings-titlovi-username':
             if value != settings.titlovi.username:
                 reset_providers = True
-                region.delete('titlovi_token')
+                provider_caches_to_clear.add('titlovi_token')
         elif key == 'settings-titlovi-password':
             if value != settings.titlovi.password:
                 reset_providers = True
-                region.delete('titlovi_token')
+                provider_caches_to_clear.add('titlovi_token')
 
         if key == 'settings-subsource-apikey':
             if value != settings.subsource.apikey:
@@ -1675,8 +1748,6 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             reset_fanout_pool = True
 
         if reset_providers:
-            from .get_providers import reset_throttled_providers
-            reset_throttled_providers(only_auth_or_conf_error=True)
             # Defer the compat-pool reset for the same race reason as
             # the fanout pool above. Resetting here, before the
             # settings[...] = value assignment lands, would let a
@@ -1712,65 +1783,8 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
 
             update_subzero = True
 
-    if undefined_subtitles_track_default_changed:
-        from .scheduler import scheduler
-        from subtitles.indexer.series import series_full_scan_subtitles
-        from subtitles.indexer.movies import movies_full_scan_subtitles
-        if settings.general.use_sonarr:
-            series_full_scan_subtitles(use_cache=True)
-        if settings.general.use_radarr:
-            movies_full_scan_subtitles(use_cache=True)
-
-    if settings.general.use_sportarr and (undefined_subtitles_track_default_changed or
-                                         use_embedded_subs_changed or audio_tracks_parsing_changed or
-                                         embedded_subtitles_parser_changed):
-        from subtitles.indexer.sports import sports_full_scan_subtitles
-        sports_full_scan_subtitles(refresh_audio=audio_tracks_parsing_changed,
-                                  audio_mode=bool(settings.general.parse_embedded_audio_track)
-                                  if audio_tracks_parsing_changed else None,
-                                  audio_refresh_id=secrets.token_hex(16)
-                                  if audio_tracks_parsing_changed or embedded_subtitles_parser_changed else None)
-
-    if audio_tracks_parsing_changed:
-        from .scheduler import scheduler
-        if settings.general.use_sonarr:
-            from sonarr.sync.series import update_series
-            update_series()
-        if settings.general.use_radarr:
-            from radarr.sync.movies import update_movies
-            update_movies()
-
     if update_subzero:
         settings.general.subzero_mods = ','.join(subzero_mods)
-
-    if reset_fanout_pool:
-        # All in-loop assignments have committed by now, so the next
-        # _get_pool() call will read the new sizing values.
-        try:
-            from subliminal_patch.core_persistent import reset_pool as _reset_fanout
-            _reset_fanout()
-        except Exception:
-            pass
-
-    if reset_compat_pool:
-        # All in-loop assignments have committed by now, so the next
-        # /compat request that constructs a pool sees the updated
-        # provider list / credentials instead of the stale pre-save
-        # values.
-        try:
-            from compat.service import reset_compat_pool as _reset_compat
-            _reset_compat()
-        except Exception:
-            pass
-
-    if invalidate_compat_cache:
-        # Same reasoning: after the writes, so the next request rebuilds
-        # against the new values rather than the ones being replaced.
-        try:
-            from compat.cache import invalidate_all as _invalidate_compat_cache
-            _invalidate_compat_cache()
-        except Exception:
-            pass
 
     try:
         settings.validators.validate()
@@ -1800,31 +1814,136 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             restore_persisted_settings()
             raise ValidationError('Unable to save settings to disk')
 
+        # Before anything below can fail: the save is on disk now, and a failure
+        # from here on must not be taken for an unsaved one, which would put the
+        # previous master switches and metadata back into the live settings only.
+        if native_configuration is not None:
+            native_configuration.publish_masters(settings)
+
+        # Each step from here on runs even when one before it failed.
+        follow_ups = _FollowUps()
+
+        if on_persisted is not None:
+            with follow_ups.step():
+                on_persisted()
+
+        # Only now that the save has been written: naming new subtitles with the
+        # hearing-impaired extension, clearing provider logins, resetting the
+        # pools and queueing library-wide jobs all act on the submitted values,
+        # and a job queued for a save that is then refused cannot be recalled.
+        # The sports reindex carries the audio mode with it.
+        if hi_extension_changed:
+            with follow_ups.step():
+                os.environ["SZ_HI_EXTENSION"] = settings.general.hi_extension or ""
+
+        # Each one is recorded before it is tried and dropped once done, so one
+        # that fails here, or was left by an earlier save, is tried again now.
+        unfinished = _unfinished_login_resets
+        if unfinished['caches'] or unfinished['throttles']:
+            # Providers built since the earlier save can hold the login it could
+            # not clear, so they are built again once it is.
+            reset_compat_pool = True
+        unfinished['caches'].update(provider_caches_to_clear)
+        unfinished['throttles'] = unfinished['throttles'] or reset_providers
+        for cache_key in sorted(unfinished['caches']):
+            with follow_ups.step():
+                region.delete(cache_key)
+                unfinished['caches'].discard(cache_key)
+
+        if unfinished['throttles']:
+            with follow_ups.step():
+                from .get_providers import reset_throttled_providers
+                reset_throttled_providers(only_auth_or_conf_error=True)
+                unfinished['throttles'] = False
+
+        if reset_fanout_pool:
+            # All in-loop assignments have committed by now, so the next
+            # _get_pool() call will read the new sizing values.
+            try:
+                from subliminal_patch.core_persistent import reset_pool as _reset_fanout
+                _reset_fanout()
+            except Exception:
+                pass
+
+        if reset_compat_pool:
+            # All in-loop assignments have committed by now, so the next
+            # /compat request that constructs a pool sees the updated
+            # provider list / credentials instead of the stale pre-save
+            # values.
+            try:
+                from compat.service import reset_compat_pool as _reset_compat
+                _reset_compat()
+            except Exception:
+                pass
+
+        if invalidate_compat_cache:
+            # Same reasoning: after the writes, so the next request rebuilds
+            # against the new values rather than the ones being replaced.
+            try:
+                from compat.cache import invalidate_all as _invalidate_compat_cache
+                _invalidate_compat_cache()
+            except Exception:
+                pass
+
+        if undefined_subtitles_track_default_changed:
+            if settings.general.use_sonarr:
+                with follow_ups.step():
+                    from subtitles.indexer.series import series_full_scan_subtitles
+                    series_full_scan_subtitles(use_cache=True)
+            if settings.general.use_radarr:
+                with follow_ups.step():
+                    from subtitles.indexer.movies import movies_full_scan_subtitles
+                    movies_full_scan_subtitles(use_cache=True)
+
+        if settings.general.use_sportarr and (undefined_subtitles_track_default_changed or
+                                             use_embedded_subs_changed or audio_tracks_parsing_changed or
+                                             embedded_subtitles_parser_changed):
+            with follow_ups.step():
+                from subtitles.indexer.sports import sports_full_scan_subtitles
+                sports_full_scan_subtitles(refresh_audio=audio_tracks_parsing_changed,
+                                          audio_mode=bool(settings.general.parse_embedded_audio_track)
+                                          if audio_tracks_parsing_changed else None,
+                                          audio_refresh_id=secrets.token_hex(16)
+                                          if audio_tracks_parsing_changed or embedded_subtitles_parser_changed
+                                          else None)
+
+        if audio_tracks_parsing_changed:
+            if settings.general.use_sonarr:
+                with follow_ups.step():
+                    from sonarr.sync.series import update_series
+                    update_series()
+            if settings.general.use_radarr:
+                with follow_ups.step():
+                    from radarr.sync.movies import update_movies
+                    update_movies()
+
         if use_embedded_subs_changed or undefined_audio_track_default_changed or adaptive_searching_max_age_changed:
             # Queued rather than run here: this is inside the settings save
             # request, and a library-wide pass held it long enough for a proxy to
             # time out a save that had already been written. And only now that
             # it has been written: a save refused by validation or by the disk
             # changed nothing that needs recalculating.
-            from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
-            queue_missing_subtitles_recalculation()
+            with follow_ups.step():
+                from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
+                queue_missing_subtitles_recalculation()
 
         if clear_disabled_provider_hub_statuses:
-            if active_provider_hub_provider_ids is None:
-                active_provider_hub_provider_ids = _active_provider_hub_provider_ids()
-            configured = getattr(settings.general, 'enabled_providers', [])
-            if isinstance(configured, str):
-                enabled_provider_ids = {
-                    item.strip().strip("'\"")
-                    for item in configured.strip().strip('[]').split(',')
-                    if item.strip()
-                }
-            elif isinstance(configured, (list, tuple, set)):
-                enabled_provider_ids = {str(item) for item in configured}
-            else:
-                enabled_provider_ids = set()
-            provider_hub_status_clears.update(
-                active_provider_hub_provider_ids - enabled_provider_ids)
+            with follow_ups.step():
+                if active_provider_hub_provider_ids is None:
+                    active_provider_hub_provider_ids = _active_provider_hub_provider_ids()
+                configured = getattr(settings.general, 'enabled_providers', [])
+                if isinstance(configured, str):
+                    enabled_provider_ids = {
+                        item.strip().strip("'\"")
+                        for item in configured.strip().strip('[]').split(',')
+                        if item.strip()
+                    }
+                elif isinstance(configured, (list, tuple, set)):
+                    enabled_provider_ids = {str(item) for item in configured}
+                else:
+                    enabled_provider_ids = set()
+                provider_hub_status_clears.update(
+                    active_provider_hub_provider_ids - enabled_provider_ids)
 
         if provider_hub_status_clears:
             try:
@@ -1834,37 +1953,36 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             except Exception:
                 logging.exception('Unable to clear stale Provider Hub runtime status')
 
-        if native_configuration is not None:
-            native_configuration.publish_masters(settings)
-
-        if on_metadata_persisted is not None:
-            on_metadata_persisted()
-
         # Set the configured state based on config.yaml file existence
-        from .database import database, update, System
-        database.execute(
-            update(System)
-            .values(configured=1))
+        with follow_ups.step():
+            from .database import database, update, System
+            database.execute(
+                update(System)
+                .values(configured=1))
 
         # Reconfigure Bazarr to reflect changes
         if configure_debug:
-            from .logger import configure_logging
-            configure_logging(settings.general.debug or args.debug)
+            with follow_ups.step():
+                from .logger import configure_logging
+                configure_logging(settings.general.debug or args.debug)
 
         if configure_log_rotation:
             # In place on the live handler, so the new ceiling holds from the
             # next record rather than from the next restart.
-            from .logger import apply_log_rotation_settings
-            apply_log_rotation_settings()
+            with follow_ups.step():
+                from .logger import apply_log_rotation_settings
+                apply_log_rotation_settings()
 
         if configure_captcha:
-            configure_captcha_func()
+            with follow_ups.step():
+                configure_captcha_func()
 
         if update_schedule:
-            from .scheduler import scheduler
-            from .event_handler import event_stream
-            scheduler.update_configurable_tasks()
-            event_stream(type='task')
+            with follow_ups.step():
+                from .scheduler import scheduler
+                from .event_handler import event_stream
+                scheduler.update_configurable_tasks()
+                event_stream(type='task')
 
         if sonarr_changed:
             # Restart every Sonarr SignalR client and re-fan-out (#156).
@@ -1892,25 +2010,30 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
                 pass
 
         if update_path_map:
-            from utilities.path_mappings import path_mappings
-            path_mappings.update()
+            with follow_ups.step():
+                from utilities.path_mappings import path_mappings
+                path_mappings.update()
 
         if configure_proxy:
-            configure_proxy_func()
+            with follow_ups.step():
+                configure_proxy_func()
 
         if exclusion_updated:
-            from .event_handler import event_stream
-            event_stream(type='badges')
-            if sonarr_exclusion_updated:
-                event_stream(type='reset-episode-wanted')
-            if radarr_exclusion_updated:
-                event_stream(type='reset-movie-wanted')
-            # The sports wanted list is computed live against the exclusion
-            # settings, so saving them has to invalidate the client's cached
-            # sports rows. The 'sports' event is the one the socketio reducer
-            # maps to the whole sports query root, wanted included.
-            if sportarr_exclusion_updated:
-                event_stream(type='sports')
+            with follow_ups.step():
+                from .event_handler import event_stream
+                event_stream(type='badges')
+                if sonarr_exclusion_updated:
+                    event_stream(type='reset-episode-wanted')
+                if radarr_exclusion_updated:
+                    event_stream(type='reset-movie-wanted')
+                # The sports wanted list is computed live against the exclusion
+                # settings, so saving them has to invalidate the client's cached
+                # sports rows. The 'sports' event is the one the socketio reducer
+                # maps to the whole sports query root, wanted included.
+                if sportarr_exclusion_updated:
+                    event_stream(type='sports')
+
+        follow_ups.raise_first()
 
 
 def get_array_from(property):

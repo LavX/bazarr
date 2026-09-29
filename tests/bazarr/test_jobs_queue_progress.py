@@ -151,3 +151,80 @@ def test_the_jobs_list_sends_last_run_time_as_utc():
     job.last_run_time = naive
     sent = marshal([vars(job)], SystemJobs.get_response_model)[0]["last_run_time"]
     assert datetime.fromisoformat(sent.replace("Z", "+00:00")) == naive.astimezone(timezone.utc)
+
+
+def test_a_duplicate_is_refused_and_can_name_the_job_it_matched():
+    """A job identical to one pending or running is refused with False. A
+    caller that has to follow that job asks for its id instead, and gets it
+    from the same look, under the queue lock, so the job cannot finish in
+    between and leave the caller with nothing to follow."""
+    from pytest import MonkeyPatch
+    from test_sportarr_workflows import private_queue
+
+    def feed(**options):
+        return queue.feed_jobs_pending_queue("Example", "tests.fake", "work", kwargs={"index": 0}, **options)
+
+    with MonkeyPatch.context() as monkeypatch:
+        queue = private_queue(monkeypatch)
+        first = feed()
+
+        assert feed() is False
+        assert feed(return_existing=True) == first
+        queue.jobs_running_queue.append(queue.jobs_pending_queue.popleft())
+        assert feed(return_existing=True) == first
+        assert len(queue.jobs_pending_queue) == 0 and len(queue.jobs_running_queue) == 1
+
+        # A finished job is no longer a duplicate: the same call queues again.
+        queue.jobs_completed_queue.append(queue.jobs_running_queue.popleft())
+        second = feed(return_existing=True)
+        assert second not in (False, first)
+
+
+def argument_heavy_job(payload=None, apikey=None, job_id=None):
+    return "done"
+
+
+class _CountsItsRepr:
+    """Stands in for a large argument, such as an uploaded package's bytes."""
+
+    def __init__(self):
+        self.formatted = 0
+
+    def __repr__(self):
+        self.formatted += 1
+        return "<payload>"
+
+
+def test_starting_a_job_never_formats_or_logs_its_arguments(caplog):
+    """The start line was an f-string with the job's args and kwargs. It built
+    their repr for every job even with debug logging off, which for a Provider
+    Hub package is several times its size, and with debug on it wrote whatever
+    the arguments carried, API keys included, to the log."""
+    import logging
+    from pytest import MonkeyPatch
+    import app.jobs_queue as module
+    from test_sportarr_workflows import private_queue
+
+    with MonkeyPatch.context() as monkeypatch:
+        queue = private_queue(monkeypatch)
+        monkeypatch.setattr(module.activity, "finish", lambda *args, **kwargs: None)
+        payload = _CountsItsRepr()
+
+        def run(level):
+            queue.feed_jobs_pending_queue("Example", __name__, "argument_heavy_job",
+                                          kwargs={"payload": payload, "apikey": "sk-fixture-key"})
+            job = queue.jobs_pending_queue.popleft()
+            queue.jobs_running_queue.append(job)
+            with caplog.at_level(level):
+                queue._run_job(job)
+            return job
+
+        assert run(logging.INFO).status == "completed"
+        assert payload.formatted == 0, "the arguments were formatted with debug logging off"
+
+        caplog.clear()
+        job = run(logging.DEBUG)
+        assert job.status == "completed"
+        assert payload.formatted == 0
+        assert "sk-fixture-key" not in caplog.text
+        assert f"Running job Example (id {job.job_id}): {__name__}.argument_heavy_job" in caplog.text

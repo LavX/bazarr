@@ -23,7 +23,7 @@ from sonarr.notify import notify_sonarr
 from radarr.notify import notify_radarr
 
 
-def _delete_subtitle_file(media_path, subtitle_path, on_publish=None, revalidate=None):
+def _delete_subtitle_file(media_path, subtitle_path, on_publish=None, revalidate=None, after_delete=None):
     with subtitle_write_locks(media_path, subtitle_path):
         # Under the directory locks, which is where a caller's ownership check
         # has to be re-asked: the sports indexer takes these same locks before
@@ -44,12 +44,19 @@ def _delete_subtitle_file(media_path, subtitle_path, on_publish=None, revalidate
             on_publish(subtitle_path)
         state.changed(subtitle_path)
         quarantine_sync_outputs_after_mutation(media_path, subtitle_path)
+        # A caller's record of the removal, such as a blacklist entry, is
+        # written only once the file is really gone and while the locks are
+        # still held, so a refused or failed deletion records nothing and a
+        # duplicate request, which finds the file already gone, cannot record
+        # it twice.
+        if after_delete is not None:
+            after_delete()
         return True
 
 
 def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_path, sonarr_series_id=None,
                      sonarr_episode_id=None, radarr_id=None, arr_instance_id=None,
-                     sports_event_id=None, revalidate=None):
+                     sports_event_id=None, revalidate=None, after_delete=None):
     if not subtitles_path:
         logging.error('No subtitles to delete.')
         return False
@@ -118,7 +125,7 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
         removed = _delete_subtitle_file(media_path, pr(subtitles_path),
                                         publication_callback(media_type, media_path, 'delete',
                                                              arr_instance_id),
-                                        revalidate=revalidate)
+                                        revalidate=revalidate, after_delete=after_delete)
         if not removed:
             store_subtitles_sports(sports_event_id, arr_instance_id)
             return False
@@ -149,7 +156,8 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
 
     if media_type == 'series':
         removed = _delete_subtitle_file(media_path, pr(subtitles_path),
-                                        publication_callback(media_type, media_path, 'delete', arr_instance_id))
+                                        publication_callback(media_type, media_path, 'delete', arr_instance_id),
+                                        revalidate=revalidate, after_delete=after_delete)
         store_subtitles(prr(media_path), media_path, arr_instance_id=arr_instance_id)
         if not removed:
             return False
@@ -172,7 +180,8 @@ def delete_subtitles(media_type, language, forced, hi, media_path, subtitles_pat
         return True
     else:
         removed = _delete_subtitle_file(media_path, pr(subtitles_path),
-                                        publication_callback(media_type, media_path, 'delete', arr_instance_id))
+                                        publication_callback(media_type, media_path, 'delete', arr_instance_id),
+                                        revalidate=revalidate, after_delete=after_delete)
         store_subtitles_movie(prr(media_path), media_path, arr_instance_id=arr_instance_id)
         if not removed:
             return False

@@ -49,3 +49,25 @@ def test_listing_jobs_documents_the_list_it_returns(spec):
     assert {"job_id", "status"} <= set(job["properties"])
     assert job["properties"]["last_run_time"]["type"] == "string"
     assert job["properties"]["last_run_time"]["format"] == "date-time"
+
+
+def test_the_jobs_list_documents_the_fields_a_new_job_sends_as_null(spec):
+    # A job that has not failed has no error, one that offers nothing has no
+    # action, and only a retry has retry_of. The list sends all three as null.
+    from flask_restx import marshal
+
+    from api.system.jobs import SystemJobs
+    from app.jobs_queue import Job
+
+    sent = marshal([vars(Job(job_id=1, job_name="Example", module="m", func="f"))],
+                   SystemJobs.get_response_model)[0]
+    assert (sent["error"], sent["action"], sent["retry_of"]) == (None, None, None)
+
+    responses = spec["paths"]["/system/jobs"]["get"]["responses"]
+    envelope = spec["definitions"][_schema_ref(responses["200"])]
+    job = spec["definitions"][envelope["properties"]["data"]["items"]["$ref"].rsplit("/", 1)[-1]]
+    for name in ("error", "action", "retry_of"):
+        assert job["properties"][name]["x-nullable"] is True, name
+    assert job["properties"]["error"]["type"] == "object"
+    assert job["properties"]["action"]["type"] == "object"
+    assert job["properties"]["retry_of"]["type"] == "integer"

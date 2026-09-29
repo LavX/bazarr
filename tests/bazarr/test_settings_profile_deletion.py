@@ -185,22 +185,67 @@ def test_a_refused_save_writes_no_database_rows(schema_session, post_settings, m
     assert _rows(schema_session) == before, "a refused save kept part of what it submitted"
 
 
-def test_a_save_whose_refresh_fails_still_writes_its_rows(schema_session, post_settings, monkeypatch):
-    """The configuration reached the disk there, so the rows go with it."""
+@pytest.mark.parametrize("error_name, code", [
+    ("MetadataFollowupError", "discover_settings_refresh_failed"),
+    ("SettingsFollowupError", "settings_refresh_failed"),
+])
+def test_a_save_whose_refresh_fails_still_writes_its_rows(schema_session, post_settings, monkeypatch,
+                                                          error_name, code):
+    """The configuration reached the disk there, so the rows go with it.
+
+    That holds for any save, not only one that changed the metadata settings.
+    """
     import sys
-    from app.config import MetadataFollowupError
+    from app import config
 
     endpoint = sys.modules["api.system.settings"]
     _seed_rows(schema_session)
 
     def saved_then_failed(_items):
-        raise MetadataFollowupError("synthetic")
+        raise getattr(config, error_name)("synthetic")
 
     monkeypatch.setattr(endpoint, "save_settings", saved_then_failed)
+    events = []
+    monkeypatch.setattr(endpoint, "event_stream", lambda *args, **_kwargs: events.append(args))
 
-    _body, status = post_settings(dict(_ROW_FORM))
+    body, status = post_settings(dict(_ROW_FORM))
 
     assert status == 503
+    assert body["code"] == code
+    assert "synthetic" not in body["message"]
+    # Other open pages reload the settings, as they do after any written save.
+    assert events[-1] == ("settings",)
+    assert _rows(schema_session) == {"profiles": [(4, "New")], "languages": [1],
+                                     "notifiers": [(1, "discord://token")]}
+
+
+def test_a_saved_failure_is_reported_as_saved_when_its_broadcast_fails(schema_session, post_settings,
+                                                                     monkeypatch):
+    """The settings event after a written save is best effort.
+
+    Raised through, it took the place of the saved-with-a-failed-refresh answer, and
+    the page reported a save that had reached the disk as failed.
+    """
+    import sys
+    from app.config import SettingsFollowupError
+
+    endpoint = sys.modules["api.system.settings"]
+    _seed_rows(schema_session)
+
+    def saved_then_failed(_items):
+        raise SettingsFollowupError("synthetic")
+
+    def broadcast(kind=None, *_args, **_kwargs):
+        if kind == "settings":
+            raise RuntimeError("synthetic broadcast failure")
+
+    monkeypatch.setattr(endpoint, "save_settings", saved_then_failed)
+    monkeypatch.setattr(endpoint, "event_stream", broadcast)
+
+    body, status = post_settings(dict(_ROW_FORM))
+
+    assert status == 503
+    assert body["code"] == "settings_refresh_failed"
     assert _rows(schema_session) == {"profiles": [(4, "New")], "languages": [1],
                                      "notifiers": [(1, "discord://token")]}
 

@@ -181,7 +181,7 @@ class _ProviderConfigs(dict):
                 # a provider that is merely unreachable right now comes back on
                 # its own, with the new config rather than the one the user
                 # just changed away from.
-                self._pool.throttle_callback(key, error)
+                self._pool._notify_throttle(key, error)
             else:
                 self._pool.initialized_providers[key] = provider
 
@@ -309,6 +309,44 @@ def _adapt_throttle_callback(callback):
     def legacy(*args, sports_context=None, **kwargs):
         return callback(*args, **kwargs)
     return legacy
+
+
+def _format_callback_failure(exc, error):
+    """Render the traceback of exc and of the exceptions chained to it, with
+    their types and raise sites but none of their messages or notes.
+
+    exc was raised by a throttle callback that was handed error, and the
+    callback may have copied error's text into its own message, a note, an
+    exception group or a wrapping error (a database error quoting the row it
+    failed to write, say). No message in the chain can be trusted to be free of
+    it, so none is printed. The chain stops at error, which the pool's handlers
+    log where they want it.
+    """
+    chain = []
+    seen = set()
+    link, connector = exc, None
+    while link is not None and link is not error and id(link) not in seen:
+        seen.add(id(link))
+        chain.append((link, connector))
+        if link.__cause__ is not None:
+            link, connector = link.__cause__, "The above exception was the direct cause of the following exception:"
+        elif not link.__suppress_context__:
+            link, connector = link.__context__, "During handling of the above exception, another exception occurred:"
+        else:
+            link = None
+
+    lines = []
+    for link, connector in reversed(chain):
+        lines.append("Traceback (most recent call last):\n")
+        lines.extend(traceback.format_tb(link.__traceback__))
+        exc_type = type(link)
+        module = exc_type.__module__
+        qualname = exc_type.__qualname__
+        lines.append((qualname if module in ("builtins", "__main__") else f"{module}.{qualname}") + "\n")
+        if connector:
+            lines.append(f"\n{connector}\n\n")
+    return "".join(lines)
+
 
 class SZProviderPool(ProviderPool):
     @staticmethod
@@ -455,6 +493,32 @@ class SZProviderPool(ProviderPool):
 
         return self.initialized_providers[name]
 
+    def _notify_throttle(self, name, error, **context):
+        """Pass a provider failure to throttle_callback from an error handler.
+
+        A callback that raises is logged and otherwise ignored. Letting its
+        exception out would replace the provider's own failure, so the search
+        status, the backoff and the health record would all be derived from
+        the wrong cause, and the handler's remaining bookkeeping (discarding
+        the provider, dropping a torn-down instance) would be skipped. The
+        call is never retried; see _adapt_throttle_callback.
+        """
+        try:
+            self.throttle_callback(name, error, **context)
+        except Exception as callback_error:
+            # Provider messages can carry URLs with credentials in them, so
+            # the provider error is named by its type only.
+            if callback_error is error:
+                # The callback let the provider error itself out, so its
+                # traceback would end in that message; log without it.
+                logger.error('Throttle callback failed for provider %r by re-raising the %s it was recording',
+                             name, type(error).__name__)
+                return
+            # No exc_info: a formatter would print every message in the
+            # callback's chain, and any of them can quote the provider error.
+            logger.error('Throttle callback failed for provider %r while recording %s, messages left out:\n%s',
+                         name, type(error).__name__, _format_callback_failure(callback_error, error).rstrip())
+
     def retire_provider(self, name):
         """Terminate an initialized provider without throttling its name.
 
@@ -482,12 +546,12 @@ class SZProviderPool(ProviderPool):
             self.initialized_providers[name].terminate()
         except (requests.Timeout, socket.timeout) as e:
             logger.error('Provider %r timed out, improperly terminated', name)
-            self.throttle_callback(name, e)
+            self._notify_throttle(name, e)
         except Exception as e:
             logger.exception('Provider %r terminated unexpectedly', name)
-            self.throttle_callback(name, e)
-
-        del self.initialized_providers[name]
+            self._notify_throttle(name, e)
+        finally:
+            del self.initialized_providers[name]
 
     def list_subtitles_provider(self, provider, video, languages, detailed=False):
         """List subtitles with a single provider.
@@ -616,8 +680,8 @@ class SZProviderPool(ProviderPool):
                 'sonarrEpisodeId': video.sonarrEpisodeId if hasattr(video, 'sonarrEpisodeId') else None,
             }
             logger.warning('Provider %r throttled: %s', provider, e)
-            self.throttle_callback(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None,
-                                   sports_context=getattr(video, 'sports_context', None))
+            self._notify_throttle(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None,
+                                  sports_context=getattr(video, 'sports_context', None))
             if detailed:
                 return provider_search_failure(provider, e)
 
@@ -628,8 +692,8 @@ class SZProviderPool(ProviderPool):
                 'sonarrEpisodeId': video.sonarrEpisodeId if hasattr(video, 'sonarrEpisodeId') else None,
             }
             logger.exception('Unexpected error in provider %r: %s', provider, traceback.format_exc())
-            self.throttle_callback(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None,
-                                   sports_context=getattr(video, 'sports_context', None))
+            self._notify_throttle(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None,
+                                  sports_context=getattr(video, 'sports_context', None))
             if detailed:
                 return provider_search_failure(provider, e)
 
@@ -824,20 +888,20 @@ class SZProviderPool(ProviderPool):
                     socket.timeout) as e:
                 logger.error('Provider %r connection error', subtitle.provider_name)
                 subtitle.download_error = e
-                self.throttle_callback(subtitle.provider_name, e, ids=ids, language=subtitle.language,
-                                       sports_context=getattr(subtitle, 'sports_context', None))
+                self._notify_throttle(subtitle.provider_name, e, ids=ids, language=subtitle.language,
+                                      sports_context=getattr(subtitle, 'sports_context', None))
 
             except (rarfile.BadRarFile, MustGetBlacklisted) as e:
-                self.throttle_callback(subtitle.provider_name, e, ids=ids, language=subtitle.language,
-                                       sports_context=getattr(subtitle, 'sports_context', None))
+                self._notify_throttle(subtitle.provider_name, e, ids=ids, language=subtitle.language,
+                                      sports_context=getattr(subtitle, 'sports_context', None))
                 return False
 
             except Exception as e:
                 logger.exception('Unexpected error in provider %r, Traceback: %s', subtitle.provider_name,
                                  traceback.format_exc())
                 subtitle.download_error = e
-                self.throttle_callback(subtitle.provider_name, e, ids=ids, language=subtitle.language,
-                                       sports_context=getattr(subtitle, 'sports_context', None))
+                self._notify_throttle(subtitle.provider_name, e, ids=ids, language=subtitle.language,
+                                      sports_context=getattr(subtitle, 'sports_context', None))
                 self.discarded_providers.add(subtitle.provider_name)
                 return False
 
