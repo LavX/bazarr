@@ -33,6 +33,22 @@ def queue(monkeypatch):
     return JobsQueue()
 
 
+# The two jobs that call the AI Subtitle Translator: a library translation and
+# the editor's. The translation lane is chosen by these, never by a job's name.
+TRANSLATION = ("subtitles.tools.translate.main", "translate_subtitles_file")
+EDITOR_TRANSLATION = ("subtitles.tools.translate.editor", "translate_editor_lines")
+DISCOVER_DOWNLOAD = ("discover.download", "run_download_job")
+MASS_OPERATION = ("subtitles.mass_operations", "mass_batch_operation")
+# What Discover names a download: title, language, provider and file.
+LOST_IN_TRANSLATION = "Lost in Translation (2003) · en · opensubtitles · Lost.in.Translation.2003.en.srt"
+
+
+def _feed(queue, name, job, index, **options):
+    module, func = job
+    return queue.feed_jobs_pending_queue(job_name=name, module=module, func=func,
+                                         kwargs={"index": index}, **options)
+
+
 def _enqueue(queue, count, name="Job"):
     for index in range(count):
         queue.feed_jobs_pending_queue(
@@ -113,8 +129,7 @@ def test_a_translation_counts_against_the_general_limit_too(queue, monkeypatch):
     monkeypatch.setattr(settings.general, "concurrent_jobs", 1)
     monkeypatch.setattr(settings.translator, "openrouter_max_concurrent", 5)
 
-    queue.feed_jobs_pending_queue(job_name="Translating something", module="tests.fake",
-                                  func="work", kwargs={"index": 0})
+    _feed(queue, "Translating something", TRANSLATION, 0)
     queue.feed_jobs_pending_queue(job_name="Syncing series", module="tests.fake",
                                   func="work", kwargs={"index": 1})
 
@@ -133,11 +148,155 @@ def test_the_translation_lane_still_caps_translations_below_the_general_limit(qu
     monkeypatch.setattr(settings.translator, "openrouter_max_concurrent", 1)
 
     for index in range(3):
-        queue.feed_jobs_pending_queue(job_name=f"Translating {index}", module="tests.fake",
-                                      func="work", kwargs={"index": index})
+        _feed(queue, f"Translating {index}", TRANSLATION, index)
 
     assert queue._reserve_next_job() is not None
     assert queue._reserve_next_job() is None, "the translation lane admitted a second one"
+
+
+def _one_translation_at_a_time(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings.general, "concurrent_jobs", 4)
+    monkeypatch.setattr(settings.translator, "openrouter_max_concurrent", 1)
+
+
+def test_a_download_named_after_a_translation_is_not_held_by_the_lane(queue, monkeypatch):
+    """A Discover download for "Lost in Translation" is not a translation.
+
+    The lane used to be picked by the word in the job name, so this download
+    waited for a real translation to finish, and every job queued behind it
+    waited too, because only the head of the queue is ever considered.
+    """
+    _one_translation_at_a_time(monkeypatch)
+    _feed(queue, "Translating Example (EN to HU)", TRANSLATION, 0)
+    _feed(queue, LOST_IN_TRANSLATION, DISCOVER_DOWNLOAD, 1)
+    queue.feed_jobs_pending_queue(job_name="Syncing series", module="tests.fake", func="work",
+                                  kwargs={"index": 2})
+
+    assert queue._reserve_next_job().func == "translate_subtitles_file"
+    download = queue._reserve_next_job()
+    assert download is not None and download.func == "run_download_job", (
+        "the download waited for the translation lane"
+    )
+    assert queue._reserve_next_job() is not None, "the job behind the download stayed blocked"
+
+
+def test_a_running_download_named_after_a_translation_takes_no_translation_slot(queue, monkeypatch):
+    _one_translation_at_a_time(monkeypatch)
+    _feed(queue, LOST_IN_TRANSLATION, DISCOVER_DOWNLOAD, 0)
+    _feed(queue, "Translating Example (EN to HU)", TRANSLATION, 1)
+
+    assert queue._reserve_next_job().func == "run_download_job"
+    assert queue._reserve_next_job() is not None, "the download used up the only translation slot"
+
+
+def test_an_editor_translation_is_in_the_lane_whatever_its_name(queue, monkeypatch):
+    _one_translation_at_a_time(monkeypatch)
+    _feed(queue, "Translating Example (EN to HU)", TRANSLATION, 0)
+    _feed(queue, "Example in the editor", EDITOR_TRANSLATION, 1)
+
+    assert queue._reserve_next_job() is not None
+    assert queue._reserve_next_job() is None, "a second translation ran beside the first"
+
+
+def test_a_renamed_running_translation_keeps_its_slot(queue, monkeypatch):
+    """A job's name changes while it runs: a failing editor translation is
+    renamed "Failed ..." before it leaves the running queue. The slot it holds
+    must not go to the next translation until it has actually finished."""
+    _one_translation_at_a_time(monkeypatch)
+    _feed(queue, "Translating Example in the editor (English to Hungarian)", EDITOR_TRANSLATION, 0)
+    running = queue._reserve_next_job()
+    queue.update_job_name(running.job_id, "Failed Example in the editor (English to Hungarian)")
+    _feed(queue, "Translating Other (EN to DE)", TRANSLATION, 1)
+
+    assert queue._reserve_next_job() is None, "the renamed translation lost its slot while running"
+
+
+def test_a_retried_translation_stays_in_the_lane(queue, monkeypatch):
+    """A failed translation is renamed "Failed ..." and a retry keeps that
+    name. The retry runs the same function, so it is still a translation."""
+    _one_translation_at_a_time(monkeypatch)
+    monkeypatch.setattr("app.jobs_queue.activity.finish", lambda *args, **kwargs: None)
+    _feed(queue, "Translating Example (EN to HU)", TRANSLATION, 0, retryable=True)
+    failed = queue._reserve_next_job()
+    queue.update_job_name(failed.job_id, "Failed Example (EN to HU)")
+    queue._mark_failed(failed)
+
+    _feed(queue, "Translating Other (EN to DE)", TRANSLATION, 1)
+    assert queue._reserve_next_job() is not None
+    assert queue.retry_job(failed.job_id)
+    assert queue._reserve_next_job() is None, "the retry ran beside another translation"
+
+
+def test_the_mass_translate_job_does_not_hold_a_translation_slot(queue, monkeypatch):
+    """"Translating Subtitles (N items)" only queues one translation job per
+    item, and those are what the lane caps. The parent holding a slot as well
+    left one fewer for the translations it had just queued."""
+    _one_translation_at_a_time(monkeypatch)
+    _feed(queue, "Translating Example (EN to HU)", TRANSLATION, 0)
+    _feed(queue, "Translating Subtitles (3 items)", MASS_OPERATION, 1)
+
+    assert queue._reserve_next_job() is not None
+    assert queue._reserve_next_job() is not None, "the batch job waited for the translation lane"
+
+
+def test_the_translator_status_counts_the_same_jobs_the_lane_does(queue, monkeypatch):
+    """The Bazarr queue figures on the translator status card count
+    translations the way the lane does, so a download named after a film about
+    translation is not reported as one."""
+    from types import SimpleNamespace
+
+    from flask import Flask
+
+    from api.translator import translator as api_mod
+
+    monkeypatch.setattr(api_mod, "jobs_queue", queue)
+    monkeypatch.setattr(api_mod.settings.translator, "openrouter_url", "http://translator:8765")
+    monkeypatch.setattr(api_mod, "get_translator_auth_headers", lambda: {})
+    monkeypatch.setattr(api_mod.requests, "get",
+                        lambda url, **kwargs: SimpleNamespace(status_code=200, json=lambda: {}))
+    _one_translation_at_a_time(monkeypatch)
+
+    _feed(queue, "Translating Example (EN to HU)", TRANSLATION, 0)
+    _feed(queue, LOST_IN_TRANSLATION, DISCOVER_DOWNLOAD, 1)
+    queue._reserve_next_job()
+    queue._reserve_next_job()
+    _feed(queue, "Example in the editor", EDITOR_TRANSLATION, 2)
+    _feed(queue, "Translating Subtitles (3 items)", MASS_OPERATION, 3)
+
+    with Flask(__name__).test_request_context("/api/translator/status"):
+        body, status = api_mod.TranslatorStatus.get.__wrapped__(api_mod.TranslatorStatus())
+
+    assert status == 200
+    assert body["bazarr_queue"] == {"pending": 1, "running": 1}
+
+
+def test_every_translation_job_names_a_function_its_module_defines():
+    """The lane knows a translation only by the module and function it runs,
+    and a job it does not recognise runs uncapped. A library translation is
+    queued under its file's module path and its own function name, and an
+    editor translation under the editor's two constants, so moving or renaming
+    either without updating TRANSLATION_JOBS would lift the limit silently."""
+    import ast
+    from pathlib import Path
+
+    from app.jobs_queue import TRANSLATION_JOBS
+
+    source = Path(__file__).resolve().parents[2] / "bazarr"
+    for module, func in sorted(TRANSLATION_JOBS):
+        path = source.joinpath(*module.split(".")).with_suffix(".py")
+        assert path.is_file(), f"{module} is no longer a module"
+        defined = {node.name for node in ast.parse(path.read_text(encoding="utf-8")).body
+                   if isinstance(node, ast.FunctionDef)}
+        assert func in defined, f"{module} no longer defines {func}"
+
+    editor = ast.parse((source / "subtitles" / "tools" / "translate" / "editor.py").read_text(encoding="utf-8"))
+    constants = {node.targets[0].id: node.value.value for node in editor.body
+                 if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+                 and isinstance(node.value, ast.Constant)}
+    queued_as = (constants.get("EDITOR_TRANSLATION_MODULE"), constants.get("EDITOR_TRANSLATION_FUNC"))
+    assert queued_as in TRANSLATION_JOBS, "the editor queues its translations outside the lane"
 
 
 def test_a_forced_job_bypasses_the_limit_without_double_counting(queue, monkeypatch):

@@ -23,6 +23,7 @@ import { faFloppyDisk } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   isMetadataFollowupError,
+  isSettingsFollowupError,
   useSettingsMutation,
   useSystemSettings,
 } from "@/apis/hooks";
@@ -43,6 +44,12 @@ interface Props {
   children: ReactNode;
   fluid?: boolean;
 }
+
+// A saved metadata field clears the form at once. The reload after a save
+// leaves a form holding one alone.
+const isMetadataKey = (key: string) =>
+  key.startsWith("settings-discover-") ||
+  key === "settings-general-metadata_language";
 
 const Layout: FunctionComponent<Props> = (props) => {
   const { children, fluid = false, name } = props;
@@ -66,19 +73,30 @@ const Layout: FunctionComponent<Props> = (props) => {
     mutateAsync,
     isPending: isMutating,
   } = useSettingsMutation(metadataRefreshFailed && totalStagedCount === 0);
-  const handleSaveError = useCallback((error: unknown) => {
-    if (isMetadataFollowupError(error)) {
-      formRef.current.reset();
-      setMetadataRefreshFailed(true);
-    }
-  }, []);
-
   // A settings refetch has several causes: the refresh the app runs when the
   // socket first reports online, the one it runs again on every reconnect, and
   // the reload that follows a save. Only the save is meant to clear the form.
   // Resetting on every refetch threw away whatever the user had staged while a
   // response was in flight, took the Save control with it, and posted nothing.
   const savedRef = useRef(false);
+
+  const handleSaveError = useCallback(
+    (error: unknown, submitted: LooseObject) => {
+      if (isMetadataFollowupError(error)) {
+        formRef.current.reset();
+        setMetadataRefreshFailed(true);
+      } else if (isSettingsFollowupError(error)) {
+        // Written all the same, so the form is cleared as after a save: by the
+        // reload, or at once when the save carried a metadata field, which the
+        // reload leaves alone.
+        savedRef.current = true;
+        if (Object.keys(submitted).some(isMetadataKey)) {
+          formRef.current.reset();
+        }
+      }
+    },
+    [],
+  );
 
   useOnValueChange(isRefetching, (value) => {
     if (value || !savedRef.current) {
@@ -87,13 +105,7 @@ const Layout: FunctionComponent<Props> = (props) => {
 
     savedRef.current = false;
 
-    if (
-      !Object.keys(form.values.settings).some(
-        (key) =>
-          key.startsWith("settings-discover-") ||
-          key === "settings-general-metadata_language",
-      )
-    ) {
+    if (!Object.keys(form.values.settings).some(isMetadataKey)) {
       form.reset();
     }
   });
@@ -111,16 +123,10 @@ const Layout: FunctionComponent<Props> = (props) => {
             // The reload this save triggers is the refetch allowed to clear the
             // form.
             savedRef.current = true;
-            if (
-              Object.keys(settingsToSubmit).some(
-                (key) =>
-                  key.startsWith("settings-discover-") ||
-                  key === "settings-general-metadata_language",
-              )
-            )
+            if (Object.keys(settingsToSubmit).some(isMetadataKey))
               formRef.current.reset();
           },
-          onError: handleSaveError,
+          onError: (error) => handleSaveError(error, settingsToSubmit),
         });
       }
     },
@@ -138,8 +144,11 @@ const Layout: FunctionComponent<Props> = (props) => {
         setMetadataRefreshFailed(false);
         savedRef.current = true;
       } catch (error) {
-        handleSaveError(error);
-        throw error;
+        handleSaveError(error, settingsToSubmit);
+        // Written all the same: leaving loses nothing.
+        if (!isSettingsFollowupError(error)) {
+          throw error;
+        }
       }
     }
   }, [form.values, mutateAsync, metadataRefreshFailed, handleSaveError]);

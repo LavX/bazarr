@@ -53,8 +53,8 @@ ARRIVAL_ACTIONS = (1, 2, 3, 4)
 FETCHED_ACTIONS = (1, 2, 3)
 
 # Classify by the module and function a job actually runs. Matching words in a
-# job name counts unrelated work: the translator status endpoint does that today
-# and a "Translating" substring is not a contract.
+# job name counts unrelated work, and a "Translating" substring is not a
+# contract.
 OPERATIONS = {
     ("subtitles.tools.translate.main", "translate_subtitles_file"): "translation",
     ("subtitles.wanted.movies", "wanted_search_missing_subtitles_movies"): "wanted_search",

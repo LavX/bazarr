@@ -1,6 +1,7 @@
 # coding=utf-8
 
 import json
+import logging
 
 from flask import request, jsonify
 from flask_restx import Resource, Namespace
@@ -11,7 +12,7 @@ from app.database import TableLanguagesProfiles, TableSettingsLanguages, TableSe
     normalize_profile_items, update_profile_id_list, database, insert, update, delete, select
 from app.event_handler import event_stream
 from app.config import (save_settings, get_settings, validate_metadata_settings,
-                        MetadataPersistenceError, MetadataFollowupError)
+                        MetadataPersistenceError, MetadataFollowupError, SettingsFollowupError)
 from app.scheduler import scheduler  # noqa: F401
 from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
 from subtitles.language_profiles import validate_combine_rule, CombineRuleError
@@ -175,16 +176,25 @@ class SystemSettings(Resource):
         try:
             try:
                 save_settings(zip(request.form.keys(), request.form.listvalues()))
-            except MetadataFollowupError:
+            except SettingsFollowupError:
                 # The configuration did reach the disk; only the refresh after
-                # it failed. Its rows follow it as they do for any saved change.
+                # it failed. Its rows follow it, and other open pages hear of
+                # it, as they do for any saved change.
                 _write_settings_rows(enabled_languages, profiles, notifications)
+                try:
+                    event_stream("settings")
+                except Exception:
+                    # Best effort: the answer still has to say it was saved.
+                    logging.exception("Unable to announce the saved settings")
                 raise
         except MetadataPersistenceError:
             return "Metadata settings could not be saved. Try again.", 503
         except MetadataFollowupError:
             return {"code": "discover_settings_refresh_failed",
                     "message": "Metadata settings were saved, but application refresh failed. Reload settings before retrying."}, 503
+        except SettingsFollowupError:
+            return {"code": "settings_refresh_failed",
+                    "message": "Settings were saved, but applying them failed. Reload settings before retrying."}, 503
         except ValidationError as e:
             event_stream("settings")
             return e.message, 406

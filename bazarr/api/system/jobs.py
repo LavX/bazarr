@@ -6,7 +6,7 @@ from flask_restx import Resource, Namespace, reqparse, fields, marshal
 
 from app.jobs_queue import jobs_queue
 
-from ..swaggerui import job_queued_model
+from ..swaggerui import NullableInteger, NullableRaw, job_queued_model
 from ..utils import authenticate
 
 api_ns_system_jobs = Namespace('System Jobs', description='List, force start, move or delete jobs from the queue')
@@ -42,13 +42,14 @@ class SystemJobs(Resource):
         'progress_message': fields.String(),
         # Why a failed job failed, {reason, message}, and what the user can do
         # with a finished one, {kind, label, ...}. Both are set by the job and
-        # are the only parts of its outcome that are sent.
-        'error': fields.Raw(),
-        'action': fields.Raw(),
+        # are the only parts of its outcome that are sent. Null until then.
+        'error': NullableRaw(),
+        'action': NullableRaw(),
         # Stop leaves a job completed, so this is what says it did not finish.
         'stopped': fields.Boolean(),
         'retryable': fields.Boolean(),
-        'retry_of': fields.Integer(),
+        # Null unless the job is a retry.
+        'retry_of': NullableInteger(),
     })
 
     get_envelope_model = api_ns_system_jobs.model('SystemJobsGetEnvelope', {

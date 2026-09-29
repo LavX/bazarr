@@ -1,5 +1,6 @@
 import { createMemoryRouter, Link, RouterProvider } from "react-router";
 import { Text } from "@mantine/core";
+import { cleanNotifications } from "@mantine/notifications";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
@@ -510,6 +511,185 @@ describe("Settings layout refetch", () => {
 
       settings.release();
       await expectStillStaged();
+    } finally {
+      router.dispose();
+    }
+  });
+
+  // The configuration reached the disk and only what the backend does after it
+  // failed, a provider login reset or a library job, say. Reported as a failed
+  // save, the page kept offering to save values it already held.
+  const savedButNotApplied = {
+    code: "settings_refresh_failed",
+    message:
+      "Settings were saved, but applying them failed. Reload settings before retrying.",
+  };
+
+  it("says a save was kept when only applying it failed, and clears the form", async () => {
+    cleanNotifications();
+    let stored = persisted();
+    serveSettings(() => stored);
+    server.use(
+      http.post("/api/system/settings", async ({ request }) => {
+        const values = Object.fromEntries((await request.formData()).entries());
+        stored = {
+          ...stored,
+          sonarr: {
+            ...stored.sonarr,
+            ssl: values["settings-sonarr-ssl"] === "true",
+          },
+        };
+        return HttpResponse.json(savedButNotApplied, { status: 503 });
+      }),
+    );
+
+    const user = userEvent.setup();
+    customRender(stagedFields);
+
+    await waitForHydration();
+
+    await user.click(screen.getByLabelText("Use SSL"));
+    await user.click(
+      await screen.findByRole("button", { name: "Save 1 pending change" }),
+    );
+
+    expect(
+      await screen.findByText("Settings saved; applying them failed"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Save failed")).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("button", { name: /save/i }),
+      ).not.toBeInTheDocument();
+    });
+    expect(screen.getByLabelText("Use SSL")).toBeChecked();
+  });
+
+  it("clears a staged metadata field too when only applying the save failed", async () => {
+    cleanNotifications();
+    serveSettings();
+    server.use(
+      http.post("/api/system/settings", () =>
+        HttpResponse.json(savedButNotApplied, { status: 503 }),
+      ),
+    );
+
+    const user = userEvent.setup();
+    customRender(
+      <Layout name="Test Settings">
+        <Check label="Use SSL" settingKey="settings-sonarr-ssl" />
+        <TextField label="Address" settingKey="settings-sonarr-ip" />
+        <TextField label="Locale" settingKey="settings-discover-locale" />
+      </Layout>,
+    );
+
+    await waitForHydration();
+
+    // A metadata field staged with the value it already holds, beside a
+    // change whose follow-up fails: the save is not a metadata change, and
+    // the reload that clears the form leaves staged metadata fields alone.
+    await user.type(screen.getByLabelText("Locale"), "en-US");
+    await user.click(screen.getByLabelText("Use SSL"));
+    await user.click(
+      await screen.findByRole("button", { name: "Save 2 pending changes" }),
+    );
+
+    expect(
+      await screen.findByText("Settings saved; applying them failed"),
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("button", { name: /save/i }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  it("keeps a metadata field staged while the save was in flight when only applying it failed", async () => {
+    cleanNotifications();
+    serveSettings();
+    let respond!: () => void;
+    const responded = new Promise<void>((resolve) => (respond = resolve));
+    let markReached!: () => void;
+    const reached = new Promise<void>((resolve) => (markReached = resolve));
+    server.use(
+      http.post("/api/system/settings", async () => {
+        markReached();
+        await responded;
+        return HttpResponse.json(savedButNotApplied, { status: 503 });
+      }),
+    );
+
+    const user = userEvent.setup();
+    customRender(
+      <Layout name="Test Settings">
+        <Check label="Use SSL" settingKey="settings-sonarr-ssl" />
+        <TextField label="Address" settingKey="settings-sonarr-ip" />
+        <TextField label="Locale" settingKey="settings-discover-locale" />
+      </Layout>,
+    );
+
+    await waitForHydration();
+
+    await user.click(screen.getByLabelText("Use SSL"));
+    await user.click(
+      await screen.findByRole("button", { name: "Save 1 pending change" }),
+    );
+    await reached;
+
+    // Staged after the request left, so it is neither submitted nor saved.
+    await user.type(screen.getByLabelText("Locale"), "hu-HU");
+    respond();
+
+    expect(
+      await screen.findByText("Settings saved; applying them failed"),
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(queryClient.isFetching()).toBe(0);
+    });
+    expect(screen.getByLabelText("Locale")).toHaveValue("hu-HU");
+  });
+
+  it("leaves after Save and leave when only applying the save failed", async () => {
+    cleanNotifications();
+    serveSettings();
+    server.use(
+      http.post("/api/system/settings", () =>
+        HttpResponse.json(savedButNotApplied, { status: 503 }),
+      ),
+    );
+    const router = createMemoryRouter([
+      {
+        path: "/",
+        element: (
+          <Layout name="Test Settings">
+            <Check label="Use SSL" settingKey="settings-sonarr-ssl" />
+            <TextField label="Address" settingKey="settings-sonarr-ip" />
+            <Link to="/away">Leave settings</Link>
+          </Layout>
+        ),
+      },
+      { path: "/away", element: <p>Destination</p> },
+    ]);
+    try {
+      rawRender(
+        <AllProviders>
+          <RouterProvider router={router} />
+        </AllProviders>,
+      );
+      await waitForHydration();
+
+      await userEvent.click(screen.getByLabelText("Use SSL"));
+      await userEvent.click(
+        screen.getByRole("link", { name: "Leave settings" }),
+      );
+      await userEvent.click(
+        await screen.findByRole("button", { name: "Save and leave" }),
+      );
+
+      expect(await screen.findByText("Destination")).toBeInTheDocument();
+      expect(
+        await screen.findByText("Settings saved; applying them failed"),
+      ).toBeInTheDocument();
     } finally {
       router.dispose();
     }
