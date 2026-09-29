@@ -1293,7 +1293,7 @@ def _queued_sync(owner, order):
 
 
 def _until_queued(owner, seconds=2):
-    """Give a sync time to miss its first acquire and queue for the lock.
+    """Give a sync time to find the lock taken and queue for it.
 
     Without waiter counts there is nothing to see, so the wait runs out, well
     inside the sync's own 5 s timeout, and the order check fails instead.

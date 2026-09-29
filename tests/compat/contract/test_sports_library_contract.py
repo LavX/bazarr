@@ -1277,7 +1277,7 @@ def test_an_owner_disabled_while_the_index_stepped_aside_still_stops_it(library,
         if not started.is_set():
             sync.start()
             assert started.wait(5)
-            # Until the sync misses its first 0.1 s acquire and queues. Without
+            # Until the sync finds the lock taken and queues. Without
             # waiter counts the wait runs out, inside the sync's 5 s timeout,
             # and the scan never stops for it.
             deadline = time.monotonic() + 2

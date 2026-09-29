@@ -47,31 +47,30 @@ def owner_sync_lock(owner, cancel=None, timeout=None, count_waiter=True):
     Background callers keep the unbounded wait, which is what they want, but
     now say so in the log rather than spinning in silence.
 
-    A caller that has to wait is counted in ``sync_waiting`` until it holds
-    the lock, gives up or is cancelled, so the scheduled recording index can
-    step aside for it. The index waits with ``count_waiter=False``: it must
-    never make another holder yield to it.
+    A caller that finds the lock taken is counted in ``sync_waiting`` before
+    it starts waiting, and until it holds the lock, gives up or is cancelled,
+    so the scheduled recording index can step aside for it. The index waits
+    with ``count_waiter=False``: it must never make another holder yield to it.
     """
     with _guard:
         lock = _locks.setdefault(owner, RLock())
     deadline = None if timeout is None else time.monotonic() + timeout
-    waited = counted = False
+    counted = False
     try:
-        while not lock.acquire(timeout=0.1):
-            check_cancelled(cancel)
-            if deadline is not None and time.monotonic() >= deadline:
-                raise SportsSyncBusy(
-                    f'A Sportarr synchronization is already running for instance {owner}')
-            if not waited:
-                waited = True
-                if count_waiter:
-                    with _guard:
-                        _waiting[owner] = _waiting.get(owner, 0) + 1
-                    counted = True
-                    logging.debug('Waiting for the Sportarr sync lock on instance %s.', owner)
-                else:
-                    logging.debug('The Sports recording index is waiting for the Sportarr sync lock on '
-                                  'instance %s.', owner)
+        if not lock.acquire(blocking=False):
+            if count_waiter:
+                with _guard:
+                    _waiting[owner] = _waiting.get(owner, 0) + 1
+                counted = True
+                logging.debug('Waiting for the Sportarr sync lock on instance %s.', owner)
+            else:
+                logging.debug('The Sports recording index is waiting for the Sportarr sync lock on '
+                              'instance %s.', owner)
+            while not lock.acquire(timeout=0.1):
+                check_cancelled(cancel)
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise SportsSyncBusy(
+                        f'A Sportarr synchronization is already running for instance {owner}')
     finally:
         if counted:
             with _guard:

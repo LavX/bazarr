@@ -90,8 +90,8 @@ def test_a_waiting_sync_is_counted_until_it_holds_the_lock():
 
     The scheduled recording index held the owner lock for its whole scan and
     nothing told it that a sync had queued behind it, so a startup sync waited
-    until every recording was hashed. A waiter counts from its first failed
-    acquire until it holds the lock, and each waiter counts separately.
+    until every recording was hashed. A waiter counts from the moment it finds
+    the lock taken until it holds the lock, and each waiter counts separately.
     """
     from sportarr import connection
     from sportarr.connection import owner_sync_lock, sync_waiting
@@ -99,15 +99,14 @@ def test_a_waiting_sync_is_counted_until_it_holds_the_lock():
     owner = 987655
     release, holder = _hold(owner)
     assert not sync_waiting(owner)
-    entered, first_done = [], threading.Event()
+    entered, done = [], threading.Event()
 
-    def sync(name, done=None):
+    def sync(name):
         with owner_sync_lock(owner, timeout=10):
             entered.append(name)
-            if done is not None:
-                done.wait(10)
+            done.wait(10)
 
-    first = threading.Thread(target=sync, args=('first', first_done), daemon=True)
+    first = threading.Thread(target=sync, args=('first',), daemon=True)
     first.start()
     _until(lambda: sync_waiting(owner))
     second = threading.Thread(target=sync, args=('second',), daemon=True)
@@ -116,17 +115,55 @@ def test_a_waiting_sync_is_counted_until_it_holds_the_lock():
     try:
         release.set()
         holder.join(10)
-        _until(lambda: entered == ['first'])
-        # The first sync holds the lock now; the second is still queued.
-        assert sync_waiting(owner)
+        # Waiters are not served in order, so either one may get the lock.
+        _until(lambda: len(entered) == 1)
+        # One sync holds the lock now; the other is still queued and counted.
+        assert connection._waiting.get(owner) == 1
     finally:
         release.set()
-        first_done.set()
+        done.set()
         first.join(10)
         second.join(10)
-    assert entered == ['first', 'second']
+    assert sorted(entered) == ['first', 'second']
     assert not sync_waiting(owner)
     assert owner not in connection._waiting
+
+
+def test_a_sync_counts_as_waiting_before_its_first_timed_wait():
+    """The index checks for a queued sync between recordings.
+
+    A sync that only counted once its first 0.1 s wait ran out could miss that
+    check when it arrived near the end of a recording, and then sit behind one
+    more hash. It counts as soon as it finds the lock taken.
+    """
+    from sportarr import connection
+    from sportarr.connection import owner_sync_lock, sync_waiting
+
+    owner = 987658
+
+    class Taken:
+        """Refuses the first try, then records what a timed wait could see."""
+
+        def __init__(self):
+            self.seen = []
+
+        def acquire(self, blocking=True, timeout=-1):
+            if not blocking:
+                return False
+            self.seen.append(sync_waiting(owner))
+            return True
+
+        def release(self):
+            pass
+
+    lock = connection._locks[owner] = Taken()
+    try:
+        with owner_sync_lock(owner, timeout=5):
+            pass
+    finally:
+        connection._locks.pop(owner, None)
+    assert lock.seen == [True]
+    assert not sync_waiting(owner)
 
 
 def test_a_waiter_that_gives_up_or_does_not_count_leaves_no_trace():
