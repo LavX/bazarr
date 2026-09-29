@@ -5,6 +5,7 @@ on:
     branches: [master]
     paths:
       - 'site/**'
+      - 'scripts/site/generate_sitemap.py'
       - '.github/workflows/deploy-pages.yml'
   workflow_dispatch:
 
@@ -27,6 +28,7 @@ jobs:
         with:
           ref: master
           path: src
+          fetch-depth: 0
 
       - name: Checkout gh-pages
         uses: actions/checkout@v7
@@ -48,6 +50,9 @@ jobs:
             --exclude 'hero/' \
             --exclude 'data/' \
             src/site/ pages/
+
+      - name: Generate sitemap dates from page history
+        run: python3 src/scripts/site/generate_sitemap.py --output "$GITHUB_WORKSPACE/pages/sitemap.xml"
 
       - name: Commit and push if changed
         working-directory: pages
