@@ -1,6 +1,17 @@
-import { FunctionComponent, useMemo, useState } from "react";
+import { CSSProperties, FunctionComponent, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
-import { Badge, Group, MantineColor, UnstyledButton } from "@mantine/core";
+import {
+  Badge,
+  Group,
+  List,
+  MantineColor,
+  Stack,
+  Text,
+  Tooltip,
+  UnstyledButton,
+} from "@mantine/core";
+import { faMinus, faPlus } from "@fortawesome/free-solid-svg-icons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   useEpisodeSubtitleModification,
   useSubtitleFileDownload,
@@ -10,7 +21,7 @@ import { CombinedSubtitleBadge } from "@/components/bazarr";
 import Language from "@/components/bazarr/Language";
 import SyncOutputCompareModal from "@/components/modals/SyncOutputCompareModal";
 import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
-import { toPython } from "@/utilities";
+import { BuildKey, toPython } from "@/utilities";
 import {
   buildSubtitleLanguageKey,
   canSynchronizeSubtitle,
@@ -22,6 +33,16 @@ import {
   sortSyncOutputSubtitles,
 } from "@/utilities/subtitles";
 
+// Match quality for a downloaded/embedded subtitle, sourced from the episode
+// history and shown inside the badge (mirrors the movie detail Score column).
+export interface SubtitleScoreInfo {
+  // Percentage string as the history API returns it, e.g. "98.0%".
+  score?: string;
+  provider?: string;
+  matches?: string[];
+  notMatches?: string[];
+}
+
 interface Props {
   seriesId: number;
   episodeId: number;
@@ -31,7 +52,58 @@ interface Props {
   missing?: boolean;
   subtitle: Subtitle;
   availableSubtitles?: Subtitle[];
+  // Present for downloaded/embedded subtitles that have a history record; the
+  // badge then shows the score and a hover tooltip with the match details.
+  scoreInfo?: SubtitleScoreInfo;
 }
+
+// Same thresholds as the movie detail ScoreBadge: green >= 90, yellow 70-89,
+// red below 70.
+function scoreBandColor(pct: number): MantineColor {
+  return pct >= 90 ? "green" : pct >= 70 ? "yellow" : "red";
+}
+
+const ScoreTooltipLabel: FunctionComponent<{
+  score: string;
+  provider?: string;
+  source: string;
+  matches: string[];
+  notMatches: string[];
+}> = ({ score, provider, source, matches, notMatches }) => (
+  <Stack gap={6}>
+    <Text size="sm" fw={700}>
+      Score: {score}
+    </Text>
+    {provider && <Text size="sm">Provider: {provider}</Text>}
+    <Text size="sm" c="dimmed">
+      {source}
+    </Text>
+    {(matches.length > 0 || notMatches.length > 0) && (
+      <Group align="flex-start" justify="left" gap="xl" wrap="nowrap" grow>
+        <Stack align="flex-start" gap={2}>
+          <Text size="sm" c="green">
+            <FontAwesomeIcon icon={faPlus} /> Matching
+          </Text>
+          <List size="sm" c="green">
+            {matches.map((v, idx) => (
+              <List.Item key={BuildKey(idx, v, "match")}>{v}</List.Item>
+            ))}
+          </List>
+        </Stack>
+        <Stack align="flex-start" gap={2}>
+          <Text size="sm" c="yellow">
+            <FontAwesomeIcon icon={faMinus} /> Not matching
+          </Text>
+          <List size="sm" c="yellow">
+            {notMatches.map((v, idx) => (
+              <List.Item key={BuildKey(idx, v, "miss")}>{v}</List.Item>
+            ))}
+          </List>
+        </Stack>
+      </Group>
+    )}
+  </Stack>
+);
 
 export function buildEpisodeSubtitleToolSelections({
   episodeId,
@@ -81,6 +153,7 @@ export const Subtitle: FunctionComponent<Props> = ({
   missing = false,
   subtitle,
   availableSubtitles,
+  scoreInfo,
 }) => {
   const navigate = useNavigate();
   const { remove, download } = useEpisodeSubtitleModification();
@@ -93,15 +166,40 @@ export const Subtitle: FunctionComponent<Props> = ({
   // falsy path (null, undefined, "") means this is an embedded (in-container) subtitle track
   const isEmbedded = !subtitle.path;
 
+  // Missing subtitles never carry a score. When a score is known the badge is
+  // colored by its band and shows the percentage; otherwise it keeps its look.
+  const scorePct = useMemo(() => {
+    if (missing || !scoreInfo?.score) return undefined;
+    const pct = parseFloat(scoreInfo.score);
+    return Number.isNaN(pct) ? undefined : pct;
+  }, [missing, scoreInfo]);
+  const scoreColor =
+    scorePct === undefined ? undefined : scoreBandColor(scorePct);
+  const scored = scoreColor !== undefined;
+
   const variant: MantineColor | undefined = useMemo(() => {
-    if (opened && (missing || !isEmbedded)) {
+    // A scored badge is painted by its band color (below) over the light
+    // variant, which clears the custom variant styling first.
+    if (scored) {
+      return "light";
+    } else if (opened && (missing || !isEmbedded)) {
       return "highlight";
     } else if (missing) {
       return "missing";
     } else if (isEmbedded) {
       return "disabled";
     }
-  }, [isEmbedded, missing, opened]);
+  }, [isEmbedded, missing, opened, scored]);
+
+  // The repo's badge.module.scss neutralizes the light variant's own color, so
+  // paint the score band explicitly with Mantine's theme-aware light tokens.
+  const scoreStyle: CSSProperties = scored
+    ? {
+        color: `var(--mantine-color-${scoreColor}-light-color)`,
+        backgroundColor: `var(--mantine-color-${scoreColor}-light)`,
+        border: "1px solid transparent",
+      }
+    : {};
 
   const selections = useMemo<FormType.ModifySubtitle[]>(() => {
     return buildEpisodeSubtitleToolSelections({
@@ -150,15 +248,48 @@ export const Subtitle: FunctionComponent<Props> = ({
       ? "Embedded in the video file"
       : `File: ${subtitle.path!.split(/[\\/]/).pop()}`;
 
+  const languageBadge = (
+    <Badge
+      variant={variant}
+      // The Mantine tooltip carries the source line when a score is shown, so
+      // the native title would only duplicate it there.
+      title={scored ? undefined : badgeTitle}
+      style={{ whiteSpace: "nowrap", flexShrink: 0, ...scoreStyle }}
+    >
+      {/* Render inline (span) so an appended score stays on the same line
+          instead of wrapping below the block <p> and being clipped. */}
+      <Language.Text value={subtitle} long={false} span></Language.Text>
+      {scored ? ` ${Math.round(scorePct!)}%` : null}
+    </Badge>
+  );
+
   const badgeEl = (
     <Group gap={4} wrap="nowrap">
-      <Badge
-        variant={variant}
-        title={badgeTitle}
-        style={{ whiteSpace: "nowrap", flexShrink: 0 }}
-      >
-        <Language.Text value={subtitle} long={false}></Language.Text>
-      </Badge>
+      {scored ? (
+        <Tooltip
+          multiline
+          // A fixed width is required: the global
+          // [data-mantine-shared-portal-node] rule otherwise collapses a
+          // multiline tooltip to min-content width.
+          w={480}
+          maw="90vw"
+          withinPortal
+          events={{ hover: true, focus: false, touch: true }}
+          label={
+            <ScoreTooltipLabel
+              score={scoreInfo!.score!}
+              provider={scoreInfo!.provider}
+              source={badgeTitle}
+              matches={scoreInfo!.matches ?? []}
+              notMatches={scoreInfo!.notMatches ?? []}
+            />
+          }
+        >
+          {languageBadge}
+        </Tooltip>
+      ) : (
+        languageBadge
+      )}
       {isSyncOutputSubtitle(subtitle) && (
         <Badge
           color="gray"

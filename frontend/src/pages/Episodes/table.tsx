@@ -24,7 +24,7 @@ import {
   isCombinedOutputSubtitle,
   isSyncOutputSubtitle,
 } from "@/utilities/subtitles";
-import { Subtitle } from "./components";
+import { Subtitle, SubtitleScoreInfo } from "./components";
 
 /**
  * How many subtitle badges an episode row draws before the rest go behind a
@@ -72,14 +72,71 @@ import tableStyles from "@/components/tables/BaseTable.module.scss";
 
 interface Props {
   episodes: Item.Episode[] | null;
+  // Whole-series episode history (one request per detail page); used to show a
+  // match score inside each downloaded/embedded subtitle badge.
+  history?: History.Episode[];
   disabled?: boolean;
   profile?: Language.Profile;
   onAllRowsExpandedChanged: (isAllRowsExpanded: boolean) => void;
 }
 
+// History stores a single hi-priority modifier: forced is dropped when hi is
+// set. Match that for history lookups. Mirrors the movie detail table.
+function buildHistoryLanguageKey(sub: {
+  code2: string;
+  hi?: boolean;
+  forced?: boolean;
+}): string {
+  if (sub.hi) return `${sub.code2}:hi`;
+  if (sub.forced) return `${sub.code2}:forced`;
+  return sub.code2;
+}
+
+function scoreInfoFromHistory(
+  record: History.Episode | undefined,
+): SubtitleScoreInfo | undefined {
+  if (!record?.score) return undefined;
+  return {
+    score: record.score,
+    provider: record.provider,
+    matches: record.matches,
+    notMatches: record.dont_matches,
+  };
+}
+
 const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
-  ({ episodes, profile, disabled, onAllRowsExpandedChanged }, ref) => {
+  ({ episodes, history, profile, disabled, onAllRowsExpandedChanged }, ref) => {
     const onlyDesired = useShowOnlyDesired();
+
+    // Score for a downloaded subtitle: keyed by (episode local id, file path)
+    // from the download/upgrade actions. Newest wins (history is newest-first).
+    const historyMap = useMemo(() => {
+      const map = new Map<string, History.Episode>();
+      history?.forEach((h) => {
+        if (!h.subtitles_path) return;
+        if ([1, 2, 3].includes(h.action)) {
+          const key = JSON.stringify([h.id, h.subtitles_path]);
+          if (!map.has(key)) map.set(key, h);
+        }
+      });
+      return map;
+    }, [history]);
+
+    // Score for an embedded track: keyed by (episode local id, language key)
+    // from the "treat embedded as downloaded" action=7 records.
+    const embeddedScoreMap = useMemo(() => {
+      const map = new Map<string, History.Episode>();
+      history?.forEach((h) => {
+        if (h.action === 7 && h.language?.code2) {
+          const key = JSON.stringify([
+            h.id,
+            buildHistoryLanguageKey(h.language),
+          ]);
+          if (!map.has(key)) map.set(key, h);
+        }
+      });
+      return map;
+    }, [history]);
 
     const tableRef =
       ref as React.MutableRefObject<TableInstance<Item.Episode> | null>;
@@ -129,6 +186,17 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
         const elements = useMemo(() => {
           const episodeId = episode.sonarrEpisodeId;
 
+          // Match score for a subtitle, from this episode's history: file rows
+          // by path, embedded tracks by language key.
+          const scoreFor = (val: Subtitle): SubtitleScoreInfo | undefined =>
+            scoreInfoFromHistory(
+              val.path
+                ? historyMap.get(JSON.stringify([episode.id, val.path]))
+                : embeddedScoreMap.get(
+                    JSON.stringify([episode.id, buildHistoryLanguageKey(val)]),
+                  ),
+            );
+
           const missing = episode.missing_subtitles.map((val, idx) => (
             <Subtitle
               missing
@@ -163,6 +231,7 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
               arrInstanceId={episode.arr_instance_id}
               subtitle={val}
               availableSubtitles={episode.subtitles}
+              scoreInfo={scoreFor(val)}
             ></Subtitle>
           );
 
@@ -174,7 +243,14 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
           // onlyDesired/profileItems are captured from the parent; the row re-renders
           // via the parent when they change, so they belong in the deps.
           // eslint-disable-next-line react-hooks/exhaustive-deps
-        }, [episode, seriesId, onlyDesired, profileItems]);
+        }, [
+          episode,
+          seriesId,
+          onlyDesired,
+          profileItems,
+          historyMap,
+          embeddedScoreMap,
+        ]);
 
         const visible = elements.slice(0, MAX_CELL_SUBTITLES);
         const overflow = elements.length - visible.length;
