@@ -24,16 +24,18 @@ Plan decides three things:
 
 - **Documentation only.** When every changed file is documentation (`docs/`,
   Markdown files, `site/`), the frontend and backend jobs are skipped and the
-  Docs job decides. `README.md`, `site/install.sh` and
-  `site/guides/getting-started.html` are read by a test, so they count as code,
-  and so does anything under `tests/`, `bazarr/`, `custom_libs/`,
-  `migrations/` and `frontend/src/`, and every `.py` file.
+  Docs job decides. `README.md`, `site/install.sh`,
+  `site/guides/getting-started.html` and `site/guides/migration.html` are read
+  by a test, so they count as code, and so does anything under `tests/`,
+  `bazarr/`, `custom_libs/`, `migrations/` and `frontend/src/`, and every
+  `.py` file.
 - **Python versions.** A pull request into development, or into any branch but
   master, runs the backend on the version the Docker image ships. A push to
   development or master, the release pull request into master, the weekly
   schedule (which GitHub runs on master, the default branch) and a manual run
   use 3.12, 3.13 and 3.14, with the same jobs and steps on each.
-- **The Docs job** runs when a pull request touches documentation.
+- **The Docs job** runs when a pull request touches documentation, or one of
+  the documents a test reads, and checks those as well.
 
 When Plan cannot read the change, it runs everything.
 

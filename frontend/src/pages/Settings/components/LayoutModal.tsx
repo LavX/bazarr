@@ -28,10 +28,13 @@ import { LOG } from "@/utilities/console";
 interface Props {
   children: ReactNode;
   callbackModal: (value: boolean) => void;
+  // Called with the changes as the save goes out, before the reload a
+  // successful save sets off.
+  onSave?: (changes: LooseObject) => void;
 }
 
 const LayoutModal: FunctionComponent<Props> = (props) => {
-  const { children, callbackModal } = props;
+  const { children, callbackModal, onSave } = props;
 
   const { data: settings, isLoading, isRefetching } = useSystemSettings();
   const { mutate, isPending: isMutating } = useSettingsMutation();
@@ -62,6 +65,7 @@ const LayoutModal: FunctionComponent<Props> = (props) => {
         const settingsToSubmit = { ...settings };
         runHooks(hooks, settingsToSubmit);
         LOG("info", "submitting settings", Object.keys(settingsToSubmit));
+        onSave?.(settingsToSubmit);
         mutate(settingsToSubmit, {
           onSuccess: () => {
             savedRef.current = true;
@@ -74,7 +78,7 @@ const LayoutModal: FunctionComponent<Props> = (props) => {
         }, 500);
       }
     },
-    [mutate, callbackModal],
+    [mutate, callbackModal, onSave],
   );
 
   const totalStagedCount = useMemo(() => {
