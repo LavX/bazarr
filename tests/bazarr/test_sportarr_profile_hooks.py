@@ -1052,3 +1052,19 @@ def test_gemini_does_not_publish_malformed_or_duplicate_positions(
         run_job(lib, enqueue(lib)[0])
     assert not (lib.folder / "1/event.hu.srt").exists()
     assert not lib.session.execute(sa.select(TableHistorySports)).all()
+
+
+@pytest.mark.parametrize("shape", ["three", "four"])
+def test_missing_languages_reads_every_stored_entry_shape(
+    indexed_library, monkeypatch, shape
+):
+    from sportarr import profile_hooks
+    from sportarr.identity import resolve_event_in_session
+    from test_sportarr_indexer import stored_entry_event
+
+    session, _ = indexed_library
+    stored_entry_event(session, monkeypatch, shape)
+    monkeypatch.setattr(profile_hooks, "database", session)
+    context = resolve_event_in_session(session, 61, 1)
+
+    assert profile_hooks.missing_languages(context) == ["de"]
