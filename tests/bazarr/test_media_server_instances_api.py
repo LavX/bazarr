@@ -305,9 +305,11 @@ def test_an_unexpected_refresh_failure_is_logged_and_not_called_a_connection_err
 
 @pytest.mark.parametrize('code, answered, logged', [
     ('timeout', 'timeout', False),
+    # What the HTTP client raises for a 5xx.
+    ('server_error', 'server_error', False),
     # A database error carries a string code of its own, and is still a fault.
     ('e3q8', 'internal_error', True),
-], ids=['refusal', 'other code'])
+], ids=['refusal', 'server error', 'other code'])
 def test_a_refusal_of_another_class_keeps_its_code(instance_api, monkeypatch, caplog,
                                                    code, answered, logged):
     """A MediaServerError from another module generation is not the class this
