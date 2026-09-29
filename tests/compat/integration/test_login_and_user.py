@@ -46,8 +46,8 @@ def test_login_response_includes_base_url():
 
 
 def test_login_base_url_honors_x_forwarded_host():
-    """Bazarr's supervisor proxies 6767 -> 6768, so request.host is the inner
-    backend. base_url must come from X-Forwarded-Host when present."""
+    """Bazarr's supervisor proxies to a loopback backend port, so request.host
+    is the inner backend. base_url must come from X-Forwarded-Host when present."""
     app = _make_app()
     r = app.test_client().post(
         "/api/v1/login",

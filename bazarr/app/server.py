@@ -1,5 +1,6 @@
 # coding=utf-8
 
+import os
 import signal
 import warnings
 import logging
@@ -16,7 +17,7 @@ from .ui import ui_bp
 from .get_args import args
 from .config import settings, base_url
 from .database import close_database
-from .app import create_app, trusted_proxy_value
+from .app import BACKEND_HOST_ENV, create_app, supervisor_token, trusted_proxy_value
 
 app = create_app()
 from compat import register as register_compat  # noqa: E402
@@ -36,7 +37,9 @@ class Server:
 
         self.server = None
         self.connected = False
-        self.address = str(settings.general.ip)
+        # docker/supervisor.py pins the backend to loopback: it is the only
+        # client, and general.ip is the address of the whole install.
+        self.address = os.environ.get(BACKEND_HOST_ENV, '').strip() or str(settings.general.ip)
         self.port = int(args.port) if args.port else int(settings.general.port)
         self.interrupted = False
 
@@ -96,9 +99,16 @@ class Server:
                 self.connected = False
                 super(Server, self).__init__()
             elif error.errno == errno.EADDRINUSE:
-                if self.port != '6767':
+                if supervisor_token():
+                    # Under the supervisor 6767 is the front listener, or on a
+                    # shared network another instance. Exit: the supervisor
+                    # restarts the backend on a fresh port.
+                    logging.exception("BAZARR cannot bind to TCP port %s because it's already in use, exiting...",
+                                      self.port)
+                    self.shutdown(EXIT_PORT_ALREADY_IN_USE_ERROR)
+                elif self.port != 6767:
                     logging.exception("BAZARR cannot bind to specified TCP port, trying with default (6767)")
-                    self.port = '6767'
+                    self.port = 6767
                     self.connected = False
                     super(Server, self).__init__()
                 else:
