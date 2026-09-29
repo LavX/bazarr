@@ -5,8 +5,8 @@ with their arr_instance_id (#156).
 
 Idempotent and non-destructive: a kind is backfilled only when no default
 instance of that kind exists yet AND there is something to own (use_sonarr /
-use_radarr enabled, or any existing owned row). A manually created default is
-never replaced. Runs at startup after migrations.
+use_radarr enabled, or any row with no owner yet). A manually created default
+is never replaced. Runs at startup after migrations.
 """
 import logging
 
@@ -37,14 +37,19 @@ _RADARR_TABLES = (
 )
 
 
-def _has_any_rows(session, tables):
+def _has_ownerless_rows(session, tables):
+    # Only rows with no owner yet: the legacy rows this backfill exists to
+    # stamp. A row naming an instance that is gone was written after that
+    # instance was deleted, and the stamp below never touches it, so it is no
+    # reason to rebuild an instance from the scalar config.
     # Select a single column (not the full entity): a full-entity select loads
     # ORM objects into the identity map keyed by the PK, and during the cutover
     # migration the local-id PK is still NULL on every row, which corrupts the
     # identity map and breaks the bulk stamp below. A scalar existence check is
     # also cheaper.
     for model in tables:
-        if session.execute(select(model.arr_instance_id).limit(1)).first() is not None:
+        if session.execute(select(model.arr_instance_id)
+                           .where(model.arr_instance_id.is_(None)).limit(1)).first() is not None:
             return True
     return False
 
@@ -90,7 +95,7 @@ def _backfill_kind(session, repo, kind, scalar, use_flag, tables):
             return {"created": False, "reason": "instance already exists",
                     "stamped": stamped}
         return {"created": False, "reason": "instance already exists"}
-    if not use_flag and not _has_any_rows(session, tables):
+    if not use_flag and not _has_ownerless_rows(session, tables):
         return {"created": False, "reason": "nothing to own"}
 
     instance = repo.create(

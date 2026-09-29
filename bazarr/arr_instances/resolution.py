@@ -20,7 +20,7 @@ import logging
 
 from sqlalchemy import select
 
-from app.database import TableShows
+from app.database import TableArrInstances, TableShows
 
 from .repository import ArrInstanceRepository
 
@@ -33,6 +33,35 @@ def default_instance_id(session, kind):
     """
     row = ArrInstanceRepository(session).get_default(kind)
     return row.id if row is not None else None
+
+
+def skip_unscoped_sync(session, kind, kind_enabled, what):
+    """Whether a single-item sync that names no instance must write nothing.
+
+    The webhook URL without an instance key, the manual sync buttons and the
+    live feed that runs while no instance is enabled sync one item without
+    naming an instance, so the row is written under the enabled default. With
+    no default it gets no owner, and a row with no owner is what the startup
+    backfill builds an instance from. Deleting the last instance of a kind also
+    switches the kind off, so an event landing after that would bring the
+    deleted instance back on the next start.
+
+    Such a sync is skipped while the kind has no instance at all, or is
+    switched off (``kind_enabled`` False) with no default to own the row. With
+    a default it goes ahead as before, and so does a kind that is switched on
+    with only disabled instances. Logs the reason once per skipped sync.
+    """
+    if default_instance_id(session, kind) is not None:
+        return False
+    has_instance = session.execute(
+        select(TableArrInstances.id).where(TableArrInstances.kind == kind).limit(1)
+    ).first() is not None
+    if has_instance and kind_enabled:
+        return False
+    name = kind.capitalize()
+    reason = f"{name} is switched off" if has_instance else f"there is no {name} instance to own it"
+    logging.info("BAZARR skipping the %s sync of %s: %s", name, what, reason)
+    return True
 
 
 def scoped(stmt, column, arr_instance_id):

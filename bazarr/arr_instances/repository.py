@@ -29,6 +29,11 @@ def _slugify(value):
     return slug or "instance"
 
 
+class InstanceOwnsRows(ValueError):
+    """A plain delete of a Sonarr or Radarr instance that still owns library
+    rows. Deleting it together with that library is the explicit alternative."""
+
+
 class ArrInstanceRepository:
     """CRUD + encryption boundary for arr_instances.
 
@@ -262,7 +267,7 @@ class ArrInstanceRepository:
             self._promote_default(row)
         return row
 
-    def delete(self, instance_id):
+    def delete(self, instance_id, remove_library=False):
         """Delete an instance.
 
         A sportarr instance is deleted outright: its leagues, events, history
@@ -270,6 +275,14 @@ class ArrInstanceRepository:
         key cascade, and no media file is touched. Every other kind refuses
         while it still owns rows, because those rows are media the user would
         lose the ownership of rather than metadata about a server.
+
+        ``remove_library`` is the explicit way past that refusal: the rows go
+        with the instance, in the same transaction. Only database rows go,
+        never a file on disk.
+
+        The last Sonarr or Radarr instance also answers for the rows of its
+        kind that no instance owns (see ``last_of_kind``), for the refusal and
+        for the removal alike.
         """
         row = self.get(instance_id)
         if row is None:
@@ -294,16 +307,160 @@ class ArrInstanceRepository:
             self._session.expire_all()
             self._refresh_ownership_triggers()
             return True
-        if self._has_owned_rows(instance_id):
-            raise ValueError("cannot delete an instance that still owns rows")
+        if not remove_library and self._has_owned_rows(row):
+            raise InstanceOwnsRows("cannot delete an instance that still owns rows")
         kind = row.kind
         # SAVEPOINT: delete + re-elect a default is multi-step; keep it atomic so
         # a mid-step failure can't leave the kind defaultless under AUTOCOMMIT.
+        # With the library it also means the rows and the instance go together
+        # or not at all, so no row is ever left naming an instance that is gone.
         with atomic(self._session):
+            if remove_library:
+                self._remove_library(row)
             self._session.delete(row)
             self._session.flush()
             self._reconcile_default(kind, demoted_id=instance_id)
         return True
+
+    def last_of_kind(self, row):
+        """Whether this is the only Sonarr or Radarr instance of its kind left.
+
+        Such an instance answers for every row of its kind: its own, and those
+        no instance owns, with no owner or one that is gone. The startup
+        backfill stamps ownerless rows onto a kind's only instance, and once a
+        kind has no instance, a row with no owner makes the backfill build one
+        from the stored connection settings, even with the kind switched off.
+        Left behind by the last instance's delete, those rows would bring it
+        back, and the rest would stay with no instance to show them.
+        """
+        from sqlalchemy import func
+
+        if row.kind not in ("sonarr", "radarr"):
+            return False
+        return self._session.execute(
+            select(func.count()).select_from(TableArrInstances)
+            .where(TableArrInstances.kind == row.kind)).scalar_one() == 1
+
+    def owned_row_counts(self, instance_id):
+        """How many rows of each kind deleting this instance's library removes."""
+        from sqlalchemy import func
+
+        counts = dict.fromkeys(
+            ("series", "episodes", "movies", "history", "blacklist", "root_folders"), 0)
+        row = self.get(instance_id)
+        if row is None:
+            return counts
+        for name, model, clause in self._library(row)[1]:
+            counts[name] += self._session.execute(
+                select(func.count()).select_from(model).where(clause)).scalar_one()
+        return counts
+
+    def _library(self, row):
+        """The rows that make up one Sonarr or Radarr instance's library.
+
+        Returns the release-type mismatch clause and the (name, model, clause)
+        list, children before the media they point at. That order is also the
+        delete order, so no statement leaves a row pointing at one already
+        gone. A history row can upgrade another one, and both have to go in the
+        same statement for the self reference to hold, so each history clause
+        takes everything that points at this owner's media in one pass.
+
+        Besides this owner's rows, it covers rows with no recorded owner that
+        point at this owner's media: they describe media that is about to go,
+        and the foreign key cascade would take them anyway. For the last
+        instance of a kind it is every row of that kind (see last_of_kind).
+        """
+        from sqlalchemy import and_, or_, true
+
+        from app.database import (
+            TableBlacklist, TableBlacklistMovie, TableEpisodes, TableHistory,
+            TableHistoryMovie, TableMovies, TableMoviesRootfolder, TableReleaseTypeMismatch,
+            TableShows, TableShowsRootfolder,
+        )
+        instance_id = row.id
+        whole_kind = self.last_of_kind(row)
+        shows = select(TableShows.id).where(TableShows.arr_instance_id == instance_id)
+        episode_clause = or_(TableEpisodes.arr_instance_id == instance_id,
+                             TableEpisodes.series_id.in_(shows))
+        episodes = select(TableEpisodes.id).where(episode_clause)
+        movies = select(TableMovies.id).where(TableMovies.arr_instance_id == instance_id)
+
+        def of(kind, clause):
+            return true() if whole_kind and row.kind == kind else clause
+
+        def episode_linked(model):
+            return of("sonarr", or_(model.arr_instance_id == instance_id,
+                                    model.series_id.in_(shows), model.episode_id.in_(episodes)))
+
+        def movie_linked(model):
+            return of("radarr", or_(model.arr_instance_id == instance_id,
+                                    model.movie_id.in_(movies)))
+
+        # The mismatch link is a plain integer to a local media id, not a
+        # foreign key, so nothing else removes these, and SQLite reuses a
+        # freed id for the next insert.
+        mismatch = TableReleaseTypeMismatch
+        mismatches = or_(
+            mismatch.arr_instance_id == instance_id,
+            and_(mismatch.media_type == 'series', mismatch.media_id.in_(episodes)),
+            and_(mismatch.media_type == 'movie', mismatch.media_id.in_(movies)))
+        if whole_kind:
+            mismatches = or_(mismatches, mismatch.media_type == (
+                'series' if row.kind == 'sonarr' else 'movie'))
+        return mismatches, (
+            ("history", TableHistory, episode_linked(TableHistory)),
+            ("history", TableHistoryMovie, movie_linked(TableHistoryMovie)),
+            ("blacklist", TableBlacklist, episode_linked(TableBlacklist)),
+            ("blacklist", TableBlacklistMovie, movie_linked(TableBlacklistMovie)),
+            ("episodes", TableEpisodes, of("sonarr", episode_clause)),
+            ("series", TableShows, of("sonarr", TableShows.arr_instance_id == instance_id)),
+            ("movies", TableMovies, of("radarr", TableMovies.arr_instance_id == instance_id)),
+            ("root_folders", TableShowsRootfolder,
+             of("sonarr", TableShowsRootfolder.arr_instance_id == instance_id)),
+            ("root_folders", TableMoviesRootfolder,
+             of("radarr", TableMoviesRootfolder.arr_instance_id == instance_id)),
+        )
+
+    def _remove_library(self, row):
+        """Delete one Sonarr or Radarr instance's library rows. The caller
+        holds the transaction. Set based, so the size of the library does not
+        decide how many statements run or how many ids are bound. Every column
+        pointing at a deleted row is indexed, so the foreign key lookups each
+        deleted row costs stay cheap too, and a Sportarr install records the
+        whole removal as one ownership change rather than one per row."""
+        from sqlalchemy import delete, update
+
+        from app.database import (TableEpisodes, TableHistory, TableHistoryMovie, TableMovies,
+                                  TableReleaseTypeMismatch)
+        from app.ownership_revision import owner_rows_deleted_in_bulk
+
+        mismatches, tables = self._library(row)
+        clauses = {model: clause for _name, model, clause in tables}
+
+        def doomed(model):
+            # correlate(None): inside an UPDATE of the same table it would
+            # otherwise read the outer row instead of selecting the set.
+            return select(model.id).where(clauses[model]).correlate(None)
+
+        # First, while the media rows the mismatch clause selects still exist.
+        statements = [delete(TableReleaseTypeMismatch).where(mismatches)]
+        # A history row outside the library can still name one inside it as
+        # the entry it upgraded: a legacy row with no owner and no media link.
+        # The link has no delete rule, so it would fail the whole removal. The
+        # row stays, without the link. Every link into the set goes, the
+        # set's own too, because they go with their rows a statement later
+        # anyway, and a NOT IN to spare them reads the whole set once per row
+        # on PostgreSQL when it does not fit in memory.
+        statements += [update(model).where(model.upgradedFromId.in_(doomed(model)))
+                       .values(upgradedFromId=None)
+                       for model in (TableHistory, TableHistoryMovie)]
+        statements += [delete(model).where(clause) for _name, model, clause in tables]
+        media = TableEpisodes if row.kind == 'sonarr' else TableMovies
+        with owner_rows_deleted_in_bulk(self._session.connection(),
+                                        {media.__tablename__: doomed(media)}):
+            for statement in statements:
+                self._session.execute(statement.execution_options(synchronize_session=False))
+            self._session.flush()
 
     def _refresh_ownership_triggers(self):
         """Install or drop the ownership triggers when Sportarr appears or goes.
@@ -347,26 +504,15 @@ class ArrInstanceRepository:
         except Exception:
             logging.exception('BAZARR could not refresh the subtitle ownership triggers')
 
-    def _has_owned_rows(self, instance_id):
-        from app.database import (
-            TableBlacklist, TableBlacklistMovie, TableEpisodes, TableHistory,
-            TableHistoryMovie, TableMovies, TableMoviesRootfolder, TableShows,
-            TableShowsRootfolder,
-        )
-        owned = (
-            TableShows, TableEpisodes, TableMovies, TableHistory,
-            TableHistoryMovie, TableBlacklist, TableBlacklistMovie,
-            TableShowsRootfolder, TableMoviesRootfolder,
-        )
-        for model in owned:
-            hit = self._session.execute(
-                select(model.arr_instance_id)
-                .where(model.arr_instance_id == instance_id)
-                .limit(1)
-            ).first()
-            if hit is not None:
-                return True
-        return False
+    def _has_owned_rows(self, row):
+        """Whether a plain delete has to refuse: any row the library removal
+        would take, apart from release-type mismatch flags."""
+        from sqlalchemy import literal
+
+        return any(
+            self._session.execute(
+                select(literal(1)).select_from(model).where(clause).limit(1)).first() is not None
+            for _name, model, clause in self._library(row)[1])
 
     def _unique_stable_key(self, kind, base):
         candidate = base
