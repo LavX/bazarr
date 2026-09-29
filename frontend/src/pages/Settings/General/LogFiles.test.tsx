@@ -36,16 +36,20 @@ function renderLogFiles() {
 }
 
 describe("LogFiles", () => {
-  it("shows the saved limits and the folder ceiling they add up to", async () => {
+  it("shows the saved limits and the size the log files settle at", async () => {
     renderLogFiles();
 
     const size = await screen.findByLabelText("Maximum Log File Size (MB)");
     await waitFor(() => expect(size).toHaveValue("32"));
     expect(screen.getByLabelText("Log Files to Keep")).toHaveValue("7");
-    // The live file plus seven rolled ones, at 32 MB each.
+    // The live file plus seven rolled ones, at 32 MB each. A settled size, not a
+    // cap: files rolled under a larger limit keep their size until they go.
     expect(
-      screen.getByText(/use at most about 256 MB: the current file plus 7/),
+      screen.getByText(
+        "With these settings bazarr.log and its rolled files settle at about 256 MB, the current file plus 7 older ones. Files rolled before a change keep their size until they roll out.",
+      ),
     ).toBeInTheDocument();
+    expect(screen.queryByText(/at most/)).not.toBeInTheDocument();
   });
 
   it("saves the typed size and count", async () => {
@@ -61,7 +65,9 @@ describe("LogFiles", () => {
     await user.type(count, "14");
 
     expect(
-      screen.getByText(/use at most about 960 MB: the current file plus 14/),
+      screen.getByText(
+        /settle at about 960 MB, the current file plus 14 older/,
+      ),
     ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /Save 2 pending/ }));
