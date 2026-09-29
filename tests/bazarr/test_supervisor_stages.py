@@ -352,6 +352,7 @@ def test_the_readiness_poll_rejects_a_neighbours_backend(monkeypatch, headers):
 
     assert mgr.state == mgr.STATE_STARTING
     assert sup.BACKEND_PORT is None
+    assert sup.BACKEND_TOKEN is None
 
 
 def test_the_readiness_poll_accepts_its_own_backend(monkeypatch):
@@ -373,6 +374,8 @@ def test_the_readiness_poll_accepts_its_own_backend(monkeypatch):
 
     assert mgr.state == mgr.STATE_RUNNING
     assert sup.BACKEND_PORT == seen["port"]
+    # The proxy checks every answer it relays against the same token.
+    assert sup.BACKEND_TOKEN == mgr.token
 
 
 # --- an in-app restart ------------------------------------------------------
@@ -577,6 +580,11 @@ stamped = client.get("/api/system/status")
 results["unsupervised_header"] = plain.headers.get("X-Bazarr-Supervisor-Token")
 results["supervised_header"] = stamped.headers.get("X-Bazarr-Supervisor-Token")
 results["supervised_status"] = stamped.status_code
+# The event stream: Socket.IO long-polling, answered by Flask-SocketIO's
+# middleware in front of Flask.
+event_stream = client.get("/api/socket.io/?EIO=4&transport=polling")
+results["event_stream_header"] = event_stream.headers.get("X-Bazarr-Supervisor-Token")
+results["event_stream_status"] = event_stream.status_code
 
 supervised = {"BAZARR_SUPERVISOR_TOKEN": "t0k3n", "BAZARR_BACKEND_HOST": "127.0.0.1"}
 results["supervised_free"] = scenario(supervised, 41007, set())
@@ -642,3 +650,12 @@ def test_the_backend_names_itself_to_its_supervisor_only_when_supervised(server_
     assert server_scenarios["unsupervised_header"] is None
     assert server_scenarios["supervised_header"] == "t0k3n"
     assert server_scenarios["supervised_status"] < 500
+
+
+def test_the_event_stream_names_the_backend_to_its_supervisor_too(server_scenarios):
+    # The proxy checks the token on every answer it relays, not only at
+    # startup. Socket.IO is answered by middleware in front of Flask, where
+    # Flask's own response hooks never run, so the token has to be added
+    # outside Flask or the event stream would be refused.
+    assert server_scenarios["event_stream_status"] < 500
+    assert server_scenarios["event_stream_header"] == "t0k3n"

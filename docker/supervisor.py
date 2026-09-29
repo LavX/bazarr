@@ -31,7 +31,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
+from aiohttp import ClientSession, ClientTimeout, TraceConfig, WSMsgType, web
 
 APP_DIR = Path(__file__).resolve().parent.parent
 import yaml  # noqa: E402
@@ -56,6 +56,11 @@ BACKEND_HOST = "127.0.0.1"
 # namespace shared with another instance (network_mode: host, or one VPN
 # container) an unverified port can be that instance's backend.
 BACKEND_PORT = None
+# The token that backend proved itself with. The proxy checks it on every
+# answer it relays as well, since a backend that crashes without closing its
+# listener leaves BACKEND_PORT set until bazarr.py notices, a few seconds on,
+# and on a shared network namespace another instance can bind the port then.
+BACKEND_TOKEN = None
 DEFAULT_PORT = 6767  # external port users connect to, unless general.port says otherwise
 # The port the front listener bound, for the container health check. /tmp is a
 # tmpfs under read_only, and it is private to the container even when the
@@ -69,9 +74,10 @@ TOKEN_HEADER = "X-Bazarr-Supervisor-Token"
 PROXY_PREFIXES = ("/api/", "/images/", "/test/", "/system/backup/download/", "/bazarr.log")
 
 
-def _set_backend_port(port) -> None:
-    global BACKEND_PORT
+def _set_backend_port(port, token=None) -> None:
+    global BACKEND_PORT, BACKEND_TOKEN
     BACKEND_PORT = port
+    BACKEND_TOKEN = token if port is not None else None
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +250,7 @@ class BackendManager:
                     async with session.get(url) as resp:
                         if (resp.status < 500 and resp.headers.get(TOKEN_HEADER) == self.token
                                 and launch_is_current()):
-                            _set_backend_port(port)
+                            _set_backend_port(port, self.token)
                             if self.state == self.STATE_STARTING:
                                 self.state = self.STATE_RUNNING
                                 self._stage_index = len(self.STAGES) - 1
@@ -291,10 +297,19 @@ def _backend_starting_response() -> web.Response:
     )
 
 
+def _from_own_backend(headers, token, port) -> bool:
+    """Whether an answer carries this supervisor's token. Anything else on the
+    port is not this instance's backend and is never relayed."""
+    if headers is not None and headers.get(TOKEN_HEADER) == token:
+        return True
+    print(f"[supervisor] Refused an answer on port {port} that did not come from this instance's backend")
+    return False
+
+
 async def proxy_handler(request: web.Request) -> web.StreamResponse:
     """Proxy API/image requests to the backend."""
-    port = BACKEND_PORT
-    if port is None:
+    port, token = BACKEND_PORT, BACKEND_TOKEN
+    if port is None or token is None:
         # No backend has proved itself yet, so nothing is relayed, not even a
         # websocket upgrade.
         return _backend_starting_response()
@@ -302,7 +317,7 @@ async def proxy_handler(request: web.Request) -> web.StreamResponse:
 
     # WebSocket upgrade
     if request.headers.get("Upgrade", "").lower() == "websocket":
-        return await _proxy_websocket(request, target_url)
+        return await _proxy_websocket(request, target_url, token, port)
 
     try:
         timeout = ClientTimeout(total=300, connect=5)
@@ -349,6 +364,8 @@ async def proxy_handler(request: web.Request) -> web.StreamResponse:
                 data=await request.read(),
                 allow_redirects=False,
             ) as resp:
+                if not _from_own_backend(resp.headers, token, port):
+                    return _backend_starting_response()
                 response = web.StreamResponse(
                     status=resp.status,
                     headers={k: v for k, v in resp.headers.items()
@@ -364,15 +381,31 @@ async def proxy_handler(request: web.Request) -> web.StreamResponse:
         return _backend_starting_response()
 
 
-async def _proxy_websocket(request: web.Request, target_url: str) -> web.WebSocketResponse:
-    """Proxy WebSocket connections to the backend."""
-    ws_client = web.WebSocketResponse()
-    await ws_client.prepare(request)
+async def _proxy_websocket(request: web.Request, target_url: str, token: str,
+                           port: int) -> web.StreamResponse:
+    """Proxy WebSocket connections to the backend.
 
+    The backend's handshake has to carry this supervisor's token before the
+    browser's upgrade is accepted, the same check every HTTP answer gets.
+    aiohttp only hands the handshake response to trace hooks.
+    """
+    handshake = {}
+
+    async def remember_handshake(session, context, params):
+        handshake["headers"] = params.response.headers
+
+    trace = TraceConfig()
+    trace.on_request_end.append(remember_handshake)
+
+    ws_client = None
     ws_url = target_url.replace("http://", "ws://")
     try:
-        async with ClientSession() as session:
+        async with ClientSession(trace_configs=[trace]) as session:
             async with session.ws_connect(ws_url) as ws_server:
+                if not _from_own_backend(handshake.get("headers"), token, port):
+                    return _backend_starting_response()
+                ws_client = web.WebSocketResponse()
+                await ws_client.prepare(request)
 
                 async def forward(src, dst):
                     async for msg in src:
@@ -390,6 +423,10 @@ async def _proxy_websocket(request: web.Request, target_url: str) -> web.WebSock
     except Exception:
         pass
 
+    if ws_client is None:
+        # The backend refused the socket or could not be reached, so the
+        # browser's upgrade was never accepted.
+        return _backend_starting_response()
     return ws_client
 
 
