@@ -50,8 +50,8 @@ async function hideThroughMenu(
   label: string,
 ) {
   const user = userEvent.setup();
-  // The row cells are declared inside the table, so a query that settles
-  // after the first render can remount them. Find the badge once it is quiet.
+  // Let the page's queries settle first, so the click lands on the badge
+  // the final render shows.
   await findTrigger();
   await waitFor(() => expect(queryClient.isFetching()).toBe(0));
   await user.click(await findTrigger());

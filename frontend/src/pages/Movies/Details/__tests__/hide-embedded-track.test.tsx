@@ -104,8 +104,8 @@ describe("Movies Detail Table, Hide track", () => {
     const requests = mockCommon();
     const user = userEvent.setup();
     customRender(<Table movie={movieWith([embeddedEnglish])} history={[]} />);
-    // The row cells are declared inside the table, so any query that settles
-    // after the first render remounts them. Open the menu once it is quiet.
+    // Let the page's queries settle first, so the click lands on the menu
+    // the final render shows.
     await screen.findByText("Video File Subtitle Track");
     await waitFor(() => expect(queryClient.isFetching()).toBe(0));
 
