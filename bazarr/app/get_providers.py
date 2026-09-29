@@ -610,11 +610,17 @@ def _handle_mgb(name, exception, ids, language, sports_context=None):
         return
 
     if ids:
-        # The id dict always carries all three keys, filled with None when the
-        # video does not have them, so membership never told these branches
-        # apart. A sports search is already gone by here: its video and every
-        # subtitle listed off it carry sports_context, which the branch above
-        # returns on, so nothing below can be a recording.
+        # The id dict always carries all three media keys, filled with None
+        # when the video does not have them, so membership never told these
+        # branches apart. A sports search is already gone by here: its video
+        # and every subtitle listed off it carry sports_context, which the
+        # branch above returns on, so nothing below can be a recording.
+        #
+        # The dict also names the instance the video belongs to. The row keeps
+        # that owner even when the item itself is gone by now, removed with its
+        # instance's library while this search ran. With no owner, the next
+        # startup gives the row to the kind's only instance, or builds one
+        # from the stored connection settings when the kind has none left.
         #
         # The remaining null-id case is an episode or movie whose database
         # refiner did not resolve, which is routine on an instance with its own
@@ -642,14 +648,15 @@ def _handle_mgb(name, exception, ids, language, sports_context=None):
                     'be attributed; recording it unattributed so the release stays excluded.',
                     name, exception.id)
             blacklist_log(ids.get('sonarrSeriesId'), ids.get('sonarrEpisodeId'), name, exception.id,
-                          language_str)
+                          language_str, arr_instance_id=ids.get('arr_instance_id'))
             return
         if not ids.get('radarrId'):
             logging.warning(
                 'BAZARR provider %s demanded a blacklist for %s on a movie that could not be '
                 'attributed; recording it unattributed so the release stays excluded.',
                 name, exception.id)
-        blacklist_log_movie(ids.get('radarrId'), name, exception.id, language_str)
+        blacklist_log_movie(ids.get('radarrId'), name, exception.id, language_str,
+                            arr_instance_id=ids.get('arr_instance_id'))
 
 
 def provider_throttle(name, exception, ids=None, language=None, sports_context=None, wait=True):

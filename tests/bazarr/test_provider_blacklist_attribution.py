@@ -27,11 +27,14 @@ from subzero.language import Language
 def blacklist_calls(monkeypatch):
     from app import get_providers
 
+    # Each call ends with the owner it was given.
     calls = []
     monkeypatch.setattr(get_providers, 'blacklist_log',
-                        lambda *args: calls.append(('series',) + args))
+                        lambda *args, arr_instance_id=None: calls.append(
+                            ('series',) + args + (arr_instance_id,)))
     monkeypatch.setattr(get_providers, 'blacklist_log_movie',
-                        lambda *args: calls.append(('movie',) + args))
+                        lambda *args, arr_instance_id=None: calls.append(
+                            ('movie',) + args + (arr_instance_id,)))
     return calls
 
 
@@ -55,8 +58,8 @@ def test_a_movie_release_is_blacklisted(blacklist_calls):
     _handle_mgb('provider', _exception('movie'),
                 {'radarrId': 7, 'sonarrSeriesId': None, 'sonarrEpisodeId': None},
                 Language('eng'))
-    # blacklist_log_movie(radarr_id, provider, subs_id, language)
-    assert blacklist_calls == [('movie', 7, 'provider', 'release-1', 'en')]
+    # blacklist_log_movie(radarr_id, provider, subs_id, language, arr_instance_id)
+    assert blacklist_calls == [('movie', 7, 'provider', 'release-1', 'en', None)]
 
 
 def test_an_episode_release_is_blacklisted(blacklist_calls):
@@ -65,8 +68,49 @@ def test_an_episode_release_is_blacklisted(blacklist_calls):
     _handle_mgb('provider', _exception('series'),
                 {'radarrId': None, 'sonarrSeriesId': 3, 'sonarrEpisodeId': 9},
                 Language('eng'))
-    # blacklist_log(series_id, episode_id, provider, subs_id, language)
-    assert blacklist_calls == [('series', 3, 9, 'provider', 'release-1', 'en')]
+    # blacklist_log(series_id, episode_id, provider, subs_id, language, arr_instance_id)
+    assert blacklist_calls == [('series', 3, 9, 'provider', 'release-1', 'en', None)]
+
+
+def _ids(media_type, owner):
+    if media_type == 'series':
+        return {'radarrId': None, 'sonarrSeriesId': 3, 'sonarrEpisodeId': 9, 'arr_instance_id': owner}
+    return {'radarrId': 7, 'sonarrSeriesId': None, 'sonarrEpisodeId': None, 'arr_instance_id': owner}
+
+
+@pytest.mark.parametrize('media_type', ['series', 'movie'])
+def test_a_release_is_blacklisted_under_the_instance_its_search_was_for(
+        blacklist_calls, media_type):
+    from app.get_providers import _handle_mgb
+
+    _handle_mgb('provider', _exception(media_type), _ids(media_type, 4), Language('eng'))
+    assert [call[0] for call in blacklist_calls] == [media_type]
+    assert blacklist_calls[0][-1] == 4
+
+
+@pytest.mark.parametrize('media_type', ['series', 'movie'])
+def test_an_exclusion_for_an_item_removed_mid_search_keeps_its_owner(
+        schema_session, monkeypatch, media_type):
+    """The search read its item before it asked the provider. When the item's
+    instance goes with its library meanwhile, there is no row left to take the
+    owner from, and an exclusion with no owner is one the next startup gives
+    to the kind's only instance, or builds an instance for."""
+    from sqlalchemy import select as sa_select
+
+    from app.database import TableBlacklist, TableBlacklistMovie
+    from app.get_providers import _handle_mgb
+    from radarr import blacklist as movie_blacklist
+    from sonarr import blacklist as series_blacklist
+
+    for module in (movie_blacklist, series_blacklist):
+        monkeypatch.setattr(module, 'database', schema_session)
+        monkeypatch.setattr(module, 'event_stream', lambda **_event: None)
+
+    _handle_mgb('provider', _exception(media_type), _ids(media_type, 4), Language('eng'))
+
+    model = TableBlacklist if media_type == 'series' else TableBlacklistMovie
+    rows = schema_session.execute(sa_select(model.arr_instance_id, model.subs_id)).all()
+    assert [tuple(row) for row in rows] == [(4, 'release-1')]
 
 
 def test_an_unattributable_movie_release_is_still_excluded(blacklist_calls):
@@ -83,7 +127,7 @@ def test_an_unattributable_movie_release_is_still_excluded(blacklist_calls):
     _handle_mgb('provider', _exception('movie'),
                 {'radarrId': None, 'sonarrSeriesId': None, 'sonarrEpisodeId': None},
                 Language('eng'))
-    assert blacklist_calls == [('movie', None, 'provider', 'release-1', 'en')]
+    assert blacklist_calls == [('movie', None, 'provider', 'release-1', 'en', None)]
 
 
 def test_a_sports_search_records_to_its_event_when_the_context_travels(
@@ -194,7 +238,7 @@ def test_a_partial_episode_id_still_excludes_the_release(blacklist_calls):
     _handle_mgb('provider', _exception('series'),
                 {'radarrId': None, 'sonarrSeriesId': 3, 'sonarrEpisodeId': None},
                 Language('eng'))
-    assert blacklist_calls == [('series', 3, None, 'provider', 'release-1', 'en')]
+    assert blacklist_calls == [('series', 3, None, 'provider', 'release-1', 'en', None)]
 
 
 def test_the_release_blacklist_is_not_scoped_to_any_media():
@@ -221,4 +265,4 @@ def test_the_language_modifier_travels_with_the_release(blacklist_calls):
     hi = Language.rebuild(Language('eng'), hi=True)
     _handle_mgb('provider', _exception('movie'),
                 {'radarrId': 7, 'sonarrSeriesId': None, 'sonarrEpisodeId': None}, hi)
-    assert blacklist_calls[0][-1] == 'en:hi'
+    assert blacklist_calls[0][-2] == 'en:hi'

@@ -340,7 +340,8 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
                                                            module='subtitles.mass_download.series',
                                                            func='episode_download_subtitles',
                                                            args=[],
-                                                           kwargs={'no': episode['sonarrEpisodeId']},
+                                                           kwargs={'no': episode['sonarrEpisodeId'],
+                                                                   'arr_instance_id': owner_instance_id},
                                                            is_signalr=is_signalr)
                     else:
                         logging.debug('BAZARR cannot find this episode file yet (Sonarr may be slow to import episode '
@@ -525,7 +526,8 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
                                                    module='subtitles.mass_download.series',
                                                    func='episode_download_subtitles',
                                                    args=[],
-                                                   kwargs={'no': episode_id},
+                                                   kwargs={'no': episode_id,
+                                                           'arr_instance_id': owner_instance_id},
                                                    is_signalr=is_signalr)
             else:
                 if is_signalr and settings.general.notify_if_nothing_is_missing_for_signalr_event:

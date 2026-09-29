@@ -587,3 +587,62 @@ def test_restart_stops_every_client_when_the_integration_is_turned_off(monkeypat
     assert singleton.stopped is True
     assert extra.stopped is True
     assert extras == []
+
+
+def _control_flow_in_finally(tree):
+    """Lines of a return, or a break or continue that leaves the block, in a
+    finally block. Python 3.14 warns about each one when it compiles the
+    module."""
+    import ast
+
+    found = []
+
+    def visit(node, in_loop):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            return
+        if isinstance(node, ast.Return) or (
+                isinstance(node, (ast.Break, ast.Continue)) and not in_loop):
+            found.append(node.lineno)
+        in_loop = in_loop or isinstance(node, (ast.For, ast.AsyncFor, ast.While))
+        for child in ast.iter_child_nodes(node):
+            visit(child, in_loop)
+
+    for node in ast.walk(tree):
+        for statement in getattr(node, "finalbody", ()):
+            visit(statement, False)
+    return found
+
+
+def test_signalr_client_compiles_without_a_return_in_a_finally_block():
+    import ast
+    import inspect
+
+    assert _control_flow_in_finally(ast.parse(inspect.getsource(signalr_client))) == []
+
+
+_MOVIE_EVENT = {"name": "movie", "body": {"action": "updated",
+                                          "resource": {"id": 1, "title": "M", "year": 2020}}}
+
+
+class _NotAnException(BaseException):
+    pass
+
+
+@pytest.mark.parametrize("outcome", ["returns", "raises", "raises_base", "malformed"])
+def test_dispatcher_always_refreshes_the_badges_and_never_raises(monkeypatch, outcome):
+    """What the feed's consumer loop relies on: every event ends with a badge
+    refresh, and nothing an event raises reaches the loop."""
+    emitted = []
+    monkeypatch.setattr(signalr_client, "event_stream", lambda **event: emitted.append(event))
+
+    def update_one_movie(**_kwargs):
+        if outcome == "raises":
+            raise RuntimeError("fixture failure")
+        if outcome == "raises_base":
+            raise _NotAnException()
+
+    monkeypatch.setattr(signalr_client, "update_one_movie", update_one_movie)
+    data = {"name": "movie"} if outcome == "malformed" else _MOVIE_EVENT
+
+    assert signalr_client.dispatcher(data) is None
+    assert emitted == [{"type": "badges"}]

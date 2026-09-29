@@ -996,6 +996,295 @@ def test_a_plain_delete_is_refused_while_that_instance_syncs(
     assert stored(arr_engine) == [(kind, "Sibling", 1, 1)]
 
 
+SEARCH_JOBS = {"sonarr": ("subtitles.mass_download.series", "episode_download_subtitles"),
+               "radarr": ("subtitles.mass_download.movies", "movies_download_subtitles")}
+
+
+def _running_job(monkeypatch, module, func, **kwargs):
+    from collections import deque
+
+    from app.jobs_queue import Job, jobs_queue
+
+    job = Job(job_id=900020, job_name="Downloading missing subtitles", module=module, func=func,
+              kwargs={"job_id": 900020, **kwargs})
+    job.status = "running"
+    monkeypatch.setattr(jobs_queue, "jobs_running_queue", deque([job]))
+    return job
+
+
+def _subtitle_job(kind, job, owner):
+    """(module, func, kwargs) of a subtitle job naming ``owner``."""
+    if job == "series_search":
+        return "subtitles.mass_download.series", "series_download_subtitles", {
+            "no": 1, "arr_instance_id": owner}
+    if job == "translation":
+        return "subtitles.tools.translate.main", "translate_subtitles_file", {
+            "video_path": "/media/item.mkv", "arr_instance_id": owner}
+    module, func = SEARCH_JOBS[kind]
+    return module, func, {"no": 11, "arr_instance_id": owner}
+
+
+@pytest.mark.parametrize("job, named", [
+    ("search", True),
+    # One that names no instance looks its item up in every instance of the kind.
+    ("search", False),
+    ("series_search", True),
+    ("series_search", False),
+    ("translation", True),
+])
+@pytest.mark.parametrize("kind", ["sonarr", "radarr"])
+def test_library_removal_waits_for_a_running_subtitle_job_of_that_instance(
+        arr_api, arr_engine, settings_saves, monkeypatch, kind, job, named):
+    """A subtitle search the sync queued has already read its item when it
+    runs. Once it finds a subtitle it saves it and records the history under
+    the instance it read, so a removal underneath it leaves a history row
+    naming an instance that is gone."""
+    if job == "series_search" and kind == "radarr":
+        pytest.skip("a whole-series search is a Sonarr job")
+    sibling = seed_library(arr_engine, kind, "Sibling", 2, default=True)
+    target = seed_library(arr_engine, kind, "Target", 1, default=False)
+    before = library_rows(arr_engine)
+    module, func, kwargs = _subtitle_job(kind, job, target if named else None)
+    _running_job(monkeypatch, module, func, **kwargs)
+
+    refused = arr_api.client.delete(f"{ROOT}/{target}?remove_library=true", headers=HEADERS)
+
+    assert refused.status_code == 409, refused.json
+    assert refused.json["error"] == "job_in_progress"
+    assert "subtitle" in refused.json["message"]
+    assert library_rows(arr_engine) == before
+    assert len(stored(arr_engine)) == 2
+
+    # The same job for the other instance does not hold this one up.
+    module, func, kwargs = _subtitle_job(kind, job, sibling)
+    _running_job(monkeypatch, module, func, **kwargs)
+    removed = arr_api.client.delete(f"{ROOT}/{target}?remove_library=true", headers=HEADERS)
+    assert removed.status_code == 204, removed.json
+    assert stored(arr_engine) == [(kind, "Sibling", 1, 1)]
+
+
+@pytest.mark.parametrize("job", ["queued", "other_kind"])
+@pytest.mark.parametrize("kind", ["sonarr", "radarr"])
+def test_library_removal_does_not_wait_for_a_subtitle_search_that_cannot_touch_it(
+        arr_api, arr_engine, settings_saves, monkeypatch, kind, job):
+    """A queued search reads its item only when it starts, and by then the
+    item is gone, so it finds nothing to search for. A search of the other
+    kind that names no instance never reads this kind's library."""
+    from collections import deque
+
+    from app.jobs_queue import Job, jobs_queue
+
+    seed_library(arr_engine, kind, "Sibling", 2, default=True)
+    target = seed_library(arr_engine, kind, "Target", 1, default=False)
+    if job == "queued":
+        module, func = SEARCH_JOBS[kind]
+        queued = Job(job_id=900021, job_name="Downloading missing subtitles", module=module,
+                     func=func, kwargs={"no": 11, "arr_instance_id": target})
+        monkeypatch.setattr(jobs_queue, "jobs_pending_queue", deque([queued]))
+    else:
+        module, func = SEARCH_JOBS[_other(kind)]
+        _running_job(monkeypatch, module, func, no=11, arr_instance_id=None)
+
+    removed = arr_api.client.delete(f"{ROOT}/{target}?remove_library=true", headers=HEADERS)
+
+    assert removed.status_code == 204, removed.json
+    assert stored(arr_engine) == [(kind, "Sibling", 1, 1)]
+
+
+def _stray_mismatch_flag(engine, kind, owner):
+    """A release-type mismatch flag a search recorded for ``owner``."""
+    from app.database import TableReleaseTypeMismatch
+
+    with engine.connect() as c:
+        c.execute(sa.insert(TableReleaseTypeMismatch).values(
+            media_type="series" if kind == "sonarr" else "movie", media_id=424242,
+            arr_instance_id=owner, language="en", video_release_type="web",
+            subtitle_release_type="bluray"))
+
+
+def _rows_naming(engine, owner):
+    from app.database import TableHistory, TableHistoryMovie, TableReleaseTypeMismatch
+
+    with engine.connect() as c:
+        return sum(c.execute(sa.select(sa.func.count()).select_from(model)
+                             .where(model.arr_instance_id == owner)).scalar_one()
+                   for model in (TableHistory, TableHistoryMovie, TableReleaseTypeMismatch))
+
+
+@pytest.mark.parametrize("left_behind", [_stray_history_row, _stray_mismatch_flag])
+@pytest.mark.parametrize("kind", ["sonarr", "radarr"])
+def test_a_new_instance_never_takes_an_id_that_rows_still_name(
+        arr_api, arr_engine, settings_saves, kind, left_behind):
+    """SQLite hands the highest id out again once its row is gone. A write that
+    was past its instance lookup when the removal committed still names that
+    id, and the next instance to take it would own those rows as its own."""
+    seed_library(arr_engine, kind, "Sibling", 2, default=True)
+    target = seed_library(arr_engine, kind, "Target", 1, default=False)
+    removed = arr_api.client.delete(f"{ROOT}/{target}?remove_library=true", headers=HEADERS)
+    assert removed.status_code == 204, removed.json
+    left_behind(arr_engine, kind, target)
+
+    created = arr_api.client.post(ROOT, json={"kind": kind, "name": "Replacement", "api_key": "k",
+                                              "port": 3}, headers=HEADERS)
+
+    assert created.status_code == 201, created.json
+    assert created.json["id"] > target
+    # The row stays where the writer put it, naming no instance there is.
+    assert _rows_naming(arr_engine, target) == 1
+    assert _rows_naming(arr_engine, created.json["id"]) == 0
+
+
+@pytest.mark.parametrize("remove_library", [True, False])
+@pytest.mark.parametrize("kind", ["sonarr", "radarr"])
+def test_a_new_instance_never_takes_the_id_of_the_instance_deleted_last(
+        arr_api, arr_engine, settings_saves, kind, remove_library):
+    """The instance deleted last had the highest id, and nothing left names
+    it: its library went with it, or it never had one. A write that was past
+    its instance lookup when the delete committed can still land after the
+    next instance is added, and that instance must not own it."""
+    seed_library(arr_engine, kind, "Sibling", 2, default=True)
+    if remove_library:
+        target = seed_library(arr_engine, kind, "Target", 1, default=False)
+    else:
+        added = arr_api.client.post(ROOT, json={"kind": kind, "name": "Target", "api_key": "k",
+                                                "port": 4}, headers=HEADERS)
+        assert added.status_code == 201, added.json
+        target = added.json["id"]
+    removed = arr_api.client.delete(
+        f"{ROOT}/{target}?remove_library={'true' if remove_library else 'false'}", headers=HEADERS)
+    assert removed.status_code == 204, removed.json
+    assert _rows_naming(arr_engine, target) == 0
+
+    created = arr_api.client.post(ROOT, json={"kind": kind, "name": "Replacement", "api_key": "k",
+                                              "port": 3}, headers=HEADERS)
+    assert created.status_code == 201, created.json
+    _stray_history_row(arr_engine, kind, target)
+
+    assert created.json["id"] > target
+    assert _rows_naming(arr_engine, created.json["id"]) == 0
+
+
+def test_a_new_sportarr_instance_never_takes_the_id_of_the_one_deleted_last(arr_session):
+    from arr_instances.repository import ArrInstanceRepository
+
+    repo = ArrInstanceRepository(arr_session)
+    repo.create("sportarr", "First")
+    last = repo.create("sportarr", "Last").id
+    assert repo.delete(last) is True
+
+    assert repo.create("sportarr", "Next").id > last
+
+
+@pytest.mark.parametrize("kind", ["sonarr", "radarr"])
+def test_a_create_gets_an_id_of_its_own_when_another_create_commits_meanwhile(
+        arr_api, arr_engine, settings_saves, kind):
+    """A script can add instances in parallel. The id is chosen when the row
+    is written, so one create that commits while the other runs does not make
+    the other fail as a duplicate."""
+    from app.database import TableArrInstances
+
+    seed_library(arr_engine, kind, "Sibling", 2, default=True)
+    raced = []
+
+    def create_meanwhile(_conn, _cursor, statement, *_args):
+        if raced or not statement.lstrip().upper().startswith("INSERT INTO ARR_INSTANCES"):
+            return
+        raced.append(statement)
+        with arr_engine.connect() as c:
+            c.execute(sa.insert(TableArrInstances).values(
+                kind=kind, name="Other", stable_key=f"{kind}-other", port=9, enabled=1,
+                is_default=0))
+
+    sa.event.listen(arr_engine, "before_cursor_execute", create_meanwhile)
+    try:
+        created = arr_api.client.post(ROOT, json={"kind": kind, "name": "Next", "api_key": "k",
+                                                  "port": 3}, headers=HEADERS)
+    finally:
+        sa.event.remove(arr_engine, "before_cursor_execute", create_meanwhile)
+
+    assert raced
+    assert created.status_code == 201, created.json
+    assert stored(arr_engine) == [(kind, "Sibling", 1, 1), (kind, "Other", 1, 0),
+                                  (kind, "Next", 1, 0)]
+
+
+def _load_retired_ids_migration():
+    import importlib.util
+    import pathlib
+
+    path = (pathlib.Path(__file__).resolve().parents[2] / "migrations" / "versions"
+            / "a7d3e9c1f428_arr_instance_retired_ids.py")
+    spec = importlib.util.spec_from_file_location("arr_instance_retired_ids_migration", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_an_existing_database_gets_the_table_of_deleted_instance_ids(arr_engine):
+    from app.database import TableArrInstanceRetiredIds
+
+    migration = _load_retired_ids_migration()
+    table = TableArrInstanceRetiredIds.__tablename__
+
+    def columns():
+        inspector = sa.inspect(arr_engine)
+        if table not in inspector.get_table_names():
+            return None
+        return ([column["name"] for column in inspector.get_columns(table)],
+                inspector.get_pk_constraint(table)["constrained_columns"])
+
+    expected = columns()
+    assert expected == (["id"], ["id"])
+    # The database as it was before this revision.
+    with arr_engine.connect() as connection:
+        connection.exec_driver_sql(f"DROP TABLE {table}")
+    assert columns() is None
+
+    with arr_engine.connect() as connection:
+        assert migration.create_retired_ids_table(connection) is True
+    assert columns() == expected
+    # Run again, as after create_all at startup: nothing to do.
+    with arr_engine.connect() as connection:
+        assert migration.create_retired_ids_table(connection) is False
+
+
+@pytest.mark.parametrize("first", [True, False])
+@pytest.mark.parametrize("kind", ["sonarr", "radarr"])
+def test_a_create_survives_a_write_another_connection_commits_meanwhile(
+        arr_api, arr_engine, settings_saves, kind, first):
+    """A library sync keeps writing while an instance is added, such as the
+    first instance's sync while the setup wizard adds the next one. In WAL
+    mode SQLite refuses the first write of a transaction that has read before
+    another connection committed, at once and whatever the busy timeout, so
+    the create must not read between its BEGIN and its INSERT."""
+    if arr_engine.dialect.name == "sqlite":
+        # As app/database.py configures every SQLite connection.
+        with arr_engine.connect() as c:
+            c.exec_driver_sql("PRAGMA journal_mode=WAL")
+        sa.event.listen(arr_engine, "connect",
+                        lambda dbapi, _record: dbapi.execute("PRAGMA busy_timeout=60000"))
+    sibling = None if first else seed_library(arr_engine, kind, "Sibling", 2, default=True)
+    wrote = []
+
+    def write_meanwhile(_conn, _cursor, statement, *_args):
+        if wrote or not statement.lstrip().upper().startswith("INSERT INTO ARR_INSTANCES"):
+            return
+        wrote.append(statement)
+        _stray_history_row(arr_engine, kind, sibling)
+
+    sa.event.listen(arr_engine, "before_cursor_execute", write_meanwhile)
+    try:
+        created = arr_api.client.post(ROOT, json={"kind": kind, "name": "Next", "api_key": "k",
+                                                  "port": 3}, headers=HEADERS)
+    finally:
+        sa.event.remove(arr_engine, "before_cursor_execute", write_meanwhile)
+
+    assert wrote
+    assert created.status_code == 201, created.json
+    assert stored(arr_engine) == ([(kind, "Next", 1, 1)] if first
+                                  else [(kind, "Sibling", 1, 1), (kind, "Next", 1, 0)])
+
+
 @pytest.mark.parametrize("remove_library", [True, False])
 @pytest.mark.parametrize("kind", ["sonarr", "radarr"])
 def test_the_kind_is_off_before_the_feed_and_jobs_are_refreshed(

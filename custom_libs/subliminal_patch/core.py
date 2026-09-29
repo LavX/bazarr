@@ -659,6 +659,7 @@ class SZProviderPool(ProviderPool):
                     s.radarrId = video.radarrId if hasattr(video, 'radarrId') else None
                     s.sonarrSeriesId = video.sonarrSeriesId if hasattr(video, 'sonarrSeriesId') else None
                     s.sonarrEpisodeId = video.sonarrEpisodeId if hasattr(video, 'sonarrEpisodeId') else None
+                    s.arr_instance_id = getattr(video, 'arr_instance_id', None)
                     # Sports carries its event context on the video; the
                     # callback needs it at download time, when only the
                     # subtitle is in scope.
@@ -678,6 +679,7 @@ class SZProviderPool(ProviderPool):
                 'radarrId': video.radarrId if hasattr(video, 'radarrId') else None,
                 'sonarrSeriesId': video.sonarrSeriesId if hasattr(video, 'sonarrSeriesId') else None,
                 'sonarrEpisodeId': video.sonarrEpisodeId if hasattr(video, 'sonarrEpisodeId') else None,
+                'arr_instance_id': getattr(video, 'arr_instance_id', None),
             }
             logger.warning('Provider %r throttled: %s', provider, e)
             self._notify_throttle(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None,
@@ -690,6 +692,7 @@ class SZProviderPool(ProviderPool):
                 'radarrId': video.radarrId if hasattr(video, 'radarrId') else None,
                 'sonarrSeriesId': video.sonarrSeriesId if hasattr(video, 'sonarrSeriesId') else None,
                 'sonarrEpisodeId': video.sonarrEpisodeId if hasattr(video, 'sonarrEpisodeId') else None,
+                'arr_instance_id': getattr(video, 'arr_instance_id', None),
             }
             logger.exception('Unexpected error in provider %r: %s', provider, traceback.format_exc())
             self._notify_throttle(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None,
@@ -853,6 +856,7 @@ class SZProviderPool(ProviderPool):
             'radarrId': subtitle.radarrId if hasattr(subtitle, 'radarrId') else None,
             'sonarrSeriesId': subtitle.sonarrSeriesId if hasattr(subtitle, 'sonarrSeriesId') else None,
             'sonarrEpisodeId': subtitle.sonarrEpisodeId if hasattr(subtitle, 'sonarrEpisodeId') else None,
+            'arr_instance_id': getattr(subtitle, 'arr_instance_id', None),
         }
 
         # retry downloading on failure until settings' download retry limit hit

@@ -153,9 +153,10 @@ export interface ArrInstanceLibrary {
 
 // The 409 a delete answers. "conflict" with can_remove_library means the
 // instance still owns synced rows and can be deleted together with them;
-// "sync_in_progress" refuses that while its library sync runs.
+// "sync_in_progress" refuses that while its library sync runs, and
+// "job_in_progress" while a subtitle job for it runs.
 export interface ArrInstanceDeleteConflict {
-  error: "conflict" | "sync_in_progress";
+  error: "conflict" | "sync_in_progress" | "job_in_progress";
   message: string;
   can_remove_library?: boolean;
   library?: ArrInstanceLibrary;
