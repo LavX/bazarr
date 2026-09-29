@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=1280, initial-scale=1">
+  <title>Bazarr+ GitHub social preview</title>
+  <style>
+    @font-face {
+      font-family: Geist;
+      src: url('../fonts/Geist-Variable.woff2') format('woff2');
+      font-display: swap;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      width: 1280px;
+      height: 640px;
+      overflow: hidden;
+      background: #121125;
+      color: #fff8e1;
+      font-family: Geist, system-ui, sans-serif;
+    }
+
+    body::before {
+      content: '';
+      position: absolute;
+      inset: -280px auto auto -180px;
+      width: 680px;
+      height: 680px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(240, 177, 68, .2), rgba(240, 177, 68, 0) 68%);
+    }
+
+    body::after {
+      content: '';
+      position: absolute;
+      right: -180px;
+      bottom: -280px;
+      width: 720px;
+      height: 720px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(88, 132, 255, .18), rgba(88, 132, 255, 0) 70%);
+    }
+
+    .copy {
+      position: absolute;
+      z-index: 2;
+      left: 64px;
+      top: 52px;
+      width: 610px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      font-size: 30px;
+      font-weight: 720;
+      letter-spacing: -.03em;
+    }
+
+    .brand img {
+      width: 54px;
+      height: 54px;
+      filter: drop-shadow(0 8px 20px rgba(0, 0, 0, .3));
+    }
+
+    .brand b { color: #f0b144; }
+
+    .eyebrow {
+      margin-top: 60px;
+      color: #f0b144;
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: .15em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 14px 0 0;
+      max-width: 600px;
+      font-size: 66px;
+      line-height: .98;
+      letter-spacing: -.058em;
+      font-weight: 760;
+    }
+
+    h1 span { color: #f0b144; }
+
+    .lede {
+      margin: 24px 0 0;
+      max-width: 560px;
+      color: #d7d4e6;
+      font-size: 22px;
+      line-height: 1.35;
+      font-weight: 450;
+    }
+
+    .pills {
+      display: flex;
+      gap: 10px;
+      margin-top: 28px;
+    }
+
+    .pill {
+      padding: 9px 14px 10px;
+      border: 1px solid rgba(255, 248, 225, .18);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, .055);
+      color: #fff8e1;
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    .window {
+      position: absolute;
+      z-index: 1;
+      top: 50px;
+      left: 728px;
+      width: 640px;
+      height: 540px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 248, 225, .2);
+      border-radius: 22px;
+      background: #17152d;
+      box-shadow: 0 34px 90px rgba(0, 0, 0, .48), 0 0 0 8px rgba(255, 255, 255, .025);
+      transform: rotate(1.2deg);
+    }
+
+    .window-bar {
+      display: flex;
+      align-items: center;
+      height: 40px;
+      padding: 0 16px;
+      gap: 8px;
+      background: #1d1a36;
+      border-bottom: 1px solid rgba(255, 248, 225, .1);
+      color: #a9a5bd;
+      font-size: 13px;
+      letter-spacing: .04em;
+    }
+
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: #f0b144; }
+    .dot:nth-child(2) { opacity: .58; }
+    .dot:nth-child(3) { opacity: .28; }
+    .window-label { margin-left: 9px; }
+
+    .window img {
+      display: block;
+      width: 640px;
+      height: 580px;
+      object-fit: cover;
+      object-position: top center;
+    }
+
+    .edge {
+      position: absolute;
+      z-index: 3;
+      inset: 0;
+      pointer-events: none;
+      border: 1px solid rgba(255, 248, 225, .08);
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="copy">
+      <div class="brand"><img src="../screenshots/logo128.png" alt=""><span>Bazarr<b>+</b></span></div>
+      <div class="eyebrow">Self-hosted subtitles</div>
+      <h1>Any film.<br>Any show.<br><span>No library required.</span></h1>
+      <p class="lede">Search, preview and download. Or connect Sonarr, Radarr and Sportarr for full automation.</p>
+      <div class="pills" aria-label="Capabilities">
+        <span class="pill">No tracking</span>
+        <span class="pill">Docker ready</span>
+        <span class="pill">Provider plugins</span>
+      </div>
+    </section>
+    <section class="window" aria-label="Discover subtitle search preview">
+      <div class="window-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="window-label">Discover</span></div>
+      <img src="../screenshots/v2.7.0/discover-title-subtitle-search.png" alt="">
+    </section>
+  </main>
+  <div class="edge"></div>
+</body>
+</html>

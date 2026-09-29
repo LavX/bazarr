@@ -271,19 +271,19 @@
 
       <p>To run this way, take the Discover path when the wizard asks at first login and connect nothing. The languages and providers from that same wizard are all Discover needs. The <a href="provider-hub.html">Provider Hub</a> and <a href="subtitle-processing.html">Subtitle Processing</a> guides apply unchanged, and the section below is for readers who do have a library. More on what Discover is and does is on the <a href="../#standalone">home page</a>.</p>
 
-      <h2 id="connecting-to-sonarr-and-radarr">Connecting to Sonarr and Radarr</h2>
-      <p>Go to <strong>Settings &gt; Sonarr</strong> (or <strong>Radarr</strong>) and fill in:</p>
+      <h2 id="connecting-to-sonarr-and-radarr">Connecting Sonarr, Radarr or Sportarr</h2>
+      <p>Go to <strong>Settings &gt; Connections</strong>, choose <strong>Sonarr</strong>, <strong>Radarr</strong> or <strong>Sportarr</strong>, and add an instance with:</p>
 
       <ul>
-        <li><strong>Host and port</strong> of your Sonarr/Radarr instance (e.g., <code>192.168.1.10:8989</code>)</li>
-        <li><strong>API key</strong>, found in Sonarr/Radarr under Settings &gt; General</li>
-        <li><strong>Base URL</strong>, only needed if you run Sonarr/Radarr behind a reverse proxy with a path prefix</li>
+        <li><strong>Host and port</strong> of the instance, for example <code>192.168.1.10:8989</code></li>
+        <li><strong>API key</strong>, found in that application's settings</li>
+        <li><strong>Base URL</strong>, only needed when the application sits behind a reverse proxy with a path prefix</li>
       </ul>
 
-      <p>Click <strong>Test</strong> to verify the connection, then <strong>Save</strong>. Bazarr+ will sync your library and start searching for missing subtitles on the next scheduled scan.</p>
+      <p>Click <strong>Test</strong> to verify the connection, then <strong>Save</strong>. Bazarr+ will sync that instance and start searching for missing subtitles on the next scheduled scan.</p>
 
       <div class="note">
-        <strong>Tip:</strong> If Sonarr/Radarr and Bazarr+ share the same Docker network, use the container name as the host (e.g., <code>sonarr</code> instead of an IP address). This avoids issues when IP addresses change.
+        <strong>Tip:</strong> If the library application and Bazarr+ share the same Docker network, use the container name as the host, for example <code>sonarr</code> instead of an IP address. This avoids issues when IP addresses change.
       </div>
 
       <h2 id="next-steps">Next steps</h2>
