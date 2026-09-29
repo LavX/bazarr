@@ -50,8 +50,13 @@ def blacklist_log_movie(radarr_id, provider, subs_id, language, arr_instance_id=
         language=language,
     )
 
-    # Stamp owner + local ref (movie_id -> the local PK) from the movie row
-    # (the INC2b pattern). Guarded; NULL for an unresolved row / pre-backfill.
+    if arr_instance_id is not None:
+        values['arr_instance_id'] = arr_instance_id
+
+    # Resolve the owner and local ref (movie_id -> the local PK) from the movie
+    # row when it is available. A missing movie must not discard an owner
+    # supplied by the caller. Without either, the row stays unowned: it still
+    # excludes the release everywhere.
     if radarr_id is not None:
         mv = _resolve_movie_owner_row(radarr_id, arr_instance_id)
         if mv is not None:

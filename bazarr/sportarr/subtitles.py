@@ -25,7 +25,7 @@ from app.config import settings
 from app.get_providers import get_providers
 from media_servers.events import publication_callback
 from sportarr.connection import check_cancelled
-from sportarr.db import SportsTransactionOutcome, sports_transaction
+from sportarr.db import SportsTransactionOutcome, error_sqlstate, sports_transaction
 from sportarr.errors import SportsOwnersBusy
 from sportarr.identity import SportsEventContext, resolve_event_in_session
 from sportarr.output import (
@@ -166,16 +166,16 @@ def _is_owner_contention(exc):
     cause behind retry wording and then repeats it for as long as the retry
     budget lasts.
 
-    Both spellings of the SQLSTATE are read. psycopg 2, which the image
-    ships, calls it ``pgcode``; psycopg 3, which the tests run on, exposes it
-    as ``sqlstate``. Reading only one of them silently classifies every real
-    lock refusal as a fault, because the attribute is simply absent on the
-    other driver.
+    The SQLSTATE is read through error_sqlstate, which takes both spellings.
+    psycopg2, the driver the image ships and CI runs on, calls it ``pgcode``;
+    psycopg 3 calls it ``sqlstate``. Reading only one of them silently
+    classifies every real lock refusal as a fault, because the attribute is
+    simply absent on the other driver.
     """
-    original = getattr(exc, 'orig', None)
-    state = getattr(original, 'sqlstate', None) or getattr(original, 'pgcode', None)
+    state = error_sqlstate(exc)
     if state is not None:
         return state in _CONTENTION_SQLSTATES
+    original = getattr(exc, 'orig', None)
     message = str(original or exc).lower()
     return 'database is locked' in message or 'database is busy' in message
 

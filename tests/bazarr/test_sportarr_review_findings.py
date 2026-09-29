@@ -156,7 +156,8 @@ def test_a_caller_fault_inside_the_guard_keeps_its_own_error(monkeypatch):
     assert raised.value is fault
 
 
-def test_guard_contention_is_reported_as_a_retryable_busy_error(monkeypatch):
+@pytest.mark.parametrize('attribute', ['pgcode', 'sqlstate'])
+def test_guard_contention_is_reported_as_a_retryable_busy_error(monkeypatch, attribute):
     from contextlib import contextmanager
 
     from sqlalchemy.exc import OperationalError
@@ -168,11 +169,14 @@ def test_guard_contention_is_reported_as_a_retryable_busy_error(monkeypatch):
     # take as 55P03. A bare OperationalError with no code is a database fault,
     # not contention, and must not be answered as busy.
     class Contended(Exception):
-        sqlstate = '55P03'
+        pass
+
+    contended = Contended('could not obtain lock')
+    setattr(contended, attribute, '55P03')
 
     @contextmanager
     def transaction(*args, **kwargs):
-        raise OperationalError('LOCK TABLE', {}, Contended('could not obtain lock'))
+        raise OperationalError('LOCK TABLE', {}, contended)
         yield  # pragma: no cover
 
     monkeypatch.setattr(sports_subtitles, 'sports_transaction', transaction)
@@ -795,11 +799,11 @@ def _operational(orig):
     return OperationalError('SQL', {}, orig)
 
 
-# psycopg 2, which the image ships, calls it pgcode; psycopg 3, which the CI
-# Postgres suites install, spells it sqlstate. Both are parametrized because
-# reading only one of them classifies every real lock refusal on the other
-# driver as a database fault, which is a silent failure: the attribute is
-# absent rather than wrong.
+# psycopg2, which the image ships and the CI Postgres suites install, calls it
+# pgcode; psycopg 3 spells it sqlstate. Both are parametrized because reading
+# only one of them classifies every real lock refusal on the other driver as a
+# database fault, which is a silent failure: the attribute is absent rather
+# than wrong.
 @pytest.mark.parametrize('attribute', ['sqlstate', 'pgcode'])
 @pytest.mark.parametrize('state,contention', [
     ('55P03', True),    # NOWAIT lock this boundary asked for and could not take
@@ -826,19 +830,134 @@ def test_only_a_discarded_transaction_counts_as_owner_contention(attribute, stat
     assert _is_owner_contention(_operational(orig)) is contention
 
 
-def test_the_real_driver_error_is_recognised():
-    """Driven with the exception psycopg actually raises, not a stand-in.
+@pytest.fixture
+def psycopg2_engine():
+    """An AUTOCOMMIT psycopg2 engine on a private schema of the test server.
+
+    psycopg2 fills pgcode only on an error the server really sent, so these
+    errors have to come from PostgreSQL. Building psycopg2.errors classes by
+    hand gives an exception whose pgcode is None.
+    """
+    import os
+    from uuid import uuid4
+
+    import sqlalchemy as sa
+
+    url = os.environ.get('BAZARR_PG_TEST_URL')
+    if not url:
+        pytest.skip('Set BAZARR_PG_TEST_URL to raise real errors from PostgreSQL')
+    # The driver the image ships, whatever driver the URL names.
+    url = sa.engine.make_url(url).set(drivername='postgresql+psycopg2')
+    schema = f'owner_contention_{uuid4().hex}'
+    admin = sa.create_engine(url, isolation_level='AUTOCOMMIT')
+    with admin.connect() as connection:
+        connection.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
+    engine = sa.create_engine(url, isolation_level='AUTOCOMMIT',
+                              connect_args={'options': f'-csearch_path={schema}'})
+    try:
+        with engine.connect() as connection:
+            connection.exec_driver_sql('CREATE TABLE owners (id integer PRIMARY KEY)')
+            connection.exec_driver_sql('INSERT INTO owners (id) VALUES (1)')
+        yield engine
+    finally:
+        engine.dispose()
+        with admin.connect() as connection:
+            connection.exec_driver_sql(f'DROP SCHEMA "{schema}" CASCADE')
+        admin.dispose()
+
+
+def _assert_psycopg2(error, driver_class, state):
+    import psycopg2.errors
+
+    assert isinstance(error.orig, getattr(psycopg2.errors, driver_class))
+    assert error.orig.pgcode == state
+
+
+@pytest.mark.parametrize('held, statement', [
+    # What sports_file_publication asks for: the owner row, without waiting.
+    ('SELECT id FROM owners WHERE id = 1 FOR UPDATE',
+     'SELECT id FROM owners WHERE id = 1 FOR UPDATE NOWAIT'),
+    # A table lock someone else holds, given up after lock_timeout.
+    ('LOCK TABLE owners IN ACCESS EXCLUSIVE MODE', 'SELECT id FROM owners'),
+], ids=['nowait', 'lock-timeout'])
+def test_a_real_psycopg2_lock_refusal_is_owner_contention(psycopg2_engine, held, statement):
+    """Driven with the error PostgreSQL really sends through psycopg2, not a stand-in.
 
     A hand-rolled double carried the attribute name this code first guessed at,
     so the unit tests passed while every genuine lock refusal fell through to
     "database fault" and the Postgres suite was the only thing that noticed.
+    psycopg2 is the only driver the image ships.
     """
-    psycopg_errors = pytest.importorskip('psycopg.errors')
+    import sqlalchemy as sa
+
+    from sportarr.db import error_sqlstate
     from sportarr.subtitles import _is_owner_contention
 
-    assert _is_owner_contention(_operational(psycopg_errors.LockNotAvailable('nope')))
-    assert _is_owner_contention(_operational(psycopg_errors.SerializationFailure('nope')))
-    assert not _is_owner_contention(_operational(psycopg_errors.DiskFull('nope')))
+    with psycopg2_engine.connect() as holder, psycopg2_engine.connect() as contender:
+        holder.execution_options(isolation_level='READ COMMITTED')
+        with holder.begin():
+            holder.exec_driver_sql(held)
+            contender.exec_driver_sql("SET lock_timeout = '100ms'")
+            with pytest.raises(sa.exc.OperationalError) as raised:
+                contender.exec_driver_sql(statement)
+
+    _assert_psycopg2(raised.value, 'LockNotAvailable', '55P03')
+    assert error_sqlstate(raised.value) == '55P03'
+    assert _is_owner_contention(raised.value)
+
+
+def test_a_real_psycopg2_serialization_failure_is_owner_contention(psycopg2_engine):
+    """Two SERIALIZABLE transactions that each read what the other writes."""
+    import sqlalchemy as sa
+
+    from sportarr.db import error_sqlstate
+    from sportarr.subtitles import _is_owner_contention
+
+    with psycopg2_engine.connect() as first, psycopg2_engine.connect() as second:
+        for connection in (first, second):
+            connection.execution_options(isolation_level='SERIALIZABLE')
+        first_transaction, second_transaction = first.begin(), second.begin()
+        first.exec_driver_sql('SELECT count(*) FROM owners').scalar_one()
+        second.exec_driver_sql('SELECT count(*) FROM owners').scalar_one()
+        first.exec_driver_sql('INSERT INTO owners (id) VALUES (10)')
+        # PostgreSQL cancels one of them, at the write or at a commit.
+        with pytest.raises(sa.exc.OperationalError) as raised:
+            second.exec_driver_sql('INSERT INTO owners (id) VALUES (20)')
+            first_transaction.commit()
+            second_transaction.commit()
+
+    _assert_psycopg2(raised.value, 'SerializationFailure', '40001')
+    assert error_sqlstate(raised.value) == '40001'
+    assert _is_owner_contention(raised.value)
+
+
+def test_a_real_psycopg2_statement_timeout_is_not_owner_contention(psycopg2_engine):
+    """A cancelled statement is a fault with a code, and the code says so."""
+    import sqlalchemy as sa
+
+    from sportarr.subtitles import _is_owner_contention
+
+    with psycopg2_engine.connect() as connection:
+        connection.exec_driver_sql("SET statement_timeout = '50ms'")
+        with pytest.raises(sa.exc.OperationalError) as raised:
+            connection.exec_driver_sql('SELECT pg_sleep(1)')
+
+    _assert_psycopg2(raised.value, 'QueryCanceled', '57014')
+    assert not _is_owner_contention(raised.value)
+
+
+@pytest.mark.parametrize('attribute', ['pgcode', 'sqlstate'])
+@pytest.mark.parametrize('state', [None, '40001', '55P03'])
+def test_the_sqlstate_is_read_whichever_driver_spells_it(attribute, state):
+    from sportarr.db import error_sqlstate
+
+    class Orig(Exception):
+        pass
+
+    orig = Orig('boom')
+    setattr(orig, attribute, state)
+    assert error_sqlstate(_operational(orig)) == state
+    assert error_sqlstate(_operational(Exception('database is locked'))) is None
 
 
 def test_sqlite_reports_contention_without_a_code():
@@ -848,7 +967,8 @@ def test_sqlite_reports_contention_without_a_code():
     assert not _is_owner_contention(_operational(Exception('attempt to write a readonly database')))
 
 
-def test_a_serialization_failure_at_commit_is_retried(monkeypatch):
+@pytest.mark.parametrize('attribute', ['pgcode', 'sqlstate'])
+def test_a_serialization_failure_at_commit_is_retried(monkeypatch, attribute):
     """SERIALIZABLE is the boundary's isolation level, so 40001 at commit is
     routine. Nothing was written, and losing the history row loses the upgrade
     and blacklist trail for good, so this is the case the retry exists for."""
@@ -860,13 +980,16 @@ def test_a_serialization_failure_at_commit_is_retried(monkeypatch):
     from sportarr.errors import SportsOwnersBusy
 
     class Serialization(Exception):
-        sqlstate = '40001'
+        pass
+
+    serialization = Serialization('could not serialize access')
+    setattr(serialization, attribute, '40001')
 
     @contextmanager
     def transaction(*args, **kwargs):
         yield SimpleNamespace(execute=lambda *a, **kw: SimpleNamespace(scalar_one=lambda: None),
                               flush=lambda: None)
-        raise OperationalError('COMMIT', {}, Serialization('could not serialize access'))
+        raise OperationalError('COMMIT', {}, serialization)
 
     monkeypatch.setattr(sports_subtitles, 'sports_transaction', transaction)
     monkeypatch.setattr(sports_subtitles, 'lock_output_owners', lambda *a, **kw: None)

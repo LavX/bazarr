@@ -10,6 +10,18 @@ class SportsTransactionOutcome:
     rollback_confirmed: bool = False
 
 
+def error_sqlstate(exc):
+    """The SQLSTATE of the driver error a SQLAlchemy exception wraps, or None.
+
+    psycopg2, which the image ships, calls it ``pgcode``; psycopg 3 calls it
+    ``sqlstate``. Both are read, because the attribute is simply absent on the
+    other driver, so a check that reads one spelling fails without a sound on
+    the other. SQLite errors carry neither.
+    """
+    original = getattr(exc, 'orig', None)
+    return getattr(original, 'sqlstate', None) or getattr(original, 'pgcode', None)
+
+
 def needs_sports_transaction(database):
     bind = database.get_bind()
     return not isinstance(bind, Connection) and bind.dialect._on_connect_isolation_level == 'AUTOCOMMIT'

@@ -733,8 +733,12 @@ def test_profile_editor_changes_recompute_sports_missing(indexed_library, monkey
     # The save queues the recalculation instead of running it; the job is run
     # below, which is where the sports rows are recomputed now.
     queued = []
-    monkeypatch.setattr(endpoint, "queue_missing_subtitles_recalculation",
-                        lambda **kwargs: queued.append(kwargs))
+
+    def queue(**kwargs):
+        queued.append(kwargs)
+        return len(queued)  # a job id, as the real helper returns
+
+    monkeypatch.setattr(endpoint, "queue_missing_subtitles_recalculation", queue)
     monkeypatch.setattr(settings.general, "use_sonarr", False)
     monkeypatch.setattr(settings.general, "use_radarr", False)
     # The sports recompute is gated on the master toggle now, like the sonarr
@@ -777,6 +781,7 @@ def test_checked_subtitle_writes_lock_owner_until_commit(
 ):
     import threading
     from app.database import TableArrInstances
+    from sportarr.db import error_sqlstate
 
     session, _ = indexed_library
     module = sports(monkeypatch, session)
@@ -806,7 +811,7 @@ def test_checked_subtitle_writes_lock_owner_until_commit(
                     assert (
                         error.orig.sqlite_errorcode == 5
                         if engine.dialect.name == "sqlite"
-                        else error.orig.sqlstate == "55P03"
+                        else error_sqlstate(error) == "55P03"
                     )
                     connection.rollback()
                     results.append("blocked")

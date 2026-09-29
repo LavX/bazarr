@@ -6,11 +6,13 @@ const sizeKey = "settings-log-max_file_size_mb";
 const countKey = "settings-log-backup_count";
 
 /**
- * How much disk the log folder may use.
+ * How large bazarr.log and its rolled files get.
  *
  * The live file starts over at midnight or at the size limit, whichever comes
- * first, and only the newest rolled files are kept. The bounds match the
- * validators in the backend config, which refuse anything outside them.
+ * first, and only the newest rolled files are kept. Pruning goes by count, so
+ * the figure below is where the files settle rather than a cap: files rolled
+ * under a larger limit keep their size until they are pruned. The bounds match
+ * the validators in the backend config, which refuse anything outside them.
  */
 const LogFiles: FunctionComponent = () => {
   const size = useSettingValue<number>(sizeKey);
@@ -43,8 +45,9 @@ const LogFiles: FunctionComponent = () => {
       </Message>
       {ceiling !== null && (
         <Message>
-          Bazarr&apos;s log files use at most about {ceiling} MB: the current
-          file plus {count} older ones
+          With these settings bazarr.log and its rolled files settle at about{" "}
+          {ceiling} MB, the current file plus {count} older ones. Files rolled
+          before a change keep their size until they roll out.
         </Message>
       )}
     </>

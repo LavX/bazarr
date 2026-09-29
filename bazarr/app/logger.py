@@ -99,13 +99,34 @@ class NoExceptionFormatter(FileHandlerFormatter):
         return ''
 
 
+class CoverStreamAborted(Exception):
+    """A library cover stopped arriving from its arr instance partway through.
+
+    app.ui raises it from the response body, so the server drops the connection
+    rather than finishing a response the browser would then cache as a whole,
+    truncated poster. It is defined here, beside the filter that keeps waitress
+    from logging it as a traceback, because app.ui cannot be imported this early.
+    """
+
+
 class UnwantedWaitressMessageFilter(logging.Filter):
+    def __init__(self, debug=False):
+        super().__init__()
+        # What configure_logging was told, which covers --debug as well as
+        # general.debug.
+        self.debug = debug
+
     def filter(self, record):
-        if settings.general.debug or "BAZARR" in record.msg:
+        if self.debug or "BAZARR" in record.msg:
             # no filtering in debug mode or if originating from us
             return True
 
         if record.levelno < logging.ERROR:
+            return False
+
+        if record.exc_info and isinstance(record.exc_info[1], CoverStreamAborted):
+            # Expected when an arr instance drops a cover mid-transfer; the
+            # abort is on purpose and app.ui has already logged it at debug.
             return False
 
         unwantedMessages = [
@@ -133,6 +154,47 @@ class UnwantedWaitressMessageFilter(logging.Filter):
                         break
 
         return wanted
+
+
+class ExpiredSocketSessionFilter(logging.Filter):
+    """Drop engineio's report of a poll for a session it no longer knows.
+
+    engineio logs the first such poll at ERROR. A browser tab sends one after
+    missing its pings on an overloaded host, and the client simply reconnects,
+    so outside debug it is not a fault worth a line in the log. Every other
+    engineio.server record, such as a failing request handler, still passes.
+    """
+
+    # How engineio words that poll: a session it has never heard of, and the
+    # KeyError it raises for one it has closed but not yet dropped, or one gone
+    # by the time it looks it up. All three share one log-once key.
+    EXPIRED_SESSION_PREFIXES = ("Invalid session ", "'Session is disconnected' ", "'Session not found' ")
+
+    def __init__(self, debug=False):
+        super().__init__()
+        self.debug = debug
+
+    def filter(self, record):
+        # engineio formats this message itself. The raw msg is read so that a
+        # record whose arguments do not fit its format still reaches the handler,
+        # which reports that, instead of raising into engineio here.
+        return self.debug or not str(record.msg).startswith(self.EXPIRED_SESSION_PREFIXES)
+
+
+def _install_filter(logger_name, filter_class, debug):
+    """Give a logger exactly one filter of this class, set to this run's debug.
+
+    configure_logging runs again whenever debug is toggled, and adding a filter
+    each time would stack them. A filter is matched by the name of its class
+    rather than by isinstance: the loggers outlive this module, so a filter left
+    by an earlier import of it is an instance of a class that is gone.
+    """
+    target = logging.getLogger(logger_name)
+    for existing in list(target.filters):
+        if (type(existing).__module__, type(existing).__qualname__) == (filter_class.__module__,
+                                                                        filter_class.__qualname__):
+            target.removeFilter(existing)
+    target.addFilter(filter_class(debug))
 
 
 # Per-logger levels as (level in a normal install, level with general.debug on).
@@ -259,7 +321,8 @@ def configure_logging(debug=False):
         logging.debug('Python version: %s', platform.python_version())
 
     logging.getLogger("waitress").setLevel(logging.INFO)
-    logging.getLogger("waitress").addFilter(UnwantedWaitressMessageFilter())
+    _install_filter("waitress", UnwantedWaitressMessageFilter, debug)
+    _install_filter("engineio.server", ExpiredSocketSessionFilter, debug)
     logging.getLogger("knowit").setLevel(logging.CRITICAL)
     logging.getLogger("enzyme").setLevel(logging.CRITICAL)
     logging.getLogger("guessit").setLevel(logging.WARNING)
@@ -363,6 +426,11 @@ class SizeAndTimeRotatingFileHandler(TimedRotatingFileHandler):
     A roll that fails, such as a rename refused by a read-only folder or a file held
     open elsewhere, keeps logging into the live file, says so once on stderr, and is
     tried again at the next midnight or once the file has grown by another maxBytes.
+
+    An old file pruning cannot delete stays, and every later roll still deletes the
+    oldest files it can, so the folder holds one file more than backupCount for each
+    one stuck. That is said once per file on stderr and once at the top of the new
+    live file, where System > Logs shows it.
     """
 
     clock = staticmethod(time.time)
@@ -380,6 +448,11 @@ class SizeAndTimeRotatingFileHandler(TimedRotatingFileHandler):
         # nothing else has been written; None once anything has rolled.
         self._emptied_size = None
         self._roll_failed = False
+        # Paths the last prune could not delete (or the folder, when it could not
+        # be listed), so each is reported once for as long as it keeps failing.
+        self._prune_failures = set()
+        # Warnings a roll left for the top of the live file it started.
+        self._notices = []
         base_name = os.path.basename(self.baseFilename)
         self._rolled_name = re.compile(re.escape(base_name) + r'\.(\d{4}-\d{2}-\d{2})(?:\.([1-9]\d*))?',
                                        re.ASCII)
@@ -449,15 +522,45 @@ class SizeAndTimeRotatingFileHandler(TimedRotatingFileHandler):
         return [path for _, _, path in rolled[:excess]]
 
     def _prune(self):
+        failed = {}
         try:
             stale = self.getFilesToDelete()
-        except OSError:
-            return
+        except OSError as error:
+            folder = os.path.dirname(self.baseFilename)
+            failed[folder] = (f'could not list {folder} to delete the log files past log.backup_count ({error}). '
+                              f'Each roll tries again')
+            stale = []
         for path in stale:
             try:
                 os.remove(path)
-            except OSError:
-                pass
+            except OSError as error:
+                failed[path] = (f'could not delete {path}, a log file past log.backup_count ({error}). It stays '
+                                f'in the log folder, and each roll tries again')
+        for path, problem in failed.items():
+            if path not in self._prune_failures:
+                self._report_prune_failure(problem)
+        # A path that was deleted since drops out, so a new failure is reported.
+        self._prune_failures = set(failed)
+
+    def _report_prune_failure(self, problem):
+        # stderr now, since logging from inside a roll would re-enter it, and the
+        # live file once the roll is over, which is where anyone looks.
+        sys.stderr.write(f'Bazarr {problem}.\n')
+        self._notices.append(f'BAZARR {problem}.')
+
+    def emit(self, record):
+        """Roll when due, and write any notice the roll left ahead of the record."""
+        try:
+            if self.shouldRollover(record):
+                self.doRollover()
+            notices, self._notices = self._notices, []
+            for notice in notices:
+                # Straight to the file: through a logger it would come back here.
+                logging.FileHandler.emit(self, logging.LogRecord(
+                    logging.getLogger().name, logging.WARNING, __file__, 0, notice, (), None))
+            logging.FileHandler.emit(self, record)
+        except Exception:
+            self.handleError(record)
 
     def _report_failure(self, error):
         # stderr rather than a log record: logging from here would re-enter the roll.

@@ -14,6 +14,7 @@ the parser returns, so stubbing the parser isolates the seam under test).
 
 Plan: docs/superpowers/plans/2026-05-27-multiple-arr-instances-final.md (Phase 4).
 """
+import pytest
 import semver
 
 from sqlalchemy import insert, select
@@ -462,6 +463,106 @@ def test_update_one_movie_passed_instance_id_wins(schema_session, monkeypatch):
     row = schema_session.execute(
         select(TableMovies.arr_instance_id).where(TableMovies.radarrId == 10)).first()
     assert row is not None and row.arr_instance_id == 2
+
+
+# ------------------------------------------------ subtitle searches a sync queues
+#
+# The search names the instance of the item it is for. Without it the search
+# looked its item up in every instance of the kind, and the delete guard could
+# not tell which instance it was working for.
+
+class _RecordingJobs(_DummyJobs):
+    def __init__(self):
+        self.queued = []
+
+    def feed_jobs_pending_queue(self, *a, **k):
+        self.queued.append((k["module"], k["func"], k["kwargs"]))
+        return len(self.queued)
+
+
+def _episode_sync(monkeypatch, session, video):
+    import sonarr.sync.episodes as ep_mod
+
+    jobs = _RecordingJobs()
+    monkeypatch.setattr(ep_mod, "database", session)
+    monkeypatch.setattr(ep_mod, "jobs_queue", jobs)
+    monkeypatch.setattr(ep_mod, "store_subtitles", _noop)
+    monkeypatch.setattr(ep_mod, "event_stream", _noop)
+    monkeypatch.setattr(ep_mod, "get_sonarr_info", _SonarrInfoStub())
+    monkeypatch.setattr(ep_mod, "_is_there_missing_subtitles", lambda **_kw: True)
+    monkeypatch.setattr(ep_mod.path_mappings, "path_replace", lambda p: p)
+    monkeypatch.setattr(ep_mod, "episodeParser", lambda e, **_kw: {
+        "sonarrSeriesId": 5, "sonarrEpisodeId": 100, "path": str(video), "season": 1,
+        "episode": 1, "title": "E", "monitored": "True"})
+    return ep_mod, jobs
+
+
+def test_a_bulk_episode_sync_queues_each_search_for_the_owning_instance(
+        schema_session, monkeypatch, tmp_path):
+    video = tmp_path / "e.mkv"
+    video.write_bytes(b"")
+    _seed_default(schema_session, "sonarr")
+    # Owned by an instance other than the default, and synced without naming it.
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=5, id=77, arr_instance_id=2, path="/tv/s", title="S",
+        audio_language="[]"))
+    ep_mod, jobs = _episode_sync(monkeypatch, schema_session, video)
+
+    ep_mod.sync_episodes(series_id=5, defer_search=False, episodes_data=[
+        {"id": 100, "hasFile": True, "monitored": True, "episodeFileId": 100,
+         "episodeFile": {"size": 999999, "path": str(video)}}])
+
+    assert jobs.queued == [("subtitles.mass_download.series", "episode_download_subtitles",
+                            {"no": 100, "arr_instance_id": 2})]
+
+
+def test_a_single_episode_sync_queues_its_search_for_the_owning_instance(
+        schema_session, monkeypatch, tmp_path):
+    video = tmp_path / "e.mkv"
+    video.write_bytes(b"")
+    schema_session.execute(insert(TableShows).values(
+        sonarrSeriesId=5, id=77, arr_instance_id=3, path="/tv/s", title="S",
+        audio_language="[]"))
+    ep_mod, jobs = _episode_sync(monkeypatch, schema_session, video)
+    monkeypatch.setattr(ep_mod, "get_episodes_from_sonarr_api",
+                        lambda **_kw: {"seriesId": 5, "hasFile": False})
+
+    ep_mod.sync_one_episode(100, defer_search=False, arr_instance_id=3)
+
+    assert jobs.queued == [("subtitles.mass_download.series", "episode_download_subtitles",
+                            {"no": 100, "arr_instance_id": 3})]
+
+
+@pytest.mark.parametrize("scoped", [True, False])
+def test_a_movie_sync_queues_its_search_for_the_owning_instance(
+        schema_session, monkeypatch, tmp_path, scoped):
+    import radarr.sync.movies as mv_mod
+
+    video = tmp_path / "m.mkv"
+    video.write_bytes(b"")
+    default = _seed_default(schema_session, "radarr")
+    jobs = _RecordingJobs()
+    monkeypatch.setattr(mv_mod, "database", schema_session)
+    monkeypatch.setattr(mv_mod, "jobs_queue", jobs)
+    monkeypatch.setattr(mv_mod, "event_stream", _noop)
+    monkeypatch.setattr(mv_mod, "store_subtitles_movie", _noop)
+    monkeypatch.setattr(mv_mod, "_is_there_missing_subtitles", lambda **_kw: True)
+    monkeypatch.setattr(mv_mod.path_mappings, "path_replace_movie", lambda p: p)
+    monkeypatch.setattr(mv_mod, "get_profile_list", lambda *a, **k: [])
+    monkeypatch.setattr(mv_mod, "get_tags", lambda *a, **k: [])
+    monkeypatch.setattr(mv_mod, "get_language_profiles", lambda *a, **k: [])
+    monkeypatch.setattr(mv_mod, "get_movies_from_radarr_api", lambda *a, **k: {"id": 10})
+    monkeypatch.setattr(mv_mod, "movieParser", lambda *a, **k: {
+        "radarrId": 10, "title": "M", "year": 2020, "path": str(video), "tmdbId": "t10"})
+
+    if scoped:
+        mv_mod.update_one_movie(10, action="updated", defer_search=False, arr_instance_id=2,
+                                arr_client=object())
+    else:
+        mv_mod.update_one_movie(10, action="updated", defer_search=False)
+
+    assert jobs.queued == [("subtitles.mass_download.movies", "movies_download_subtitles",
+                            {"no": 10, "arr_instance_id": 2 if scoped else default})]
 
 
 # ============================================================================

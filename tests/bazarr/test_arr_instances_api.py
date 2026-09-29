@@ -6,8 +6,6 @@ api-key safety) without the heavy Flask/flask_restx import chain: the logic
 lives in arr_instances.service and returns (body, status_code) tuples. The
 thin Flask resources in bazarr/api/system/arr_instances.py just parse the
 request, call these, and commit.
-
-Plan: docs/superpowers/plans/2026-05-27-multiple-arr-instances-final.md (Phase 6).
 """
 import pytest
 
@@ -101,6 +99,13 @@ def test_delete_with_owned_rows_returns_409(schema_session):
     body, status = service.delete_instance(schema_session, created["id"])
     assert status == 409
     assert body["error"] == "conflict"
+    # The refusal names what the instance still holds and that deleting it
+    # together with that library is possible, so the dialog can offer it.
+    assert body["message"] == "cannot delete an instance that still owns rows"
+    assert body["can_remove_library"] is True
+    assert body["library"] == {"series": 1, "episodes": 0, "movies": 0, "history": 0,
+                               "blacklist": 0, "root_folders": 0}
+    assert body["last_of_kind"] is True
 
 
 # ------------------------------------------------------ validation + conflicts
@@ -656,3 +661,161 @@ def test_f5_signalr_failure_does_not_propagate(monkeypatch):
     service.refresh_runtime("sonarr", instance_id=5)
     # The local rebuild + event still happen despite the signalr failure.
     rec.update_tasks.assert_called_once()
+
+
+# ------------------------------------------------- deleting with the synced library
+
+def _owned_show(session, owner):
+    from sqlalchemy import insert
+
+    from app.database import TableShows
+
+    session.execute(insert(TableShows).values(
+        sonarrSeriesId=1, path=f"/tv/show-{owner}", title="Show", arr_instance_id=owner))
+
+
+def test_delete_with_remove_library_returns_204_and_removes_the_rows(schema_session):
+    from sqlalchemy import func, select
+
+    from app.database import TableShows
+    from arr_instances import service
+    from arr_instances.repository import ArrInstanceRepository
+
+    kept, _ = service.create_instance(
+        schema_session, {"kind": "sonarr", "name": "Kept", "api_key": "k", "port": 1})
+    gone, _ = service.create_instance(
+        schema_session, {"kind": "sonarr", "name": "Gone", "api_key": "k", "port": 2})
+    _owned_show(schema_session, kept["id"])
+    _owned_show(schema_session, gone["id"])
+
+    body, status = service.delete_instance(schema_session, gone["id"], remove_library=True)
+
+    assert (body, status) == ("", 204)
+    assert ArrInstanceRepository(schema_session).get(gone["id"]) is None
+    owners = schema_session.execute(select(TableShows.arr_instance_id, func.count())
+                                    .group_by(TableShows.arr_instance_id)).all()
+    assert [tuple(row) for row in owners] == [(kept["id"], 1)]
+
+
+def test_a_sportarr_delete_never_waits_on_the_job_queue(schema_session, monkeypatch):
+    """The flag means nothing to Sportarr, so its delete does not hold up
+    starting and finishing jobs while its ownership triggers are rebuilt."""
+    from app.jobs_queue import jobs_queue
+    from arr_instances import service
+
+    class Untouchable:
+        def __enter__(self):
+            pytest.fail("the job queue lock was taken")
+
+        def __exit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(jobs_queue, "_queue_lock", Untouchable())
+    created, _ = service.create_instance(
+        schema_session, {"kind": "sportarr", "name": "Sports", "api_key": "k"})
+    assert service.delete_instance(schema_session, created["id"], remove_library=True) == ("", 204)
+    assert service.delete_instance(schema_session, 999, remove_library=True)[1] == 404
+
+
+@pytest.mark.parametrize("kind,module,func", [
+    ("sonarr", "sonarr.sync.series", "update_series"),
+    ("radarr", "radarr.sync.movies", "update_movies"),
+])
+@pytest.mark.parametrize("is_default", [True, False])
+def test_a_whole_kind_sync_holds_up_every_instance_of_its_kind(
+        schema_session, monkeypatch, kind, module, func, is_default):
+    """The legacy whole-kind sync carries no instance id. It writes to the
+    default it resolved when it started, which need not be the default now,
+    so it holds up every instance of its kind, and none of the other kind."""
+    from collections import deque
+
+    from sqlalchemy import insert
+
+    from app.database import TableMovies
+    from app.jobs_queue import Job, jobs_queue
+    from arr_instances import service
+
+    first, _ = service.create_instance(
+        schema_session, {"kind": kind, "name": "First", "api_key": "k", "port": 1})
+    second, _ = service.create_instance(
+        schema_session, {"kind": kind, "name": "Second", "api_key": "k", "port": 2})
+    target = first if is_default else second
+    assert target["is_default"] is is_default
+    if kind == "sonarr":
+        _owned_show(schema_session, target["id"])
+    else:
+        schema_session.execute(insert(TableMovies).values(
+            radarrId=1, tmdbId="1", path="/m.mkv", title="M", arr_instance_id=target["id"]))
+    other_module, other_func = (("radarr.sync.movies", "update_movies") if kind == "sonarr"
+                                else ("sonarr.sync.series", "update_series"))
+    other_kind_sync = Job(job_id=900003, job_name="Syncing", module=other_module,
+                          func=other_func, kwargs={"job_id": None, "arr_instance_id": None})
+    job = Job(job_id=900002, job_name="Syncing", module=module, func=func,
+              kwargs={"job_id": None, "wait_for_completion": False, "arr_instance_id": None,
+                      "arr_client": None})
+    job.status = "running"
+    monkeypatch.setattr(jobs_queue, "jobs_pending_queue", deque([other_kind_sync]))
+    monkeypatch.setattr(jobs_queue, "jobs_running_queue", deque([job]))
+
+    body, status = service.delete_instance(schema_session, target["id"], remove_library=True)
+
+    assert status == 409
+    assert body["error"] == "sync_in_progress"
+
+    # Once it is done, only the other kind's sync is left, and that one does
+    # not hold this instance up.
+    monkeypatch.setattr(jobs_queue, "jobs_running_queue", deque())
+    assert service.delete_instance(
+        schema_session, target["id"], remove_library=True) == ("", 204)
+
+
+@pytest.mark.parametrize("kind", ["sonarr", "radarr"])
+def test_the_last_instance_switch_off_goes_through_the_settings_save(
+        schema_session, monkeypatch, scalar_snapshot, kind):
+    from types import SimpleNamespace
+
+    from app import config as app_config
+    from app import database as app_database
+    from app import event_handler
+    from arr_instances import service
+
+    writes, app_events = [], []
+    monkeypatch.setattr(app_config, "write_config", lambda **_kwargs: writes.append(True) or True)
+    monkeypatch.setattr(app_config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(event_handler, "event_stream", lambda **event: app_events.append(event))
+    rec = _patch_runtime(monkeypatch)
+    monkeypatch.setattr(app_config.settings.general, f"use_{kind}", True)
+
+    created, _ = service.create_instance(schema_session, {"kind": kind, "name": "Only", "api_key": "k"})
+    # Still has an instance: nothing to switch off.
+    assert service.switch_off_kind_without_instances(schema_session, kind) is False
+    assert writes == [] and getattr(app_config.settings.general, f"use_{kind}") is True
+
+    assert service.delete_instance(schema_session, created["id"]) == ("", 204)
+    # The save marks the install configured through the application database.
+    statements = []
+    monkeypatch.setattr(app_database, "database", SimpleNamespace(execute=statements.append))
+    assert service.switch_off_kind_without_instances(schema_session, kind) is True
+    assert len(statements) == 1
+
+    assert getattr(app_config.settings.general, f"use_{kind}") is False
+    assert writes == [True]
+    # The same refresh a save from the Settings page gets.
+    rec.update_tasks.assert_called_once()
+    assert app_events == [{"type": "task"}]
+    getattr(rec, f"restart_{kind}").assert_called_once()
+    rec.event_stream.assert_called_with(type="settings")
+
+    # Already off: nothing is written again.
+    assert service.switch_off_kind_without_instances(schema_session, kind) is False
+    assert writes == [True]
+
+
+def test_sportarr_is_never_switched_off_by_an_instance_delete(schema_session, monkeypatch):
+    from app import config as app_config
+    from arr_instances import service
+
+    monkeypatch.setattr(app_config, "save_settings", lambda items: pytest.fail("saved"))
+    monkeypatch.setattr(app_config.settings.general, "use_sportarr", True)
+    assert service.switch_off_kind_without_instances(schema_session, "sportarr") is False
+    assert app_config.settings.general.use_sportarr is True

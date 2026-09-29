@@ -50,6 +50,15 @@ def _enabled_instances(kind):
     except Exception:
         return []
 
+
+def _has_instances(kind):
+    """Whether the kind has any instance, enabled or not. False if the
+    registry can't be read yet."""
+    try:
+        return bool(ArrInstanceRepository(database).list(kind))
+    except Exception:
+        return False
+
 SIGNALR_ACTIVE_STATES = {0, 1, 2}
 UNKNOWN_SONARR_VERSION_VALUES = {"", "unknown", None}
 
@@ -152,6 +161,10 @@ class _SignalrClientLifecycle:
         super(_SignalrClientLifecycle, self).__init__()
         self._lifecycle_lock = threading.Lock()
         self._generation = 0
+        # Left unstarted on purpose: its kind is switched on, and every one of
+        # its instances is disabled. Nothing is expected to connect, so not
+        # being connected is no disconnection.
+        self.idle = False
 
     def _begin_generation(self):
         with self._lifecycle_lock:
@@ -316,7 +329,7 @@ class SonarrSignalrClient(_SignalrClientLifecycle):
         if self.connection:
             if _signalr_connection_active(self.connection):
                 self.stop()
-        if settings.general.use_sonarr:
+        if settings.general.use_sonarr and not self.idle:
             self.start()
 
     def exception_handler(self):
@@ -404,7 +417,7 @@ class RadarrSignalrClient(_SignalrClientLifecycle):
         if self.connection:
             if _signalr_connection_active(self.connection):
                 self.stop()
-        if settings.general.use_radarr:
+        if settings.general.use_radarr and not self.idle:
             self.start()
 
     def exception_handler(self):
@@ -515,6 +528,12 @@ def dispatcher(data):
             logging.debug(f'Event received from Sonarr for series: {series_title} ({series_year})')  # noqa: G004
             if episodesChanged:
                 # this will happen if a season's monitored status is changed.
+                # sync_episodes also serves the bulk sync, so this caller makes
+                # the check update_one_series and sync_one_episode make.
+                if arr_instance_id is None and resolution.skip_unscoped_sync(
+                        database, 'sonarr', settings.general.use_sonarr,
+                        f'the episodes of series {media_id}'):
+                    return
                 arr_client = client_for_instance(database, arr_instance_id) if arr_instance_id is not None else None
                 sync_episodes(series_id=media_id, defer_search=settings.sonarr.defer_search_signalr, is_signalr=True,
                               arr_instance_id=arr_instance_id, arr_client=arr_client)
@@ -540,10 +559,15 @@ def dispatcher(data):
                 update_one_movie(movie_id=media_id, action=action, defer_search=settings.radarr.defer_search_signalr,
                                  is_signalr=True)
     except Exception as e:
-        logging.debug(f'BAZARR an exception occurred while parsing SignalR feed: {repr(e)}')  # noqa: G004
+        # Formatted by logging, which reports a failure to format rather than
+        # raising it, so nothing can escape from this handler.
+        logging.debug('BAZARR an exception occurred while parsing SignalR feed: %r', e)
+    except BaseException:
+        # Nothing an event raises may end the thread that consumes the feed,
+        # not even an exception outside Exception.
+        pass
     finally:
         event_stream(type='badges')
-        return
 
 
 def filter_nested_dict(data: dict) -> dict:
@@ -660,13 +684,13 @@ def all_sonarr_signalr_connected():
     LIVE only when every enabled feed is up, so a secondary instance whose feed
     is DOWN is not masked by the singleton's state (#156).
     """
-    return (sonarr_signalr_client.connected
+    return ((sonarr_signalr_client.connected or sonarr_signalr_client.idle)
             and all(c.connected for c in _sonarr_signalr_clients))
 
 
 def all_radarr_signalr_connected():
     """Radarr counterpart of :func:`all_sonarr_signalr_connected`."""
-    return (radarr_signalr_client.connected
+    return ((radarr_signalr_client.connected or radarr_signalr_client.idle)
             and all(c.connected for c in _radarr_signalr_clients))
 
 
@@ -699,14 +723,21 @@ def _start_clients_for_kind(kind, singleton, extra_list, client_cls):
     ``update_*_<id>`` scheduler job - which is the only sync job the scheduler
     now registers (the scalar Host form was removed, so the scalar config is
     stale, #156). With more than one instance, each remaining instance gets one
-    extra tagged client. Only when there are ZERO enabled instances does the
-    singleton fall back to the scalar/default path (arr_instance_id None); with
-    use_sonarr/use_radarr on and no instance row, there is nothing live to do.
+    extra tagged client. Only when the kind has no instance at all does the
+    singleton fall back to the scalar/default path (arr_instance_id None).
+    When it has instances and every one is disabled, nothing starts: the
+    scalar settings mirror the last default, which may since have been deleted,
+    and the scheduler registers no sync for the kind either. The singleton is
+    marked idle then, so it reads as nothing to watch rather than a feed that
+    is down, and its restart() leaves it stopped.
     Like the scheduler fan-out, new instances are picked up on (re)start.
     """
     instances = _enabled_instances(kind)
     _stop_clients_for_kind(singleton, extra_list)
 
+    singleton.idle = not instances and _has_instances(kind)
+    if singleton.idle:
+        return []
     if len(instances) >= 1:
         singleton.arr_instance_id = instances[0].id
         clients = [singleton] + [client_cls(inst.id) for inst in instances[1:]]

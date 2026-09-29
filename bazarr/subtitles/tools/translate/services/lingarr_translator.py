@@ -125,11 +125,13 @@ class LingarrTranslatorService:
                 history_log(action=6,
                             sonarr_series_id=self.sonarr_series_id,
                             sonarr_episode_id=self.sonarr_episode_id,
-                            result=result)
+                            result=result,
+                            arr_instance_id=self.arr_instance_id)
             else:
                 history_log_movie(action=6,
                                   radarr_id=self.radarr_id,
-                                  result=result)
+                                  result=result,
+                                  arr_instance_id=self.arr_instance_id)
 
             jobs_queue.update_job_progress(job_id=job_id, progress_value='max')
 

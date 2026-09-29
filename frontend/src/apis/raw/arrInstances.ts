@@ -140,6 +140,29 @@ export type ArrInstanceTestOverrides = Partial<{
   http_timeout: number;
 }>;
 
+// What a Sonarr or Radarr instance's library holds: the rows a delete with
+// remove_library takes along. Database rows only, never files on disk.
+export interface ArrInstanceLibrary {
+  series: number;
+  episodes: number;
+  movies: number;
+  history: number;
+  blacklist: number;
+  root_folders: number;
+}
+
+// The 409 a delete answers. "conflict" with can_remove_library means the
+// instance still owns synced rows and can be deleted together with them;
+// "sync_in_progress" refuses that while its library sync runs, and
+// "job_in_progress" while a subtitle job for it runs.
+export interface ArrInstanceDeleteConflict {
+  error: "conflict" | "sync_in_progress" | "job_in_progress";
+  message: string;
+  can_remove_library?: boolean;
+  library?: ArrInstanceLibrary;
+  last_of_kind?: boolean;
+}
+
 export interface ArrApplyDefaultProfileResult {
   updated: number;
   profileId: number;
@@ -176,8 +199,15 @@ class ArrInstancesApi extends BaseApi {
     return response.data;
   }
 
-  remove(id: number) {
-    return this.delete(`/${id}`);
+  // removeLibrary also deletes what the instance synced, instead of the
+  // server refusing while it owns any. It never touches files on disk.
+  remove(id: number, removeLibrary = false) {
+    return this.delete(
+      `/${id}`,
+      undefined,
+      // eslint-disable-next-line camelcase -- the server's parameter name
+      removeLibrary ? { remove_library: true } : undefined,
+    );
   }
 
   // Opt-in: fills in this instance's default language profile on its media that

@@ -101,6 +101,7 @@ def test_translate_saves_partial_subtitles_and_marks_history(tmp_path, mocker, m
         encoding="utf-8",
     )
     service = _build_service(str(source), str(destination), media_type)
+    service.arr_instance_id = 4
     error = "1 of 2 batches failed: " + "Failed to parse JSON. " * 15
 
     def _partial_result(lines_list, bazarr_job_id=None):
@@ -130,11 +131,12 @@ def test_translate_saves_partial_subtitles_and_marks_history(tmp_path, mocker, m
     result = openrouter_translator.create_process_result.return_value
     if media_type == "episode":
         openrouter_translator.history_log.assert_called_once_with(
-            action=6, sonarr_series_id=1, sonarr_episode_id=2, result=result,
+            action=6, sonarr_series_id=1, sonarr_episode_id=2, result=result, arr_instance_id=4,
         )
         openrouter_translator.history_log_movie.assert_not_called()
     else:
-        openrouter_translator.history_log_movie.assert_called_once_with(action=6, radarr_id=3, result=result)
+        openrouter_translator.history_log_movie.assert_called_once_with(
+            action=6, radarr_id=3, result=result, arr_instance_id=4)
         openrouter_translator.history_log.assert_not_called()
 
 

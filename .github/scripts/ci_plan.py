@@ -8,8 +8,8 @@ Every job in .github/workflows/ci.yml that runs tests waits on this script's
 - `code`: "true" unless every file the change touches is documentation. Only
   then are the backend and frontend jobs skipped, and the docs job alone
   decides the pull request.
-- `docs`: "true" when a pull request touches documentation, which starts the
-  docs job.
+- `docs`: "true" when a pull request touches documentation, or one of the
+  documents a test reads, which starts the docs job.
 - `python`: the JSON list of Python versions the backend jobs run on. A pull
   request into anything but master gets one version, the one the Docker image
   ships, because that is the interpreter users run. Everything else gets the
@@ -52,11 +52,13 @@ DOCS_PATTERNS = (
 # Files that look like documentation and are read by a test, so a change to
 # one of them has to run the backend. tests/bazarr/test_container_hardening.py
 # parses the compose block out of the README and checks the installer and the
-# getting-started guide for the same hardening.
+# getting-started guide for the same hardening. tests/bazarr/test_installer_backup.py
+# runs the installer's backup and the migration guide's backup and restore commands.
 TESTED_DOCUMENTS = frozenset({
     "README.md",
     "site/install.sh",
     "site/guides/getting-started.html",
+    "site/guides/migration.html",
 })
 
 # Trees that are never documentation, whatever the file inside them is called:
@@ -73,6 +75,12 @@ def is_documentation(path: str) -> bool:
     if path.startswith(CODE_TREES) or path.endswith(".py"):
         return False
     return any(fnmatch.fnmatchcase(path, pattern) for pattern in DOCS_PATTERNS)
+
+
+def needs_docs_check(path: str) -> bool:
+    """Whether the docs job checks this path: documentation, and the documents a
+    test reads, which run the suites too but are still text a reader sees."""
+    return path.strip() in TESTED_DOCUMENTS or is_documentation(path)
 
 
 def docker_python(dockerfile: pathlib.Path = REPO_ROOT / "Dockerfile") -> str:
@@ -95,6 +103,7 @@ def plan(event: str, base_ref: str, changed, image_python: str = None) -> dict:
     files = [path for path in (changed or []) if path.strip()]
     documentation = [path for path in files if is_documentation(path)]
     docs_only = bool(files) and len(documentation) == len(files)
+    checked = any(needs_docs_check(path) for path in files)
 
     one_version = (
         event == "pull_request"
@@ -105,7 +114,7 @@ def plan(event: str, base_ref: str, changed, image_python: str = None) -> dict:
         "code": not docs_only,
         # An unreadable change list starts the docs job too, which then fails
         # loudly for the same reason instead of being skipped in silence.
-        "docs": event == "pull_request" and (changed is None or bool(documentation)),
+        "docs": event == "pull_request" and (changed is None or checked),
         "python": [image_python] if one_version else list(FULL_MATRIX),
     }
 
