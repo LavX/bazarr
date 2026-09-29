@@ -1,11 +1,14 @@
 # coding=utf-8
 
+import logging
+
 from flask import request
 from flask_restx import Namespace, Resource
 
 from app.database import database
 from media_servers import service
-from media_servers.dispatcher import get_refresh_status, retry_pending_refreshes
+from media_servers.dispatcher import (_ERROR_CODES, _refusal_code, get_refresh_status,
+                                      retry_pending_refreshes)
 from media_servers.http import MediaServerError
 from ..utils import authenticate
 
@@ -101,8 +104,17 @@ class MediaServerInstanceLibraryRefresh(Resource):
             return refresh_libraries(instance_id), 200
         except MediaServerError as error:
             return {'requested': 0, 'error_code': error.code}, 400
-        except Exception:
-            return {'requested': 0, 'error_code': 'connection_error'}, 400
+        except Exception as error:
+            # Read as the refresh worker reads it: a known code is a refusal,
+            # whatever module generation raised it (see _refusal_code).
+            code = _refusal_code(error)
+            if code in _ERROR_CODES:
+                return {'requested': 0, 'error_code': code}, 400
+            # The clients turn every transport failure into a MediaServerError,
+            # so this is a fault in Bazarr, not the connection.
+            logging.exception('BAZARR could not refresh the libraries of media server destination %s',
+                              instance_id)
+            return {'requested': 0, 'error_code': 'internal_error'}, 400
 
 
 @api_ns_system_media_server_instances.route(_ROOT + '/<string:instance_id>/retry-pending')

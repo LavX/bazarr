@@ -2,6 +2,7 @@ import { FunctionComponent, useState } from "react";
 import { Alert, Button, Group, Select, Stack, Text } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import {
+  isPlexSignInRequired,
   usePlexAuthValidationQuery,
   usePlexWebhookCreateMutation,
   usePlexWebhookDeleteMutation,
@@ -9,6 +10,8 @@ import {
 } from "@/apis/hooks/plex";
 import { useInstanceName } from "@/apis/hooks/site";
 import styles from "@/pages/Settings/Plex/WebhookSelector.module.scss";
+
+const signInMessage = "Sign in to Plex to manage webhooks.";
 
 export type WebhookSelectorProps = {
   label: string;
@@ -37,6 +40,10 @@ const WebhookSelector: FunctionComponent<WebhookSelectorProps> = (props) => {
   } = usePlexWebhookListQuery({
     enabled: isAuthenticated,
   });
+
+  // Bazarr holds no Plex token any more, while the account above still reads
+  // as signed in until it is read again.
+  const signInRequired = isPlexSignInRequired(error);
 
   const createMutation = usePlexWebhookCreateMutation();
   const deleteMutation = usePlexWebhookDeleteMutation();
@@ -79,10 +86,12 @@ const WebhookSelector: FunctionComponent<WebhookSelectorProps> = (props) => {
         color: "green",
       });
       await refetch();
-    } catch {
+    } catch (err) {
       notifications.show({
         title: "Error",
-        message: "Failed to create webhook",
+        message: isPlexSignInRequired(err)
+          ? signInMessage
+          : "Failed to create webhook",
         color: "red",
       });
     }
@@ -101,10 +110,12 @@ const WebhookSelector: FunctionComponent<WebhookSelectorProps> = (props) => {
         setSelectedWebhookUrl("");
       }
       await refetch();
-    } catch {
+    } catch (err) {
       notifications.show({
         title: "Error",
-        message: "Failed to delete webhook",
+        message: isPlexSignInRequired(err)
+          ? signInMessage
+          : "Failed to delete webhook",
         color: "red",
       });
     }
@@ -133,6 +144,19 @@ const WebhookSelector: FunctionComponent<WebhookSelectorProps> = (props) => {
           disabled
           className={styles.loadingField}
         />
+      </Stack>
+    );
+  }
+
+  if (signInRequired) {
+    return (
+      <Stack gap="xs" className={styles.webhookSelector}>
+        <Text fw={500} className={styles.labelText}>
+          {label}
+        </Text>
+        <Alert color="brand" variant="light" className={styles.alertMessage}>
+          Plex is signed out. Sign in to Plex above to manage webhooks.
+        </Alert>
       </Stack>
     );
   }

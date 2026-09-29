@@ -279,3 +279,58 @@ def test_refresh_libraries_is_authenticated_and_reports_what_it_asked_for(instan
     response = instance_api.post(path, headers=HEADERS)
     assert response.status_code == 400
     assert response.json == {'requested': 0, 'error_code': 'library_missing'}
+
+
+def test_an_unexpected_refresh_failure_is_logged_and_not_called_a_connection_error(
+        instance_api, monkeypatch, caplog):
+    """A fault in Bazarr answered connection_error and logged nothing, so the
+    user checked a connection that was fine and the log had no trace of it."""
+    import logging
+    from media_servers import libraries
+    created = instance_api.post(ROOT, json=payload('emby'), headers=HEADERS)
+    path = ROOT + '/' + created.json['id'] + '/refresh-libraries'
+
+    def broken(_instance_id):
+        raise RuntimeError('synthetic fault')
+
+    monkeypatch.setattr(libraries, 'refresh_libraries', broken)
+    with caplog.at_level(logging.ERROR):
+        response = instance_api.post(path, headers=HEADERS)
+    assert response.status_code == 400
+    assert response.json == {'requested': 0, 'error_code': 'internal_error'}
+    record, = [record for record in caplog.records
+               if record.exc_info and record.exc_info[0] is RuntimeError]
+    assert record.levelno == logging.ERROR
+
+
+@pytest.mark.parametrize('code, answered, logged', [
+    ('timeout', 'timeout', False),
+    # A database error carries a string code of its own, and is still a fault.
+    ('e3q8', 'internal_error', True),
+], ids=['refusal', 'other code'])
+def test_a_refusal_of_another_class_keeps_its_code(instance_api, monkeypatch, caplog,
+                                                   code, answered, logged):
+    """A MediaServerError from another module generation is not the class this
+    endpoint catches. It carries the same code, yet was answered internal_error
+    and logged as a fault in Bazarr."""
+    import logging
+    from media_servers import libraries
+
+    class Refusal(Exception):
+        pass
+
+    Refusal.code = code
+    created = instance_api.post(ROOT, json=payload('emby'), headers=HEADERS)
+    path = ROOT + '/' + created.json['id'] + '/refresh-libraries'
+
+    def refused(_instance_id):
+        raise Refusal('synthetic')
+
+    monkeypatch.setattr(libraries, 'refresh_libraries', refused)
+    with caplog.at_level(logging.ERROR):
+        response = instance_api.post(path, headers=HEADERS)
+    assert response.status_code == 400
+    assert response.json == {'requested': 0, 'error_code': answered}
+    faults = [record for record in caplog.records
+              if record.exc_info and record.exc_info[0] is Refusal]
+    assert len(faults) == (1 if logged else 0)

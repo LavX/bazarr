@@ -6,8 +6,12 @@ through ``get_plex_server``, which used to pass ``verify=False`` whatever the
 user chose. Their certificate check now follows the "Verify SSL" checkbox of
 the Plex instance the account owns, and without one the legacy setting, which
 is off unless someone turned it on.
+
+The webhook handlers of the same account panel are tested at the end, on the
+same signed-in account.
 """
 
+import logging
 from collections import OrderedDict
 from types import SimpleNamespace
 from uuid import uuid4
@@ -342,3 +346,218 @@ def test_picking_the_first_server_follows_the_legacy_setting(oauth_account, plex
     oauth_account.plex.verify_ssl = legacy
     assert _server_picker()['data'][0]['name'] == 'Attic'
     assert plex_requests == [legacy]
+
+
+# --- The webhook handlers, against a faked plex.tv account -------------------
+#
+# Webhooks are a Plex Pass feature. plex.tv refuses the webhooks endpoint to
+# any other account with a 403 (code 1043), and the settings page lists the
+# account's webhooks on every visit.
+
+_PLEX_PASS_REFUSAL = ('(403) forbidden; https://plex.tv/api/v2/user/webhooks '
+                      '{"errors":[{"code":1043,"message":"This action is not available for this user",'
+                      '"status":403}]}')
+# plexapi asks for no JSON, so plex.tv may answer the same refusal in XML.
+_PLEX_PASS_REFUSAL_XML = ('(403) forbidden; https://plex.tv/api/v2/user/webhooks '
+                          '<?xml version="1.0" encoding="UTF-8"?> <errors>   <error code="1043" '
+                          'message="This action is not available for this user" status="403"/> </errors> ')
+# A 403 for any other reason, which is not a Plex Pass answer.
+_OTHER_REFUSAL = ('(403) forbidden; https://plex.tv/api/v2/user/webhooks '
+                  '{"errors":[{"code":1003,"message":"Access denied","status":403}]}')
+_WEBHOOK = 'https://bazarr.example/api/webhooks/plex?apikey=synthetic&instance=Bazarr'
+
+
+def _plex_tv_error(message):
+    """What plexapi raises for a plex.tv refusal such as a 403 or a 500."""
+    from plexapi.exceptions import BadRequest
+    return BadRequest(message)
+
+
+class _PlexAccount:
+    """A plex.tv account as MyPlexAccount reads it, with no network behind it."""
+
+    def __init__(self, *, plex_pass, refusal=None, webhooks=()):
+        self.subscriptionActive = plex_pass
+        self.subscriptionFeatures = ['webhooks'] if plex_pass else []
+        self.subscriptionPlan = 'lifetime' if plex_pass else None
+        self.refusal = refusal
+        self.urls = list(webhooks)
+        self.asked = []
+
+    def _answer(self, call):
+        self.asked.append(call)
+        if self.refusal is not None:
+            raise self.refusal
+        return list(self.urls)
+
+    def webhooks(self):
+        return self._answer('webhooks')
+
+    def addWebhook(self, url):
+        self.urls.append(url)
+        return self._answer('addWebhook')
+
+    def deleteWebhook(self, url):
+        self.urls.remove(url)
+        return self._answer('deleteWebhook')
+
+
+@pytest.fixture
+def plex_tv(oauth_account, monkeypatch):
+    """The account plex.tv answers with, set by each test."""
+    from api.plex import oauth
+    state = SimpleNamespace(account=None, settings=oauth_account)
+    monkeypatch.setattr('plexapi.myplex.MyPlexAccount', lambda token: state.account)
+    monkeypatch.setattr(oauth, '_update_plexapi_headers', lambda: None)
+    # Creating a webhook builds its callback address from these two.
+    monkeypatch.setitem(oauth_account.auth, 'apikey', 'synthetic-bazarr-key')
+    monkeypatch.setitem(oauth_account.general, 'hostname', 'bazarr.example')
+    return state
+
+
+def _webhook_call(name, body=None):
+    """One webhook handler, past the API-key check, as (body, status)."""
+    from flask import Flask
+    from api.plex import oauth
+    resource = getattr(oauth, name)
+    method = 'get' if name == 'PlexWebhookList' else 'post'
+    if body is None and name == 'PlexWebhookDelete':
+        body = {'webhook_url': _WEBHOOK}
+    with Flask(__name__).test_request_context('/plex/webhook', method=method.upper(), json=body):
+        answer = getattr(resource, method).__wrapped__(resource())
+    return answer if isinstance(answer, tuple) else (answer, 200)
+
+
+def _loud(caplog, level):
+    return [record for record in caplog.records if record.levelno >= level]
+
+
+def test_listing_webhooks_without_plex_pass_reports_the_plan_instead_of_failing(plex_tv, caplog):
+    """The listing asked plex.tv anyway and turned its refusal into an ERROR
+    line and a 502 on every visit, so the page showed a failure instead of
+    the Plex Pass notice it already has."""
+    plex_tv.account = _PlexAccount(plex_pass=False, refusal=_plex_tv_error(_PLEX_PASS_REFUSAL))
+    with caplog.at_level(logging.DEBUG):
+        body, status = _webhook_call('PlexWebhookList')
+    assert status == 200
+    assert body == {'data': {'webhooks': [], 'count': 0, 'plexPassSubscription': {
+        'active': False, 'has_webhooks_feature': False, 'plan': None}}}
+    assert plex_tv.account.asked == []
+    assert _loud(caplog, logging.WARNING) == []
+
+
+@pytest.mark.parametrize('refusal', [_PLEX_PASS_REFUSAL, _PLEX_PASS_REFUSAL_XML], ids=['json', 'xml'])
+def test_a_plex_pass_refusal_from_plex_tv_reads_as_no_webhooks_feature(plex_tv, caplog, refusal):
+    """The account lists the feature, yet plex.tv refuses: the same answer as
+    an account without it, not a failed listing. The two disagree, so the log
+    at its default level says so."""
+    plex_tv.account = _PlexAccount(plex_pass=True, refusal=_plex_tv_error(refusal))
+    with caplog.at_level(logging.DEBUG):
+        body, status = _webhook_call('PlexWebhookList')
+    assert status == 200
+    assert body == {'data': {'webhooks': [], 'count': 0, 'plexPassSubscription': {
+        'active': True, 'has_webhooks_feature': False, 'plan': 'lifetime'}}}
+    assert plex_tv.account.asked == ['webhooks']
+    assert [record.levelno for record in _loud(caplog, logging.INFO)] == [logging.INFO]
+
+
+def test_a_plex_pass_account_still_lists_its_webhooks(plex_tv):
+    plex_tv.account = _PlexAccount(plex_pass=True, webhooks=[_WEBHOOK])
+    body, status = _webhook_call('PlexWebhookList')
+    assert status == 200
+    assert body == {'data': {'webhooks': [{'url': _WEBHOOK}], 'count': 1, 'plexPassSubscription': {
+        'active': True, 'has_webhooks_feature': True, 'plan': 'lifetime'}}}
+
+
+@pytest.mark.parametrize('failure', [
+    '(500) internal_server_error; https://plex.tv/api/v2/user/webhooks ',
+    _OTHER_REFUSAL,
+], ids=['500', 'other 403'])
+def test_any_other_plex_tv_failure_still_fails_the_listing(plex_tv, caplog, failure):
+    plex_tv.account = _PlexAccount(plex_pass=True, refusal=_plex_tv_error(failure))
+    with caplog.at_level(logging.DEBUG):
+        _body, status = _webhook_call('PlexWebhookList')
+    assert status == 502
+    assert [record.levelno for record in _loud(caplog, logging.WARNING)] == [logging.ERROR]
+
+
+@pytest.mark.parametrize('plex_account', [
+    lambda: _PlexAccount(plex_pass=False),
+    lambda: _PlexAccount(plex_pass=True, refusal=_plex_tv_error(_PLEX_PASS_REFUSAL)),
+], ids=['the account says so', 'plex.tv says so'])
+def test_creating_a_webhook_without_plex_pass_says_it_needs_plex_pass(plex_tv, caplog, plex_account):
+    """The account check already answered this. A refusal from plex.tv itself
+    was logged as an ERROR and answered 502, a Plex outage to the page."""
+    plex_tv.account = plex_account()
+    with caplog.at_level(logging.DEBUG):
+        body, status = _webhook_call('PlexWebhookCreate')
+    assert status == 403
+    assert 'requires Plex Pass' in body['error']
+    assert _loud(caplog, logging.ERROR) == []
+
+
+def test_removing_a_webhook_plex_tv_refuses_says_it_needs_plex_pass(plex_tv, caplog):
+    plex_tv.account = _PlexAccount(plex_pass=True, refusal=_plex_tv_error(_PLEX_PASS_REFUSAL))
+    with caplog.at_level(logging.DEBUG):
+        body, status = _webhook_call('PlexWebhookDelete')
+    assert status == 403
+    assert 'requires Plex Pass' in body['error']
+    assert _loud(caplog, logging.ERROR) == []
+
+
+@pytest.mark.parametrize('handler', ['PlexWebhookCreate', 'PlexWebhookDelete'])
+def test_a_403_for_another_reason_is_not_called_a_plex_pass_refusal(plex_tv, caplog, handler):
+    """Every call in these handlers goes to plex.tv, the sign-in included, and
+    a 403 there can mean something else than a missing Plex Pass."""
+    plex_tv.account = _PlexAccount(plex_pass=True, refusal=_plex_tv_error(_OTHER_REFUSAL))
+    with caplog.at_level(logging.DEBUG):
+        body, status = _webhook_call(handler)
+    assert status == 502
+    assert 'Plex Pass' not in body['error']
+    assert [record.levelno for record in _loud(caplog, logging.WARNING)] == [logging.ERROR]
+
+
+def test_a_plex_pass_account_adds_its_webhook(plex_tv, monkeypatch):
+    monkeypatch.setitem(plex_tv.settings.general, 'base_url', '')
+    monkeypatch.setitem(plex_tv.settings.general, 'instance_name', 'Living Room')
+    plex_tv.account = _PlexAccount(plex_pass=True)
+    body, status = _webhook_call('PlexWebhookCreate')
+    webhook = 'http://bazarr.example/api/webhooks/plex?apikey=synthetic-bazarr-key&instance=Living+Room'
+    assert status == 200
+    assert body == {'data': {'success': True, 'message': 'Webhook created successfully',
+                             'webhook_url': webhook, 'total_webhooks': 1}}
+    assert plex_tv.account.asked == ['webhooks', 'addWebhook']
+    assert plex_tv.account.urls == [webhook]
+
+
+def test_a_plex_pass_account_removes_its_webhook(plex_tv):
+    plex_tv.account = _PlexAccount(plex_pass=True, webhooks=[_WEBHOOK])
+    body, status = _webhook_call('PlexWebhookDelete')
+    assert status == 200
+    assert body == {'data': {'success': True, 'message': 'Webhook deleted successfully'}}
+    assert plex_tv.account.asked == ['webhooks', 'deleteWebhook']
+    assert plex_tv.account.urls == []
+
+
+@pytest.mark.parametrize('handler', ['PlexWebhookList', 'PlexWebhookCreate', 'PlexWebhookDelete'])
+def test_a_missing_plex_token_asks_for_a_plex_sign_in_not_a_bazarr_login(plex_tv, monkeypatch, handler):
+    """Each handler raised UnauthorizedError inside the try whose catch-all
+    turned it into a 502. A 401 is no better: the web client reads any 401 as
+    its own Bazarr session ending and goes back to the login page, when only
+    Plex is signed out. So it is a 409 with a code the Plex panel reads."""
+    monkeypatch.setitem(plex_tv.settings.plex, 'token', '')
+    plex_tv.account = _PlexAccount(plex_pass=True)
+    body, status = _webhook_call(handler)
+    assert status == 409
+    assert body['error_code'] == 'sign_in_required'
+    assert 'Sign in to Plex' in body['error']
+    assert plex_tv.account.asked == []
+
+
+def test_removing_a_webhook_without_naming_one_is_a_bad_request(plex_tv):
+    """The argument check ran inside the same catch-all, so its 400 became a 502."""
+    from werkzeug.exceptions import BadRequest
+    plex_tv.account = _PlexAccount(plex_pass=True, webhooks=[_WEBHOOK])
+    with pytest.raises(BadRequest):
+        _webhook_call('PlexWebhookDelete', body={})
+    assert plex_tv.account.asked == []

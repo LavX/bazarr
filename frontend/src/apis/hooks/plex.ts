@@ -1,16 +1,42 @@
 import {
+  QueryClient,
   useMutation,
   useQuery,
   useQueryClient,
   UseQueryOptions,
 } from "@tanstack/react-query";
+import { isAxiosError } from "axios";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { mediaServerInstancesKey } from "./mediaServers";
 
+const plexValidationKey = [QueryKeys.Plex, "auth", "validate"];
+
+// The webhook calls answer 409 with this code when Bazarr holds no Plex token.
+// Not a 401: the client reads any 401 as the Bazarr session ending.
+export function isPlexSignInRequired(error: unknown): boolean {
+  return (
+    isAxiosError(error) &&
+    error.response?.status === 409 &&
+    error.response.data?.error_code === "sign_in_required"
+  );
+}
+
+// The panel only calls these while it reads a signed-in account, so that
+// reading is out of date: read it again, and the webhooks with it.
+function forgetPlexSignIn(queryClient: QueryClient, error: unknown) {
+  if (!isPlexSignInRequired(error)) {
+    return;
+  }
+  void queryClient.invalidateQueries({ queryKey: plexValidationKey });
+  void queryClient.invalidateQueries({
+    queryKey: [QueryKeys.Plex, "webhooks"],
+  });
+}
+
 export const usePlexAuthValidationQuery = () => {
   return useQuery({
-    queryKey: [QueryKeys.Plex, "auth", "validate"],
+    queryKey: plexValidationKey,
     queryFn: async () => {
       try {
         const result = await api.plex.validateAuth();
@@ -186,6 +212,7 @@ export const usePlexWebhookCreateMutation = () => {
         queryKey: [QueryKeys.Plex, "webhooks"],
       });
     },
+    onError: (error) => forgetPlexSignIn(queryClient, error),
   });
 };
 
@@ -194,11 +221,21 @@ export const usePlexWebhookListQuery = <TData = Plex.WebhookList>(
     UseQueryOptions<Plex.WebhookList, Error, TData, (string | boolean)[]>
   > & { enabled?: boolean },
 ) => {
+  const queryClient = useQueryClient();
   const enabled = options?.enabled ?? true;
 
   return useQuery({
     queryKey: [QueryKeys.Plex, "webhooks"],
-    queryFn: () => api.plex.listWebhooks(),
+    queryFn: async () => {
+      try {
+        return await api.plex.listWebhooks();
+      } catch (error) {
+        if (isPlexSignInRequired(error)) {
+          void queryClient.invalidateQueries({ queryKey: plexValidationKey });
+        }
+        throw error;
+      }
+    },
     enabled,
     staleTime: 1000 * 60 * 2, // Cache for 2 minutes
     refetchOnWindowFocus: false,
@@ -216,6 +253,7 @@ export const usePlexWebhookDeleteMutation = () => {
         queryKey: [QueryKeys.Plex, "webhooks"],
       });
     },
+    onError: (error) => forgetPlexSignIn(queryClient, error),
   });
 };
 
