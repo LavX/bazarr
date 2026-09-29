@@ -533,10 +533,12 @@ do_upgrade() {
 # --- Generate compose ---
 generate_compose() {
   local bazarr_port="$1" movies="$2" tv="$3" translator="$4" translator_port="$5" flaresolverr="$6"
-  local movies_vol="" tv_vol="" translator_block="" flare_block="" bazarr_depends="" volumes_block=""
+  local sports="${7:-}"
+  local movies_vol="" tv_vol="" sports_vol="" translator_block="" flare_block="" bazarr_depends="" volumes_block=""
 
   [[ -n "$movies" ]] && movies_vol="      - ${movies}:/movies"
   [[ -n "$tv" ]]     && tv_vol="      - ${tv}:/tv"
+  [[ -n "$sports" ]] && sports_vol="      - ${sports}:/sports"
 
   # FlareSolverr service. The native OpenSubtitles.org plugin reads its FlareSolverr URL
   # from the provider settings in the UI (http://flaresolverr:8191/v1), so no env var is
@@ -610,6 +612,7 @@ __BAZARR_DEPENDS__
       - ./config:/config
 __MOVIES_VOLUME__
 __TV_VOLUME__
+__SPORTS_VOLUME__
     read_only: true
     tmpfs:
       - /tmp:size=512m
@@ -637,6 +640,7 @@ __VOLUMES_BLOCK__'
   template="${template//__VOLUMES_BLOCK__/$volumes_block}"
   template="${template//__MOVIES_VOLUME__/$movies_vol}"
   template="${template//__TV_VOLUME__/$tv_vol}"
+  template="${template//__SPORTS_VOLUME__/$sports_vol}"
   template="${template//__TRANSLATOR_SERVICE__/$translator_block}"
 
   # Remove blank lines from empty volume slots
@@ -795,10 +799,14 @@ INSTALL_DIR=$(validate_directory "$INSTALL_DIR")
 check_existing "$INSTALL_DIR"
 
 # Collect media paths
+info "Media folders are optional. Leave all three empty for standalone Discover."
 MOVIES_PATH=$(read_input "Movies path (leave empty to skip)" "")
 MOVIES_PATH=$(validate_media_path "$MOVIES_PATH") || MOVIES_PATH=""
 TV_PATH=$(read_input "TV shows path (leave empty to skip)" "")
 TV_PATH=$(validate_media_path "$TV_PATH") || TV_PATH=""
+SPORTS_PATH=$(read_input "Sports path (leave empty to skip)" "")
+SPORTS_PATH=$(validate_media_path "$SPORTS_PATH") || SPORTS_PATH=""
+info "You can connect Sonarr, Radarr or Sportarr later in Settings > Connections."
 
 # Sonarr/Radarr integration
 SONARR_IP=""; SONARR_KEY=""; SONARR_PORT=8989
@@ -851,6 +859,7 @@ printf "${DIM}%-24s${RST} %s\n" "Install directory:" "$INSTALL_DIR"
 printf "${DIM}%-24s${RST} %s\n" "Bazarr port:" "$BAZARR_PORT"
 [[ -n "$MOVIES_PATH" ]] && printf "${DIM}%-24s${RST} %s\n" "Movies:" "$MOVIES_PATH"
 [[ -n "$TV_PATH" ]]     && printf "${DIM}%-24s${RST} %s\n" "TV shows:" "$TV_PATH"
+[[ -n "$SPORTS_PATH" ]] && printf "${DIM}%-24s${RST} %s\n" "Sports:" "$SPORTS_PATH"
 printf "${DIM}%-24s${RST} %s\n" "Timezone:" "$TZ"
 printf "${DIM}%-24s${RST} %s\n" "User/Group:" "${PUID}:${PGID}"
 [[ "$FLARESOLVERR" == "y" ]] && printf "${DIM}%-24s${RST} %s\n" "FlareSolverr:" "enabled"
@@ -879,7 +888,7 @@ success "Created .env (mode 600)"
 # ./config is mounted as /config, and Bazarr+ reads /config/config/config.yaml.
 generate_config "$INSTALL_DIR/config"
 
-generate_compose "$BAZARR_PORT" "$MOVIES_PATH" "$TV_PATH" "$TRANSLATOR" "$TRANSLATOR_PORT" "$FLARESOLVERR" \
+generate_compose "$BAZARR_PORT" "$MOVIES_PATH" "$TV_PATH" "$TRANSLATOR" "$TRANSLATOR_PORT" "$FLARESOLVERR" "$SPORTS_PATH" \
   > docker-compose.yml
 success "Created docker-compose.yml"
 
