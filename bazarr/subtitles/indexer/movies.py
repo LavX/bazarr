@@ -79,11 +79,12 @@ def store_subtitles_movie(original_path, reversed_path, use_cache=True, arr_inst
                                                               arr_instance_id=owner_instance_id)
                     for subtitle_language, subtitle_forced, subtitle_hi, subtitle_codec in subtitle_languages:
                         try:
-                            if (settings.general.ignore_pgs_subs and subtitle_codec.lower() == "pgs") or \
-                                    (settings.general.ignore_vobsub_subs and subtitle_codec.lower() ==
-                                     "vobsub") or \
-                                    (settings.general.ignore_ass_subs and subtitle_codec.lower() ==
-                                     "ass"):
+                            # A track whose format the parser cannot name has no
+                            # codec, so no ignore switch can match it: keep it.
+                            codec = subtitle_codec.lower() if subtitle_codec else None
+                            if codec and ((settings.general.ignore_pgs_subs and codec == "pgs") or
+                                          (settings.general.ignore_vobsub_subs and codec == "vobsub") or
+                                          (settings.general.ignore_ass_subs and codec == "ass")):
                                 logging.debug("BAZARR skipping %s sub for language: %s" % (subtitle_codec, alpha2_from_alpha3(subtitle_language)))  # noqa: G002
                                 continue
 

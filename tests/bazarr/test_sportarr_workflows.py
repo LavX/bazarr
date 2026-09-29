@@ -1978,3 +1978,33 @@ def test_sportarr_ai_upgrade_requires_human_result_to_beat_hash_inflated_score(
     assert rows[-1].action == 3
     assert rows[-1].upgradedFromId == rows[0].id
     assert rows[-1].score == hash_inflated_score + 1
+
+
+@pytest.mark.parametrize("shape", ["three", "four"])
+def test_the_cutoff_recheck_reads_every_stored_entry_shape(
+    workflow_library, monkeypatch, shape
+):
+    """The recheck before each language reads the stored column, not the list
+    the indexer returned, so whatever another writer stored reaches it."""
+    from app.database import TableSportsEvents
+    from test_sportarr_indexer import STORED_ENTRIES
+
+    automatic, _, _, _, session, folder = workflow_library
+    stored = [entry for entry in STORED_ENTRIES[shape] if entry[1] is None]
+    real_index = automatic.store_subtitles_sports
+
+    def index_then_store(event_id, arr_instance_id=None, **kwargs):
+        indexed = real_index(event_id, arr_instance_id, **kwargs)
+        session.execute(
+            sa.update(TableSportsEvents)
+            .where(TableSportsEvents.id == event_id)
+            .values(subtitles=str(indexed + stored))
+        )
+        return indexed
+
+    monkeypatch.setattr(automatic, "store_subtitles_sports", index_then_store)
+
+    result = automatic.search_event(61, 1)
+
+    assert result["status"] == "downloaded"
+    assert (folder / "1/event.en.srt").exists()

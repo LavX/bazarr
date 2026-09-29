@@ -7,6 +7,7 @@ and the ordered-list shape of pool.providers that it relies on.
 """
 
 import pytest
+import requests
 
 from subliminal_patch import core
 
@@ -210,3 +211,317 @@ def test_throttle_callback_internal_typeerror_is_not_retried():
     with pytest.raises(TypeError, match="inside callback"):
         pool.throttle_callback("alpha", OSError(), sports_context=object())
     assert calls == ["alpha"]
+
+
+# A throttle callback runs inside the pool's error handlers. When it raises,
+# the provider's own failure must still decide the outcome, the handler's
+# remaining bookkeeping must still run, and the callback's failure must be
+# logged rather than lost.
+
+class _CallbackBroke(Exception):
+    pass
+
+
+def _raising_callback(calls, error_type=_CallbackBroke):
+    def callback(name, exc, ids=None, language=None):
+        calls.append((name, exc))
+        raise error_type("throttle callback fixture failure")
+    return callback
+
+
+def _callback_failures(caplog):
+    return [record for record in caplog.records
+            if record.name == core.logger.name and record.getMessage().startswith("Throttle callback failed")]
+
+
+@pytest.mark.parametrize("error, status", [
+    (core.APIThrottled("fixture throttle"), "cooldown"),
+    (requests.ConnectionError("fixture unreachable"), "unreachable"),
+    (RuntimeError("fixture failure"), "error"),
+])
+def test_raising_throttle_callback_keeps_the_search_failure(monkeypatch, caplog, error, status):
+    from types import SimpleNamespace
+
+    language = core.Language("eng")
+    searches = []
+
+    class Provider(_FakeProvider):
+        languages = {language}
+
+        def list_subtitles(self, video, languages):
+            searches.append(languages)
+            raise error
+
+    monkeypatch.setattr(core, "provider_registry", {"alpha": Provider})
+    calls = []
+    # A TypeError inside the callback is the case the adapter must not retry
+    # without sports_context, so it doubles as the not-retried check here.
+    pool = core.SZProviderPool(["alpha"], {}, throttle_callback=_raising_callback(calls, TypeError))
+    video = SimpleNamespace(sports_context="owned fixture")
+
+    with caplog.at_level("ERROR", logger=core.logger.name):
+        result = pool.list_subtitles_provider("alpha", video, {language}, detailed=True)
+
+    assert (result.provider, result.status, result.subtitles) == ("alpha", status, [])
+    assert calls == [("alpha", error)]
+    assert len(searches) == 1
+    failures = _callback_failures(caplog)
+    assert len(failures) == 1
+    # The record carries no exc_info, since a formatter would print the
+    # messages from it; the callback's exception type is in the text instead.
+    assert failures[0].exc_info is None
+    assert failures[0].getMessage().rstrip().endswith("TypeError")
+
+
+def test_raising_throttle_callback_still_discards_the_failed_search_provider(monkeypatch):
+    from types import SimpleNamespace
+
+    language = core.Language("eng")
+
+    class Provider(_FakeProvider):
+        languages = {language}
+
+        def list_subtitles(self, video, languages):
+            raise RuntimeError("fixture failure")
+
+    monkeypatch.setattr(core, "provider_registry", {"alpha": Provider})
+    calls = []
+    pool = core.SZProviderPool(["alpha"], {}, throttle_callback=_raising_callback(calls))
+
+    assert pool.list_subtitles(SimpleNamespace(), {language}) == []
+    assert "alpha" in pool.discarded_providers
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("error, attempts, discarded, recorded", [
+    (requests.ConnectionError("fixture unreachable"), core.DOWNLOAD_TRIES, True, True),
+    (core.rarfile.BadRarFile("fixture archive"), 1, False, False),
+    (core.MustGetBlacklisted("fixture-id", "movie"), 1, False, False),
+    (RuntimeError("fixture failure"), 1, True, True),
+])
+def test_raising_throttle_callback_keeps_the_download_outcome(monkeypatch, caplog, error, attempts, discarded,
+                                                              recorded):
+    from types import SimpleNamespace
+
+    downloads = []
+
+    class Provider(_FakeProvider):
+        def download_subtitle(self, subtitle):
+            downloads.append(subtitle)
+            raise error
+
+    monkeypatch.setattr(core, "provider_registry", {"alpha": Provider})
+    monkeypatch.setattr(core, "DOWNLOAD_RETRY_SLEEP", 0)
+    calls = []
+    pool = core.SZProviderPool(["alpha"], {}, throttle_callback=_raising_callback(calls))
+    subtitle = SimpleNamespace(provider_name="alpha", language=core.Language("eng"), sports_context=None)
+
+    with caplog.at_level("ERROR", logger=core.logger.name):
+        assert pool.download_subtitle(subtitle) is False
+
+    assert len(downloads) == attempts
+    assert calls == [("alpha", error)] * attempts
+    assert len(_callback_failures(caplog)) == attempts
+    assert ("alpha" in pool.discarded_providers) is discarded
+    if recorded:
+        assert subtitle.download_error is error
+
+
+# Kept out of the raising lines, which the callback failure log prints, so
+# these texts can only reach the log as exception messages.
+_CALLBACK_MESSAGE = "callback fixture failure"
+_INNER_MESSAGE = "inner fixture failure"
+
+
+def _raise_plain(exc):
+    raise _CallbackBroke(_CALLBACK_MESSAGE)
+
+
+def _raise_while_handling_its_own_error(exc):
+    try:
+        raise KeyError(_INNER_MESSAGE)
+    except KeyError:
+        raise _CallbackBroke(_CALLBACK_MESSAGE)
+
+
+def _raise_from_its_own_error(exc):
+    # The shape of a database error wrapped by its driver layer.
+    try:
+        raise KeyError(_INNER_MESSAGE)
+    except KeyError as inner:
+        raise _CallbackBroke(_CALLBACK_MESSAGE) from inner
+
+
+def _raise_from_the_provider_error(exc):
+    raise _CallbackBroke(_CALLBACK_MESSAGE) from exc
+
+
+def _raise_with_the_provider_message(exc):
+    raise _CallbackBroke(f"recording failed: {exc}")
+
+
+def _raise_with_the_provider_message_in_a_note(exc):
+    callback_error = _CallbackBroke(_CALLBACK_MESSAGE)
+    callback_error.add_note(f"while recording {exc}")
+    raise callback_error
+
+
+def _raise_a_group_holding_the_provider_error(exc):
+    raise ExceptionGroup(_CALLBACK_MESSAGE, [exc])
+
+
+def _reraise_the_provider_error(exc):
+    raise exc
+
+
+@pytest.mark.parametrize("raise_from_callback, logged_types", [
+    (_raise_plain, ["_CallbackBroke"]),
+    (_raise_while_handling_its_own_error, ["KeyError", "_CallbackBroke"]),
+    (_raise_from_its_own_error, ["KeyError", "_CallbackBroke"]),
+    (_raise_from_the_provider_error, ["_CallbackBroke"]),
+    (_raise_with_the_provider_message, ["_CallbackBroke"]),
+    (_raise_with_the_provider_message_in_a_note, ["_CallbackBroke"]),
+    (_raise_a_group_holding_the_provider_error, ["ExceptionGroup"]),
+    (_reraise_the_provider_error, []),
+])
+def test_raising_throttle_callback_log_leaves_out_the_provider_message(monkeypatch, caplog, raise_from_callback,
+                                                                        logged_types):
+    from types import SimpleNamespace
+
+    # The connection error handler names only the provider, so the callback
+    # failure record is the one place this message could reach the log.
+    error = requests.ConnectionError("https://example.invalid/sub?token=fixture-secret")
+
+    class Provider(_FakeProvider):
+        def download_subtitle(self, subtitle):
+            raise error
+
+    def callback(name, exc, ids=None, language=None):
+        raise_from_callback(exc)
+
+    monkeypatch.setattr(core, "provider_registry", {"alpha": Provider})
+    monkeypatch.setattr(core, "DOWNLOAD_TRIES", 1)
+    pool = core.SZProviderPool(["alpha"], {}, throttle_callback=callback)
+    subtitle = SimpleNamespace(provider_name="alpha", language=core.Language("eng"), sports_context=None)
+
+    with caplog.at_level("ERROR", logger=core.logger.name):
+        assert pool.download_subtitle(subtitle) is False
+
+    failures = _callback_failures(caplog)
+    assert len(failures) == 1
+    assert failures[0].exc_info is None
+    assert "fixture-secret" not in caplog.text
+    # A callback can copy the provider message into its own, so no message
+    # in the callback's chain is logged; its types and raise sites are.
+    assert _CALLBACK_MESSAGE not in caplog.text
+    assert _INNER_MESSAGE not in caplog.text
+    logged = failures[0].getMessage()
+    assert "ConnectionError" in logged
+    for name in logged_types:
+        assert name in logged
+    if logged_types:
+        assert f"in {raise_from_callback.__name__}" in logged
+    # The provider error the pool keeps is left as it was raised.
+    assert subtitle.download_error is error
+    assert str(error) == "https://example.invalid/sub?token=fixture-secret"
+
+
+@pytest.mark.parametrize("error", [
+    requests.Timeout("fixture timeout"),
+    RuntimeError("fixture teardown failure"),
+])
+def test_raising_throttle_callback_still_drops_the_torn_down_provider(monkeypatch, caplog, error):
+    terminated = []
+
+    class Provider(_FakeProvider):
+        def terminate(self):
+            terminated.append(self)
+            raise error
+
+    monkeypatch.setattr(core, "provider_registry", {"alpha": Provider})
+    calls = []
+    pool = core.SZProviderPool(["alpha"], {}, throttle_callback=_raising_callback(calls))
+    pool["alpha"]
+
+    with caplog.at_level("ERROR", logger=core.logger.name):
+        del pool["alpha"]
+
+    assert "alpha" not in pool.initialized_providers
+    assert len(terminated) == 1
+    assert calls == [("alpha", error)]
+    assert len(_callback_failures(caplog)) == 1
+
+
+def test_update_terminates_every_removed_provider_when_a_teardown_callback_raises(monkeypatch):
+    terminated = []
+
+    class Provider(_FakeProvider):
+        def terminate(self):
+            terminated.append(self)
+            raise RuntimeError("fixture teardown failure")
+
+    monkeypatch.setattr(core, "provider_registry", {"alpha": Provider, "beta": Provider, "gamma": Provider})
+    calls = []
+    pool = core.SZProviderPool(["alpha", "beta", "gamma"], {"gamma": {"token": "old"}},
+                               throttle_callback=_raising_callback(calls))
+    removed = {pool["alpha"], pool["beta"]}
+
+    pool.update(["gamma"], {"gamma": {"token": "new"}}, [("gamma", "fixture-id")],
+                {"must_contain": [], "must_not_contain": []})
+
+    assert set(terminated) == removed
+    assert sorted(name for name, _ in calls) == ["alpha", "beta"]
+    assert pool.providers == ["gamma"]
+    # The rest of update() still ran after the teardowns: gamma's config
+    # change restarted it and the new blacklist is in place.
+    assert list(pool.initialized_providers) == ["gamma"]
+    assert pool.initialized_providers["gamma"].kwargs == {"token": "new"}
+    assert ("gamma", "fixture-id") in pool.blacklist
+
+
+def test_raising_throttle_callback_on_config_restart_keeps_restarting(monkeypatch, caplog):
+    init_error = ConnectionError("fixture restart failure")
+
+    class Provider(_FakeProvider):
+        def initialize(self):
+            if self.kwargs.get("token") == "broken":
+                raise init_error
+            super().initialize()
+
+    monkeypatch.setattr(core, "provider_registry", {"alpha": Provider, "beta": Provider})
+    calls = []
+    pool = core.SZProviderPool(["alpha", "beta"], {"alpha": {"token": "old"}, "beta": {"token": "old"}},
+                               throttle_callback=_raising_callback(calls))
+    pool["alpha"]
+    old_beta = pool["beta"]
+
+    with caplog.at_level("ERROR", logger=core.logger.name):
+        pool.provider_configs.update({"alpha": {"token": "broken"}, "beta": {"token": "new"}})
+
+    assert calls == [("alpha", init_error)]
+    assert len(_callback_failures(caplog)) == 1
+    assert "alpha" not in pool.initialized_providers
+    assert pool.provider_configs["alpha"] == {"token": "broken"}
+    # beta comes after the failing restart and is still replaced.
+    assert pool.initialized_providers["beta"] is not old_beta
+    assert pool.initialized_providers["beta"].kwargs == {"token": "new"}
+
+
+def test_teardown_drops_the_provider_even_when_terminate_aborts(monkeypatch):
+    # Anything escaping terminate(), not only what the handlers catch, must
+    # still leave the pool without the instance it was deleting.
+    class _Abort(BaseException):
+        pass
+
+    class Provider(_FakeProvider):
+        def terminate(self):
+            raise _Abort()
+
+    monkeypatch.setattr(core, "provider_registry", {"alpha": Provider})
+    pool = core.SZProviderPool(["alpha"], {})
+    pool["alpha"]
+
+    with pytest.raises(_Abort):
+        del pool["alpha"]
+
+    assert "alpha" not in pool.initialized_providers
