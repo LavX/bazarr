@@ -1737,3 +1737,134 @@ def test_review_completed_mutation_keeps_success_when_quarantine_fails(rejected_
         assert "Synced" in probe.source.read_text()
         assert flow.sync_history
     _assert_reported_quarantine_failure(probe, caplog)
+
+
+# --- the upload routes bound what they read -------------------------------------
+#
+# The episode and movie routes read the whole file part into memory before any
+# size check, and the queued upload kept it. A VobSub .sub or an .ass carrying its
+# fonts runs to tens of megabytes, so the ceiling is generous, but it is one.
+
+def _upload_route(media_type):
+    from importlib import import_module
+
+    package = "episodes" if media_type == "series" else "movies"
+    module = import_module(f"api.{package}.{package}_subtitles")
+    return module, (module.EpisodesSubtitles if media_type == "series" else module.MoviesSubtitles)
+
+
+@pytest.fixture
+def upload_route(monkeypatch, tmp_path):
+    """Both upload routes, with the library lookup faked and the queued upload recorded."""
+    video = tmp_path / "Media.mkv"
+    video.write_bytes(b"video")
+    row = SimpleNamespace(path=str(video), audio_language="[]")
+    lookup = SimpleNamespace(execute=lambda statement: SimpleNamespace(first=lambda: row))
+    queued = []
+    for media_type in ("series", "movie"):
+        module, _ = _upload_route(media_type)
+        monkeypatch.setattr(module, "database", lookup)
+        monkeypatch.setattr(module, "manual_upload_subtitle", lambda **kwargs: queued.append(kwargs))
+    monkeypatch.setattr("utilities.path_mappings.path_mappings.path_replace", lambda path: path)
+    monkeypatch.setattr("utilities.path_mappings.path_mappings.path_replace_movie", lambda path: path)
+    return queued
+
+
+def _small_subtitle_ceiling(monkeypatch, media_type, size):
+    module, _ = _upload_route(media_type)
+    monkeypatch.setattr(module, "MAX_SUBTITLE_UPLOAD_SIZE", size)
+
+
+def _post_upload(media_type, content, *, filename="Media.en.sub", declared=None):
+    from flask import Flask
+
+    _, resource = _upload_route(media_type)
+    form = {"language": "en", "forced": "false", "hi": "false", "file": (BytesIO(content), filename)}
+    form.update({"seriesid": "4", "episodeid": "5"} if media_type == "series" else {"radarrid": "5"})
+    environ = {"CONTENT_LENGTH": str(declared)} if declared is not None else None
+    with Flask(__name__).test_request_context("/api/test", method="POST", data=form,
+                                              content_type="multipart/form-data",
+                                              environ_overrides=environ):
+        return resource.post.__wrapped__(resource())
+
+
+def test_the_subtitle_upload_ceiling_is_150_mib():
+    from api import utils
+
+    assert utils.MAX_SUBTITLE_UPLOAD_SIZE == 150 * 1024 * 1024
+    for media_type in ("series", "movie"):
+        module, _ = _upload_route(media_type)
+        assert module.MAX_SUBTITLE_UPLOAD_SIZE == utils.MAX_SUBTITLE_UPLOAD_SIZE
+
+
+@pytest.mark.parametrize("media_type", ["movie", "series"])
+def test_an_upload_declared_over_the_ceiling_is_refused_before_it_is_parsed(upload_route, media_type):
+    from api.utils import MAX_SUBTITLE_UPLOAD_SIZE, UPLOAD_FORM_ALLOWANCE
+
+    body, status = _post_upload(media_type, b"1\n", declared=MAX_SUBTITLE_UPLOAD_SIZE + UPLOAD_FORM_ALLOWANCE + 1)
+
+    assert status == 413
+    assert "too large" in body
+    assert upload_route == []
+
+
+@pytest.mark.parametrize("media_type", ["movie", "series"])
+def test_a_file_over_the_ceiling_is_refused_and_never_queued(upload_route, monkeypatch, media_type):
+    _small_subtitle_ceiling(monkeypatch, media_type, 4096)
+
+    body, status = _post_upload(media_type, b"x" * 4097)
+
+    assert status == 413
+    assert upload_route == []
+
+
+@pytest.mark.parametrize("media_type", ["movie", "series"])
+def test_a_file_at_the_ceiling_is_uploaded(upload_route, monkeypatch, media_type):
+    _small_subtitle_ceiling(monkeypatch, media_type, 4096)
+    content = b"x" * 4096
+
+    assert _post_upload(media_type, content) == ("", 204)
+
+    [upload] = upload_route
+    assert upload["subtitle"].getvalue() == content
+    assert upload["filename"] == "Media.en.sub"
+    assert upload["media_type"] == media_type
+
+
+@pytest.mark.parametrize("media_type", ["movie", "series"])
+def test_a_file_of_an_unsupported_format_is_refused_as_a_bad_request(upload_route, media_type):
+    # It raised ValueError, which the API answered as a 500 with a traceback in
+    # the log. A PGS .sup is not among the formats a per-file upload takes.
+    assert _post_upload(media_type, b"PG", filename="Media.en.sup") == (
+        "A subtitle of an invalid format was uploaded.", 400)
+    assert upload_route == []
+
+
+def _recorded_reads(monkeypatch, module):
+    from api import utils
+
+    reads = []
+
+    def recording(upload, limit):
+        reads.append(limit)
+        return utils.read_bounded_upload(upload, limit)
+
+    monkeypatch.setattr(module, "read_bounded_upload", recording)
+    return reads
+
+
+@pytest.mark.parametrize("media_type", ["movie", "series"])
+@pytest.mark.parametrize("missing, status", [("library entry", 404), ("media file", 500)])
+def test_an_upload_that_is_not_queued_is_never_read_into_memory(upload_route, monkeypatch, tmp_path,
+                                                                 media_type, missing, status):
+    # Only an upload that is queued needs its file part in memory; up to the
+    # ceiling of it is too much to load for an answer that refuses it anyway.
+    module, _ = _upload_route(media_type)
+    reads = _recorded_reads(monkeypatch, module)
+    row = None if missing == "library entry" else SimpleNamespace(path=str(tmp_path / "Gone.mkv"),
+                                                                  audio_language="[]")
+    monkeypatch.setattr(module, "database", SimpleNamespace(execute=lambda statement: SimpleNamespace(first=lambda: row)))
+
+    assert _post_upload(media_type, b"1\n")[1] == status
+    assert reads == []
+    assert upload_route == []
