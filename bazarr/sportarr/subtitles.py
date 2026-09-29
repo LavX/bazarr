@@ -411,17 +411,19 @@ def _publish_after_release(video_path, arr_instance_id):
 
     Changes are recorded as they happen and reported on every exit, so a file
     that reached disk is announced even when later work fails or is cancelled.
-    They are queued together, so an upgrade's new file and the one it replaced
-    reach each server as one refresh rather than one each.
+    Everything the save publishes is queued as one batch once it lets go,
+    including what an automatic sync reports for its output on the way, so
+    an upgrade's new file, the one it replaced and a sync of it reach each
+    server as one refresh rather than one each.
     """
     from media_servers.dispatcher import queued_together
     from subtitles.tools.subsync_engines import _report_subtitle_publication
 
     changes = []
-    try:
-        yield changes
-    finally:
-        with queued_together():
+    with queued_together():
+        try:
+            yield changes
+        finally:
             for operation, subtitle_path in changes:
                 _report_subtitle_publication(
                     publication_callback("sports", video_path, operation, arr_instance_id),

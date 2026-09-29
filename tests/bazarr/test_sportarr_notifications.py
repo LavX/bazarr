@@ -334,3 +334,46 @@ def test_an_upgrade_reports_the_removed_file_once_the_save_let_go(manual_library
     assert [released for _, released in released_publications] == [True, True]
     # Both queued as one batch, so each server refreshes the video once.
     assert batches == [0, 2]
+
+
+def test_a_sync_during_the_save_is_queued_with_it_once_the_save_let_go(manual_library, monkeypatch):  # noqa: F811
+    """An automatic sync publishes its output from inside the save. That
+    publication is held with the save's own and queued in the same batch, so
+    no refresh worker starts while the save still holds its locks."""
+    from media_servers import dispatcher
+    from media_servers.events import publication_callback
+    from subtitles import processing
+
+    service, session, folder = manual_library
+    video, written = str(folder / '1' / 'event.mkv'), str(folder / '1' / 'event.en.srt')
+    queued, holds = [], []
+
+    class Held:
+        def __enter__(self):
+            holds.append(len(queued))
+
+        def __exit__(self, *exc):
+            holds.append(len(queued))
+
+    class Dispatcher:
+        condition = Held()
+
+        def notify(self, event):
+            queued.append((_described(event), _save_has_let_go(session, event)))
+
+    monkeypatch.setattr(dispatcher, '_get_dispatcher', lambda: Dispatcher())
+    process = processing.process_subtitle
+
+    def process_with_sync(*args, **kwargs):
+        # What a successful automatic sync reports for the file it rewrote.
+        publication_callback('sports', video, 'sync', 1)(written)
+        return process(*args, **kwargs)
+
+    monkeypatch.setattr(processing, 'process_subtitle', process_with_sync)
+    result = service.manual_search_sports(61, 'en', arr_instance_id=1)[0]
+    service.manual_download_sports(61, result, 1)
+    assert queued == [
+        (('sports', video, 'sync', 1, written), True),
+        (('sports', video, 'download', 1, written), True),
+    ]
+    assert holds == [0, 2]

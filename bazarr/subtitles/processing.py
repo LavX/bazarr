@@ -309,7 +309,8 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         # A subtitle write does not change Sportarr's video inventory, so
         # Sportarr is not asked to rescan. The save that called this reports
         # the final file to the media servers once it releases its locks,
-        # which is after the sync and post-processing below.
+        # which is after the sync and post-processing below, and holds what
+        # the sync publishes until then.
         instance = validate()
         if path != context.mapped_path:
             raise ValueError('Sports subtitle path does not match its event')
