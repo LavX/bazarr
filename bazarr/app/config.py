@@ -3,6 +3,7 @@
 import hashlib  # noqa: F401
 import os
 import ast
+import contextlib
 import json
 import logging
 import re
@@ -1327,6 +1328,33 @@ _native_settings_save_lock = threading.RLock()
 # written save retries these, whatever it changes. Saves run one at a time.
 _unfinished_login_resets = {'caches': set(), 'throttles': False}
 
+
+class _FollowUps:
+    """Runs what a written save sets off, so that one step failing stops no other.
+
+    The save is on disk by then and every step acts on it by itself: a failed login
+    reset must not leave a library job unqueued, which saving the same values again
+    would not queue either. Once all have run, the first failure is raised and any
+    others are logged.
+    """
+
+    def __init__(self):
+        self.failures = []
+
+    @contextlib.contextmanager
+    def step(self):
+        try:
+            yield
+        except Exception as error:
+            self.failures.append(error)
+
+    def raise_first(self):
+        for error in self.failures[1:]:
+            logging.error('Settings were saved, but applying them also failed', exc_info=error)
+        if self.failures:
+            raise self.failures[0]
+
+
 # Every kind's master switch, so flipping one republishes that kind's saved
 # snapshots. A kind missing from here keeps refreshing after the user turned it
 # off, until the next restart.
@@ -1799,26 +1827,33 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
         # hearing-impaired extension, clearing provider logins, resetting the
         # pools and queueing library-wide jobs all act on the submitted values,
         # and a job queued for a save that is then refused cannot be recalled.
-        # The sports reindex carries the audio mode with it.
+        # The sports reindex carries the audio mode with it. Each step runs
+        # even when one before it failed.
+        follow_ups = _FollowUps()
+
         if hi_extension_changed:
-            os.environ["SZ_HI_EXTENSION"] = settings.general.hi_extension or ""
+            with follow_ups.step():
+                os.environ["SZ_HI_EXTENSION"] = settings.general.hi_extension or ""
 
         # Each one is recorded before it is tried and dropped once done, so one
         # that fails here, or was left by an earlier save, is tried again now.
         unfinished = _unfinished_login_resets
         if unfinished['caches'] or unfinished['throttles']:
-            # The earlier save failed before its pool reset, too.
+            # Providers built since the earlier save can hold the login it could
+            # not clear, so they are built again once it is.
             reset_compat_pool = True
         unfinished['caches'].update(provider_caches_to_clear)
         unfinished['throttles'] = unfinished['throttles'] or reset_providers
         for cache_key in sorted(unfinished['caches']):
-            region.delete(cache_key)
-            unfinished['caches'].discard(cache_key)
+            with follow_ups.step():
+                region.delete(cache_key)
+                unfinished['caches'].discard(cache_key)
 
         if unfinished['throttles']:
-            from .get_providers import reset_throttled_providers
-            reset_throttled_providers(only_auth_or_conf_error=True)
-            unfinished['throttles'] = False
+            with follow_ups.step():
+                from .get_providers import reset_throttled_providers
+                reset_throttled_providers(only_auth_or_conf_error=True)
+                unfinished['throttles'] = False
 
         if reset_fanout_pool:
             # All in-loop assignments have committed by now, so the next
@@ -1850,30 +1885,36 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
                 pass
 
         if undefined_subtitles_track_default_changed:
-            from subtitles.indexer.series import series_full_scan_subtitles
-            from subtitles.indexer.movies import movies_full_scan_subtitles
             if settings.general.use_sonarr:
-                series_full_scan_subtitles(use_cache=True)
+                with follow_ups.step():
+                    from subtitles.indexer.series import series_full_scan_subtitles
+                    series_full_scan_subtitles(use_cache=True)
             if settings.general.use_radarr:
-                movies_full_scan_subtitles(use_cache=True)
+                with follow_ups.step():
+                    from subtitles.indexer.movies import movies_full_scan_subtitles
+                    movies_full_scan_subtitles(use_cache=True)
 
         if settings.general.use_sportarr and (undefined_subtitles_track_default_changed or
                                              use_embedded_subs_changed or audio_tracks_parsing_changed or
                                              embedded_subtitles_parser_changed):
-            from subtitles.indexer.sports import sports_full_scan_subtitles
-            sports_full_scan_subtitles(refresh_audio=audio_tracks_parsing_changed,
-                                      audio_mode=bool(settings.general.parse_embedded_audio_track)
-                                      if audio_tracks_parsing_changed else None,
-                                      audio_refresh_id=secrets.token_hex(16)
-                                      if audio_tracks_parsing_changed or embedded_subtitles_parser_changed else None)
+            with follow_ups.step():
+                from subtitles.indexer.sports import sports_full_scan_subtitles
+                sports_full_scan_subtitles(refresh_audio=audio_tracks_parsing_changed,
+                                          audio_mode=bool(settings.general.parse_embedded_audio_track)
+                                          if audio_tracks_parsing_changed else None,
+                                          audio_refresh_id=secrets.token_hex(16)
+                                          if audio_tracks_parsing_changed or embedded_subtitles_parser_changed
+                                          else None)
 
         if audio_tracks_parsing_changed:
             if settings.general.use_sonarr:
-                from sonarr.sync.series import update_series
-                update_series()
+                with follow_ups.step():
+                    from sonarr.sync.series import update_series
+                    update_series()
             if settings.general.use_radarr:
-                from radarr.sync.movies import update_movies
-                update_movies()
+                with follow_ups.step():
+                    from radarr.sync.movies import update_movies
+                    update_movies()
 
         if use_embedded_subs_changed or undefined_audio_track_default_changed or adaptive_searching_max_age_changed:
             # Queued rather than run here: this is inside the settings save
@@ -1881,25 +1922,27 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             # time out a save that had already been written. And only now that
             # it has been written: a save refused by validation or by the disk
             # changed nothing that needs recalculating.
-            from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
-            queue_missing_subtitles_recalculation()
+            with follow_ups.step():
+                from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
+                queue_missing_subtitles_recalculation()
 
         if clear_disabled_provider_hub_statuses:
-            if active_provider_hub_provider_ids is None:
-                active_provider_hub_provider_ids = _active_provider_hub_provider_ids()
-            configured = getattr(settings.general, 'enabled_providers', [])
-            if isinstance(configured, str):
-                enabled_provider_ids = {
-                    item.strip().strip("'\"")
-                    for item in configured.strip().strip('[]').split(',')
-                    if item.strip()
-                }
-            elif isinstance(configured, (list, tuple, set)):
-                enabled_provider_ids = {str(item) for item in configured}
-            else:
-                enabled_provider_ids = set()
-            provider_hub_status_clears.update(
-                active_provider_hub_provider_ids - enabled_provider_ids)
+            with follow_ups.step():
+                if active_provider_hub_provider_ids is None:
+                    active_provider_hub_provider_ids = _active_provider_hub_provider_ids()
+                configured = getattr(settings.general, 'enabled_providers', [])
+                if isinstance(configured, str):
+                    enabled_provider_ids = {
+                        item.strip().strip("'\"")
+                        for item in configured.strip().strip('[]').split(',')
+                        if item.strip()
+                    }
+                elif isinstance(configured, (list, tuple, set)):
+                    enabled_provider_ids = {str(item) for item in configured}
+                else:
+                    enabled_provider_ids = set()
+                provider_hub_status_clears.update(
+                    active_provider_hub_provider_ids - enabled_provider_ids)
 
         if provider_hub_status_clears:
             try:
@@ -1910,30 +1953,35 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
                 logging.exception('Unable to clear stale Provider Hub runtime status')
 
         # Set the configured state based on config.yaml file existence
-        from .database import database, update, System
-        database.execute(
-            update(System)
-            .values(configured=1))
+        with follow_ups.step():
+            from .database import database, update, System
+            database.execute(
+                update(System)
+                .values(configured=1))
 
         # Reconfigure Bazarr to reflect changes
         if configure_debug:
-            from .logger import configure_logging
-            configure_logging(settings.general.debug or args.debug)
+            with follow_ups.step():
+                from .logger import configure_logging
+                configure_logging(settings.general.debug or args.debug)
 
         if configure_log_rotation:
             # In place on the live handler, so the new ceiling holds from the
             # next record rather than from the next restart.
-            from .logger import apply_log_rotation_settings
-            apply_log_rotation_settings()
+            with follow_ups.step():
+                from .logger import apply_log_rotation_settings
+                apply_log_rotation_settings()
 
         if configure_captcha:
-            configure_captcha_func()
+            with follow_ups.step():
+                configure_captcha_func()
 
         if update_schedule:
-            from .scheduler import scheduler
-            from .event_handler import event_stream
-            scheduler.update_configurable_tasks()
-            event_stream(type='task')
+            with follow_ups.step():
+                from .scheduler import scheduler
+                from .event_handler import event_stream
+                scheduler.update_configurable_tasks()
+                event_stream(type='task')
 
         if sonarr_changed:
             # Restart every Sonarr SignalR client and re-fan-out (#156).
@@ -1961,25 +2009,30 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
                 pass
 
         if update_path_map:
-            from utilities.path_mappings import path_mappings
-            path_mappings.update()
+            with follow_ups.step():
+                from utilities.path_mappings import path_mappings
+                path_mappings.update()
 
         if configure_proxy:
-            configure_proxy_func()
+            with follow_ups.step():
+                configure_proxy_func()
 
         if exclusion_updated:
-            from .event_handler import event_stream
-            event_stream(type='badges')
-            if sonarr_exclusion_updated:
-                event_stream(type='reset-episode-wanted')
-            if radarr_exclusion_updated:
-                event_stream(type='reset-movie-wanted')
-            # The sports wanted list is computed live against the exclusion
-            # settings, so saving them has to invalidate the client's cached
-            # sports rows. The 'sports' event is the one the socketio reducer
-            # maps to the whole sports query root, wanted included.
-            if sportarr_exclusion_updated:
-                event_stream(type='sports')
+            with follow_ups.step():
+                from .event_handler import event_stream
+                event_stream(type='badges')
+                if sonarr_exclusion_updated:
+                    event_stream(type='reset-episode-wanted')
+                if radarr_exclusion_updated:
+                    event_stream(type='reset-movie-wanted')
+                # The sports wanted list is computed live against the exclusion
+                # settings, so saving them has to invalidate the client's cached
+                # sports rows. The 'sports' event is the one the socketio reducer
+                # maps to the whole sports query root, wanted included.
+                if sportarr_exclusion_updated:
+                    event_stream(type='sports')
+
+        follow_ups.raise_first()
 
 
 def get_array_from(property):

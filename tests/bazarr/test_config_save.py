@@ -1157,8 +1157,14 @@ def test_a_save_its_own_validators_refuse_starts_no_library_job(metadata_save_en
     assert getattr(env.settings, kind).http_timeout == 60
 
 
+# Everything the saves below set off: a new OpenSubtitles.org login, audio track
+# parsing turned on and embedded subtitles turned off, with every arr in use.
+_EVERY_FOLLOW_UP = sorted(["clear os_token", "throttled providers", "compat pool", "sports scan",
+                           "sonarr sync", "radarr sync", "missing subtitles recalculation"])
+
+
 @pytest.mark.parametrize("failing", ["clear os_token", "throttled providers", "sports scan",
-                                     "sonarr sync", "missing subtitles recalculation"])
+                                     "sonarr sync", "radarr sync", "missing subtitles recalculation"])
 def test_a_written_metadata_save_keeps_its_values_when_a_follow_up_fails(
     metadata_save_environment, monkeypatch, failing,
 ):
@@ -1190,7 +1196,9 @@ def test_a_written_metadata_save_keeps_its_values_when_a_follow_up_fails(
             ("settings-opensubtitles-username", ["after"]),
         ])
 
-    assert effects[-1] == failing
+    # One that fails stops none of the others, which saving the same values
+    # again would not set off.
+    assert sorted(effects) == _EVERY_FOLLOW_UP
     stored = decrypt_settings_dict(yaml.safe_load(env.path.read_text()))
     assert stored["discover"]["tmdb_access_token"] == replacement
     assert stored["general"]["parse_embedded_audio_track"] is True
@@ -1200,7 +1208,7 @@ def test_a_written_metadata_save_keeps_its_values_when_a_follow_up_fails(
 
 
 @pytest.mark.parametrize("failing", ["clear os_token", "throttled providers", "sports scan",
-                                     "sonarr sync", "missing subtitles recalculation"])
+                                     "sonarr sync", "radarr sync", "missing subtitles recalculation"])
 def test_a_written_save_whose_follow_up_fails_is_reported_as_saved(
     metadata_save_environment, monkeypatch, failing,
 ):
@@ -1229,7 +1237,9 @@ def test_a_written_save_whose_follow_up_fails_is_reported_as_saved(
         ])
 
     assert not isinstance(error.value, env.config.MetadataFollowupError)
-    assert effects[-1] == failing
+    # One that fails stops none of the others, which saving the same values
+    # again would not set off.
+    assert sorted(effects) == _EVERY_FOLLOW_UP
     stored = decrypt_settings_dict(yaml.safe_load(env.path.read_text()))
     assert stored["general"]["parse_embedded_audio_track"] is True
     assert stored["opensubtitles"]["username"] == "after"
@@ -1238,7 +1248,7 @@ def test_a_written_save_whose_follow_up_fails_is_reported_as_saved(
 
 
 @pytest.mark.parametrize("failing, retried", [
-    ("clear os_token", ["clear os_token", "compat pool", "throttled providers"]),
+    ("clear os_token", ["clear os_token", "compat pool"]),
     ("throttled providers", ["compat pool", "throttled providers"]),
 ])
 def test_a_login_reset_that_fails_after_the_write_is_retried_by_the_next_save(
