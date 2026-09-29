@@ -14,7 +14,6 @@ from plexapi.exceptions import BadRequest, NotFound, Unauthorized
 
 from media_servers import resolution
 from media_servers.http import MediaServerError
-from media_servers.paths import file_name
 
 logger = logging.getLogger(__name__)
 
@@ -203,16 +202,17 @@ class PlexRefreshClient:
         # walk reports the publication as unresolved rather than as requested.
         return {'status': 'requested'} if updated else None
 
-    def locate(self, media_type, metadata, video_path=None):
+    def locate(self, media_type, metadata):
         """The Plex item a library row names, with nothing refreshed.
 
         Through the refresh's own lookup, and in its order: the IMDB guid in
         every configured section first, so an item the refresh finds is the
         item found here. Only then the TMDB or TVDB guid, which the refresh
         never asks and a link still can. A miss is never turned into a scan.
+        A sports recording is refused: Plex files a show's date-named
+        recordings of one day as one episode, so no file name pins one, and
+        links never asks.
         """
-        if media_type == 'sports':
-            return self._locate_recording(metadata, video_path)
         if media_type not in ('movie', 'episode', 'series'):
             raise MediaServerError('internal_error')
         if not metadata.locatable(media_type):
@@ -228,26 +228,3 @@ class PlexRefreshClient:
                 if item is not None:
                     return item
         return None
-
-    def _locate_recording(self, metadata, video_path):
-        """The one item titled like the event whose file has the recording's name.
-
-        A recording has no identifiers, so the event's title narrows the
-        sports sections and the file name decides, because Plex's path and
-        Bazarr's can differ in everything but that. A tie is nothing.
-        """
-        name = file_name(video_path)
-        if name is None or not metadata.title:
-            return None
-        matches = []
-        for _name, section in _sections(self.server, self.snapshot.libraries('sports')):
-            libtype = 'episode' if getattr(section, 'type', None) == 'show' else None
-            try:
-                found = section.search(title=metadata.title, libtype=libtype)
-                matches += [item for item in found
-                            if any(file_name(getattr(part, 'file', None)) == name for part in item.iterParts())]
-            except NotFound:
-                continue
-            except Exception as error:
-                raise _refusal(error) from None
-        return matches[0] if len(matches) == 1 else None

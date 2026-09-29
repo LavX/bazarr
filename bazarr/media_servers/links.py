@@ -35,6 +35,16 @@ HTTP_TIMEOUT = (3, 4)
 # Plex may ask its agent online, and the pooled Plex client cannot be given a
 # shorter timeout.
 BUDGETS = {'emby': 8, 'jellyfin': 8, 'silo': 8, 'plex': 15}
+# Whether a kind can pin a sports recording to one item of its own. A
+# recording has no identifiers, so it is found by its file: Emby by the mapped
+# path, Jellyfin by the file name. Silo's native API has no path lookup, and a
+# recording it never matched carries a hashed id nothing here can derive.
+# Plex files a show's date-named recordings of one day as one episode (four
+# NFL games of one Sunday are one item, "Episode 09-20"), so no file name
+# picks out an item of its own there. A kind that cannot pin a recording is
+# not offered for sports at all, rather than drawn as a row that can only
+# ever answer "Not found".
+PINS_RECORDINGS = {'emby': True, 'jellyfin': True, 'plex': False, 'silo': False}
 # Lookups in flight per destination. A lookup past its budget keeps its worker
 # until the server lets go, so every destination has workers of its own: a
 # server that hangs then holds only its own rows, never another server's.
@@ -106,16 +116,14 @@ def candidates(row, media_type, native):
     the scoping the refresh uses. Emby and Silo hold a file only where a path
     mapping covers it; a row no mapping covers is not on that server at all,
     which is different from a server that was asked and did not find it.
-    A recording is found by its file on every kind, so one whose path could
-    not be mapped is on none of them.
+    A recording is offered only on the kinds that pin one by its file, see
+    ``PINS_RECORDINGS``, so one whose path could not be mapped is on none.
     """
     if media_type == 'sports' and row.video_path is None:
         return []
     targets = []
     for snapshot, display_name in destinations(native):
-        if media_type == 'sports' and snapshot.kind == 'silo':
-            # Silo's native API has no path lookup, and a recording it never
-            # matched carries a hashed id nothing here can derive.
+        if media_type == 'sports' and not PINS_RECORDINGS[snapshot.kind]:
             continue
         mapped = None
         if snapshot.kind in LIBRARY_KEYS:
@@ -165,8 +173,8 @@ def resolve(instance_id, media_type, local_id, native=None):
                    if target.snapshot.id == instance_id), None)
     if target is None:
         return {'instance_id': instance_id, 'state': 'not_found', 'url': None}
-    # The file the answer depends on. Jellyfin and Plex map no path, but they
-    # find a recording by its file name, so a replaced recording is asked again.
+    # The file the answer depends on. Jellyfin maps no path, but it finds a
+    # recording by its file name, so a replaced recording is asked again.
     path = target.mapped_path or (row.video_path if media_type == 'sports' else None)
     key = f'{instance_id}:{target.snapshot.revision}:{media_type}:{local_id}:{path}'
     return links_region.get_or_create(key, lambda: _answer(target, media_type, row),
@@ -271,7 +279,7 @@ def _lookup(target, media_type, row):
     if snapshot.kind == 'plex':
         from plex.refresh import PlexRefreshClient
         with PlexRefreshClient(snapshot) as client:
-            item = client.locate(media_type, row.metadata, row.video_path)
+            item = client.locate(media_type, row.metadata)
             return None if item is None else item.getWebURL(base=plex_web_base(snapshot))
     from silo.client import SiloClient
     with SiloClient(snapshot.url, snapshot.apikey, snapshot.verify_ssl) as client:

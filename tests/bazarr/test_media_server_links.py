@@ -261,23 +261,51 @@ def sports_row(path='/media/NHL/Game 12.mkv'):
     return LibraryRow(MediaMetadata(title='Game 12', season=2026, episode=12), path, 3)
 
 
-def test_a_recording_is_never_offered_on_silo_and_needs_a_sports_library_elsewhere():
+def test_every_kind_says_whether_it_can_pin_a_recording_and_only_emby_and_jellyfin_can():
+    # A recording has no identifiers, so a kind is offered for sports only
+    # when a file name picks out one item of its own there. Silo cannot look
+    # a file up, and Plex files a show's date-named recordings of one day as
+    # one episode.
+    from media_servers.instances import VALID_KINDS
+    from media_servers.links import PINS_RECORDINGS
+    assert set(PINS_RECORDINGS) == set(VALID_KINDS)
+    assert {kind for kind, pins in PINS_RECORDINGS.items() if pins} == {'emby', 'jellyfin'}
+
+
+def test_a_recording_is_offered_only_where_its_kind_pins_it_and_a_library_or_mapping_holds_it():
     from media_servers.links import candidates
     configuration = native(snap('emby', 'A', **EMBY_A), snap('silo', 'S', **SILO_A), snap('jellyfin', 'J'),
+                           snap('jellyfin', 'K', options={'sports_library_ids': ['sports']}),
                            snap('plex', 'P', options={'movie_libraries': ['Movies'], 'sports_libraries': ['Sports']}))
-    assert [target.snapshot.kind for target in candidates(sports_row(), 'sports', configuration)] == ['emby', 'plex']
+    assert [target.snapshot.id for target in candidates(sports_row(), 'sports', configuration)] == [
+        'emby-A', 'jellyfin-K']
+
+
+def test_plex_is_never_offered_for_a_recording_even_with_a_sports_library(monkeypatch):
+    # The live check: four NFL recordings of one Sunday are one Plex episode,
+    # "Episode 09-20", so every sports row read "Not found on Plex". The
+    # sports event row and the sports History row both ask about the event's
+    # local id as a sports row, so neither is offered Plex. A movie still is.
+    from media_servers import links
+    monkeypatch.setattr(links, 'media_metadata_for', lambda media_type, local_id: (
+        sports_row() if media_type == 'sports' else library_row()))
+    monkeypatch.setattr(links, '_lookup', lambda *_args: pytest.fail('Plex is never asked about a recording'))
+    plex = snap('plex', 'P', options={'movie_libraries': ['Movies'], 'sports_libraries': ['Sports']})
+    assert links.candidate_rows('sports', 11, native(plex)) == []
+    assert links.resolve(plex.id, 'sports', 11, native(plex)) == {
+        'instance_id': plex.id, 'state': 'not_found', 'url': None}
+    assert [row['kind'] for row in links.candidate_rows('movie', 7, native(plex))] == ['plex']
 
 
 def test_a_recording_whose_path_could_not_be_mapped_is_offered_nowhere():
-    # Every kind finds a recording by its file, so a recording without a path
-    # has no destination to ask, rather than a Jellyfin or Plex row that can
-    # only ever answer "Not found".
+    # Every kind that is offered a recording finds it by its file, so a
+    # recording without a path has no destination to ask, rather than a
+    # Jellyfin row that can only ever answer "Not found".
     from media_servers.links import candidates
     configuration = native(snap('emby', 'A', **EMBY_A),
-                           snap('jellyfin', 'J', options={'sports_library_ids': ['sports']}),
-                           snap('plex', 'P', options={'sports_libraries': ['Sports']}))
+                           snap('jellyfin', 'J', options={'sports_library_ids': ['sports']}))
     assert [target.snapshot.kind for target in candidates(sports_row(), 'sports', configuration)] == [
-        'emby', 'jellyfin', 'plex']
+        'emby', 'jellyfin']
     assert candidates(sports_row(path=None), 'sports', configuration) == []
 
 

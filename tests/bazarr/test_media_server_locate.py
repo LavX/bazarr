@@ -284,23 +284,16 @@ def test_jellyfin_finds_a_recording_by_file_name_in_its_sports_libraries(jellyfi
     assert not [call for call in jellyfin_server.calls if call[0] == 'POST']
 
 
-def test_plex_finds_a_recording_by_title_and_confirms_it_by_file_name(monkeypatch):
+def test_plex_refuses_a_recording_lookup_as_silo_does(monkeypatch):
+    # Plex files a show's date-named recordings of one day as one episode, so
+    # no file name pins an item there and a link never asks; a lookup that is
+    # asked anyway is a caller's mistake, and the server hears nothing of it.
+    from media_servers.http import MediaServerError
     from media_servers.resolution import MediaMetadata
     from plex import operations
     from plex.refresh import PlexRefreshClient
-
-    def recording(*files):
-        return SimpleNamespace(iterParts=lambda: [SimpleNamespace(file=path) for path in files])
-    wrong, right = recording('/plex/NHL/Game 11.mkv'), recording('/plex/NHL/Game 12.mkv')
-
-    class Sports:
-        type = 'show'
-
-        def search(self, title=None, libtype=None):
-            assert (title, libtype) == ('Game 12', 'episode')
-            return [wrong, right]
-    monkeypatch.setattr(operations, 'plex_server_for', lambda *_args: SimpleNamespace(
-        library=SimpleNamespace(section=lambda name: Sports())))
+    monkeypatch.setattr(operations, 'plex_server_for', lambda *_args: pytest.fail('no request for a recording'))
     client = PlexRefreshClient(snap('plex', 'P', options={'sports_libraries': ['Sports']}))
-    assert client.locate('sports', MediaMetadata(title='Game 12'), '/media/NHL/Game 12.mkv') is right
-    assert client.locate('sports', MediaMetadata(title='Game 12'), '/media/NHL/Game 13.mkv') is None
+    with pytest.raises(MediaServerError) as refused:
+        client.locate('sports', MediaMetadata(title='Game 12'))
+    assert refused.value.code == 'internal_error'
