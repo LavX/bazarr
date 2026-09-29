@@ -2,9 +2,10 @@
 # coding=utf-8
 """Checks for a change that touches documentation.
 
-The CI Docs job runs this on every pull request that changes a file
-.github/scripts/ci_plan.py classifies as documentation. It checks only what
-the change adds, so an old page is never failed for text nobody touched:
+The CI Docs job runs this on every pull request that changes documentation,
+or one of the documents a test reads, as .github/scripts/ci_plan.py's
+needs_docs_check decides. It checks only what the change adds, so an old page
+is never failed for text nobody touched:
 
 - Release notes under docs/release-notes/ render with pandoc GFM, through
   `scripts/release/notes.py check`, the same check the release process runs.
@@ -99,7 +100,7 @@ def main() -> int:
     documents = [
         path
         for path in changed(base, head)
-        if ci_plan.is_documentation(path) and (REPO_ROOT / path).is_file()
+        if ci_plan.needs_docs_check(path) and (REPO_ROOT / path).is_file()
     ]
     if not documents:
         print("No documentation in this change.")
