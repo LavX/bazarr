@@ -452,6 +452,44 @@ def _config_yaml(config_dir: str) -> Path:
     return Path(config_dir) / "config" / "config.yaml"
 
 
+def _split_listen_port(args: list[str]) -> tuple[int | None, list[str]]:
+    """The listen port from the command line, and the arguments without it.
+
+    Takes every spelling the backend's parser accepts for -p/--port ("-p N",
+    "-pN", "-p=N", "--port N", "--port=N" or an abbreviation such as
+    "--po N"), the last one winning. None of them may reach the backend: it is
+    started with its own loopback port first, and a later port option would
+    override that one while the readiness poll waits on it.
+    """
+    port = None
+    rest = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        value = None
+        if arg.startswith("--"):
+            name, has_value, attached = arg.partition("=")
+            # No other backend option starts with "--p".
+            if len(name) >= 3 and "--port".startswith(name):
+                if has_value:
+                    value = attached
+                elif i + 1 < len(args):
+                    value = args[i + 1]
+                    i += 1
+        elif arg.startswith("-p"):
+            if len(arg) > 2:
+                value = arg[3:] if arg[2] == "=" else arg[2:]
+            elif i + 1 < len(args):
+                value = args[i + 1]
+                i += 1
+        if value is None:
+            rest.append(arg)
+        else:
+            port = int(value)
+        i += 1
+    return port, rest
+
+
 def _backend_config_dir(bazarr_args: list[str], environ=os.environ) -> str:
     """The configuration directory the backend will use with these arguments.
 
@@ -932,17 +970,7 @@ def create_app(config_dir: str, backend: BackendManager) -> web.Application:
 # ---------------------------------------------------------------------------
 async def main():
     # Parse our args, pass the rest to bazarr
-    port = None
-    bazarr_args = []
-    args = sys.argv[1:]
-    i = 0
-    while i < len(args):
-        if args[i] == "--port" and i + 1 < len(args):
-            port = int(args[i + 1])
-            i += 2
-        else:
-            bazarr_args.append(args[i])
-            i += 1
+    port, bazarr_args = _split_listen_port(sys.argv[1:])
     config_dir = _backend_config_dir(bazarr_args)
 
     if port is None:

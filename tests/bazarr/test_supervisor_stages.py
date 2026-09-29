@@ -209,11 +209,44 @@ def test_a_port_that_cannot_be_bound_stops_the_supervisor_with_a_clear_message(
     assert "Traceback" not in out
 
 
-# The listen port comes from the config.yaml the backend reads, so the
-# supervisor has to reach the backend's configuration directory from the same
-# arguments and environment. It used to know only "--config DIR" and fell
-# back to /config, so "-c DIR" or BAZARR_CONFIG_DIR left it on 6767 whatever
-# general.port said.
+# The supervisor reads the listen port and the configuration directory from
+# the command line it hands to the backend, so it has to parse both the way the
+# backend's own parser does. It used to know only "--config DIR" and
+# "--port N": "-c DIR" or BAZARR_CONFIG_DIR left it reading /config and
+# listening on 6767 whatever general.port said, and "-p N" or "--port=N"
+# reached the backend after its loopback port and moved it off the port the
+# readiness poll waits on.
+
+_BACKEND_PARSE = r"""
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(sys.argv[1], "bazarr"))
+from app.get_args import parser  # noqa: E402
+
+forms = json.loads(sys.argv[2])
+answers = []
+for form in forms:
+    parsed = parser.parse_args(form)
+    answers.append([parsed.config_dir, parsed.port])
+print("RESULTS " + json.dumps(answers), flush=True)
+"""
+
+
+def _backend_parse(forms, env_dir=None):
+    """[config_dir, port] for each argument list, from the backend's parser."""
+    env = {k: v for k, v in os.environ.items() if k not in ("BAZARR_CONFIG_DIR", "NO_UPDATE")}
+    env["NO_CLI"] = "true"
+    if env_dir is not None:
+        env["BAZARR_CONFIG_DIR"] = env_dir
+    result = subprocess.run(
+        [sys.executable, "-c", _BACKEND_PARSE, str(ROOT), json.dumps(forms)],
+        capture_output=True, text=True, timeout=120, env=env, cwd=str(ROOT))
+    lines = [line for line in result.stdout.splitlines() if line.startswith("RESULTS ")]
+    assert lines, f"the backend parser did not answer (rc {result.returncode}):\n{result.stderr[-4000:]}"
+    return json.loads(lines[-1][len("RESULTS "):])
+
 
 _CONFIG_DIR_FORMS = [
     ["--no-update", "--config", "/srv/a"],
@@ -229,35 +262,14 @@ _CONFIG_DIR_FORMS = [
     [],
 ]
 
-_BACKEND_CONFIG_DIRS = r'''
-import json
-import os
-import sys
-
-sys.path.insert(0, os.path.join(sys.argv[1], "bazarr"))
-from app.get_args import parser  # noqa: E402
-
-forms = json.loads(sys.argv[2])
-print("RESULTS " + json.dumps([parser.parse_args(form).config_dir for form in forms]), flush=True)
-'''
-
 
 @pytest.mark.parametrize("env_dir", [None, "/srv/env"])
 def test_the_supervisor_uses_the_config_directory_the_backend_parses(env_dir):
     # Ask the backend's own parser, so a form it accepts cannot drift from
     # what the supervisor reads.
     sup = _load_supervisor()
-    env = {k: v for k, v in os.environ.items() if k not in ("BAZARR_CONFIG_DIR", "NO_UPDATE")}
-    env["NO_CLI"] = "true"
-    environ = {}
-    if env_dir is not None:
-        env["BAZARR_CONFIG_DIR"] = environ["BAZARR_CONFIG_DIR"] = env_dir
-    result = subprocess.run(
-        [sys.executable, "-c", _BACKEND_CONFIG_DIRS, str(ROOT), json.dumps(_CONFIG_DIR_FORMS)],
-        capture_output=True, text=True, timeout=120, env=env, cwd=str(ROOT))
-    lines = [line for line in result.stdout.splitlines() if line.startswith("RESULTS ")]
-    assert lines, f"the backend parser did not answer (rc {result.returncode}):\n{result.stderr[-4000:]}"
-    backend = json.loads(lines[-1][len("RESULTS "):])
+    environ = {} if env_dir is None else {"BAZARR_CONFIG_DIR": env_dir}
+    backend = [config_dir for config_dir, _ in _backend_parse(_CONFIG_DIR_FORMS, env_dir)]
 
     supervisor = [sup._backend_config_dir(form, environ) for form in _CONFIG_DIR_FORMS]
 
@@ -266,6 +278,50 @@ def test_the_supervisor_uses_the_config_directory_the_backend_parses(env_dir):
     assert supervisor[:9] == ["/srv/a"] * 7 + ["/srv/b"] * 2
     if env_dir is not None:
         assert supervisor[9:] == [env_dir, env_dir]
+
+
+_PORT_FORMS = [
+    (["--port", "7001"], 7001),
+    (["--no-update", "--port=7001"], 7001),
+    (["--po", "7001"], 7001),
+    (["--p=7001"], 7001),
+    (["-p", "7001", "--no-update"], 7001),
+    (["-p7001"], 7001),
+    (["-p=7001"], 7001),
+    (["-p", "7000", "--port", "7001"], 7001),
+    (["--port", "7000", "-p7001"], 7001),
+    (["--no-update", "-c", "/srv/a"], None),
+]
+
+
+def test_every_port_spelling_the_backend_accepts_is_the_listen_port_and_stays_off_the_backend():
+    sup = _load_supervisor()
+    forms = [form for form, _ in _PORT_FORMS]
+    expected = [port for _, port in _PORT_FORMS]
+    split = [sup._split_listen_port(form) for form in forms]
+
+    # The supervisor reads the port the operator meant, as the backend would.
+    assert [port for port, _ in split] == expected
+    assert [port for _, port in _backend_parse(forms)] == expected
+    # Whatever is left goes to the backend after its own loopback port, and
+    # that port must be the one the backend ends up on.
+    launched = [["--port", "41000"] + rest for _, rest in split]
+    assert [port for _, port in _backend_parse(launched)] == [41000] * len(forms)
+    # Nothing else is dropped.
+    assert [rest for _, rest in split] == [
+        [], ["--no-update"], [], [], ["--no-update"], [], [], [], [], ["--no-update", "-c", "/srv/a"]]
+
+
+def _record_backend_args(sup, monkeypatch):
+    forwarded = []
+    original_init = sup.BackendManager.__init__
+
+    def _recording_init(self, bazarr_args):
+        forwarded.append(list(bazarr_args))
+        original_init(self, bazarr_args)
+
+    monkeypatch.setattr(sup.BackendManager, "__init__", _recording_init)
+    return forwarded
 
 
 @pytest.mark.parametrize("how", ["-c", "--config=", "BAZARR_CONFIG_DIR"])
@@ -281,14 +337,7 @@ def test_main_listens_on_general_port_from_the_backends_config_directory(monkeyp
     else:
         monkeypatch.setenv("BAZARR_CONFIG_DIR", str(tmp_path))
         argv = ["--no-update"]
-    forwarded = []
-    original_init = sup.BackendManager.__init__
-
-    def _recording_init(self, bazarr_args):
-        forwarded.append(list(bazarr_args))
-        original_init(self, bazarr_args)
-
-    monkeypatch.setattr(sup.BackendManager, "__init__", _recording_init)
+    forwarded = _record_backend_args(sup, monkeypatch)
 
     bound, launched, result = _run_main(sup, monkeypatch, argv, port_file)
 
@@ -296,6 +345,24 @@ def test_main_listens_on_general_port_from_the_backends_config_directory(monkeyp
     assert "(from general.port)" in capsys.readouterr().out
     # The backend still gets the flag exactly as given.
     assert forwarded == [argv]
+    assert launched == [True]
+    assert not result
+
+
+@pytest.mark.parametrize("port_args", [["-p", "7001"], ["-p7001"], ["--port=7001"]])
+def test_main_listens_on_any_port_spelling_and_keeps_it_from_the_backend(monkeypatch, tmp_path, capsys,
+                                                                        port_args):
+    sup = _load_supervisor()
+    _write_general(tmp_path, "general:\n  port: 6868\n")
+    port_file = tmp_path / "supervisor.port"
+    forwarded = _record_backend_args(sup, monkeypatch)
+
+    bound, launched, result = _run_main(
+        sup, monkeypatch, ["--no-update", "--config", str(tmp_path)] + port_args, port_file)
+
+    assert bound["address"] == ("0.0.0.0", 7001)
+    assert "(from --port)" in capsys.readouterr().out
+    assert forwarded == [["--no-update", "--config", str(tmp_path)]]
     assert launched == [True]
     assert not result
 
