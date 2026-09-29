@@ -1145,17 +1145,59 @@ def test_a_stop_after_one_language_published_keeps_that_download(workflow_librar
     assert len(session.execute(sa.select(TableHistorySports)).all()) == 1
 
 
-def test_a_league_download_does_not_request_a_library_rescan(workflow_library):
+def _record_publications(monkeypatch):
+    from media_servers import dispatcher
+
+    published = []
+    monkeypatch.setattr(
+        dispatcher,
+        "notify_subtitle_mutation",
+        lambda event: published.append(
+            (event.media_type, event.video_path, event.operation,
+             event.arr_instance_id, event.subtitle_path)
+        ),
+    )
+    return published
+
+
+def test_a_league_download_publishes_each_subtitle_once(workflow_library, monkeypatch):
     automatic, history, workflows, service, session, folder = workflow_library
+    published = _record_publications(monkeypatch)
     workflows.sports_download_subtitles(51, 1, job_id="test")
     assert (folder / "1/event.en.srt").exists()
+    assert published == [
+        ("sports", str(folder / "1/event.mkv"), "download", 1, str(folder / "1/event.en.srt")),
+    ]
 
 
-def test_a_single_manual_download_does_not_request_a_library_rescan(manual_library):
+def test_a_single_manual_download_publishes_its_subtitle_once(manual_library, monkeypatch):
     service, session, folder = manual_library
+    published = _record_publications(monkeypatch)
     result = service.manual_search_sports(61, "en", arr_instance_id=1)[0]
     service.manual_download_sports(61, result, 1)
     assert (folder / "1/event.en.srt").exists()
+    assert published == [
+        ("sports", str(folder / "1/event.mkv"), "download", 1, str(folder / "1/event.en.srt")),
+    ]
+
+
+def test_no_subtitle_change_asks_sportarr_to_rescan_its_library():
+    """A subtitle write leaves Sportarr's video inventory unchanged.
+
+    POST /api/library/rescan walks every root folder of the instance. It ran in
+    a background thread, so a runtime check could pass before it fired; the
+    route and its module are therefore checked for directly.
+    """
+    from pathlib import Path
+
+    assert importlib.util.find_spec("sportarr.notify") is None
+    root = Path(__file__).resolve().parents[2] / "bazarr"
+    callers = [
+        str(path.relative_to(root))
+        for path in root.rglob("*.py")
+        if "library/rescan" in path.read_text(encoding="utf-8")
+    ]
+    assert callers == []
 
 
 # --------------------------------------------------------------------------

@@ -3,7 +3,7 @@
 
 import logging
 import os
-from media_servers.events import observe_subtitle_change, publication_callback
+from media_servers.events import observe_subtitle_change
 
 from app.config import settings, sync_checker as _defaul_sync_checker
 from utilities.path_mappings import path_mappings
@@ -306,8 +306,11 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
     logging.debug("Sync checker: %s", sync_checker)
 
     if media_type == 'sports':
-        # A subtitle write does not change Sportarr's video inventory.
-        # The publication below refreshes configured media servers.
+        # A subtitle write does not change Sportarr's video inventory, so
+        # Sportarr is not asked to rescan. The save that called this reports
+        # the final file to the media servers once it releases its locks,
+        # which is after the sync and post-processing below, and holds what
+        # the sync publishes until then.
         instance = validate()
         if path != context.mapped_path:
             raise ValueError('Sports subtitle path does not match its event')
@@ -392,9 +395,7 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                 # around it would acquire them twice.
                 postprocessing(command, path, subtitle_path=downloaded_path,
                                publication_guard=publication_guard,
-                               command_builder=command_for_subtitle,
-                               on_publish=publication_callback(
-                                   media_type, path, 'download', owner_instance_id))
+                               command_builder=command_for_subtitle)
                 set_chmod(subtitles_path=downloaded_path)
             else:
                 destination = os.path.join(get_target_folder(path, create=False) or os.path.dirname(path), '.destination')

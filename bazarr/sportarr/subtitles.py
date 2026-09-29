@@ -359,7 +359,7 @@ def sports_history(
 
 
 def _remove_superseded_sports_subtitle(path, previous_artifact, written_paths, is_upgrade,
-                                      arr_instance_id=None):
+                                      on_publish=None):
     """Delete the subtitle an upgrade replaced, when it lands under a new name.
 
     Mirrors subtitles/download.py:166. previous_artifact alone only proved the
@@ -371,6 +371,9 @@ def _remove_superseded_sports_subtitle(path, previous_artifact, written_paths, i
     A rewrite in place is not a replacement, so paths are compared by realpath
     to avoid deleting the file that was just written through a symlink or a
     differently-cased path.
+
+    A removed file is handed to ``on_publish``; the caller decides when the
+    media servers hear about it.
     """
     if not (is_upgrade and previous_artifact and written_paths):
         return
@@ -386,11 +389,46 @@ def _remove_superseded_sports_subtitle(path, previous_artifact, written_paths, i
     try:
         with subtitle_mutation(path, previous_path):
             os.remove(previous_path)
-            publication_callback('sports', path, 'delete', arr_instance_id)(previous_path)
     except OSError:
         logging.exception(
             "BAZARR unable to remove superseded sports subtitle: %s", previous_path
         )
+        return
+    if on_publish is not None:
+        on_publish(previous_path)
+
+
+@contextmanager
+def _publish_after_release(video_path, arr_instance_id):
+    """Tell the media servers about a save's file changes once it lets go.
+
+    A refresh worker takes the video's subtitle locks before it scans, and the
+    save holds them through processing, history and indexing, so a report made
+    inside would park that server's only worker for all of it. Queuing the
+    refresh also takes the dispatcher's configuration lock, which a media
+    server settings save holds across its own database write, and must not
+    wait for it while the publication transaction holds the database writer.
+
+    Changes are recorded as they happen and reported on every exit, so a file
+    that reached disk is announced even when later work fails or is cancelled.
+    Everything the save publishes is queued as one batch once it lets go,
+    including what an automatic sync reports for its output on the way, so
+    an upgrade's new file, the one it replaced and a sync of it reach each
+    server as one refresh rather than one each.
+    """
+    from media_servers.dispatcher import queued_together
+    from subtitles.tools.subsync_engines import _report_subtitle_publication
+
+    changes = []
+    with queued_together():
+        try:
+            yield changes
+        finally:
+            for operation, subtitle_path in changes:
+                _report_subtitle_publication(
+                    publication_callback("sports", video_path, operation, arr_instance_id),
+                    subtitle_path,
+                )
 
 
 def save_sports_subtitle(
@@ -448,7 +486,10 @@ def save_sports_subtitle(
             yield publication
         pending_replacement = False
 
-    with subtitle_write_locks(path, destination, cancel=cancel):
+    with (
+        _publish_after_release(path, context.arr_instance_id) as changes,
+        subtitle_write_locks(path, destination, cancel=cancel),
+    ):
         validate()
         if pending_replacement:
             from sportarr.artifacts import validate_replacement_state
@@ -484,7 +525,7 @@ def save_sports_subtitle(
                 validate=validate,
                 publication_guard=publication_guard,
                 written_paths=written_paths,
-                on_publish=publication_callback('sports', path, 'download', context.arr_instance_id),
+                on_publish=lambda written: changes.append(("download", written)),
             )
             if not saved:
                 raise OSError("Could not save sports subtitles")
@@ -500,7 +541,8 @@ def save_sports_subtitle(
                 logging.exception(
                     "BAZARR could not clear the sports release-type mismatch after a save")
             _remove_superseded_sports_subtitle(
-                path, previous_artifact, written_paths, is_upgrade, context.arr_instance_id
+                path, previous_artifact, written_paths, is_upgrade,
+                on_publish=lambda removed: changes.append(("delete", removed)),
             )
             state["published"] = True
             phase = "processing"

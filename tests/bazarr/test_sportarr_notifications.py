@@ -204,21 +204,88 @@ def test_live_syncs_are_the_only_ones_that_can_report_the_found_nothing_notice()
 
 @pytest.fixture
 def sports_refresh_targets(monkeypatch):
-    """Capture sports publications without a live media server."""
-    from media_servers import events
+    """Capture sports publications without a live media server.
+
+    Both sinks are replaced. A module that bound the dispatcher's entry point
+    directly would bypass the events one, and the events one is what the
+    toolbox fixture silences.
+    """
+    from media_servers import dispatcher, events
 
     publications = []
     monkeypatch.setattr(events, 'notify_subtitle_mutation', publications.append)
+    monkeypatch.setattr(dispatcher, 'notify_subtitle_mutation', publications.append)
 
     return publications
 
 
+def _save_has_let_go(session, event):
+    """Whether a refresh worker could start on this publication right now.
+
+    The worker first takes the video's subtitle locks, from its own thread, and
+    queuing it takes the dispatcher's configuration lock, which a media server
+    settings save holds across a database write. Neither may still be held by
+    the save that published.
+    """
+    import os
+    import sqlite3
+    import threading
+    from subtitles.tools.subsync_engines import subtitle_write_lock
+
+    states = {id(state): state for state in (
+        subtitle_write_lock(event.video_path, os.path.dirname(path))
+        for path in (event.video_path, event.subtitle_path))}
+    free = []
+
+    def probe():
+        taken = [state.lock for state in states.values() if state.lock.acquire(blocking=False)]
+        for lock in taken:
+            lock.release()
+        free.append(len(taken) == len(states))
+
+    worker = threading.Thread(target=probe)
+    worker.start()
+    worker.join()
+    url = session.get_bind().url
+    if url.get_backend_name() != 'sqlite':
+        return free[0]
+    writer = sqlite3.connect(url.database, timeout=0)
+    try:
+        writer.execute('BEGIN IMMEDIATE')
+        writer.rollback()
+    except sqlite3.OperationalError:
+        return False
+    finally:
+        writer.close()
+    return free[0]
+
+
+@pytest.fixture
+def released_publications(manual_library, sports_refresh_targets, monkeypatch):  # noqa: F811
+    """Each publication with whether the save had released everything by then."""
+    from media_servers import dispatcher, events
+
+    _, session, _ = manual_library
+    recorded = []
+
+    def record(event):
+        recorded.append((event, _save_has_let_go(session, event)))
+
+    monkeypatch.setattr(events, 'notify_subtitle_mutation', record)
+    monkeypatch.setattr(dispatcher, 'notify_subtitle_mutation', record)
+    return recorded
+
+
+def _described(event):
+    return (event.media_type, event.video_path, event.operation, event.arr_instance_id,
+            event.subtitle_path)
+
+
 @pytest.mark.parametrize('failure', [False, True])
-def test_single_provider_publication_refreshes_even_when_processing_fails(manual_library, sports_refresh_targets, monkeypatch, failure):  # noqa: F811
+def test_single_provider_publication_refreshes_even_when_processing_fails(manual_library, released_publications, monkeypatch, failure):  # noqa: F811
     from subtitles import processing
 
     service, session, folder = manual_library
-    publications = sports_refresh_targets
     result = service.manual_search_sports(61, 'en', arr_instance_id=1)[0]
     if failure:
         def failed_processing(*args, **kwargs):
@@ -228,4 +295,85 @@ def test_single_provider_publication_refreshes_even_when_processing_fails(manual
     assert outcome.publication['published'] is True
     assert outcome.publication['status'] == ('published_with_warnings' if failure else 'published')
     assert (folder / '1' / 'event.en.srt').exists()
-    assert len(publications) == 1
+    assert [_described(event) for event, _ in released_publications] == [
+        ('sports', str(folder / '1' / 'event.mkv'), 'download', 1, str(folder / '1' / 'event.en.srt')),
+    ]
+    # Reported only once the save let go. From inside, the server's single
+    # refresh worker would park on the save's locks through processing,
+    # history and indexing, and queuing it would wait on a lock whose holder
+    # may be waiting for this save's database writer.
+    assert [released for _, released in released_publications] == [True]
+
+
+def test_an_upgrade_reports_the_removed_file_once_the_save_let_go(manual_library, released_publications, monkeypatch):  # noqa: F811
+    from contextlib import contextmanager
+    from media_servers import dispatcher
+
+    service, session, folder = manual_library
+    replaced = folder / '1' / 'event.en.ass'
+    batches = []
+
+    def remove_superseded(path, previous_artifact, written_paths, is_upgrade, on_publish=None):
+        on_publish(str(replaced))
+
+    @contextmanager
+    def queued_together():
+        batches.append(len(released_publications))
+        yield
+        batches.append(len(released_publications))
+
+    monkeypatch.setattr(service, '_remove_superseded_sports_subtitle', remove_superseded)
+    monkeypatch.setattr(dispatcher, 'queued_together', queued_together)
+    result = service.manual_search_sports(61, 'en', arr_instance_id=1)[0]
+    service.manual_download_sports(61, result, 1)
+    video = str(folder / '1' / 'event.mkv')
+    assert [_described(event) for event, _ in released_publications] == [
+        ('sports', video, 'download', 1, str(folder / '1' / 'event.en.srt')),
+        ('sports', video, 'delete', 1, str(replaced)),
+    ]
+    assert [released for _, released in released_publications] == [True, True]
+    # Both queued as one batch, so each server refreshes the video once.
+    assert batches == [0, 2]
+
+
+def test_a_sync_during_the_save_is_queued_with_it_once_the_save_let_go(manual_library, monkeypatch):  # noqa: F811
+    """An automatic sync publishes its output from inside the save. That
+    publication is held with the save's own and queued in the same batch, so
+    no refresh worker starts while the save still holds its locks."""
+    from media_servers import dispatcher
+    from media_servers.events import publication_callback
+    from subtitles import processing
+
+    service, session, folder = manual_library
+    video, written = str(folder / '1' / 'event.mkv'), str(folder / '1' / 'event.en.srt')
+    queued, holds = [], []
+
+    class Held:
+        def __enter__(self):
+            holds.append(len(queued))
+
+        def __exit__(self, *exc):
+            holds.append(len(queued))
+
+    class Dispatcher:
+        condition = Held()
+
+        def notify(self, event):
+            queued.append((_described(event), _save_has_let_go(session, event)))
+
+    monkeypatch.setattr(dispatcher, '_get_dispatcher', lambda: Dispatcher())
+    process = processing.process_subtitle
+
+    def process_with_sync(*args, **kwargs):
+        # What a successful automatic sync reports for the file it rewrote.
+        publication_callback('sports', video, 'sync', 1)(written)
+        return process(*args, **kwargs)
+
+    monkeypatch.setattr(processing, 'process_subtitle', process_with_sync)
+    result = service.manual_search_sports(61, 'en', arr_instance_id=1)[0]
+    service.manual_download_sports(61, result, 1)
+    assert queued == [
+        (('sports', video, 'sync', 1, written), True),
+        (('sports', video, 'download', 1, written), True),
+    ]
+    assert holds == [0, 2]

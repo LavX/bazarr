@@ -74,14 +74,16 @@ def test_sports_process_subtitle_does_not_duplicate_the_file_publication(monkeyp
     from subzero.language import Language
     from app.config import settings
     from languages import get_languages
-    from media_servers import events
+    from media_servers import dispatcher
     from subtitles import processing
 
     published = []
     monkeypatch.setattr(settings.general, "use_plex", True)
     monkeypatch.setattr(settings.general, "use_jellyfin", True)
     monkeypatch.setattr(settings.general, "use_emby", True)
-    monkeypatch.setattr(events, "notify_subtitle_mutation", published.append)
+    # The dispatcher's entry point, which every publication reaches whichever
+    # module bound the events helper at import.
+    monkeypatch.setattr(dispatcher, "notify_subtitle_mutation", published.append)
     monkeypatch.setattr(processing, "_defaul_sync_checker", lambda subtitle: False)
     monkeypatch.setattr(processing, "_postprocessing_config", lambda *args: (False, "", False, 0))
     monkeypatch.setattr(processing, "call_external_webhook", lambda **kwargs: None)
