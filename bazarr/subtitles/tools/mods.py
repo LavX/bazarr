@@ -173,13 +173,6 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
             except Exception:
                 logging.exception('BAZARR could not reindex sports event %s after applying mods',
                                   media_id)
-            # The file publication already reached every media server; only
-            # Sportarr still needs its own rescan, as the request path did.
-            try:
-                from sportarr.notify import notify_rescan
-                notify_rescan(arr_instance_id)
-            except Exception:
-                logging.exception('BAZARR could not ask Sportarr to rescan after applying mods')
             event_stream(type='sports', action='update', payload=media_id)
         else:
             event_stream(type='movie', payload=media_id)

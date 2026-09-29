@@ -1060,15 +1060,19 @@ def test_partial_keep_all_indexes_only_current_publications_after_cancellation(s
 @pytest.mark.parametrize('cancelled', [False, True])
 def test_sports_sync_refreshes_final_outputs_once_even_after_partial_cancellation(
         sync_library, sports_refresh_targets, monkeypatch, toolbox, cancelled):  # noqa: F811
+    import ast
+    from app.database import TableSportsEvents
     from app.jobs_queue import JobCancelled
     from api.subtitles import subtitles as endpoint
     from subtitles import sync
     from subtitles.indexer import sports as indexer
     from subtitles.tools.subsyncer import SubSyncer
     from sportarr.subtitles import sports_manual_operation
+    from media_servers import events
 
-    _, session, folder, published, _ = sync_library
-    refreshed, _ = sports_refresh_targets
+    _, session, folder, _, refreshed = sync_library
+    publications = sports_refresh_targets
+    monkeypatch.setattr(sync, 'publication_callback', events.publication_callback)
     indexer.store_subtitles_sports(61, 1)
     monkeypatch.setattr(endpoint, 'database', session)
     monkeypatch.setattr(endpoint, 'event_stream', lambda **kwargs: None)
@@ -1100,10 +1104,16 @@ def test_sports_sync_refreshes_final_outputs_once_even_after_partial_cancellatio
         assert run() == (('', 204) if toolbox else True)
     output = folder / '1/event.en.hi.ffsubsync.srt'
     assert output.exists()
-    assert len(published) == 1
-    # One rescan for the owner, once, whatever the engines did. Every media
-    # server refreshes off that single publication on its own worker.
-    assert refreshed == [('sportarr', 1)]
+    assert len(publications) == 1
+    publication = publications[0]
+    assert publication.media_type == 'sports'
+    assert publication.video_path == str(folder / '1/event.mkv')
+    assert publication.subtitle_path == str(output)
+    assert publication.operation == 'sync'
+    assert publication.arr_instance_id == 1
+    indexed = ast.literal_eval(session.get(TableSportsEvents, 61).subtitles)
+    assert any(item[1] == '/sports/' + output.name for item in indexed)
+    assert refreshed == [{'type': 'sports', 'payload': 61}]
 
 
 @pytest.mark.parametrize('filters, expected', [

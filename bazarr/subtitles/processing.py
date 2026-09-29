@@ -3,7 +3,7 @@
 
 import logging
 import os
-from media_servers.events import observe_subtitle_change, SubtitleMutation, notify_subtitle_mutation
+from media_servers.events import observe_subtitle_change, publication_callback
 
 from app.config import settings, sync_checker as _defaul_sync_checker
 from utilities.path_mappings import path_mappings
@@ -265,22 +265,6 @@ def _postprocessing_config(media_type, arr_instance_id):
     return use_pp, cmd, use_threshold, threshold
 
 
-def refresh_sports_media_servers(video_path, subtitle_path, arr_instance_id):
-    """Tell every configured media server a sports subtitle changed.
-
-    Series and movies resolve by identifiers a sports event has not got, so
-    every destination falls to its configured SPORTS library, and a destination
-    with no sports library configured is left alone. Every kind refreshes
-    through the same publication dispatcher movies and episodes use, scoped to
-    its saved configuration, so a destination that cannot reach this video is
-    never asked to scan anything.
-    """
-    if any(getattr(settings.general, 'use_' + kind) is True
-           for kind in ('emby', 'jellyfin', 'plex', 'silo')):
-        notify_subtitle_mutation(
-            SubtitleMutation('sports', video_path, subtitle_path, 'download', arr_instance_id))
-
-
 def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_upgrade=False, is_manual=False,
                      job_id=None, arr_instance_id=None, *,
                      context=None, validate=None, cancel=None, publication_guard=None):
@@ -322,16 +306,8 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
     logging.debug("Sync checker: %s", sync_checker)
 
     if media_type == 'sports':
-        # No arr rescan here; the Sportarr whole-library rescan is dispatched
-        # through sportarr.notify, once per affected owner per operation, because
-        # /api/library/rescan walks every root folder and is untargeted. Sonarr
-        # and Radarr each take a per-item Rescan command, which is why they get
-        # one below.
-        #
-        # The media-server refresh happens later in this function, through
-        # refresh_sports_media_servers, which publishes once to the dispatcher.
-        # Every kind then scans its own configured sports libraries on its own
-        # worker.
+        # A subtitle write does not change Sportarr's video inventory.
+        # The publication below refreshes configured media servers.
         instance = validate()
         if path != context.mapped_path:
             raise ValueError('Sports subtitle path does not match its event')
@@ -416,7 +392,9 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                 # around it would acquire them twice.
                 postprocessing(command, path, subtitle_path=downloaded_path,
                                publication_guard=publication_guard,
-                               command_builder=command_for_subtitle)
+                               command_builder=command_for_subtitle,
+                               on_publish=publication_callback(
+                                   media_type, path, 'download', owner_instance_id))
                 set_chmod(subtitles_path=downloaded_path)
             else:
                 destination = os.path.join(get_target_folder(path, create=False) or os.path.dirname(path), '.destination')
@@ -437,7 +415,6 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         mappings = read_sports_mappings(instance.path_mappings)
         reversed_path = apply_sports_mapping(path, mappings, reverse=True)
         reversed_subtitles_path = apply_sports_mapping(downloaded_path, mappings, reverse=True)
-        refresh_sports_media_servers(path, downloaded_path, owner_instance_id)
     elif media_type == 'series':
         # Reverse-map through the owning instance's path_mappings (#156) now that
         # the owner is known; None owner => global mapping, unchanged.

@@ -23,11 +23,11 @@ from app.database import (
 )
 from app.config import settings
 from app.get_providers import get_providers
+from media_servers.events import publication_callback
 from sportarr.connection import check_cancelled
 from sportarr.db import SportsTransactionOutcome, sports_transaction
 from sportarr.errors import SportsOwnersBusy
 from sportarr.identity import SportsEventContext, resolve_event_in_session
-from sportarr.notify import notify_rescan, rescan_batch
 from sportarr.output import (
     SportsOutputNamespace,
     lock_output_owners,
@@ -358,7 +358,8 @@ def sports_history(
     return row
 
 
-def _remove_superseded_sports_subtitle(path, previous_artifact, written_paths, is_upgrade):
+def _remove_superseded_sports_subtitle(path, previous_artifact, written_paths, is_upgrade,
+                                      arr_instance_id=None):
     """Delete the subtitle an upgrade replaced, when it lands under a new name.
 
     Mirrors subtitles/download.py:166. previous_artifact alone only proved the
@@ -385,13 +386,13 @@ def _remove_superseded_sports_subtitle(path, previous_artifact, written_paths, i
     try:
         with subtitle_mutation(path, previous_path):
             os.remove(previous_path)
+            publication_callback('sports', path, 'delete', arr_instance_id)(previous_path)
     except OSError:
         logging.exception(
             "BAZARR unable to remove superseded sports subtitle: %s", previous_path
         )
 
 
-@rescan_batch()
 def save_sports_subtitle(
     video,
     subtitle,
@@ -428,12 +429,6 @@ def save_sports_subtitle(
 
     pending_replacement = replacement_state is not None
     publication_destination = None
-
-    def published(output_path):
-        # Record the physical write before later processing can fail or stop.
-        # The batch flushes these rescans after the final outputs are settled;
-        # the media servers were already told by the file publication itself.
-        notify_rescan(context.arr_instance_id)
 
     def validate(destination=None):
         nonlocal publication_destination
@@ -489,7 +484,7 @@ def save_sports_subtitle(
                 validate=validate,
                 publication_guard=publication_guard,
                 written_paths=written_paths,
-                on_publish=published,
+                on_publish=publication_callback('sports', path, 'download', context.arr_instance_id),
             )
             if not saved:
                 raise OSError("Could not save sports subtitles")
@@ -505,7 +500,7 @@ def save_sports_subtitle(
                 logging.exception(
                     "BAZARR could not clear the sports release-type mismatch after a save")
             _remove_superseded_sports_subtitle(
-                path, previous_artifact, written_paths, is_upgrade
+                path, previous_artifact, written_paths, is_upgrade, context.arr_instance_id
             )
             state["published"] = True
             phase = "processing"
@@ -577,10 +572,6 @@ def save_sports_subtitle(
                     )
                 except Exception:
                     logging.exception("BAZARR could not send a sports notification")
-            # Ask Sportarr to notice the subtitle it now records. The rescan is
-            # untargeted and dispatched per affected owner per operation, so it
-            # never blocks this state machine.
-            notify_rescan(context.arr_instance_id)
             phase = "index"
             outcome.refresh(candidate, database, cancel)
             if state["index"] != "completed":

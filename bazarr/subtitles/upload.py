@@ -57,13 +57,6 @@ def _notify_upload(consumer, callback, *args, **kwargs):
 def _refresh_upload_consumers(media_type, metadata, arr_instance_id):
     callbacks = []
     if media_type == 'sports':
-        # Sportarr offers only an untargeted whole-library scan, so one rescan
-        # per affected owner is requested behind the per-instance transport,
-        # non-blocking. The media servers refresh through the publication the
-        # upload already dispatched, which falls to their configured sports
-        # libraries. The event re-index is what makes the upload visible.
-        from sportarr.notify import notify_rescan
-        notify_rescan(arr_instance_id)
         return
     if media_type == 'series':
         callbacks.append(('Sonarr', lambda: notify_sonarr(

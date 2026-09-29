@@ -20,7 +20,7 @@ def test_sports_deletion_finalizes_only_after_file_removal(indexed_library, monk
     from app.config import settings
     from app.database import TableHistorySports
     from media_servers import events as publication
-    from sportarr import history, notify
+    from sportarr import history
     from sportarr import subtitles as sports_subtitles
     from subtitles.indexer import sports
     from subtitles.tools import delete
@@ -37,9 +37,8 @@ def test_sports_deletion_finalizes_only_after_file_removal(indexed_library, monk
     monkeypatch.setattr(sports_subtitles, 'database', session)
     monkeypatch.setattr(settings.general, 'use_plex', False)
     monkeypatch.setattr(settings.general, 'use_jellyfin', False)
-    emissions, rescans, notifications, webhooks = [], [], [], []
+    emissions, notifications, webhooks = [], [], []
     monkeypatch.setattr(delete, 'event_stream', lambda **kw: emissions.append(kw))
-    monkeypatch.setattr(notify, 'notify_rescan', rescans.append)
     monkeypatch.setattr(publication, 'notify_subtitle_mutation', notifications.append)
     monkeypatch.setattr(delete, 'call_external_webhook', lambda **kw: webhooks.append(kw))
 
@@ -76,11 +75,10 @@ def test_sports_deletion_finalizes_only_after_file_removal(indexed_library, monk
         assert len(rows) == 1
         assert (rows[0].event_id, rows[0].arr_instance_id, rows[0].action) == (61, 1, 0)
         assert rows[0].subtitles_path == '/sports/event.en.hi.srt'
-        assert rescans == [1]
         assert emissions == [{'type': 'sports', 'action': 'update', 'payload': 61}]
         assert len(notifications) == len(webhooks) == 1
     else:
-        assert rows == rescans == emissions == notifications == webhooks == []
+        assert rows == emissions == notifications == webhooks == []
 
 
 def test_the_route_exists():
@@ -161,10 +159,8 @@ def test_no_item_level_media_server_refresh_for_sports():
     assert "jellyfin" not in sports
 
 
-def test_sports_delete_requests_one_rescan_and_publishes_to_the_dispatcher():
-    """Deleting a sports subtitle asks Sportarr for one whole-library rescan,
-    and reaches the native Emby and Silo refresh through the same publication
-    callback the series and movie branches use."""
+def test_sports_delete_publishes_without_a_sportarr_rescan():
+    """Deleting a subtitle refreshes media servers, not Sportarr's video library."""
     import inspect
 
     from subtitles.tools import delete
@@ -172,7 +168,7 @@ def test_sports_delete_requests_one_rescan_and_publishes_to_the_dispatcher():
     source = inspect.getsource(delete.delete_subtitles)
     start = source.rindex("if media_type == 'sports':")
     sports = source[start : source.index("if media_type == 'series':", start)]
-    assert "notify_rescan(arr_instance_id)" in sports
+    assert "notify_rescan" not in sports
     assert "publication_callback(media_type, media_path, 'delete'," in sports
     assert "arr_instance_id)" in sports.split("publication_callback(media_type, media_path, 'delete',")[1]
 
@@ -291,7 +287,7 @@ def test_the_recording_is_rechecked_under_the_locks_before_the_unlink(indexed_li
     from api.sports import events
     from app.config import settings
     from media_servers import events as publication
-    from sportarr import history, notify
+    from sportarr import history
     from sportarr import subtitles as sports_subtitles
     from subtitles.indexer import sports
     from subtitles.tools import delete
@@ -302,7 +298,6 @@ def test_the_recording_is_rechecked_under_the_locks_before_the_unlink(indexed_li
         monkeypatch.setattr(module, 'database', session)
     monkeypatch.setattr(settings.general, 'use_plex', False)
     monkeypatch.setattr(settings.general, 'use_jellyfin', False)
-    monkeypatch.setattr(notify, 'notify_rescan', lambda *a: None)
     monkeypatch.setattr(publication, 'notify_subtitle_mutation', lambda *a: None)
     monkeypatch.setattr(delete, 'event_stream', lambda **kw: None)
     monkeypatch.setattr(delete, 'call_external_webhook', lambda **kw: None)

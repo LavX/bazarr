@@ -204,97 +204,13 @@ def test_live_syncs_are_the_only_ones_that_can_report_the_found_nothing_notice()
 
 @pytest.fixture
 def sports_refresh_targets(monkeypatch):
-    """Sportarr's own batching, and the one publication every destination shares.
-
-    The media servers are no longer called from here: each of them refreshes
-    its configured sports library off the publication, on its own worker, with
-    its own pending state. What this fixture still has to hold is that Sportarr
-    gets one rescan per owner per batch and that no publication is lost.
-    """
-    from app.config import settings
+    """Capture sports publications without a live media server."""
     from media_servers import events
-    from sportarr import notify
-    from subtitles import processing
 
-    refreshed = []
     publications = []
-    for kind in ('plex', 'jellyfin', 'emby'):
-        monkeypatch.setattr(settings.general, 'use_' + kind, True)
-    # Both publication routes, because that is what "the media servers were
-    # told" now means: the sports helper publishes through processing, and a
-    # file the writer rewrote publishes through its own callback.
-    monkeypatch.setattr(processing, 'notify_subtitle_mutation', publications.append)
     monkeypatch.setattr(events, 'notify_subtitle_mutation', publications.append)
 
-    class InlineThread:
-        def __init__(self, target, args=(), **kwargs):
-            self.target, self.args = target, args
-
-        def start(self):
-            self.target(*self.args)
-
-    monkeypatch.setattr(notify, 'Thread', InlineThread)
-    monkeypatch.setattr(notify, '_rescan_request', lambda owner, **kwargs: refreshed.append(('sportarr', owner)))
-    return refreshed, publications
-
-
-@pytest.mark.parametrize('end', ['success', 'failure', 'cancelled'])
-def test_sports_batch_coalesces_whole_library_refreshes_and_preserves_publications(sports_refresh_targets, end):
-    from app.jobs_queue import JobCancelled
-    from sportarr.notify import rescan_batch, notify_rescan
-    from subtitles.processing import refresh_sports_media_servers
-
-    refreshed, publications = sports_refresh_targets
-    error = None if end == 'success' else JobCancelled if end == 'cancelled' else ValueError
-    try:
-        with rescan_batch():
-            for event_id, owner in ((61, 1), (62, 1), (63, 2)):
-                refresh_sports_media_servers(f'/sports/{event_id}.mkv', f'/sports/{event_id}.en.srt', owner)
-                notify_rescan(owner)
-            if error:
-                raise error('operation stopped after published files')
-    except (JobCancelled, ValueError):
-        pass
-    assert sorted(refreshed, key=str) == sorted([('sportarr', 1), ('sportarr', 2)], key=str)
-    assert [event.arr_instance_id for event in publications] == [1, 1, 2]
-    assert [event.subtitle_path for event in publications] == ['/sports/61.en.srt', '/sports/62.en.srt', '/sports/63.en.srt']
-
-
-def test_nested_sports_batches_flush_only_after_the_last_publication(sports_refresh_targets):
-    from sportarr.notify import rescan_batch, notify_rescan
-    from subtitles.processing import refresh_sports_media_servers
-
-    refreshed, _ = sports_refresh_targets
-    with rescan_batch():
-        with rescan_batch():
-            refresh_sports_media_servers('/sports/first.mkv', '/sports/first.en.srt', 1)
-            notify_rescan(1)
-        assert refreshed == []
-        refresh_sports_media_servers('/sports/last.mkv', '/sports/last.en.srt', 1)
-        notify_rescan(1)
-    assert refreshed == [('sportarr', 1)]
-
-
-def test_an_individual_sports_publication_is_dispatched_once_to_every_destination(sports_refresh_targets):
-    from subtitles.processing import refresh_sports_media_servers
-
-    refreshed, publications = sports_refresh_targets
-    refresh_sports_media_servers('/sports/one.mkv', '/sports/one.en.srt', 1)
-    # One publication reaches every destination; fanning out to each kind from
-    # here as well would refresh the two that used to be singletons twice, and
-    # Sportarr is not asked at all outside a batch.
-    assert refreshed == []
-    assert len(publications) == 1
-
-
-def test_an_empty_failed_batch_does_not_refresh_libraries(sports_refresh_targets):
-    from sportarr.notify import rescan_batch
-
-    refreshed, publications = sports_refresh_targets
-    with pytest.raises(ValueError):
-        with rescan_batch():
-            raise ValueError('no publication')
-    assert refreshed == publications == []
+    return publications
 
 
 @pytest.mark.parametrize('failure', [False, True])
@@ -302,7 +218,7 @@ def test_single_provider_publication_refreshes_even_when_processing_fails(manual
     from subtitles import processing
 
     service, session, folder = manual_library
-    refreshed, _ = sports_refresh_targets
+    publications = sports_refresh_targets
     result = service.manual_search_sports(61, 'en', arr_instance_id=1)[0]
     if failure:
         def failed_processing(*args, **kwargs):
@@ -312,4 +228,4 @@ def test_single_provider_publication_refreshes_even_when_processing_fails(manual
     assert outcome.publication['published'] is True
     assert outcome.publication['status'] == ('published_with_warnings' if failure else 'published')
     assert (folder / '1' / 'event.en.srt').exists()
-    assert refreshed == [('sportarr', 1)]
+    assert len(publications) == 1
