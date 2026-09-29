@@ -1,4 +1,5 @@
 # coding=utf-8
+import os
 import sys
 from types import SimpleNamespace
 
@@ -983,3 +984,263 @@ def test_a_missing_subtitles_input_queues_the_recalculation_only_once_saved(monk
         with pytest.raises(ValidationError):
             config.save_settings(items)
         assert queued == [], "a refused save queued a library-wide recalculation"
+
+
+# What a save sets off from the values it carries, keyed by the submitted setting.
+# Each value is (settings the save starts from, items submitted, effects expected
+# once the save is written).
+_SAVE_SIDE_EFFECT_CASES = {
+    "undefined embedded subtitles language": (
+        {"general": {"default_und_embedded_subtitles_lang": ""}},
+        [("settings-general-default_und_embedded_subtitles_lang", ["en"])],
+        ["series scan", "movies scan", "sports scan"]),
+    "embedded subtitles": (
+        {"general": {"use_embedded_subs": True}},
+        [("settings-general-use_embedded_subs", ["false"])],
+        ["sports scan", "missing subtitles recalculation"]),
+    "embedded subtitles parser": (
+        {"general": {"embedded_subtitles_parser": "ffprobe"}},
+        [("settings-general-embedded_subtitles_parser", ["mediainfo"])],
+        ["sports scan"]),
+    "audio track parsing": (
+        {"general": {"parse_embedded_audio_track": False}},
+        [("settings-general-parse_embedded_audio_track", ["true"])],
+        ["sports scan", "sonarr sync", "radarr sync"]),
+    "addic7ed login": (
+        {"addic7ed": {"username": "before"}},
+        [("settings-addic7ed-username", ["after"])],
+        ["clear addic7ed_data", "throttled providers", "compat pool"]),
+    "legendasdivx login": (
+        {"legendasdivx": {"password": "before"}},
+        [("settings-legendasdivx-password", ["after"])],
+        ["clear legendasdivx_cookies2", "throttled providers", "compat pool"]),
+    "opensubtitles login": (
+        {"opensubtitles": {"username": "before"}},
+        [("settings-opensubtitles-username", ["after"])],
+        ["clear os_token", "throttled providers", "compat pool"]),
+    "opensubtitles.com login": (
+        {"opensubtitlescom": {"password": "before"}},
+        [("settings-opensubtitlescom-password", ["after"])],
+        ["clear oscom_token", "throttled providers", "compat pool"]),
+    "titlovi login": (
+        {"titlovi": {"username": "before"}},
+        [("settings-titlovi-username", ["after"])],
+        ["clear titlovi_token", "throttled providers", "compat pool"]),
+    "subsource key": (
+        {"subsource": {"apikey": "before"}},
+        [("settings-subsource-apikey", ["after"])],
+        ["throttled providers", "compat pool"]),
+    "enabled providers": (
+        {"general": {"enabled_providers": []}},
+        [("settings-general-enabled_providers", ["subsource"])],
+        ["compat pool"]),
+    "fan-out pool size": (
+        {"compat_endpoint": {"fanout_max_workers": 32}},
+        [("settings-compat_endpoint-fanout_max_workers", ["48"])],
+        ["fanout pool"]),
+    "score modifiers": (
+        {"general": {"provider_score_modifiers": {}}},
+        [("settings-general-provider_score_modifiers", ['{"whisperai": 25}'])],
+        ["compat cache"]),
+    # Subtitles saved from then on are named with it.
+    "hearing-impaired extension": (
+        {"general": {"hi_extension": "hi"}},
+        [("settings-general-hi_extension", ["sdh"])],
+        ["hi extension sdh"]),
+    # The same login sent back unchanged is not a new login.
+    "unchanged opensubtitles login": (
+        {"opensubtitles": {"username": "same"}},
+        [("settings-opensubtitles-username", ["same"])],
+        []),
+}
+
+
+@pytest.mark.parametrize("outcome", ["saved", "invalid", "unwritable"])
+@pytest.mark.parametrize("case", sorted(_SAVE_SIDE_EFFECT_CASES))
+def test_a_refused_save_queues_no_library_job_and_resets_no_provider(monkeypatch, case, outcome):
+    """Library jobs, provider logins and provider pools follow a save only once it is written.
+
+    They used to be set off while the submitted values were still being applied,
+    before validation and before the write. A save refused for another field or by
+    the disk then still reindexed sports with the rejected audio mode, synced every
+    series and movie, signed providers out and rebuilt their pools, while the page
+    reported that nothing had been saved.
+    """
+    from app import config
+
+    starting, items, expected = _SAVE_SIDE_EFFECT_CASES[case]
+    for section, values in starting.items():
+        for name, value in values.items():
+            monkeypatch.setattr(getattr(config.settings, section), name, value)
+    for name in ("use_sonarr", "use_radarr", "use_sportarr"):
+        monkeypatch.setattr(config.settings.general, name, True)
+    monkeypatch.setenv("SZ_HI_EXTENSION", "hi")
+
+    effects = _record_save_side_effects(monkeypatch)
+    record = effects.append
+
+    def validate():
+        if outcome == "invalid":
+            raise ValidationError("synthetic invalid value")
+
+    restored = []
+    monkeypatch.setattr(config.settings.validators, "validate", validate)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setattr(config, "write_config", lambda: outcome != "unwritable")
+    monkeypatch.setattr(config, "restore_persisted_settings", lambda: restored.append(True))
+
+    if outcome == "saved":
+        config.save_settings(items)
+    else:
+        with pytest.raises(ValidationError):
+            config.save_settings(items)
+    if os.environ["SZ_HI_EXTENSION"] != "hi":
+        record(f"hi extension {os.environ['SZ_HI_EXTENSION']}")
+
+    if outcome == "saved":
+        assert sorted(effects) == sorted(expected)
+        assert restored == []
+    else:
+        assert effects == [], "a refused save acted on values it did not keep"
+        assert restored == [True]
+
+
+@pytest.mark.parametrize("kind", ["sonarr", "radarr"])
+def test_a_save_its_own_validators_refuse_starts_no_library_job(metadata_save_environment, monkeypatch, kind):
+    """The same, with the real validators: a boolean timeout sent beside a new audio setting.
+
+    On a settings file of its own, since validating replaces whole sections of the
+    settings it checks, and a value patched on the replaced section is never put back.
+    """
+    env = metadata_save_environment
+    env.settings.validators.register(*env.config.validators)
+    env.settings.general.parse_embedded_audio_track = False
+    getattr(env.settings, kind).http_timeout = 60
+    for name in ("use_sonarr", "use_radarr", "use_sportarr"):
+        setattr(env.settings.general, name, True)
+    assert env.config.write_config() is True
+    disk = env.path.read_bytes()
+    effects = _record_save_side_effects(monkeypatch)
+
+    with pytest.raises(ValidationError, match=f"{kind}.http_timeout"):
+        env.config.save_settings([("settings-general-parse_embedded_audio_track", ["true"]),
+                                  (f"settings-{kind}-http_timeout", ["true"])])
+
+    assert effects == []
+    assert env.path.read_bytes() == disk
+    assert env.settings.general.parse_embedded_audio_track is False
+    assert getattr(env.settings, kind).http_timeout == 60
+
+
+@pytest.mark.parametrize("failing", ["clear os_token", "throttled providers", "sports scan",
+                                     "sonarr sync", "missing subtitles recalculation"])
+def test_a_written_metadata_save_keeps_its_values_when_a_follow_up_fails(
+    metadata_save_environment, monkeypatch, failing,
+):
+    """A login reset or a job that fails once the save is on disk undoes nothing.
+
+    The save is reported as written with a failed refresh, and the live settings keep
+    what the file holds. Treated as unsaved, the new TMDB token was taken back out of
+    the live settings only, and the next save of anything else wrote the old one to disk.
+    """
+    import yaml
+    from secret_store import decrypt_settings_dict
+
+    env = metadata_save_environment
+    env.settings.general.parse_embedded_audio_track = False
+    env.settings.general.use_embedded_subs = True
+    env.settings.opensubtitles.username = "before"
+    for name in ("use_sonarr", "use_radarr", "use_sportarr"):
+        setattr(env.settings.general, name, True)
+    assert env.config.write_config() is True
+    before = env.config.get_settings()["discover"]
+    effects = _record_save_side_effects(monkeypatch, fail=failing)
+    replacement = "5ecafe33cafe33cafe33cafe33cafe33"
+
+    with pytest.raises(env.config.MetadataFollowupError):
+        env.config.save_settings([
+            ("settings-discover-tmdb_access_token", [replacement]),
+            ("settings-general-parse_embedded_audio_track", ["true"]),
+            ("settings-general-use_embedded_subs", ["false"]),
+            ("settings-opensubtitles-username", ["after"]),
+        ])
+
+    assert effects[-1] == failing
+    stored = decrypt_settings_dict(yaml.safe_load(env.path.read_text()))
+    assert stored["discover"]["tmdb_access_token"] == replacement
+    assert stored["general"]["parse_embedded_audio_track"] is True
+    assert env.settings.discover.tmdb_access_token == replacement
+    assert env.settings.general.parse_embedded_audio_track is True
+    assert env.config.get_settings()["discover"]["metadata_revision"] != before["metadata_revision"]
+
+
+def test_a_written_master_switch_save_keeps_the_switch_when_a_follow_up_fails(
+    metadata_save_environment, monkeypatch,
+):
+    """The media-server switch the file holds is the one left live after a failed job."""
+    import yaml
+    from media_servers import dispatcher
+
+    env = metadata_save_environment
+    env.settings.general.use_silo = False
+    env.settings.general.parse_embedded_audio_track = False
+    env.settings.general.use_sportarr = True
+    assert env.config.write_config() is True
+    monkeypatch.setattr(dispatcher, "_configuration", dispatcher.NativeConfiguration(env.settings))
+    effects = _record_save_side_effects(monkeypatch, fail="sports scan")
+
+    with pytest.raises(RuntimeError, match="synthetic follow-up failure"):
+        env.config.save_settings([("settings-general-use_silo", ["true"]),
+                                  ("settings-general-parse_embedded_audio_track", ["true"])])
+
+    assert effects[-1] == "sports scan"
+    assert yaml.safe_load(env.path.read_text())["general"]["use_silo"] is True
+    assert env.settings.general.use_silo is True
+    assert dispatcher.get_native_configuration().masters["silo"] is True
+
+
+def _record_save_side_effects(monkeypatch, fail=None):
+    """Stand in for everything a save can set off, and list what it did, in order.
+
+    Each stand-in replaces a whole module, so nothing of the application is imported
+    for it, not even while a test has put a stand-in database in place. The one named
+    by `fail` raises once it has been recorded.
+    """
+    from app import config
+
+    effects = []
+
+    def record(effect):
+        effects.append(effect)
+        if effect == fail:
+            raise RuntimeError("synthetic follow-up failure")
+
+    monkeypatch.setitem(sys.modules, "subtitles.indexer.series", SimpleNamespace(
+        series_full_scan_subtitles=lambda **_kw: record("series scan")))
+    monkeypatch.setitem(sys.modules, "subtitles.indexer.movies", SimpleNamespace(
+        movies_full_scan_subtitles=lambda **_kw: record("movies scan")))
+    monkeypatch.setitem(sys.modules, "subtitles.indexer.sports", SimpleNamespace(
+        sports_full_scan_subtitles=lambda **_kw: record("sports scan")))
+    monkeypatch.setitem(sys.modules, "sonarr.sync.series", SimpleNamespace(
+        update_series=lambda: record("sonarr sync")))
+    monkeypatch.setitem(sys.modules, "radarr.sync.movies", SimpleNamespace(
+        update_movies=lambda: record("radarr sync")))
+    monkeypatch.setitem(sys.modules, "subtitles.indexer.missing_refresh", SimpleNamespace(
+        queue_missing_subtitles_recalculation=lambda *_a, **_kw: record("missing subtitles recalculation")))
+    monkeypatch.setattr(config, "region", SimpleNamespace(delete=lambda key: record(f"clear {key}")))
+    monkeypatch.setitem(sys.modules, "app.get_providers", SimpleNamespace(
+        reset_throttled_providers=lambda **_kw: record("throttled providers")))
+    monkeypatch.setitem(sys.modules, "subliminal_patch.core_persistent", SimpleNamespace(
+        reset_pool=lambda: record("fanout pool")))
+    monkeypatch.setitem(sys.modules, "compat.service", SimpleNamespace(
+        reset_compat_pool=lambda: record("compat pool")))
+    monkeypatch.setitem(sys.modules, "compat.cache", SimpleNamespace(
+        invalidate_all=lambda: record("compat cache")))
+    monkeypatch.setitem(sys.modules, "provider_hub.state", SimpleNamespace(
+        load_state=lambda: {"installations": {}}))
+    monkeypatch.setitem(sys.modules, "app.scheduler", SimpleNamespace(scheduler=None))
+    monkeypatch.setitem(sys.modules, "app.database", SimpleNamespace(
+        database=SimpleNamespace(execute=lambda _statement: None),
+        update=lambda _model: _FakeUpdate(), System=object,
+    ))
+    return effects
