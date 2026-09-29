@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <strong>Enhanced subtitle management built on <a href="https://www.bazarr.media">Bazarr</a></strong>
+  <strong>Self-hosted subtitles for movies, TV and sports</strong>
 </p>
 
 <p align="center">
@@ -21,7 +21,7 @@
 </p>
 
 <p align="center">
-  New UI with Discover as the homepage · <strong>Multiple Sonarr/Radarr/Sportarr instances</strong> · <strong>Provider Hub</strong> plugin catalog · <strong>Distribution Hub</strong> multi-tenant subtitle API · combined bilingual/trilingual subtitles · AI translation via OpenRouter (300+ LLMs) · multi-engine subtitle sync · Subtitle Editor with video preview and waveform · OpenSubtitles.org native plugin · security hardening, API key encryption at rest, no tracking · Python 3.14
+  Provider plugins · subtitle sync · bilingual and trilingual subtitles · AI translation · no tracking
 </p>
 
 <p align="center">
@@ -29,6 +29,30 @@
   <a href="https://github.com/LavX/bazarr"><strong>GitHub</strong></a> ·
   <a href="https://github.com/LavX/bazarr/releases/latest"><strong>Releases</strong></a>
 </p>
+
+---
+
+<p align="center">
+  <a href="screenshot/discover-title-subtitle-search.png"><img src="site/screenshots/github-social-preview.png" alt="Bazarr+ standalone Discover search: subtitles for any film or show, with no library required" width="960"></a>
+</p>
+
+## Start here
+
+Choose the path that matches how you watch:
+
+| I want to... | Start with |
+|---|---|
+| **Find a subtitle for any film or show** | Run Bazarr+ with no library and use [Discover search](https://lavx.github.io/bazarr/guides/getting-started.html#no-library). |
+| **Automate an existing media library** | Follow [Getting Started](https://lavx.github.io/bazarr/guides/getting-started.html), then connect any Sonarr, Radarr or Sportarr instances you run. |
+| **Move from upstream Bazarr** | Back up `/config` first, then follow the [migration guide](https://lavx.github.io/bazarr/guides/migration.html). |
+
+The fastest new install uses the project installer to write a Docker Compose stack and start it:
+
+```bash
+curl -fsSL https://lavx.github.io/bazarr/install.sh | bash
+```
+
+[Review the installer and full Docker Compose setup](https://lavx.github.io/bazarr/guides/getting-started.html#one-liner-install) before running it.
 
 ---
 
@@ -58,7 +82,7 @@ Bazarr+ uses its own versioning starting at v2.0.0, unrelated to upstream versio
 - Provider Hub is additive. Existing providers keep working, and installed plugin providers can be enabled under Subtitle Hub > My Providers after restart
 - The OpenSubtitles-compatible endpoint is now managed from the Distribution Hub. If you used the old Settings > External Integration page, your shared token is preserved as a Distribution Hub key and that route now redirects to the Distribution Hub
 - Recommended: test with a copy of your config before committing to the switch
-- See the [migration guide](https://lavx.github.io/bazarr/guides/) for the full walkthrough
+- See the [migration guide](https://lavx.github.io/bazarr/guides/migration.html) for the full walkthrough
 
 ---
 
@@ -116,13 +140,13 @@ Two limits worth knowing before you set this up:
 | **Multi-engine subtitle sync** | Single engine | Multiple sync engines with a side-by-side output comparison before you keep a result. The configured maximum offset is an acceptance threshold for engines that report their offset (ffsubsync and autosubsync; alass reports only success or failure), and a keep-all sync job's outcome names the engines that failed instead of reporting an unqualified success. |
 | **Scoring controls** | Fixed scoring | Per-provider score modifiers weight any provider up or down, Provider Hub candidates are scored on their release information, movie edition is preserved in matching, and release-type mismatches trigger a notification. |
 | **Jellyfin Library Refresh** | Basic refresh (since upstream v1.6.0) | HTTPS with optional self-signed cert acceptance, per-library overrides, secret redaction, response cap, and a per-instance "Refresh libraries" action |
-| **Provider Priority** | [Rejected](https://bazarr.featureupvote.com/suggestions/112323/provider-prioritization) (62 votes) | Dual mode: priority order with early stop, or classic simultaneous |
+| **Provider Priority** | [Rejected](https://bazarr.featureupvote.com/suggestions/112323/provider-prioritization) | Dual mode: priority order with early stop, or classic simultaneous |
 | **OpenSubtitles.org (native plugin)** | Not available | Provider Hub plugin that scrapes in-process via ai-cloudscraper with inline Anubis proof-of-work solving; FlareSolverr recommended for Cloudflare challenges |
 | **AI Subtitle Translator (OpenRouter)** | Not available | 300+ LLMs + any custom model ID |
 | **API Key Encryption** | Not available | AES-encrypted **at rest** (provider keys, Sonarr/Radarr, Plex token, OpenRouter key, Distribution Hub token) with auto-migration and key rotation; AES-256-GCM **in transit** to the AI translator |
 | **Translate from Missing Menu** | Not available | Action menu on missing subs with source language picker |
 | **Batch Translation** | Not available | Translate entire series/libraries from Wanted pages |
-| **Mass Subtitle Sync** | [Rejected](https://bazarr.featureupvote.com/suggestions/172013/mass-sync-all-subtitles) (249 votes) | Bulk sync from Tasks page or Mass Edit, skips already-synced |
+| **Mass Subtitle Sync** | [Rejected](https://bazarr.featureupvote.com/suggestions/172013/mass-sync-all-subtitles) | Bulk sync from Tasks page or Mass Edit, skips already-synced |
 | **Bulk Operations** | One-at-a-time only | 11 batch actions: sync, translate, OCR fixes, common fixes, remove HI, remove tags, fix uppercase, reverse RTL, scan disk, search missing, upgrade (up to 10k items) |
 | **Dedicated Translator Settings** | Not available | 4-zone page with pricing, cost estimates, status panel |
 | **No Tracking** | GA4 + legacy UA phone home to Google | All telemetry removed, nothing phones home |
@@ -344,7 +368,7 @@ OpenSubtitles.org shut down their XML-RPC API for all third-party apps, VIP incl
 FlareSolverr is strongly recommended. Run a FlareSolverr container and set its `/v1` endpoint in the plugin's **FlareSolverr URL** setting. FlareSolverr is used as a fallback to solve Cloudflare browser challenges when `ai-cloudscraper` is itself challenged. The plugin exposes `flaresolverr_url` and `flaresolverr_timeout_ms` settings. Use `http://flaresolverr:8191/v1` when Bazarr+ and FlareSolverr share a Docker network (the Compose default below), or `http://localhost:8191/v1` if you run Bazarr+ with host networking (in which case also publish FlareSolverr's `8191:8191` port, or run it on host networking too, so 8191 is reachable on the host loopback).
 
 ### Provider Priority
-Upstream Bazarr queries all subtitle providers simultaneously and picks the highest-scored result. There's no way to prefer one provider over another. This has been [requested for 6 years](https://bazarr.featureupvote.com/suggestions/112323/provider-prioritization) (62 votes), but upstream rejected it as "won't happen," calling it a "major rework" that "would take months of development."
+Upstream Bazarr queries all subtitle providers simultaneously and picks the highest-scored result. There's no way to prefer one provider over another. This has been [requested for years](https://bazarr.featureupvote.com/suggestions/112323/provider-prioritization), but upstream rejected it as "won't happen," calling it a "major rework" that "would take months of development."
 
 Bazarr+ solves it with a **Provider Priority toggle** in Subtitle Hub > My Providers. When enabled, providers are queried sequentially in the order you've arranged them. If a provider returns subtitles meeting the minimum score, Bazarr+ stops searching and uses those results. Your preferred providers (curated community sites, specialized language sources) always get first shot. When disabled, the original behavior is preserved: all providers queried simultaneously, best score wins.
 
@@ -412,7 +436,7 @@ The film plays against the cue list, the current line is editable beside it, and
 Read-only subtitle preview accessible from the subtitle action menu. Supports SRT, VTT, and ASS/SSA formats with automatic format detection. Shows a cue table with timestamps and text, file size, and format badge. Useful for quickly checking subtitle content and timing. When you do want the files, every subtitle menu has a Download action, and the series and movie pages can produce a zip of everything on disk, filtered by season and language.
 
 ### Mass Subtitle Sync
-Upstream lets you sync subtitles one at a time, or per-series via Mass Edit. But there's no way to sync your entire library at once. This has been [requested for years](https://bazarr.featureupvote.com/suggestions/172013/mass-sync-all-subtitles) (249 votes), but upstream rejected it as "won't happen," saying "Bazarr isn't a batch tool."
+Upstream lets you sync subtitles one at a time, or per-series via Mass Edit. But there's no way to sync your entire library at once. This has been [requested for years](https://bazarr.featureupvote.com/suggestions/172013/mass-sync-all-subtitles), but upstream rejected it as "won't happen," saying "Bazarr isn't a batch tool."
 
 Bazarr+ adds two entry points for bulk sync:
 - **System Tasks page**: a "Mass Sync All Subtitles" task with a Run button that syncs every subtitle in your library
@@ -756,6 +780,7 @@ Where Bazarr+ is heading. Plans shift, but the direction is steady.
 ## Documentation
 
 - [Bazarr+ Guides](https://lavx.github.io/bazarr/guides/): getting started, Provider Hub, Distribution Hub, subtitle processing, AI translation, and migration
+- [Share Bazarr+](docs/share-bazarr-plus.md): concise project copy, proof points, canonical links and current visual assets
 - [Fork Maintenance Guide](docs/FORK_MAINTENANCE.md): how upstream sync works
 - [Provider Catalog](https://github.com/LavX/bazarr-provider-catalog): the OpenSubtitles.org plugin and other catalog providers
 - [AI Subtitle Translator](https://github.com/LavX/ai-subtitle-translator): AI translator service docs
