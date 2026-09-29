@@ -44,7 +44,7 @@ def test_save_settings_creates_missing_provider_section_for_hub_config(monkeypat
         assert config.settings[provider_id]["api_token"] == "token-value"
         assert executed
     finally:
-        config.settings.unset(provider_id.upper())
+        config.settings.unset(provider_id.upper(), force=True)
 
 
 def test_save_settings_resets_compat_pool_for_dynamic_provider_hub_config(monkeypatch):
@@ -92,7 +92,7 @@ def test_save_settings_resets_compat_pool_for_dynamic_provider_hub_config(monkey
         assert reset_calls == ["http://solver:8191"]
         assert executed
     finally:
-        config.settings.unset(provider_id.upper())
+        config.settings.unset(provider_id.upper(), force=True)
 
 
 def test_provider_hub_settings_saves_clear_runtime_quota(monkeypatch):
@@ -165,7 +165,7 @@ def test_provider_hub_settings_saves_clear_runtime_quota(monkeypatch):
     finally:
         runtime_status.clear()
         config.settings.general.enabled_providers = previous_enabled
-        config.settings.unset(provider_id.upper())
+        config.settings.unset(provider_id.upper(), force=True)
 
 
 def test_save_settings_invalidates_the_compat_cache_for_a_score_modifier(monkeypatch):
@@ -798,17 +798,19 @@ def test_sports_exclusion_save_emits_a_sports_event(monkeypatch):
         SimpleNamespace(event_stream=lambda **kwargs: events.append(kwargs)),
     )
 
-    try:
-        config.save_settings(
-            [
-                ("settings-sportarr-excluded_sports", ["Golf"]),
-                ("settings-sportarr-only_monitored", ["false"]),
-            ]
-        )
-        assert config.settings.sportarr["excluded_sports"] == ["Golf"]
-        assert config.settings.sportarr["only_monitored"] is False
-    finally:
-        config.settings.unset("sportarr")
+    # Only these two are put back afterwards. Removing the whole section would
+    # take every other sports setting away from the tests that run after this one.
+    monkeypatch.setattr(config.settings.sportarr, "excluded_sports", [])
+    monkeypatch.setattr(config.settings.sportarr, "only_monitored", True)
+
+    config.save_settings(
+        [
+            ("settings-sportarr-excluded_sports", ["Golf"]),
+            ("settings-sportarr-only_monitored", ["false"]),
+        ]
+    )
+    assert config.settings.sportarr["excluded_sports"] == ["Golf"]
+    assert config.settings.sportarr["only_monitored"] is False
 
     assert {"type": "badges"} in events
     assert {"type": "sports"} in events
@@ -1244,3 +1246,88 @@ def _record_save_side_effects(monkeypatch, fail=None):
         update=lambda _model: _FakeUpdate(), System=object,
     ))
     return effects
+
+
+def test_a_section_a_save_created_can_be_removed_for_good(metadata_save_environment):
+    """The startup cleanup of retired provider sections removes one a save created.
+
+    Dynaconf keeps a section created through set() as a default of its own: unset()
+    skipped it unless forced, and a later reload() put a forced one back. A save
+    creates a missing section, so a cleanup running after one left it in place.
+    """
+    import yaml
+
+    env = metadata_save_environment
+    env.config.save_settings([("settings-retiredhub-api_token", ["token-value"])])
+    assert yaml.safe_load(env.path.read_text())["retiredhub"] == {"api_token": "token-value"}
+
+    env.config.remove_settings_section("retiredhub")
+    env.config.write_config()
+
+    assert "RETIREDHUB" not in env.settings.store
+    assert "retiredhub" not in {key.lower() for key in env.settings.as_dict()}
+    assert "retiredhub" not in yaml.safe_load(env.path.read_text())
+    # A refused save reloads the settings from disk, which must not bring it back.
+    env.config.restore_persisted_settings()
+    assert env.settings.get("retiredhub") is None
+
+
+@pytest.mark.parametrize("assignment", ["set", "item", "attribute"])
+def test_a_section_code_added_can_be_removed_for_good(metadata_save_environment, assignment):
+    """A section added in code, not loaded from the file, is removed and stays removed.
+
+    Each of these assignments keeps the section as a Dynaconf default: unset() skipped
+    it unless forced, and a forced unset left the default behind for the next reload(),
+    such as the one that undoes a refused save, to put back with its old values.
+    """
+    env = metadata_save_environment
+    if assignment == "set":
+        env.settings.set("codehub", {"api_token": "token-value"})
+    elif assignment == "item":
+        env.settings["codehub"] = {"api_token": "token-value"}
+    else:
+        env.settings.codehub = {"api_token": "token-value"}
+    assert env.settings.codehub.api_token == "token-value"
+
+    env.config.remove_settings_section("codehub")
+
+    assert "CODEHUB" not in env.settings.store
+    assert "codehub" not in {key.lower() for key in env.settings.as_dict()}
+    env.config.restore_persisted_settings()
+    assert env.settings.get("codehub") is None
+    assert "codehub" not in {key.lower() for key in env.settings.as_dict()}
+
+
+@pytest.mark.parametrize("outcome", ["invalid", "unwritable"])
+def test_a_refused_save_keeps_no_section_it_created(metadata_save_environment, monkeypatch, outcome):
+    """A section that first appears in a refused save is gone again afterwards.
+
+    Reloading from disk is what undoes a refused save, and it kept a section the
+    save had created, so a new provider's rejected credentials stayed live and the
+    next save of anything else wrote them to disk.
+    """
+    env = metadata_save_environment
+    if outcome == "invalid":
+        def fail():
+            raise ValidationError("synthetic invalid value")
+        monkeypatch.setattr(env.settings.validators, "validate", fail)
+    else:
+        monkeypatch.setattr(env.config, "write_config", lambda: False)
+    disk = env.path.read_bytes()
+
+    with pytest.raises(ValidationError):
+        env.config.save_settings([("settings-newhub-api_token", ["rejected-token"])])
+
+    assert env.settings.get("newhub") is None
+    assert "newhub" not in {key.lower() for key in env.settings.as_dict()}
+    assert env.path.read_bytes() == disk
+    assert env.executed == env.resets == []
+
+
+def test_a_section_a_save_created_survives_the_reload_of_a_later_refused_save(metadata_save_environment):
+    env = metadata_save_environment
+    env.config.save_settings([("settings-newhub-api_token", ["kept-token"])])
+
+    env.config.restore_persisted_settings()
+
+    assert env.settings.newhub.api_token == "kept-token"

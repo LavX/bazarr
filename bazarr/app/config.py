@@ -1011,6 +1011,19 @@ def migrate_retired_openrouter_model(settings) -> bool:
     return True
 
 
+def remove_settings_section(name):
+    """Drop a whole top-level section from the live settings, for good.
+
+    Dynaconf keeps a section added by a set() without a loader name, which is also
+    what an item or attribute assignment on the settings does, as a default of its
+    own. unset() skips a default unless forced, and a forced unset still leaves it
+    for the next reload() to put back, so the default is dropped as well.
+    """
+    key = name.upper()
+    settings.unset(key, force=True)
+    settings.__core__.config.defaults.pop(key, None)
+
+
 base_url = settings.general.base_url.rstrip('/')
 
 array_keys = ['excluded_tags',
@@ -1069,9 +1082,9 @@ if hasattr(settings.embeddedsubtitles, 'unknown_as_english'):
 
 # delete custom scores sections since we don't use this anymore
 if hasattr(settings, 'series_scores'):
-    settings.unset('SERIES_SCORES')
+    remove_settings_section('series_scores')
 if hasattr(settings, 'movie_scores'):
-    settings.unset('MOVIE_SCORES')
+    remove_settings_section('movie_scores')
 
 # backward compatibility: migrate gemini_key to gemini_keys
 if hasattr(settings.translator, 'gemini_key'):
@@ -1161,10 +1174,15 @@ def _settings_mapping(parent, key):
     try:
         mapping = parent[key]
     except KeyError:
-        parent[key] = {}
-        mapping = parent[key]
+        mapping = None
     if mapping is None:
-        parent[key] = {}
+        if parent is settings:
+            # Named, because Dynaconf keeps a section added by an unnamed set() as a
+            # default of its own: reload() then keeps it, so a refused save that
+            # created it would not be undone, and unset() skips it unless forced.
+            settings.set(key, {}, loader_identifier='settings_save')
+        else:
+            parent[key] = {}
         mapping = parent[key]
     return mapping
 
