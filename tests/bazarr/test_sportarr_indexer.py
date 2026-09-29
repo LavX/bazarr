@@ -733,8 +733,12 @@ def test_profile_editor_changes_recompute_sports_missing(indexed_library, monkey
     # The save queues the recalculation instead of running it; the job is run
     # below, which is where the sports rows are recomputed now.
     queued = []
-    monkeypatch.setattr(endpoint, "queue_missing_subtitles_recalculation",
-                        lambda **kwargs: queued.append(kwargs))
+
+    def queue(**kwargs):
+        queued.append(kwargs)
+        return len(queued)  # a job id, as the real helper returns
+
+    monkeypatch.setattr(endpoint, "queue_missing_subtitles_recalculation", queue)
     monkeypatch.setattr(settings.general, "use_sonarr", False)
     monkeypatch.setattr(settings.general, "use_radarr", False)
     # The sports recompute is gated on the master toggle now, like the sonarr

@@ -60,7 +60,8 @@ def _settings_endpoint(session, monkeypatch):
 
     monkeypatch.setattr(endpoint, "database", session)
     monkeypatch.setattr(endpoint, "event_stream", lambda *a, **kw: None)
-    monkeypatch.setattr(endpoint, "queue_missing_subtitles_recalculation", lambda *a, **kw: None)
+    # A job id, as the real helper returns for a queued recalculation.
+    monkeypatch.setattr(endpoint, "queue_missing_subtitles_recalculation", lambda *a, **kw: 1)
     monkeypatch.setattr(endpoint.TableLanguagesProfiles, "__table__",
                         endpoint.TableLanguagesProfiles.__table__)
 
@@ -345,6 +346,7 @@ def _recording_queue(monkeypatch, endpoint, fails=False):
         queued.append(True)
         if fails:
             raise RuntimeError("synthetic queue failure")
+        return len(queued)
 
     monkeypatch.setattr(endpoint, "queue_missing_subtitles_recalculation", queue)
     return queued
@@ -433,3 +435,58 @@ def test_a_refused_save_keeps_its_answer_while_events_fail(schema_session, post_
     logged = [record.getMessage() for record in caplog.records if record.levelno >= logging.ERROR]
     assert logged, "the failed settings event was not logged"
     assert not any("were saved" in message for message in logged), logged
+
+
+# ---------------------------------------------------------------------------
+# The recalculation queued through the real helper
+#
+# queue_missing_subtitles_recalculation() never raises: it logs a failure and
+# returns None instead of a job id. The answer has to hear of it all the same.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def real_recalculation(post_settings, monkeypatch):
+    """The endpoint queueing through the real helper, into a private queue."""
+    import sys
+    from app import jobs_queue as jobs_queue_module
+    from subtitles.indexer import missing_refresh
+
+    queue = jobs_queue_module.JobsQueue()
+    monkeypatch.setattr(missing_refresh, "jobs_queue", queue)
+    monkeypatch.setattr(jobs_queue_module, "event_stream", lambda **_kwargs: None)
+    endpoint = sys.modules["api.system.settings"]
+    monkeypatch.setattr(endpoint, "queue_missing_subtitles_recalculation",
+                        missing_refresh.queue_missing_subtitles_recalculation)
+    monkeypatch.setattr(endpoint, "save_settings", lambda _items: None)
+    return missing_refresh, queue
+
+
+def test_a_recalculation_the_queue_refused_is_reported(schema_session, post_settings,
+                                                       real_recalculation, monkeypatch):
+    _missing_refresh, queue = real_recalculation
+    _seed_rows(schema_session)
+
+    def refuse(*_args, **_kwargs):
+        raise RuntimeError("synthetic queue failure")
+
+    monkeypatch.setattr(queue, "feed_jobs_pending_queue", refuse)
+
+    body, status = post_settings(dict(_ROW_FORM))
+
+    assert status == 503
+    assert body["code"] == "settings_refresh_failed"
+    assert _rows(schema_session) == _ALL_ROWS
+
+
+def test_a_queued_or_folded_recalculation_is_reported_as_applied(schema_session, post_settings,
+                                                                 real_recalculation):
+    missing_refresh, queue = real_recalculation
+    _seed_rows(schema_session)
+
+    assert post_settings(dict(_ROW_FORM)) == ('', 204)
+    # A second save finds the first recalculation still pending and joins it.
+    assert post_settings(dict(_ROW_FORM)) == ('', 204)
+
+    [job] = list(queue.jobs_pending_queue)
+    assert (job.module, job.func) == (missing_refresh.JOB_MODULE, missing_refresh.JOB_FUNC)
+    assert _rows(schema_session) == _ALL_ROWS

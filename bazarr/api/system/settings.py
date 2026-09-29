@@ -121,13 +121,24 @@ def _write_settings_rows(enabled_languages, profiles, notifications):
 
 
 def _best_effort(action, *args):
-    """Run one step that follows a written save, and report whether it went through."""
+    """Run one step that follows a written save, and report whether it went through.
+
+    A step went through unless it raised or returned False.
+    """
     try:
-        action(*args)
+        return action(*args) is not False
     except Exception:
         logging.exception("Settings were saved, but a step after saving them failed")
         return False
-    return True
+
+
+def _queue_recalculation():
+    """Queue the library-wide missing subtitles recalculation, and say whether it was queued.
+
+    The helper never raises: it logs its own failure and returns None, which for
+    a library-wide pass means no job was queued or joined.
+    """
+    return queue_missing_subtitles_recalculation() is not None
 
 
 def _after_settings_rows(enabled_languages, profiles):
@@ -148,7 +159,7 @@ def _after_settings_rows(enabled_languages, profiles):
     # settings, so the job reads the arr toggles this same save may have
     # changed. The response does not wait for it.
     if profiles is not None:
-        done.append(_best_effort(queue_missing_subtitles_recalculation))
+        done.append(_best_effort(_queue_recalculation))
 
     # Other open pages reload the settings, as they do after any written save.
     done.append(_best_effort(event_stream, "settings"))
