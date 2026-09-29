@@ -111,12 +111,27 @@ def test_an_invalid_extension_is_rejected_before_any_work():
     assert ext_at < upload_at
 
 
-def test_upload_consumers_for_sports_do_not_rescan_video_libraries():
-    """The subtitle publication refreshes media servers without a video rescan."""
+def test_upload_consumers_for_sports_do_not_rescan_video_libraries(monkeypatch):
+    """The subtitle publication refreshes media servers without a video rescan.
+
+    Nothing is asked of any arr, in the foreground or in a background thread,
+    which is where the Sportarr library rescan used to run.
+    """
+    import threading
+
     from subtitles import upload
 
-    assert upload._refresh_upload_consumers("sports", None, 7) is None
-    upload._refresh_upload_consumers("sports", None, 7)
+    asked = []
+
+    def record(name):
+        return lambda *args, **kwargs: asked.append(name)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(threading.Thread, "start", record("thread"))
+        for name in ("client_for_instance", "notify_sonarr", "notify_radarr"):
+            patch.setattr(upload, name, record(name))
+        upload._refresh_upload_consumers("sports", None, 7)
+    assert asked == []
 
 
 @pytest.fixture

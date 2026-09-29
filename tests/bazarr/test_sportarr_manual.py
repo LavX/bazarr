@@ -314,17 +314,20 @@ def test_owner_mods_postprocessing_and_no_native_notifications(
 ):
     import shlex
     from app.database import TableArrInstances
+    from media_servers import dispatcher, events
     from subtitles import processing
 
     service, session, folder = manual_library
     published = []
 
-    def record_publication(media_type, video_path, operation, owner):
-        return lambda subtitle_path: published.append(
-            (media_type, video_path, operation, owner, subtitle_path)
+    def record_publication(event):
+        published.append(
+            (event.media_type, event.video_path, event.operation,
+             event.arr_instance_id, event.subtitle_path)
         )
 
-    monkeypatch.setattr(processing, "publication_callback", record_publication)
+    monkeypatch.setattr(events, "notify_subtitle_mutation", record_publication)
+    monkeypatch.setattr(dispatcher, "notify_subtitle_mutation", record_publication)
     script = folder / "postprocess.py"
     script.write_text(
         'import sys\nfrom pathlib import Path\np=Path(sys.argv[1])\ns=p.read_text()\nassert "<i>" not in s\nassert sys.argv[2:] == ["", ""]\np.write_text(s.replace("Sporting event", "Owner A processed"))\n'
@@ -360,11 +363,18 @@ def test_owner_mods_postprocessing_and_no_native_notifications(
     assert "Owner A processed" in (folder / "1/event.en.srt").read_text()
     assert "Sporting event" in (folder / "2/event.en.srt").read_text()
     assert "Owner A processed" not in (folder / "2/event.en.srt").read_text()
+    # One publication per download, post-processed or not. The save reports
+    # its file after post-processing has finished, so a second report from the
+    # post-processing write would only queue a second full library scan.
     assert published == [
         (
             "sports", str(folder / "1/event.mkv"), "download", 1,
             str(folder / "1/event.en.srt"),
-        )
+        ),
+        (
+            "sports", str(folder / "2/event.mkv"), "download", 2,
+            str(folder / "2/event.en.srt"),
+        ),
     ]
 
 
