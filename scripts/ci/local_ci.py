@@ -30,6 +30,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import yaml
 
@@ -179,6 +180,20 @@ def frontend_test_tasks(args, jobs: dict, frontend_dir: Path, work: Path) -> lis
     return tasks
 
 
+def _local_database_url(url: str, port, database: str) -> str:
+    """The step's own URL, pointed at the local server and one worker's database.
+
+    Only where it connects changes. The scheme, and with it the driver, stays
+    whatever ci.yml wrote, so the mirror cannot run a driver CI does not.
+    """
+    parts = urlsplit(url)
+    credentials, _, _ = parts.netloc.rpartition("@")
+    netloc = f"127.0.0.1:{port}"
+    if credentials:
+        netloc = f"{credentials}@{netloc}"
+    return urlunsplit(parts._replace(netloc=netloc, path=f"/{database}"))
+
+
 def _free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -276,8 +291,8 @@ def run(tasks: list, args, logs: Path, history: dict) -> None:
         env.update(task.env)
         if task.needs_db:
             task.database = databases.pop()
-            env["BAZARR_PG_TEST_URL"] = (
-                f"postgresql+psycopg://postgres:postgres@127.0.0.1:{args.pg_port}/{task.database}"
+            env["BAZARR_PG_TEST_URL"] = _local_database_url(
+                task.env["BAZARR_PG_TEST_URL"], args.pg_port, task.database
             )
         safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", f"{task.group}-{task.label}")[:150]
         task.log = logs / f"{counter:03d}-{safe}.log"

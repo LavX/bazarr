@@ -164,6 +164,13 @@ try:
 except Exception:  # pragma: no cover - hub failures must not prevent startup
     logging.exception("Unable to activate staged Provider Hub installations on startup")
 try:
+    # A package uploaded for an install that never ran: its job did not
+    # survive the restart, so nothing will install or remove it now.
+    from provider_hub.service import discard_local_package_uploads
+    discard_local_package_uploads()
+except Exception:  # pragma: no cover - hub failures must not prevent startup
+    logging.exception("Unable to remove leftover Provider Hub package uploads on startup")
+try:
     from provider_hub.registry import register_active_provider_classes
     registered = register_active_provider_classes()
     if registered:

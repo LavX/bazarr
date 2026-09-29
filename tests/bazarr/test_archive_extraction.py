@@ -143,3 +143,82 @@ def test_corrupt_archive_raises_archive_error():
 def test_unsupported_extension_raises_archive_error():
     with pytest.raises(ArchiveError):
         extract_subtitles_from_archive("pack.tar.gz", b"whatever")
+
+
+# --- the archive upload route bounds what it reads -------------------------------
+#
+# Every other upload route answers an oversized file with 413 and the same
+# "<what> is too large: the limit is N MiB." message; an archive over its own
+# ceiling is refused the same way, and one right at it is still extracted.
+
+def _post_archive(content, *, filename="pack.zip", declared=None):
+    from flask import Flask
+
+    from api.subtitles.archive import SubtitleArchive
+
+    environ = {"CONTENT_LENGTH": str(declared)} if declared is not None else None
+    with Flask(__name__).test_request_context("/api/subtitles/archive", method="POST",
+                                              data={"file": (BytesIO(content), filename)},
+                                              content_type="multipart/form-data",
+                                              environ_overrides=environ):
+        return SubtitleArchive.post.__wrapped__(SubtitleArchive())
+
+
+@pytest.fixture
+def archive_extractions(monkeypatch):
+    """The archives the route handed to the extractor."""
+    from api.subtitles import archive
+
+    extracted = []
+
+    def recording(filename, data):
+        extracted.append((filename, data))
+        return extract_subtitles_from_archive(filename, data)
+
+    monkeypatch.setattr(archive, "extract_subtitles_from_archive", recording)
+    return extracted
+
+
+def test_the_archive_upload_ceiling_is_50_mib():
+    from api.subtitles import archive
+
+    assert archive.MAX_ARCHIVE_SIZE == 50 * 1024 * 1024
+
+
+def test_an_archive_declared_over_the_ceiling_is_refused_as_too_large(archive_extractions):
+    from api.subtitles.archive import MAX_ARCHIVE_SIZE
+    from api.utils import UPLOAD_FORM_ALLOWANCE
+
+    body, status = _post_archive(b"PK", declared=MAX_ARCHIVE_SIZE + UPLOAD_FORM_ALLOWANCE + 1)
+
+    assert (body, status) == ("Archive is too large: the limit is 50 MiB.", 413)
+    assert archive_extractions == []
+
+
+def test_an_archive_over_the_ceiling_is_refused_as_too_large(archive_extractions, monkeypatch):
+    from api.subtitles import archive
+    from api.utils import upload_too_large_message
+
+    data = _zip([("movie.srt", b"sub-one")])
+    monkeypatch.setattr(archive, "MAX_ARCHIVE_SIZE", len(data) - 1)
+
+    body, status = _post_archive(data)
+
+    assert (body, status) == (upload_too_large_message("Archive", len(data) - 1), 413)
+    assert archive_extractions == []
+
+
+def test_an_archive_at_the_ceiling_is_extracted(archive_extractions, monkeypatch):
+    # The declared length also counts the multipart framing around the file,
+    # so an archive of exactly the ceiling arrives in a larger request.
+    from api.subtitles import archive
+
+    data = _zip([("movie.srt", b"sub-one")])
+    monkeypatch.setattr(archive, "MAX_ARCHIVE_SIZE", len(data))
+
+    response = _post_archive(data)
+
+    assert response.status_code == 200
+    assert response.get_json()["count"] == 1
+    assert response.get_json()["files"][0]["name"] == "movie.srt"
+    assert archive_extractions == [("pack.zip", data)]

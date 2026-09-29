@@ -104,7 +104,8 @@ if entries:
   fi
 
   VENV="$CACHE/venv-$PYTHON_VERSION"
-  VENV_STAMP="$(cat "$ROOT/requirements.txt" "$ROOT/dev-requirements.txt" <("$PYTHON" -VV) <(echo "$PYTHON") | sha256sum | cut -c1-16)"
+  VENV_STAMP="$(cat "$ROOT/requirements.txt" "$ROOT/dev-requirements.txt" "$ROOT/postgres-requirements.txt" \
+    <("$PYTHON" -VV) <(echo "$PYTHON") | sha256sum | cut -c1-16)"
   if [[ "$(cat "$VENV/.bazarr-ci-stamp" 2>/dev/null)" != "$VENV_STAMP" ]]; then
     say "Creating the Python $PYTHON_VERSION virtualenv in $VENV"
     rm -rf "$VENV"
@@ -113,11 +114,12 @@ if entries:
     else
       "$PYTHON" -m venv "$VENV"
     fi
-    # The same installs as the CI backend jobs, psycopg included.
+    # The same installs as the CI backend jobs. The PostgreSQL driver is the
+    # one the image ships, installed from the file the isolation jobs install.
     "$VENV/bin/pip" install -q -r "$ROOT/requirements.txt"
     "$VENV/bin/pip" install -q --no-deps signalrcore==1.0.2
     "$VENV/bin/pip" install -q -r "$ROOT/dev-requirements.txt"
-    "$VENV/bin/pip" install -q "psycopg[binary]"
+    "$VENV/bin/pip" install -q -r "$ROOT/postgres-requirements.txt"
     echo "$VENV_STAMP" > "$VENV/.bazarr-ci-stamp"
   fi
   ORCHESTRATOR_PYTHON="$VENV/bin/python"

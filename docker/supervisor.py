@@ -75,6 +75,30 @@ TOKEN_HEADER = "X-Bazarr-Supervisor-Token"
 # Paths that get proxied to the backend
 PROXY_PREFIXES = ("/api/", "/images/", "/test/", "/system/backup/download/", "/bazarr.log")
 
+# The backend's own request body ceiling (MAX_REQUEST_BODY_SIZE in
+# bazarr/app/server.py). Waitress refuses a declared length at the ceiling, not
+# only above it, and it counts a chunked body with its chunk framing. Its
+# refusal carries no token, so relayed it would read as a neighbour's, and the
+# proxy refuses first: a declared length at the ceiling, and a body relayed in
+# chunks once it comes within STREAM_FRAMING_ALLOWANCE of it.
+MAX_REQUEST_BODY_SIZE = 256 * 1024 * 1024  # 256 MiB
+
+# A body relayed in chunks is sent in pieces of at least RELAY_CHUNK_SIZE, so
+# its framing stays well inside the allowance: under 50 KiB at the ceiling.
+RELAY_CHUNK_SIZE = 64 * 1024
+STREAM_FRAMING_ALLOWANCE = 64 * 1024
+
+# The encodings aiohttp decodes as it reads a request body. What the proxy
+# relays for one of these is the decoded body, so its declared length and its
+# Content-Encoding no longer describe it.
+DECODED_ENCODINGS = {"gzip", "deflate", "br", "zstd"}
+
+# An answer has 300 seconds, counted from the request's last byte: a large
+# upload over a slow link can take longer than that to arrive, and the backend
+# has nothing to answer until it has.
+ANSWER_TIMEOUT = 300
+PROXY_TIMEOUT = ClientTimeout(total=None, connect=5)
+
 
 def _set_backend_port(port, token=None) -> None:
     global BACKEND_PORT, BACKEND_TOKEN
@@ -299,6 +323,46 @@ def _backend_starting_response() -> web.Response:
     )
 
 
+def _body_too_large_response() -> web.Response:
+    return web.json_response(
+        {"error": f"Request body is too large: the limit is {MAX_REQUEST_BODY_SIZE // (1024 * 1024)} MiB"},
+        status=413,
+    )
+
+
+class _BodyTooLarge(Exception):
+    pass
+
+
+async def _bounded_body(content, limit, finished):
+    """Relay the body as it arrives, and stop it once more than ``limit`` bytes
+    have come, before the excess is relayed. ``finished`` is called once the
+    last byte has been handed on."""
+    size = 0
+    pending = bytearray()
+    async for chunk in content.iter_any():
+        size += len(chunk)
+        if size > limit:
+            raise _BodyTooLarge()
+        pending += chunk
+        if len(pending) >= RELAY_CHUNK_SIZE:
+            yield bytes(pending)
+            pending.clear()
+    if pending:
+        yield bytes(pending)
+    finished()
+
+
+def _caused_by(error, kind) -> bool:
+    seen = set()
+    while error is not None and id(error) not in seen:
+        if isinstance(error, kind):
+            return True
+        seen.add(id(error))
+        error = error.__cause__ or error.__context__
+    return False
+
+
 def _from_own_backend(headers, token, port) -> bool:
     """Whether an answer carries this supervisor's token. Anything else on the
     port is not this instance's backend and is never relayed."""
@@ -321,21 +385,40 @@ async def proxy_handler(request: web.Request) -> web.StreamResponse:
     if request.headers.get("Upgrade", "").lower() == "websocket":
         return await _proxy_websocket(request, target_url, token, port)
 
+    if request.content_length is not None and request.content_length >= MAX_REQUEST_BODY_SIZE:
+        return _body_too_large_response()
+    encoding = request.headers.get("Content-Encoding", "")
+    decoded = encoding.isascii() and encoding.lower() in DECODED_ENCODINGS
+    # The length the body is relayed with, or None when it goes in chunks.
+    length = None if decoded else request.content_length
+
+    loop = asyncio.get_running_loop()
+    response = None
     try:
-        timeout = ClientTimeout(total=300, connect=5)
-        async with ClientSession(timeout=timeout) as session:
-            # Strip hop-by-hop / framing headers before forwarding. The body
-            # has already been fully read via request.read() (aiohttp de-chunks
-            # at parse time), so forwarding Transfer-Encoding: chunked would
-            # either cause aiohttp to re-chunk a body that's no longer
-            # chunked, or tell waitress to expect more chunk frames that
-            # never come - waitress then hangs waiting for the trailer.
-            # This manifested as silent 100s+ hangs on any POST from clients
-            # like .NET's HttpClient that default to chunked request bodies.
+        async with asyncio.timeout(None) as deadline, ClientSession(timeout=PROXY_TIMEOUT) as session:
+            def start_answer_deadline():
+                if deadline.when() is None:
+                    deadline.reschedule(loop.time() + ANSWER_TIMEOUT)
+
+            # Strip hop-by-hop / framing headers before forwarding. aiohttp
+            # de-chunks the body as it arrives, so forwarding
+            # Transfer-Encoding: chunked would tell waitress to expect chunk
+            # frames that never come, and waitress then hangs waiting for the
+            # trailer. This manifested as silent 100s+ hangs on any POST from
+            # clients like .NET's HttpClient that default to chunked request
+            # bodies. The body is streamed through instead of read whole: with
+            # its declared length when it had one and aiohttp did not decode
+            # it, otherwise re-chunked by the client session itself. Reading it
+            # whole went through aiohttp's 1 MiB request limit, so every larger
+            # upload was answered as "Backend is starting up".
             _drop = {"host", "content-length", "transfer-encoding",
                      "connection", "keep-alive", "expect"}
+            if decoded:
+                _drop.add("content-encoding")
             forwarded_headers = {k: v for k, v in request.headers.items()
                                  if k.lower() not in _drop}
+            if length is not None:
+                forwarded_headers["Content-Length"] = str(length)
             # Advertise the CLIENT-facing URL to the backend. Without
             # these, Flask's request.host is the internal loopback address
             # and any absolute URL it builds (download links, base_url,
@@ -359,13 +442,22 @@ async def proxy_handler(request: web.Request) -> web.StreamResponse:
                 forwarded_headers["X-Forwarded-Proto"] = request.scheme
             if request.remote:
                 forwarded_headers["X-Forwarded-For"] = request.remote
+            if request.body_exists:
+                limit = MAX_REQUEST_BODY_SIZE - 1 if length is not None \
+                    else MAX_REQUEST_BODY_SIZE - STREAM_FRAMING_ALLOWANCE
+                body = _bounded_body(request.content, limit, start_answer_deadline)
+            else:
+                body = b""
+                start_answer_deadline()
             async with session.request(
                 method=request.method,
                 url=target_url,
                 headers=forwarded_headers,
-                data=await request.read(),
+                data=body,
                 allow_redirects=False,
             ) as resp:
+                # Waitress answers a body it refuses before the body is done.
+                start_answer_deadline()
                 if not _from_own_backend(resp.headers, token, port):
                     return _backend_starting_response()
                 response = web.StreamResponse(
@@ -379,7 +471,15 @@ async def proxy_handler(request: web.Request) -> web.StreamResponse:
                     await response.write(chunk)
                 await response.write_eof()
                 return response
-    except Exception:
+    except Exception as error:
+        if response is not None and response.prepared:
+            # Part of the answer is already relayed, so no other answer can
+            # follow it. Closing the connection leaves it visibly cut short.
+            if request.transport is not None:
+                request.transport.close()
+            return response
+        if _caused_by(error, _BodyTooLarge):
+            return _body_too_large_response()
         return _backend_starting_response()
 
 

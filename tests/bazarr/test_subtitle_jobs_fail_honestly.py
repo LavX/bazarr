@@ -231,6 +231,59 @@ def test_a_provider_error_is_the_reason_the_download_failed(manual, monkeypatch)
         _download(manual)
 
 
+@pytest.mark.parametrize('listed_for', [None, 5])
+def test_a_manual_download_names_the_instance_it_downloads_for(manual, monkeypatch, listed_for):
+    """The listing tagged the subtitle with the instance the refiner found,
+    which is none for an instance with path mappings of its own. A provider
+    failure reports the ids the subtitle carries, and an exclusion a provider
+    demands is recorded under the instance they name."""
+    from app.jobs_queue import JobFailed
+
+    cached = _cached_subtitle()
+    cached.arr_instance_id = listed_for
+    monkeypatch.setattr(manual.subtitle_cache, 'get', lambda key: cached)
+    owners = []
+
+    def boom(subtitles, pool):
+        owners.extend(subtitle.arr_instance_id for subtitle in subtitles)
+        raise RuntimeError('HTTP 429 Too Many Requests')
+
+    monkeypatch.setattr(manual, 'download_subtitles', boom)
+    with pytest.raises(JobFailed):
+        manual.manual_download_subtitle('/m/Film.mkv', 'English', 'False', 'False', 'cache-id',
+                                        'opensubtitles', 'None', 'Film', 'movie', False, profile_id=1,
+                                        job_id=3, arr_instance_id=2)
+    assert owners == [2]
+
+
+@pytest.mark.parametrize('refined', [None, 5])
+def test_a_manual_search_names_the_instance_it_searches_for(manual, monkeypatch, refined):
+    """A provider failure while listing reports the video's ids, and an
+    exclusion a provider demands is recorded under the instance they name.
+    The refiner finds none for an instance with path mappings of its own, or
+    once the item is gone, so the video carries the one the caller names."""
+    class Video:
+        original_path = '/m/Film.mkv'
+        arr_instance_id = refined
+
+    searched = []
+
+    def listing(videos, languages, pool, min_score):
+        searched.extend(video.arr_instance_id for video in videos)
+        return {video: [] for video in videos}
+
+    monkeypatch.setattr(manual, 'get_video', lambda *args, **kwargs: Video())
+    monkeypatch.setattr(manual, '_get_language_obj',
+                        lambda profile_id: ([SimpleNamespace(forced=False, hi=False)], False))
+    monkeypatch.setattr(manual, 'list_all_subtitles', listing)
+    monkeypatch.setattr(manual, 'subliminal', SimpleNamespace(
+        region=SimpleNamespace(backend=SimpleNamespace(sync=lambda: None))))
+
+    assert manual.manual_search('/m/Film.mkv', 1, ['opensubtitles'], 'None', 'Film', 'movie',
+                                arr_instance_id=2) == []
+    assert searched == [2]
+
+
 def test_a_cancelled_download_is_not_turned_into_a_failure(manual, monkeypatch):
     from app.jobs_queue import JobCancelled
 

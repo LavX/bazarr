@@ -13,6 +13,7 @@ from datetime import datetime
 from sqlalchemy import event, create_engine, inspect, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, UniqueConstraint, Index, Integer, LargeBinary, Text, Boolean, func, text, BigInteger
 # importing here to be indirectly imported in other modules later
 from sqlalchemy import update, delete, select, func  # noqa: F401, F811
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import scoped_session, sessionmaker, mapped_column, close_all_sessions, declarative_base
 from sqlalchemy.pool import NullPool
 from alembic.migration import MigrationContext
@@ -78,6 +79,48 @@ def optimize_sqlite_database(engine_to_optimize):
     return True
 
 
+# The image installs psycopg2 from postgres-requirements.txt and no other
+# PostgreSQL driver. A bare 'postgresql' URL leaves the choice to SQLAlchemy,
+# which picks psycopg 3 from 2.1 on, so the driver is named instead.
+POSTGRES_DRIVERNAME = "postgresql+psycopg2"
+
+
+def postgres_engine_url(postgres_url, username, password, host, port, database):
+    """The URL the PostgreSQL engine connects with.
+
+    POSTGRES_URL when one is given, with any of the five settings that are set
+    written over it, otherwise the five settings alone. A URL that names a
+    driver keeps it; a bare 'postgresql' one gets psycopg2, as the five
+    settings do.
+    """
+    if not postgres_url:
+        return URL.create(
+            drivername=POSTGRES_DRIVERNAME,
+            username=username,
+            password=password,
+            host=host,
+            port=port,
+            database=database
+        )
+    url = make_url(postgres_url)
+    backend_name = url.get_backend_name()
+    if backend_name != 'postgresql':
+        raise ValueError(f"Invalid Postgres URL, scheme must be 'postgresql', got {backend_name}")
+
+    # Allow overriding individual components of the URL
+    url_overrides = {
+        'username': username if username else None,
+        'password': password if password else None,
+        'host': host if host else None,
+        'port': port if port else None,
+        'database': database if database else None,
+    }
+    url = url.set(**{k: v for k, v in url_overrides.items()})
+    if url.drivername == 'postgresql':
+        url = url.set(drivername=POSTGRES_DRIVERNAME)
+    return url
+
+
 def log_sqlite_runtime_version(engine_to_log):
     if engine_to_log.dialect.name != 'sqlite':
         return False
@@ -88,7 +131,6 @@ def log_sqlite_runtime_version(engine_to_log):
 if postgresql:
     # insert is different between database types
     from sqlalchemy.dialects.postgresql import insert
-    from sqlalchemy.engine import URL, make_url
 
     postgres_database = os.getenv("POSTGRES_DATABASE", settings.postgresql.database)
     postgres_username = os.getenv("POSTGRES_USERNAME", settings.postgresql.username)
@@ -97,30 +139,8 @@ if postgresql:
     postgres_port = os.getenv("POSTGRES_PORT", settings.postgresql.port)
     postgres_url = os.getenv("POSTGRES_URL", settings.postgresql.url)
 
-    if postgres_url:
-        url = make_url(postgres_url)
-        backend_name = url.get_backend_name()
-        if backend_name != 'postgresql':
-            raise ValueError(f"Invalid Postgres URL, scheme must be 'postgresql', got {backend_name}")
-        
-        # Allow overriding individual components of the URL
-        url_overrides = {
-            'username': postgres_username if postgres_username else None,
-            'password': postgres_password if postgres_password else None,
-            'host': postgres_host if postgres_host else None,
-            'port': postgres_port if postgres_port else None,
-            'database': postgres_database if postgres_database else None,
-        }
-        url = url.set(**{k: v for k, v in url_overrides.items()})
-    else:
-        url = URL.create(
-            drivername="postgresql",
-            username=postgres_username,
-            password=postgres_password,
-            host=postgres_host,
-            port=postgres_port,
-            database=postgres_database
-        )
+    url = postgres_engine_url(postgres_url, postgres_username, postgres_password,
+                              postgres_host, postgres_port, postgres_database)
     # Build the log message from individual non-secret components instead of
     # going through `url`. SQLAlchemy's render_as_string(hide_password=True)
     # masks the password at render time, but the URL object still carries the
@@ -313,6 +333,16 @@ class TableArrInstances(Base):
 
     def to_dict(self):
         return {column.name: getattr(self, column.name) for column in self.__table__.columns}
+
+
+class TableArrInstanceRetiredIds(Base):
+    # The id of every deleted arr_instances row. SQLite hands the highest id
+    # out again once its row is gone, and a write already in flight when the
+    # delete committed can still land afterwards, naming it. The repository
+    # picks new ids above these, so no instance ever takes over such a row.
+    __tablename__ = 'arr_instance_retired_ids'
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=False)
 
 
 class TableCompatApiKeys(Base):

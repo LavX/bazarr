@@ -290,7 +290,9 @@ const SettingsConnectionsView: FunctionComponent = () => {
       title={
         refusal.error === "sync_in_progress"
           ? "Library sync in progress"
-          : "Instance could not be deleted"
+          : refusal.error === "job_in_progress"
+            ? "Subtitle job in progress"
+            : "Instance could not be deleted"
       }
     >
       {refusal.message}

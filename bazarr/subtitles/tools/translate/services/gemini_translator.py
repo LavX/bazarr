@@ -156,9 +156,10 @@ class GeminiTranslatorService:
                 return self.dest_srt_file
             if self.media_type == 'episode':
                 history_log(action=6, sonarr_series_id=self.sonarr_series_id, sonarr_episode_id=self.sonarr_episode_id,
-                            result=result)
+                            result=result, arr_instance_id=self.arr_instance_id)
             else:
-                history_log_movie(action=6, radarr_id=self.radarr_id, result=result)
+                history_log_movie(action=6, radarr_id=self.radarr_id, result=result,
+                                  arr_instance_id=self.arr_instance_id)
 
     @staticmethod
     def get_instruction(language: str, description: str) -> str:

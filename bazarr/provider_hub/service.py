@@ -1163,14 +1163,44 @@ def _fetch_bundle(manifest, deadline: float | None = None) -> Path:
 _LOCAL_PACKAGE_MAX_MEMBERS = 5000
 _LOCAL_PACKAGE_MAX_TOTAL_BYTES = 100 * 1024 * 1024  # 100 MB uncompressed
 
+# The uploaded .zip itself, bounded by the upload route before it is spooled.
+MAX_LOCAL_PACKAGE_SIZE = 100 * 1024 * 1024  # 100 MiB
 
-def _safe_extract_zip(archive_bytes: bytes, dest: Path) -> None:
-    """Extract a zip into ``dest`` with zip-slip, size and read-error guards."""
+
+def local_package_uploads_dir() -> Path:
+    """Where an uploaded package waits on disk for its install job."""
+    return provider_hub_dir() / "uploads"
+
+
+def discard_local_package(path: str | Path) -> None:
+    with contextlib.suppress(OSError):
+        Path(path).unlink()
+
+
+def discard_local_package_uploads() -> None:
+    """Remove every spooled package. Run at startup: pending jobs do not survive
+    a restart, so nothing is waiting for these files any more."""
+    uploads = local_package_uploads_dir()
+    if not uploads.is_dir():
+        return
+    for leftover in uploads.iterdir():
+        if leftover.is_file():
+            discard_local_package(leftover)
+
+
+def _safe_extract_zip(package: bytes | str | Path, dest: Path) -> None:
+    """Extract a zip into ``dest`` with zip-slip, size and read-error guards.
+
+    ``package`` is the path of the spooled upload, or the package's bytes.
+    """
     dest_root = dest.resolve()
+    source = io.BytesIO(package) if isinstance(package, (bytes, bytearray)) else package
     try:
-        archive = zipfile.ZipFile(io.BytesIO(archive_bytes))
+        archive = zipfile.ZipFile(source)
     except zipfile.BadZipFile as error:
         raise ProviderHubInstallError("uploaded package is not a valid .zip archive") from error
+    except OSError as error:
+        raise ProviderHubInstallError("uploaded package could not be read") from error
     with archive:
         infos = archive.infolist()
         # Bound the work before extracting so an oversized or zip-bomb upload
@@ -1573,15 +1603,21 @@ def stage_install(
     )
 
 
-def stage_install_local(archive_bytes: bytes, checkpoint=None) -> dict[str, Any]:
+def stage_install_local(package: bytes | str | Path, checkpoint=None) -> dict[str, Any]:
     """Install a Provider Hub provider from an uploaded .zip package.
+
+    ``package`` is the path of the spooled upload, or the package's bytes.
 
     A local package has no catalog vouching for it, so it is always recorded as
     origin="local" and forced untrusted: it can never shadow a built-in provider.
     Its files are still hash-verified against the manifest and smoke-tested before
     activation, exactly like a catalog install.
     """
-    if not isinstance(archive_bytes, (bytes, bytearray)) or not archive_bytes:
+    if isinstance(package, (bytes, bytearray)):
+        if not package:
+            raise ProviderHubInstallError("uploaded package is empty")
+        package = bytes(package)
+    elif not isinstance(package, (str, Path)):
         raise ProviderHubInstallError("uploaded package is empty")
 
     # A local upload can be the very first Provider Hub write, before any catalog
@@ -1590,7 +1626,7 @@ def stage_install_local(archive_bytes: bytes, checkpoint=None) -> dict[str, Any]
     hub_dir.mkdir(parents=True, exist_ok=True)
     work_dir = Path(tempfile.mkdtemp(prefix="phub-local-", dir=str(hub_dir)))
     try:
-        _safe_extract_zip(bytes(archive_bytes), work_dir)
+        _safe_extract_zip(package, work_dir)
         manifest, bundle_root = _find_local_manifest(work_dir)
         # Untrusted (full built-in set, no replacements): a local package can
         # never shadow a built-in provider.

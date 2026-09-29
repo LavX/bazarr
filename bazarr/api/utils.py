@@ -18,6 +18,62 @@ None_Keys = ['null', 'undefined', '', None]
 
 False_Keys = ['False', 'false', '0']
 
+# A subtitle file uploaded on its own. A VobSub .sub or an .ass carrying its
+# fonts runs to tens of megabytes, so the ceiling is generous.
+MAX_SUBTITLE_UPLOAD_SIZE = 150 * 1024 * 1024  # 150 MiB
+
+# Room for the multipart boundaries and the small form fields sent beside the
+# file, so a file right at its ceiling is not refused by the declared length.
+UPLOAD_FORM_ALLOWANCE = 64 * 1024
+
+_UPLOAD_COPY_CHUNK = 1024 * 1024
+
+
+class UploadTooLarge(Exception):
+    pass
+
+
+def upload_too_large_message(what, limit):
+    return f'{what} is too large: the limit is {limit // (1024 * 1024)} MiB.'
+
+
+def upload_declared_too_large(limit):
+    """Whether the request declares a body too large for a file of ``limit`` bytes.
+
+    Checked before anything touches ``request.files``, so an oversized upload
+    is refused before its body is parsed.
+    """
+    length = request.content_length
+    return bool(length) and length > limit + UPLOAD_FORM_ALLOWANCE
+
+
+def read_bounded_upload(upload, limit):
+    """The uploaded file's bytes, reading at most one byte past ``limit``.
+
+    Raises UploadTooLarge instead of buffering an oversized file whole.
+    """
+    data = upload.read(limit + 1)
+    if len(data) > limit:
+        raise UploadTooLarge()
+    return data
+
+
+def copy_bounded_upload(upload, destination, limit):
+    """Copy the uploaded file into ``destination`` in chunks, and return its size.
+
+    Raises UploadTooLarge as soon as more than ``limit`` bytes have arrived;
+    whatever was written by then is the caller's to discard.
+    """
+    size = 0
+    while True:
+        chunk = upload.read(min(_UPLOAD_COPY_CHUNK, limit + 1 - size))
+        if not chunk:
+            return size
+        size += len(chunk)
+        if size > limit:
+            raise UploadTooLarge()
+        destination.write(chunk)
+
 
 def image_proxy_path_with_instance(path, arr_instance_id):
     if arr_instance_id is None:

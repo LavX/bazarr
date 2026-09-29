@@ -7,9 +7,9 @@ comes across with everything else. PostgreSQL is a first-class backend here, so
 the adoption is exercised against a real server rather than assumed to follow
 from the SQLite run.
 
-Skips when no Postgres is reachable (set BAZARR_PG_TEST_URL, default the
-docker-compose/dev container on 55432). CI provides a postgres service so this
-does NOT skip there.
+Skips when BAZARR_PG_TEST_URL is unset and the docker-compose/dev container
+on 55432 does not answer. With the variable set, as CI sets it, an unreachable
+server or a missing driver fails instead, so the lane cannot go quietly green.
 """
 import os
 
@@ -18,7 +18,7 @@ import sqlalchemy as sa
 
 _PG_URL = os.environ.get(
     "BAZARR_PG_TEST_URL",
-    "postgresql+psycopg://postgres:test@127.0.0.1:55432/bazarr")
+    "postgresql+psycopg2://postgres:test@127.0.0.1:55432/bazarr")
 
 
 @pytest.fixture
@@ -28,7 +28,9 @@ def pg_engine():
         with engine.connect() as connection:
             connection.execute(sa.text("SELECT 1"))
     except Exception as exc:  # driver missing or server unreachable
-        pytest.skip(f"no PostgreSQL at {_PG_URL}: {exc}")
+        if os.environ.get("BAZARR_PG_TEST_URL"):
+            pytest.fail(f"BAZARR_PG_TEST_URL is set, but PostgreSQL is not usable: {exc}")
+        pytest.skip(f"no PostgreSQL at the default URL: {exc}")
 
     with engine.begin() as connection:
         connection.execute(sa.text('DROP SCHEMA IF EXISTS upstream_adoption CASCADE'))

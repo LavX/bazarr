@@ -69,7 +69,13 @@ def test_provider_exclusion_revalidates_context(callback_library, change):
     assert session.execute(sa.select(TableBlacklistSports)).all() == []
 
 
-def test_overlapping_provider_callbacks_publish_one_exclusion(callback_library):
+def _overlapping_callbacks(callback_library, first_release, second_release):
+    """Run two exclusion callbacks for one owner so their transactions overlap.
+
+    The first callback is held just before its INSERT until the second is
+    waiting on the owner lock, so on PostgreSQL the second one's SERIALIZABLE
+    snapshot predates the first one's commit.
+    """
     from app.database import TableBlacklistSports
     from sportarr.identity import resolve_event_in_session
 
@@ -95,19 +101,19 @@ def test_overlapping_provider_callbacks_publish_one_exclusion(callback_library):
         statement = args[2].replace(table_name.lower(), 'table_blacklist_sports')
         overlap(*args[:2], statement, *args[3:])
 
-    def callback():
+    def callback(release):
         try:
-            history.blacklist_log_sports(context, 'provider', 'release', 'en:hi')
+            history.blacklist_log_sports(context, 'provider', release, 'en:hi')
         finally:
             session.remove()
 
     sa.event.listen(engine, 'before_cursor_execute', capture)
     try:
         with ThreadPoolExecutor(max_workers=2) as pool:
-            first = pool.submit(callback)
+            first = pool.submit(callback, first_release)
             try:
                 assert first_inserting.wait(5), 'first callback did not reach publication'
-                second = pool.submit(callback)
+                second = pool.submit(callback, second_release)
                 assert second_attempting.wait(5), 'callbacks did not overlap in the transaction'
             finally:
                 allow_first_commit.set()
@@ -115,12 +121,30 @@ def test_overlapping_provider_callbacks_publish_one_exclusion(callback_library):
             second.result(timeout=5)
     finally:
         sa.event.remove(engine, 'before_cursor_execute', capture)
-    assert session.execute(sa.select(sa.func.count()).select_from(TableBlacklistSports)).scalar_one() == 1
+    return sorted(session.execute(sa.select(TableBlacklistSports.subs_id)).scalars().all())
 
 
+def test_overlapping_provider_callbacks_publish_one_exclusion(callback_library):
+    assert _overlapping_callbacks(callback_library, 'release', 'release') == ['release']
+
+
+def test_overlapping_callbacks_for_different_releases_publish_both(callback_library):
+    """The retried callback still has its own release to exclude.
+
+    PostgreSQL cancels the later SERIALIZABLE transaction as a pivot even
+    though the two rows never collide, so the retry has to insert rather than
+    find the other callback's row and stop.
+    """
+    assert _overlapping_callbacks(callback_library, 'first-release', 'second-release') == [
+        'first-release', 'second-release']
+
+
+# psycopg2, the driver the image ships, calls the SQLSTATE pgcode; psycopg 3
+# calls it sqlstate. Reading only one spelling never retries on the other.
+@pytest.mark.parametrize('attribute', ['pgcode', 'sqlstate'])
 @pytest.mark.parametrize('sqlstate, attempts', [('40001', 3), ('08006', 1)])
 def test_provider_exclusion_retries_only_serialization_and_is_bounded(
-    callback_library, monkeypatch, sqlstate, attempts
+    callback_library, monkeypatch, attribute, sqlstate, attempts
 ):
     from sportarr.identity import resolve_event_in_session
 
@@ -130,7 +154,7 @@ def test_provider_exclusion_retries_only_serialization_and_is_bounded(
 
     def fail(*args):
         calls.append(True)
-        raise sa.exc.OperationalError('SELECT', {}, SimpleNamespace(sqlstate=sqlstate))
+        raise sa.exc.OperationalError('SELECT', {}, SimpleNamespace(**{attribute: sqlstate}))
 
     monkeypatch.setattr(history, 'require_sportarr', fail)
     with pytest.raises(sa.exc.OperationalError):

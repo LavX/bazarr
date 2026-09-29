@@ -905,7 +905,8 @@ def _live_feed_observations():
     ``use_sonarr`` or ``use_radarr`` is set and SignalR is not disabled. A client
     that was never asked to run is therefore not a disconnection; it is an
     absence of any observation, and reporting it as a failure would turn an
-    optional unused library into a permanent attention item.
+    optional unused library into a permanent attention item. The same holds for
+    a client left idle because every instance of its kind is disabled.
     """
     from app.config import settings
     from app.get_args import args
@@ -920,7 +921,8 @@ def _live_feed_observations():
         if not getattr(settings.general, f"use_{kind}", False):
             continue
         primary = getattr(module, singleton, None)
-        candidates = ([primary] if primary is not None else [])
+        candidates = ([primary] if primary is not None and not getattr(primary, "idle", False)
+                      else [])
         candidates += list(getattr(module, extras, None) or [])
         clients.extend({"kind": kind,
                         "arr_instance_id": getattr(client, "arr_instance_id", None),
