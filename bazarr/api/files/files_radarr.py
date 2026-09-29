@@ -7,6 +7,7 @@ from app.database import database
 from arr_instances.resolution import client_for_instance
 
 from ..utils import authenticate
+from .directories import directory_rows
 
 api_ns_files_radarr = Namespace('Files Browser for Radarr', description='Browse content of file system as seen by '
                                                                         'Radarr')
@@ -36,13 +37,11 @@ class BrowseRadarrFS(Resource):
         # otherwise the default-server behaviour is unchanged.
         instance_id = args.get('instance_id')
         arr_client = client_for_instance(database, instance_id, enabled_only=False) if instance_id is not None else None
-        data = []
         try:
             result = browse_radarr_filesystem(path, arr_client=arr_client)
-            if result is None:
+            data = directory_rows(result, 'Radarr')
+            if data is None:
                 raise ValueError
         except Exception:
             return []
-        for item in result['directories']:
-            data.append({'name': item['name'], 'children': True, 'path': item['path']})  # noqa: PERF401
         return marshal(data, self.get_response_model)
