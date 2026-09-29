@@ -309,7 +309,6 @@ jobs:
             tests/bazarr/test_app_cors.py \
             tests/bazarr/test_app_get_providers.py \
             tests/bazarr/test_retired_provider_config_compat.py \
-            tests/bazarr/test_settings_profile_deletion.py \
             tests/bazarr/test_standard_job_actions.py \
             tests/bazarr/test_jellyfin_apikey_location.py \
             tests/bazarr/test_emby_api.py \
@@ -632,6 +631,7 @@ jobs:
             tests/bazarr/test_triage_low_findings.py \
             tests/bazarr/test_provider_hub_worker_reaper.py \
             tests/bazarr/test_embedded_track_eligibility.py \
+            tests/bazarr/test_settings_profile_deletion.py \
             tests/bazarr/test_upstream_db_adoption_pg.py ; do
             echo "::group::$f"
             pytest "$f" -p no:cacheprovider -q
