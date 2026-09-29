@@ -2,7 +2,7 @@
 
 import base64
 
-from flask import jsonify, make_response, request
+from flask import jsonify, make_response
 from flask_restx import Namespace, Resource, reqparse
 from werkzeug.datastructures import FileStorage
 
@@ -12,7 +12,8 @@ from subtitles.tools.archives import (
     is_archive,
 )
 
-from ..utils import authenticate
+from ..utils import (UploadTooLarge, authenticate, read_bounded_upload, upload_declared_too_large,
+                     upload_too_large_message)
 
 api_ns_subtitle_archive = Namespace(
     'SubtitleArchive',
@@ -34,6 +35,7 @@ class SubtitleArchive(Resource):
     @api_ns_subtitle_archive.response(200, 'Success')
     @api_ns_subtitle_archive.response(400, 'Not a valid or supported archive')
     @api_ns_subtitle_archive.response(401, 'Not Authenticated')
+    @api_ns_subtitle_archive.response(413, 'Archive is too large')
     def post(self):
         """Extract subtitle files from an uploaded archive (#233).
 
@@ -43,8 +45,8 @@ class SubtitleArchive(Resource):
         """
         # Reject an oversized upload from the declared length before parse_args
         # spools the whole multipart body to disk/memory.
-        if request.content_length and request.content_length > MAX_ARCHIVE_SIZE:
-            return 'Archive is too large.', 400
+        if upload_declared_too_large(MAX_ARCHIVE_SIZE):
+            return upload_too_large_message('Archive', MAX_ARCHIVE_SIZE), 413
 
         args = self.post_request_parser.parse_args()
         uploaded = args.get('file')
@@ -55,9 +57,10 @@ class SubtitleArchive(Resource):
 
         # Read at most one byte past the cap so an oversized upload is rejected
         # without buffering the whole thing into memory.
-        data = uploaded.read(MAX_ARCHIVE_SIZE + 1)
-        if len(data) > MAX_ARCHIVE_SIZE:
-            return 'Archive is too large.', 400
+        try:
+            data = read_bounded_upload(uploaded, MAX_ARCHIVE_SIZE)
+        except UploadTooLarge:
+            return upload_too_large_message('Archive', MAX_ARCHIVE_SIZE), 413
 
         try:
             extracted = extract_subtitles_from_archive(filename, data)

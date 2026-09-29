@@ -21,7 +21,8 @@ from app.jobs_queue import jobs_queue  # noqa: F401
 from app.event_handler import event_stream  # noqa: F401
 from app.config import settings  # noqa: F401
 
-from ..utils import authenticate
+from ..utils import (MAX_SUBTITLE_UPLOAD_SIZE, UploadTooLarge, authenticate, read_bounded_upload,
+                     upload_declared_too_large, upload_too_large_message)
 
 api_ns_episodes_subtitles = Namespace('Episodes Subtitles', description='Download, upload or delete episodes subtitles')
 
@@ -70,19 +71,24 @@ class EpisodesSubtitles(Resource):
     @authenticate
     @api_ns_episodes_subtitles.doc(parser=post_request_parser)
     @api_ns_episodes_subtitles.response(204, 'Success')
+    @api_ns_episodes_subtitles.response(400, 'A subtitle of an invalid format was uploaded')
     @api_ns_episodes_subtitles.response(401, 'Not Authenticated')
     @api_ns_episodes_subtitles.response(404, 'Episode not found')
     @api_ns_episodes_subtitles.response(409, 'Unable to save subtitles file. Permission or path mapping issue?')
+    @api_ns_episodes_subtitles.response(413, 'Subtitle file is too large')
     @api_ns_episodes_subtitles.response(500, 'Episode file not found. Path mapping issue?')
     def post(self):
         """Upload an episode subtitles"""
+        # Refused from the declared length before the form is parsed.
+        if upload_declared_too_large(MAX_SUBTITLE_UPLOAD_SIZE):
+            return upload_too_large_message('Subtitle file', MAX_SUBTITLE_UPLOAD_SIZE), 413
         args = self.post_request_parser.parse_args()
 
         uploaded_file = args.get('file')
         _, ext = os.path.splitext(uploaded_file.filename)
 
         if not isinstance(ext, str) or ext.lower() not in SUBTITLE_EXTENSIONS:
-            raise ValueError('A subtitle of an invalid format was uploaded.')
+            return 'A subtitle of an invalid format was uploaded.', 400
 
         sonarrSeriesId = args.get('seriesid')
         sonarrEpisodeId = args.get('episodeid')
@@ -102,7 +108,10 @@ class EpisodesSubtitles(Resource):
         if not os.path.exists(episodePath):
             return 'Episode file not found. Path mapping issue?', 500
 
-        subtitle_content = BytesIO(uploaded_file.read())
+        try:
+            subtitle_content = BytesIO(read_bounded_upload(uploaded_file, MAX_SUBTITLE_UPLOAD_SIZE))
+        except UploadTooLarge:
+            return upload_too_large_message('Subtitle file', MAX_SUBTITLE_UPLOAD_SIZE), 413
 
         manual_upload_subtitle(path=episodePath,
                                language=args.get('language'),

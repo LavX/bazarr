@@ -1,8 +1,12 @@
 # coding=utf-8
+import os
+import tempfile
+
 from flask import request
 from flask_restx import Namespace, Resource, reqparse
 
-from api.utils import authenticate
+from api.utils import (UploadTooLarge, authenticate, copy_bounded_upload, upload_declared_too_large,
+                       upload_too_large_message)
 from provider_hub import jobs as hub_jobs
 from provider_hub import service
 from provider_hub.service import CatalogSourceError, ProviderHubSettingsError
@@ -150,20 +154,43 @@ class ProviderHubInstallations(Resource):
         return {"job_id": hub_jobs.queue_install(manifest)}, 202
 
 
+def _package_too_large():
+    return upload_too_large_message('Package', service.MAX_LOCAL_PACKAGE_SIZE), 413
+
+
 @api_ns_provider_hub.route('provider-hub/installations/local')
 class ProviderHubLocalInstallations(Resource):
     @authenticate
     @api_ns_provider_hub.response(202, 'Install queued as a job')
     @api_ns_provider_hub.response(400, 'Invalid package')
     @api_ns_provider_hub.response(401, 'Not Authenticated')
+    @api_ns_provider_hub.response(413, 'Package is too large')
     def post(self):
+        # Refuse an oversized package from the declared length, before the form
+        # is parsed. The package then goes to a file for the job to install
+        # from, never into memory or the job's arguments.
+        if upload_declared_too_large(service.MAX_LOCAL_PACKAGE_SIZE):
+            return _package_too_large()
         upload = request.files.get("file") or request.files.get("package")
         if upload is None:
             return 'a .zip package file is required', 400
-        archive_bytes = upload.read()
-        if not archive_bytes:
-            return 'uploaded package is empty', 400
-        return {"job_id": hub_jobs.queue_install_local(archive_bytes, upload.filename or None)}, 202
+        uploads = service.local_package_uploads_dir()
+        uploads.mkdir(parents=True, exist_ok=True)
+        handle, package_path = tempfile.mkstemp(prefix='package-', suffix='.zip', dir=str(uploads))
+        try:
+            with os.fdopen(handle, 'wb') as spool:
+                size = copy_bounded_upload(upload, spool, service.MAX_LOCAL_PACKAGE_SIZE)
+            if not size:
+                service.discard_local_package(package_path)
+                return 'uploaded package is empty', 400
+            job_id = hub_jobs.queue_install_local(package_path, upload.filename or None)
+        except UploadTooLarge:
+            service.discard_local_package(package_path)
+            return _package_too_large()
+        except BaseException:
+            service.discard_local_package(package_path)
+            raise
+        return {"job_id": job_id}, 202
 
 
 @api_ns_provider_hub.route('provider-hub/installations/<string:provider_id>')
