@@ -89,12 +89,31 @@ def series_download_subtitles(no, job_id=None, job_sub_function=False, arr_insta
     jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Downloaded missing subtitles for {series_row.title}")
 
 
+def _episode_series_title(sonarr_episode_id, arr_instance_id):
+    """Title of the series that owns this episode, or None when that is not one series.
+
+    ``sonarr_episode_id`` is an episode id, so the series is reached through the
+    episode's local relationship, never by comparing it with a series id.
+    Without an owner the same upstream id can exist in several instances, and
+    a label that picked one of them would name the wrong series.
+    """
+    titles = database.execute(scoped(
+        select(TableShows.title)
+        .select_from(TableEpisodes)
+        .join(TableShows, TableEpisodes.series_id == TableShows.id)
+        .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id),
+        TableEpisodes.arr_instance_id, arr_instance_id).limit(2)).all()
+    return titles[0].title if len(titles) == 1 else None
+
+
 def episode_download_subtitles(no, job_id=None, job_sub_function=False, providers_list=None, fallback_allowed=False,
                                arr_instance_id=None):
     if not job_sub_function and not job_id:
-        jobs_queue.add_job_from_function(f"""Downloading missing subtitles for {database.scalar(
-            scoped(select(TableShows.title).where(TableShows.sonarrSeriesId == no),
-                   TableShows.arr_instance_id, arr_instance_id)) or 'Unknown Series'}""", is_progress=True)
+        # No local variables here: the queue re-binds this frame's locals as the
+        # job's keyword arguments.
+        jobs_queue.add_job_from_function(
+            f"Downloading missing subtitles for {_episode_series_title(no, arr_instance_id) or 'Unknown Series'}",
+            is_progress=True)
         return
 
     conditions = [(TableEpisodes.sonarrEpisodeId == no)]
