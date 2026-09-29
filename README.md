@@ -539,7 +539,8 @@ services:
       ai-subtitle-translator:
         condition: service_healthy
     # The right-hand side is the Port under Settings > General (6767 unless
-    # changed). Keep the two equal; a new port applies after a container restart.
+    # changed) and has to match it; the left-hand side is the port on this
+    # host. A new port applies after a container restart.
     ports:
       - "6767:6767"
     environment:

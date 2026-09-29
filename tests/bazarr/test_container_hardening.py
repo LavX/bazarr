@@ -577,6 +577,30 @@ def test_the_health_check_falls_back_to_6767_before_the_port_file_exists(where, 
     assert urls == ['http://localhost:6767/_supervisor/status']
 
 
+@pytest.mark.parametrize('where', ['Dockerfile', 'docker-compose.yml', 'install.sh', 'getting-started guide'])
+@pytest.mark.parametrize('content', [
+    # Unquoted, this would hand root's curl a config file of the writer's
+    # choosing.
+    '6767/_supervisor/status --config /config/evil http://localhost:6767\n',
+    '6767 6868\n',
+    'localhost:6767\n',
+    '-1\n',
+    '',
+])
+def test_a_port_file_that_is_not_a_port_number_fails_the_check_without_calling_curl(where, content, tmp_path):
+    # The health check runs as root (the image has no USER; the entrypoint
+    # drops to PUID through gosu), while the port file sits in /tmp where the
+    # app user, and so a provider plugin, can rewrite it.
+    command = _healthchecks()[where]
+
+    rc, urls = _run_healthcheck(command, tmp_path, 6767, content)
+
+    assert rc != 0, f'{where}: a port file holding {content!r} passed the health check'
+    assert urls == [], f'{where}: curl ran with a port file holding {content!r}'
+    assert '"http://localhost:$port/_supervisor/status"' in command, (
+        f'{where}: the probed URL is not quoted: {command}')
+
+
 def test_no_health_check_is_pinned_to_6767_any_more():
     for name in ('Dockerfile', 'docker-compose.yml', 'README.md',
                  os.path.join('site', 'install.sh'), os.path.join('site', 'guides', 'getting-started.html')):

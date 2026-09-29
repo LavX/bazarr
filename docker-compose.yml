@@ -107,8 +107,9 @@ services:
     
     healthcheck:
       # Reads the port the container listens on (general.port), so it keeps
-      # working after a port change. $$ is Compose's escape for a literal $.
-      test: ["CMD-SHELL", "port=$$(cat /tmp/bazarr-supervisor.port 2>/dev/null || echo 6767); curl -sf http://localhost:$$port/_supervisor/status | grep -q '\"running\"'"]
+      # working after a port change, and fails on anything but a port number
+      # in that file. $$ is Compose's escape for a literal $.
+      test: ["CMD-SHELL", "port=$$(cat /tmp/bazarr-supervisor.port 2>/dev/null || echo 6767); case \"$$port\" in \"\"|*[!0-9]*) exit 1 ;; esac; curl -sf \"http://localhost:$$port/_supervisor/status\" | grep -q '\"running\"'"]
       interval: 30s
       timeout: 10s
       retries: 3
