@@ -21,6 +21,7 @@ import PlayOnMenu from "@/components/PlayOnMenu";
 import StateIcon from "@/components/StateIcon";
 import TextPopover from "@/components/TextPopover";
 import HistoryView from "@/pages/views/HistoryView";
+import { episodeCodeOf } from "@/utilities/episodes";
 
 // Defined once, so the columns being rebuilt never remount an open menu.
 const EpisodePlayCell = ({
@@ -29,7 +30,7 @@ const EpisodePlayCell = ({
   <PlayOnMenu
     mediaType="episode"
     id={original.id}
-    itemLabel={`${original.seriesTitle} ${original.episode_number}`}
+    itemLabel={`${original.seriesTitle} ${episodeCodeOf(original.episode_number)}`}
     variant="action"
   />
 );

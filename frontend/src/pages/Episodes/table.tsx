@@ -33,6 +33,7 @@ import PlayOnMenu from "@/components/PlayOnMenu";
 import TextPopover from "@/components/TextPopover";
 import { useModals } from "@/modules/modals";
 import { filterSubtitleBy } from "@/utilities";
+import { episodeCode } from "@/utilities/episodes";
 import { useProfileItemsToLanguages } from "@/utilities/languages";
 import {
   buildSubtitleLanguageKey,
@@ -338,7 +339,7 @@ const EpisodePlayCell = ({ row }: CellContext<Item.Episode, unknown>) => (
   <PlayOnMenu
     mediaType="episode"
     id={row.original.id}
-    itemLabel={`S${String(row.original.season).padStart(2, "0")}E${String(row.original.episode).padStart(2, "0")}`}
+    itemLabel={episodeCode(row.original.season, row.original.episode)}
     variant="action"
     className={tableStyles.actionIcon}
   />

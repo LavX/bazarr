@@ -1,5 +1,6 @@
 /* eslint-disable camelcase */
 
+import userEvent from "@testing-library/user-event";
 import { http } from "msw";
 import { HttpResponse } from "msw";
 import { customRender, screen, waitFor } from "@/tests";
@@ -55,7 +56,7 @@ describe("History Series", () => {
     );
   });
 
-  it("offers each row on the media servers, asking about the local episode id", async () => {
+  it("offers each row on the media servers by its SxxEyy name, asking about the local episode id", async () => {
     let asked = "";
     server.use(
       http.get("/api/episodes/history", () =>
@@ -65,7 +66,8 @@ describe("History Series", () => {
               id: 4560,
               series_id: 789,
               seriesTitle: "Breaking Bad",
-              episode_number: "S05E07",
+              // The history API sends season x episode.
+              episode_number: "5x7",
               episodeTitle: "Pilot",
               language: { code2: "en", name: "English" },
               action: 1,
@@ -101,12 +103,18 @@ describe("History Series", () => {
         return HttpResponse.json({ data: [] });
       }),
     );
+    const user = userEvent.setup();
     customRender(<SeriesHistoryView />);
+    // Named the way the episode rows name it, with the series in front.
     const trigger = await screen.findByRole("button", {
       name: "Play Breaking Bad S05E07 on a media server",
     });
     trigger.focus();
     // The history row's id is the episode's local id, not its Sonarr ids.
     await waitFor(() => expect(asked).toBe("?media_type=episode&id=4560"));
+    await user.hover(trigger);
+    expect(
+      await screen.findByRole("tooltip", { hidden: true }, { timeout: 3000 }),
+    ).toHaveTextContent("Play Breaking Bad S05E07 on a media server");
   });
 });
