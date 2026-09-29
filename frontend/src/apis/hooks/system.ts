@@ -170,13 +170,8 @@ export function useSettingsMutation(retryingMetadataRefresh = false) {
 
     onError: (error, changes) => {
       if (isMetadataFollowupError(error) || retryingMetadataRefresh) {
-        retireMetadata(changes, retryingMetadataRefresh);
-        void client.invalidateQueries({
-          queryKey: [QueryKeys.System, QueryKeys.Settings],
-        });
-        void client.invalidateQueries({
-          queryKey: [QueryKeys.ProviderHub],
-        });
+        // Written as well, other settings in the same request included.
+        reloadSaved(changes);
         showNotification(
           notification.error(
             "Settings saved; application refresh failed",
