@@ -29,8 +29,10 @@ IMAGE_REPOSITORIES = {
     "flaresolverr": "ghcr.io/flaresolverr/flaresolverr",
 }
 PLATFORMS = ("stack", "casaos", "runtipi", "truenas", "unraid")
+SHARED_ASSETS = ("LICENSE", "NOTICES.md")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 VERSION = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
+LOCK_NAME = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.json\Z")
 EXCLUDED_NAMES = {"__pycache__", ".DS_Store", ".pytest_cache", ".mypy_cache", ".ruff_cache", "test_values", "tests"}
 EXCLUDED_SUFFIXES = {".pyc", ".pyo", ".swp", ".tmp", ".bak", "~"}
 MANIFEST_ACCEPT = "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json"
@@ -211,7 +213,8 @@ def git_provenance():
         result = subprocess.run(["git", *args], cwd=PACKAGING.parent, capture_output=True, text=True, timeout=10, check=True)
         return result.stdout.strip()
     try:
-        return {"commit": run("rev-parse", "HEAD"), "dirty": bool(run("status", "--porcelain", "--untracked-files=all", "--", "packaging"))}
+        status = run("status", "--porcelain", "--untracked-files=all", "--", "packaging", *SHARED_ASSETS)
+        return {"commit": run("rev-parse", "HEAD"), "dirty": bool(status)}
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         raise ReleaseError(f"Cannot establish packaging provenance: {exc}") from exc
 
@@ -290,8 +293,7 @@ def verify_live(lock, tag):
                 time.sleep(min(RETRY_SECONDS, remaining))
 
 
-def prepare(tag, lock_path, output, live):
-    lock = read_lock(lock_path, tag)
+def checked_output(output):
     if ".." in output.parts:
         raise ReleaseError("Output path must not contain traversal")
     if output.is_symlink() or any(parent.is_symlink() for parent in output.absolute().parents):
@@ -303,6 +305,12 @@ def prepare(tag, lock_path, output, live):
         raise ReleaseError("Output must be separate from package sources")
     if not output.parent.is_dir() or output.parent.is_symlink():
         raise ReleaseError("Output parent must be an existing regular directory")
+    return output
+
+
+def prepare(tag, lock_path, output, live):
+    lock = read_lock(lock_path, tag)
+    output = checked_output(output)
     files = inventory_sources()
     if live:
         verify_live(lock, tag)
@@ -332,18 +340,52 @@ def prepare(tag, lock_path, output, live):
     return output
 
 
+def prepare_all(locks, output):
+    """Prepare an offline candidate for every release lock, failing on any lock that cannot be packaged."""
+    if locks.is_symlink() or not locks.is_dir():
+        raise ReleaseError("Lock directory must be a regular directory")
+    names = [path.name for path in locks.iterdir()]
+    unexpected = sorted(name for name in names if not LOCK_NAME.fullmatch(name))
+    if unexpected:
+        raise ReleaseError(f"Lock directory holds files that are not release locks: {', '.join(unexpected)}")
+    if not names:
+        raise ReleaseError("Lock directory holds no release locks")
+    versions = sorted(tuple(int(part) for part in name.removesuffix(".json").split(".")) for name in names)
+    tags = ["v" + ".".join(str(part) for part in version) for version in versions]
+    output = checked_output(output)
+    with tempfile.TemporaryDirectory(prefix=".bazarr-candidates-", dir=output.parent) as temporary:
+        staging = Path(temporary) / "result"
+        staging.mkdir()
+        for tag in tags:
+            prepare(tag, locks / f"{tag[1:]}.json", staging / tag, False)
+        if output.exists():
+            raise ReleaseError("Output path appeared during preparation")
+        staging.rename(output)
+    return [output / tag for tag in tags]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tag", required=True)
-    parser.add_argument("--lock", type=Path, required=True)
+    parser.add_argument("--tag")
+    parser.add_argument("--lock", type=Path)
+    parser.add_argument("--all-locks", type=Path, metavar="DIRECTORY",
+                        help="prepare an offline candidate for every release lock in DIRECTORY")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--verify-live", action="store_true")
     args = parser.parse_args(argv)
+    if args.all_locks and (args.tag or args.lock or args.verify_live):
+        parser.error("--all-locks cannot be combined with --tag, --lock or --verify-live")
+    if not args.all_locks and not (args.tag and args.lock):
+        parser.error("--tag and --lock are required unless --all-locks is used")
     try:
-        output = prepare(args.tag, args.lock, args.output, args.verify_live)
+        if args.all_locks:
+            outputs = prepare_all(args.all_locks, args.output)
+        else:
+            outputs = [prepare(args.tag, args.lock, args.output, args.verify_live)]
     except ReleaseError as exc:
         parser.exit(1, f"release preparation refused: {exc}\n")
-    print(output)
+    for output in outputs:
+        print(output)
     return 0
 
 

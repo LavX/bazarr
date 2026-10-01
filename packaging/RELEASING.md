@@ -26,6 +26,63 @@ Release publication and image builds are separate. Registry checks wait for a bo
 
 Workflow artifacts expire after 30 days. They are review outputs, not permanent download links. After approval, attach versioned archives, provenance and checksum files to the existing application release without replacing older assets. Packaging corrections require a new package revision. Preserve prior files for rollback.
 
+## Export store repositories
+
+`marketplaces.py` turns one release lock into the root of a store repository. The chosen destination is `LavX/bazarr-packages` on branch `main`. That repository is prepared for, not yet created or published, and no store lists these apps yet.
+
+```sh
+python3 packaging/test_marketplaces.py
+python3 packaging/marketplaces.py --tag v2.7.0 \
+  --lock packaging/releases/2.7.0.json \
+  --repository LavX/bazarr-packages --ref main \
+  --output /tmp/bazarr-store-v2.7.0 --verify-live
+```
+
+The command runs the release preparation above, so the same lock checks, pins and `--verify-live` rules apply. Without `--verify-live` the export is an offline candidate and its README says so. The output directory must not exist. A refusal leaves no partial tree.
+
+| Path in the export | Used by |
+| --- | --- |
+| `apps/bazarr-plus/` | Runtipi custom store |
+| `Apps/BazarrPlus/`, `Apps/BazarrPlusStack/`, `store-config.json`, `supported-languages.json` | CasaOS / ZimaOS v2 store source |
+| `templates/bazarr-plus.xml`, `ca_profile.xml` | Unraid template repository, with a TemplateURL for the chosen repository and branch |
+| `stacks/bazarr-plus/` | Compose / Portainer raw file or Git source |
+| `submissions/truenas/` | Directory to copy into a `truenas/apps` pull request, with its test fixtures and library license |
+| `.github/workflows/store.yml`, `.github/scripts/verify_export.py` | Destination workflow that builds the CasaOS feeds and publishes them to GitHub Pages |
+| `category-list.json`, `featured-apps.json`, `recommend-list.json`, `build/.gitkeep` | Minimal inputs for the legacy CasaOS v1 ZIP: one Media category, nothing featured or recommended |
+| `README.md`, `EXPORT.json`, `LICENSE`, `NOTICES.md` | Install URLs, provenance and file hashes, licenses |
+
+Compose files in the export carry an `x-bazarr-plus-package` block and the Unraid template a `<Changes>` line, so a package revision bump changes what store clients compare.
+
+The platform packages workflow uploads a store export per candidate as a `store-exports-*` artifact, hidden `.github` files included. Pull request runs export offline. Release and manual runs export with `--verify-live`, using only the job's read-only `GITHUB_TOKEN`. The workflow never pushes the export anywhere.
+
+### Destination workflow
+
+`store.yml` runs in the destination repository, not here. On pull requests and manual runs it first checks the tree against `EXPORT.json` with `verify_export.py`: any changed, missing, extra or symlinked file fails the run. It then builds two artifacts with pinned upstream tooling and keeps them for 30 days:
+
+- `casaos-v2`: the v2 feed from `IceWhaleTech/build-appstore-action` at `c9bb47fad5b32d7928a07978fad68801f52e910f`, with the feed URL from `EXPORT.json` as base URL.
+- `casaos-v1`: `store/main.zip` from `build_store_v1.py` in `IceWhaleTech/CasaOS-AppStore` at `0909364b800950030e71ea82355a5969a1c08b39`. That script stages in a fixed `/tmp/appstore-v1`, so it runs in its own job.
+
+No upstream installer or builder code is copied into the export. Build jobs only get `contents: read`, and checkouts do not keep credentials.
+
+Publishing happens only on a manual run on `main`. The `pages` job runs `verify_export.py --publish`, which also requires `live_verified: true`, a clean packaging commit, and a repository and ref that match the run. Then it assembles the v2 feed with the v1 ZIP at `store/main.zip`. Only the `deploy` job holds `pages: write` and `id-token: write`, and it deploys through the `github-pages` environment. Builds and deploys share one concurrency queue per ref. A newer queued run replaces an older one that has not started yet.
+
+One-time setup in the destination repository, done by the owner:
+
+1. Settings, Pages, Build and deployment: set Source to GitHub Actions.
+2. Settings, Environments: open `github-pages`, or create it if it is not listed. Limit deployment branches to `main` and add the owner under Required reviewers. Leave Prevent self-review off when the owner is the only reviewer, otherwise nobody can approve the owner's own run.
+
+The environment name alone does not require approval. Until required reviewers are configured, a manual run on `main` that passes verification deploys straight away. With reviewers set, the `deploy` job waits for an approval in the run page, and a rejected or expired request publishes nothing.
+
+To publish after review:
+
+1. Create the destination repository if it does not exist, then replace the contents of its branch with a fresh live export. Review the diff and commit it there.
+2. Runtipi: add the repository as a custom app store and install from it.
+3. CasaOS / ZimaOS: complete the one-time setup above, check the `casaos-v2` and `casaos-v1` artifacts from the pull request or a manual run, then run Store feeds manually on `main` and approve the deployment. Add the Pages URL from the export README as a store and install from it.
+4. Unraid: run CA Validate and Scan against the template repository, then submit it for moderation.
+5. TrueNAS: copy `submissions/truenas/ix-dev/community/bazarr-plus` into a fork of `truenas/apps`, let the catalog tooling generate `item.yaml`, and open the pull request.
+
+Record the destination commit, the Pages URL and each store's response. Until a store shows the reviewed version, the app is only prepared for that store.
+
 ## Distribution routes
 
 | Ecosystem | Package route | Publication and updates |

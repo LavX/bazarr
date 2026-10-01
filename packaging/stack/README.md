@@ -50,7 +50,7 @@ Add the integration in Bazarr's settings and run its connection test. Confirm a 
 
 ## Storage and updates
 
-This package starts with **fresh storage**. It refuses to overwrite an existing unmanaged Bazarr config or translator data directory. Existing installations need a separate, backed-up migration, not a volume swap into this package.
+This package starts with **fresh storage**. It refuses to overwrite an existing unmanaged Bazarr config or translator data directory. Existing installations need a separate, backed-up migration, not a volume swap into this package. If the first start is interrupted or cannot set volume ownership, fix the cause and start the stack again: setup resumes from its own journal and stops if the volumes hold anything it did not write.
 
 Keep both named volumes, `bazarr-config` and `translator-data`, together in backups. They contain your settings, database, translator jobs and matching encryption key. Restarting the stack preserves settings changed through the UI, including a different translator connection. A missing key or a key volume that does not match the original package marker stops initialization instead of silently replacing it. Health checks do not validate later custom connections or model credentials.
 
