@@ -13,6 +13,9 @@ export interface ProviderHubCatalogSource {
   last_error?: string | null;
   resolved_commit?: string | null;
   dev_ref?: string | null;
+  official?: boolean;
+  /** Why the source is trusted or not, for example "outside main and beta". */
+  trust_reason?: string | null;
 }
 
 export interface ProviderHubCatalogEntry {
@@ -25,6 +28,8 @@ export interface ProviderHubCatalogEntry {
   manifest?: ProviderHubManifest | string | null;
   manifest_json?: ProviderHubManifest | string | null;
   resolved_commit?: string | null;
+  /** Set when this entry cannot be installed from its source, with the reason. */
+  blocked_reason?: string | null;
 }
 
 export interface ProviderHubCatalog {
@@ -60,13 +65,26 @@ export interface ProviderHubInstallation {
   manifest?: ProviderHubManifest;
   /** "catalog" for marketplace installs, "local" for uploaded packages. */
   origin?: string;
-  /** Catalog source id this install came from, or null for local packages. */
+  /**
+   * Catalog source id the install is bound to and updates from. Null for local
+   * packages and for installs whose source is unknown or gone.
+   */
   source_id?: string | null;
+  /** The bound source's name from Bazarr+'s own source records. */
+  source_name?: string | null;
+  /** False until the next catalog refresh binds an install made before installs recorded their source. */
+  source_bound?: boolean;
+  /** Why the install lost its trust or its source, and the way back. */
+  trust_note?: string | null;
 }
 
-export interface ProviderHubInstallRequest {
-  manifest: ProviderHubManifest;
-}
+/**
+ * An install names a catalog entry. A raw manifest is accepted only when it
+ * equals an entry the catalog holds.
+ */
+export type ProviderHubInstallRequest =
+  | { source: string; provider_id: string; version: string }
+  | { manifest: ProviderHubManifest };
 
 export interface ProviderHubJob {
   id?: string;
@@ -145,10 +163,11 @@ class ProviderHubApi extends BaseApi {
     return response.data;
   }
 
-  async install(manifest: ProviderHubManifest) {
-    const response = await this.postRaw<ProviderHubJobRef>("/installations", {
-      manifest,
-    });
+  async install(request: ProviderHubInstallRequest) {
+    const response = await this.postRaw<ProviderHubJobRef>(
+      "/installations",
+      request,
+    );
     return response.data;
   }
 

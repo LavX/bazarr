@@ -142,16 +142,25 @@ class ProviderHubProviderTest(Resource):
 class ProviderHubInstallations(Resource):
     @authenticate
     @api_ns_provider_hub.response(202, 'Install queued as a job')
-    @api_ns_provider_hub.response(400, 'Invalid manifest')
+    @api_ns_provider_hub.response(400, 'No installable catalog entry')
     @api_ns_provider_hub.response(401, 'Not Authenticated')
     def post(self):
+        # An install names a catalog entry by source, provider_id and version. A
+        # raw manifest is taken only when it equals an entry the catalog holds.
         payload = request.json or {}
-        manifest = payload.get("manifest") if isinstance(payload, dict) else None
-        if not isinstance(manifest, dict):
-            return 'manifest is required', 400
+        if not isinstance(payload, dict):
+            return 'source, provider_id and version are required', 400
+        try:
+            entry = service.resolve_catalog_install(
+                payload.get("source"), payload.get("provider_id"), payload.get("version"),
+                manifest=payload.get("manifest"),
+            )
+        except service.ProviderHubInstallError as error:
+            return str(error), 400
         # Validation, the bundle download and the smoke test run in the job,
         # which raises with the reason when any of them fails.
-        return {"job_id": hub_jobs.queue_install(manifest)}, 202
+        return {"job_id": hub_jobs.queue_install(entry["source"], entry["provider_id"],
+                                                 entry["version"], entry["name"])}, 202
 
 
 def _package_too_large():

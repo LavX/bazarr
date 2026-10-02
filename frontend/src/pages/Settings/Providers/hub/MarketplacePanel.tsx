@@ -48,22 +48,20 @@ interface MarketplacePanelProps {
 
 type TrustFilter = "all" | "trusted" | "community";
 
-function sourceNameFromInstallation(provider: ProviderHubInstallation) {
-  const source = provider.manifest?.source as LooseObject | undefined;
-  return (
-    (typeof source?.name === "string" ? source.name : undefined) ??
-    (typeof source?.repo === "string" ? source.repo : undefined) ??
-    "Installed"
-  );
+function cardKey(sourceId: string | undefined, providerId: string) {
+  return `${sourceId ?? ""}\u0000${providerId}`;
 }
 
+// The source is the one Bazarr+ bound the install to, never the manifest's own
+// label, so an install whose source is unknown or gone says so.
 function catalogEntryFromInstallation(
   provider: ProviderHubInstallation,
 ): ProviderHubCatalogEntry {
   const version =
     provider.staged_version ?? provider.active_version ?? "installed";
   return {
-    source: sourceNameFromInstallation(provider),
+    source: provider.source_id ?? undefined,
+    source_name: provider.source_name ?? "Unknown source",
     provider_id: provider["provider_id"],
     name: provider.name,
     version,
@@ -96,32 +94,48 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
     return map;
   }, [providers]);
 
+  // Keyed by the source id each install is bound to.
   const installedSourceUsage = useMemo(() => {
     const usage: Record<string, number> = {};
     for (const p of providers ?? []) {
-      const source = p.manifest?.source as LooseObject | undefined;
-      const sourceName = source?.repo as string | undefined;
-      if (sourceName) usage[sourceName] = (usage[sourceName] ?? 0) + 1;
+      if (p.source_id) usage[p.source_id] = (usage[p.source_id] ?? 0) + 1;
     }
     return usage;
   }, [providers]);
 
+  // One card per source and provider: an install belongs to one source, and
+  // another source's version of the same id is a different plugin.
   const latestPerProvider = useMemo(() => {
     const seen = new Map<string, ProviderHubCatalogEntry>();
     for (const entry of catalog?.entries ?? []) {
-      const current = seen.get(entry.provider_id);
+      const key = cardKey(entry.source, entry.provider_id);
+      const current = seen.get(key);
       if (!current) {
-        seen.set(entry.provider_id, entry);
+        seen.set(key, entry);
         continue;
       }
       const best = getLatestCatalogEntry(
         { sources: [], entries: [current, entry] },
         entry.provider_id,
       );
-      if (best) seen.set(entry.provider_id, best);
+      if (best) seen.set(key, best);
     }
     return Array.from(seen.values());
   }, [catalog?.entries]);
+
+  const installedFor = useCallback(
+    (entry: ProviderHubCatalogEntry) => {
+      const installed = installedById.get(entry.provider_id);
+      if (!installed) return null;
+      // An install made before installs recorded their source is matched by
+      // id until the next catalog refresh binds it.
+      if (!installed.source_bound) return installed;
+      return (installed.source_id ?? undefined) === entry.source
+        ? installed
+        : null;
+    },
+    [installedById],
+  );
 
   // Providers installed from an uploaded package. They own their card (built from
   // the installation, not a catalog entry) and are excluded from the marketplace
@@ -148,11 +162,20 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
     const catalogProviderIds = new Set(
       latestPerProvider.map((entry) => entry.provider_id),
     );
+    const catalogCards = new Set(
+      latestPerProvider.map((entry) =>
+        cardKey(entry.source, entry.provider_id),
+      ),
+    );
     const installedOnlyEntries = (providers ?? [])
       .filter(
         (provider) =>
-          !catalogProviderIds.has(provider.provider_id) &&
-          provider.origin !== "local",
+          provider.origin !== "local" &&
+          (provider.source_bound
+            ? !catalogCards.has(
+                cardKey(provider.source_id ?? undefined, provider.provider_id),
+              )
+            : !catalogProviderIds.has(provider.provider_id)),
       )
       .map(catalogEntryFromInstallation);
 
@@ -189,8 +212,12 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
 
   const handleInstall = useCallback(
     (entry: ProviderHubCatalogEntry) => {
-      const manifest = parseManifest(entry);
-      if (manifest) install.mutate({ manifest });
+      if (!entry.source || !parseManifest(entry)) return;
+      install.mutate({
+        source: entry.source,
+        provider_id: entry.provider_id,
+        version: entry.version,
+      });
     },
     [install],
   );
@@ -207,13 +234,20 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
   const renderCard = useCallback(
     (entry: ProviderHubCatalogEntry, isLocal: boolean) => (
       <CatalogCard
-        key={`${entry.provider_id}-${entry.version}`}
+        key={`${entry.source ?? ""}-${entry.provider_id}-${entry.version}`}
         entry={entry}
-        installed={installedById.get(entry.provider_id) ?? null}
+        installed={
+          isLocal
+            ? (installedById.get(entry.provider_id) ?? null)
+            : installedFor(entry)
+        }
         onInstall={handleInstall}
         isInstalling={
           install.isPending &&
-          install.variables?.manifest?.provider_id === entry.provider_id
+          install.variables !== undefined &&
+          "source" in install.variables &&
+          install.variables.source === entry.source &&
+          install.variables.provider_id === entry.provider_id
         }
         onTest={(providerId) => testProvider.mutate(providerId)}
         onUninstall={(providerId) => uninstall.mutate(providerId)}
@@ -223,7 +257,14 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
         isLocal={isLocal}
       />
     ),
-    [installedById, handleInstall, install, testProvider, uninstall],
+    [
+      installedById,
+      installedFor,
+      handleInstall,
+      install,
+      testProvider,
+      uninstall,
+    ],
   );
 
   const noSources =

@@ -423,24 +423,56 @@ def call_hub(resource_name, method, *args, json_body=None, query=None):
         return getattr(resource, method).__wrapped__(resource(), *args)
 
 
-def test_install_is_queued_and_answers_at_once(queue, monkeypatch):
+EXAMPLE_ENTRY = ("community", "examplehub", "1.0.0", "Example")
+
+
+@pytest.fixture
+def hub_catalog(tmp_path, monkeypatch):
+    """A community catalog source that lists Example 1.0.0."""
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "state.json"))
+    state = load_state()
+    state["catalog_sources"]["community"] = {
+        "id": "community", "name": "community", "type": "github", "enabled": True,
+        "url": "https://github.com/owner/repo/blob/main/catalog.json"}
+    state["catalog_entries"]["community:examplehub:1.0.0"] = {
+        "source": "community", "provider_id": "examplehub", "name": "Example", "version": "1.0.0",
+        "manifest": {"provider_id": "examplehub", "name": "Example", "version": "1.0.0"}}
+    save_state(state)
+
+
+def test_install_is_queued_and_answers_at_once(queue, hub_catalog, monkeypatch):
     from provider_hub import service
 
     monkeypatch.setattr(service, "stage_install", lambda manifest: pytest.fail("installed in the request"))
-    body, status = call_hub("ProviderHubInstallations", "post",
-                            json_body={"manifest": {"provider_id": "examplehub", "name": "Example"}})
+    body, status = call_hub("ProviderHubInstallations", "post", json_body={
+        "source": "community", "provider_id": "examplehub", "version": "1.0.0"})
 
     [job] = pending(queue)
     assert status == 202 and body == {"job_id": job.job_id}
     assert job.job_name == "Installing provider Example"
     assert (job.module, job.func) == ("provider_hub.jobs", "install_provider")
+    assert job.kwargs == {"source_id": "community", "provider_id": "examplehub", "version": "1.0.0",
+                          "name": "Example"}
+
+
+def test_an_install_naming_no_catalog_entry_is_refused_and_queues_nothing(queue, hub_catalog):
+    forged = {"provider_id": "examplehub", "name": "Example", "version": "1.0.0",
+              "source": {"catalog_url": "https://github.com/LavX/bazarr-provider-catalog/blob/main/catalog.json"}}
+
+    body, status = call_hub("ProviderHubInstallations", "post", json_body={"manifest": forged})
+    assert status == 400 and "matches no catalog entry" in body
+    body, status = call_hub("ProviderHubInstallations", "post", json_body={
+        "source": "community", "provider_id": "examplehub", "version": "9.9.9"})
+    assert status == 400 and "does not list examplehub 9.9.9" in body
+    assert pending(queue) == []
 
 
 def test_a_second_identical_install_follows_the_first_job(queue):
     from provider_hub import jobs as hub_jobs
 
-    manifest = {"provider_id": "examplehub", "name": "Example"}
-    assert hub_jobs.queue_install(manifest) == hub_jobs.queue_install(manifest)
+    assert hub_jobs.queue_install(*EXAMPLE_ENTRY) == hub_jobs.queue_install(*EXAMPLE_ENTRY)
     assert len(pending(queue)) == 1
 
 
@@ -455,8 +487,7 @@ def test_a_duplicate_install_follows_the_first_job_even_when_it_ends_at_once(que
     from provider_hub import jobs as hub_jobs
 
     monkeypatch.setattr("app.jobs_queue.activity.finish", lambda *args, **kwargs: None)
-    manifest = {"provider_id": "examplehub", "name": "Example"}
-    first = hub_jobs.queue_install(manifest)
+    first = hub_jobs.queue_install(*EXAMPLE_ENTRY)
     running = queue._reserve_next_job()
     feed = queue.feed_jobs_pending_queue
 
@@ -467,7 +498,7 @@ def test_a_duplicate_install_follows_the_first_job_even_when_it_ends_at_once(que
 
     monkeypatch.setattr(queue, "feed_jobs_pending_queue", first_install_fails_right_after_the_answer)
 
-    assert hub_jobs.queue_install(manifest) == first
+    assert hub_jobs.queue_install(*EXAMPLE_ENTRY) == first
     assert queue.list_jobs_from_queue(job_id=first)[0]["status"] == "failed"
     assert pending(queue) == []
 
@@ -476,9 +507,9 @@ def test_install_job_success_returns_the_installation(queue, monkeypatch):
     from provider_hub import jobs as hub_jobs
     from provider_hub import service
 
-    monkeypatch.setattr(service, "stage_install", lambda manifest, **_: {"provider_id": "examplehub",
-                                                                          "state": "staged"})
-    hub_jobs.queue_install({"provider_id": "examplehub", "name": "Example"})
+    monkeypatch.setattr(service, "install_catalog_entry",
+                        lambda *reference, **_: {"provider_id": "examplehub", "state": "staged"})
+    hub_jobs.queue_install(*EXAMPLE_ENTRY)
     job = run_next(queue)
 
     assert job["status"] == "completed"
@@ -489,11 +520,11 @@ def test_install_job_failure_names_the_provider_and_the_reason(queue, monkeypatc
     from provider_hub import jobs as hub_jobs
     from provider_hub import service
 
-    def mismatch(manifest, **_):
+    def mismatch(*reference, **_):
         raise service.ProviderHubInstallError("bundle hash mismatch for provider.py")
 
-    monkeypatch.setattr(service, "stage_install", mismatch)
-    hub_jobs.queue_install({"provider_id": "examplehub", "name": "Example"})
+    monkeypatch.setattr(service, "install_catalog_entry", mismatch)
+    hub_jobs.queue_install(*EXAMPLE_ENTRY)
     job = run_next(queue)
 
     assert job["status"] == "failed"
@@ -608,6 +639,21 @@ def hub_install(tmp_path, monkeypatch, queue):
         if control.stop_at == name:
             press_stop(queue)
 
+    def offer(version):
+        from provider_hub.state import load_state, save_state
+
+        state = load_state()
+        state["catalog_sources"]["community"] = {
+            "id": "community", "name": "community", "type": "github", "enabled": True,
+            "url": "https://github.com/owner/repo/blob/main/catalog.json"}
+        state["catalog_entries"][f"community:examplehub:{version}"] = {
+            "source": "community", "provider_id": "examplehub", "version": version,
+            "manifest": control.manifest(version)}
+        save_state(state)
+        return "community", "examplehub", version
+
+    control.offer = offer
+
     def fake_get(url, timeout):
         step("download")
         return _FakeResponse(content=content)
@@ -647,7 +693,7 @@ def test_stopping_an_install_records_no_provider_and_removes_what_it_staged(queu
     from provider_hub.service import load_state
 
     hub_install.stop_at = "download"
-    hub_jobs.queue_install(hub_install.manifest("1.0.0"))
+    hub_jobs.queue_install(*hub_install.offer("1.0.0"))
     assert_stopped(run_next(queue))
 
     assert "examplehub" not in load_state()["installations"]
@@ -665,7 +711,7 @@ def test_stopping_an_update_keeps_the_active_version_untouched(queue, hub_instal
     active = load_state()["installations"]["examplehub"]
     assert active["active_version"] == "1.0.0"
     hub_install.stop_at = "smoke"
-    hub_jobs.queue_install(hub_install.manifest("1.1.0"))
+    hub_jobs.queue_install(*hub_install.offer("1.1.0"))
     assert_stopped(run_next(queue))
 
     assert load_state()["installations"]["examplehub"] == active

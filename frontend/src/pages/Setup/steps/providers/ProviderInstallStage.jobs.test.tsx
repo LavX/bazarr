@@ -108,9 +108,9 @@ describe("ProviderInstallStage with standard jobs", () => {
     vi.mocked(api.system.jobs).mockResolvedValue([]);
     vi.mocked(api.system.status).mockReturnValue(new Promise(() => undefined));
     vi.mocked(api.providerHub.install).mockImplementation(
-      async (manifest: LooseObject) => ({
+      async (request: LooseObject) => ({
         // eslint-disable-next-line camelcase
-        job_id: manifest.id === "opensubtitles" ? 31 : 32,
+        job_id: request.manifest.id === "opensubtitles" ? 31 : 32,
       }),
     );
   });
