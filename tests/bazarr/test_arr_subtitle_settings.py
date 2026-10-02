@@ -72,6 +72,53 @@ def test_validate_rejects_bad_values(blob):
         validate_subtitle_settings(blob)
 
 
+def test_turning_post_processing_on_without_a_command_checks_the_inherited_global(monkeypatch):
+    """Enabling post-processing per instance without a command override inherits the
+    global command, which may predate the no-shell switch: the command this instance
+    will actually run gets the same save-time validation, so a stored shell command
+    cannot be enabled through the per-instance toggle."""
+    monkeypatch.setattr('app.config.settings.general.postprocessing_cmd',
+                        'process {{subtitles}} | tee /tmp/log', raising=False)
+    with pytest.raises(ValueError, match='inherited global command'):
+        validate_subtitle_settings({"general": {"use_postprocessing": True}})
+
+    monkeypatch.setattr('app.config.settings.general.postprocessing_cmd',
+                        '/opt/scripts/process.sh "{{subtitles}}"', raising=False)
+    assert validate_subtitle_settings({"general": {"use_postprocessing": True}}) == {
+        "general": {"use_postprocessing": True}}
+
+    # Nothing turns post-processing on, so nothing runs and nothing is checked.
+    monkeypatch.setattr('app.config.settings.general.postprocessing_cmd',
+                        'process {{subtitles}} | tee /tmp/log', raising=False)
+    assert validate_subtitle_settings({"general": {"postprocessing_threshold": 80}}) == {
+        "general": {"postprocessing_threshold": 80}}
+
+
+@pytest.mark.parametrize("blob", [
+    {"general": {"use_postprocessing": True, "postprocessing_cmd": ""}},
+    {"general": {"use_postprocessing": True, "postprocessing_cmd": "   "}},
+])
+def test_post_processing_on_with_a_blank_command_is_refused(blob):
+    """Post-processing on with no command would silently skip every download
+    for the instance, so the toggle and the command go together."""
+    with pytest.raises(ValueError, match="post-processing is on with no command"):
+        validate_subtitle_settings(blob)
+
+
+def test_post_processing_on_with_a_blank_command_inherits_the_blank_global(monkeypatch):
+    """Turning post-processing on without a command override inherits the global
+    command, and a blank one is as unusable as a broken one."""
+    monkeypatch.setattr('app.config.settings.general.postprocessing_cmd', '', raising=False)
+    with pytest.raises(ValueError, match="post-processing is on with no command"):
+        validate_subtitle_settings({"general": {"use_postprocessing": True}})
+
+
+def test_post_processing_off_with_a_blank_command_is_left_alone():
+    assert validate_subtitle_settings({"general": {"use_postprocessing": False,
+                                                 "postprocessing_cmd": "  "}}) == {
+        "general": {"use_postprocessing": False, "postprocessing_cmd": "  "}}
+
+
 def test_read_subtitle_settings():
     blob = {"subsync": {"subsync_threshold": 80}}
     options = json.dumps({"subtitle_settings": blob, "other": 1})
@@ -176,7 +223,11 @@ def test_service_create_rejects_invalid_subtitle_settings(schema_session):
     assert status == 400
 
 
-def test_service_update_round_trips_and_clears_subtitle_settings(schema_session):
+def test_service_update_round_trips_and_clears_subtitle_settings(schema_session, monkeypatch):
+    # Turning post-processing on without a command override inherits the global
+    # command, so the round trip needs one that can actually run.
+    monkeypatch.setattr('app.config.settings.general.postprocessing_cmd',
+                        '/opt/scripts/process.sh "{{subtitles}}"', raising=False)
     created, _ = service.create_instance(schema_session, {
         "kind": "radarr", "name": "Movies", "ip": "127.0.0.1", "port": 7878,
     })

@@ -257,18 +257,22 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
     uploaded_language_code2 = alpha2_from_alpha3(language) + modifier_code
 
     if use_postprocessing:
-        command = pp_replace(postprocessing_cmd, path, subtitle_path, uploaded_language, uploaded_language_code2,
-                             uploaded_language_code3, audio_language['name'], audio_language['code2'],
-                             audio_language['code3'], 100, "1", "manual", "user", "unknown", sonarrSeriesId,
-                             sonarrEpisodeId or radarrId,)
-        with subtitle_write_locks(path, subtitle_path):
-            if subtitle_source_version(subtitle_path) == source_version:
-                with observe_subtitle_change(media_type, path, subtitle_path, 'upload', arr_instance_id):
-                    postprocessing(command, path, subtitle_path=subtitle_path)
-                    set_chmod(subtitles_path=subtitle_path)
-                source_version = subtitle_source_version(subtitle_path)
-                source_publication.release()
-                source_publication = SubtitlePublication(path, subtitle_path, source_version)
+        try:
+            command = pp_replace(postprocessing_cmd, path, subtitle_path, uploaded_language, uploaded_language_code2,
+                                 uploaded_language_code3, audio_language['name'], audio_language['code2'],
+                                 audio_language['code3'], 100, "1", "manual", "user", "unknown", sonarrSeriesId,
+                                 sonarrEpisodeId or radarrId)
+        except ValueError as exc:
+            logging.error('BAZARR invalid post-processing command: %s', exc)
+        else:
+            with subtitle_write_locks(path, subtitle_path):
+                if subtitle_source_version(subtitle_path) == source_version:
+                    with observe_subtitle_change(media_type, path, subtitle_path, 'upload', arr_instance_id):
+                        postprocessing(command, path, subtitle_path=subtitle_path)
+                        set_chmod(subtitles_path=subtitle_path)
+                    source_version = subtitle_source_version(subtitle_path)
+                    source_publication.release()
+                    source_publication = SubtitlePublication(path, subtitle_path, source_version)
 
     refresh_subtitles = partial(_refresh_uploaded_subtitles, path, subtitle_path, sonarr_series_id=sonarrSeriesId,
                                 sonarr_episode_id=sonarrEpisodeId, radarr_id=radarrId,

@@ -347,11 +347,11 @@ def test_upload_preserves_postprocessing_hi_and_notification_policy(upload_flow,
     flow = upload_flow
     monkeypatch.setattr(settings.general, "dont_notify_manual_actions", True)
     monkeypatch.setattr(processing, "_postprocessing_config", lambda kind, owner: (True, "process", False, 0))
-    monkeypatch.setattr(upload, "pp_replace", lambda *args: "process")
+    monkeypatch.setattr(upload, "pp_replace", lambda *args: ["process"])
     monkeypatch.setattr(upload, "set_chmod", lambda **kwargs: None)
 
     def postprocess(command, video_path, subtitle_path=None):
-        assert command == "process"
+        assert command == ["process"]
         flow.video.with_suffix(".en.hi.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nProcessed\n")
 
     monkeypatch.setattr(upload, "postprocessing", postprocess)
@@ -470,7 +470,7 @@ def test_unrelated_upload_finishes_while_other_media_postprocessing_is_blocked(u
         assert unblock.wait(5), 'probe failed to release postprocessing'
 
     monkeypatch.setattr(processing, '_postprocessing_config', config)
-    monkeypatch.setattr(upload, 'pp_replace', lambda *args: 'controlled')
+    monkeypatch.setattr(upload, 'pp_replace', lambda *args: ['controlled'])
     monkeypatch.setattr(upload, 'postprocessing', postprocess)
     monkeypatch.setattr(upload, 'set_chmod', lambda **kwargs: None)
     flow.submit('movie', owner=7)
@@ -869,7 +869,7 @@ def test_review_editor_write_cannot_be_lost_at_sync_publication(upload_flow, mon
                     return Mock(communicate=lambda: ("", ""))
 
                 monkeypatch.setattr(post_processing.subprocess, "Popen", popen)
-                post_processing.postprocessing("fixture command", str(flow.video))
+                post_processing.postprocessing(["fixture command"], str(flow.video))
                 writer_results.append(200)
             else:
                 module = importlib.import_module(f"subtitles.tools.translate.services.{operation}_translator")
@@ -1488,7 +1488,7 @@ def test_review_postprocessing_without_a_queued_job_invalidates_exact_outputs(up
         return Mock(communicate=lambda: ("", ""))
 
     monkeypatch.setattr(post_processing.subprocess, "Popen", popen)
-    post_processing.postprocessing("fixture", str(flow.video), subtitle_path=str(source))
+    post_processing.postprocessing(["fixture"], str(flow.video), subtitle_path=str(source))
     assert source.read_text() == "After processing"
     assert not output.exists()
     assert any(path.read_text() == "Generated before processing" for path in flow.video.parent.glob("*.bak"))
@@ -1868,3 +1868,23 @@ def test_an_upload_that_is_not_queued_is_never_read_into_memory(upload_route, mo
     assert _post_upload(media_type, b"1\n")[1] == status
     assert reads == []
     assert upload_route == []
+
+
+@pytest.mark.parametrize('media_type', ['movie', 'series'])
+def test_invalid_optional_command_keeps_saved_upload_finalization(upload_flow, monkeypatch, media_type):
+    from subtitles import processing, upload
+
+    flow = upload_flow
+    monkeypatch.setattr(processing, '_postprocessing_config',
+                        lambda kind, owner: (True, 'process {{subtitles}} | tee /tmp/log', False, 0))
+    postprocess = Mock()
+    monkeypatch.setattr(upload, 'postprocessing', postprocess)
+
+    result = flow.submit(media_type, job_id='existing-upload-job')
+
+    assert result is not None
+    assert 'Uploaded' in flow.video.with_suffix('.en.srt').read_text()
+    assert flow.indexes
+    assert len(flow.history) == 1
+    assert flow.events
+    postprocess.assert_not_called()

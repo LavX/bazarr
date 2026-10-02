@@ -560,19 +560,25 @@ def test_owner_disable_during_processing_does_not_block_or_publish_stale_output(
 
         monkeypatch.setattr(SubSyncer, "_run_ffsubsync_engine", engine)
     else:
+        import shlex
+
+        script = folder / "postprocess.py"
+        command = (
+            f"{shlex.quote(sys.executable)} {shlex.quote(str(script))} "
+            "{{subtitles}}"
+        )
         options = {
             "general": {
                 "use_postprocessing": True,
-                "postprocessing_cmd": "{{subtitles}}",
+                "postprocessing_cmd": command,
                 "use_postprocessing_threshold_movie": False,
             }
         }
 
-        def postprocess(command, path):
-            import shlex
-
+        def postprocess(argv, path):
+            assert argv[:2] == [sys.executable, str(script)]
             disable_owner()
-            target = Path(shlex.split(command)[0])
+            target = Path(argv[2])
             target.write_text(
                 target.read_text().replace("Sporting event", "Stale processed result")
             )
@@ -1179,17 +1185,23 @@ def test_new_recorded_owner_during_processing_preserves_published_bytes(
             )
 
     if stage == "postprocess":
+        import shlex
+
         monkeypatch.setattr(settings.general, "use_postprocessing", True)
         monkeypatch.setattr(
             settings.general, "use_postprocessing_threshold_movie", False
         )
-        monkeypatch.setattr(settings.general, "postprocessing_cmd", "{{subtitles}}")
+        script = folder / "postprocess.py"
+        command = (
+            f"{shlex.quote(sys.executable)} {shlex.quote(str(script))} "
+            "{{subtitles}}"
+        )
+        monkeypatch.setattr(settings.general, "postprocessing_cmd", command)
 
-        def postprocess(command, _):
-            import shlex
-
+        def postprocess(argv, _):
+            assert argv[:2] == [sys.executable, str(script)]
             claim()
-            Path(shlex.split(command)[0]).write_text("Stale postprocessing output")
+            Path(argv[2]).write_text("Stale postprocessing output")
 
         monkeypatch.setattr(pp, "_postprocessing_locked", postprocess)
     else:
