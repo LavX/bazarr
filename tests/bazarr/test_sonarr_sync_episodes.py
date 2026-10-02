@@ -102,3 +102,56 @@ def test_bug_reproduction_dict_vs_attribute_access(mock_row):
     result_path = existing_episode.path  # No TypeError!
     assert result_path == "/tv/Show/S01E01.mkv"
 
+
+
+def test_an_undecodable_episode_file_body_skips_the_series(schema_session, monkeypatch, caplog):
+    """A non-JSON episode-file answer is a failed fetch, not an empty list.
+
+    On a Sonarr older than 4.0.9.2421 the episodes come without their file
+    records and the episodeFile endpoint fills them in. When that answer
+    cannot be decoded, an empty answer would leave every episode without its
+    file record, the sync would count the whole series as gone and delete it
+    from the database. The series is skipped instead, nothing is deleted.
+    """
+    import logging
+    import semver
+    from types import SimpleNamespace
+
+    import sonarr.sync.episodes as episodes_mod
+    from app.database import TableEpisodes
+
+    schema_session.add(TableEpisodes(
+        id=701, series_id=None, sonarrEpisodeId=42, sonarrSeriesId=7,
+        arr_instance_id=None, path="/series/alpha/s01e01.mkv", title="Pilot",
+        season=1, episode=1, monitored="True", subtitles="[]"))
+    schema_session.flush()
+
+    monkeypatch.setattr(episodes_mod.settings.sonarr, 'apikey', 'x', raising=False)
+    monkeypatch.setattr(episodes_mod.settings.sonarr, 'sync_only_monitored_series', False,
+                        raising=False)
+    monkeypatch.setattr(episodes_mod, 'database', schema_session)
+    monkeypatch.setattr(episodes_mod, 'get_sonarr_info',
+                        SimpleNamespace(semver=lambda: semver.Version(*(4, 0, 9, 2420))))
+    monkeypatch.setattr(episodes_mod, 'sonarr_series_owner', lambda *a, **kw: (None, None))
+    monkeypatch.setattr(episodes_mod, 'get_episodes_from_sonarr_api',
+                        lambda **kw: [{'id': 42, 'hasFile': True, 'episodeFileId': 60,
+                                       'monitored': True}])
+    monkeypatch.setattr(episodes_mod, 'get_episodesFiles_from_sonarr_api', lambda **kw: None)
+    monkeypatch.setattr(episodes_mod, 'forget_media_by_upstream', lambda *a, **kw: None)
+    monkeypatch.setattr(episodes_mod, 'event_stream', lambda *a, **kw: None)
+
+    with caplog.at_level(logging.ERROR):
+        result = episodes_mod.sync_episodes(7)
+
+    from sqlalchemy import select
+    remaining = schema_session.execute(
+        select(TableEpisodes.sonarrEpisodeId)).scalars().all()
+
+    assert result is episodes_mod.SYNC_SKIPPED_UNREADABLE_EPISODE_FILES, (
+        "a skipped series returned a plain result the bulk sync cannot tell "
+        "from a sync that ran")
+    assert remaining == [42], (
+        f"the episode row{'s were' if len(remaining) != 1 else ' was'} deleted from the "
+        "database after a failed episode-file fetch")
+    assert "could not read the episode files" in caplog.text, (
+        "a skipped series was not reported in the log")
