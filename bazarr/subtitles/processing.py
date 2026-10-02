@@ -385,9 +385,13 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                               downloaded_language_code3, audio_language, audio_language_code2, audio_language_code3,
                               percent_score, subtitle_id, downloaded_provider, uploader, release_info, series_id,
                               episode_id)
-        command = command_for_subtitle(downloaded_path)
+        try:
+            command = command_for_subtitle(downloaded_path)
+        except ValueError as exc:
+            logging.error('BAZARR invalid post-processing command: %s', exc)
+            command = None
 
-        if not use_pp_threshold or (use_pp_threshold and percent_score < pp_threshold):
+        if command is not None and (not use_pp_threshold or (use_pp_threshold and percent_score < pp_threshold)):
             logging.debug(f"BAZARR Using post-processing command: {command}")  # noqa: G004
             if publication_guard is not None:
                 # Sports stages its own write under the owned publication guard,
@@ -405,7 +409,7 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                     with observe_subtitle_change(media_type, path, downloaded_path, 'download', owner_instance_id):
                         postprocessing(command, path, subtitle_path=downloaded_path, lock_paths=lock_paths)
                         set_chmod(subtitles_path=downloaded_path)
-        else:
+        elif command is not None:
             logging.debug(f"BAZARR post-processing skipped because subtitles score isn't below this "  # noqa: G004
                           f"threshold value: {pp_threshold}%")
 
