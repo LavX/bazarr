@@ -340,6 +340,28 @@ def test_every_panel_request_verifies_the_way_the_instance_says(oauth_account, r
     assert result not in ({'data': []}, {'movie_paths': [], 'series_paths': []})
 
 
+def _autopulse_config():
+    from flask import Flask
+    from api.plex.oauth import PlexAutopulseConfig
+    with Flask(__name__).test_request_context('/plex/autopulse/config'):
+        return PlexAutopulseConfig.get.__wrapped__(PlexAutopulseConfig())
+
+
+@pytest.mark.parametrize('call, message', [
+    (_connection_test, 'Sign in to Plex to test the connection.'),
+    (_autopulse_config, 'Sign in to Plex to generate an Autopulse configuration.'),
+], ids=['connection test', 'autopulse config'])
+def test_the_panel_asks_for_a_plex_sign_in_when_bazarr_holds_no_plex_token(oauth_account, plex_requests,
+                                                                           monkeypatch, call, message):
+    """Both answered 401, and the web client reads any 401 as its own Bazarr
+    session ending: it signs the reader out and goes back to the login page,
+    when only Plex is signed out. A 409 with a code the Plex panel reads asks
+    for a Plex sign-in instead, and nothing is sent anywhere without a token."""
+    monkeypatch.setitem(oauth_account.plex, 'token', '')
+    assert call() == ({'error': message, 'error_code': 'sign_in_required'}, 409)
+    assert plex_requests == []
+
+
 @pytest.mark.parametrize('legacy', [True, False])
 def test_picking_the_first_server_follows_the_legacy_setting(oauth_account, plex_requests, legacy):
     """Before a server is picked there is no instance row, so no checkbox to read."""
