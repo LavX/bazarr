@@ -26,14 +26,6 @@ _queued_packages = set()
 _queued_packages_lock = threading.Lock()
 
 
-def _manifest_name(manifest):
-    if isinstance(manifest, dict):
-        name = manifest.get("name") or manifest.get("provider_id")
-        if isinstance(name, str) and name.strip():
-            return name.strip()
-    return "provider"
-
-
 def _checkpoint(job_id):
     """Report a step on the job, and stop there when Stop was pressed.
 
@@ -59,9 +51,15 @@ def _enqueue(label, func, kwargs):
         return_existing=True)
 
 
-def queue_install(manifest):
-    return _enqueue(f"Installing provider {_manifest_name(manifest)}", "install_provider",
-                    {"manifest": manifest})
+def queue_install(source_id, provider_id, version, name=None):
+    """Queue the install of the entry ``source_id`` lists for ``provider_id``.
+
+    The job carries the reference, not a manifest: it installs what the source
+    holds when it runs, bound to that source.
+    """
+    return _enqueue(f"Installing provider {name or provider_id}", "install_provider",
+                    {"source_id": source_id, "provider_id": provider_id, "version": version,
+                     "name": name})
 
 
 def _discard_abandoned_packages():
@@ -112,14 +110,15 @@ def queue_catalog_refresh():
     return _enqueue("Refreshing provider catalog", "refresh_catalog", {})
 
 
-def install_provider(manifest, job_id=None):
-    name = _manifest_name(manifest)
+def install_provider(source_id, provider_id, version, name=None, job_id=None):
+    label = name or provider_id
     try:
-        return service.stage_install(manifest, checkpoint=_checkpoint(job_id))
+        return service.install_catalog_entry(source_id, provider_id, version,
+                                             checkpoint=_checkpoint(job_id))
     except service.ProviderHubStopped as stopped:
         raise JobCancelled(str(stopped)) from stopped
     except Exception as error:
-        raise JobFailed(f"Could not install {name}: {reason_of(error)}") from error
+        raise JobFailed(f"Could not install {label}: {reason_of(error)}") from error
 
 
 def install_local_provider(package_path, filename=None, job_id=None):

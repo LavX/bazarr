@@ -221,12 +221,22 @@ function compareSemverParts(a: string, b: string): number {
   return 0;
 }
 
+/**
+ * The newest catalog entry for a provider. With `sourceId`, only that source's
+ * installable entries count, which is where an install takes its updates from:
+ * null (no bound source) matches nothing.
+ */
 export function getLatestCatalogEntry(
   catalog: ProviderHubCatalog | undefined | null,
   providerId: string,
+  sourceId?: string | null,
 ): ProviderHubCatalogEntry | null {
   const entries = catalog?.entries ?? [];
-  const matching = entries.filter((e) => e.provider_id === providerId);
+  const matching = entries.filter(
+    (e) =>
+      e.provider_id === providerId &&
+      (sourceId === undefined || (e.source === sourceId && !e.blocked_reason)),
+  );
   if (matching.length === 0) return null;
   return matching.reduce((best, current) =>
     compareSemverParts(current.version ?? "0", best.version ?? "0") > 0
@@ -241,7 +251,11 @@ export function isUpdateAvailable(
 ): boolean {
   if (!provider.active_version) return false;
   if (provider.pending_restart) return false;
-  const latest = getLatestCatalogEntry(catalog, provider.provider_id);
+  const latest = getLatestCatalogEntry(
+    catalog,
+    provider.provider_id,
+    provider.source_id ?? null,
+  );
   if (!latest) return false;
   return compareSemverParts(latest.version, provider.active_version) > 0;
 }

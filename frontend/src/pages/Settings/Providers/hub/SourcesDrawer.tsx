@@ -35,6 +35,9 @@ import {
 } from "@/pages/Settings/Providers/hub/utils";
 import styles from "@/pages/Settings/Providers/hub/hub.module.scss";
 
+// The official source stays trusted only on these branches.
+const TRUSTED_OFFICIAL_REFS = ["main", "beta"];
+
 interface SourcesDrawerProps {
   opened: boolean;
   onClose: () => void;
@@ -67,6 +70,10 @@ const SourceRow: FunctionComponent<SourceRowProps> = ({
 
   const trimmedBranch = branch.trim();
   const wouldSet = devMode ? trimmedBranch || null : null;
+  const leavesTrust =
+    Boolean(source.official) &&
+    wouldSet !== null &&
+    !TRUSTED_OFFICIAL_REFS.includes(wouldSet);
   const dirty = (source.dev_ref ?? null) !== wouldSet;
   const canApply =
     dirty && (!devMode || trimmedBranch.length > 0) && !patch.isPending;
@@ -113,6 +120,11 @@ const SourceRow: FunctionComponent<SourceRowProps> = ({
       <Group justify="space-between" align="center">
         <Group gap={6}>
           <TrustBadge trusted={source.trusted} />
+          {source.official && !source.trusted && source.trust_reason && (
+            <Text size="xs" c="dimmed">
+              Not trusted: {source.trust_reason}
+            </Text>
+          )}
           {source.dev_ref && (
             <Badge
               size="xs"
@@ -180,6 +192,13 @@ const SourceRow: FunctionComponent<SourceRowProps> = ({
             </Button>
           </Group>
         )}
+        {devMode && leavesTrust && (
+          <Text size="xs" c="yellow" mt="xs" role="alert">
+            Only main and beta are trusted. Any other branch, tag or commit is
+            treated as a community source: its plugins cannot replace built-in
+            providers.
+          </Text>
+        )}
         {!devMode && source.dev_ref && (
           <Group gap="xs" mt="xs">
             <Text size="xs" c="dimmed">
@@ -240,7 +259,7 @@ export const SourcesDrawer: FunctionComponent<SourcesDrawerProps> = ({
   };
 
   const handleRemove = (source: ProviderHubCatalogSource) => {
-    const count = installedSourceUsage[source.name] ?? 0;
+    const count = installedSourceUsage[source.id ?? source.name] ?? 0;
     const msg =
       count > 0
         ? `Remove "${source.name}"? ${count} installed provider${count === 1 ? " stays" : "s stay"} but will no longer receive updates from this source.`
@@ -321,7 +340,7 @@ export const SourcesDrawer: FunctionComponent<SourcesDrawerProps> = ({
                 <SourceRow
                   key={source.id ?? source.name}
                   source={source}
-                  usage={installedSourceUsage[source.name] ?? 0}
+                  usage={installedSourceUsage[source.id ?? source.name] ?? 0}
                   onRemove={handleRemove}
                 />
               ))}

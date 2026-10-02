@@ -116,8 +116,8 @@ describe("getLatestCatalogEntry", () => {
     const prereleaseCatalog: ProviderHubCatalog = {
       sources: [],
       entries: [
-        { provider_id: "a", version: "1.0.0rc1", trusted: true },
-        { provider_id: "a", version: "1.0.0", trusted: true },
+        { source: "s", provider_id: "a", version: "1.0.0rc1", trusted: true },
+        { source: "s", provider_id: "a", version: "1.0.0", trusted: true },
       ],
     };
 
@@ -126,7 +126,12 @@ describe("getLatestCatalogEntry", () => {
     );
     expect(
       isUpdateAvailable(
-        { provider_id: "a", state: "active", active_version: "1.0.0rc1" },
+        {
+          provider_id: "a",
+          state: "active",
+          active_version: "1.0.0rc1",
+          source_id: "s",
+        },
         prereleaseCatalog,
       ),
     ).toBe(true);
@@ -174,21 +179,66 @@ describe("isUpdateAvailable / summarizeUpdates", () => {
   const catalog: ProviderHubCatalog = {
     sources: [],
     entries: [
-      { provider_id: "a", version: "2.0.0", trusted: true },
-      { provider_id: "b", version: "1.0.0", trusted: true },
+      { source: "s", provider_id: "a", version: "2.0.0", trusted: true },
+      { source: "s", provider_id: "b", version: "1.0.0", trusted: true },
     ],
   };
 
   const providers: ProviderHubInstallation[] = [
-    { provider_id: "a", state: "active", active_version: "1.0.0" },
-    { provider_id: "b", state: "active", active_version: "1.0.0" },
+    {
+      provider_id: "a",
+      state: "active",
+      active_version: "1.0.0",
+      source_id: "s",
+    },
+    {
+      provider_id: "b",
+      state: "active",
+      active_version: "1.0.0",
+      source_id: "s",
+    },
     {
       provider_id: "c",
       state: "staged",
       active_version: "1.0.0",
       pending_restart: true,
+      source_id: "s",
     },
   ];
+
+  it("offers an update only from the source the install is bound to", () => {
+    const twoSources: ProviderHubCatalog = {
+      sources: [],
+      entries: [
+        { source: "first", provider_id: "a", version: "1.1.0", trusted: false },
+        {
+          source: "second",
+          provider_id: "a",
+          version: "5.0.0",
+          trusted: false,
+        },
+        {
+          source: "first",
+          provider_id: "a",
+          version: "9.0.0",
+          trusted: false,
+          blocked_reason: "reserved",
+        },
+      ],
+    };
+    const installed = (sourceId: string | null): ProviderHubInstallation => ({
+      provider_id: "a",
+      state: "active",
+      active_version: "1.0.0",
+      source_id: sourceId,
+    });
+
+    expect(getLatestCatalogEntry(twoSources, "a", "first")?.version).toBe(
+      "1.1.0",
+    );
+    expect(isUpdateAvailable(installed("first"), twoSources)).toBe(true);
+    expect(isUpdateAvailable(installed(null), twoSources)).toBe(false);
+  });
 
   it("flags providers with a newer version in catalog", () => {
     expect(isUpdateAvailable(providers[0], catalog)).toBe(true);

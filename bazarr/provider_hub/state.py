@@ -15,6 +15,7 @@ from typing import Any
 OFFICIAL_CATALOG_SOURCE_ID = "official"
 OFFICIAL_CATALOG_SOURCE_NAME = "Official Bazarr Provider Catalog"
 OFFICIAL_CATALOG_URL = "https://github.com/LavX/bazarr-provider-catalog/blob/main/catalog.json"
+OFFICIAL_CATALOG_REPO = "LavX/bazarr-provider-catalog"
 _STATE_LOCK = threading.RLock()
 
 
@@ -145,14 +146,17 @@ def load_state(path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
             continue
         is_official = source_id == OFFICIAL_CATALOG_SOURCE_ID
         if is_official:
+            # Trust is kept as the last refresh computed it from the commit it
+            # resolved; only the record's identity is rebuilt here.
             official = official_catalog_source()
             official.update(
                 {
                     key: value
                     for key, value in source.items()
-                    if key not in ("official", "trusted", "url", "type")
+                    if key not in ("official", "url", "type")
                 }
             )
+            official["trusted"] = bool(official.get("trusted"))
             official["id"] = OFFICIAL_CATALOG_SOURCE_ID
             official["name"] = OFFICIAL_CATALOG_SOURCE_NAME
             sources[source_id] = official
