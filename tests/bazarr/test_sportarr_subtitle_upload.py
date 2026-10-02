@@ -496,6 +496,43 @@ def test_upload_chmod_preserves_the_exact_sync_publication(upload_library, monke
     assert stat.S_IMODE((folder / '1/event.en.srt').stat().st_mode) == 0o640
 
 
+def test_the_completed_sports_upload_releases_its_buffer(upload_library):
+    """The queued job's retained kwargs must not hold the uploaded bytes.
+
+    The sports path dispatches to sportarr.upload from the shared entry
+    point, and the close lives in the shared entry point, so a sports upload
+    proves the release covers the dispatch too.
+    """
+    from subtitles import upload
+
+    session, folder, submit, published, notifications = upload_library
+    kwargs = submit()
+    buffer = kwargs['subtitle']
+
+    upload.manual_upload_subtitle(**kwargs)
+
+    assert (folder / '1/event.en.srt').is_file()
+    assert buffer.closed
+
+
+def test_the_failed_sports_upload_releases_its_buffer(upload_library, monkeypatch):
+    from subtitles import upload
+
+    session, folder, submit, published, notifications = upload_library
+    kwargs = submit()
+    buffer = kwargs['subtitle']
+
+    def refuse(*args, **kwargs):
+        raise OSError('controlled save failure')
+
+    monkeypatch.setattr(upload, 'save_subtitles', refuse)
+    with pytest.raises(OSError, match='controlled save failure'):
+        upload.manual_upload_subtitle(**kwargs)
+
+    assert not (folder / '1/event.en.srt').exists()
+    assert buffer.closed
+
+
 def test_upload_releases_captured_publications_when_the_saver_raises(upload_library, monkeypatch):
     from sportarr import upload as sports_upload
     from subtitles import upload
