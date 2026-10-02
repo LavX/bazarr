@@ -587,7 +587,9 @@ SPORTS_JOB_FUNCTIONS = frozenset(
 # every second forever. The function is pinned to its module so a job cannot
 # pair a known function name with an unrelated module.
 SPORTS_SYNC_JOB_MODULES = {
-    "sportarr.sync.leagues": frozenset({"update_sports_for_instance"}),
+    # The scheduled sync queues sync_sports_for_instance; the Sports page
+    # queues update_sports_for_instance itself.
+    "sportarr.sync.leagues": frozenset({"update_sports_for_instance", "sync_sports_for_instance"}),
     "sportarr.sync.events": frozenset({"sync_one_league"}),
     # A manual download publishes like any other sports job, so switching
     # Sportarr off has to remove or stop it too.

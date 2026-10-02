@@ -966,6 +966,7 @@ def test_real_job_signal_cancellation_keeps_committed_publication(
     ("module", "func"),
     [
         ("sportarr.sync.leagues", "update_sports_for_instance"),
+        ("sportarr.sync.leagues", "sync_sports_for_instance"),
         ("sportarr.sync.events", "sync_one_league"),
     ],
 )
@@ -1084,6 +1085,257 @@ def test_cancel_disabled_jobs_removes_and_stops_manual_downloads(workflow_librar
     )
     workflows.cancel_disabled_jobs(set())
     assert removed == [41] and cancelled == [42]
+
+
+def _scheduled_sync_queue(workflow_library, monkeypatch):
+    """The real capture and run of the scheduled library sync.
+
+    The sync module and the canceller share the fixture's private queue and
+    database, so the enqueue, the owner lookups and the stop all meet in one
+    place, the way they do in the running app.
+    """
+    from sportarr.sync import leagues
+
+    _, _, workflows, _, session, _ = workflow_library
+    monkeypatch.setattr(leagues, "jobs_queue", workflows.jobs_queue)
+    monkeypatch.setattr(leagues, "database", session)
+    return leagues, workflows, workflows.jobs_queue, session
+
+
+def _instance_goes_away(session, owner, change):
+    from app.database import TableArrInstances
+
+    where = TableArrInstances.id == owner
+    if change == "disabled":
+        session.execute(sa.update(TableArrInstances).where(where).values(enabled=0))
+    else:
+        session.execute(sa.delete(TableArrInstances).where(where))
+
+
+def test_scheduled_sports_sync_is_registered_through_the_jobs_queue(
+    workflow_library, monkeypatch
+):
+    """The scheduled sync ran the whole library sync inside the scheduler
+    thread, so it never appeared in System > Jobs and could not be stopped.
+    It registers the queueing wrapper and waits for the queued run instead, the
+    way the Sonarr and Radarr syncs do."""
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from app.get_args import args
+    from sportarr.scheduler import configure_sports_jobs
+    from sportarr.sync import leagues
+
+    _, _, _, _, session, _ = workflow_library
+    monkeypatch.setattr(args, "no_signalr", True)
+    scheduler = BackgroundScheduler()
+    configure_sports_jobs(scheduler, session)
+    job = scheduler.get_job("update_sports_1")
+    assert job.func is leagues.sync_sports_for_instance
+    assert job.kwargs == {"arr_instance_id": 1, "wait_for_completion": True}
+    assert job.name == "Sync with Sportarr (1)"
+
+
+def test_scheduled_sports_sync_queues_one_named_job_and_forwards_the_queued_run(
+    workflow_library, monkeypatch
+):
+    """Without a job_id the wrapper queues itself once, named for its instance,
+    and syncs nothing in the calling thread. The queued run carries the job_id
+    the queue injects and hands it on, which is what gives the sync its per-job
+    stop signal."""
+    from app.database import TableArrInstances
+
+    leagues, workflows, queue, session = _scheduled_sync_queue(workflow_library, monkeypatch)
+    session.execute(
+        sa.update(TableArrInstances).where(TableArrInstances.id == 1).values(name="Main")
+    )
+    synced = []
+    monkeypatch.setattr(
+        leagues,
+        "update_sports_for_instance",
+        lambda owner, **kwargs: synced.append((owner, kwargs)),
+    )
+
+    leagues.sync_sports_for_instance(1)
+    # A second tick while the first run is still queued adds nothing.
+    leagues.sync_sports_for_instance(1)
+    assert synced == []
+    rows = queue.list_jobs_from_queue()
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["module"], row["func"]) == ("sportarr.sync.leagues", "sync_sports_for_instance")
+    assert row["kwargs"]["arr_instance_id"] == 1
+    assert row["status"] == "pending"
+    assert row["job_name"] == "Syncing sports library with Sportarr (Main)"
+    assert workflows.is_sports_job(row)
+
+    job = queue.jobs_pending_queue.popleft()
+    queue.jobs_running_queue.append(job)
+    assert queue._run_job(job)
+    assert synced == [(1, {"job_id": job.job_id})]
+    assert job.job_name == "Synced sports library with Sportarr (Main)"
+
+    leagues.sync_sports_for_instance(2, job_id=77)
+    assert synced[-1] == (2, {"job_id": 77})
+    assert not queue.jobs_pending_queue
+
+
+def test_a_queued_scheduled_sync_is_cancelled_when_the_master_toggle_goes_off(
+    workflow_library, monkeypatch
+):
+    """The master toggle can flip off between a tick's check and this queued
+    run, after the setting change swept the pending jobs but before this one
+    was swept. The queued run rechecks the toggle, so the sync stops as
+    cancelled instead of running a whole library sweep the setting just
+    turned off."""
+    leagues, workflows, queue, session = _scheduled_sync_queue(workflow_library, monkeypatch)
+    synced = []
+    monkeypatch.setattr(
+        leagues, "update_sports_for_instance",
+        lambda owner, **kwargs: synced.append((owner, kwargs)),
+    )
+
+    leagues.sync_sports_for_instance(1)
+    assert queue.list_jobs_from_queue()
+    monkeypatch.setattr(leagues.settings.general, "use_sportarr", False, raising=False)
+
+    job = queue.jobs_pending_queue.popleft()
+    queue.jobs_running_queue.append(job)
+    assert queue._run_job(job) is False
+    assert job.stopped is True
+    assert job.progress_message == "Cancelled by user"
+    assert synced == []
+
+
+@pytest.mark.parametrize("change", ["disabled", "deleted"])
+def test_a_queued_scheduled_sync_is_removed_when_its_owner_goes_away(
+    workflow_library, monkeypatch, change
+):
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from app.get_args import args
+    from sportarr.scheduler import configure_sports_jobs
+
+    leagues, _, queue, session = _scheduled_sync_queue(workflow_library, monkeypatch)
+    monkeypatch.setattr(args, "no_signalr", True)
+    leagues.sync_sports_for_instance(1)
+    leagues.sync_sports_for_instance(2)
+    _instance_goes_away(session, 1, change)
+    configure_sports_jobs(BackgroundScheduler(), session)
+    assert [job.kwargs["arr_instance_id"] for job in queue.jobs_pending_queue] == [2]
+
+
+@pytest.mark.parametrize("change", ["disabled", "deleted"])
+def test_a_running_scheduled_sync_stops_when_its_owner_goes_away(
+    workflow_library, monkeypatch, change
+):
+    """A scheduled sync kept going for minutes after its instance was deleted,
+    then failed with "Enabled Sportarr instance not found". Queued, the refresh
+    that follows the instance change cancels it, and its own job signal stops
+    it at the next checkpoint instead of after the whole library."""
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from app.get_args import args
+    from sportarr import rootfolder
+    from sportarr.connection import check_cancelled
+    from sportarr.scheduler import configure_sports_jobs
+
+    leagues, _, queue, session = _scheduled_sync_queue(workflow_library, monkeypatch)
+    monkeypatch.setattr(args, "no_signalr", True)
+    reached = []
+
+    def owner_changes_mid_sync(owner, *, cancel, **kwargs):
+        _instance_goes_away(session, owner, change)
+        configure_sports_jobs(BackgroundScheduler(), session)
+        check_cancelled(cancel)
+        reached.append("after the checkpoint")
+
+    monkeypatch.setattr(rootfolder, "sync_rootfolders", owner_changes_mid_sync)
+    monkeypatch.setattr(leagues, "sync_leagues", lambda *a, **k: reached.append("leagues"))
+    leagues.sync_sports_for_instance(1)
+    job = queue.jobs_pending_queue.popleft()
+    queue.jobs_running_queue.append(job)
+    assert queue._run_job(job) is False
+    assert job.cancelled and job.stopped
+    assert job.status == "completed" and job.progress_message == "Cancelled by user"
+    assert reached == []
+    assert not queue.jobs_failed_queue
+
+
+@pytest.mark.parametrize("change", ["disabled", "deleted"])
+@pytest.mark.parametrize("moment", ["before the run", "during the run"])
+def test_a_scheduled_sync_whose_owner_goes_away_before_the_sweep_ends_cancelled(
+    workflow_library, monkeypatch, caplog, change, moment
+):
+    """The instance refresh stops the event streams before it cancels the
+    owner's jobs, and that can take several seconds. A sync that meets the
+    missing owner in that window has been stopped by it, so it ends cancelled
+    rather than as a failed job with an error traceback. During the run the
+    owner is checked the way revalidate does, just after a cached stop check
+    that still says enabled."""
+    import logging
+
+    from sportarr import rootfolder
+    from sportarr.connection import revalidate
+
+    leagues, _, queue, session = _scheduled_sync_queue(workflow_library, monkeypatch)
+    reached = []
+
+    def owner_changes_mid_sync(owner, *, cancel, expected_connection, **kwargs):
+        if moment == "during the run":
+            _instance_goes_away(session, owner, change)
+        revalidate(session, owner, expected_connection, cancel)
+        reached.append("after the checkpoint")
+
+    monkeypatch.setattr(rootfolder, "sync_rootfolders", owner_changes_mid_sync)
+    monkeypatch.setattr(leagues, "sync_leagues", lambda *a, **k: reached.append("leagues"))
+    leagues.sync_sports_for_instance(1)
+    if moment == "before the run":
+        _instance_goes_away(session, 1, change)
+    job = queue.jobs_pending_queue.popleft()
+    queue.jobs_running_queue.append(job)
+    with caplog.at_level(logging.ERROR):
+        assert queue._run_job(job) is False
+    assert job.stopped and job.error is None
+    assert job.status == "completed" and job.progress_message == "Cancelled by user"
+    assert reached == []
+    assert not queue.jobs_failed_queue
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
+def test_an_unrelated_sync_failure_still_fails_the_scheduled_job(
+    workflow_library, monkeypatch
+):
+    """Only the owner's own stop becomes a cancellation. A sync that fails
+    while its owner is still enabled is a real failure and is reported."""
+    from sportarr import rootfolder
+
+    leagues, _, queue, session = _scheduled_sync_queue(workflow_library, monkeypatch)
+
+    def malformed(owner, **kwargs):
+        raise ValueError("Malformed Sportarr league")
+
+    monkeypatch.setattr(rootfolder, "sync_rootfolders", malformed)
+    leagues.sync_sports_for_instance(1)
+    job = queue.jobs_pending_queue.popleft()
+    queue.jobs_running_queue.append(job)
+    assert queue._run_job(job) is False
+    assert not job.stopped and job.status == "failed"
+    assert list(queue.jobs_failed_queue) == [job]
+
+
+@pytest.mark.parametrize("change", ["off", "disabled", "deleted"])
+def test_a_scheduled_tick_queues_nothing_for_an_owner_it_no_longer_serves(
+    workflow_library, monkeypatch, change
+):
+    """The refresh sweeps the owner's queued syncs before it drops the
+    scheduler entry, so a tick that fires in between must not queue a sync the
+    sweep has already passed."""
+    from app.config import settings
+
+    leagues, _, queue, session = _scheduled_sync_queue(workflow_library, monkeypatch)
+    if change == "off":
+        monkeypatch.setattr(settings.general, "use_sportarr", False)
+    else:
+        _instance_goes_away(session, 1, change)
+    assert leagues.sync_sports_for_instance(1) is None
+    assert not queue.jobs_pending_queue
 
 
 @pytest.mark.parametrize(
