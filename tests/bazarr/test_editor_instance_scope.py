@@ -1,5 +1,6 @@
 # coding=utf-8
 
+import logging
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -261,3 +262,81 @@ def test_editor_sync_passes_arr_instance_id(monkeypatch):
 
     assert result == ("Movie not found", 404)
     assert captured == [("movie", 50, 2)]
+
+
+@pytest.fixture
+def editor_client(schema_session, monkeypatch, tmp_path):
+    from api import utils
+    from api.editor import editor
+    from app.database import TableMovies
+
+    api_key = "editor +/&=?%#"
+    monkeypatch.setattr(utils, "settings", SimpleNamespace(auth=SimpleNamespace(apikey=api_key)))
+    monkeypatch.setattr(editor, "database", schema_session)
+    monkeypatch.setattr(editor.path_mappings, "path_replace_movie", lambda path: path)
+    monkeypatch.setattr(editor, "_probe_video", lambda _path: {
+        "format": {"duration": "12.3"},
+        "streams": [{"codec_type": "audio", "codec_name": "aac", "channels": 2}],
+    })
+    monkeypatch.setattr(editor, "request_peaks", lambda _path, _track: (
+        "ready", {"peaks": [0.5, -1], "duration": 0.2, "sampleRate": 10},
+    ))
+    monkeypatch.setitem(editor._editor_sync_jobs, "job-1", {"status": "running", "message": "Working"})
+
+    video_path = tmp_path / "video.mkv"
+    video_path.write_bytes(b"video")
+    schema_session.add(TableMovies(
+        id=102, radarrId=50, arr_instance_id=2, path=str(video_path), title="Movie", tmdbId="2",
+        subtitles=str([["en", str(tmp_path / "video.en.srt"), 100]]),
+    ))
+    schema_session.flush()
+
+    app = Flask(__name__)
+    app.config["TESTING"] = True
+    Api(app).add_namespace(editor.api_ns_editor, path="/api/")
+    with app.test_client() as client:
+        yield client, api_key
+
+
+# The four requests the editor makes with fetch(): info, peaks, the subtitle
+# list and the sync poll.
+EDITOR_FETCHES = [
+    pytest.param("/api/editor/info", {"mediaType": "movie", "mediaId": "50", "arr_instance_id": "2"}, id="info"),
+    pytest.param(
+        "/api/editor/peaks",
+        {"mediaType": "movie", "mediaId": "50", "audioTrack": "0", "arr_instance_id": "2"},
+        id="peaks",
+    ),
+    pytest.param(
+        "/api/editor/subtitles", {"mediaType": "movie", "mediaId": "50", "arr_instance_id": "2"}, id="subtitles",
+    ),
+    pytest.param("/api/editor/sync", {"jobKey": "job-1"}, id="sync-poll"),
+]
+
+
+def _deprecation_warnings(caplog):
+    return [record for record in caplog.records if "deprecated" in record.getMessage()]
+
+
+@pytest.mark.parametrize("path, query", EDITOR_FETCHES)
+def test_editor_fetch_with_header_key_logs_no_deprecation(editor_client, caplog, path, query):
+    client, api_key = editor_client
+    caplog.set_level(logging.WARNING)
+
+    response = client.get(path, query_string=query, headers={"X-API-KEY": api_key})
+
+    assert response.status_code == 200
+    assert _deprecation_warnings(caplog) == []
+
+
+@pytest.mark.parametrize("path, query", EDITOR_FETCHES)
+def test_editor_fetch_with_query_key_still_logs_deprecation(editor_client, caplog, path, query):
+    # The same capture sees the warning a key in the query string produces, so
+    # an empty capture above means no warning, not a warning nobody caught.
+    client, api_key = editor_client
+    caplog.set_level(logging.WARNING)
+
+    response = client.get(path, query_string={**query, "apikey": api_key})
+
+    assert response.status_code == 200
+    assert len(_deprecation_warnings(caplog)) == 1

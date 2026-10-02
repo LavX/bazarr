@@ -346,15 +346,14 @@ export default function EditorPage() {
   >([]);
   useEffect(() => {
     if (!mediaType || !mediaId) return;
-    const apiKey = Environment.apiKey ?? "";
     fetch(
       buildEditorSubtitlesUrl(
         Environment.baseUrl,
         mediaType,
         mediaId,
-        apiKey,
         scopedArrInstanceId,
       ),
+      { headers: { "X-API-KEY": Environment.apiKey ?? "" } },
     )
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {

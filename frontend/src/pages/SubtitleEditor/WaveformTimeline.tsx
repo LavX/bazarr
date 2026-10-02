@@ -101,7 +101,7 @@ export default function WaveformTimeline({
   const peaksUrl =
     mediaType && mediaId
       ? appendArrInstanceParam(
-          `${Environment.baseUrl}/api/editor/peaks?mediaType=${mediaType}&mediaId=${mediaId}&audioTrack=${audioTrack}&apikey=${encodeURIComponent(apiKey)}`,
+          `${Environment.baseUrl}/api/editor/peaks?mediaType=${encodeURIComponent(mediaType)}&mediaId=${mediaId}&audioTrack=${audioTrack}`,
           arrInstanceId,
         )
       : null;
@@ -111,7 +111,7 @@ export default function WaveformTimeline({
     if (!ws || !peaksUrl) return;
     const generation = peaksGeneration.current;
     peaksAttempts.current += 1;
-    fetch(peaksUrl)
+    fetch(peaksUrl, { headers: { "X-API-KEY": apiKey } })
       .then(async (r) => {
         if (r.status === 202) {
           const body = (await r.json()) as { jobId?: number };
@@ -135,7 +135,7 @@ export default function WaveformTimeline({
       .catch(() => {
         if (generation === peaksGeneration.current) setLoading(false);
       });
-  }, [peaksUrl]);
+  }, [peaksUrl, apiKey]);
 
   const peaksJob = useEditorJob(peaksJobId);
   const peaksJobFinished = isTerminalJob(peaksJob);
