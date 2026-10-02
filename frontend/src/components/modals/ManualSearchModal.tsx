@@ -124,8 +124,13 @@ export function ManualSearchView<T extends SupportType>(props: Props<T>) {
     void results.refetch();
   }, [results]);
 
+  // The key of the row whose download is running, so the spinner sits on the
+  // row that was clicked while every Get button is held off. A boolean would
+  // put no spinner anywhere, and the row is the only thing that says which
+  // result is being fetched.
+  const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
+  const downloading = downloadingKey !== null;
   const [downloadedKey, setDownloadedKey] = useState<string | null>(null);
-  const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
 
   const columns = useMemo<ColumnDef<SearchResultType>[]>(
@@ -236,6 +241,7 @@ export function ManualSearchView<T extends SupportType>(props: Props<T>) {
               label="Download"
               icon={isDownloaded ? faCloudDownloadAlt : faDownload}
               color={isDownloaded ? "brand" : "gray"}
+              isLoading={downloadingKey === resultKey}
               disabled={
                 item === null ||
                 downloading ||
@@ -244,7 +250,7 @@ export function ManualSearchView<T extends SupportType>(props: Props<T>) {
               onClick={async () => {
                 if (!item) return;
 
-                setDownloading(true);
+                setDownloadingKey(resultKey);
                 setDownloadError(null);
                 try {
                   await download(item, result);
@@ -252,7 +258,7 @@ export function ManualSearchView<T extends SupportType>(props: Props<T>) {
                 } catch (error) {
                   setDownloadError(failureText(error));
                 } finally {
-                  setDownloading(false);
+                  setDownloadingKey(null);
                 }
               }}
             ></Action>
@@ -260,7 +266,14 @@ export function ManualSearchView<T extends SupportType>(props: Props<T>) {
         },
       },
     ],
-    [download, item, downloadedKey, downloading, props.preventRepeatDownload],
+    [
+      download,
+      item,
+      downloadedKey,
+      downloading,
+      downloadingKey,
+      props.preventRepeatDownload,
+    ],
   );
 
   const bSceneNameAvailable =

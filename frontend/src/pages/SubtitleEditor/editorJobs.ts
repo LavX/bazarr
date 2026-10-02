@@ -34,6 +34,17 @@ export function useEditorJob(jobId: number | null | undefined) {
   if (!cachedTerminal && rechecked && isTerminalJob(rechecked)) {
     return rechecked;
   }
+  if (!cachedTerminal && jobId != null && rechecked === null) {
+    // The queue keeps only the last ten finished jobs, so a job whose terminal
+    // event was missed can be gone by the time it is re-read. Gone means it
+    // ended; the caller reads the real outcome from its own endpoint, which
+    // keeps editor results longer than the queue does.
+    return {
+      // eslint-disable-next-line camelcase
+      ...(cached ?? ({ job_id: jobId } as System.Jobs)),
+      status: "completed",
+    };
+  }
   return cached;
 }
 

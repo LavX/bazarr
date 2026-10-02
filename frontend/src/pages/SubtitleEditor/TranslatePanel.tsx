@@ -7,6 +7,7 @@ import {
 } from "react";
 import { faSpinner, faTimes } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { isAxiosError } from "axios";
 import { useLanguages } from "@/apis/hooks/languages";
 import { useTranslatorModels } from "@/apis/hooks/translator";
 import {
@@ -279,9 +280,14 @@ export default function TranslatePanel({
           finish("failed", state.error || "Translation failed.");
         }
       })
-      .catch(() => {
+      .catch((error) => {
         if (active) {
-          finish("failed", "The finished translation could not be read.");
+          finish(
+            "failed",
+            isAxiosError(error) && error.response?.status === 404
+              ? "The translation result is no longer available. Translate again."
+              : "The finished translation could not be read.",
+          );
         }
       });
 
