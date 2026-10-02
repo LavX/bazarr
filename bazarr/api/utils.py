@@ -125,14 +125,21 @@ def authenticate(actual_method):
         if _safe_apikey_compare(apikey_header, apikey_settings):
             return actual_method(*args, **kwargs)
 
-        # Legacy: accept API key from query string or form data with deprecation warning
-        # Suppress warning for webhook endpoints (Plex webhooks use ?apikey= in callback URLs)
+        # Legacy: accept API key from query string or an urlencoded form body, with
+        # a deprecation warning. Suppress the warning for webhook endpoints (Plex
+        # webhooks use ?apikey= in callback URLs)
+        # The form is read only for an urlencoded body. Reading request.form parses
+        # the whole request, whatever its content type, so a multipart upload was
+        # parsed (and spooled) just to look for one field: before this 401, and
+        # before the route's own declared-length refusal. An urlencoded body is
+        # the form a client posts a key in, so that fallback is kept.
         apikey_get = request.args.get('apikey')
-        apikey_post = request.form.get('apikey')
+        apikey_post = (request.form.get('apikey')
+                       if request.mimetype == 'application/x-www-form-urlencoded' else None)
         if _safe_apikey_compare(apikey_get, apikey_settings) or _safe_apikey_compare(apikey_post, apikey_settings):
             if '/webhooks/' not in request.path:
                 logging.warning(
-                    'API key passed via query string or form data is deprecated. '
+                    'API key passed via query string or an urlencoded form body is deprecated. '
                     'Use the X-API-KEY header instead. '
                     'Endpoint: %s %s', request.method, request.path
                 )
