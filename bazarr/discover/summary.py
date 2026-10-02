@@ -25,7 +25,7 @@ import sys
 import time
 from threading import Lock
 
-from sqlalchemy import and_, false, func, or_, select
+from sqlalchemy import and_, false, func, or_, select, true
 
 logger = logging.getLogger(__name__)
 
@@ -152,19 +152,19 @@ def _owned(table, kind, instances):
     Rows survive an integration being switched off and an instance being
     disabled, so every read here that stands for "your library" has to say
     which rows are still the reader's. The integration being off is the whole
-    answer: none of its rows count. Otherwise a row counts when an enabled
-    instance of that kind owns it.
+    answer: none of its rows count. Otherwise a row counts unless a disabled
+    instance owns it, the scope the Discover library pages use as well.
     """
     from app.config import settings
     if not getattr(getattr(settings, "general", None), f"use_{kind}", False):
         return false()
-    owners = [owner for owner, entry in instances.items()
-              if entry["enabled"] and entry["kind"] == kind]
-    # A row from before the multi-instance migration carries no owner and
-    # belongs to the default instance. Matching only the owner list would
-    # quietly drop every one of them.
+    disabled = [owner for owner, entry in instances.items() if not entry["enabled"]]
+    # A row from before the multi-instance migration carries no owner, and a
+    # row naming a deleted instance has none left. The Series, Movies and
+    # Wanted pages list both, so matching only the enabled owners came up
+    # short of them.
     orphan = table.arr_instance_id.is_(None)
-    return or_(orphan, table.arr_instance_id.in_(owners)) if owners else orphan
+    return or_(orphan, table.arr_instance_id.not_in(disabled)) if disabled else true()
 
 
 # ------------------------------------------------------------------ wanted
@@ -935,12 +935,18 @@ def _inaccessible_rootfolders(connection, instances):
     from app.database import TableMoviesRootfolder, TableShowsRootfolder
     groups = []
     for table, kind in ((TableShowsRootfolder, "sonarr"), (TableMoviesRootfolder, "radarr")):
+        # A retired instance's last recorded check is not something to fix,
+        # and warning about it kept Discover degraded for good. Nothing
+        # rechecks a row whose instance was deleted either, so only enabled
+        # owners and rows with no owner are read here.
+        live = [owner for owner, entry in instances.items()
+                if entry["enabled"] and entry["kind"] == kind]
+        orphan = table.arr_instance_id.is_(None)
         rows = connection.execute(
             select(table.arr_instance_id, func.count().label("folders"),
                    func.min(table.path).label("example"))
-            # A retired instance's last recorded check is not something to fix,
-            # and warning about it kept Discover degraded for good.
-            .where(table.accessible == 0, _owned(table, kind, instances))
+            .where(table.accessible == 0, _owned(table, kind, instances),
+                   or_(orphan, table.arr_instance_id.in_(live)) if live else orphan)
             .group_by(table.arr_instance_id)
             # Without an order the engine chooses which owners survive the
             # bound, and SQLite and PostgreSQL need not choose the same ones.
