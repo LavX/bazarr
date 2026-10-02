@@ -5,7 +5,8 @@
 the backend and the frontend, and what gives a pull request into development
 one Python version instead of three. Both are ways to run fewer tests, so the
 decisions are pinned here case by case. test_ci_guard_list.py separately checks
-that no file a test can depend on is ever classified as documentation.
+that no file a test can depend on is ever classified as documentation. The last
+section covers the local mirror, scripts/ci/local_ci.py.
 """
 
 import importlib.util
@@ -15,6 +16,7 @@ import subprocess
 import sys
 
 import pytest
+import yaml
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PLANNER = REPO_ROOT / ".github" / "scripts" / "ci_plan.py"
@@ -88,7 +90,7 @@ def test_code_and_tested_documents_are_not_documentation(path):
 
 def test_a_documentation_only_pull_request_skips_the_suites():
     decision = _plan("pull_request", "development", ["docs/a.md", "site/index.html"])
-    assert decision == {"code": False, "docs": True, "python": ["3.14"]}
+    assert decision == {"code": False, "docs": True, "python": ["3.14"], "hero": False}
 
 
 def test_one_code_file_runs_everything():
@@ -99,14 +101,14 @@ def test_one_code_file_runs_everything():
 
 def test_a_code_only_pull_request_needs_no_docs_job():
     decision = _plan("pull_request", "development", ["bazarr/main.py"])
-    assert decision == {"code": True, "docs": False, "python": ["3.14"]}
+    assert decision == {"code": True, "docs": False, "python": ["3.14"], "hero": False}
 
 
 @pytest.mark.parametrize("path", sorted(ci_plan.TESTED_DOCUMENTS))
 def test_a_document_a_test_reads_runs_the_suites_and_the_docs_job(path):
     """It counts as code for the suites, and it is still prose for the dash check."""
     decision = _plan("pull_request", "development", [path])
-    assert decision == {"code": True, "docs": True, "python": ["3.14"]}
+    assert decision == {"code": True, "docs": True, "python": ["3.14"], "hero": False}
 
 
 @pytest.mark.parametrize("base", ["development", "feature/stacked-on-something"])
@@ -140,6 +142,61 @@ def test_an_unreadable_change_list_runs_everything(event):
 def test_an_empty_change_list_runs_everything():
     assert _plan("pull_request", "development", [])["code"] is True
     assert _plan("pull_request", "development", ["", "  "])["code"] is True
+    assert _plan("pull_request", "development", [])["hero"] is True
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "scripts/release/hero/src/Root.tsx",
+        "scripts/release/hero/package-lock.json",
+        # The still loads the brand font from here.
+        "site/fonts/Geist-Variable.woff2",
+        # The job itself, the planner that starts it, and the Node it runs on.
+        ".github/workflows/ci.yml",
+        ".github/scripts/ci_plan.py",
+        "frontend/.nvmrc",
+    ],
+)
+@pytest.mark.parametrize("event", ["pull_request", "push"])
+def test_a_change_to_what_the_hero_builds_from_renders_it(event, path):
+    assert _plan(event, "development", ["bazarr/main.py", path])["hero"] is True
+
+
+def test_a_font_only_change_renders_the_hero_and_skips_the_suites():
+    decision = _plan("pull_request", "development", ["site/fonts/Geist-Variable.woff2"])
+    assert decision["hero"] is True
+    assert decision["code"] is False
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "bazarr/main.py",
+        "frontend/src/App.tsx",
+        "frontend/package-lock.json",
+        "scripts/release/notes.py",
+        "site/hero/index.html",
+        "docs/agents/release-hero.md",
+    ],
+)
+@pytest.mark.parametrize("event", ["pull_request", "push"])
+def test_an_unrelated_change_does_not_render_the_hero(event, path):
+    assert _plan(event, "development", [path])["hero"] is False
+
+
+@pytest.mark.parametrize(
+    "event,base,changed",
+    [
+        ("pull_request", "development", None),
+        ("push", "", None),
+        ("schedule", "", ["bazarr/main.py"]),
+        ("workflow_dispatch", "", ["bazarr/main.py"]),
+        ("pull_request", "master", ["bazarr/main.py"]),
+    ],
+)
+def test_the_hero_renders_whenever_the_change_is_unknown_or_a_release(event, base, changed):
+    assert _plan(event, base, changed)["hero"] is True
 
 
 @pytest.mark.parametrize("image", ["", "3.11", "4.0"])
@@ -229,6 +286,7 @@ def test_main_writes_the_outputs_the_workflow_reads(tmp_path, monkeypatch):
     written = dict(line.split("=", 1) for line in output.read_text().splitlines())
     assert written["code"] == "true"
     assert written["docs"] == "false"
+    assert written["hero"] == "true"
     assert json.loads(written["python"]) == FULL
     assert "CI plan" in summary.read_text()
 
@@ -256,3 +314,44 @@ def test_the_docs_check_still_checks_a_document_a_test_reads(tmp_path, monkeypat
 
     assert docs_check.main() == 1
     assert f"{path}:2: adds an em dash" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# The local mirror, scripts/ci/local_ci.py.
+# ---------------------------------------------------------------------------
+
+LOCAL_CI = REPO_ROOT / "scripts" / "ci" / "local_ci.py"
+
+
+def _load_local_ci():
+    spec = importlib.util.spec_from_file_location("_local_ci_under_test", LOCAL_CI)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_mirror_installs_the_hero_only_when_its_stamp_is_stale(tmp_path, monkeypatch):
+    """The hero's `npm ci` runs when no stamp stands for it, records one, and
+    is skipped once the stamp matches, as the job skips it on a cache hit. The
+    still itself is the one hero step that loads a machine's cores, so the
+    worker budget counts it at the weight the model gives it."""
+    local_ci = _load_local_ci()
+    stamp = tmp_path / "node_modules" / ".bazarr-ci-stamp"
+    monkeypatch.setattr(local_ci, "HERO_STAMP", stamp)
+    jobs = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text())["jobs"]
+
+    fresh = local_ci.hero_tasks(jobs, tmp_path)
+    install = next(task for task in fresh if "npm ci" in task.argv[3])
+    assert ".bazarr-ci-stamp" in install.argv[3], "a fresh install records no stamp"
+    render = next(task for task in fresh if "npm run still" in task.argv[3])
+    assert render.weight == local_ci.HERO_RENDER_WEIGHT == 1
+
+    stamp.parent.mkdir(parents=True)
+    stamp.write_text(local_ci._hero_stamp())
+    stamped = local_ci.hero_tasks(jobs, tmp_path)
+    assert not any("npm ci" in task.argv[3] for task in stamped), (
+        "the mirror reinstalls a hero the stamp already stands for"
+    )
+    assert [task.key for task in stamped] == [
+        task.key for task in fresh if task is not install
+    ], "skipping the install has to leave the chain of the other steps intact"
