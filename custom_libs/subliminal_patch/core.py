@@ -725,8 +725,7 @@ class SZProviderPool(ProviderPool):
             try:
                 provider_subtitles = self.list_subtitles_provider(name, video, languages)
             except LanguageReverseError:
-                logger.exception("Unexpected language reverse error in %s, skipping. Error: %s", name,
-                                 traceback.format_exc())
+                logger.exception("Unexpected language reverse error in %s, skipping", name)
                 continue
 
             if provider_subtitles is None:
@@ -817,7 +816,7 @@ class SZProviderPool(ProviderPool):
                 try:
                     matches = subtitle.get_matches(video)
                 except AttributeError:
-                    logger.error("%r: Match computation failed: %s", subtitle, traceback.format_exc())
+                    logger.error("%r: Match computation failed", subtitle, exc_info=True)
                     continue
                 orig_matches = matches.copy()
                 score, _ = compute_score(matches, subtitle, video, False)
@@ -965,7 +964,7 @@ class SZProviderPool(ProviderPool):
                     matches = cached
 
             except AttributeError:
-                logger.error("%r: Match computation failed: %s", s, traceback.format_exc())
+                logger.error("%r: Match computation failed", s, exc_info=True)
                 continue
 
             orig_matches = matches.copy()
