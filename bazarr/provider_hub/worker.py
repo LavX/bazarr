@@ -61,6 +61,19 @@ class WorkerError(RuntimeError):
         self.retryable = retryable
 
 
+class RequestNotAdmitted(Exception):
+    """A gated request whose admission check said no once it got its turn.
+
+    Deliberately not a WorkerError: nothing that classifies worker failures
+    may take a request that was never sent for one.
+    """
+
+
+class WorkerBusy(Exception):
+    """A gated request that could not get its turn within its own timeout, or
+    whose client was stopped while it waited. Not a WorkerError either."""
+
+
 def _raise_worker_error(payload):
     if not isinstance(payload, dict):
         raise WorkerError("worker request failed")
@@ -189,6 +202,20 @@ class ProviderWorkerClient:
         # monotonic timestamp of the last request, read by reap_idle_workers
         self.last_used: float = time.monotonic()
         self._lock = threading.Lock()
+        # Set while no gated request on this worker is waiting for its outcome
+        # to be recorded. A gated request clears it right before it writes and
+        # the pool sets it again, through outcome_recorded(), once the backoff
+        # and discard for that call are in place, so a queued request never
+        # runs its admission check against the state from before a failure.
+        # Waited on without the lock: the call that cleared it may still need
+        # the lock for its archive member selection.
+        self._outcome_latch = threading.Event()
+        self._outcome_latch.set()
+        # Which thread cleared the latch; only that thread may set it again.
+        self._latch_owner = threading.local()
+        # Set by stop(): a retired client admits no gated request, so a waiter
+        # cannot respawn its worker with the configuration that was replaced.
+        self._closed = False
         self._stdout_queue: queue.Queue[Any] | None = None
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
@@ -405,6 +432,12 @@ class ProviderWorkerClient:
         return True
 
     def stop(self, grace_seconds: float = 5.0) -> None:
+        # Closed first, on every path, then the latch is set so that a gated
+        # request waiting on it wakes, sees the mark and gives up.
+        self._closed = True
+        latch = getattr(self, "_outcome_latch", None)
+        if latch is not None:
+            latch.set()
         process = self.process
         if not process or process.poll() is not None:
             # Nothing left to reap, so this is the one safe unconditional
@@ -495,7 +528,67 @@ class ProviderWorkerClient:
             "select_archive_member", payload, timeout=30.0 if timeout is None else timeout
         )
 
-    def request(self, op: str, payload: dict[str, Any] | None = None, timeout: float = 30.0) -> WorkerResult:
+    def outcome_recorded(self) -> None:
+        """Let the next gated request run its admission check.
+
+        Only the thread whose gated request cleared the latch sets it again. A
+        call that never cleared it (refused, busy, or never sent) leaves it
+        alone, or a queued request could pass its check while the failure it
+        should see is still being recorded.
+        """
+        owner = getattr(self, "_latch_owner", None)
+        if owner is None or not getattr(owner, "cleared", False):
+            return
+        owner.cleared = False
+        self._outcome_latch.set()
+
+    def _acquire_gated(self, timeout: float, admit) -> None:
+        """Take the request lock for a gated request, or raise.
+
+        Waits for the outcome latch without the lock, then for the lock,
+        within the request's own timeout, and runs ``admit`` once it holds
+        both. Returns with the lock held and the latch cleared by this thread.
+        """
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            # A timeout of zero or less would make acquire() raise ValueError,
+            # or wait forever for -1, so a spent budget is busy right here.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not self._outcome_latch.wait(remaining):
+                raise WorkerBusy(f"worker busy for {timeout:.1f}s")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not self._lock.acquire(timeout=remaining):
+                raise WorkerBusy(f"worker busy for {timeout:.1f}s")
+            if self._closed:
+                self._lock.release()
+                raise WorkerBusy("worker client is stopped")
+            if not self._outcome_latch.is_set():
+                # Another gated request took its turn between the wait and the
+                # lock; wait for its outcome instead.
+                self._lock.release()
+                continue
+            try:
+                admitted = admit()
+            except BaseException:
+                self._lock.release()
+                raise
+            if not admitted:
+                self._lock.release()
+                raise RequestNotAdmitted("provider is excluded")
+            self._outcome_latch.clear()
+            self._latch_owner.cleared = True
+            return
+
+    def request(self, op: str, payload: dict[str, Any] | None = None, timeout: float = 30.0,
+                admit=None) -> WorkerResult:
+        """Send one request and read its reply.
+
+        With ``admit``, a callable answering whether the provider may still be
+        called, the request is gated: see _acquire_gated. The caller must then
+        report the outcome through outcome_recorded(). Without it the request
+        queues on the lock as it always has, which shutdown and the archive
+        member selection rely on.
+        """
         request_id = str(uuid.uuid4())
         message = {
             "abi": WORKER_ABI_VERSION,
@@ -505,7 +598,11 @@ class ProviderWorkerClient:
             "payload": payload or {},
         }
 
-        with self._lock:
+        if admit is None:
+            self._lock.acquire()
+        else:
+            self._acquire_gated(timeout, admit)
+        try:
             # Startup and the freshness stamp live under the request lock:
             # outside it, the sweep can acquire the lock after start() returns,
             # read the old timestamp, and kill the worker this request is
@@ -537,6 +634,8 @@ class ProviderWorkerClient:
             # hour ceiling), and a worker judged only on when its request
             # STARTED would read as idle for almost all of that.
             self.last_used = time.monotonic()
+        finally:
+            self._lock.release()
 
         if not line:
             raise WorkerError("worker closed stdout")

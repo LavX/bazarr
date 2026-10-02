@@ -54,7 +54,7 @@ def _pool_listing(monkeypatch, subtitles_by_provider):
     it unbound, so an instance attribute would never be reached.
     """
     monkeypatch.setattr(SZProviderPool, 'list_subtitles_provider',
-                        lambda self, name, video, languages: subtitles_by_provider.get(name, []))
+                        lambda self, name, video, languages, **kwargs: subtitles_by_provider.get(name, []))
     return SZProviderPool(providers=list(subtitles_by_provider))
 
 
