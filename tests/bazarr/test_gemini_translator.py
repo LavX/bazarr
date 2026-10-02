@@ -329,3 +329,84 @@ def test_ordinary_request_retries_keep_existing_behavior(queued_gemini, monkeypa
     assert not list(fixture.source.parent.glob(".bazarr-write-*"))
     if failure == "rate-limit":
         assert keys[0] != keys[1]
+
+
+FAKE_GEMINI_KEY = (
+    "AIzaSyA-"
+    "fake_key"
+    "-0123456"
+    "789abcde"
+    "fghijkl"
+)
+
+
+def _key_windows(key, size=8):
+    return {key[start:start + size] for start in range(len(key) - size + 1)}
+
+
+def _assert_no_key_window(text, key=FAKE_GEMINI_KEY):
+    leaked = [window for window in _key_windows(key) if window in text]
+    assert not leaked, leaked
+
+
+def test_request_sends_the_key_in_a_header_and_not_in_the_url(queued_gemini, monkeypatch):
+    fixture = queued_gemini
+    sent = []
+    monkeypatch.setattr(fixture.service, "_get_configured_api_keys", lambda: [FAKE_GEMINI_KEY])
+
+    def transport(method, url, **kwargs):
+        sent.append((url, kwargs))
+        return _gemini_response()
+
+    monkeypatch.setattr(gemini_translator.requests, "request", transport)
+    fixture.worker.start()
+    fixture.worker.join(3)
+    assert not fixture.worker.is_alive()
+    assert fixture.job.status == "completed"
+    assert len(sent) == 1
+    url, kwargs = sent[0]
+    assert "key=" not in url and "?" not in url
+    _assert_no_key_window(url)
+    assert kwargs["headers"]["x-goog-api-key"] == FAKE_GEMINI_KEY
+    connect, read = kwargs["timeout"]
+    assert 0 < connect <= read < float("inf")
+
+
+@pytest.mark.parametrize("failure", ["rejected-key", "read-timeout"])
+def test_failed_request_ends_the_job_without_the_key(queued_gemini, monkeypatch, caplog, failure):
+    fixture = queued_gemini
+    timeouts = []
+    messages = []
+    monkeypatch.setattr(fixture.service, "_get_configured_api_keys", lambda: [FAKE_GEMINI_KEY])
+    original = fixture.queue.update_job_progress
+
+    def progress(*args, **kwargs):
+        if kwargs.get("progress_message"):
+            messages.append(kwargs["progress_message"])
+        return original(*args, **kwargs)
+
+    def transport(method, url, **kwargs):
+        # A hung call would block here forever without a timeout to end it.
+        timeouts.append(kwargs.get("timeout"))
+        if failure == "read-timeout":
+            raise gemini_translator.requests.ReadTimeout(f"Read timed out. (read timeout={kwargs.get('timeout')})")
+        response = _gemini_response(400)
+        response._content = json.dumps({"error": {"status": "INVALID_ARGUMENT",
+                                                  "message": "API key not valid."}}).encode()
+        response.reason = "Bad Request"
+        response.url = url
+        return response
+
+    monkeypatch.setattr(fixture.queue, "update_job_progress", progress)
+    monkeypatch.setattr(gemini_translator.requests, "request", transport)
+    with caplog.at_level("DEBUG"):
+        fixture.worker.start()
+        fixture.worker.join(3)
+    assert not fixture.worker.is_alive()
+    assert fixture.job.status == "failed"
+    assert len(timeouts) == 4 and all(timeout for timeout in timeouts)
+    failed = [message for message in messages if message.startswith("Gemini translation failed")]
+    assert failed and ("400 Client Error" if failure == "rejected-key" else "Read timed out") in failed[-1]
+    assert fixture.destination.read_text() == "Previous destination"
+    for text in messages + [str(fixture.job.progress_message), str(fixture.job.error), caplog.text]:
+        _assert_no_key_window(text)
