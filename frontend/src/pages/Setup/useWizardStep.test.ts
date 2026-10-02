@@ -1,6 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WizardStepDef } from "./steps/types";
+import { readOnboardingValue } from "./onboardingStorage";
 import { useWizardStep } from "./useWizardStep";
 
 const STORAGE_KEY = "bazarr.onboarding.step";
@@ -153,10 +154,10 @@ describe("useWizardStep", () => {
     );
 
     expect(result.current.step.key).toBe("welcome");
-    expect(localStorage.getItem("bazarr.onboarding.step::/bazarr")).toBeNull();
-    // Only this install's own cursor is discarded. Reading the legacy one
-    // again lands on Welcome the same way, and another install may still
-    // need it.
+    expect(readOnboardingValue("step")).toBeNull();
+    // Only this install's own cursor is discarded, and it stays discarded
+    // rather than being adopted again on the next read. Another install may
+    // still need the legacy one.
     expect(localStorage.getItem("bazarr.onboarding.step")).toBe("2");
   });
 
@@ -226,5 +227,24 @@ describe("useWizardStep", () => {
 
     expect(result.current.index).toBe(0);
     expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
+  });
+
+  it("reset under a base URL does not bring the adopted cursor back", () => {
+    // The legacy cursor is adopted when this install has nothing of its own.
+    // A reset used to leave exactly that, so the next visit adopted the same
+    // step again and Run first-time setup reopened on it instead of Welcome.
+    localStorage.setItem("bazarr.onboarding.intent", "library");
+    localStorage.setItem(STORAGE_KEY, "radarr");
+    vi.stubGlobal("Bazarr", { baseUrl: "/bazarr" });
+
+    const view = renderHook(() => useWizardStep(LIBRARY));
+    expect(view.result.current.step.key).toBe("radarr");
+
+    act(() => view.result.current.reset());
+    view.unmount();
+
+    const { result } = renderHook(() => useWizardStep(LIBRARY));
+    expect(result.current.step.key).toBe("welcome");
+    expect(localStorage.getItem(STORAGE_KEY)).toBe("radarr");
   });
 });

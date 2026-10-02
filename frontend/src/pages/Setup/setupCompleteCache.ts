@@ -13,12 +13,18 @@ import { clearPersistedStep } from "./useWizardStep";
  * the old value until the refetch returns. Leaving setup navigates to "/", and
  * the Redirector there read setup_complete as false and sent the reader
  * straight back into the wizard they had just left.
+ *
+ * A settings read that left before the save is cancelled first, so it cannot
+ * land after this and put the old value back. The invalidation below only
+ * cancels it while something observes the query, which the theme loader
+ * happens to do today; this does not rely on it.
  */
 export async function settleSetupComplete(
   client: QueryClient,
   complete: boolean,
 ) {
   const queryKey = [QueryKeys.System, QueryKeys.Settings];
+  await client.cancelQueries({ queryKey });
   client.setQueryData<Settings>(queryKey, (current) =>
     current === undefined
       ? current
