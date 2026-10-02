@@ -357,7 +357,7 @@ def test_list_subtitles_prioritized_early_exit_when_not_exhaustive(
 
     call_log = []
 
-    def fake_list(self, provider, video, languages):
+    def fake_list(self, provider, video, languages, **kwargs):
         call_log.append(provider)
         if provider == "provider_a":
             return [sub_a]
@@ -393,7 +393,7 @@ def test_list_subtitles_prioritized_no_early_exit_when_exhaustive(
 
     call_log = []
 
-    def fake_list(self, provider, video, languages):
+    def fake_list(self, provider, video, languages, **kwargs):
         call_log.append(provider)
         if provider == "provider_a":
             return [sub_a]
@@ -427,7 +427,7 @@ def test_list_subtitles_prioritized_report_stop_shape(two_provider_pool, monkeyp
     sub_a = _make_fake_subtitle(lang)
     sub_b = _make_fake_subtitle(lang)
 
-    def fake_list(self, provider, video, languages):
+    def fake_list(self, provider, video, languages, **kwargs):
         return [sub_a] if provider == "provider_a" else [sub_b]
 
     monkeypatch.setattr(core.SZProviderPool, "list_subtitles_provider", fake_list)
