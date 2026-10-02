@@ -299,6 +299,7 @@ def _pool():
     from subliminal_patch.core import SZProviderPool
 
     pool = SZProviderPool.__new__(SZProviderPool)
+    pool.discarded_providers = set()
     pool.download_subtitle = lambda subtitle: True
     return pool
 
@@ -394,6 +395,7 @@ def test_core_persistent_passes_the_sink_through_to_the_pool():
 
     video = _episode_video()
     pool = MagicMock()
+    pool.list_subtitles_prioritized.return_value = ([], None)
     pool.download_best_subtitles.return_value = []
     sink = []
 

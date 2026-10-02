@@ -87,31 +87,126 @@ def download_best_subtitles(
     for video in checked_videos:
         logger.info("Downloading best subtitles for %r", video)
         if use_provider_priority:
-            # exhaustive=False is the default, but spelling it out here keeps
-            # the auto/scheduled download intent obvious and prevents a silent
-            # behavior change if the default ever flips. The exhaustive path
-            # is reserved for manual searches (see list_all_subtitles).
-            listed = pool_instance.list_subtitles_prioritized(
-                video, languages - video.subtitle_languages,
-                min_score=min_score, exhaustive=False,
+            subtitles = _download_prioritized(
+                video, languages, pool_instance, min_score=min_score, hearing_impaired=hearing_impaired,
+                only_one=only_one, use_original_format=use_original_format,
+                fallback_allowed=fallback_allowed, candidate_sink=candidate_sink,
             )
         else:
             listed = pool_instance.list_subtitles(video, languages - video.subtitle_languages)
-        subtitles = pool_instance.download_best_subtitles(
-            listed,
-            video,
-            languages,
-            min_score=min_score,
-            hearing_impaired=hearing_impaired,
-            only_one=only_one,
-            use_original_format=use_original_format,
-            fallback_allowed=fallback_allowed,
-            candidate_sink=candidate_sink,
-        )
+            subtitles = pool_instance.download_best_subtitles(
+                listed,
+                video,
+                languages,
+                min_score=min_score,
+                hearing_impaired=hearing_impaired,
+                only_one=only_one,
+                use_original_format=use_original_format,
+                fallback_allowed=fallback_allowed,
+                candidate_sink=candidate_sink,
+            )
         logger.info("Downloaded %d subtitle(s)", len(subtitles))
         downloaded_subtitles[video].extend(subtitles)
 
     return downloaded_subtitles
+
+
+def _download_prioritized(video, languages, pool_instance, min_score, hearing_impaired, only_one,
+                          use_original_format, fallback_allowed, candidate_sink):
+    """The priority waterfall: list until every language is satisfied, then
+    download, and when a language is still missing afterwards carry on from
+    the provider after the one the listing stopped at.
+
+    The listing decides on scores, so the provider that satisfied it may still
+    fail to deliver: a quota, a broken file, a discard by a concurrent search.
+    Each round lists providers the earlier rounds did not reach, so every
+    provider is asked at most once and every candidate a round downloads from
+    is new. The order is taken once, so a concurrent pool.update() cannot make
+    the search revisit or skip a provider.
+    """
+    order = list(pool_instance.providers)
+    to_list = languages - video.subtitle_languages
+    to_download = set(languages)
+    remaining = order
+    downloaded = []
+    listed_by_rounds = []
+    queried = set()
+
+    while True:
+        # exhaustive=False is the default, but spelling it out here keeps
+        # the auto/scheduled download intent obvious and prevents a silent
+        # behavior change if the default ever flips. The exhaustive path
+        # is reserved for manual searches (see list_all_subtitles).
+        listed, stopped_at = pool_instance.list_subtitles_prioritized(
+            video, to_list, min_score=min_score, provider_order=remaining, exhaustive=False,
+            report_stop=True,
+        )
+        listed_by_rounds.extend(listed)
+        # The listing walked the order from its start until the provider that
+        # satisfied it, or to its end: those are the providers this round
+        # asked, the ones that came up empty included.
+        queried.update(remaining if stopped_at is None
+                       else remaining[:remaining.index(stopped_at) + 1])
+        # Whisper is the costliest source and runs only once the whole
+        # waterfall has come up empty, never between two rounds.
+        downloaded.extend(pool_instance.download_best_subtitles(
+            listed,
+            video,
+            to_download,
+            min_score=min_score,
+            hearing_impaired=hearing_impaired,
+            only_one=only_one,
+            use_original_format=use_original_format,
+            fallback_allowed=False,
+            candidate_sink=candidate_sink,
+        ))
+        if only_one and downloaded:
+            break
+
+        # Per language: a language that downloaded is not searched again. The
+        # whole language is compared, not just its alpha3 code, or a profile
+        # asking for two languages that share one code (plain English and
+        # English (GB)) would stop searching the second one as soon as the
+        # first one downloaded.
+        delivered = {subtitle.language for subtitle in downloaded}
+        to_list = {language for language in to_list if language not in delivered}
+        to_download = {language for language in to_download if language not in delivered}
+        if not to_list or stopped_at is None:
+            break
+
+        # Never pass an empty order: list_subtitles_prioritized reads it as
+        # "no order given" and would start the waterfall over. Whisper stays
+        # out of the later rounds, the way the comment above promises: it is
+        # the costliest source and runs only once the whole waterfall has come
+        # up empty, never between two rounds.
+        remaining = [name for name in order[order.index(stopped_at) + 1:]
+                     if name not in pool_instance.discarded_providers and name != 'whisperai']
+        if not remaining:
+            break
+        logger.info("Nothing downloaded for %s from provider %s, which satisfied the search; "
+                    "continuing with %s", ", ".join(sorted(str(language) for language in to_list)),
+                    stopped_at, ", ".join(remaining))
+
+    if not downloaded and fallback_allowed:
+        # Whisper was kept out of the later rounds, so a whisper ordered after
+        # the provider that satisfied the listing was never asked: its
+        # candidates reach the fallback only through the rounds' listings, so
+        # it is listed here, once, for the fallback. A whisper a round already
+        # asked, even when it came up empty, is not consulted again, and a
+        # discarded whisper is not consulted again either.
+        if ('whisperai' in order
+                and 'whisperai' not in pool_instance.discarded_providers
+                and 'whisperai' not in queried):
+            listed_whisper, _ = pool_instance.list_subtitles_prioritized(
+                video, to_list, min_score=min_score, provider_order=['whisperai'],
+                exhaustive=False, report_stop=True)
+            listed_by_rounds.extend(listed_whisper)
+        downloaded = pool_instance.download_fallback_subtitles(
+            listed_by_rounds, video, languages, hearing_impaired=hearing_impaired,
+            use_original_format=use_original_format, candidate_sink=candidate_sink,
+        )
+
+    return downloaded
 
 
 # ---- Shared bounded executor for compat fanout ----
