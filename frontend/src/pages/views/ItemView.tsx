@@ -256,6 +256,18 @@ function ItemView<T extends Item.Base>({
   }
   // Read out once the typing settles, not at every keystroke.
   const [announcedCount] = useDebouncedValue(countLabel, 500);
+  // While every row is still on its way the count says nothing, and an empty
+  // count gave its width to the search field on a phone, which took it back
+  // once the count returned. The total is known all along and is what the
+  // band has said since its first load, so the label falls back to it:
+  // truthful text that keeps the width and never shows a filtered number
+  // before the real one is known. The status region above keeps saying
+  // nothing, so screen readers hear no total mid-filter either.
+  let displayLabel = countLabel;
+  if (displayLabel === "" && totalCount > 0) {
+    const noun = totalCount === 1 ? itemNoun.one : itemNoun.other;
+    displayLabel = `${totalCount.toLocaleString()} ${noun}`;
+  }
 
   return (
     <Stack gap={0}>
@@ -278,7 +290,7 @@ function ItemView<T extends Item.Base>({
               aria-hidden="true"
               className={styles.count}
             >
-              {countLabel}
+              {displayLabel}
             </Text>
           )}
           <Group gap="xs" className={styles.controls}>

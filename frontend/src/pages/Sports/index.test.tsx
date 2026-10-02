@@ -400,6 +400,14 @@ describe("sports library", () => {
     await user.type(screen.getByPlaceholderText("Search by title..."), "cup");
     // One cup is on the page standing in for the library; the other is not.
     expect(screen.queryAllByText(/ of 60 leagues$/)).toHaveLength(0);
+    // The label falls back to the total while the placeholder page stands
+    // in, the same words it has shown since the first load, so the band
+    // keeps its width and invents no number.
+    expect(
+      screen.getByText("60 leagues", {
+        ignore: "script, style, [role=status]",
+      }),
+    ).toBeVisible();
 
     await act(async () => {
       release();
