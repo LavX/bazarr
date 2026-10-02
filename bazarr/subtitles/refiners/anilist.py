@@ -11,7 +11,7 @@ from app.config import settings
 from subliminal import Episode, region, __short_version__
 
 logger = logging.getLogger(__name__)
-refined_providers = {'jimaku'}
+refined_providers = {'jimaku', 'tsukihime'}
 
 
 INDEXED_ID_TAGS = ("anidb_id", "imdb_id")
@@ -105,7 +105,13 @@ def refine_from_anilist(path, video):
             return
 
     if refined_providers.intersection(settings.general.enabled_providers) and video.anilist_id is None:
-        refine_anilist_ids(video)
+        # get_video runs every refiner in one try block and drops the item when
+        # one raises, so a failed anime lookup must not escape into the search.
+        try:
+            refine_anilist_ids(video)
+        except Exception:
+            logger.warning('AniList refinement failed for %s, continuing without an AniList id', video.name,
+                           exc_info=True)
 
 
 def refine_anilist_ids(video):
@@ -118,7 +124,7 @@ def refine_anilist_ids(video):
         
     candidate_id_value = getattr(video, candidate_id_name, None)
     if not candidate_id_value:
-        logger.error(f"Found no value for property {candidate_id_name} of video.")  # noqa: G004
+        logger.debug(f"Found no value for property {candidate_id_name} of video.")  # noqa: G004
         return video
     
     anilist_id = anilist_client.get_series_id(candidate_id_name, candidate_id_value)

@@ -20,8 +20,8 @@ except ImportError:
     except ImportError:
         import xml.etree.ElementTree as etree
 
-refined_providers = {'animetosho', 'jimaku'}
-providers_requiring_anidb_api = {'animetosho'}
+refined_providers = {'animetosho', 'animetosho_xyz', 'jimaku', 'tsukihime'}
+providers_requiring_anidb_api = {'animetosho', 'animetosho_xyz', 'tsukihime'}
 
 logger = logging.getLogger(__name__)
 
@@ -210,7 +210,13 @@ def refine_from_anidb(path, video):
         return
 
     if refined_providers.intersection(settings.general.enabled_providers) and video.series_anidb_id is None:
-        refine_anidb_ids(video)
+        # get_video runs every refiner in one try block and drops the item when
+        # one raises, so a failed anime lookup must not escape into the search.
+        try:
+            refine_anidb_ids(video)
+        except Exception:
+            logger.warning('AniDB refinement failed for %s, continuing without AniDB ids', video.series,
+                           exc_info=True)
 
 
 def refine_anidb_ids(video):
@@ -236,17 +242,20 @@ def refine_anidb_ids(video):
             logger.warning(f'API daily limit reached. Skipping episode ID refinement for {video.series}')  # noqa: G004
         else:
             try:
-                anidb_episode_id = anidb_client.get_episode_ids(
+                _, anidb_episode_id = anidb_client.get_episode_ids(
                     anidb_series_id,
                     anidb_episode_no
                 )
             except TooManyRequests:
                 logger.error(f'API daily limit reached while refining {video.series}')  # noqa: G004
                 anidb_client.mark_as_throttled()
+            except Exception:
+                logger.warning('AniDB episode lookup failed for %s, continuing without the episode id',
+                               video.series, exc_info=True)
     else:
         intersect = providers_requiring_anidb_api.intersection(settings.general.enabled_providers)
         if len(intersect) >= 1:
-            logger.warn(f'AniDB API credentials are not fully set up, the following providers may not work: {intersect}')  # noqa: G004, G010
+            logger.warning(f'AniDB API credentials are not fully set up, the following providers may not work: {intersect}')  # noqa: G004
 
     video.series_anidb_id = anidb_series_id
     video.series_anidb_episode_id = anidb_episode_id
