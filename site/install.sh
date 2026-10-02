@@ -305,7 +305,8 @@ compose_bazarr_service() {
     /^    image: .*lavx\/bazarr/ { print c; exit }'
 }
 
-# One environment value of one service.
+# One environment value of one service. Fails when the service does not set the key at all,
+# which tells an unset variable from one set to an empty string.
 compose_env() {
   printf '%s\n' "$1" | awk -v svc="$2" -v key="$3" '
     /^services:/ { s = 1; next }
@@ -314,7 +315,8 @@ compose_env() {
     /^  [^ ]/ { c = $1; sub(/:$/, "", c); e = 0; next }
     c != svc { next }
     /^    [^ ]/ { e = ($1 == "environment:"); next }
-    e && $1 == key ":" { $1 = ""; sub(/^ +/, ""); gsub(/^"|"$/, ""); print; exit }'
+    e && $1 == key ":" { $1 = ""; sub(/^ +/, ""); gsub(/^"|"$/, ""); print; found = 1; exit }
+    END { exit !found }'
 }
 
 # The type and source, tab-separated, of what the Bazarr+ service mounts at /config. Printed
@@ -351,8 +353,86 @@ config_postgres_value() {
     s && $1 == key ":" { $1 = ""; sub(/^ +/, ""); gsub("^[\"" q "]|[\"" q "]$", ""); print; exit }' "$1"
 }
 
-# Works out which database the existing install uses, the way Bazarr+ itself decides:
-# the POSTGRES_* environment wins over config.yaml, and POSTGRES_URL fills in what is left.
+# One parameter from a URL's query string, printed empty when the URL has no query or does
+# not name the key at all. Fails when the key is not there, so an empty value tells apart a
+# parameter the URL sets to nothing from one the URL does not name: host, hostaddr and
+# dbname can ride in the query, which the authority and the path parsing below does not
+# cover. A value set to an empty string is discarded by the application's URL parser, the
+# way parse_qsl drops blank pairs, so only a non-blank query value overrides and the
+# authority or the path stays. The last non-blank value wins, the way a connection string's
+# repeated keyword does. The value is decoded the way the application's own URL parser
+# decodes it, so a percent-encoded name is what reaches libpq, not the encoding libpq
+# would refuse.
+url_query_value() {
+  local raw
+  raw=$(printf '%s\n' "$1" | awk -v key="$2" '
+    { idx = index($0, "?")
+      if (idx > 0) {
+        count = split(substr($0, idx + 1), pairs, "&")
+        for (i = 1; i <= count; i++) {
+          eq = index(pairs[i], "=")
+          if (eq > 0 && substr(pairs[i], 1, eq - 1) == key) {
+            candidate = substr(pairs[i], eq + 1)
+            if (candidate != "") {
+              value = candidate
+              found = 1
+            }
+          }
+        }
+      }
+    }
+    END { if (found) print value; exit !found }') || return
+  url_decode "$raw"
+}
+
+# How many times a query key appears with a value. The application reads a host or a
+# hostaddr named more than once as an ordered failover list, so such a query is not one
+# address to classify. A pair set to an empty string is discarded by the application's
+# URL parser the way parse_qsl drops blank pairs, so it does not count.
+url_query_count() {
+  printf '%s\n' "$1" | awk -v key="$2" '
+    { idx = index($0, "?")
+      if (idx > 0) {
+        count = split(substr($0, idx + 1), pairs, "&")
+        for (i = 1; i <= count; i++) {
+          eq = index(pairs[i], "=")
+          if (eq > 0 && substr(pairs[i], 1, eq - 1) == key && substr(pairs[i], eq + 1) != "")
+            seen++
+        }
+      }
+    }
+    END { print seen + 0 }'
+}
+
+# Decodes a URL query value the way the application's own URL parser does: every
+# %XY pair becomes its byte, a plus becomes a space, and every other character
+# stays exactly as written, including a percent that does not introduce two
+# hexadecimal digits.
+url_decode() {
+  local raw="$1" out="" segment digits
+  while [[ "$raw" == *%* ]]; do
+    segment="${raw%%\%*}"
+    raw="${raw#*\%}"
+    out+="${segment//+/ }"
+    if [[ "${raw:0:2}" =~ ^[0-9A-Fa-f][0-9A-Fa-f]$ ]]; then
+      digits="${raw:0:2}"
+      raw="${raw:2}"
+      out+="$(printf '%b' "\\x$digits")"
+    else
+      out+="%"
+    fi
+  done
+  out+="${raw//+/ }"
+  printf '%s' "$out"
+}
+
+# Works out which database the existing install uses, the way Bazarr+ itself decides: the
+# host and the database each come from their POSTGRES_* variable, then POSTGRES_URL (its
+# authority and path, or the host, hostaddr and dbname parameters in its query string,
+# which win over the authority and the path the way they do for the application's own
+# connection), then config.yaml. config.yaml stays out when the variable or the query
+# parameter is set to an empty string, and when the query names a service, whose service
+# file lives inside the container where this script cannot read it.
 # Sets DB_ENGINE to sqlite, postgres (DB_SERVICE in this compose stack holds DB_NAME) or
 # external (a PostgreSQL server outside the stack, which this script cannot back up).
 # Also sets CONFIG_DIR, the host directory mounted at /config: ./config unless the compose
@@ -361,6 +441,9 @@ config_postgres_value() {
 # copy, and falling back to ./config would back up the wrong folder or none at all.
 detect_database() {
   local dir="$1" config svc enabled host database url rest yaml mount mount_type
+  local url_host="" url_database="" url_host_query="" url_database_query="" \
+    url_host_count url_hostaddr_count \
+    url_host_set=1 url_database_set=1 url_service=1 host_set database_set
   DB_ENGINE=sqlite; DB_SERVICE=""; DB_NAME=""; DB_OTHER_SERVICES=()
   config=$(sudo docker compose -f "$dir/docker-compose.yml" config 2>/dev/null) \
     || fatal "Could not read $dir/docker-compose.yml. Nothing was changed."
@@ -377,19 +460,50 @@ detect_database() {
   [[ "${enabled,,}" == "true" ]] || return 0
 
   DB_ENGINE=external
-  host=$(compose_env "$config" "$svc" POSTGRES_HOST)
-  [[ -n "$host" ]] || host=$(config_postgres_value "$yaml" host)
-  database=$(compose_env "$config" "$svc" POSTGRES_DATABASE)
-  [[ -n "$database" ]] || database=$(config_postgres_value "$yaml" database)
-  url=$(compose_env "$config" "$svc" POSTGRES_URL)
-  [[ -n "$url" ]] || url=$(config_postgres_value "$yaml" url)
+  url=$(compose_env "$config" "$svc" POSTGRES_URL) || url=$(config_postgres_value "$yaml" url)
   if [[ -n "$url" ]]; then
     rest="${url#*://}"; rest="${rest##*@}"
-    [[ -n "$host" ]] || { host="${rest%%[/?]*}"; host="${host%:*}"; }
-    if [[ -z "$database" && "$rest" == */* ]]; then
-      database="${rest#*/}"; database="${database%%\?*}"
+    url_host="${rest%%[/?]*}"; url_host="${url_host%:*}"
+    if [[ "$rest" == */* ]]; then
+      url_database="${rest#*/}"; url_database="${url_database%%\?*}"
     fi
+    # host, hostaddr or dbname can also ride in the URL's query string, and a query
+    # naming `service` points at a service file inside the container. A query value
+    # wins over the authority and the path, the way the application's own engine
+    # reads the same URL, or the classification could take for an outside database
+    # the very connection the application makes to the stack, or dump a database
+    # the application never connects to. A query naming host or hostaddr more than
+    # once is an ordered failover list the application may connect to any member
+    # of, and a query naming both connects through hostaddr while host stays for
+    # authentication, so neither narrows to one service to dump: both stay
+    # unclassified, which says so and backs nothing up, rather than dumping a
+    # database the application may not be using.
+    url_host_count=$(url_query_count "$url" host)
+    url_hostaddr_count=$(url_query_count "$url" hostaddr)
+    if (( url_host_count + url_hostaddr_count > 1 )); then
+      url_host=""
+    elif url_host_query=$(url_query_value "$url" host); then
+      url_host="$url_host_query"; url_host_set=0
+    elif url_host_query=$(url_query_value "$url" hostaddr); then
+      url_host="$url_host_query"; url_host_set=0
+    elif [[ -n "$url_host" ]]; then
+      url_host_set=0
+    fi
+    if url_database_query=$(url_query_value "$url" dbname); then
+      url_database="$url_database_query"; url_database_set=0
+    elif [[ -n "$url_database" ]]; then
+      url_database_set=0
+    fi
+    url_query_value "$url" service && url_service=0
   fi
+  host=$(compose_env "$config" "$svc" POSTGRES_HOST); host_set=$?
+  [[ -n "$host" ]] || { host="$url_host"; [[ $url_host_set -eq 0 ]] && host_set=0; }
+  [[ -n "$host" || $host_set -eq 0 || $url_service -eq 0 ]] \
+    || host=$(config_postgres_value "$yaml" host)
+  database=$(compose_env "$config" "$svc" POSTGRES_DATABASE); database_set=$?
+  [[ -n "$database" ]] || { database="$url_database"; [[ $url_database_set -eq 0 ]] && database_set=0; }
+  [[ -n "$database" || $database_set -eq 0 || $url_service -eq 0 ]] \
+    || database=$(config_postgres_value "$yaml" database)
   if [[ -n "$host" && -n "$database" && "$host" != "$svc" ]] \
      && compose_services "$config" | grep -qxF -- "$host"; then
     DB_ENGINE=postgres; DB_SERVICE="$host"; DB_NAME="$database"
