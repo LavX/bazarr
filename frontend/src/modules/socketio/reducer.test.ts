@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { QueryKeys } from "@/apis/queries/keys";
+import api from "@/apis/raw";
 
 const queryClientMock = vi.hoisted(() => ({
   getQueryData: vi.fn(),
@@ -145,4 +146,20 @@ describe("socketio reducer", () => {
       });
     },
   );
+
+  it("marks the jobs list stale when a finished job cannot be fetched", async () => {
+    vi.mocked(api.system.jobs).mockRejectedValueOnce(new Error("offline"));
+    const handler = reducerFor("jobs").update as (payload: unknown[]) => void;
+
+    // eslint-disable-next-line camelcase
+    handler([{ job_id: 7, status: "completed", progress_value: null }]);
+
+    await vi.waitFor(() =>
+      expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+        queryKey: [QueryKeys.System, QueryKeys.Jobs],
+        exact: true,
+      }),
+    );
+    expect(queryClientMock.setQueryData).not.toHaveBeenCalled();
+  });
 });

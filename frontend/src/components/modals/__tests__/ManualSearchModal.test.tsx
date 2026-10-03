@@ -19,7 +19,7 @@ import { UseQueryResult } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { MovieSearchModal } from "@/components/modals/ManualSearchModal";
-import { customRender, screen, waitFor } from "@/tests";
+import { act, customRender, screen, waitFor } from "@/tests";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -424,4 +424,58 @@ it("still says something when the failure carries no message", async () => {
   expect(
     await screen.findByText("The request failed and said nothing further."),
   ).toBeInTheDocument();
+});
+
+it("spins on the clicked row while its download runs, and only there", async () => {
+  const user = userEvent.setup();
+  // Held open until the test releases it, so the spinner is observable.
+  let release: () => void = () => undefined;
+  const download = vi.fn().mockImplementation(
+    () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+  );
+  const resultA = makeSearchResult({
+    provider: "opensubtitles",
+    url: "https://www.opensubtitles.org/en/subtitles/1234",
+  });
+  const resultB = makeSearchResult({
+    provider: "subscene",
+    url: "https://subscene.com/sub/999",
+  });
+  renderModal([resultA, resultB], download);
+  await user.click(screen.getByRole("button", { name: /^search$/i }));
+  const [rowA] = await screen.findAllByLabelText("Download");
+
+  await user.click(rowA);
+
+  // The clicked row swaps its icon for the spinner. The buttons are queried
+  // fresh each time because the changing columns remount the cells.
+  await waitFor(() => {
+    const [pending] = screen.getAllByLabelText("Download");
+    // The loader replaces the icon, so the row stops carrying one.
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(pending.querySelector("svg[data-icon]")).toBeNull();
+  });
+  const [pending, other] = screen.getAllByLabelText("Download");
+  expect(pending).toBeDisabled();
+  expect(other).toBeDisabled();
+  // eslint-disable-next-line testing-library/no-node-access
+  expect(other.querySelector('svg[data-icon="download"]')).not.toBeNull();
+
+  act(() => {
+    release();
+  });
+
+  // Settled: the spinner gives way to the downloaded mark on that row.
+  await waitFor(() => {
+    const [clicked] = screen.getAllByLabelText("Download");
+    expect(
+      // eslint-disable-next-line testing-library/no-node-access
+      clicked.querySelector('svg[data-icon="cloud-arrow-down"]'),
+    ).not.toBeNull();
+  });
+  const [, untouched] = screen.getAllByLabelText("Download");
+  expect(untouched).toBeEnabled();
 });

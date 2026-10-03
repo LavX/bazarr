@@ -31,8 +31,18 @@ describe("appendArrInstanceParam", () => {
 
 describe("buildEditorSubtitlesUrl", () => {
   it("includes arr_instance_id when fetching editor subtitle lists", () => {
-    expect(buildEditorSubtitlesUrl("/bazarr", "movie", "50", "secret", 3)).toBe(
-      "/bazarr/api/editor/subtitles?mediaType=movie&mediaId=50&apikey=secret&arr_instance_id=3",
+    expect(buildEditorSubtitlesUrl("/bazarr", "movie", "50", 3)).toBe(
+      "/bazarr/api/editor/subtitles?mediaType=movie&mediaId=50&arr_instance_id=3",
+    );
+  });
+
+  it("never puts the API key in the URL", () => {
+    // The key travels in the X-API-KEY header. In a URL it lands in proxy
+    // access logs and makes the server log a deprecation warning per call.
+    const url = buildEditorSubtitlesUrl("", "episode", "7");
+    expect(url).toBe("/api/editor/subtitles?mediaType=episode&mediaId=7");
+    expect(new URL(url, "http://bazarr.test").searchParams.has("apikey")).toBe(
+      false,
     );
   });
 });
