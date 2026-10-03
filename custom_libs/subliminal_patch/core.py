@@ -725,8 +725,7 @@ class SZProviderPool(ProviderPool):
             try:
                 provider_subtitles = self.list_subtitles_provider(name, video, languages)
             except LanguageReverseError:
-                logger.exception("Unexpected language reverse error in %s, skipping. Error: %s", name,
-                                 traceback.format_exc())
+                logger.exception("Unexpected language reverse error in %s, skipping", name)
                 continue
 
             if provider_subtitles is None:
@@ -759,7 +758,7 @@ class SZProviderPool(ProviderPool):
                 and ("series" in orig_matches or "imdb_id" in orig_matches))
 
     def list_subtitles_prioritized(self, video, languages, min_score=0, provider_order=None, compute_score=None,
-                                   exhaustive=False):
+                                   exhaustive=False, report_stop=False):
         """List subtitles with priority-based provider search.
 
         Search providers in priority order. Stop only when every requested
@@ -769,6 +768,11 @@ class SZProviderPool(ProviderPool):
         When ``exhaustive=True`` (manual search), the early-exit on satisfied
         languages is disabled so every provider is queried and the user sees
         the full set of candidates regardless of score.
+
+        With ``report_stop=True`` the result is ``(subtitles, stopped_at)``:
+        the name of the provider that satisfied every language, or None when
+        the listing ran to the end. A caller resumes after that provider when
+        what it listed could not be downloaded.
         """
         from .score import compute_score as default_compute_score
         compute_score = compute_score or default_compute_score
@@ -812,7 +816,7 @@ class SZProviderPool(ProviderPool):
                 try:
                     matches = subtitle.get_matches(video)
                 except AttributeError:
-                    logger.error("%r: Match computation failed: %s", subtitle, traceback.format_exc())
+                    logger.error("%r: Match computation failed", subtitle, exc_info=True)
                     continue
                 orig_matches = matches.copy()
                 score, _ = compute_score(matches, subtitle, video, False)
@@ -830,9 +834,9 @@ class SZProviderPool(ProviderPool):
 
             if not exhaustive and required_languages and satisfied_languages >= required_languages:
                 logger.info('All requested languages satisfied after provider %s, stopping search', name)
-                return all_subtitles
+                return (all_subtitles, name) if report_stop else all_subtitles
 
-        return all_subtitles
+        return (all_subtitles, None) if report_stop else all_subtitles
 
     def download_subtitle(self, subtitle):
         """Download `subtitle`'s :attr:`~subliminal.subtitle.Subtitle.content`.
@@ -960,7 +964,7 @@ class SZProviderPool(ProviderPool):
                     matches = cached
 
             except AttributeError:
-                logger.error("%r: Match computation failed: %s", s, traceback.format_exc())
+                logger.error("%r: Match computation failed", s, exc_info=True)
                 continue
 
             orig_matches = matches.copy()
@@ -1012,6 +1016,12 @@ class SZProviderPool(ProviderPool):
 
         # download best subtitles, falling back on the next on error
         downloaded_subtitles = []
+        # Providers whose remaining candidates this round leaves alone, logged
+        # once each. A provider is often discarded by its own first failure
+        # here, or by a concurrent search on the same pool, and every later
+        # candidate of it would otherwise be refused with a warning of its own.
+        skip_reasons = {}
+        skipped_providers = set()
         for subtitle, score, score_without_hash, matches, orig_matches in scored_subtitles:
             # check score
             if score < min_score:
@@ -1042,6 +1052,16 @@ class SZProviderPool(ProviderPool):
                              subtitle, score)
                 continue
 
+            skip_reason = skip_reasons.get(subtitle.provider_name)
+            if skip_reason is None and subtitle.provider_name in self.discarded_providers:
+                skip_reason = 'discarded'
+            if skip_reason is not None:
+                if subtitle.provider_name not in skipped_providers:
+                    skipped_providers.add(subtitle.provider_name)
+                    logger.info('Skipping the remaining candidates of provider %r in this round (%s)',
+                                subtitle.provider_name, skip_reason)
+                continue
+
             # make sure to preserve original subtitles format if requested
             subtitle.use_original_format = use_original_format
 
@@ -1057,23 +1077,10 @@ class SZProviderPool(ProviderPool):
                     logger.debug('Only one subtitle downloaded')
                     break
 
-        # --- WHISPER FALLBACK PRECONDITIONS ---
-        # 1. No regular provider results with at least minimum score
-        # 2. We are in a Bulk Task or Single Series search
-        # 3. User enabled the Whisper fallback setting
-        # 4. Whisper is actually in the active providers list
-        if (not downloaded_subtitles and 
-            fallback_allowed and 
-            'whisperai' in self.providers):
-            
-            for subtitle, score, score_without_hash, matches, orig_matches in scored_subtitles:
-                if subtitle.provider_name == 'whisperai':
-                    logger.info('BAZARR Bulk Task: Falling back to Whisper for %r', video.name)
-                    subtitle.use_original_format = use_original_format
-                    if self.download_subtitle(subtitle):
-                        subtitle.score = score
-                        downloaded_subtitles.append(subtitle)
-                        break
+        if not downloaded_subtitles and fallback_allowed:
+            downloaded_subtitles = self.download_fallback_subtitles(
+                subtitles, video, languages, hearing_impaired=hearing_impaired,
+                use_original_format=use_original_format)
 
         if candidate_sink is not None:
             # Identity, not equality: Subtitle equality is provider-defined and
@@ -1099,6 +1106,48 @@ class SZProviderPool(ProviderPool):
                 })
 
         return downloaded_subtitles
+
+    def download_fallback_subtitles(self, subtitles, video, languages, hearing_impaired=False,
+                                    use_original_format=False, candidate_sink=None):
+        """Transcribe with Whisper when nothing else could be downloaded.
+
+        The caller has already checked that nothing was downloaded and that the
+        fallback is allowed. Whisper's own candidates are tried best first,
+        whatever their score, and the first one that downloads is returned.
+
+        With ``candidate_sink`` the record a listing round already wrote for
+        the candidate is flagged downloaded, so a caller reading the sink sees
+        the fallback's outcome; a candidate no round scored is appended with
+        the same record shape.
+        """
+        if 'whisperai' not in self.providers:
+            return []
+
+        whisper_subtitles = [s for s in subtitles if s.provider_name == 'whisperai']
+        for subtitle, score, _score_without_hash, matches, orig_matches in self._score_subtitles(
+                whisper_subtitles, video, languages, hearing_impaired):
+            logger.info('BAZARR Bulk Task: Falling back to Whisper for %r', video.name)
+            subtitle.use_original_format = use_original_format
+            if self.download_subtitle(subtitle):
+                subtitle.score = score
+                if candidate_sink is not None:
+                    described = {
+                        'provider_name': subtitle.provider_name,
+                        'release_info': getattr(subtitle, 'release_info', None),
+                        'score': score,
+                        'matches': sorted(orig_matches or ()),
+                        'scored_matches': sorted(matches or ()),
+                    }
+                    for record in candidate_sink:
+                        if record.get('downloaded') is False and all(
+                                record.get(key) == value for key, value in described.items()):
+                            record['downloaded'] = True
+                            break
+                    else:
+                        candidate_sink.append(dict(described, downloaded=True))
+                return [subtitle]
+
+        return []
 
     def list_supported_languages(self):
         """List supported languages.

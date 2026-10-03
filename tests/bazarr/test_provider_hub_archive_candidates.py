@@ -754,9 +754,9 @@ def select_best(pool, subtitles, only_one=True, languages=None, existing_languag
                          subtitle_languages=existing_languages or set())
     listed_languages, sink = [], []
 
-    def list_subtitles(video, languages, **kwargs):
+    def list_subtitles(video, languages, report_stop=False, **kwargs):
         listed_languages.append(languages)
-        return subtitles
+        return (subtitles, None) if report_stop else subtitles
 
     pool.list_subtitles_prioritized = list_subtitles
     result = core_persistent.download_best_subtitles(

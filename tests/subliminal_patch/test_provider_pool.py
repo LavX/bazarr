@@ -584,3 +584,93 @@ def test_teardown_drops_the_provider_even_when_terminate_aborts(monkeypatch):
         del pool["alpha"]
 
     assert "alpha" not in pool.initialized_providers
+
+
+# A provider failure in the pool carries its traceback on the log record,
+# exactly once: the message stays a single clean line, and the traceback text
+# reaches the log through the record, where the file sinks' redaction sees it.
+
+def _pool_error_records(caplog):
+    return [record for record in caplog.records
+            if record.name == core.logger.name and record.levelname == "ERROR"]
+
+
+def test_a_language_reverse_failure_records_its_traceback_once(monkeypatch, caplog):
+    """The LanguageReverseError handler used to paste format_exc() into a
+    logger.exception call, which already appends the traceback, so the log
+    wrote it twice."""
+    from types import SimpleNamespace
+
+    pool = core.SZProviderPool(["alpha"], {})
+
+    def reversing(provider, video, languages, detailed=False):
+        raise core.LanguageReverseError("fixture reverse failure")
+
+    monkeypatch.setattr(pool, "list_subtitles_provider", reversing)
+
+    with caplog.at_level("ERROR", logger=core.logger.name):
+        assert pool.list_subtitles(SimpleNamespace(), {core.Language("eng")}) == []
+
+    failures = _pool_error_records(caplog)
+    assert len(failures) == 1
+    record = failures[0]
+    # One record, one traceback, and the message carries neither.
+    assert record.getMessage() == "Unexpected language reverse error in alpha, skipping"
+    assert "\n" not in record.getMessage()
+    assert "Traceback" not in record.getMessage()
+    assert record.exc_info and record.exc_info[0] is core.LanguageReverseError
+    assert "fixture reverse failure" in record.exc_text
+    assert caplog.text.count("Traceback (most recent call last)") == 1
+
+
+class _MatchComputationFails:
+    """A listed candidate whose match computation fails; the handler logs it
+    and the search moves on to the next candidate."""
+
+    def __init__(self):
+        self.id = "fixture-sub"
+        self.language = core.Language("eng")
+        self.hearing_impaired = False
+        self.provider_name = "alpha"
+        self.release_info = ""
+
+    def get_matches(self, video):
+        raise AttributeError("fixture match failure")
+
+
+@pytest.mark.parametrize("path", ["prioritized_listing", "scoring"])
+def test_a_match_computation_failure_records_its_traceback_once(monkeypatch, caplog, path):
+    """The "Match computation failed" handlers used to bury format_exc() in
+    an error message instead of attaching the traceback to the record."""
+    from types import SimpleNamespace
+
+    broken = _MatchComputationFails()
+    language = broken.language
+
+    class Provider(_FakeProvider):
+        languages = {language}
+
+        def list_subtitles(self, video, languages):
+            return [broken]
+
+    monkeypatch.setattr(core, "provider_registry", {"alpha": Provider})
+    pool = core.SZProviderPool(["alpha"], {})
+    video = SimpleNamespace(radarrId=7, arr_instance_id=4, sports_context=None, fps=None)
+
+    with caplog.at_level("ERROR", logger=core.logger.name):
+        if path == "prioritized_listing":
+            assert pool.list_subtitles_prioritized(video, {language}) == [broken]
+        else:
+            assert core.SZProviderPool._score_subtitles([broken], video, {language}, "no") == []
+
+    failures = _pool_error_records(caplog)
+    assert len(failures) == 1
+    record = failures[0]
+    # One record, one traceback, and the message is a single clean line.
+    message = record.getMessage()
+    assert message.endswith(": Match computation failed")
+    assert "\n" not in message
+    assert "Traceback" not in message
+    assert record.exc_info and record.exc_info[0] is AttributeError
+    assert "fixture match failure" in record.exc_text
+    assert caplog.text.count("Traceback (most recent call last)") == 1
