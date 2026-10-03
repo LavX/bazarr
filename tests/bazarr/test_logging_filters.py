@@ -103,6 +103,50 @@ def test_tmdb_v3_key_is_redacted_in_a_urllib3_request_line():
     ) == "GET /3/movie/42?api_key=(removed)"
 
 
+GEMINI_SHAPED_KEY = (
+    "AIzaSyA-"
+    "fake_key"
+    "-0123456"
+    "789abcde"
+    "fghijkl"
+)
+OPENROUTER_SHAPED_KEY = "sk-or-v1-" + "0123456789abcdef" * 4
+DOTTED_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJlLXZhbHVl"
+
+
+def _eight_character_windows(value):
+    return [value[start:start + 8] for start in range(len(value) - 7)]
+
+
+@pytest.mark.parametrize("name", ["key", "apikey", "api_key", "apiKey", "token", "api_token", "access_token",
+                                  "X-Plex-Token"])
+@pytest.mark.parametrize("value", [GEMINI_SHAPED_KEY, OPENROUTER_SHAPED_KEY, DOTTED_TOKEN, "abc+def/ghij==",
+                                   "123456:AAH-secret_tail", "user@secret!tail$x*y,z;w(1)#2[3]", "sécret-tail"])
+def test_redaction_removes_the_whole_value_up_to_the_next_delimiter(name, value):
+    from app.logger import FileHandlerFormatter
+
+    fmt = FileHandlerFormatter()
+    line = f"GET https://host.example/v1/models?{name}={value}&alt=json HTTP/1.1 '{name}%3D{value}'|done"
+    redacted = fmt.formatApikey(line)
+    assert redacted == (f"GET https://host.example/v1/models?{name}=(removed)&alt=json HTTP/1.1 "
+                        f"'{name}=(removed)'|done")
+    assert not [window for window in _eight_character_windows(value) if window in redacted]
+
+
+def test_redaction_reaches_a_key_inside_a_logged_traceback():
+    from app.logger import FileHandlerFormatter
+
+    try:
+        raise RuntimeError("400 Client Error: Bad Request for url: "
+                           f"https://host.example/v1beta/models/m:generateContent?key={GEMINI_SHAPED_KEY}")
+    except RuntimeError:
+        record = logging.LogRecord("root", logging.ERROR, "", 0, "Exception raised while running function",
+                                   (), sys.exc_info())
+    formatted = FileHandlerFormatter('%(levelname)s|%(message)s|').format(record)
+    assert "generateContent?key=(removed)" in formatted
+    assert not [window for window in _eight_character_windows(GEMINI_SHAPED_KEY) if window in formatted]
+
+
 # ---------------------------------------------------------------------------
 # Graded per-logger levels
 # ---------------------------------------------------------------------------
