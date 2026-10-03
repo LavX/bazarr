@@ -96,6 +96,37 @@ def validate_subtitle_settings(blob):
             section_out[key] = value
         if section_out:
             cleaned[section] = section_out
+    general = cleaned.get("general", {})
+    command = general.get("postprocessing_cmd")
+    inherited = command is None and general.get("use_postprocessing")
+    from app.config import settings
+    if inherited:
+        # Turning post-processing on without a command override inherits the
+        # global command, which may predate the no-shell switch: the command
+        # this instance will actually run gets the same save-time validation.
+        command = settings.general.postprocessing_cmd
+    if not general.get("use_postprocessing", settings.general.use_postprocessing):
+        # The override leaves post-processing off, so whatever command it
+        # stores never runs and is left alone.
+        return cleaned
+    if command is None:
+        # Nothing in this save turns post-processing on or names a command,
+        # so what the instance inherits from the global settings is guarded by
+        # the global save and reported by the health check instead.
+        return cleaned
+    if not command.strip():
+        # Post-processing is on with nothing to run, which would silently
+        # skip every download for this instance; the toggle and the command
+        # go together.
+        raise ValueError("general.postprocessing_cmd: post-processing is on with no command")
+    from utilities.post_processing import parse_postprocessing_command
+    try:
+        parse_postprocessing_command(command)
+    except ValueError as exc:
+        if inherited:
+            raise ValueError(f"general.postprocessing_cmd (the inherited global "
+                             f"command): {exc}") from None
+        raise ValueError(f"general.postprocessing_cmd: {exc}") from None
     return cleaned
 
 
