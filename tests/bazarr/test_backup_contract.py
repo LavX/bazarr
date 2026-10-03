@@ -739,9 +739,9 @@ class _ServerConnection:
 
 
 def _fake_driver(version, opened):
-    def connect(**arguments):
-        opened.append((arguments, _ServerConnection(version)))
-        return opened[-1][1]
+    def connect(conninfo, **arguments):
+        opened.append((conninfo, arguments, _ServerConnection(version)))
+        return opened[-1][2]
     return SimpleNamespace(connect=connect)
 
 
@@ -756,10 +756,29 @@ def test_the_server_version_is_read_with_psycopg2_which_the_image_ships(backup_e
     connection = backup_env.module._postgres_connection_settings()
     assert backup_env.module._postgres_server_major(connection) == '16'
 
-    (arguments, server), = opened
-    assert arguments == {'host': 'db.internal', 'port': 5433, 'dbname': 'bazarr',
-                         'user': 'bazarr_user', 'password': 'sekrit', 'connect_timeout': 5}
+    (conninfo, arguments, server), = opened
+    assert conninfo == "host='db.internal' port='5433' dbname='bazarr' user='bazarr_user'"
+    assert arguments == {'password': 'sekrit', 'connect_timeout': 5}
     # Leaving a psycopg 2 connection's with-block does not close it.
+    assert server.closed is True
+
+
+def test_the_server_version_probe_keeps_the_url_query_options(backup_env, monkeypatch):
+    """The probe connected with the five fields alone, so a server that only
+    takes client certificates or verify-full was worded as 'unknown'."""
+    _enable_postgresql_by_url(backup_env, monkeypatch)
+    opened = []
+    monkeypatch.setitem(sys.modules, 'psycopg2', _fake_driver(160004, opened))
+
+    connection = backup_env.module._postgres_connection_settings()
+    assert backup_env.module._postgres_server_major(connection) == '16'
+
+    (conninfo, arguments, server), = opened
+    for option in ("host='url.host'", "port='6543'", "sslmode='verify-full'",
+                   "sslcert='/certs/client.crt'", "sslrootcert='/certs/root.crt'"):
+        assert option in conninfo
+    assert 'url_password' not in conninfo
+    assert arguments == {'password': 'url_password', 'connect_timeout': 5}
     assert server.closed is True
 
 
@@ -771,7 +790,7 @@ def test_without_psycopg2_the_server_version_is_read_with_psycopg_3(backup_env, 
 
     connection = backup_env.module._postgres_connection_settings()
     assert backup_env.module._postgres_server_major(connection) == '17'
-    assert [server.closed for _, server in opened] == [True]
+    assert [server.closed for _, _, server in opened] == [True]
 
     monkeypatch.setitem(sys.modules, 'psycopg', None)
     assert backup_env.module._postgres_server_major(connection) is None
@@ -850,25 +869,25 @@ def test_connection_settings_follow_the_same_precedence_as_the_application(backu
     assert connection['password'] == 'sekrit'
 
 
-def test_a_connection_url_only_fills_what_the_keys_leave_empty(backup_env, monkeypatch):
+def test_config_yaml_only_fills_what_the_connection_url_leaves_out(backup_env, monkeypatch):
     postgresql = backup_env.settings.postgresql
     monkeypatch.setattr(postgresql, 'enabled', True)
-    monkeypatch.setattr(postgresql, 'host', '')
-    monkeypatch.setattr(postgresql, 'port', '')
-    monkeypatch.setattr(postgresql, 'database', '')
+    # host and port are never empty in config.yaml: these are its defaults.
+    monkeypatch.setattr(postgresql, 'host', 'localhost')
+    monkeypatch.setattr(postgresql, 'port', 5432)
+    monkeypatch.setattr(postgresql, 'database', 'configured_database')
     monkeypatch.setattr(postgresql, 'username', 'configured_user')
-    monkeypatch.setattr(postgresql, 'password', '')
-    monkeypatch.setattr(postgresql, 'url',
-                        'postgresql://url_user:url_password@url.host:6543/url_database')
+    monkeypatch.setattr(postgresql, 'password', 'configured_password')
+    monkeypatch.setattr(postgresql, 'url', 'postgresql://url_user@url.host:6543/url_database')
 
     connection = backup_env.module._postgres_connection_settings()
 
     assert connection['host'] == 'url.host'
     assert connection['port'] == 6543
     assert connection['database'] == 'url_database'
-    assert connection['password'] == 'url_password'
-    # The configured key wins; the URL only fills the gaps.
-    assert connection['username'] == 'configured_user'
+    assert connection['username'] == 'url_user'
+    # The URL carries no password, so config.yaml supplies it.
+    assert connection['password'] == 'configured_password'
 
 
 def test_an_unparseable_connection_url_does_not_escape_as_a_boot_failure(backup_env, monkeypatch):
@@ -959,7 +978,10 @@ TLS_URL = ('postgresql://url_user:url_password@url.host:6543/url_database'
 def _enable_postgresql_by_url(backup_env, monkeypatch, url=TLS_URL):
     postgresql = backup_env.settings.postgresql
     monkeypatch.setattr(postgresql, 'enabled', True)
-    for key in ('host', 'port', 'database', 'username', 'password'):
+    # What config.yaml holds when only the URL was set: its validator defaults.
+    monkeypatch.setattr(postgresql, 'host', 'localhost')
+    monkeypatch.setattr(postgresql, 'port', 5432)
+    for key in ('database', 'username', 'password'):
         monkeypatch.setattr(postgresql, key, '')
     monkeypatch.setattr(postgresql, 'url', url)
 
@@ -989,6 +1011,49 @@ def test_the_client_tools_keep_the_url_query_options(backup_env, monkeypatch, to
     assert '--no-password' in argv
     assert 'url_password' not in argv
     assert 'PGPASSWORD url_password' in open(log_path, encoding='utf-8').read()
+
+
+@pytest.mark.parametrize('tool', ['pg_dump', 'pg_restore'])
+def test_a_service_url_is_backed_up_and_restored_without_a_database_name(backup_env, monkeypatch, tool):
+    """The service entry names the database, so the URL carries none, and the
+    missing name refused every backup and restore."""
+    _enable_postgresql_by_url(backup_env, monkeypatch, 'postgresql:///?service=bazarr')
+    log_path = _write_fake_tool(str(backup_env.tools_dir), tool, writes_output=tool == 'pg_dump')
+
+    if tool == 'pg_dump':
+        backup_env.module.backup_to_zip(job_id=1)
+    else:
+        _stage_restore(backup_env, 'bazarr_postgres.dump')
+        assert backup_env.module.restore_from_backup() is True
+
+    argv = _argv_line(log_path)
+    assert "--dbname service='bazarr'" in argv
+    assert 'localhost' not in argv
+
+
+@pytest.mark.parametrize('url, host_option, port_option', [
+    ('postgresql:///?host=primary:5432&host=standby:5433', "host='primary,standby'",
+     "port='5432,5433'"),
+    ('postgresql:///?host=db:6543', "host='db'", "port='6543'"),
+    # Entries without a port change nothing: the host list alone, and the port
+    # the URL resolution already carried, here config.yaml's default.
+    ('postgresql:///?host=primary&host=standby', "host='primary,standby'", "port='5432'"),
+])
+def test_the_conninfo_splits_a_query_host_port_off_its_host(backup_env, monkeypatch, url,
+                                                            host_option, port_option):
+    """The application's dialect splits the port a query host entry carries inline
+    off before libpq sees it, host=db and port=6543 from ?host=db:6543, so the
+    conninfo has to carry the same split: a host list that keeps the inline
+    ports, host=primary:5432,standby:5433, is not a form libpq reads, and the
+    reachability check, pg_dump and pg_restore would all fail against a
+    database the application connects to. Entries without a port keep the
+    conninfo they always had."""
+    _enable_postgresql_by_url(backup_env, monkeypatch, url)
+
+    conninfo = backup_env.module._postgres_conninfo(backup_env.module._postgres_connection_settings())
+
+    assert host_option in conninfo
+    assert port_option in conninfo
 
 
 def test_a_password_in_the_url_query_stays_off_the_command_line(backup_env, monkeypatch):
@@ -1080,3 +1145,148 @@ def test_a_reachable_database_that_fails_mid_restore_still_stops_the_start(backu
     assert backup_env.stops == [EXIT_RESTORE_ERROR]
     assert MID_RESTORE_WORDING in caplog.text
     assert (backup_env.restore_dir / 'bazarr_postgres.dump.failed').is_file()
+
+
+# ------------------------------------- one connection URL for app and backups
+
+def _resolve(url='', environ=None, **configured):
+    """The URL resolved from a config.yaml postgresql section and an environment."""
+    from app.postgres_url import postgres_engine_url
+
+    postgresql = dict(host='localhost', port=5432, database='', username='', password='', url=url)
+    postgresql.update(configured)
+    return postgres_engine_url(SimpleNamespace(postgresql=SimpleNamespace(**postgresql)),
+                               environ={} if environ is None else environ)
+
+
+def _target(url):
+    return url.username, url.password, url.host, url.port, url.database
+
+
+def test_a_url_only_setup_reaches_the_url_host_past_the_config_defaults():
+    """config.yaml always carries localhost:5432, and those replaced the URL's
+    host and port, so an install configured by POSTGRES_URL alone never connected."""
+    url = _resolve(environ={'POSTGRES_URL': 'postgresql://u:p@db.example:6543/bazarr?sslmode=verify-full'})
+
+    assert _target(url) == ('u', 'p', 'db.example', 6543, 'bazarr')
+    assert url.query == {'sslmode': 'verify-full'}
+
+
+def test_the_environment_still_overrides_the_url():
+    url = _resolve('postgresql://u:p@db.example:6543/bazarr',
+                   environ={'POSTGRES_HOST': 'other.example', 'POSTGRES_PORT': '7654',
+                            'POSTGRES_USERNAME': 'env_user', 'POSTGRES_PASSWORD': 'env_password',
+                            'POSTGRES_DATABASE': 'env_database'})
+
+    assert (url.username, url.password, url.host, url.database) == (
+        'env_user', 'env_password', 'other.example', 'env_database')
+    assert int(url.port) == 7654
+
+
+def test_the_url_wins_over_config_yaml_for_every_field():
+    url = _resolve('postgresql://u:p@db.example:6543/bazarr', host='config.example', port=5433,
+                   username='config_user', password='config_password', database='config_database')
+
+    assert _target(url) == ('u', 'p', 'db.example', 6543, 'bazarr')
+
+
+def test_config_yaml_fills_what_the_url_leaves_out():
+    url = _resolve('postgresql:///bazarr', host='config.example', port=5433, username='config_user',
+                   password='config_password')
+
+    assert _target(url) == ('config_user', 'config_password', 'config.example', 5433, 'bazarr')
+
+
+def test_a_host_in_the_url_query_gets_no_localhost_added():
+    url = _resolve('postgresql://u@/bazarr?host=/run/postgresql')
+
+    assert url.host is None
+    assert url.query == {'host': '/run/postgresql'}
+
+
+def test_a_service_entry_gets_nothing_from_config_yaml():
+    """Anything set beside a service wins over the service file, so the
+    config.yaml defaults sent a service URL to localhost:5432."""
+    url = _resolve('postgresql:///?service=bazarr', username='config_user', password='config_password',
+                   database='config_database')
+
+    assert (url.username, url.password, url.host, url.port) == (None, None, None, None)
+    assert not url.database
+    assert url.query == {'service': 'bazarr'}
+
+
+def test_a_hostaddr_in_the_url_query_gets_no_localhost_added():
+    url = _resolve('postgresql://u@/bazarr?hostaddr=10.0.0.5')
+
+    assert (url.host, url.port) == (None, 5432)
+
+
+@pytest.mark.parametrize('field, variable, value', [
+    ('password', 'POSTGRES_PASSWORD', 'env_password'),
+    ('host', 'POSTGRES_HOST', 'env.host'),
+])
+def test_the_environment_also_overrides_the_url_query(field, variable, value):
+    """SQLAlchemy lays the query over the URL's fields, so a variable that only
+    replaced the field lost to the query in the application's own connection."""
+    url = _resolve(f'postgresql://u@db.example/bazarr?{field}=from_query&sslmode=require',
+                   environ={variable: value})
+
+    assert getattr(url, field) == value
+    assert url.query == {'sslmode': 'require'}
+
+
+def test_the_environment_port_wins_over_the_port_a_query_host_carries_inline():
+    """The dialect reads the port inside a query host entry, host=db:6543, over
+    the port the URL itself carries, so a POSTGRES_PORT that replaced the
+    URL's port still connected the application to the inline one. The entry
+    is rewritten instead, db:6543 to db, the way the port query key is
+    replaced, so the port the environment names is the one the connection
+    uses. Without POSTGRES_PORT the inline port stays."""
+    url = _resolve('postgresql:///?host=db:6543', environ={'POSTGRES_PORT': '7654'})
+
+    assert int(url.port) == 7654
+    assert url.query['host'] == 'db'
+
+    url = _resolve('postgresql:///?host=db:6543')
+
+    assert url.query['host'] == 'db:6543'
+
+
+def test_a_backup_uses_the_query_password_the_application_connects_with(backup_env, monkeypatch):
+    _enable_postgresql_by_url(backup_env, monkeypatch,
+                              'postgresql://url_user:netloc_password@url.host/url_database?password=query_password')
+
+    connection = backup_env.module._postgres_connection_settings()
+
+    assert connection['password'] == 'query_password'
+
+
+def test_without_a_url_the_five_fields_resolve_as_before():
+    url = _resolve(host='config.example', port=5433, username='config_user', password='config_password',
+                   database='config_database', environ={'POSTGRES_DATABASE': 'env_database',
+                                                        'POSTGRES_PASSWORD': ''})
+
+    assert url.drivername == 'postgresql+psycopg2'
+    # An empty variable still blanks the config.yaml value when there is no URL.
+    assert _target(url) == ('config_user', '', 'config.example', 5433, 'env_database')
+
+
+def test_an_empty_environment_variable_changes_nothing_in_the_url():
+    """POSTGRES_HOST= and POSTGRES_PORT= beside the URL were the way around the
+    config.yaml defaults, so they still leave the URL alone and keep config.yaml
+    out of the parts they name."""
+    url = _resolve('postgresql://u:p@db.example/bazarr',
+                   environ={'POSTGRES_HOST': '', 'POSTGRES_PORT': ''})
+
+    assert (url.host, url.port) == ('db.example', None)
+
+
+def test_a_backup_follows_the_same_precedence_for_a_url(backup_env, monkeypatch):
+    _enable_postgresql_by_url(backup_env, monkeypatch,
+                              'postgresql://url_user:url_password@url.host:6543/url_database')
+    monkeypatch.setenv('POSTGRES_HOST', 'env.host')
+
+    connection = backup_env.module._postgres_connection_settings()
+
+    assert (connection['username'], connection['password'], connection['host'], connection['port'],
+            connection['database']) == ('url_user', 'url_password', 'env.host', 6543, 'url_database')
