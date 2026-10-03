@@ -38,6 +38,12 @@ FEATURE_PREFIX = "SYNC_EPISODES "
 # inserts on modern SQLite/PostgreSQL deployments.
 EPISODE_INSERT_CHUNK_SIZE = 50
 
+# Returned by sync_episodes when the series' episode-file answer could not be
+# decoded and the series was skipped whole, so the bulk sync can count that
+# series as skipped the way it counts a failed episode fetch. Every other
+# return, including the implicit one, means the sync itself ran.
+SYNC_SKIPPED_UNREADABLE_EPISODE_FILES = object()
+
 
 def trace(message):
     if settings.general.debug:
@@ -163,6 +169,17 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
             # episodeFile API endpoint results
             episodeFiles = get_episodesFiles_from_sonarr_api(apikey_sonarr=apikey_sonarr, series_id=series_id,
                                                              arr_client=arr_client)
+            if episodeFiles is None:
+                # A body that is not JSON is a failed fetch, not an empty
+                # answer. Without the episodeFile records no episode below
+                # carries its file, so every one of them would count as gone
+                # and the sync would delete the whole series. Skip the series
+                # instead, the way a failed episodes fetch does. The sentinel
+                # return tells the bulk sync this series was skipped, where an
+                # empty return would read as a sync that ran.
+                logging.error("BAZARR could not read the episode files of series %s from Sonarr; "
+                              "the series was skipped and no episode was deleted", series_id)
+                return SYNC_SKIPPED_UNREADABLE_EPISODE_FILES
             if episodeFiles:
                 for episode in episodes:
                     if episodeFiles and episode['hasFile']:
