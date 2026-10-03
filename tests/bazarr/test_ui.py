@@ -734,14 +734,16 @@ def test_proxy_route_rejects_wrong_api_key(monkeypatch):
 
 # --- backup download containment (path-traversal hardening) ------------------
 
-def test_backup_download_rejects_sibling_prefix(monkeypatch, tmp_path):
-    """backup_download must not serve a sibling directory that merely shares the
-    backup-folder name prefix, while still serving a real backup."""
+@pytest.fixture
+def backup_app(monkeypatch, tmp_path):
+    """A backup folder holding one real backup, with a config file beside it and
+    a sibling directory that shares the folder's name as a prefix."""
     from app import ui
 
     backup_dir = tmp_path / "backup"
     backup_dir.mkdir()
     (backup_dir / "bazarr_backup.zip").write_text("zip-bytes")
+    (tmp_path / "config.yaml").write_text("apikey: top-secret")
     sibling = tmp_path / "backup-evil"
     sibling.mkdir()
     (sibling / "secret.txt").write_text("top-secret")
@@ -751,9 +753,34 @@ def test_backup_download_rejects_sibling_prefix(monkeypatch, tmp_path):
         backup=SimpleNamespace(folder=str(backup_dir))))
     app = Flask(__name__)
     app.register_blueprint(ui.ui_bp)
+    return app, tmp_path
 
+
+@pytest.mark.parametrize("filename", [
+    ".",
+    "../config.yaml",
+    "ABSOLUTE",
+    "../backup-evil/secret.txt",
+])
+def test_backup_download_refuses_anything_outside_the_backup_folder(backup_app, filename):
+    """The folder itself, a parent-relative path, an absolute path and a sibling
+    directory sharing the folder's name prefix are all a plain 404."""
+    from app import ui
+
+    app, root = backup_app
+    if filename == "ABSOLUTE":
+        filename = str(root / "config.yaml")
     with app.test_request_context():
-        # sibling-prefix escape is refused
-        assert ui.backup_download("../backup-evil/secret.txt") == ('', 404)
-        # a genuine backup inside the folder is served
-        assert ui.backup_download("bazarr_backup.zip").status_code == 200
+        assert ui.backup_download(filename) == ('', 404)
+
+
+def test_backup_download_serves_a_real_backup(backup_app):
+    from app import ui
+
+    app, _ = backup_app
+    with app.test_request_context():
+        response = ui.backup_download("bazarr_backup.zip")
+        response.direct_passthrough = False
+        assert response.status_code == 200
+        assert response.get_data() == b"zip-bytes"
+        assert "attachment" in response.headers["Content-Disposition"]
