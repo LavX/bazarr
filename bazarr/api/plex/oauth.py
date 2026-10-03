@@ -116,14 +116,14 @@ def _plex_pass_required(feature_name):
             'Please subscribe at https://www.plex.tv/plans/')
 
 
-def _webhooks_need_plex_sign_in():
-    """The answer when Bazarr holds no Plex token to manage webhooks with.
+def _plex_sign_in_required(message):
+    """The answer when Bazarr holds no Plex token for what was asked.
 
     A 409 rather than a 401: the web client reads any 401 as its own Bazarr
     session ending and goes back to the login page, when only Plex is signed
     out. The Plex panel reads the code and asks for a Plex sign-in instead.
     """
-    return {'error': 'Sign in to Plex to manage webhooks.', 'error_code': 'sign_in_required'}, 409
+    return {'error': message, 'error_code': 'sign_in_required'}, 409
 
 
 def _refused_plex_pass(error):
@@ -889,10 +889,7 @@ class PlexTestConnection(Resource):
 
         decrypted_token = get_decrypted_token()
         if not decrypted_token:
-            return {
-                'error': 'No authentication token available',
-                'code': 'UNAUTHORIZED'
-            }, 401
+            return _plex_sign_in_required('Sign in to Plex to test the connection.')
 
         try:
             headers = {
@@ -1107,7 +1104,7 @@ class PlexWebhookCreate(Resource):
             return {'error': f'Plex API error: {error_msg}'}, 502
 
         except UnauthorizedError:  # noqa: F405
-            return _webhooks_need_plex_sign_in()
+            return _plex_sign_in_required('Sign in to Plex to manage webhooks.')
         except Exception as e:
             logger.error(f"Failed to create Plex webhook: {e}")
             return {'error': f'Failed to create webhook: {str(e)}'}, 502
@@ -1179,7 +1176,7 @@ class PlexWebhookList(Resource):
             return _webhook_listing(webhook_list, subscription)
 
         except UnauthorizedError:  # noqa: F405
-            return _webhooks_need_plex_sign_in()
+            return _plex_sign_in_required('Sign in to Plex to manage webhooks.')
         except Exception as e:
             logger.error(f"Failed to list Plex webhooks: {e}")
             return {'error': f'Failed to list webhooks: {str(e)}'}, 502
@@ -1226,7 +1223,7 @@ class PlexWebhookDelete(Resource):
             }
 
         except UnauthorizedError:  # noqa: F405
-            return _webhooks_need_plex_sign_in()
+            return _plex_sign_in_required('Sign in to Plex to manage webhooks.')
         except Exception as e:
             if _refused_plex_pass(e):
                 logger.warning(f"plex.tv refused to delete a webhook without Plex Pass: {e}")
@@ -1259,7 +1256,7 @@ class PlexAutopulseConfig(Resource):
                 return {'error': 'Failed to get Plex configuration for Autopulse'}, 400
 
         except UnauthorizedError:  # noqa: F405
-            return {'error': 'Plex authentication required'}, 401
+            return _plex_sign_in_required('Sign in to Plex to generate an Autopulse configuration.')
         except Exception as e:
             logger.error(f"Failed to get Autopulse config: {e}")
             return {'error': f'Failed to get Autopulse config: {str(e)}'}, 500
