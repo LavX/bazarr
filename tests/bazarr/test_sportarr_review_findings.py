@@ -547,9 +547,9 @@ def test_a_guarded_external_command_runs_without_the_write_locks(monkeypatch, tm
     monkeypatch.setattr(post_processing, '_postprocessing_locked',
                         lambda command, path: held.append('command'))
 
-    post_processing.postprocessing('cmd', str(video), subtitle_path=str(subtitle),
+    post_processing.postprocessing(['cmd'], str(video), subtitle_path=str(subtitle),
                                    publication_guard=lambda **kw: None,
-                                   command_builder=lambda temporary: 'cmd')
+                                   command_builder=lambda temporary: ['cmd'])
 
     assert held == ['acquired', 'released', 'command']
 
@@ -582,7 +582,7 @@ def test_an_unguarded_external_command_runs_holding_them(monkeypatch, tmp_path):
     monkeypatch.setattr(post_processing, '_postprocessing_locked',
                         lambda command, path: held.append('command'))
 
-    post_processing.postprocessing('cmd', str(video))
+    post_processing.postprocessing(['cmd'], str(video))
 
     assert held == ['acquired', 'command', 'released']
 

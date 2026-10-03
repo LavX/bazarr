@@ -100,245 +100,261 @@ def manual_upload_subtitle(path, language, forced, hi, media_type, subtitle, fil
     if not job_id:
         return jobs_queue.add_job_from_function(f"Uploading {filename}", is_progress=False)
 
-    if media_type == 'sports':
-        from sportarr.upload import upload_sports_subtitle
-        return upload_sports_subtitle(sportsEventId, arr_instance_id, language, forced, hi,
-                                      subtitle, filename, job_id)
-
-    logging.debug(f'BAZARR Manually uploading subtitles: {filename}')  # noqa: G004
-
-    single = settings.general.single_language
-
-    # Resolve post-processing against the owning instance (#227) so a per-instance
-    # override applies to manual uploads too, matching the download path. Manual
-    # uploads are not score-gated, so the threshold values are ignored here.
-    from subtitles.processing import _postprocessing_config
-    use_postprocessing, postprocessing_cmd, _, _ = _postprocessing_config(
-        media_type, arr_instance_id)
-
-    chmod = int(settings.general.chmod, 8) if not sys.platform.startswith(
-        'win') and settings.general.chmod_enabled else None
-
-    language = alpha3_from_alpha2(language)
-
-    custom = CustomLanguage.from_value(language, "alpha3")
-    if custom is None:
-        lang_obj = Language(language)
-    else:
-        lang_obj = custom.subzero_language()
-
-    if hi:
-        lang_obj = Language.rebuild(lang_obj, hi=True)
-
-    if forced:
-        lang_obj = Language.rebuild(lang_obj, forced=True)
-
-    if media_type == 'series':
-        episode_metadata = database.execute(scoped(
-            select(TableEpisodes.sonarrSeriesId,
-                   TableEpisodes.sonarrEpisodeId,
-                   TableEpisodes.season,
-                   TableEpisodes.episode,
-                   TableShows.profileId,
-                   TableShows.imdbId,
-                   TableShows.tvdbId)
-            .select_from(TableEpisodes)
-            .join(TableShows)
-            .where(TableEpisodes.sonarrEpisodeId == sonarrEpisodeId),
-            TableEpisodes.arr_instance_id, arr_instance_id)) \
-            .first()
-
-        if episode_metadata:
-            sonarrSeriesId = episode_metadata.sonarrSeriesId
-            sonarrEpisodeId = episode_metadata.sonarrEpisodeId
-            use_original_format = _profile_original_format(episode_metadata.profileId)
-        else:
-            raise JobFailed(f'Could not upload {filename}: the episode is no longer in the library.')
-    else:
-        movie_metadata = database.execute(scoped(
-            select(TableMovies.radarrId, TableMovies.profileId,
-                   TableMovies.imdbId, TableMovies.tmdbId)
-            .where(TableMovies.radarrId == radarrId),
-            TableMovies.arr_instance_id, arr_instance_id)) \
-            .first()
-
-        if movie_metadata:
-            radarrId = movie_metadata.radarrId
-            use_original_format = _profile_original_format(movie_metadata.profileId)
-        else:
-            raise JobFailed(f'Could not upload {filename}: the movie is no longer in the library.')
-
-    audio_language = get_audio_profile_languages(audio_language)
-    if len(audio_language) and isinstance(audio_language[0], dict):
-        audio_language = audio_language[0]
-    else:
-        audio_language = {'name': '', 'code2': '', 'code3': ''}
-
-    from subtitles.tools.mods import get_subzero_mods
-    sub = Subtitle(
-        lang_obj,
-        mods=get_subzero_mods(arr_instance_id),
-        original_format=use_original_format
-    )
-
-    sub.content = subtitle.getvalue()
-    if not sub.is_valid():
-        logging.exception(f'BAZARR Invalid subtitle file: {filename}')  # noqa: G004
-        sub.mods = None
-
-    if settings.general.utf8_encode:
-        sub.set_encoding("utf-8")
-
+    # The queue retains ten completed and ten failed jobs, and the kwargs a
+    # job was queued with stay on the retained one. The BytesIO the route
+    # wrapped the uploaded file in is one of those kwargs, so a retained job
+    # held a copy of the file, up to the 150 MiB ceiling, for as long as it
+    # stayed listed. Nothing reads the buffer once this function has
+    # returned: upload jobs are queued as non-retryable, so no retry replays
+    # the arguments, and the jobs the UI lists render only named fields.
+    # BytesIO.close() releases the underlying buffer, which is what stops a
+    # retained job from holding the bytes.
     try:
-        sub.format = (get_format_identifier(os.path.splitext(filename)[1]),)
-    except Exception:
-        pass
+        if media_type == 'sports':
+            from sportarr.upload import upload_sports_subtitle
+            return upload_sports_subtitle(sportsEventId, arr_instance_id, language, forced, hi,
+                                          subtitle, filename, job_id)
 
-    saved_subtitles = []
-    try:
-        # ensure that formats must be a tuple of strings
-        sub_format = (sub.format,) if isinstance(sub.format, str) else sub.format
-        subtitle_directory = get_target_folder(path)
-        with subtitle_write_locks(path, os.path.join(subtitle_directory or os.path.dirname(path), '.destination')):
-            written_paths = []
-            saved_subtitles = save_subtitles(path,
-                                            [sub],
-                                            single=single,
-                                            tags=None,  # fixme
-                                            directory=subtitle_directory,
-                                            chmod=chmod,
-                                            formats=sub_format if use_original_format else ("srt",),
-                                            path_decoder=force_unicode,
-                                            write_subtitle=partial(
-                                                write_subtitle_file, path, written_paths=written_paths,
-                                                on_publish=publication_callback(media_type, path, 'upload', arr_instance_id)))
-            saved_subtitles = [saved for saved in saved_subtitles if saved.storage_path in written_paths]
-            source_version = subtitle_source_version(saved_subtitles[0].storage_path) if saved_subtitles else None
-            source_publication = (SubtitlePublication(path, saved_subtitles[0].storage_path, source_version)
-                                  if source_version is not None else None)
-    except Exception as e:
-        logging.exception(f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')  # noqa: G004
-        raise JobFailed(f'Could not save {filename} to disk: {e}') from e
+        logging.debug(f'BAZARR Manually uploading subtitles: {filename}')  # noqa: G004
 
-    if len(saved_subtitles) < 1:
-        logging.error(f'BAZARR Error saving Subtitles file to disk for this file: {path}')  # noqa: G004
-        raise JobFailed(f'Could not save {filename} to disk: nothing was written. Check that the file is a '
-                               f'readable subtitle and that the media folder is writable.')
+        single = settings.general.single_language
 
-    # An uploaded subtitle satisfies the language as surely as a downloaded one,
-    # so whatever mismatch was recorded for it no longer describes anything. This
-    # path has no Video object, only the ids, which is all the resolver reads.
-    from types import SimpleNamespace
+        # Resolve post-processing against the owning instance (#227) so a per-instance
+        # override applies to manual uploads too, matching the download path. Manual
+        # uploads are not score-gated, so the threshold values are ignored here.
+        from subtitles.processing import _postprocessing_config
+        use_postprocessing, postprocessing_cmd, _, _ = _postprocessing_config(
+            media_type, arr_instance_id)
 
-    from .manual import clear_mismatch_after_manual_save
+        chmod = int(settings.general.chmod, 8) if not sys.platform.startswith(
+            'win') and settings.general.chmod_enabled else None
 
-    clear_mismatch_after_manual_save(
-        SimpleNamespace(sonarrEpisodeId=sonarrEpisodeId, radarrId=radarrId,
-                        original_path=path, arr_instance_id=arr_instance_id),
-        media_type, saved_subtitles, arr_instance_id)
+        language = alpha3_from_alpha2(language)
 
-    subtitle_path = saved_subtitles[0].storage_path
+        custom = CustomLanguage.from_value(language, "alpha3")
+        if custom is None:
+            lang_obj = Language(language)
+        else:
+            lang_obj = custom.subzero_language()
 
-    if hi:
-        modifier_string = " HI"
-    elif forced:
-        modifier_string = " forced"
-    else:
-        modifier_string = ""
+        if hi:
+            lang_obj = Language.rebuild(lang_obj, hi=True)
 
-    if hi:
-        modifier_code = ":hi"
-    elif forced:
-        modifier_code = ":forced"
-    else:
-        modifier_code = ""
-    uploaded_language_code3 = language + modifier_code
-    uploaded_language = language_from_alpha3(language) + modifier_string
-    uploaded_language_code2 = alpha2_from_alpha3(language) + modifier_code
+        if forced:
+            lang_obj = Language.rebuild(lang_obj, forced=True)
 
-    if use_postprocessing:
-        command = pp_replace(postprocessing_cmd, path, subtitle_path, uploaded_language, uploaded_language_code2,
-                             uploaded_language_code3, audio_language['name'], audio_language['code2'],
-                             audio_language['code3'], 100, "1", "manual", "user", "unknown", sonarrSeriesId,
-                             sonarrEpisodeId or radarrId,)
-        with subtitle_write_locks(path, subtitle_path):
-            if subtitle_source_version(subtitle_path) == source_version:
-                with observe_subtitle_change(media_type, path, subtitle_path, 'upload', arr_instance_id):
-                    postprocessing(command, path, subtitle_path=subtitle_path)
-                    set_chmod(subtitles_path=subtitle_path)
-                source_version = subtitle_source_version(subtitle_path)
-                source_publication.release()
-                source_publication = SubtitlePublication(path, subtitle_path, source_version)
-
-    refresh_subtitles = partial(_refresh_uploaded_subtitles, path, subtitle_path, sonarr_series_id=sonarrSeriesId,
-                                sonarr_episode_id=sonarrEpisodeId, radarr_id=radarrId,
-                                arr_instance_id=arr_instance_id)
-    refresh_subtitles()
-
-    if media_type == 'series':
-        # Reverse-map through the owning instance's path_mappings (#156); None
-        # owner => global mapping (the default/single-instance path), unchanged.
-        reversed_path = path_mappings.path_replace_reverse_instance(path, arr_instance_id, "series")
-        reversed_subtitles_path = path_mappings.path_replace_reverse_instance(
-            subtitle_path, arr_instance_id, "series")
-        # Route the rescan at the OWNING instance's server (#156). None owner =
-        # default server (legacy single-instance), unchanged.
-        event_stream(type='series', action='update', payload=episode_metadata.sonarrSeriesId)
-        event_stream(type='episode-wanted', action='delete', payload=episode_metadata.sonarrEpisodeId)
-    else:
-        # Reverse-map through the owning instance's path_mappings (#156); None
-        # owner => global mapping (the default/single-instance path), unchanged.
-        reversed_path = path_mappings.path_replace_reverse_instance(path, arr_instance_id, "movie")
-        reversed_subtitles_path = path_mappings.path_replace_reverse_instance(
-            subtitle_path, arr_instance_id, "movie")
-        event_stream(type='movie', action='update', payload=movie_metadata.radarrId)
-        event_stream(type='movie-wanted', action='delete', payload=movie_metadata.radarrId)
-
-    result = ProcessSubtitlesResult(message=f"{language_from_alpha3(language)}{modifier_string} Subtitles manually "
-                                            "uploaded.",
-                                    reversed_path=reversed_path,
-                                    downloaded_language_code2=uploaded_language_code2,
-                                    downloaded_provider=None,
-                                    score=None,
-                                    forced=None,
-                                    subtitle_id=None,
-                                    reversed_subtitles_path=reversed_subtitles_path,
-                                    hearing_impaired=None)
-
-    if not result:
-        logging.debug(f"BAZARR unable to process subtitles for this {'episode' if media_type == 'series' else 'movie'}:"  # noqa: G004
-                      f" {path}")
-    else:
-        if isinstance(result, tuple) and len(result):
-            result = result[0]
-        provider = "manual"
         if media_type == 'series':
-            history_log(4, sonarrSeriesId, sonarrEpisodeId, result, fake_provider=provider,
-                        fake_score=MAX_SCORES['episode'], arr_instance_id=arr_instance_id)
-            if not settings.general.dont_notify_manual_actions:
-                _notify_upload("user", send_notifications, sonarrSeriesId, sonarrEpisodeId, result.message,
-                                   arr_instance_id=arr_instance_id)
-            if settings.general.use_plex:
-                if settings.plex.set_episode_added:
-                    _notify_upload("Plex added date", plex_set_episode_added_date_now, episode_metadata)
-        else:
-            history_log_movie(4, radarrId, result, fake_provider=provider, fake_score=MAX_SCORES['movie'],
-                              arr_instance_id=arr_instance_id)
-            if not settings.general.dont_notify_manual_actions:
-                _notify_upload("user", send_notifications_movie, radarrId, result.message, arr_instance_id=arr_instance_id)
-            if settings.general.use_plex:
-                if settings.plex.set_movie_added:
-                    _notify_upload("Plex added date", plex_set_movie_added_date_now, movie_metadata)
+            episode_metadata = database.execute(scoped(
+                select(TableEpisodes.sonarrSeriesId,
+                       TableEpisodes.sonarrEpisodeId,
+                       TableEpisodes.season,
+                       TableEpisodes.episode,
+                       TableShows.profileId,
+                       TableShows.imdbId,
+                       TableShows.tvdbId)
+                .select_from(TableEpisodes)
+                .join(TableShows)
+                .where(TableEpisodes.sonarrEpisodeId == sonarrEpisodeId),
+                TableEpisodes.arr_instance_id, arr_instance_id)) \
+                .first()
 
-    refresh_consumers = partial(
-        _refresh_upload_consumers, media_type,
-        episode_metadata if media_type == 'series' else movie_metadata,
-        arr_instance_id)
-    refresh_consumers()
-    if source_publication is not None:
-        sync_subtitles(video_path=path, srt_path=subtitle_path, srt_lang=uploaded_language_code2,
-                       percent_score=100, forced=forced, hi=hi, sonarr_series_id=sonarrSeriesId,
-                       sonarr_episode_id=sonarrEpisodeId, radarr_id=radarrId,
-                       arr_instance_id=arr_instance_id, callback=refresh_subtitles,
-                       source_version=source_publication, on_success=refresh_consumers)
-    return '', 204
+            if episode_metadata:
+                sonarrSeriesId = episode_metadata.sonarrSeriesId
+                sonarrEpisodeId = episode_metadata.sonarrEpisodeId
+                use_original_format = _profile_original_format(episode_metadata.profileId)
+            else:
+                raise JobFailed(f'Could not upload {filename}: the episode is no longer in the library.')
+        else:
+            movie_metadata = database.execute(scoped(
+                select(TableMovies.radarrId, TableMovies.profileId,
+                       TableMovies.imdbId, TableMovies.tmdbId)
+                .where(TableMovies.radarrId == radarrId),
+                TableMovies.arr_instance_id, arr_instance_id)) \
+                .first()
+
+            if movie_metadata:
+                radarrId = movie_metadata.radarrId
+                use_original_format = _profile_original_format(movie_metadata.profileId)
+            else:
+                raise JobFailed(f'Could not upload {filename}: the movie is no longer in the library.')
+
+        audio_language = get_audio_profile_languages(audio_language)
+        if len(audio_language) and isinstance(audio_language[0], dict):
+            audio_language = audio_language[0]
+        else:
+            audio_language = {'name': '', 'code2': '', 'code3': ''}
+
+        from subtitles.tools.mods import get_subzero_mods
+        sub = Subtitle(
+            lang_obj,
+            mods=get_subzero_mods(arr_instance_id),
+            original_format=use_original_format
+        )
+
+        sub.content = subtitle.getvalue()
+        if not sub.is_valid():
+            logging.exception(f'BAZARR Invalid subtitle file: {filename}')  # noqa: G004
+            sub.mods = None
+
+        if settings.general.utf8_encode:
+            sub.set_encoding("utf-8")
+
+        try:
+            sub.format = (get_format_identifier(os.path.splitext(filename)[1]),)
+        except Exception:
+            pass
+
+        saved_subtitles = []
+        try:
+            # ensure that formats must be a tuple of strings
+            sub_format = (sub.format,) if isinstance(sub.format, str) else sub.format
+            subtitle_directory = get_target_folder(path)
+            with subtitle_write_locks(path, os.path.join(subtitle_directory or os.path.dirname(path), '.destination')):
+                written_paths = []
+                saved_subtitles = save_subtitles(path,
+                                                [sub],
+                                                single=single,
+                                                tags=None,  # fixme
+                                                directory=subtitle_directory,
+                                                chmod=chmod,
+                                                formats=sub_format if use_original_format else ("srt",),
+                                                path_decoder=force_unicode,
+                                                write_subtitle=partial(
+                                                    write_subtitle_file, path, written_paths=written_paths,
+                                                    on_publish=publication_callback(media_type, path, 'upload', arr_instance_id)))
+                saved_subtitles = [saved for saved in saved_subtitles if saved.storage_path in written_paths]
+                source_version = subtitle_source_version(saved_subtitles[0].storage_path) if saved_subtitles else None
+                source_publication = (SubtitlePublication(path, saved_subtitles[0].storage_path, source_version)
+                                      if source_version is not None else None)
+        except Exception as e:
+            logging.exception(f'BAZARR Error saving Subtitles file to disk for this file {path}: {repr(e)}')  # noqa: G004
+            raise JobFailed(f'Could not save {filename} to disk: {e}') from e
+
+        if len(saved_subtitles) < 1:
+            logging.error(f'BAZARR Error saving Subtitles file to disk for this file: {path}')  # noqa: G004
+            raise JobFailed(f'Could not save {filename} to disk: nothing was written. Check that the file is a '
+                                   f'readable subtitle and that the media folder is writable.')
+
+        # An uploaded subtitle satisfies the language as surely as a downloaded one,
+        # so whatever mismatch was recorded for it no longer describes anything. This
+        # path has no Video object, only the ids, which is all the resolver reads.
+        from types import SimpleNamespace
+
+        from .manual import clear_mismatch_after_manual_save
+
+        clear_mismatch_after_manual_save(
+            SimpleNamespace(sonarrEpisodeId=sonarrEpisodeId, radarrId=radarrId,
+                            original_path=path, arr_instance_id=arr_instance_id),
+            media_type, saved_subtitles, arr_instance_id)
+
+        subtitle_path = saved_subtitles[0].storage_path
+
+        if hi:
+            modifier_string = " HI"
+        elif forced:
+            modifier_string = " forced"
+        else:
+            modifier_string = ""
+
+        if hi:
+            modifier_code = ":hi"
+        elif forced:
+            modifier_code = ":forced"
+        else:
+            modifier_code = ""
+        uploaded_language_code3 = language + modifier_code
+        uploaded_language = language_from_alpha3(language) + modifier_string
+        uploaded_language_code2 = alpha2_from_alpha3(language) + modifier_code
+
+        if use_postprocessing:
+            try:
+                command = pp_replace(postprocessing_cmd, path, subtitle_path, uploaded_language, uploaded_language_code2,
+                                     uploaded_language_code3, audio_language['name'], audio_language['code2'],
+                                     audio_language['code3'], 100, "1", "manual", "user", "unknown", sonarrSeriesId,
+                                     sonarrEpisodeId or radarrId)
+            except ValueError as exc:
+                logging.error('BAZARR invalid post-processing command: %s', exc)
+            else:
+                with subtitle_write_locks(path, subtitle_path):
+                    if subtitle_source_version(subtitle_path) == source_version:
+                        with observe_subtitle_change(media_type, path, subtitle_path, 'upload', arr_instance_id):
+                            postprocessing(command, path, subtitle_path=subtitle_path)
+                            set_chmod(subtitles_path=subtitle_path)
+                        source_version = subtitle_source_version(subtitle_path)
+                        source_publication.release()
+                        source_publication = SubtitlePublication(path, subtitle_path, source_version)
+
+        refresh_subtitles = partial(_refresh_uploaded_subtitles, path, subtitle_path, sonarr_series_id=sonarrSeriesId,
+                                    sonarr_episode_id=sonarrEpisodeId, radarr_id=radarrId,
+                                    arr_instance_id=arr_instance_id)
+        refresh_subtitles()
+
+        if media_type == 'series':
+            # Reverse-map through the owning instance's path_mappings (#156); None
+            # owner => global mapping (the default/single-instance path), unchanged.
+            reversed_path = path_mappings.path_replace_reverse_instance(path, arr_instance_id, "series")
+            reversed_subtitles_path = path_mappings.path_replace_reverse_instance(
+                subtitle_path, arr_instance_id, "series")
+            # Route the rescan at the OWNING instance's server (#156). None owner =
+            # default server (legacy single-instance), unchanged.
+            event_stream(type='series', action='update', payload=episode_metadata.sonarrSeriesId)
+            event_stream(type='episode-wanted', action='delete', payload=episode_metadata.sonarrEpisodeId)
+        else:
+            # Reverse-map through the owning instance's path_mappings (#156); None
+            # owner => global mapping (the default/single-instance path), unchanged.
+            reversed_path = path_mappings.path_replace_reverse_instance(path, arr_instance_id, "movie")
+            reversed_subtitles_path = path_mappings.path_replace_reverse_instance(
+                subtitle_path, arr_instance_id, "movie")
+            event_stream(type='movie', action='update', payload=movie_metadata.radarrId)
+            event_stream(type='movie-wanted', action='delete', payload=movie_metadata.radarrId)
+
+        result = ProcessSubtitlesResult(message=f"{language_from_alpha3(language)}{modifier_string} Subtitles manually "
+                                                "uploaded.",
+                                        reversed_path=reversed_path,
+                                        downloaded_language_code2=uploaded_language_code2,
+                                        downloaded_provider=None,
+                                        score=None,
+                                        forced=None,
+                                        subtitle_id=None,
+                                        reversed_subtitles_path=reversed_subtitles_path,
+                                        hearing_impaired=None)
+
+        if not result:
+            logging.debug(f"BAZARR unable to process subtitles for this {'episode' if media_type == 'series' else 'movie'}:"  # noqa: G004
+                          f" {path}")
+        else:
+            if isinstance(result, tuple) and len(result):
+                result = result[0]
+            provider = "manual"
+            if media_type == 'series':
+                history_log(4, sonarrSeriesId, sonarrEpisodeId, result, fake_provider=provider,
+                            fake_score=MAX_SCORES['episode'], arr_instance_id=arr_instance_id)
+                if not settings.general.dont_notify_manual_actions:
+                    _notify_upload("user", send_notifications, sonarrSeriesId, sonarrEpisodeId, result.message,
+                                       arr_instance_id=arr_instance_id)
+                if settings.general.use_plex:
+                    if settings.plex.set_episode_added:
+                        _notify_upload("Plex added date", plex_set_episode_added_date_now, episode_metadata)
+            else:
+                history_log_movie(4, radarrId, result, fake_provider=provider, fake_score=MAX_SCORES['movie'],
+                                  arr_instance_id=arr_instance_id)
+                if not settings.general.dont_notify_manual_actions:
+                    _notify_upload("user", send_notifications_movie, radarrId, result.message, arr_instance_id=arr_instance_id)
+                if settings.general.use_plex:
+                    if settings.plex.set_movie_added:
+                        _notify_upload("Plex added date", plex_set_movie_added_date_now, movie_metadata)
+
+        refresh_consumers = partial(
+            _refresh_upload_consumers, media_type,
+            episode_metadata if media_type == 'series' else movie_metadata,
+            arr_instance_id)
+        refresh_consumers()
+        if source_publication is not None:
+            sync_subtitles(video_path=path, srt_path=subtitle_path, srt_lang=uploaded_language_code2,
+                           percent_score=100, forced=forced, hi=hi, sonarr_series_id=sonarrSeriesId,
+                           sonarr_episode_id=sonarrEpisodeId, radarr_id=radarrId,
+                           arr_instance_id=arr_instance_id, callback=refresh_subtitles,
+                           source_version=source_publication, on_success=refresh_consumers)
+        return '', 204
+    finally:
+        subtitle.close()

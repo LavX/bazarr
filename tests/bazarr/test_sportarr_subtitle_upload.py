@@ -291,17 +291,18 @@ def test_uploaded_auto_sync_keeps_its_owned_context_after_indexing(upload_librar
 
 
 def test_upload_postprocessing_runs_on_a_private_copy_and_records_final_bytes(upload_library, monkeypatch):
-    import shlex
     from app.database import TableHistorySports
     from sportarr import upload as sports_upload
     from subtitles import post_processing, upload
 
     session, folder, submit, _, _ = upload_library
     kwargs = submit()
-    monkeypatch.setattr(sports_upload, '_postprocessing_config', lambda *args: (True, '{{subtitles}}', False, 0))
+    monkeypatch.setattr(
+        sports_upload, '_postprocessing_config',
+        lambda *args: (True, 'fixture {{subtitles}}', False, 0))
     destinations = []
     def command(command, video):
-        destination = Path(shlex.split(command)[0])
+        destination = Path(command[1])
         destinations.append(destination)
         assert destination != folder / '1/event.en.srt'
         assert 'Uploaded sports subtitle.' in (folder / '1/event.en.srt').read_text()
@@ -374,7 +375,6 @@ def test_later_upload_is_not_adopted_as_the_earlier_upload_source(upload_library
 
 @pytest.mark.parametrize('phase', ['input', 'replacement', 'capture'])
 def test_upload_postprocessing_preserves_a_later_writer(upload_library, monkeypatch, phase):
-    import shlex
     from app.database import TableHistorySports
     from sportarr import upload as sports_upload
     from subtitles import upload, post_processing
@@ -384,9 +384,9 @@ def test_upload_postprocessing_preserves_a_later_writer(upload_library, monkeypa
     def configure(*args):
         if phase == 'input':
             _replace_from_another_writer(video, output)
-        return True, '{{subtitles}}', False, 0
+        return True, 'fixture {{subtitles}}', False, 0
     def command(command, video_path):
-        temporary = Path(shlex.split(command)[0])
+        temporary = Path(command[1])
         processed.append(temporary.read_bytes())
         if phase == 'replacement':
             _replace_from_another_writer(video, output)
@@ -432,7 +432,6 @@ def test_stale_queued_upload_sync_releases_its_publication(upload_library, monke
 
 @pytest.mark.parametrize('observer_fails', [False, True])
 def test_final_postprocessed_upload_bytes_have_a_publication_notification(upload_library, monkeypatch, observer_fails):
-    import shlex
     from threading import Thread
     from app.database import TableHistorySports, TableSportsEvents
     from sportarr import upload as sports_upload
@@ -455,9 +454,11 @@ def test_final_postprocessed_upload_bytes_have_a_publication_notification(upload
                 raise RuntimeError('Final publication observer unavailable')
         return observe
     monkeypatch.setattr(upload, 'publication_callback', callback)
-    monkeypatch.setattr(sports_upload, '_postprocessing_config', lambda *args: (True, '{{subtitles}}', False, 0))
+    monkeypatch.setattr(
+        sports_upload, '_postprocessing_config',
+        lambda *args: (True, 'fixture {{subtitles}}', False, 0))
     def command(command, video):
-        Path(shlex.split(command)[0]).write_bytes(b'1\n00:00:00,000 --> 00:00:01,000\nPostprocessed final bytes.\n')
+        Path(command[1]).write_bytes(b'1\n00:00:00,000 --> 00:00:01,000\nPostprocessed final bytes.\n')
     monkeypatch.setattr(post_processing, '_postprocessing_locked', command)
     upload.manual_upload_subtitle(**submit())
     for reader in readers:
@@ -472,7 +473,6 @@ def test_final_postprocessed_upload_bytes_have_a_publication_notification(upload
 
 @pytest.mark.parametrize('postprocess', [False, True])
 def test_upload_chmod_preserves_the_exact_sync_publication(upload_library, monkeypatch, postprocess):
-    import shlex
     import stat
     from app.config import settings
     from sportarr import upload as sports_upload
@@ -481,9 +481,9 @@ def test_upload_chmod_preserves_the_exact_sync_publication(upload_library, monke
     monkeypatch.setattr(settings.general, 'chmod_enabled', True)
     monkeypatch.setattr(settings.general, 'chmod', '0640')
     monkeypatch.setattr(sports_upload, '_postprocessing_config',
-                        lambda *args: (postprocess, '{{subtitles}}', False, 0))
+                        lambda *args: (postprocess, 'fixture {{subtitles}}', False, 0))
     monkeypatch.setattr(post_processing, '_postprocessing_locked',
-                        lambda command, video: Path(shlex.split(command)[0]).write_bytes(_NEWER_UPLOAD))
+                        lambda command, video: Path(command[1]).write_bytes(_NEWER_UPLOAD))
     captured = []
     def sync(**kwargs):
         publication = kwargs['source_version']
@@ -494,6 +494,43 @@ def test_upload_chmod_preserves_the_exact_sync_publication(upload_library, monke
     upload.manual_upload_subtitle(**submit())
     assert captured == [True]
     assert stat.S_IMODE((folder / '1/event.en.srt').stat().st_mode) == 0o640
+
+
+def test_the_completed_sports_upload_releases_its_buffer(upload_library):
+    """The queued job's retained kwargs must not hold the uploaded bytes.
+
+    The sports path dispatches to sportarr.upload from the shared entry
+    point, and the close lives in the shared entry point, so a sports upload
+    proves the release covers the dispatch too.
+    """
+    from subtitles import upload
+
+    session, folder, submit, published, notifications = upload_library
+    kwargs = submit()
+    buffer = kwargs['subtitle']
+
+    upload.manual_upload_subtitle(**kwargs)
+
+    assert (folder / '1/event.en.srt').is_file()
+    assert buffer.closed
+
+
+def test_the_failed_sports_upload_releases_its_buffer(upload_library, monkeypatch):
+    from subtitles import upload
+
+    session, folder, submit, published, notifications = upload_library
+    kwargs = submit()
+    buffer = kwargs['subtitle']
+
+    def refuse(*args, **kwargs):
+        raise OSError('controlled save failure')
+
+    monkeypatch.setattr(upload, 'save_subtitles', refuse)
+    with pytest.raises(OSError, match='controlled save failure'):
+        upload.manual_upload_subtitle(**kwargs)
+
+    assert not (folder / '1/event.en.srt').exists()
+    assert buffer.closed
 
 
 def test_upload_releases_captured_publications_when_the_saver_raises(upload_library, monkeypatch):

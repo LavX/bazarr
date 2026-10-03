@@ -1286,6 +1286,58 @@ def _require_provider_order_for_custom_routing(settings_items):
                               'Choose a provider, or pick another routing option.')
 
 
+def _validate_postprocessing_command(settings_items):
+    """Refuse a post-processing command that relies on a shell.
+
+    Commands run as an argument list without a shell, so a pipe, redirect or
+    variable would reach the program as a literal argument. A request that
+    sets the command is always checked, because an enabled instance can
+    inherit the global command while the global toggle is off, and a command
+    that cannot run should not be stored at all. A request that only turns
+    post-processing on is checked against the stored command, so a command
+    stored before this rule never blocks saves on other pages or switching it
+    off; the health check reports that one instead. Turning the global switch
+    on also checks the commands stored per instance: an override saved while
+    the instance toggle was off becomes effective the moment the switch is on.
+    """
+    submitted = {key.lower(): value[0] if isinstance(value, list) and value else value
+                 for key, value in settings_items}
+    command = submitted.get('settings-general-postprocessing_cmd')
+    submitted_toggle = submitted.get('settings-general-use_postprocessing')
+    if command is None and submitted_toggle is None:
+        return
+    sets_command = command is not None
+    if command is None:
+        command = settings.general.postprocessing_cmd
+    enabled = settings.general.use_postprocessing if submitted_toggle is None \
+        else str(submitted_toggle).lower() == 'true'
+    if not sets_command and not enabled:
+        return
+    from utilities.post_processing import parse_postprocessing_command
+    try:
+        parse_postprocessing_command(str(command))
+    except ValueError as error:
+        raise ValidationError(f'Post-processing command: {error}.') from None
+    turns_post_processing_on = (not sets_command and submitted_toggle is not None
+                                and str(submitted_toggle).lower() == 'true')
+    if not turns_post_processing_on:
+        return
+    from app.database import database, TableArrInstances, select
+    from arr_instances.subtitle_settings import read_subtitle_settings
+    instances = database.execute(
+        select(TableArrInstances.name, TableArrInstances.options)
+        .where(TableArrInstances.enabled == 1)).all()
+    for instance in instances:
+        own = read_subtitle_settings(instance.options).get('general', {}).get('postprocessing_cmd')
+        if not isinstance(own, str) or not own.strip():
+            continue
+        try:
+            parse_postprocessing_command(own)
+        except ValueError as error:
+            raise ValidationError(f"Post-processing command for {instance.name}: {error}. Turn that "
+                                  f"instance's post-processing off or fix its command first.") from None
+
+
 def validate_metadata_settings(settings_items):
     from discover.metadata import validate_token
     allowed = {"settings-discover-tmdb_access_token", "settings-discover-locale",
@@ -1466,6 +1518,7 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
         for key, value in settings_items
     ]
     _require_provider_order_for_custom_routing(settings_items)
+    _validate_postprocessing_command(settings_items)
     configure_debug = False
     configure_log_rotation = False
     hi_extension_changed = False

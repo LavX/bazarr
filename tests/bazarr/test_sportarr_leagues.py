@@ -92,9 +92,14 @@ def test_disabled_owner_and_transaction_failure(library, monkeypatch):
     assert session.get(TableSportsLeagues, ids[0]).title == 'League'
 
 
-def test_sports_settings_merge_and_validation(schema_session):
+def test_sports_settings_merge_and_validation(schema_session, monkeypatch):
     from arr_instances.service import create_instance, update_instance
     from arr_instances.repository import ArrInstanceRepository
+    # The created instance turns post-processing on and inherits the global
+    # command, and the save refuses an enabled toggle with no command. This
+    # test is about the merge semantics, so give it a runnable command.
+    monkeypatch.setattr('app.config.settings.general.postprocessing_cmd',
+                        '/opt/scripts/process.sh "{{subtitles}}"', raising=False)
     body, status = create_instance(schema_session, {'kind': 'sportarr', 'name': 'Sports', 'sports_settings': {'sports_sync': 13, 'excluded_sports': ['Golf']}, 'subtitle_settings': {'general': {'use_postprocessing': True}}})
     assert status == 201 and body['sports_settings']['sports_sync'] == 13
 
