@@ -357,7 +357,7 @@ def test_list_subtitles_prioritized_early_exit_when_not_exhaustive(
 
     call_log = []
 
-    def fake_list(self, provider, video, languages):
+    def fake_list(self, provider, video, languages, **kwargs):
         call_log.append(provider)
         if provider == "provider_a":
             return [sub_a]
@@ -393,7 +393,7 @@ def test_list_subtitles_prioritized_no_early_exit_when_exhaustive(
 
     call_log = []
 
-    def fake_list(self, provider, video, languages):
+    def fake_list(self, provider, video, languages, **kwargs):
         call_log.append(provider)
         if provider == "provider_a":
             return [sub_a]
@@ -412,3 +412,35 @@ def test_list_subtitles_prioritized_no_early_exit_when_exhaustive(
 
     assert call_log == ["provider_a", "provider_b"]
     assert sub_a in result and sub_b in result
+
+
+def test_list_subtitles_prioritized_report_stop_shape(two_provider_pool, monkeypatch):
+    """Why: the priority waterfall resumes after the provider whose listing
+    satisfied the search, so the listing has to say which one that was.
+    What: with report_stop=True the result is (subtitles, stopped_at), naming
+    the provider that satisfied every language, or None when the listing ran
+    to the end. Without the flag the result keeps its plain list shape.
+    Test: the same listing three ways; a satisfied search names the provider,
+    an unsatisfied one names None, and the unflagged call returns the list.
+    """
+    lang = core.Language("eng")
+    sub_a = _make_fake_subtitle(lang)
+    sub_b = _make_fake_subtitle(lang)
+
+    def fake_list(self, provider, video, languages, **kwargs):
+        return [sub_a] if provider == "provider_a" else [sub_b]
+
+    monkeypatch.setattr(core.SZProviderPool, "list_subtitles_provider", fake_list)
+    video = MagicMock()
+
+    satisfied = two_provider_pool.list_subtitles_prioritized(
+        video, {lang}, min_score=80, compute_score=_fixed_score(100), report_stop=True)
+    assert satisfied == ([sub_a], "provider_a")
+
+    unsatisfied = two_provider_pool.list_subtitles_prioritized(
+        video, {lang}, min_score=80, compute_score=_fixed_score(10), report_stop=True)
+    assert unsatisfied == ([sub_a, sub_b], None)
+
+    plain = two_provider_pool.list_subtitles_prioritized(
+        video, {lang}, min_score=80, compute_score=_fixed_score(100))
+    assert plain == [sub_a]
