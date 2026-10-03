@@ -67,6 +67,29 @@ const ScoreBadge: React.FC<{ score?: string | number | null }> = ({
   );
 };
 
+// A copy of the history, newest first. ISO timestamps retain the database's
+// microsecond precision. Display timestamps are localized and cannot be used
+// to order file mutations.
+function newestFirst(history: History.Movie[] | undefined) {
+  return [...(history ?? [])].sort((a, b) => {
+    if (
+      a.timestamp_iso &&
+      b.timestamp_iso &&
+      a.timestamp_iso !== b.timestamp_iso
+    ) {
+      return a.timestamp_iso > b.timestamp_iso ? -1 : 1;
+    }
+    return (b.history_id ?? 0) - (a.history_id ?? 0);
+  });
+}
+
+// Deletion, the downloads and upgrades, upload and translation each put a
+// different file at the path, or none. Sync (5) rewrites the same file and
+// embedded tracks (7) have no path.
+function replacesFile(action: number) {
+  return [0, 1, 2, 3, 4, 6].includes(action);
+}
+
 function isSubtitleTrack(path: string | undefined | null) {
   return !isString(path) || path.length === 0;
 }
@@ -313,13 +336,18 @@ const Table: FunctionComponent<Props> = ({
     [movie?.subtitles],
   );
 
+  // Score and provider belong to whatever last wrote the file on disk. A
+  // sync rewrites it in place and keeps where it came from, so only the
+  // newest record that replaced or removed the file counts, and only a
+  // download, manual download or upgrade has a score to show.
   const historyMap = useMemo(() => {
     const map = new Map<string, History.Movie>();
-    history?.forEach((h) => {
-      if (!h.subtitles_path) return;
-      if ([1, 2, 3].includes(h.action)) {
-        if (!map.has(h.subtitles_path)) map.set(h.subtitles_path, h);
-      }
+    const settled = new Set<string>();
+    newestFirst(history).forEach((h) => {
+      if (!h.subtitles_path || settled.has(h.subtitles_path)) return;
+      if (!replacesFile(h.action)) return;
+      settled.add(h.subtitles_path);
+      if ([1, 2, 3].includes(h.action)) map.set(h.subtitles_path, h);
     });
     return map;
   }, [history]);
@@ -338,19 +366,7 @@ const Table: FunctionComponent<Props> = ({
   const statusMap = useMemo(() => {
     const map = new Map<string, Set<number>>();
     const completed = new Set<string>();
-    const records = [...(history ?? [])].sort((a, b) => {
-      // ISO timestamps retain the database's microsecond precision. Display
-      // timestamps are localized and cannot be used to order file mutations.
-      if (
-        a.timestamp_iso &&
-        b.timestamp_iso &&
-        a.timestamp_iso !== b.timestamp_iso
-      ) {
-        return a.timestamp_iso > b.timestamp_iso ? -1 : 1;
-      }
-      return (b.history_id ?? 0) - (a.history_id ?? 0);
-    });
-    records.forEach((record) => {
+    newestFirst(history).forEach((record) => {
       if (!record.subtitles_path || record.id !== movie?.id) return;
       if (
         record.arr_instance_id != null &&
@@ -370,8 +386,7 @@ const Table: FunctionComponent<Props> = ({
       }
       // A replacement or deletion ends this file's history. Translation also
       // writes a new file, so only syncs after that translation still apply.
-      if ([0, 1, 2, 3, 4, 6].includes(record.action))
-        completed.add(record.subtitles_path);
+      if (replacesFile(record.action)) completed.add(record.subtitles_path);
     });
     return map;
   }, [history, movie]);
