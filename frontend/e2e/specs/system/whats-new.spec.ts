@@ -3,7 +3,7 @@
  * a fresh browser context is exactly a reader arriving after the upgrade.
  */
 import { expect, test } from "@e2e/fixtures";
-import { WHATS_NEW_VERSION } from "@e2e/lib/whatsNew";
+import { WHATS_NEW_SEEN_KEY, WHATS_NEW_VERSION } from "@e2e/lib/whatsNew";
 
 test.describe("What's New", { tag: ["@status"] }, () => {
   test("opens once on the first load, shows every slide and stays closed", async ({
@@ -15,6 +15,17 @@ test.describe("What's New", { tag: ["@status"] }, () => {
     await expect(
       modal.getByText(`What's new in Bazarr+ ${WHATS_NEW_VERSION}`),
     ).toBeVisible();
+    // The tour records itself as seen when it opens. Every other spec writes
+    // this same marker to keep it closed, so the build under test has to
+    // agree with the suite on both the key and the release.
+    await expect
+      .poll(() =>
+        page.evaluate(
+          (key) => window.localStorage.getItem(key),
+          WHATS_NEW_SEEN_KEY,
+        ),
+      )
+      .toBe(WHATS_NEW_VERSION);
 
     const dots = modal.getByRole("button", { name: /^Go to update \d+$/ });
     const slides = await dots.count();
