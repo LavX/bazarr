@@ -1580,6 +1580,8 @@ def test_apply_update_uses_latest_catalog_manifest(tmp_path, monkeypatch):
                         "python_path": "/old/python",
                         "state": "active",
                         "pending_restart": False,
+                        "source_bound": True,
+                        "source_id": "official",
                         "manifest": _manifest(provider_id=provider_id, version="1.0.0"),
                     }
                 },
@@ -2255,7 +2257,7 @@ def test_empty_state_seeds_official_trusted_catalog_source(tmp_path, monkeypatch
 def test_list_catalog_auto_refreshes_unchecked_sources(tmp_path, monkeypatch):
     from provider_hub.service import list_catalog
 
-    def fake_get(url, timeout):
+    def fake_get(url, timeout, **_kwargs):
         if "api.github.com" in url:
             return _FakeResponse({"sha": "d" * 40})
         return _FakeResponse(
@@ -2296,7 +2298,7 @@ def test_catalog_refresh_fetches_github_catalog_entries(tmp_path, monkeypatch):
 
     calls = []
 
-    def fake_get(url, timeout):
+    def fake_get(url, timeout, **_kwargs):
         calls.append((url, timeout))
         if "api.github.com" in url:
             return _FakeResponse({"sha": "d" * 40})
@@ -2328,7 +2330,7 @@ def test_catalog_refresh_fetches_github_catalog_entries(tmp_path, monkeypatch):
 def test_catalog_refresh_prunes_stale_entries_for_successful_source(tmp_path, monkeypatch):
     from provider_hub.service import list_catalog, refresh_catalog
 
-    def fake_get(url, timeout):
+    def fake_get(url, timeout, **_kwargs):
         if "api.github.com" in url:
             return _FakeResponse({"sha": "d" * 40})
         if "LavX/bazarr-provider-catalog" in url:
@@ -3158,7 +3160,7 @@ def test_refresh_catalog_uses_dev_ref_when_set(tmp_path, monkeypatch):
 
     calls = []
 
-    def fake_get(url, timeout):
+    def fake_get(url, timeout, **_kwargs):
         calls.append(url)
         if "api.github.com" in url:
             return _FakeResponse({"sha": "f" * 40})
@@ -3190,7 +3192,7 @@ def test_refresh_catalog_reports_network_errors_for_users(tmp_path, monkeypatch)
     from provider_hub.service import add_catalog_source, refresh_catalog
     from provider_hub.state import load_state
 
-    def fake_get(url, timeout):
+    def fake_get(url, timeout, **_kwargs):
         raise requests.exceptions.ConnectionError(
             "HTTPSConnectionPool(host='api.github.com', port=443): "
             "Max retries exceeded with url: /repos/example/providers/commits/main"
@@ -3227,7 +3229,7 @@ def test_patch_catalog_source_updates_dev_ref(tmp_path, monkeypatch):
         update_catalog_source,
     )
 
-    def fake_get(url, timeout):
+    def fake_get(url, timeout, **_kwargs):
         if "api.github.com" in url:
             return _FakeResponse({"sha": "9" * 40})
         return _FakeResponse({"providers": []})
@@ -3357,13 +3359,15 @@ def test_check_updates_reports_available_updates(tmp_path, monkeypatch):
         "active_version": "1.0.0",
         "state": "active",
         "pending_restart": False,
-        "manifest": {"provider_id": "examplehub", "version": "1.0.0"},
+        "source_bound": True,
+        "source_id": "official",
+        "manifest": _manifest(),
     }
     state["catalog_entries"]["official:examplehub:1.1.0"] = {
         "provider_id": "examplehub",
         "version": "1.1.0",
         "source": "official",
-        "manifest": {"provider_id": "examplehub", "version": "1.1.0"},
+        "manifest": _manifest(version="1.1.0"),
     }
     save_state(state)
 
@@ -3374,33 +3378,28 @@ def test_check_updates_reports_available_updates(tmp_path, monkeypatch):
     assert "1.0.0 -> 1.1.0" in job["message"]
 
 
+def _official_entries(*versions):
+    return {
+        f"official:examplehub:{version}": {
+            "source": "official",
+            "provider_id": "examplehub",
+            "version": version,
+            "manifest": _manifest(version=version),
+        }
+        for version in versions
+    }
+
+
 def test_latest_catalog_manifest_respects_prerelease_precedence():
     from provider_hub.service import _latest_catalog_manifest
 
-    state = {
-        "catalog_entries": {
-            "official:examplehub:1.0.0-alpha": {
-                "provider_id": "examplehub",
-                "version": "1.0.0-alpha",
-                "manifest": {"provider_id": "examplehub", "version": "1.0.0-alpha"},
-            },
-            "official:examplehub:1.0.0-rc.1": {
-                "provider_id": "examplehub",
-                "version": "1.0.0-rc.1",
-                "manifest": {"provider_id": "examplehub", "version": "1.0.0-rc.1"},
-            },
-        }
-    }
+    state = {"catalog_entries": _official_entries("1.0.0-alpha", "1.0.0-rc.1")}
 
-    assert _latest_catalog_manifest(state, "examplehub", "1.0.0") is None
+    assert _latest_catalog_manifest(state, "examplehub", "1.0.0", "official") is None
 
-    state["catalog_entries"]["official:examplehub:1.0.0"] = {
-        "provider_id": "examplehub",
-        "version": "1.0.0",
-        "manifest": {"provider_id": "examplehub", "version": "1.0.0"},
-    }
+    state["catalog_entries"].update(_official_entries("1.0.0"))
 
-    latest = _latest_catalog_manifest(state, "examplehub", "1.0.0-rc.1")
+    latest = _latest_catalog_manifest(state, "examplehub", "1.0.0-rc.1", "official")
 
     assert latest["version"] == "1.0.0"
 
@@ -3408,17 +3407,9 @@ def test_latest_catalog_manifest_respects_prerelease_precedence():
 def test_latest_catalog_manifest_ignores_build_metadata():
     from provider_hub.service import _latest_catalog_manifest
 
-    state = {
-        "catalog_entries": {
-            "official:examplehub:1.2.3+build.5": {
-                "provider_id": "examplehub",
-                "version": "1.2.3+build.5",
-                "manifest": {"provider_id": "examplehub", "version": "1.2.3+build.5"},
-            },
-        }
-    }
+    state = {"catalog_entries": _official_entries("1.2.3+build.5")}
 
-    assert _latest_catalog_manifest(state, "examplehub", "1.2.3") is None
+    assert _latest_catalog_manifest(state, "examplehub", "1.2.3", "official") is None
 
 
 def test_add_catalog_source_records_activity_job(tmp_path, monkeypatch):
@@ -3502,7 +3493,7 @@ def test_refresh_catalog_records_summary(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
 
-    def fake_get(url, timeout):
+    def fake_get(url, timeout, **_kwargs):
         if "api.github.com" in url:
             return _FakeResponse({"sha": "f" * 40})
         return _FakeResponse({"providers": []})
@@ -3803,36 +3794,6 @@ def test_remove_catalog_source_purges_catalog_entries(tmp_path, monkeypatch):
     remaining = load_state()["catalog_entries"]
     assert "community:foo:1.0.0" not in remaining
     assert "official:bar:1.0.0" in remaining
-
-
-def test_install_origin_resolves_catalog_source_id():
-    # A catalog install is always origin="catalog"; the source_id is resolved from
-    # the manifest's catalog_url, or None when no configured source matches.
-    # ("local" is reserved for uploads, recorded explicitly by stage_install_local.)
-    from provider_hub.service import _install_origin
-
-    state = {
-        "catalog_sources": {
-            "official": {
-                "id": "official",
-                "url": "https://github.com/owner/repo/blob/main/catalog.json",
-            }
-        }
-    }
-    catalog_manifest = _manifest()  # source.catalog_url matches the official source
-    assert _install_origin(catalog_manifest, state) == ("catalog", "official")
-
-    unmatched_manifest = _manifest(
-        source={
-            "type": "github",
-            "repo": "someone/elsewhere",
-            "ref": "main",
-            "commit": "a" * 40,
-            "catalog_url": "https://github.com/someone/elsewhere/blob/main/catalog.json",
-            "trusted": False,
-        }
-    )
-    assert _install_origin(unmatched_manifest, state) == ("catalog", None)
 
 
 def test_stage_install_local_records_origin_local_and_untrusted(tmp_path, monkeypatch):
@@ -5069,3 +5030,404 @@ def test_a_first_install_that_cannot_be_enabled_is_reported_as_failed(tmp_path, 
 
     with pytest.raises(service.ProviderHubSettingsError, match="could not be enabled"):
         stage_install_local(package)
+
+
+# Trust and install binding follow the catalog source Bazarr+ resolved, checked
+# against a fake GitHub that knows the official catalog's branch history.
+
+_OFFICIAL_REPO_API = "https://api.github.com/repos/LavX/bazarr-provider-catalog"
+_MAIN, _BETA, _OUTSIDE = "1" * 40, "2" * 40, "f" * 40
+_OLD_MAIN = "3" * 40
+
+
+class _GitHubAnswer(_FakeResponse):
+    def __init__(self, payload=None, status=200):
+        super().__init__(payload)
+        self.status_code = status
+        self.headers = {"x-ratelimit-remaining": "0"} if status == 403 else {}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import requests
+            raise requests.exceptions.HTTPError(f"HTTP {self.status_code}", response=self)
+
+
+class _FakeGitHub:
+    """The official catalog repository: branch heads, which commits each commit
+    contains, the commits GitHub does not know, and the catalog every commit serves."""
+
+    def __init__(self, monkeypatch, providers=()):
+        self.heads = {"main": _MAIN, "beta": _BETA}
+        self.history = {_MAIN: {_MAIN, _OLD_MAIN}, _BETA: {_BETA, _OLD_MAIN}, _OLD_MAIN: {_OLD_MAIN}}
+        self.unknown = set()
+        self.compare_limited = False
+        self.providers = list(providers)
+        self.compares = []
+        monkeypatch.setattr("provider_hub.service.requests.get", self.get)
+
+    def get(self, url, timeout, **_kwargs):
+        if url.startswith(_OFFICIAL_REPO_API + "/commits/"):
+            return _GitHubAnswer({"sha": self.heads[url.rsplit("/", 1)[1]]})
+        if url == _OFFICIAL_REPO_API + "/git/matching-refs/heads/":
+            return _GitHubAnswer([{"ref": f"refs/heads/{name}", "object": {"sha": sha}}
+                                  for name, sha in self.heads.items()])
+        if url.startswith(_OFFICIAL_REPO_API + "/compare/"):
+            base, head = url.rsplit("/", 1)[1].split("...")
+            self.compares.append((base, head))
+            if self.compare_limited:
+                return _GitHubAnswer({"message": "API rate limit exceeded"}, status=403)
+            if head in self.unknown:
+                return _GitHubAnswer({"message": "Not Found"}, status=404)
+            if head == base:
+                status = "identical"
+            elif head in self.history.get(base, ()):
+                status = "behind"
+            elif base in self.history.get(head, ()):
+                status = "ahead"
+            else:
+                status = "diverged"
+            return _GitHubAnswer({"status": status})
+        if url.startswith("https://raw.githubusercontent.com/"):
+            return _GitHubAnswer({"providers": [{"manifest": manifest} for manifest in self.providers]})
+        raise AssertionError(f"unexpected request {url}")
+
+
+def _official_manifest(provider_id="examplehub", version="1.0.0", commit=_MAIN):
+    return _manifest(
+        provider_id=provider_id, name=provider_id, version=version, dependencies={"requirements": []},
+        source={"type": "github", "repo": "LavX/bazarr-provider-catalog", "ref": "main", "commit": commit,
+                "catalog_url": "https://github.com/LavX/bazarr-provider-catalog/blob/main/catalog.json",
+                "trusted": True},
+    )
+
+
+def _hub_state(tmp_path, monkeypatch, *, dev_ref=None, installations=None, sources=None, entries=None):
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    state = load_state()
+    state["catalog_sources"]["official"]["dev_ref"] = dev_ref
+    state["catalog_sources"].update(sources or {})
+    state["catalog_entries"].update(entries or {})
+    state["installations"].update(installations or {})
+    save_state(state)
+
+
+def _community_source(name, url=None, resolved_commit="c" * 40):
+    return {name: {"id": name, "name": name, "type": "github", "enabled": True, "trusted": False,
+                   "url": url or f"https://github.com/{name}/catalog/blob/main/catalog.json",
+                   "resolved_commit": resolved_commit}}
+
+
+def _entry(source, manifest):
+    key = f"{source}:{manifest['provider_id']}:{manifest['version']}"
+    return {key: {"source": source, "source_name": source, "provider_id": manifest["provider_id"],
+                  "name": manifest["name"], "version": manifest["version"], "trusted": source == "official",
+                  "manifest": manifest}}
+
+
+def _installed(manifest, *, trusted, **fields):
+    row = {"provider_id": manifest["provider_id"], "name": manifest["name"], "state": "active",
+           "active_version": manifest["version"], "pending_restart": False, "origin": "catalog",
+           "trusted": trusted, "manifest": manifest}
+    row.update(fields)
+    return {manifest["provider_id"]: row}
+
+
+@pytest.mark.parametrize("dev_ref, reason", [
+    (None, "default branch"),
+    ("beta", "beta"),
+    (_OLD_MAIN, "ancestor of main"),
+])
+def test_official_source_is_trusted_on_main_beta_and_their_ancestors(tmp_path, monkeypatch, dev_ref, reason):
+    from provider_hub.service import list_catalog, refresh_catalog
+
+    _FakeGitHub(monkeypatch, providers=[_official_manifest()])
+    _hub_state(tmp_path, monkeypatch, dev_ref=dev_ref)
+
+    refresh_catalog()
+
+    catalog = list_catalog()
+    official = next(source for source in catalog["sources"] if source["id"] == "official")
+    assert (official["trusted"], official["trust_reason"]) == (True, reason)
+    assert [entry["trusted"] for entry in catalog["entries"]] == [True]
+
+
+def test_official_source_on_a_commit_outside_main_and_beta_is_community_code(tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.manifest import ManifestValidationError
+    from provider_hub.state import load_state
+
+    _FakeGitHub(monkeypatch, providers=[_official_manifest("gestdown", commit=_OUTSIDE)])
+    _hub_state(tmp_path, monkeypatch, dev_ref=_OUTSIDE)
+
+    service.refresh_catalog()
+
+    state = load_state()
+    official = state["catalog_sources"]["official"]
+    assert (official["trusted"], official["trust_reason"]) == (False, "outside main and beta")
+    [entry] = state["catalog_entries"].values()
+    assert entry["trusted"] is False and entry["manifest"]["source"]["trusted"] is False
+    # It cannot replace a built-in provider, and startup auto-install skips it.
+    with pytest.raises(ManifestValidationError, match="built-in"):
+        service.install_catalog_entry("official", "gestdown", "1.0.0")
+    assert service._latest_official_catalog_manifest(state, "gestdown") is None
+
+
+def test_an_unanswered_ancestry_check_never_grants_trust_and_never_removes_it(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    github = _FakeGitHub(monkeypatch, providers=[_official_manifest()])
+    github.compare_limited = True
+    _hub_state(tmp_path, monkeypatch, dev_ref=_OLD_MAIN)
+
+    refresh_catalog()
+    official = load_state()["catalog_sources"]["official"]
+    assert (official["trusted"], official["trust_reason"]) == (False, "could not verify: rate limited")
+
+    # A stored yes that no ancestry check produced is not an earlier verdict.
+    from provider_hub.state import save_state
+    state = load_state()
+    state["catalog_sources"]["official"]["trusted"] = True
+    state["catalog_sources"]["official"].pop("trust_reason")
+    save_state(state)
+    refresh_catalog()
+    official = load_state()["catalog_sources"]["official"]
+    assert (official["trusted"], official["trust_reason"]) == (False, "could not verify: rate limited")
+
+    # Once trusted on that commit, the same unanswered check keeps it trusted.
+    github.compare_limited = False
+    refresh_catalog()
+    github.compare_limited = True
+    github.heads["main"] = "4" * 40
+    refresh_catalog()
+    assert load_state()["catalog_sources"]["official"]["trusted"] is True
+
+
+def test_an_install_from_a_community_source_is_bound_to_it_whatever_its_manifest_says(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    _patch_local_install_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(service, "_fetch_bundle", lambda manifest, deadline=None: tmp_path / "bundle")
+    # A copy of an official manifest, still naming the official catalog.
+    copied = _official_manifest(commit="c" * 40)
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
+               entries=_entry("community", copied))
+
+    reference = service.resolve_catalog_install(manifest=copied)
+    assert reference["source"] == "community"
+    service.install_catalog_entry("community", "examplehub", "1.0.0")
+
+    [provider] = service.list_providers()
+    assert (provider["source_id"], provider["source_name"], provider["trusted"]) == (
+        "community", "community", False)
+
+
+def test_only_the_official_catalog_installs_or_updates_an_official_id(tmp_path, monkeypatch):
+    from provider_hub import service
+
+    github = _FakeGitHub(monkeypatch, providers=[_official_manifest("officialhub")])
+    installed = _official_manifest("officialhub")
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
+               installations=_installed(installed, trusted=True, source_bound=True, source_id="official"))
+    service.refresh_catalog(source_ids={"official"})
+    github.providers = []
+    higher = _official_manifest("officialhub", version="9.0.0", commit="c" * 40)
+    _hub_state(tmp_path, monkeypatch, entries=_entry("community", higher))
+
+    assert service.check_updates()["details"]["updates_available"] == 0
+    with pytest.raises(service.ProviderHubInstallError, match="only the official catalog"):
+        service.resolve_catalog_install("community", "officialhub", "9.0.0")
+    blocked = [entry for entry in service.list_catalog()["entries"] if entry["source"] == "community"]
+    assert blocked[0]["blocked_reason"] == service.RESERVED_ID_REASON
+
+
+def test_an_update_comes_only_from_the_source_the_install_is_bound_to(tmp_path, monkeypatch):
+    from provider_hub.service import check_updates
+
+    def community(name, version):
+        return _manifest(version=version, dependencies={"requirements": []},
+                         source={"type": "github", "repo": f"{name}/catalog", "ref": "main",
+                                 "commit": "c" * 40, "trusted": False,
+                                 "catalog_url": f"https://github.com/{name}/catalog/blob/main/catalog.json"})
+
+    _hub_state(tmp_path, monkeypatch,
+               sources={**_community_source("first"), **_community_source("second")},
+               entries={**_entry("first", community("first", "1.1.0")),
+                        **_entry("second", community("second", "5.0.0"))},
+               installations=_installed(community("first", "1.0.0"), trusted=False,
+                                        source_bound=True, source_id="first"))
+
+    job = check_updates()
+
+    assert job["details"]["providers"] == ["Example Hub Provider: 1.0.0 -> 1.1.0"]
+
+
+def test_the_first_official_refresh_binds_existing_installs_by_where_their_code_came_from(tmp_path, monkeypatch):
+    from provider_hub.service import list_providers, refresh_catalog
+
+    github = _FakeGitHub(monkeypatch)
+    github.history[_OUTSIDE] = {_OUTSIDE, _OLD_MAIN}
+    foreign = _official_manifest("foreignhub")
+    foreign["source"]["repo"] = "someone/elsewhere"
+    orphan = _manifest(provider_id="orphanhub", name="orphanhub", source={
+        "type": "github", "repo": "gone/catalog", "ref": "main", "commit": "d" * 40,
+        "catalog_url": "https://github.com/gone/catalog/blob/main/catalog.json", "trusted": False})
+    held = _manifest(provider_id="heldhub", name="heldhub", source={
+        "type": "github", "repo": "kept/catalog", "ref": "main", "commit": "c" * 40,
+        "catalog_url": "https://github.com/kept/catalog/blob/main/catalog.json", "trusted": False})
+    unrelated_orphan = dict(orphan, source=dict(orphan["source"], repo="other/catalog", commit="e" * 40))
+    _hub_state(
+        tmp_path, monkeypatch,
+        sources={**_community_source("kept"), **_community_source("other", resolved_commit="e" * 40)},
+        entries={**_entry("kept", held), **_entry("other", unrelated_orphan)},
+        installations={
+            **_installed(_official_manifest("mainhub", commit=_OLD_MAIN), trusted=True, source_id="official"),
+            **_installed(_official_manifest("outsidehub", commit=_OUTSIDE), trusted=True, source_id="official"),
+            **_installed(foreign, trusted=True, source_id="official"),
+            **_installed(orphan, trusted=False),
+            **_installed(held, trusted=False),
+        })
+
+    refresh_catalog(source_ids={"official"})
+
+    providers = {row["provider_id"]: row for row in list_providers()}
+    assert (providers["mainhub"]["trusted"], providers["mainhub"]["source_id"]) == (True, "official")
+    assert not providers["mainhub"].get("trust_note")
+    for demoted in ("outsidehub", "foreignhub"):
+        assert (providers[demoted]["trusted"], providers[demoted]["source_id"]) == (False, None)
+        assert providers[demoted]["trust_note"].startswith("No longer trusted")
+    assert "outside main and beta" in providers["outsidehub"]["trust_note"]
+    assert providers["orphanhub"]["source_id"] is None
+    assert "no updates" in providers["orphanhub"]["trust_note"]
+    assert (providers["heldhub"]["source_id"], providers["heldhub"]["source_name"]) == ("kept", "kept")
+
+
+def test_installed_trust_follows_the_official_branches_on_every_refresh(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    github = _FakeGitHub(monkeypatch)
+    _hub_state(tmp_path, monkeypatch, installations=_installed(
+        _official_manifest("gestdown", commit=_OLD_MAIN), trusted=True, source_bound=True, source_id="official"))
+
+    def installed():
+        return load_state()["installations"]["gestdown"]
+
+    refresh_catalog()
+    assert installed()["trusted"] is True
+
+    # A fast-forward keeps the cached yes: one compare per moved branch, none for the commit.
+    new_main = "5" * 40
+    github.history[new_main] = {new_main, _MAIN, _OLD_MAIN}
+    github.heads["main"] = new_main
+    github.compares.clear()
+    refresh_catalog()
+    assert installed()["trusted"] is True
+    assert github.compares == [(_MAIN, new_main)]
+
+    # A check GitHub does not answer changes nothing.
+    rewritten_main, rewritten_beta = "6" * 40, "7" * 40
+    github.history.update({rewritten_main: {rewritten_main}, rewritten_beta: {rewritten_beta}})
+    github.heads.update(main=rewritten_main, beta=rewritten_beta)
+    github.compare_limited = True
+    refresh_catalog()
+    assert installed()["trusted"] is True
+
+    # Both branches rewritten without the commit: demoted, and it says why.
+    github.compare_limited = False
+    refresh_catalog()
+    assert installed()["trusted"] is False and installed()["source_id"] is None
+    assert "leaves provider searches" in installed()["trust_note"]
+
+    # beta repaired to contain the commit again: trust and the official binding return.
+    repaired = "8" * 40
+    github.history[repaired] = {repaired, _OLD_MAIN}
+    github.heads["beta"] = repaired
+    refresh_catalog()
+    assert (installed()["trusted"], installed()["source_id"], installed()["trust_note"]) == (
+        True, "official", None)
+
+
+def test_a_commit_github_does_not_know_is_untrusted(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    github = _FakeGitHub(monkeypatch, providers=[_official_manifest(commit=_OUTSIDE)])
+    github.unknown.add(_OUTSIDE)
+    _hub_state(tmp_path, monkeypatch, dev_ref=_OUTSIDE, installations=_installed(
+        _official_manifest("outsidehub", commit=_OUTSIDE), trusted=True, source_bound=True, source_id="official"))
+
+    refresh_catalog()
+
+    state = load_state()
+    assert state["catalog_sources"]["official"]["trust_reason"] == "unknown commit"
+    assert state["catalog_sources"]["official"]["trusted"] is False
+    assert state["installations"]["outsidehub"]["trusted"] is False
+    assert "unknown to GitHub" in state["installations"]["outsidehub"]["trust_note"]
+
+
+def test_a_failed_refresh_keeps_entries_and_installed_trust(tmp_path, monkeypatch):
+    import requests
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    def failing_get(url, timeout, **_kwargs):
+        raise requests.exceptions.ConnectionError("could not reach GitHub")
+
+    _hub_state(tmp_path, monkeypatch,
+               entries=_entry("official", _official_manifest("examplehub")),
+               installations=_installed(_official_manifest("examplehub", commit=_OLD_MAIN),
+                                        trusted=True, source_bound=True, source_id="official"))
+    monkeypatch.setattr("provider_hub.service.requests.get", failing_get)
+
+    refresh_catalog()
+
+    state = load_state()
+    assert "Could not reach GitHub" in state["catalog_sources"]["official"]["last_error"]
+    assert list(state["catalog_entries"]) == ["official:examplehub:1.0.0"]
+    installation = state["installations"]["examplehub"]
+    assert (installation["state"], installation["trusted"], installation["source_id"]) == (
+        "active", True, "official")
+    assert not installation.get("trust_note")
+
+
+def test_one_source_failing_does_not_block_other_sources(tmp_path, monkeypatch):
+    import requests
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    live_commit = "9" * 40
+
+    def community(repo, provider_id, version, commit):
+        return _manifest(provider_id=provider_id, name=provider_id, version=version,
+                         dependencies={"requirements": []},
+                         source={"type": "github", "repo": f"{repo}/catalog", "ref": "main", "commit": commit,
+                                 "trusted": False,
+                                 "catalog_url": f"https://github.com/{repo}/catalog/blob/main/catalog.json"})
+
+    def get(url, timeout, **_kwargs):
+        if url.startswith("https://api.github.com/repos/broken/catalog/"):
+            raise requests.exceptions.ConnectionError("could not reach GitHub")
+        if url == "https://api.github.com/repos/live/catalog/commits/main":
+            return _FakeResponse({"sha": live_commit})
+        if url == f"https://raw.githubusercontent.com/live/catalog/{live_commit}/catalog.json":
+            return _FakeResponse({"providers": [
+                {"manifest": community("live", "livehub", "2.0.0", live_commit)}]})
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", get)
+    _hub_state(tmp_path, monkeypatch,
+               sources={**_community_source("broken"), **_community_source("live")},
+               entries=_entry("broken", community("broken", "brokenhub", "1.0.0", "c" * 40)))
+
+    refresh_catalog(source_ids={"broken", "live"})
+
+    state = load_state()
+    broken = state["catalog_sources"]["broken"]
+    assert "Could not reach GitHub" in broken["last_error"]
+    assert broken["resolved_commit"] == "c" * 40
+    live = state["catalog_sources"]["live"]
+    assert (live["last_error"], live["resolved_commit"]) == (None, live_commit)
+    assert set(state["catalog_entries"]) == {"broken:brokenhub:1.0.0", "live:livehub:2.0.0"}
