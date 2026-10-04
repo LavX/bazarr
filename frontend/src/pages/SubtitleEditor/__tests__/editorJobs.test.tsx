@@ -1,12 +1,15 @@
 /* eslint-disable camelcase */
+import { createMemoryRouter, RouterProvider } from "react-router";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
+import EditorPage from "@/pages/SubtitleEditor/EditorPage";
 import TranslatePanel from "@/pages/SubtitleEditor/TranslatePanel";
 import WaveformTimeline from "@/pages/SubtitleEditor/WaveformTimeline";
-import { act, customRender, screen, waitFor } from "@/tests";
+import { AllProviders } from "@/providers";
+import { act, customRender, rawRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 
 const wavesurfer = vi.hoisted(() => ({
@@ -68,10 +71,17 @@ function socketUpdate(update: Partial<System.Jobs>) {
   });
 }
 
+// The re-read of a tracked job finds it still running unless a test says
+// otherwise; an empty answer means the job has left the queue.
+function stillRunning({ request }: { request: Request }) {
+  const id = new URL(request.url).searchParams.get("id");
+  return HttpResponse.json({ data: id ? [job({ job_id: Number(id) })] : [] });
+}
+
 beforeEach(() => {
   wavesurfer.load.mockReset();
   server.use(
-    http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
+    http.get("/api/system/jobs", stillRunning),
     http.get("/api/system/languages", () =>
       HttpResponse.json([
         { code2: "en", code3: "eng", name: "English", enabled: true },
@@ -236,6 +246,63 @@ describe("TranslatePanel recovery and cancel", () => {
     expect(
       await screen.findByText(/Translation complete\. 2\/2 lines translated\./),
     ).toBeVisible();
+  });
+
+  it("reads the kept result when the job left the queue before its terminal event arrived", async () => {
+    server.use(
+      http.post("/api/translator/editor", () =>
+        HttpResponse.json({ jobId: 7 }, { status: 202 }),
+      ),
+      // Ten other jobs finished meanwhile, so the queue no longer lists it.
+      http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
+      http.get("/api/translator/editor", () =>
+        HttpResponse.json({
+          jobId: 7,
+          status: "completed",
+          lines: [
+            { position: 0, line: "Szia" },
+            { position: 1, line: "Világ" },
+          ],
+        }),
+      ),
+    );
+    renderPanel();
+    const user = userEvent.setup();
+
+    const translate = await screen.findByRole("button", { name: "Translate" });
+    await waitFor(() => expect(translate).toBeEnabled());
+    await user.click(translate);
+    socketUpdate({ progress_value: 40, progress_message: "Batch 2 of 5" });
+
+    expect(
+      await screen.findByText(/Translation complete\. 2\/2 lines translated\./),
+    ).toBeVisible();
+  });
+
+  it("says the result is gone when the job left the queue and nothing was kept", async () => {
+    server.use(
+      http.post("/api/translator/editor", () =>
+        HttpResponse.json({ jobId: 7 }, { status: 202 }),
+      ),
+      http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
+      http.get("/api/translator/editor", () =>
+        HttpResponse.json({ message: "Job not found" }, { status: 404 }),
+      ),
+    );
+    renderPanel();
+    const user = userEvent.setup();
+
+    const translate = await screen.findByRole("button", { name: "Translate" });
+    await waitFor(() => expect(translate).toBeEnabled());
+    await user.click(translate);
+
+    expect(
+      await screen.findByText(
+        "The translation result is no longer available. Translate again.",
+      ),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Try Again" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
   });
 
   it("asks the server to stop the job, queued or running", async () => {
@@ -406,5 +473,178 @@ describe("WaveformTimeline on the job path", () => {
       await screen.findByText("ffmpeg could not read audio track 1"),
     ).toBeVisible();
     expect(peakRequests).toBe(1);
+  });
+
+  it("asks for the peaks again when the peaks job left the queue unseen", async () => {
+    let peakRequests = 0;
+    server.use(
+      http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
+      http.get("/api/editor/peaks", () => {
+        peakRequests += 1;
+        if (peakRequests === 1) {
+          return HttpResponse.json(
+            { jobId: 9, status: "pending" },
+            { status: 202 },
+          );
+        }
+        return HttpResponse.json({
+          peaks: [0.5, -1],
+          duration: 0.2,
+          sampleRate: 10,
+        });
+      }),
+    );
+
+    customRender(
+      <WaveformTimeline
+        mediaType="movie"
+        mediaId={1}
+        cues={[]}
+        selectedIndex={-1}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(wavesurfer.load).toHaveBeenCalledTimes(1));
+    expect(peakRequests).toBe(2);
+  });
+});
+
+describe("EditorPage single-line translate", () => {
+  function renderEditor(content: string) {
+    const router = createMemoryRouter(
+      [
+        {
+          path: "/subtitles/edit/:mediaType/:mediaId/:language",
+          element: <EditorPage />,
+        },
+      ],
+      { initialEntries: ["/subtitles/edit/movie/50/en?arr_instance_id=3"] },
+    );
+    rawRender(
+      <AllProviders>
+        <RouterProvider router={router} />
+      </AllProviders>,
+    );
+    return content;
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal("Bazarr", { apiKey: "editor-key", baseUrl: "" });
+    vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(
+      () => undefined,
+    );
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockReturnValue(
+      Promise.resolve() as unknown as Promise<void>,
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("clears the translating cue once the line job ends, however its end is learned", async () => {
+    const srt =
+      "1\n00:00:01,000 --> 00:00:02,000\nHello\n\n2\n00:00:03,000 --> 00:00:04,000\nWorld\n";
+    const reference = "1\n00:00:01,000 --> 00:00:02,000\nSzervusz\n";
+    // Held until the test releases it, so the held cue is observable before
+    // the retained result is applied.
+    let answerResult: () => void = () => undefined;
+    const resultGate = new Promise<void>((resolve) => {
+      answerResult = resolve;
+    });
+    server.use(
+      http.get("/api/movies/50/subtitles/en/content", () =>
+        HttpResponse.json({
+          content: srt,
+          encoding: "utf-8",
+          format: "srt",
+          language: "en",
+          size: 100,
+          lastModified: 0,
+          mediaTitle: "Example",
+        }),
+      ),
+      // The reference the line is translated from, one load select away.
+      http.get("/api/movies/50/subtitles/hu/content", () =>
+        HttpResponse.json({
+          content: reference,
+          encoding: "utf-8",
+          format: "srt",
+          language: "hu",
+          size: 100,
+          lastModified: 0,
+        }),
+      ),
+      http.get("/api/editor/subtitles", () =>
+        HttpResponse.json({ subtitles: [] }),
+      ),
+      http.get("/api/editor/info", () =>
+        HttpResponse.json({
+          duration: 2,
+          videoCodec: "h264",
+          audioCodec: "aac",
+          resolution: "1920x1080",
+          container: "mkv",
+          audioTracks: [],
+        }),
+      ),
+      http.get("/api/editor/peaks", () =>
+        HttpResponse.json({ peaks: [0.5, -1], duration: 0.2, sampleRate: 10 }),
+      ),
+      // The socket event is lost, and by the time the queue is re-read the
+      // job has left it, so the only outcome left is the kept result.
+      http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
+      http.post("/api/translator/editor", () =>
+        HttpResponse.json({ jobId: 7 }, { status: 202 }),
+      ),
+      http.get("/api/translator/editor", ({ request }) =>
+        resultGate.then(() => {
+          expect(new URL(request.url).searchParams.get("jobId")).toBe("7");
+          return HttpResponse.json({
+            jobId: 7,
+            status: "completed",
+            lines: [{ position: 0, line: "Szia" }],
+          });
+        }),
+      ),
+    );
+    renderEditor(srt);
+    const user = userEvent.setup();
+
+    // A reference is what the line translates from. The first cue is
+    // selected on load, so opening the reference panel and picking a
+    // language is all the setup the AI button needs.
+    await user.click(
+      await screen.findByRole("button", { name: "Reference Subtitle" }),
+    );
+    const referenceOption = await screen.findByText("Select language...");
+    // A native select has no Testing Library query of its own.
+    // eslint-disable-next-line testing-library/no-node-access
+    const referenceSelect = referenceOption.closest("select");
+    expect(referenceSelect).not.toBeNull();
+    await user.selectOptions(referenceSelect!, "hu");
+
+    // Send the line through the AI button.
+    await user.click(await screen.findByTitle("Translate this cue"));
+
+    // The cue is held while its job runs and its result is unread.
+    await waitFor(() =>
+      expect(screen.getByTitle("Translate this cue")).toHaveTextContent("..."),
+    );
+    expect(screen.getByTitle("Translate this cue")).toBeDisabled();
+
+    act(() => {
+      answerResult();
+    });
+
+    // The retained result is applied and the hold clears, so a second line
+    // can be sent without reloading anything.
+    expect(await screen.findByText("Szia")).toBeVisible();
+    await waitFor(() =>
+      expect(screen.getByTitle("Translate this cue")).toBeEnabled(),
+    );
+    expect(screen.getByTitle("Translate this cue")).toHaveTextContent("AI");
   });
 });

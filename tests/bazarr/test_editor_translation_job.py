@@ -242,6 +242,33 @@ def test_a_result_outlives_its_job_leaving_the_bounded_queue(queue, sidecar):
     assert state['lines'] == [{'position': 0, 'line': 'Szia'}, {'position': 1, 'line': 'Világ'}]
 
 
+def test_a_failure_outlives_its_job_leaving_the_bounded_queue(queue, sidecar):
+    job_id = editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+    sidecar.polls = [{'status': 'failed', 'error': 'OpenRouter rejected the key'}]
+    job = _run(queue, job_id)
+    queue.jobs_failed_queue.clear()
+
+    state = editor.editor_translation_state(job_id)
+
+    assert state == {'jobId': job_id, 'status': 'failed', 'error': job.error['message']}
+    assert 'OpenRouter rejected the key' in state['error']
+
+
+def test_an_unexpected_failure_keeps_the_same_message_the_job_shows(queue, sidecar, monkeypatch):
+    def broken(*args, **kwargs):
+        raise ValueError('/secret/path in a provider payload')
+
+    monkeypatch.setattr(openrouter_translator.OpenRouterTranslatorService, 'submit_content', broken)
+    job_id = editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+    job = _run(queue, job_id)
+    queue.jobs_failed_queue.clear()
+
+    state = editor.editor_translation_state(job_id)
+
+    assert state['status'] == 'failed'
+    assert state['error'] == job.error['message'] == jobs_queue_module.UNEXPECTED_JOB_ERROR['message']
+
+
 def test_a_library_translation_failure_reason_lands_on_its_job(monkeypatch):
     from subtitles.tools.translate import main
 

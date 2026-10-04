@@ -9,7 +9,8 @@ import { Button, useMantineColorScheme } from "@mantine/core";
 import { cleanNotifications } from "@mantine/notifications";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { JOB_WATCH_POLL_MS } from "@/apis/hooks/jobWatch";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import { useDiscover } from "@/contexts/Discover";
@@ -19,6 +20,7 @@ import server from "@/tests/mocks/node";
 import type { DiscoverSearchSnapshot } from "@/types/discover";
 import { setAuthenticated } from "@/utilities/event";
 import * as files from "@/utilities/files";
+import { UNKNOWN_JOB_OUTCOME } from "@/utilities/jobs";
 import {
   downloadJobHandlers,
   DownloadRequest,
@@ -703,6 +705,69 @@ describe("Discover download as a standard job", () => {
     expect(
       row("full").getByRole("button", { name: "Download SRT" }),
     ).toBeEnabled();
+  });
+
+  describe("when the terminal socket event never arrives", () => {
+    let jobPolls: number;
+
+    beforeEach(() => {
+      jobPolls = 0;
+      server.use(
+        // Counts the row's own job reads, then lets the harness answer.
+        http.get("/api/system/jobs", ({ request }) => {
+          if (new URL(request.url).searchParams.get("id")) jobPolls += 1;
+        }),
+        ...handlers({ outcome: () => ({ status: "running" }) }),
+      );
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    async function nextPoll() {
+      await act(() => vi.advanceTimersByTimeAsync(JOB_WATCH_POLL_MS));
+    }
+
+    it("asks for the job directly and saves the file once, then stops asking", async () => {
+      const { user } = renderDiscover();
+      await search(user);
+      await user.click(row().getByRole("button", { name: "Download SRT" }));
+      await waitFor(() => expect(requests).toHaveLength(1));
+
+      await nextPoll();
+      expect(jobPolls).toBe(1);
+      expect(tickets).toEqual([]);
+
+      // It finishes, and the event saying so is lost.
+      setJob(jobId(), { status: "completed" });
+      await nextPoll();
+
+      expect(await row().findByText("Saved")).toBeInTheDocument();
+      expect(save).toHaveBeenCalledTimes(1);
+      expect(tickets).toEqual([jobId()]);
+      await nextPoll();
+      expect(jobPolls).toBe(2);
+    });
+
+    it("fails the row, retryable, when the job is no longer reported", async () => {
+      const { user } = renderDiscover();
+      await search(user);
+      await user.click(row().getByRole("button", { name: "Download SRT" }));
+      await waitFor(() => expect(requests).toHaveLength(1));
+
+      jobs.delete(jobId());
+      await nextPoll();
+
+      expect(await screen.findByText(/Download failed for/)).toHaveTextContent(
+        UNKNOWN_JOB_OUTCOME,
+      );
+      expect(
+        screen.getByRole("button", { name: "Retry download" }),
+      ).toBeEnabled();
+      expect(save).not.toHaveBeenCalled();
+    });
   });
 
   it("turns an expired handle found by the job into the expired recovery", async () => {

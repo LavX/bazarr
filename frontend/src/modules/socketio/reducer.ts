@@ -360,6 +360,13 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
             })
             .catch((e: unknown) => {
               LOG("warning", "Failed to fetch job update", payload.job_id, e);
+              // The cached row still says what it said before the event, and
+              // everything following the job reads it. Mark the list stale
+              // so its observers read it again.
+              void queryClient.invalidateQueries({
+                queryKey: keys,
+                exact: true,
+              });
             });
         });
       },
