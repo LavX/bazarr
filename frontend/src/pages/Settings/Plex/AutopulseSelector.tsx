@@ -14,11 +14,24 @@ import {
 import { notifications } from "@mantine/notifications";
 import { faCopy } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { useQueryClient } from "@tanstack/react-query";
+import { isAxiosError } from "axios";
 import {
   usePlexAuthValidationQuery,
   usePlexAutopulseConfigQuery,
 } from "@/apis/hooks/plex";
+import { QueryKeys } from "@/apis/queries/keys";
 import styles from "@/pages/Settings/Plex/AutopulseSelector.module.scss";
+
+// Bazarr holds no Plex token. The server says so with a 409 and this code, not
+// a 401, which the client reads as the Bazarr session ending.
+function isPlexSignInRequired(error: unknown): boolean {
+  return (
+    isAxiosError(error) &&
+    error.response?.status === 409 &&
+    error.response.data?.error_code === "sign_in_required"
+  );
+}
 
 export type AutopulseSelectorProps = {
   label: string;
@@ -29,6 +42,7 @@ const AutopulseSelector: FunctionComponent<AutopulseSelectorProps> = (
   props,
 ) => {
   const { label, description } = props;
+  const queryClient = useQueryClient();
 
   // Check if user is authenticated with OAuth
   const { data: authData } = usePlexAuthValidationQuery();
@@ -59,12 +73,26 @@ const AutopulseSelector: FunctionComponent<AutopulseSelectorProps> = (
       const status = (result.error as { response?: { status?: number } })
         ?.response?.status;
 
-      const errorMessage =
-        status === 401
-          ? "Plex OAuth authentication required. Please configure OAuth authentication above."
-          : status === 400
-            ? "Unable to generate configuration. Please ensure the external webhook is configured and saved in Settings."
-            : "Failed to generate Autopulse configuration. Please ensure Autopulse is running and supports the template API.";
+      // Bazarr's own session has ended, and the app is on its way to the login
+      // page, which says all there is to say.
+      if (status === 401) {
+        return;
+      }
+
+      const signInRequired = isPlexSignInRequired(result.error);
+      if (signInRequired) {
+        // The account above was read while Bazarr still held the token, so
+        // read it again. Signed out, this panel then asks for a Plex sign-in.
+        void queryClient.invalidateQueries({
+          queryKey: [QueryKeys.Plex, "auth", "validate"],
+        });
+      }
+
+      const errorMessage = signInRequired
+        ? "Sign in to Plex to generate an Autopulse configuration."
+        : status === 400
+          ? "Unable to generate configuration. Please ensure the external webhook is configured and saved in Settings."
+          : "Failed to generate Autopulse configuration. Please ensure Autopulse is running and supports the template API.";
 
       notifications.show({
         id: "autopulse-config",
