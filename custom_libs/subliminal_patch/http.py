@@ -142,6 +142,21 @@ class CFSession(CloudScraper):
         )
 
 
+def _loggable_url(url):
+    """scheme://host:port of a URL: never the userinfo (a proxy's credentials)
+    nor the path or query (a provider's API key)."""
+    try:
+        parts = urlparse(url)
+        host = parts.hostname or ""
+        port = parts.port
+    except (TypeError, ValueError, AttributeError):
+        return "<unparseable url>"
+    if ":" in host:
+        host = "[%s]" % host
+    netloc = "%s:%s" % (host, port) if port else host
+    return "%s://%s" % (parts.scheme, netloc)
+
+
 class RetryingSession(CertifiSession):
     proxied_functions = ("get", "post")
 
@@ -154,12 +169,12 @@ class RetryingSession(CertifiSession):
                 "http": proxy,
                 "https": proxy
             }
+            # Once per session, with the credentials stripped. Never per
+            # request: the request URL can carry a provider's API key, so it
+            # is not logged at all.
+            logger.debug("Using proxy %s", _loggable_url(proxy))
 
     def retry_method(self, method, *args, **kwargs):
-        if self.proxies:
-            # fixme: may be a little loud
-            logger.debug("Using proxy %s for: %s", self.proxies["http"], args[0])
-
         return retry_call(getattr(super(RetryingSession, self), method), fargs=args, fkwargs=kwargs, tries=3, delay=5,
                           exceptions=(exceptions.ConnectionError,
                                       exceptions.ProxyError,

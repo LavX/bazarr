@@ -14,6 +14,7 @@ Covers:
   query parameter on these routes is the target arr's key and is forwarded to
   the host being probed.
 """
+import logging
 import socket
 from unittest.mock import patch, MagicMock
 
@@ -132,6 +133,8 @@ def test_base_url_validator_accepts(url):
     ("http://x.test/?evil=1", "query"),
     ("http://x.test/#frag", "fragment"),
     ("http://x.test/sonarr/../admin", "relative"),
+    ("http://x.test:notaport", "invalid port or URL"),
+    ("http://[::1", "invalid port or URL"),
 ])
 def test_base_url_validator_rejects(url, reason):
     from app.ui import _validate_test_base_url
@@ -758,3 +761,98 @@ def test_legacy_proxy_keeps_the_success_shape(monkeypatch):
         r = client.get("/test/http/sonarr.lan:8989/api")
         assert r.mimetype == "application/json"
         assert r.get_json() == {"status": True, "version": "4.0.10.2544", "code": 200}
+
+
+# === refusals and failures report fixed text, never the exception's ===
+
+def _unresolvable(*a, **kw):
+    raise socket.gaierror(socket.EAI_NONAME, "Name or service not known: nowhere.test")
+
+
+def _no_dns(*a, **kw):
+    pytest.fail("the target should be refused before any lookup")
+
+
+@pytest.mark.parametrize("url,resolver,expected", [
+    ("ftp://x.test", _no_dns, "Request blocked: unsupported protocol"),
+    ("http://x.test/sonarr?evil=1", _no_dns,
+     "Request blocked: query strings and fragments are not allowed in url"),
+    ("http://nowhere.test:8989", _unresolvable, "Request blocked: hostname could not be resolved"),
+    ("http://x.test:caller-typed", _no_dns, "Request blocked: invalid port or URL"),
+    ("http://[::1", _no_dns, "Request blocked: invalid port or URL"),
+    ("http://x.test:8989", lambda *a, **kw: [_addr("224.0.0.1")],
+     "Request blocked: No usable address resolved (multicast and unspecified are not valid TCP targets)"),
+])
+def test_proxy_service_refuses_with_a_fixed_reason(monkeypatch, url, resolver, expected):
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    monkeypatch.setattr(socket, "getaddrinfo", resolver)
+    app = _build_app()
+    client = app.test_client()
+    _login(client)
+    body = client.get("/test/sonarr", query_string={"url": url, "apikey": "k"}).get_json()
+    assert body == {"status": False, "error": expected, "code": 0}
+
+
+@pytest.mark.parametrize("path,resolver,expected", [
+    ("/test/http/sonarr.lan:8989/api", lambda *a, **kw: [_addr("127.0.0.1")],
+     "Request blocked: All resolved addresses are link-local or loopback"),
+    ("/test/http/nowhere.test:8989/api", _unresolvable, "Request blocked: hostname could not be resolved"),
+    ("/test/http/sonarr.lan:caller-typed/api", _no_dns, "Request blocked: invalid port or URL"),
+])
+def test_legacy_proxy_refuses_with_a_fixed_reason(monkeypatch, path, resolver, expected):
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    monkeypatch.setattr(socket, "getaddrinfo", resolver)
+    app = _build_app()
+    client = app.test_client()
+    _login(client)
+    assert client.get(path).get_json() == {"status": False, "error": expected, "code": 0}
+
+
+def _failures():
+    import requests
+    return [
+        (requests.ConnectionError("refused http://10.0.0.5:8989/api/system/status LEAK"),
+         "Cannot connect: connection refused or host unreachable"),
+        (requests.exceptions.SSLError("certificate verify failed LEAK"), "Cannot connect: TLS handshake failed"),
+        (requests.ConnectTimeout("connect timeout LEAK"), "Cannot connect: timed out"),
+        (requests.ReadTimeout("read timeout LEAK"), "Cannot connect: timed out"),
+        (requests.exceptions.InvalidHeader("bad header LEAK"), "Cannot connect: request failed"),
+    ]
+
+
+def _logged_probe_failure(caplog, error):
+    """The failed probe's exception is kept for the log, where the reply drops it."""
+    return any(record.levelno == logging.DEBUG and record.exc_info and record.exc_info[1] is error
+               for record in caplog.records)
+
+
+@pytest.mark.parametrize("error,expected", _failures())
+def test_proxy_service_reports_a_failed_probe_without_its_text(monkeypatch, caplog, error, expected):
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **kw: [_addr("10.0.0.5")])
+    with patch("app.ui.requests.get", side_effect=error), caplog.at_level(logging.DEBUG):
+        app = _build_app()
+        client = app.test_client()
+        _login(client)
+        r = client.get("/test/sonarr?url=http://sonarr.lan:8989&apikey=k")
+    assert r.get_json()["error"] == expected
+    assert "LEAK" not in r.get_data(as_text=True)
+    assert _logged_probe_failure(caplog, error)
+
+
+@pytest.mark.parametrize("error,expected", _failures())
+def test_legacy_proxy_reports_a_failed_probe_without_the_probed_url(monkeypatch, caplog, error, expected):
+    """The probed URL carries the target's key in its query string, and the
+    exception text names that URL."""
+    monkeypatch.setattr("app.config.settings.auth.type", None)
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **kw: [_addr("10.0.0.5")])
+    error.args = (f"{error.args[0]} http://10.0.0.5:8989/api?apikey=target-arr-key",)
+    with patch("app.ui.requests.get", side_effect=error), caplog.at_level(logging.DEBUG):
+        app = _build_app()
+        client = app.test_client()
+        _login(client)
+        r = client.get("/test/http/sonarr.lan:8989/api?apikey=target-arr-key")
+    assert r.get_json() == {"status": False, "error": expected}
+    text = r.get_data(as_text=True)
+    assert "LEAK" not in text and "target-arr-key" not in text
+    assert _logged_probe_failure(caplog, error)

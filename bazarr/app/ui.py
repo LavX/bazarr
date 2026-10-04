@@ -9,8 +9,8 @@ import time
 import requests
 import mimetypes
 
-from flask import (request, abort, render_template, Response, send_file, stream_with_context, Blueprint,
-                   jsonify, redirect)
+from flask import (request, abort, render_template, Response, send_file, send_from_directory,
+                   stream_with_context, Blueprint, jsonify, redirect)
 from functools import wraps
 from urllib.parse import unquote, urlparse
 
@@ -367,10 +367,11 @@ def backup_download(filename):
     backup_folder = os.path.realpath(settings.backup.folder)
     fullpath = os.path.realpath(os.path.join(backup_folder, filename))
     # Trailing-separator containment so a sibling dir sharing the prefix
-    # (e.g. /config/backup-evil) cannot pass; realpath also defeats `..`/symlinks.
-    if fullpath != backup_folder and not fullpath.startswith(backup_folder + os.sep):
+    # (e.g. /config/backup-evil) cannot pass, nor the folder itself; realpath
+    # also defeats `..`/symlinks.
+    if not fullpath.startswith(backup_folder + os.sep):
         return '', 404
-    return send_file(fullpath, max_age=0, as_attachment=True)
+    return send_from_directory(backup_folder, filename, as_attachment=True, max_age=0)
 
 
 def swaggerui_static_dir():
@@ -396,17 +397,77 @@ def swaggerui_static(filename):
         return send_file(fullpath)
 
 
+# Why a connection test refused its target. A refusal reports one of these and
+# never the exception's own text: a resolver error or a malformed port quotes
+# back what the caller typed.
+_BLOCKED_REASONS = {
+    'protocol': 'unsupported protocol',
+    'host': 'missing host',
+    'query': 'query strings and fragments are not allowed in url',
+    'relative': 'relative path segments are not allowed in url',
+    'invalid_url': 'invalid port or URL',
+    'no_addresses': 'DNS resolution returned no results',
+    'loopback': 'All resolved addresses are link-local or loopback',
+    'no_usable_address': 'No usable address resolved (multicast and unspecified are not valid TCP targets)',
+}
+
+
+class _BlockedTarget(ValueError):
+    """A connection-test target a validator refused, named by its reason code."""
+
+    def __init__(self, code):
+        super().__init__(_BLOCKED_REASONS[code])
+        self.code = code
+
+
+def _blocked(error):
+    """The reply for a refused target, its reason chosen by exception type."""
+    if isinstance(error, _BlockedTarget):
+        reason = _BLOCKED_REASONS[error.code]
+    elif isinstance(error, socket.gaierror):
+        reason = 'hostname could not be resolved'
+    else:
+        reason = 'invalid port or URL'
+    return dict(status=False, error=f'Request blocked: {reason}', code=0)
+
+
+def _probe_failure(error):
+    """What a probe that raised reports, chosen by exception type. The exception
+    text names the probed URL, and on the legacy route that URL carries the
+    target's API key in its query string, so only the log keeps the detail and
+    the file formatter strips the key there."""
+    logging.debug('BAZARR connection test probe failed', exc_info=error)
+    if isinstance(error, requests.exceptions.SSLError):
+        return 'Cannot connect: TLS handshake failed'
+    if isinstance(error, requests.Timeout):
+        return 'Cannot connect: timed out'
+    if isinstance(error, requests.ConnectionError):
+        return 'Cannot connect: connection refused or host unreachable'
+    return 'Cannot connect: request failed'
+
+
+def _parse_target(url_str):
+    """Parse a target URL and its port. The parser's own errors (a malformed
+    port, a broken IPv6 literal) quote back what the caller typed, so they are
+    refused with a fixed reason like every other invalid target."""
+    try:
+        parsed = urlparse(url_str)
+        port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    except ValueError:
+        raise _BlockedTarget('invalid_url')
+    return parsed, port
+
+
 def _resolve_and_validate(url_str):
     """Resolve DNS once and validate resolved IPs. Pick a safe address to pin to.
     Returns (resolved_ip, hostname, parsed) or raises ValueError."""
-    parsed = urlparse(url_str)
+    parsed, port = _parse_target(url_str)
     hostname = parsed.hostname
     if not hostname:
-        raise ValueError("No hostname in URL")
-    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+        raise _BlockedTarget('host')
     addrs = socket.getaddrinfo(hostname, port)
     if not addrs:
-        raise ValueError("DNS resolution returned no results")
+        raise _BlockedTarget('no_addresses')
     # Find a safe (non-link-local, non-loopback) address to pin to.
     # Dual-stack hosts may resolve to both private LAN and link-local IPv6.
     safe_ip = None
@@ -416,7 +477,7 @@ def _resolve_and_validate(url_str):
             if safe_ip is None:
                 safe_ip = sockaddr[0]
     if safe_ip is None:
-        raise ValueError("All resolved addresses are link-local or loopback")
+        raise _BlockedTarget('loopback')
     return safe_ip, hostname, parsed
 
 
@@ -449,14 +510,13 @@ def _resolve_and_validate_constrained(url_str):
 
     Raises ValueError if no usable address was returned.
     """
-    parsed = urlparse(url_str)
+    parsed, port = _parse_target(url_str)
     hostname = parsed.hostname
     if not hostname:
-        raise ValueError("No hostname in URL")
-    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+        raise _BlockedTarget('host')
     addrs = socket.getaddrinfo(hostname, port)
     if not addrs:
-        raise ValueError("DNS resolution returned no results")
+        raise _BlockedTarget('no_addresses')
     seen = set()
     resolved_ips = []
     for _, _, _, _, sockaddr in addrs:
@@ -469,9 +529,7 @@ def _resolve_and_validate_constrained(url_str):
             continue
         resolved_ips.append(ip_str)
     if not resolved_ips:
-        raise ValueError(
-            "No usable address resolved (multicast and unspecified are not valid TCP targets)"
-        )
+        raise _BlockedTarget('no_usable_address')
     return resolved_ips, hostname, parsed
 
 
@@ -504,15 +562,15 @@ def _validate_test_base_url(base):
     base paths like /sonarr but refuse anything that smuggles a different
     request via .., query string, or fragment.
     """
-    parsed = urlparse(base)
+    parsed, _ = _parse_target(base)
     if parsed.scheme not in ('http', 'https'):
-        raise ValueError('unsupported protocol')
+        raise _BlockedTarget('protocol')
     if not parsed.hostname:
-        raise ValueError('missing host')
+        raise _BlockedTarget('host')
     if parsed.query or parsed.fragment:
-        raise ValueError('query strings and fragments are not allowed in url')
+        raise _BlockedTarget('query')
     if '..' in (parsed.path or ''):
-        raise ValueError('relative path segments are not allowed in url')
+        raise _BlockedTarget('relative')
     return parsed
 
 
@@ -622,14 +680,14 @@ def proxy_service(service):
     try:
         base_parsed = _validate_test_base_url(base)
     except ValueError as e:
-        return dict(status=False, error=f'Request blocked: {e}', code=0)
+        return _blocked(e)
 
     try:
         resolved_ips, hostname, _ = _resolve_and_validate_constrained(
             base_parsed.geturl()
         )
     except (ValueError, socket.gaierror) as e:
-        return dict(status=False, error=f'Request blocked: {e}', code=0)
+        return _blocked(e)
 
     verify = (get_ssl_verify(service)
               if config['has_verify_ssl_setting'] else True)
@@ -672,12 +730,12 @@ def proxy_service(service):
                                       verify=verify,
                                       timeout=5, headers=request_headers)
             except requests.ConnectionError as e:
-                last_connection_error = repr(e)
+                last_connection_error = _probe_failure(e)
                 # Cannot reach this IP; try the next one. Skip the
                 # remaining status paths for this IP.
                 break
             except Exception as e:
-                return dict(status=False, error=repr(e))
+                return dict(status=False, error=_probe_failure(e))
             reachable_ip = resolved_ip
             last_response_code = result.status_code
             if result.status_code == 200:
@@ -715,7 +773,7 @@ def proxy_service(service):
                             code=result.status_code)
     if reachable_ip is None and last_connection_error is not None:
         return dict(status=False,
-                    error=f'Cannot connect: {last_connection_error}', code=0)
+                    error=last_connection_error, code=0)
     return dict(status=False,
                 error=last_error or 'Cannot reach Sonarr/Radarr at the configured URL.',
                 code=last_response_code)
@@ -732,7 +790,7 @@ def proxy(protocol, url):
     try:
         resolved_ip, hostname, parsed = _resolve_and_validate(url)
     except (ValueError, socket.gaierror) as e:
-        return dict(status=False, error=f'Request blocked: {e}', code=0)
+        return _blocked(e)
     # Pin request to resolved IP to prevent DNS rebinding
     port = parsed.port or (443 if parsed.scheme == 'https' else 80)
     pinned_netloc = f'{resolved_ip}:{port}'
@@ -743,7 +801,7 @@ def proxy(protocol, url):
     try:
         result = requests.get(pinned_url, params, allow_redirects=False, verify=False, timeout=5, headers=pinned_headers)
     except Exception as e:
-        return dict(status=False, error=repr(e))
+        return dict(status=False, error=_probe_failure(e))
     else:
         if result.status_code == 200:
             try:
