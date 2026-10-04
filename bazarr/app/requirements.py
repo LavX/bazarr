@@ -152,7 +152,7 @@ RUNTIME_REQUIREMENTS = {
     "semver": ("semver", "==3.1.0"),
     "signalrcore": ("signalrcore", "==1.0.2"),
     "six": ("six", "==1.17.0"),
-    "sqlalchemy": ("sqlalchemy", "==2.0.54"),
+    "sqlalchemy": ("sqlalchemy", "==2.1.1"),
     "srt": ("srt", "==3.5.3"),
     "subliminal": ("subliminal", "==2.6.0"),
     "textdistance": ("textdistance", "==4.6.3"),
