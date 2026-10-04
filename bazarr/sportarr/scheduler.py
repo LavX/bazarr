@@ -11,7 +11,7 @@ from sportarr.workflows import (
 )
 from arr_instances.repository import ArrInstanceRepository
 from sportarr.settings import get_sports_settings
-from sportarr.sync.leagues import update_sports_for_instance
+from sportarr.sync.leagues import sync_sports_for_instance
 from subtitles.indexer.sports import sports_full_scan_subtitles
 
 
@@ -46,8 +46,10 @@ def configure_sports_jobs(aps_scheduler, session):
         if job.id.startswith(prefixes) and job.id not in wanted:
             aps_scheduler.remove_job(job.id)
     for instance in instances:
+        # Through the jobs queue, like the Sonarr and Radarr syncs, so the run
+        # shows in System > Jobs, can be stopped, and stops for its owner.
         aps_scheduler.add_job(
-            update_sports_for_instance,
+            sync_sports_for_instance,
             "interval",
             minutes=get_sports_settings(instance)["sports_sync"],
             max_instances=1,
@@ -56,7 +58,7 @@ def configure_sports_jobs(aps_scheduler, session):
             id=f"update_sports_{instance.id}",
             name=f"Sync with Sportarr ({instance.name})",
             replace_existing=True,
-            kwargs={"arr_instance_id": instance.id},
+            kwargs={"arr_instance_id": instance.id, "wait_for_completion": True},
         )
         scan = get_sports_settings(instance)
         trigger = {"hour": scan["full_update_hour"]}

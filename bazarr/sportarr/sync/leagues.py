@@ -6,6 +6,7 @@ from sqlalchemy import delete, select
 
 from app.config import settings
 from app.database import database, TableArrInstances, TableLanguagesProfiles, TableSportsLeagues
+from app.jobs_queue import jobs_queue, JobCancelled
 from arr_instances.client import ArrClientFactory
 from arr_instances.resolution import resolve_default_profile
 from sportarr.db import sports_transaction
@@ -264,3 +265,63 @@ def update_sports_for_instance(arr_instance_id, job_id=None, *, cancel=None, exp
         check_cancelled(cancel)
         sync_event_leagues(ids, arr_instance_id, **kwargs, is_signalr=is_signalr, complete=True)
         return ids
+
+
+def _sync_job_label(arr_instance_id):
+    name = database.execute(select(TableArrInstances.name).where(
+        TableArrInstances.id == arr_instance_id,
+        TableArrInstances.kind == 'sportarr')).scalar_one_or_none()
+    return name or f'instance {arr_instance_id}'
+
+
+def _owner_is_enabled(arr_instance_id):
+    return database.execute(select(TableArrInstances.id).where(
+        TableArrInstances.id == arr_instance_id,
+        TableArrInstances.kind == 'sportarr',
+        TableArrInstances.enabled == 1)).scalar_one_or_none() is not None
+
+
+def sync_sports_for_instance(arr_instance_id, job_id=None, wait_for_completion=False):
+    """Scheduled sync of one Sportarr instance, run through the jobs queue.
+
+    The Sonarr and Radarr enqueue-then-run shape: without a job_id this queues
+    itself and returns, and the queue calls it again with the job_id it
+    injects. Called straight from the scheduler, the sync ran inside the
+    scheduler thread, so it never appeared in System > Jobs, could not be
+    stopped, had no per-job stop signal, and kept going after its instance was
+    deleted. Only the parameters may exist before the enqueue, because
+    add_job_from_function captures this frame's locals.
+
+    The live stream and the webhook keep calling update_sports_for_instance
+    directly: they bring their own stop signal and lock timeout.
+    """
+    if not job_id:
+        # An instance change sweeps the queued syncs before it drops this
+        # schedule, so a tick that fires in between must not queue another.
+        if settings.general.use_sportarr and _owner_is_enabled(arr_instance_id):
+            jobs_queue.add_job_from_function(
+                f'Syncing sports library with Sportarr ({_sync_job_label(arr_instance_id)})',
+                is_progress=False, wait_for_completion=wait_for_completion)
+        return
+    from sportarr.workflows import SportsJobSignal
+
+    if not settings.general.use_sportarr:
+        # The master toggle can flip off between the tick's check above and
+        # this queued run, after the setting change swept the pending jobs
+        # and could no longer reach this one. That is the stop, not a
+        # failure.
+        raise JobCancelled('Use Sportarr was switched off')
+
+    try:
+        update_sports_for_instance(arr_instance_id, job_id=job_id)
+    except ValueError:
+        # An instance change stops the event streams before it cancels this
+        # job, so the sync can reach its missing owner first. That is the
+        # owner's stop, not a failure. The check uses a new signal because the
+        # sync's own one can still hold a cached "enabled".
+        if SportsJobSignal(arr_instance_id, job_id).is_set():
+            raise JobCancelled('Sportarr owner stopped') from None
+        raise
+    jobs_queue.update_job_name(
+        job_id=job_id,
+        new_job_name=f'Synced sports library with Sportarr ({_sync_job_label(arr_instance_id)})')
