@@ -27,7 +27,11 @@ class FileHandlerFormatter(logging.Formatter):
     """Formatter that removes apikey from logs."""
     # Bare "key=" too: 2Captcha-compatible captcha vendors carry the account
     # key as ?key=... on res.php polling, and urllib3 logs request targets.
-    APIKEY_RE = re.compile(r'((?:api)?key)(?:=|%3D)([a-zA-Z0-9]+)')
+    # "token" covers api_token, access_token and X-Plex-Token. The value runs
+    # to the next delimiter (&, whitespace, a quote, the log's | or the
+    # backslash of an escaped newline), so a Gemini, OpenRouter or dotted
+    # token with -, _ or . in it goes whole rather than up to its first dash.
+    APIKEY_RE = re.compile(r'((?:api)?key|token)(?:=|%3D)([^\s&\'"|\\]+)', re.IGNORECASE)
     IPv4_RE = re.compile(r'\b(?<!Failed\sauthentication\sfrom\s)(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.)'
                          r'{3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\b')
     PLEX_URL_RE = re.compile(r'(?:https?://)?[0-9\-]+\.[a-f0-9]+\.plex\.direct(?::\d+)?')
