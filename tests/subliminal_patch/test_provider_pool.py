@@ -603,7 +603,7 @@ def test_a_language_reverse_failure_records_its_traceback_once(monkeypatch, capl
 
     pool = core.SZProviderPool(["alpha"], {})
 
-    def reversing(provider, video, languages, detailed=False):
+    def reversing(provider, video, languages, detailed=False, discard_on_failure=False):
         raise core.LanguageReverseError("fixture reverse failure")
 
     monkeypatch.setattr(pool, "list_subtitles_provider", reversing)
@@ -674,3 +674,189 @@ def test_a_match_computation_failure_records_its_traceback_once(monkeypatch, cap
     assert record.exc_info and record.exc_info[0] is AttributeError
     assert "fixture match failure" in record.exc_text
     assert caplog.text.count("Traceback (most recent call last)") == 1
+
+
+# The pool rechecks a provider it already holds just before it calls it, so a
+# provider that went on backoff after the search started is not called again.
+
+class _Candidate:
+    hash_verifiable = False
+    hearing_impaired = False
+    hearing_impaired_verifiable = False
+    release_info = None
+
+    def __init__(self, provider_name, sub_id):
+        self.provider_name = provider_name
+        self.id = sub_id
+        self.language = core.Language("eng")
+
+    def get_matches(self, video):
+        return {"series", "year", "season", "episode"}
+
+    def is_valid(self):
+        return True
+
+    def normalize(self):
+        pass
+
+
+def _raising(error):
+    def call(*args, **kwargs):
+        raise error
+    return call
+
+
+def _gated_pool(monkeypatch, download=None, usable=None):
+    """Two held providers, alpha and beta, recording every call they get."""
+    calls = []
+
+    class Provider(_FakeProvider):
+        languages = {core.Language("eng")}
+
+        def list_subtitles(self, video, languages):
+            calls.append(("list", self.name))
+            return []
+
+        def download_subtitle(self, subtitle):
+            calls.append(("download", subtitle.id))
+            if download is not None and subtitle.provider_name == "alpha":
+                raise download
+
+    class Alpha(Provider):
+        name = "alpha"
+
+    class Beta(Provider):
+        name = "beta"
+
+    monkeypatch.setattr(core, "provider_registry", {"alpha": Alpha, "beta": Beta})
+    monkeypatch.setattr(core, "DOWNLOAD_RETRY_SLEEP", 0)
+    throttled = []
+    usable = usable if usable is not None else {"alpha": True, "beta": True}
+    pool = core.SZProviderPool(
+        ["alpha", "beta"], {},
+        throttle_callback=lambda name, error, **context: throttled.append(name),
+        adoption_gate=lambda name: usable[name])
+    pool["alpha"], pool["beta"]
+    return pool, calls, throttled, usable
+
+
+def test_a_held_provider_on_backoff_is_neither_searched_nor_downloaded_from(monkeypatch):
+    pool, calls, throttled, usable = _gated_pool(monkeypatch)
+    usable["alpha"] = False
+    language = core.Language("eng")
+    subtitle = _Candidate("alpha", "a1")
+
+    assert pool.list_subtitles_provider("alpha", object(), {language}) is None
+    detailed = pool.list_subtitles_provider("alpha", object(), {language}, detailed=True)
+    assert (detailed.status, detailed.reason) == ("skipped", "provider_excluded")
+    assert pool.download_subtitle(subtitle) is False
+    assert subtitle.skip_reason == "provider_excluded"
+    assert calls == []
+    assert throttled == []
+
+
+@pytest.mark.parametrize("busy", [True, False])
+def test_a_busy_or_excluded_provider_costs_the_round_one_attempt(monkeypatch, caplog, busy):
+    pool, calls, throttled, usable = _gated_pool(
+        monkeypatch, download=core.ProviderBusyError("alpha") if busy else None)
+    if not busy:
+        usable["alpha"] = False
+    video = core.Episode("/m/Show.S01E01.mkv", "Show", 1, 1)
+    candidates = [_Candidate("alpha", f"a{n}") for n in (1, 2, 3)] + [_Candidate("beta", "b1")]
+
+    with caplog.at_level("INFO", logger=core.logger.name):
+        downloaded = pool.download_best_subtitles(candidates, video, {core.Language("eng")}, min_score=1)
+
+    assert [subtitle.id for subtitle in downloaded] == ["b1"]
+    assert calls == ([("download", "a1")] if busy else []) + [("download", "b1")]
+    assert "alpha" not in pool.discarded_providers
+    assert throttled == []
+    assert len([r for r in caplog.records if "remaining candidates of provider 'alpha'" in r.getMessage()]) == 1
+
+
+@pytest.mark.parametrize("error, listed", [
+    (core.ProviderBusyError("alpha"), []),
+    (core.ProviderExcludedWhileQueuedError("alpha"), None),
+])
+def test_a_refused_turn_is_not_a_provider_failure(monkeypatch, error, listed):
+    pool, calls, throttled, usable = _gated_pool(monkeypatch)
+    pool.initialized_providers["alpha"].list_subtitles = _raising(error)
+    language = core.Language("eng")
+
+    assert pool.list_subtitles_provider("alpha", object(), {language}, discard_on_failure=True) == listed
+    detailed = pool.list_subtitles_provider("alpha", object(), {language}, detailed=True)
+    assert detailed.status == "skipped"
+    assert detailed.reason == ("provider_busy" if listed == [] else "provider_excluded")
+    assert throttled == []
+    # Excluded means discarded for the pool, like any exclusion; busy does not.
+    assert ("alpha" in pool.discarded_providers) is (listed is None)
+
+
+@pytest.mark.parametrize("operation", ["search", "download"])
+def test_the_outcome_is_reported_after_the_throttle_and_the_discard(monkeypatch, operation):
+    pool, calls, throttled, usable = _gated_pool(monkeypatch, download=RuntimeError("fixture failure"))
+    events = []
+    provider = pool.initialized_providers["alpha"]
+    provider.list_subtitles = _raising(RuntimeError("fixture failure"))
+    provider.outcome_recorded = lambda: events.append(("recorded", list(throttled),
+                                                       "alpha" in pool.discarded_providers))
+
+    if operation == "search":
+        pool.list_subtitles(object(), {core.Language("eng")})
+    else:
+        pool.download_subtitle(_Candidate("alpha", "a1"))
+
+    assert events == [("recorded", ["alpha"], True)]
+
+
+def test_a_provider_rebuilt_by_a_config_change_stays_gated(monkeypatch):
+    pool, calls, throttled, usable = _gated_pool(monkeypatch)
+    pool.provider_configs["alpha"] = {"option": "old"}
+    old = pool.initialized_providers["alpha"]
+
+    pool.provider_configs.update({"alpha": {"option": "new"}})
+    rebuilt = pool.initialized_providers["alpha"]
+
+    assert rebuilt is not old
+    assert rebuilt.admit() is True
+    usable["alpha"] = False
+    assert rebuilt.admit() is False
+
+
+def test_a_connection_error_that_records_a_backoff_keeps_its_retries(monkeypatch):
+    pool, calls, throttled, usable = _gated_pool(monkeypatch, download=requests.ConnectionError("fixture"))
+    pool.throttle_callback = lambda name, error, **context: usable.update({name: False})
+
+    assert pool.download_subtitle(_Candidate("alpha", "a1")) is False
+    assert calls == [("download", "a1")] * core.DOWNLOAD_TRIES
+
+
+def test_a_broken_admission_check_lets_the_call_through(monkeypatch, caplog):
+    pool, calls, throttled, usable = _gated_pool(monkeypatch)
+    usable.clear()
+
+    with caplog.at_level("WARNING", logger=core.logger.name):
+        assert pool.download_subtitle(_Candidate("alpha", "a1")) is True
+
+    assert calls == [("download", "a1")]
+    assert len([r for r in caplog.records if "Admission check" in r.getMessage()]) == 1
+
+
+def test_a_detailed_search_skips_a_held_provider_the_pool_discarded(monkeypatch):
+    # Discover fans out to both providers with detailed results. A provider
+    # the pool holds but another search discarded while this one was running
+    # is skipped, not called: the recheck covers held providers, which the
+    # adoption path only ever looked at once, when it first admitted them.
+    pool, calls, throttled, usable = _gated_pool(monkeypatch)
+    pool.discarded_providers.add("alpha")
+    language = core.Language("eng")
+    video = core.Episode("/m/Show.S01E01.mkv", "Show", 1, 1)
+
+    alpha = pool.list_subtitles_provider("alpha", video, {language}, detailed=True)
+    beta = pool.list_subtitles_provider("beta", video, {language}, detailed=True)
+
+    assert (alpha.status, alpha.reason) == ("skipped", "provider_excluded")
+    assert (beta.status, beta.reason) == ("empty", None)
+    assert pool.list_subtitles_provider("alpha", video, {language}) is None
+    assert calls == [("list", "beta")]
+    assert throttled == []
