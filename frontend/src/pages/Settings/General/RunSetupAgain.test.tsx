@@ -1,6 +1,8 @@
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useSettingsMutation } from "@/apis/hooks";
+import { readOnboardingValue } from "@/pages/Setup/onboardingStorage";
+import OnboardingWizardView from "@/pages/Setup/OnboardingWizard";
 import { customRender, screen, waitFor } from "@/tests";
 import RunSetupAgain from "./RunSetupAgain";
 
@@ -31,6 +33,11 @@ describe("RunSetupAgain", () => {
     mockedSettingsMutation.mockReturnValue({
       mutate,
     } as unknown as ReturnType<typeof useSettingsMutation>);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    localStorage.clear();
   });
 
   it("clears the flag and reopens the wizard", async () => {
@@ -89,6 +96,54 @@ describe("RunSetupAgain", () => {
 
     await waitFor(() => expect(navigate).toHaveBeenCalledWith("/setup"));
     expect(storedAtNavigate).toEqual([null, null, null]);
+  });
+
+  it("reopens at Welcome under a base URL too", async () => {
+    // An install served under a subpath adopts what an earlier version left
+    // under the plain keys, and it did so again after every clear, because a
+    // cleared key looked exactly like one that was never written. The wizard
+    // came back on the old step with the old answer.
+    const user = userEvent.setup();
+    const names = ["step", "intent", "media-servers"];
+    const earlier = {
+      step: "sonarr",
+      intent: "library",
+      "media-servers": "[]",
+    };
+    for (const [name, value] of Object.entries(earlier)) {
+      localStorage.setItem(`bazarr.onboarding.${name}`, value);
+    }
+    vi.stubGlobal("Bazarr", { baseUrl: "/bazarr" });
+    // Read once, as an earlier visit would have, so this install has adopted
+    // its own copies.
+    expect(names.map(readOnboardingValue)).toEqual(Object.values(earlier));
+
+    let storedAtNavigate: (string | null)[] = [];
+    navigate.mockImplementation(() => {
+      storedAtNavigate = names.map(readOnboardingValue);
+    });
+    mutate.mockImplementation(
+      (_input: unknown, opts?: { onSuccess?: () => void }) => {
+        opts?.onSuccess?.();
+      },
+    );
+
+    const view = customRender(<RunSetupAgain />);
+    await user.click(
+      screen.getByRole("button", { name: /run first-time setup/i }),
+    );
+
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("/setup"));
+    expect(storedAtNavigate).toEqual([null, null, null]);
+
+    view.unmount();
+    customRender(<OnboardingWizardView />);
+
+    expect(
+      await screen.findByRole("heading", { name: /welcome to bazarr/i }),
+    ).toBeInTheDocument();
+    // The install served from the root still has its own.
+    expect(localStorage.getItem("bazarr.onboarding.step")).toBe("sonarr");
   });
 
   it("says so when the flag cannot be cleared", async () => {

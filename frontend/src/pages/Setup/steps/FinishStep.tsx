@@ -37,6 +37,7 @@ import {
   useOnboardingIntent,
 } from "@/pages/Setup/useOnboardingIntent";
 import { clearPersistedSelection } from "@/pages/Setup/useOnboardingSelection";
+import { useReportStepBusy } from "@/pages/Setup/useStepBusy";
 import { clearPersistedStep } from "@/pages/Setup/useWizardStep";
 import type { WizardStepProps } from "./types";
 
@@ -107,6 +108,17 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
   const mutation = useSettingsMutation();
   const client = useQueryClient();
   const [failed, setFailed] = useState(false);
+  // The write answers before the cache has settled, and the navigation waits
+  // for the settle. TanStack does not count a mutate callback's own work as
+  // pending, so Finish stopped spinning for that second wait and could be
+  // pressed again.
+  const [settling, setSettling] = useState(false);
+  const finishing = mutation.isPending || settling;
+  // Leaving the step while it finishes is what the shell is told to prevent:
+  // Back unmounted it mid-write, and the success that followed still cleared
+  // the wizard and navigated away from under the step the reader went back to.
+  // The shell drops Back, disables Set up later and holds the browser's Back.
+  useReportStepBusy(finishing);
 
   const { data: instances } = useArrInstances();
   const { data: profiles } = useLanguageProfiles();
@@ -300,11 +312,17 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
   }
 
   const handleFinish = () => {
+    if (finishing) {
+      return;
+    }
     setFailed(false);
     mutation.mutate(
       { "settings-general-setup_complete": true },
       {
         onSuccess: async () => {
+          // Never cleared: the navigation below unmounts the wizard, and the
+          // settle does not reject.
+          setSettling(true);
           await settleSetupComplete(client, true);
           clearPersistedStep();
           clearPersistedIntent();
@@ -366,7 +384,7 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
               </Button>
             )}
           </Group>
-          <Button onClick={handleFinish} loading={mutation.isPending} size="md">
+          <Button onClick={handleFinish} loading={finishing} size="md">
             {discoverPath ? "Finish and open Discover" : "Finish"}
           </Button>
         </Group>
