@@ -7,15 +7,16 @@ export function appendArrInstanceParam(url: string, arrInstanceId?: number) {
   return `${url}${separator}arr_instance_id=${encodeURIComponent(String(arrInstanceId))}`;
 }
 
+// The API key goes in the X-API-KEY header, never in the URL: a URL ends up
+// in reverse proxy access logs.
 export function buildEditorSubtitlesUrl(
   baseUrl: string,
   mediaType: string,
   mediaId: string,
-  apiKey: string,
   arrInstanceId?: number,
 ) {
   return appendArrInstanceParam(
-    `${baseUrl}/api/editor/subtitles?mediaType=${encodeURIComponent(mediaType)}&mediaId=${encodeURIComponent(mediaId)}&apikey=${encodeURIComponent(apiKey)}`,
+    `${baseUrl}/api/editor/subtitles?mediaType=${encodeURIComponent(mediaType)}&mediaId=${encodeURIComponent(mediaId)}`,
     arrInstanceId,
   );
 }

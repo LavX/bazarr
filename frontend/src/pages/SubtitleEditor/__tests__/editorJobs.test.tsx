@@ -1,7 +1,7 @@
 /* eslint-disable camelcase */
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import TranslatePanel from "@/pages/SubtitleEditor/TranslatePanel";
@@ -320,6 +320,53 @@ describe("WaveformTimeline on the job path", () => {
     const [, channels, duration] = wavesurfer.load.mock.calls[0];
     expect(Array.from(channels[0] as Float32Array)).toEqual([0.5, -1]);
     expect(duration).toBe(0.2);
+  });
+
+  describe("with an API key", () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it("sends the key in the X-API-KEY header, never in the URL", async () => {
+      vi.stubGlobal("Bazarr", { apiKey: "editor-key", baseUrl: "" });
+      const requests: Request[] = [];
+      server.use(
+        http.get("/api/editor/peaks", ({ request }) => {
+          requests.push(request);
+          return HttpResponse.json({
+            peaks: [0.5, -1],
+            duration: 0.2,
+            sampleRate: 10,
+          });
+        }),
+      );
+
+      customRender(
+        <WaveformTimeline
+          mediaType="movie"
+          mediaId={1}
+          arrInstanceId={2}
+          audioTrack={1}
+          cues={[]}
+          selectedIndex={-1}
+          onSelect={vi.fn()}
+        />,
+      );
+
+      await waitFor(() => expect(wavesurfer.load).toHaveBeenCalled());
+      expect(requests.length).toBeGreaterThan(0);
+      for (const request of requests) {
+        const url = new URL(request.url);
+        expect(request.headers.get("X-API-KEY")).toBe("editor-key");
+        expect(url.searchParams.has("apikey")).toBe(false);
+        expect(Object.fromEntries(url.searchParams)).toEqual({
+          mediaType: "movie",
+          mediaId: "1",
+          audioTrack: "1",
+          arr_instance_id: "2",
+        });
+      }
+    });
   });
 
   it("shows why the waveform failed instead of asking again", async () => {

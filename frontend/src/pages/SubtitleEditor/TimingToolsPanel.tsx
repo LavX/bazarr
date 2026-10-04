@@ -624,7 +624,7 @@ function AutoSyncTab({
 
         try {
           const pollResp = await fetch(
-            `${Environment.baseUrl}/api/editor/sync?jobKey=${encodeURIComponent(jobKey)}&apikey=${encodeURIComponent(Environment.apiKey ?? "")}`,
+            `${Environment.baseUrl}/api/editor/sync?jobKey=${encodeURIComponent(jobKey)}`,
             { headers: { "X-API-KEY": Environment.apiKey ?? "" } },
           );
           const pollResult = await pollResp.json();
