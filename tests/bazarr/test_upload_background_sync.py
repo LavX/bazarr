@@ -136,6 +136,43 @@ def upload_flow(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("media_type", ["movie", "series"])
+def test_a_completed_upload_job_no_longer_holds_its_buffer(upload_flow, media_type):
+    """The queue retains finished jobs, so the buffer has to be released.
+
+    A completed job keeps the kwargs it was queued with, one of which is the
+    BytesIO the route wrapped the uploaded file in. Without the close, ten
+    retained completed jobs held ten copies of the uploaded bytes.
+    """
+    flow = upload_flow
+    flow.submit(media_type)
+    job, thread = flow.start()
+    thread.join(2)
+
+    assert job.status == "completed"
+    assert job.kwargs["subtitle"].closed
+
+
+@pytest.mark.parametrize("media_type", ["movie", "series"])
+def test_a_failed_upload_job_no_longer_holds_its_buffer(upload_flow, monkeypatch, media_type):
+    """The same release on the failure path, where the job is retained as failed."""
+    from subtitles import upload
+
+    flow = upload_flow
+
+    def refuse(*args, **kwargs):
+        raise OSError("controlled save failure")
+
+    monkeypatch.setattr(upload, "save_subtitles", refuse)
+    flow.submit(media_type)
+    job, thread = flow.start()
+    thread.join(2)
+
+    assert job.status == "failed"
+    assert job.kwargs["subtitle"].closed
+    assert not (flow.video.parent / "Video.en.srt").exists()
+
+
+@pytest.mark.parametrize("media_type", ["movie", "series"])
 @pytest.mark.parametrize("failure", ["settings", "enqueue"])
 def test_saved_upload_refreshes_consumers_when_sync_setup_fails(upload_flow, monkeypatch, media_type, failure):
     from app.config import settings
