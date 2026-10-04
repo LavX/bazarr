@@ -21,7 +21,7 @@ from arr_instances.resolution import (client_for_instance, default_instance_id,
                                       resolve_default_profile, scoped, skip_unscoped_sync,
                                       stamp_owner)
 
-from .episodes import sync_episodes
+from .episodes import SYNC_SKIPPED_UNREADABLE_EPISODE_FILES, sync_episodes
 from .parser import seriesParser
 from .utils import get_profile_list, get_tags, get_series_from_sonarr_api, get_episodes_from_sonarr_api
 
@@ -40,6 +40,12 @@ SONARR_PREFETCH_WORKERS = 8
 # keeps them from idling between hand-offs without letting the read-ahead
 # run away from a consumer that writes to the database serially.
 SONARR_PREFETCH_WINDOW = SONARR_PREFETCH_WORKERS * 2
+# After this many episode fetches fail in a row, stop asking Sonarr for the
+# rest of the run: it is most likely struggling, and every further request adds
+# to its load. The remaining series keep their episodes until the next sync.
+SONARR_PREFETCH_FAILURE_LIMIT = 3
+# How many skipped series ids the end-of-sync warning lists.
+SONARR_SKIPPED_IDS_LOGGED = 20
 
 
 def trace(message):
@@ -89,6 +95,17 @@ def update_series(job_id=None, wait_for_completion=False, arr_instance_id=None, 
         logging.exception(f"BAZARR Error trying to get series from Sonarr: {e}")  # noqa: G004
         return
     else:
+        # The fetcher already logged why a failed one failed. An empty list is
+        # a real answer (the sync walks on and removes what Sonarr no longer
+        # holds); a None one means the list never arrived, and the sync must
+        # not treat that as an empty library. End the run counted as skipped
+        # instead of letting the failure vanish into the guard above.
+        if series is None:
+            logging.warning('BAZARR Sonarr did not return a usable series list; '
+                            'the sync was skipped and the database was left unchanged.')
+            jobs_queue.update_job_name(job_id=job_id,
+                                       new_job_name="Synced series with Sonarr (series list skipped)")
+            return
         # Hoist invariants out of the per-series loop. update_one_series
         # used to call get_profile_list / get_tags / get_language_profiles
         # internally - that produced 3N redundant calls (2 HTTP + 1 SQL
@@ -161,6 +178,8 @@ def update_series(job_id=None, wait_for_completion=False, arr_instance_id=None, 
         process_count = len(shows_to_process)
         jobs_queue.update_job_progress(job_id=job_id, progress_max=process_count)
 
+        skipped_series = []
+
         # Pass 2: parallel-prefetch the per-series episode lists from
         # Sonarr (the dominant wall-clock cost of a full sync) while
         # walking the kept series serially. update_one_series runs in
@@ -189,13 +208,16 @@ def update_series(job_id=None, wait_for_completion=False, arr_instance_id=None, 
             )
 
             processed_index = 0
+            consecutive_failures = 0
+            stopped_fetching = False
             while in_flight:
                 (orig_index, show), episode_future = in_flight.popleft()
                 # Top the window up before the slow part, so the fetchers stay
-                # busy while this series is written.
+                # busy while this series is written. Once the prefetch has
+                # stopped, the rest are queued with no fetch at all.
                 following = next(upcoming, None)
                 if following is not None:
-                    in_flight.append((following, _prefetch(following)))
+                    in_flight.append((following, None if stopped_fetching else _prefetch(following)))
                 processed_index += 1
                 jobs_queue.update_job_progress(job_id=job_id, progress_value=processed_index,
                                                progress_message=show['title'])
@@ -216,15 +238,38 @@ def update_series(job_id=None, wait_for_completion=False, arr_instance_id=None, 
                                   arr_instance_id=arr_instance_id, arr_client=arr_client,
                                   serie_default_profile=serie_default_profile)
 
-                try:
-                    episodes_data = episode_future.result()
-                except Exception:
-                    logging.exception(f"BAZARR error pre-fetching episodes for series {show['id']}")  # noqa: G004
-                    episodes_data = None
+                episodes_data = None
+                if episode_future is not None and not episode_future.cancelled():
+                    try:
+                        episodes_data = episode_future.result()
+                    except Exception:
+                        logging.exception(f"BAZARR error pre-fetching episodes for series {show['id']}")  # noqa: G004
 
-                sync_episodes(series_id=show['id'], episodes_data=episodes_data,
-                              arr_instance_id=arr_instance_id, arr_client=arr_client)
+                if episodes_data is None:
+                    # The fetcher already logged why. Handing None to
+                    # sync_episodes would make it ask Sonarr a second time, so
+                    # skip the series: its episodes stay as they are until the
+                    # next sync.
+                    skipped_series.append(show['id'])
+                    if episode_future is not None and not stopped_fetching:
+                        consecutive_failures += 1
+                        if consecutive_failures >= SONARR_PREFETCH_FAILURE_LIMIT:
+                            stopped_fetching = True
+                            # Drop the queued fetches that have not started yet.
+                            for _, pending in in_flight:
+                                if pending is not None:
+                                    pending.cancel()
+                    continue
+
+                consecutive_failures = 0
+                outcome = sync_episodes(series_id=show['id'], episodes_data=episodes_data,
+                                        arr_instance_id=arr_instance_id, arr_client=arr_client)
                 del episodes_data
+                # A series whose episode-file answer could not be decoded was
+                # skipped whole, the way a failed episode fetch is, so it
+                # belongs in the skipped count and the job name too.
+                if outcome is SYNC_SKIPPED_UNREADABLE_EPISODE_FILES:
+                    skipped_series.append(show['id'])
 
         # Calculate series to remove from DB
         removed_series = current_shows_db - current_shows_sonarr
@@ -238,9 +283,22 @@ def update_series(job_id=None, wait_for_completion=False, arr_instance_id=None, 
         if settings.sonarr.sync_only_monitored_series:
             trace(f"skipped {skipped_count} unmonitored series out of {series_count}")
 
-        logging.debug('BAZARR All series synced from Sonarr into database.')
-
-    jobs_queue.update_job_name(job_id=job_id, new_job_name="Synced series with Sonarr")
+        if skipped_series:
+            shown_ids = ', '.join(str(x) for x in skipped_series[:SONARR_SKIPPED_IDS_LOGGED])
+            if len(skipped_series) > SONARR_SKIPPED_IDS_LOGGED:
+                shown_ids += ', ...'
+            logging.warning(
+                'BAZARR Sonarr did not return episodes for %d of %d series%s; their episodes were left '
+                'unchanged until the next sync. Series ids: %s',
+                len(skipped_series), process_count,
+                f' (stopped asking after {SONARR_PREFETCH_FAILURE_LIMIT} failures in a row)'
+                if stopped_fetching else '',
+                shown_ids)
+            jobs_queue.update_job_name(job_id=job_id,
+                                       new_job_name=f"Synced series with Sonarr ({len(skipped_series)} skipped)")
+        else:
+            logging.debug('BAZARR All series synced from Sonarr into database.')
+            jobs_queue.update_job_name(job_id=job_id, new_job_name="Synced series with Sonarr")
 
     gc.collect()
 

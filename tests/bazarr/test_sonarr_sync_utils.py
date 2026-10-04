@@ -131,3 +131,64 @@ def test_get_tags_handles_connection_error_on_both_paths(monkeypatch):
         raise requests.exceptions.ConnectionError("down")
 
     assert utils.get_tags(arr_client=_mirror_client(boom_get)) == []
+
+
+def test_a_non_json_200_is_a_failed_fetch_not_an_exception(monkeypatch, caplog):
+    # A proxy error page or a body cut short by an out-of-memory Sonarr comes
+    # back as a 200 that is not JSON. Raising here escaped the whole sync.
+    import logging
+
+    import requests
+
+    from sonarr.sync import utils
+
+    class _HtmlResp:
+        status_code = 200
+        headers = {"content-type": "text/html; charset=utf-8"}
+        text = "<html>not json</html>"
+        content = text.encode("utf-8")
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            raise requests.exceptions.JSONDecodeError("Expecting value", self.text, 0)
+
+    class _HtmlSession:
+        def get(self, *a, **k):
+            return _HtmlResp()
+
+    monkeypatch.setattr(utils, "sonarr_session", lambda: _HtmlSession())
+
+    with caplog.at_level(logging.ERROR):
+        assert utils.get_series_from_sonarr_api("KEY", 541) is None
+        assert utils.get_series_from_sonarr_api("KEY") is None
+        assert utils.get_episodes_from_sonarr_api("KEY", series_id=541) is None
+        assert utils.get_episodesFiles_from_sonarr_api("KEY", series_id=541) is None
+
+    assert caplog.text.count("non-JSON response from Sonarr") == 4
+    assert "getting series 541" in caplog.text
+    assert "getting the series list" in caplog.text
+    assert "series_id=541" in caplog.text
+    assert "status=200" in caplog.text
+    assert "content_type=text/html; charset=utf-8" in caplog.text
+    assert "KEY" not in caplog.text
+
+
+def test_get_series_decode_shapes(monkeypatch):
+    # The bulk call returns Sonarr's list as it came; the per-series call wraps
+    # a single record in a list, and decodes the body only once.
+    class _Session:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def get(self, *a, **k):
+            return _Resp(self._payload)
+
+    from sonarr.sync import utils
+
+    monkeypatch.setattr(utils, "sonarr_session", lambda: _Session([{"id": 7}]))
+    assert utils.get_series_from_sonarr_api("KEY") == [{"id": 7}]
+
+    monkeypatch.setattr(utils, "sonarr_session", lambda: _Session({"id": 7}))
+    assert utils.get_series_from_sonarr_api("KEY", 7) == [{"id": 7}]
