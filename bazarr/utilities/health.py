@@ -248,4 +248,80 @@ def get_health_issues():
                               'issue': 'Although you have created at least one languages profile, you must assign it '
                                        'to your content.'})
 
+    health_issues.extend(_postprocessing_command_issues())
+
     return health_issues
+
+
+def _postprocessing_command_issues():
+    """A stored post-processing command that no longer runs is skipped on every
+    download, so name it here rather than only in the log. One that is missing
+    entirely is the same silent skip, so it gets its own line."""
+    from arr_instances.subtitle_settings import read_subtitle_settings
+    from utilities.post_processing import parse_postprocessing_command
+
+    issues = []
+
+    def unusable(command):
+        if not isinstance(command, str) or not command.strip():
+            return None
+        try:
+            parse_postprocessing_command(command)
+            return None
+        except ValueError as error:
+            return str(error)
+
+    def report(name, error):
+        issues.append({'object': name,
+                       'issue': f'{error}. Post-processing is skipped until the command is changed.'})
+
+    def report_blank(name):
+        issues.append({'object': name, 'issue': 'Post-processing is on with no command'})
+
+    global_command = settings.general.postprocessing_cmd
+    global_error = unusable(global_command)
+    global_reported = False
+    if settings.general.use_postprocessing:
+        if not isinstance(global_command, str) or not global_command.strip():
+            report_blank('Post-processing command')
+            global_reported = True
+        elif global_error:
+            report('Post-processing command', global_error)
+            global_reported = True
+
+    instances = database.execute(
+        select(TableArrInstances.name, TableArrInstances.options)
+        .where(TableArrInstances.enabled == 1)
+        .order_by(TableArrInstances.id)).all()
+    for instance in instances:
+        general = read_subtitle_settings(instance.options).get('general')
+        if not (isinstance(general, dict) and
+                ('postprocessing_cmd' in general or 'use_postprocessing' in general)):
+            continue
+        own = general.get('postprocessing_cmd')
+        if own is None:
+            command, inherited = settings.general.postprocessing_cmd, True
+        else:
+            command, inherited = own, own == settings.general.postprocessing_cmd
+        enabled = general.get('use_postprocessing', settings.general.use_postprocessing)
+        if not enabled:
+            continue
+        if not isinstance(command, str) or not command.strip():
+            # An instance inheriting the missing global command is already
+            # named by the global line above; one with its own blank command
+            # is not, so it gets its own line.
+            if not (inherited and settings.general.use_postprocessing and global_reported):
+                report_blank(f'Post-processing command for {instance.name}')
+            continue
+        error = unusable(command)
+        if error is None:
+            continue
+        if inherited and settings.general.use_postprocessing and global_reported:
+            # The global line above already names this command, and one line
+            # is enough for it. An instance overriding the global command with
+            # its own broken one is still named, and so is a second instance
+            # with the same broken command: the health page did not name the
+            # second owner before.
+            continue
+        report(f'Post-processing command for {instance.name}', error)
+    return issues
