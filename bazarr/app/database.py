@@ -13,7 +13,6 @@ from datetime import datetime
 from sqlalchemy import event, create_engine, inspect, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, UniqueConstraint, Index, Integer, LargeBinary, Text, Boolean, func, text, BigInteger
 # importing here to be indirectly imported in other modules later
 from sqlalchemy import update, delete, select, func  # noqa: F401, F811
-from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import scoped_session, sessionmaker, mapped_column, close_all_sessions, declarative_base
 from sqlalchemy.pool import NullPool
 from alembic.migration import MigrationContext
@@ -21,6 +20,7 @@ from alembic.migration import MigrationContext
 from flask_sqlalchemy import SQLAlchemy
 
 from .ownership_revision import metadata_created, install_ownership_revision
+from .postgres_url import postgres_engine_url
 from .config import settings
 from .get_args import args
 from .upstream_adoption import (adopt_upstream_database, explain_unknown_revision,
@@ -79,48 +79,6 @@ def optimize_sqlite_database(engine_to_optimize):
     return True
 
 
-# The image installs psycopg2 from postgres-requirements.txt and no other
-# PostgreSQL driver. A bare 'postgresql' URL leaves the choice to SQLAlchemy,
-# which picks psycopg 3 from 2.1 on, so the driver is named instead.
-POSTGRES_DRIVERNAME = "postgresql+psycopg2"
-
-
-def postgres_engine_url(postgres_url, username, password, host, port, database):
-    """The URL the PostgreSQL engine connects with.
-
-    POSTGRES_URL when one is given, with any of the five settings that are set
-    written over it, otherwise the five settings alone. A URL that names a
-    driver keeps it; a bare 'postgresql' one gets psycopg2, as the five
-    settings do.
-    """
-    if not postgres_url:
-        return URL.create(
-            drivername=POSTGRES_DRIVERNAME,
-            username=username,
-            password=password,
-            host=host,
-            port=port,
-            database=database
-        )
-    url = make_url(postgres_url)
-    backend_name = url.get_backend_name()
-    if backend_name != 'postgresql':
-        raise ValueError(f"Invalid Postgres URL, scheme must be 'postgresql', got {backend_name}")
-
-    # Allow overriding individual components of the URL
-    url_overrides = {
-        'username': username if username else None,
-        'password': password if password else None,
-        'host': host if host else None,
-        'port': port if port else None,
-        'database': database if database else None,
-    }
-    url = url.set(**{k: v for k, v in url_overrides.items()})
-    if url.drivername == 'postgresql':
-        url = url.set(drivername=POSTGRES_DRIVERNAME)
-    return url
-
-
 def log_sqlite_runtime_version(engine_to_log):
     if engine_to_log.dialect.name != 'sqlite':
         return False
@@ -132,29 +90,17 @@ if postgresql:
     # insert is different between database types
     from sqlalchemy.dialects.postgresql import insert
 
-    postgres_database = os.getenv("POSTGRES_DATABASE", settings.postgresql.database)
-    postgres_username = os.getenv("POSTGRES_USERNAME", settings.postgresql.username)
-    postgres_password = os.getenv("POSTGRES_PASSWORD", settings.postgresql.password)
-    postgres_host = os.getenv("POSTGRES_HOST", settings.postgresql.host)
-    postgres_port = os.getenv("POSTGRES_PORT", settings.postgresql.port)
-    postgres_url = os.getenv("POSTGRES_URL", settings.postgresql.url)
-
-    url = postgres_engine_url(postgres_url, postgres_username, postgres_password,
-                              postgres_host, postgres_port, postgres_database)
-    # Build the log message from individual non-secret components instead of
-    # going through `url`. SQLAlchemy's render_as_string(hide_password=True)
-    # masks the password at render time, but the URL object still carries the
-    # password value, which trips CodeQL's py/clear-text-logging-sensitive-data
-    # because that masking call is not recognised as a sanitizer.
-    log_user = postgres_username or "<default>"
-    log_host = postgres_host or "<default>"
-    log_port = postgres_port or "<default>"
-    log_db = postgres_database or "<default>"
-    if postgres_url:
-        log_db = f"{log_db} (via POSTGRES_URL)"
+    url = postgres_engine_url(settings)
+    # Log the target the engine really connects to, from its non-secret
+    # components rather than by rendering `url`. SQLAlchemy's
+    # render_as_string(hide_password=True) masks the password at render time,
+    # but the URL object still carries the password value, which trips
+    # CodeQL's py/clear-text-logging-sensitive-data because that masking call
+    # is not recognised as a sanitizer.
     logger.debug(
         "Connecting to PostgreSQL database: postgresql://%s@%s:%s/%s",
-        log_user, log_host, log_port, log_db,
+        url.username or "<default>", url.host or "<default>", url.port or "<default>",
+        url.database or "<default>",
     )
 
     # Postgres: use SQLAlchemy's default QueuePool. NullPool would force a

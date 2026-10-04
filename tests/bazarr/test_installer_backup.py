@@ -36,8 +36,8 @@ ROOT = os.path.realpath(os.path.join(os.path.dirname(__file__), '..', '..'))
 GUIDE = os.path.join(ROOT, 'site', 'guides', 'migration.html')
 
 FUNCTIONS = ('compose_services', 'compose_bazarr_service', 'compose_env', 'compose_config_mount',
-             'config_postgres_value', 'detect_database', 'dump_postgres', 'discard_backup',
-             'restart_and_fail', 'do_backup')
+             'config_postgres_value', 'url_query_value', 'url_query_count', 'url_decode', 'detect_database',
+             'dump_postgres', 'discard_backup', 'restart_and_fail', 'do_backup')
 
 STUBS = r'''
 info() { printf 'INFO %s\n' "$*"; }; success() { printf 'SUCCESS %s\n' "$*"; }
@@ -188,6 +188,211 @@ def test_an_in_stack_postgres_configured_only_in_a_custom_config_path_is_dumped(
     assert (backup / 'bazarr_postgres.dump').read_text(encoding='utf-8') == 'PGDMP'
     assert 'EXEC exec -T db' in docker_log
     assert (backup / 'config' / 'config' / 'config.yaml').is_file()
+
+
+def _with_environment(rendered, **variables):
+    lines = ''.join(f'      {name}: "{value}"\n' for name, value in variables.items())
+    return rendered.replace('      PUID: "1000"\n', '      PUID: "1000"\n' + lines)
+
+
+# What config.yaml holds when the database was set up through the environment alone.
+DEFAULT_POSTGRES_YAML = "postgresql:\n  enabled: false\n  host: localhost\n  port: 5432\n  database: ''\n"
+
+
+def test_an_in_stack_postgres_configured_only_by_its_url_is_dumped(install, tmp_path):
+    """config.yaml always holds host localhost, and it used to beat the URL's host, so a stack
+    set up by POSTGRES_URL alone was taken for an outside server and left without a dump."""
+    install_dir, run = install
+    custom = tmp_path / 'srv' / 'bazarr'
+    _config_tree(custom, DEFAULT_POSTGRES_YAML)
+    rendered = _with_environment(_rendered_config(custom, postgres_service=True), POSTGRES_ENABLED='true',
+                                 POSTGRES_URL='postgresql://bazarr:not-a-secret@db:5432/bazarr?sslmode=disable')
+
+    output, backup, docker_log = run(rendered)
+
+    assert 'DB_ENGINE=postgres' in output
+    assert (backup / 'bazarr_postgres.dump').read_text(encoding='utf-8') == 'PGDMP'
+    [dumped] = [line for line in docker_log.splitlines() if line.startswith('EXEC ')]
+    assert dumped.startswith('EXEC exec -T db ') and dumped.endswith(' bazarr')
+
+
+def test_an_empty_database_variable_keeps_the_config_yaml_database_out(install, tmp_path):
+    """Bazarr+ connects with no database name then, not config.yaml's, so dumping that one
+    would back up the wrong database."""
+    install_dir, run = install
+    custom = tmp_path / 'srv' / 'bazarr'
+    _config_tree(custom, 'postgresql:\n  enabled: true\n  host: db\n  database: bazarr\n')
+    rendered = _with_environment(_rendered_config(custom, postgres_service=True), POSTGRES_DATABASE='')
+
+    # Declining to go on without a database backup ends the run here.
+    output, backups, docker_log = run(rendered, succeed=False, stubs='confirm() { exit 3; }\n')
+
+    assert 'WARN Bazarr+ uses a PostgreSQL database outside this compose stack' in output
+    assert backups == []
+    assert 'EXEC' not in docker_log
+
+
+@pytest.mark.parametrize('query_host, in_stack', [
+    ('host=db', True),
+    ('hostaddr=10.0.0.5', False),
+])
+def test_host_and_database_given_only_in_the_url_query_beat_config_yaml(install, tmp_path,
+                                                                        query_host, in_stack):
+    """libpq takes host, hostaddr and dbname from the URL's query string, which the
+    installer's authority and path parsing did not cover: config.yaml's host then decided
+    alone, so its localhost turned an in-stack database into an outside one, and its db made
+    the installer dump a server the URL never named."""
+    install_dir, run = install
+    custom = tmp_path / 'srv' / 'bazarr'
+    _config_tree(custom, 'postgresql:\n  enabled: true\n  host: db\n  database: other\n')
+    rendered = _with_environment(_rendered_config(custom, postgres_service=True),
+                                 POSTGRES_ENABLED='true',
+                                 POSTGRES_URL=f'postgresql:///?{query_host}&dbname=bazarr')
+
+    if in_stack:
+        output, backup, docker_log = run(rendered)
+        assert 'DB_ENGINE=postgres' in output
+        assert (backup / 'bazarr_postgres.dump').read_text(encoding='utf-8') == 'PGDMP'
+        [dumped] = [line for line in docker_log.splitlines() if line.startswith('EXEC ')]
+        assert dumped.startswith('EXEC exec -T db ') and dumped.endswith(' bazarr')
+    else:
+        output, backups, docker_log = run(rendered, succeed=False, stubs='confirm() { exit 3; }\n')
+        assert 'WARN Bazarr+ uses a PostgreSQL database outside this compose stack' in output
+        assert backups == []
+        assert 'EXEC' not in docker_log
+
+
+def test_a_query_host_beats_the_authority_host(install, tmp_path):
+    """libpq reads the host or hostaddr a URL's query string names over the authority's,
+    so the application connects to the query's host. The classification must read the
+    URL the same way round, or a URL that moves the connection into the stack keeps
+    being taken for an outside database and is never dumped."""
+    install_dir, run = install
+    custom = tmp_path / 'srv' / 'bazarr'
+    _config_tree(custom, 'postgresql:\n  enabled: true\n  host: localhost\n  database: bazarr\n')
+    rendered = _with_environment(_rendered_config(custom, postgres_service=True),
+                                 POSTGRES_ENABLED='true',
+                                 POSTGRES_URL='postgresql://outside.example/bazarr?host=db')
+
+    output, backup, docker_log = run(rendered)
+
+    assert 'DB_ENGINE=postgres' in output
+    [dumped] = [line for line in docker_log.splitlines() if line.startswith('EXEC ')]
+    assert dumped.startswith('EXEC exec -T db ')
+
+
+def test_a_query_dbname_beats_the_path_database(install, tmp_path):
+    """The dbname a URL's query names wins over the database in its path for the
+    application's own connection, so the installer dumps that database, not the
+    path's: a dump of the wrong database is no backup at all."""
+    install_dir, run = install
+    custom = tmp_path / 'srv' / 'bazarr'
+    _config_tree(custom, 'postgresql:\n  enabled: true\n  host: localhost\n  database: bazarr\n')
+    rendered = _with_environment(_rendered_config(custom, postgres_service=True),
+                                 POSTGRES_ENABLED='true',
+                                 POSTGRES_URL='postgresql://db/other?dbname=bazarr')
+
+    output, backup, docker_log = run(rendered)
+
+    assert 'DB_ENGINE=postgres' in output
+    [dumped] = [line for line in docker_log.splitlines() if line.startswith('EXEC ')]
+    assert dumped.startswith('EXEC exec -T db ') and dumped.endswith(' bazarr')
+
+
+@pytest.mark.parametrize('url', [
+    'postgresql://db/bazarr?dbname=',
+    'postgresql://db/bazarr?host=',
+    'postgresql://external.example/bazarr?host=&host=db&dbname=bazarr',
+])
+def test_a_query_pair_set_to_nothing_is_discarded_like_the_application_discards_it(
+        install, tmp_path, url):
+    """The application's URL parser drops a query pair whose value is empty, the way
+    parse_qsl does, so the authority or the path decides. The installer read a blank
+    value as present: ?dbname= blanked the path's database, ?host= blanked the
+    authority's host, and ?host=&host=db counted as an ambiguous failover list, and
+    all three left the stack's own database without a dump."""
+    install_dir, run = install
+    custom = tmp_path / 'srv' / 'bazarr'
+    _config_tree(custom, DEFAULT_POSTGRES_YAML)
+    rendered = _with_environment(_rendered_config(custom, postgres_service=True), POSTGRES_ENABLED='true',
+                                 POSTGRES_URL=url)
+
+    output, backup, docker_log = run(rendered)
+
+    assert 'DB_ENGINE=postgres' in output
+    assert (backup / 'bazarr_postgres.dump').read_text(encoding='utf-8') == 'PGDMP'
+    [dumped] = [line for line in docker_log.splitlines() if line.startswith('EXEC ')]
+    assert dumped.startswith('EXEC exec -T db ') and dumped.endswith(' bazarr')
+
+
+@pytest.mark.parametrize('query', [
+    'host=external&host=db',
+    'hostaddr=external&hostaddr=db',
+    'host=db&hostaddr=10.0.0.5',
+])
+def test_a_query_naming_a_host_more_than_once_is_an_outside_database(install, tmp_path, query):
+    """The application's own engine reads a host named twice as an ordered failover
+    list it may connect to either member of, and hostaddr as the address it connects
+    through when a query names both, so no single service can be named to dump. The
+    classification takes such a URL for an outside database rather than dumping a
+    database the application may never connect to, which would upgrade the stack
+    with no backup of the database it uses."""
+    install_dir, run = install
+    custom = tmp_path / 'srv' / 'bazarr'
+    _config_tree(custom, 'postgresql:\n  enabled: true\n  host: localhost\n  database: bazarr\n')
+    rendered = _with_environment(_rendered_config(custom, postgres_service=True),
+                                 POSTGRES_ENABLED='true',
+                                 POSTGRES_URL=f'postgresql://outside.example/bazarr?{query}&dbname=bazarr')
+
+    output, backups, docker_log = run(rendered, succeed=False, stubs='confirm() { exit 3; }\n')
+
+    assert 'WARN Bazarr+ uses a PostgreSQL database outside this compose stack' in output
+    assert backups == []
+    assert 'EXEC' not in docker_log
+
+
+@pytest.mark.parametrize('encoded, decoded', [
+    ('bazarr%20blue', 'bazarr blue'),
+    ('bazarr+blue', 'bazarr blue'),
+    ('bazarr%2Fblue', 'bazarr/blue'),
+    ('bazarr%zzblue', 'bazarr%zzblue'),
+])
+def test_a_percent_encoded_query_value_is_decoded_like_the_application_decodes_it(
+        install, tmp_path, encoded, decoded):
+    """The application's own URL parser decodes a query value's percent escapes and its
+    plus signs before the name reaches libpq, so the decoded name is what the installer
+    dumps, not the encoding libpq would refuse. A percent that does not introduce two
+    hexadecimal digits stays as written, the way the parser leaves it."""
+    install_dir, run = install
+    custom = tmp_path / 'srv' / 'bazarr'
+    _config_tree(custom, 'postgresql:\n  enabled: true\n  host: localhost\n  database: bazarr\n')
+    rendered = _with_environment(_rendered_config(custom, postgres_service=True),
+                                 POSTGRES_ENABLED='true',
+                                 POSTGRES_URL=f'postgresql:///?host=db&dbname={encoded}')
+
+    output, backup, docker_log = run(rendered)
+
+    assert 'DB_ENGINE=postgres' in output
+    [dumped] = [line for line in docker_log.splitlines() if line.startswith('EXEC ')]
+    assert dumped.startswith('EXEC exec -T db ') and dumped.endswith(f' {decoded}')
+
+
+def test_a_url_naming_a_service_is_an_outside_database_even_when_config_yaml_names_one(install, tmp_path):
+    """The service file the query names lives inside the container, where this installer
+    cannot read it, so nothing says the database is the compose service db that config.yaml
+    happens to name. It used to be dumped anyway."""
+    install_dir, run = install
+    custom = tmp_path / 'srv' / 'bazarr'
+    _config_tree(custom, 'postgresql:\n  enabled: true\n  host: db\n  database: bazarr\n')
+    rendered = _with_environment(_rendered_config(custom, postgres_service=True),
+                                 POSTGRES_ENABLED='true',
+                                 POSTGRES_URL='postgresql:///?service=bazarr')
+
+    output, backups, docker_log = run(rendered, succeed=False, stubs='confirm() { exit 3; }\n')
+
+    assert 'WARN Bazarr+ uses a PostgreSQL database outside this compose stack' in output
+    assert backups == []
+    assert 'EXEC' not in docker_log
 
 
 def test_the_default_config_directory_is_still_backed_up(install):

@@ -11,6 +11,8 @@ create_engine loads the driver but does not connect, so no server is needed.
 The file runs where CI installs postgres-requirements.txt.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import sqlalchemy as sa
 
@@ -19,9 +21,10 @@ FIELDS = dict(username='bazarr', password='not-a-secret', host='db.invalid', por
 
 
 def _url(postgres_url=None, **fields):
-    from app.database import postgres_engine_url
+    from app.postgres_url import postgres_engine_url
 
-    return postgres_engine_url(postgres_url, **dict(FIELDS, **fields))
+    postgresql = SimpleNamespace(url=postgres_url or '', **dict(FIELDS, **fields))
+    return postgres_engine_url(SimpleNamespace(postgresql=postgresql), environ={})
 
 
 def test_the_five_settings_select_psycopg2():
