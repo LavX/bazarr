@@ -290,7 +290,8 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
 def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode_id, hi, forced, use_original_format,
                                                 selected_provider, subtitle, job_id=None, arr_instance_id=None):
     if not job_id:
-        return jobs_queue.add_job_from_function("Manually downloading Subtitles",is_progress=False)
+        return jobs_queue.add_job_from_function("Manually downloading Subtitles", is_progress=False,
+                                                return_existing=True)
 
     episodeInfo = database.execute(scoped(
         select(

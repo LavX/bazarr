@@ -1196,6 +1196,7 @@ def _process_media_action(items, action, job_id):
 
     jobs_queue.update_job_progress(job_id=job_id, progress_max=len(items))
 
+    searched_series = set()
     for i, item in enumerate(items, start=1):
         item_type = item.get('type')
         jobs_queue.update_job_progress(
@@ -1248,7 +1249,15 @@ def _process_media_action(items, action, job_id):
                     if not series_id:
                         skipped += 1
                         continue
-                    series_download_subtitles(series_id, arr_instance_id=item.get('arr_instance_id'))
+                    # Episode selections can share a series. Inline searches
+                    # need the deduplication previously supplied by the queue.
+                    series_key = (item.get('arr_instance_id'), series_id)
+                    if series_key in searched_series:
+                        skipped += 1
+                        continue
+                    searched_series.add(series_key)
+                    series_download_subtitles(series_id, job_id=job_id, job_sub_function=True,
+                                               arr_instance_id=item.get('arr_instance_id'))
                 elif item_type == 'movie':
                     radarr_id = item.get('radarrId')
                     if not radarr_id:

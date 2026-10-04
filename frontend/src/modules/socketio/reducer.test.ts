@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { QueryKeys } from "@/apis/queries/keys";
+import { episodesHistoryKey, QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 
 const queryClientMock = vi.hoisted(() => ({
   getQueryData: vi.fn(),
+  getQueryState: vi.fn(),
   invalidateQueries: vi.fn(),
   setQueryData: vi.fn(),
 }));
@@ -72,7 +73,7 @@ describe("socketio reducer", () => {
 
   it.each(["update", "delete"] as const)(
     "invalidates the local series query for episode %s events",
-    (event) => {
+    async (event) => {
       const localSeriesIdKey = "series_id";
       queryClientMock.getQueryData.mockReturnValue({
         [localSeriesIdKey]: 501,
@@ -80,6 +81,7 @@ describe("socketio reducer", () => {
       });
 
       emitEpisode(event, [9001]);
+      await Promise.resolve();
 
       expect(queryClientMock.getQueryData).toHaveBeenCalledWith([
         QueryKeys.Episodes,
@@ -87,6 +89,10 @@ describe("socketio reducer", () => {
       ]);
       expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
         queryKey: [QueryKeys.Series, 501],
+      });
+      expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+        queryKey: episodesHistoryKey(501),
+        exact: true,
       });
       expect(queryClientMock.invalidateQueries).not.toHaveBeenCalledWith({
         queryKey: [QueryKeys.Series, 42],

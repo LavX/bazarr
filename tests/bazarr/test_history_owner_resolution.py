@@ -160,7 +160,10 @@ def test_resolved_media_supplies_owner_and_local_refs(history, history_session, 
     assert row.provider == 'provider-a'
     assert row.score == 75
     assert row.score_out_of == history.score_out_of
-    assert history.events == [{'type': f'{history.kind}-history'}]
+    expected_event = {'type': f'{history.kind}-history'}
+    if history.kind == 'episode':
+        expected_event['payload'] = history.local_refs['series_id']
+    assert history.events == [expected_event]
 
 
 @pytest.mark.parametrize('media_state', ['missing', 'no-upstream-id', 'unowned'])
@@ -226,7 +229,10 @@ def test_explicit_owner_keeps_history_fields_and_scoped_refs(history, history_se
     assert row.not_matched == "['release_group']"
     assert row.upgradedFromId == 9
     assert before <= row.timestamp <= datetime.now()
-    assert history.events == [{'type': f'{history.kind}-history'}]
+    expected_event = {'type': f'{history.kind}-history'}
+    if history.kind == 'episode':
+        expected_event['payload'] = history.local_refs['series_id']
+    assert history.events == [expected_event]
 
 
 def _called_name(node):

@@ -691,7 +691,7 @@ class TestProcessMediaActions:
         items = [{'type': 'series', 'sonarrSeriesId': 1}]
         result = _process_media_action(items, action='search-missing', job_id='test')
 
-        mock_download.assert_called_once_with(1, arr_instance_id=None)
+        mock_download.assert_called_once_with(1, job_id='test', job_sub_function=True, arr_instance_id=None)
         assert result['queued'] == 1
 
     @patch('subtitles.mass_operations.movies_download_subtitles')

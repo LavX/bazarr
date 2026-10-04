@@ -26,17 +26,16 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
     extracted by the job, so the request that queues it returns at once.
     """
     if not job_id:
-        # Build job label with media title. Note: no local variables can be
-        # assigned here because add_job_from_function introspects the frame
-        # and re-passes all locals as kwargs on re-invocation.
-        jobs_queue.add_job_from_function(
+        # Build the label inline: add_job_from_function captures the frame,
+        # which must contain only function parameters before it is called.
+        job_id = jobs_queue.add_job_from_function(
             (lambda t: f'Translating {t} ({from_lang.upper()} to {to_lang.upper()})' if t else
              f'Translating {from_lang.upper()} to {to_lang.upper()}')(
                 get_title(media_type, radarr_id, sonarr_series_id, sonarr_episode_id,
                           arr_instance_id,
                           **({'sports_context': sports_operation.context} if sports_operation else {}))),
-            is_progress=True)
-        return
+            is_progress=True, return_existing=media_type == 'episode')
+        return job_id if media_type == 'episode' else None
 
     translator_label = settings.translator.translator_type.replace("_", " ").title()
     # Observation only. The queue records a generic completed envelope for every

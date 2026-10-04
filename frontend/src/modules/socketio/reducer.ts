@@ -1,5 +1,6 @@
 import { isArray, isEmpty, isNumber } from "lodash";
 import queryClient from "@/apis/queries";
+import { invalidateEpisodesHistory } from "@/apis/queries/episodeHistory";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { notifyJobOutcome, resetJobNotifications } from "@/modules/jobs";
@@ -117,6 +118,7 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
             id,
           ]);
           if (episode !== undefined) {
+            void invalidateEpisodesHistory(queryClient, episode.series_id);
             void queryClient.invalidateQueries({
               queryKey: [QueryKeys.Series, episode.series_id],
             });
@@ -135,6 +137,7 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
             id,
           ]);
           if (episode !== undefined) {
+            void invalidateEpisodesHistory(queryClient, episode.series_id);
             void queryClient.invalidateQueries({
               queryKey: [QueryKeys.Series, episode.series_id],
             });
@@ -222,6 +225,13 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
     },
     {
       key: "episode-history",
+      // New history writes carry the canonical local series id. Legacy events
+      // without a payload still refresh the general history page via `any`.
+      update: (seriesIds) => {
+        seriesIds.forEach((seriesId) => {
+          void invalidateEpisodesHistory(queryClient, seriesId);
+        });
+      },
       any: () => {
         void queryClient.invalidateQueries({
           queryKey: [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.History],

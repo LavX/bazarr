@@ -33,8 +33,15 @@ class BaseApi {
     }
   }
 
-  protected async get<T = unknown>(path: string, params?: LooseObject) {
-    const response = await client.axios.get<T>(this.prefix + path, { params });
+  protected async get<T = unknown>(
+    path: string,
+    params?: LooseObject,
+    signal?: AbortSignal,
+  ) {
+    const response = await client.axios.get<T>(this.prefix + path, {
+      params,
+      signal,
+    });
     return response.data;
   }
 

@@ -5,6 +5,7 @@ declare namespace SocketIO {
     | "movie"
     | "series"
     | "episode"
+    | "episode-history"
     | "episode-wanted"
     | "movie-wanted";
 
@@ -14,7 +15,6 @@ declare namespace SocketIO {
     | "connect_error"
     | "disconnect"
     | "episode-blacklist"
-    | "episode-history"
     | "movie-blacklist"
     | "movie-history"
     | "reset-episode-wanted"

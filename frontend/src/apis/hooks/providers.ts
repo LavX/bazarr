@@ -1,4 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { whenJobFinishes } from "@/apis/hooks/jobWatch";
+import { invalidateEpisodeHistory } from "@/apis/queries/episodeHistory";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 
@@ -89,13 +91,21 @@ export function useDownloadEpisodeSubtitles() {
         param.arrInstanceId,
       ),
 
-    onSuccess: () => {
-      // Invalidate by prefix. Series queries are cached under the canonical
-      // LOCAL series id, while seriesId here is the upstream one, so a key
-      // built from it never matched a series cache entry.
-      client.invalidateQueries({
-        queryKey: [QueryKeys.Series],
-      });
+    onSuccess: (data, param) => {
+      const refresh = () => {
+        // Invalidate by prefix. Series queries are cached under the canonical
+        // LOCAL series id, while seriesId here is the upstream one, so a key
+        // built from it never matched a series cache entry.
+        void client.invalidateQueries({
+          queryKey: [QueryKeys.Series],
+        });
+        return invalidateEpisodeHistory(client, param);
+      };
+      if (typeof data?.job_id === "number") {
+        whenJobFinishes(client, data.job_id, () => void refresh());
+        return;
+      }
+      return refresh();
     },
   });
 }

@@ -1,4 +1,11 @@
-import React, { forwardRef, useCallback, useEffect, useMemo } from "react";
+import React, {
+  createContext,
+  forwardRef,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+} from "react";
 import { Badge, Group, Popover, Text, Tooltip } from "@mantine/core";
 import { faBookmark as farBookmark } from "@fortawesome/free-regular-svg-icons";
 import {
@@ -8,7 +15,7 @@ import {
   faMagnifyingGlass,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { ColumnDef, Table as TableInstance } from "@tanstack/react-table";
+import { ColumnDef, Row, Table as TableInstance } from "@tanstack/react-table";
 import { useDownloadEpisodeSubtitles, useEpisodesProvider } from "@/apis/hooks";
 import { useShowOnlyDesired } from "@/apis/hooks/site";
 import { Action, GroupTable } from "@/components";
@@ -18,9 +25,10 @@ import { EpisodeHistoryModal } from "@/components/modals";
 import { EpisodeSearchModal } from "@/components/modals/ManualSearchModal";
 import TextPopover from "@/components/TextPopover";
 import { useModals } from "@/modules/modals";
-import { BuildKey, filterSubtitleBy } from "@/utilities";
+import { filterSubtitleBy } from "@/utilities";
 import { useProfileItemsToLanguages } from "@/utilities/languages";
 import {
+  buildSubtitleLanguageKey,
   isCombinedOutputSubtitle,
   isSyncOutputSubtitle,
 } from "@/utilities/subtitles";
@@ -104,29 +112,158 @@ function scoreInfoFromHistory(
   };
 }
 
+interface SubtitlesContextValue {
+  onlyDesired: boolean;
+  profileItems: ReturnType<typeof useProfileItemsToLanguages>;
+  historyMap: Map<string, History.Episode>;
+  embeddedScoreMap: Map<string, History.Episode>;
+}
+
+const SubtitlesContext = createContext<SubtitlesContextValue | null>(null);
+
+const SubtitlesCell = React.memo(({ row }: { row: Row<Item.Episode> }) => {
+  const episode = row.original;
+  const { onlyDesired, profileItems, historyMap, embeddedScoreMap } =
+    useContext(SubtitlesContext)!;
+  const seriesId = episode.sonarrSeriesId;
+
+  const elements = useMemo(() => {
+    const episodeId = episode.sonarrEpisodeId;
+
+    // Match score for a subtitle, from this episode's history: file rows
+    // by path, embedded tracks by language key.
+    const scoreFor = (val: Subtitle): SubtitleScoreInfo | undefined => {
+      if (!val.path) {
+        return scoreInfoFromHistory(
+          embeddedScoreMap.get(
+            JSON.stringify([episode.id, buildHistoryLanguageKey(val)]),
+          ),
+        );
+      }
+      const record = historyMap.get(JSON.stringify([episode.id, val.path]));
+      return record && [1, 2, 3].includes(record.action)
+        ? scoreInfoFromHistory(record)
+        : undefined;
+    };
+
+    // The API does not expose embedded track ids. Distinguish repeated tracks
+    // by their occurrence within a language, keeping file keys independent of
+    // the order of other subtitles.
+    const occurrences = new Map<string, number>();
+    const subtitleKey = (val: Subtitle, kind: string) => {
+      const identity = [
+        episode.id,
+        kind,
+        val.path || buildSubtitleLanguageKey(val),
+      ];
+      const key = JSON.stringify(identity);
+      const occurrence = occurrences.get(key) ?? 0;
+      occurrences.set(key, occurrence + 1);
+      return JSON.stringify([...identity, occurrence]);
+    };
+
+    const missing = episode.missing_subtitles.map((val) => (
+      <Subtitle
+        missing
+        key={subtitleKey(val, "missing")}
+        seriesId={seriesId}
+        episodeId={episodeId}
+        arrInstanceId={episode.arr_instance_id}
+        subtitle={val}
+        availableSubtitles={episode.subtitles}
+      ></Subtitle>
+    ));
+
+    let filteredSubtitles = episode.subtitles;
+    if (onlyDesired) {
+      filteredSubtitles = filterSubtitleBy(filteredSubtitles, profileItems);
+    }
+
+    // Files before tracks. A release can carry several dozen embedded
+    // tracks and a handful of files, and the files are the ones a reader
+    // can act on, so they must not be the ones an overflow cuts off.
+    const files = filteredSubtitles.filter((val) => val.path);
+    const embedded = filteredSubtitles.filter((val) => !val.path);
+
+    const render = (val: Subtitle, kind: string) => (
+      <Subtitle
+        key={subtitleKey(val, kind)}
+        seriesId={seriesId}
+        episodeId={episodeId}
+        arrInstanceId={episode.arr_instance_id}
+        subtitle={val}
+        availableSubtitles={episode.subtitles}
+        scoreInfo={scoreFor(val)}
+      ></Subtitle>
+    );
+
+    return [
+      ...missing,
+      ...files.map((val) => render(val, "file")),
+      ...embedded.map((val) => render(val, "embedded")),
+    ];
+  }, [
+    episode,
+    seriesId,
+    onlyDesired,
+    profileItems,
+    historyMap,
+    embeddedScoreMap,
+  ]);
+
+  const visible = elements.slice(0, MAX_CELL_SUBTITLES);
+  const overflow = elements.length - visible.length;
+
+  return (
+    <Group gap="xs" wrap="wrap">
+      {visible}
+      {overflow > 0 && (
+        <SubtitlesOverflow count={overflow}>
+          {elements.slice(MAX_CELL_SUBTITLES)}
+        </SubtitlesOverflow>
+      )}
+    </Group>
+  );
+});
+
 const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
   ({ episodes, history, profile, disabled, onAllRowsExpandedChanged }, ref) => {
     const onlyDesired = useShowOnlyDesired();
 
+    const orderedHistory = useMemo(
+      () =>
+        [...(history ?? [])].sort((a, b) => {
+          if (
+            a.timestamp_iso &&
+            b.timestamp_iso &&
+            a.timestamp_iso !== b.timestamp_iso
+          ) {
+            return a.timestamp_iso > b.timestamp_iso ? -1 : 1;
+          }
+          return (b.history_id ?? 0) - (a.history_id ?? 0);
+        }),
+      [history],
+    );
+
     // Score for a downloaded subtitle: keyed by (episode local id, file path)
-    // from the download/upgrade actions. Newest wins (history is newest-first).
+    // from the newest file mutation, including replacements and deletions.
     const historyMap = useMemo(() => {
       const map = new Map<string, History.Episode>();
-      history?.forEach((h) => {
+      orderedHistory.forEach((h) => {
         if (!h.subtitles_path) return;
-        if ([1, 2, 3].includes(h.action)) {
+        if ([0, 1, 2, 3, 4, 6].includes(h.action)) {
           const key = JSON.stringify([h.id, h.subtitles_path]);
           if (!map.has(key)) map.set(key, h);
         }
       });
       return map;
-    }, [history]);
+    }, [orderedHistory]);
 
     // Score for an embedded track: keyed by (episode local id, language key)
     // from the "treat embedded as downloaded" action=7 records.
     const embeddedScoreMap = useMemo(() => {
       const map = new Map<string, History.Episode>();
-      history?.forEach((h) => {
+      orderedHistory.forEach((h) => {
         if (h.action === 7 && h.language?.code2) {
           const key = JSON.stringify([
             h.id,
@@ -136,7 +273,7 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
         }
       });
       return map;
-    }, [history]);
+    }, [orderedHistory]);
 
     const tableRef =
       ref as React.MutableRefObject<TableInstance<Item.Episode> | null>;
@@ -148,7 +285,7 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
     const modals = useModals();
 
     const download = useCallback(
-      (item: Item.Episode, result: SearchResultType) => {
+      async (item: Item.Episode, result: SearchResultType) => {
         const {
           language,
           hearing_impaired: hi,
@@ -159,7 +296,7 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
         } = result;
         const { sonarrSeriesId: seriesId, sonarrEpisodeId: episodeId } = item;
 
-        return mutateAsync({
+        await mutateAsync({
           seriesId,
           episodeId,
           // Scope the download to the episode's owning instance (#156); the
@@ -177,95 +314,6 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
         });
       },
       [mutateAsync],
-    );
-
-    const SubtitlesCell = React.memo(
-      ({ episode }: { episode: Item.Episode }) => {
-        const seriesId = episode.sonarrSeriesId;
-
-        const elements = useMemo(() => {
-          const episodeId = episode.sonarrEpisodeId;
-
-          // Match score for a subtitle, from this episode's history: file rows
-          // by path, embedded tracks by language key.
-          const scoreFor = (val: Subtitle): SubtitleScoreInfo | undefined =>
-            scoreInfoFromHistory(
-              val.path
-                ? historyMap.get(JSON.stringify([episode.id, val.path]))
-                : embeddedScoreMap.get(
-                    JSON.stringify([episode.id, buildHistoryLanguageKey(val)]),
-                  ),
-            );
-
-          const missing = episode.missing_subtitles.map((val, idx) => (
-            <Subtitle
-              missing
-              key={BuildKey(idx, val.code2, "missing")}
-              seriesId={seriesId}
-              episodeId={episodeId}
-              arrInstanceId={episode.arr_instance_id}
-              subtitle={val}
-              availableSubtitles={episode.subtitles}
-            ></Subtitle>
-          ));
-
-          let filteredSubtitles = episode.subtitles;
-          if (onlyDesired) {
-            filteredSubtitles = filterSubtitleBy(
-              filteredSubtitles,
-              profileItems,
-            );
-          }
-
-          // Files before tracks. A release can carry several dozen embedded
-          // tracks and a handful of files, and the files are the ones a reader
-          // can act on, so they must not be the ones an overflow cuts off.
-          const files = filteredSubtitles.filter((val) => val.path);
-          const embedded = filteredSubtitles.filter((val) => !val.path);
-
-          const render = (val: Subtitle, idx: number, kind: string) => (
-            <Subtitle
-              key={BuildKey(idx, val.code2, kind)}
-              seriesId={seriesId}
-              episodeId={episodeId}
-              arrInstanceId={episode.arr_instance_id}
-              subtitle={val}
-              availableSubtitles={episode.subtitles}
-              scoreInfo={scoreFor(val)}
-            ></Subtitle>
-          );
-
-          return [
-            ...missing,
-            ...files.map((val, idx) => render(val, idx, "file")),
-            ...embedded.map((val, idx) => render(val, idx, "embedded")),
-          ];
-          // onlyDesired/profileItems are captured from the parent; the row re-renders
-          // via the parent when they change, so they belong in the deps.
-          // eslint-disable-next-line react-hooks/exhaustive-deps
-        }, [
-          episode,
-          seriesId,
-          onlyDesired,
-          profileItems,
-          historyMap,
-          embeddedScoreMap,
-        ]);
-
-        const visible = elements.slice(0, MAX_CELL_SUBTITLES);
-        const overflow = elements.length - visible.length;
-
-        return (
-          <Group gap="xs" wrap="wrap">
-            {visible}
-            {overflow > 0 && (
-              <SubtitlesOverflow count={overflow}>
-                {elements.slice(MAX_CELL_SUBTITLES)}
-              </SubtitlesOverflow>
-            )}
-          </Group>
-        );
-      },
     );
 
     const columns = useMemo<ColumnDef<Item.Episode>[]>(
@@ -339,9 +387,7 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
         {
           header: "Subtitles",
           accessorKey: "missing_subtitles",
-          cell: ({ row: { original } }) => {
-            return <SubtitlesCell episode={original} />;
-          },
+          cell: SubtitlesCell,
         },
         {
           header: "Actions",
@@ -412,7 +458,7 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
           },
         },
       ],
-      [disabled, download, modals, SubtitlesCell],
+      [disabled, download, modals],
     );
 
     const maxSeason = useMemo(
@@ -428,21 +474,29 @@ const Table = forwardRef<TableInstance<Item.Episode> | null, Props>(
       tableRef?.current?.setExpanded(() => ({ [`season:${maxSeason}`]: true }));
     }, [tableRef, maxSeason]);
 
+    const subtitlesContext = useMemo(
+      () => ({ onlyDesired, profileItems, historyMap, embeddedScoreMap }),
+      [onlyDesired, profileItems, historyMap, embeddedScoreMap],
+    );
+
     return (
-      <GroupTable
-        columns={columns}
-        data={episodes ?? []}
-        instanceRef={tableRef}
-        onAllRowsExpandedChanged={onAllRowsExpandedChanged}
-        initialState={{
-          sorting: [
-            { id: "season", desc: true },
-            { id: "episode", desc: true },
-          ],
-          grouping: ["season"],
-        }}
-        tableStyles={{ emptyText: "No Episode Found For This Series" }}
-      ></GroupTable>
+      <SubtitlesContext.Provider value={subtitlesContext}>
+        <GroupTable
+          columns={columns}
+          data={episodes ?? []}
+          getRowId={(episode) => String(episode.id)}
+          instanceRef={tableRef}
+          onAllRowsExpandedChanged={onAllRowsExpandedChanged}
+          initialState={{
+            sorting: [
+              { id: "season", desc: true },
+              { id: "episode", desc: true },
+            ],
+            grouping: ["season"],
+          }}
+          tableStyles={{ emptyText: "No Episode Found For This Series" }}
+        ></GroupTable>
+      </SubtitlesContext.Provider>
     );
   },
 );

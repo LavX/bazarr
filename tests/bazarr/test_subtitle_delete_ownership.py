@@ -295,7 +295,8 @@ def test_the_indexed_subtitle_resolves_through_its_owner(
 
     answer = _request(kind, blacklist, path, owner=second if explicit_owner else None)
 
-    assert answer == ('', 200 if blacklist else 204)
+    expected_body = {'job_id': None} if kind == 'series' and blacklist else ''
+    assert answer == (expected_body, 200 if blacklist else 204)
     assert recorded[0][0] == 'delete'
     target = recorded[0][1]
     assert target['arr_instance_id'] == second
@@ -348,7 +349,8 @@ def test_malformed_entries_do_not_hide_a_valid_one(library, recorded, kind, blac
 
     answer = _request(kind, blacklist, item.subtitle, owner=owner)
 
-    assert answer == ('', 200 if blacklist else 204)
+    expected_body = {'job_id': None} if kind == 'series' and blacklist else ''
+    assert answer == (expected_body, 200 if blacklist else 204)
     assert recorded[0][1]['subtitles_path'] == item.stored
 
 
@@ -433,7 +435,8 @@ def test_blacklist_is_recorded_only_for_an_accepted_delete(library, real_delete,
     assert _untouched(library)
 
     item = library.items[kind, second, 5]
-    assert _request(kind, True, item.subtitle, owner=second) == ('', 200)
+    expected_body = {'job_id': None} if kind == 'series' else ''
+    assert _request(kind, True, item.subtitle, owner=second) == (expected_body, 200)
     assert _blacklisted(library, kind) == [second]
     assert not item.subtitle.exists()
     assert library.items[kind, first, 5].subtitle.read_bytes() == b'subtitle'
@@ -468,7 +471,8 @@ def test_a_repeated_blacklist_request_records_one_entry(library, real_delete, ki
     owner = OWNERS[kind][0]
     item = library.items[kind, owner, 5]
 
-    assert _request(kind, True, item.subtitle, owner=owner) == ('', 200)
+    expected_body = {'job_id': None} if kind == 'series' else ''
+    assert _request(kind, True, item.subtitle, owner=owner) == (expected_body, 200)
     # The reindex is recorded rather than run, so the index still lists the
     # removed file, as it does for a concurrent duplicate that passed its
     # check before the first request's reindex landed.
@@ -525,7 +529,8 @@ def test_a_row_without_an_owner_resolves_through_the_global_mapping(
     monkeypatch.setattr(path_mappings, 'path_mapping_movies' if kind == 'movie' else 'path_mapping_series',
                         [[f'/remote/{kind}/{first}', str(item.subtitle.parent)]])
 
-    assert _request(kind, blacklist, item.subtitle, owner=None) == ('', 200 if blacklist else 204)
+    expected_body = {'job_id': None} if kind == 'series' and blacklist else ''
+    assert _request(kind, blacklist, item.subtitle, owner=None) == (expected_body, 200 if blacklist else 204)
 
     assert not item.subtitle.exists()
     assert _blacklisted(library, kind) == ([None] if blacklist else [])

@@ -25,6 +25,7 @@ from subtitles.indexer.movies import store_subtitles_movie
 from subtitles.sync import sync_subtitles
 from app.config import settings, empty_values, get_array_from
 from app.event_handler import event_stream
+from api.swaggerui import job_queued_model
 
 
 from ..utils import authenticate
@@ -221,10 +222,12 @@ class Subtitles(Resource):
         help="Comma-separated sync engines to use",
     )
 
+    patch_job_model = api_ns_subtitles.model('JobQueued', job_queued_model)
+
     @authenticate
     @api_ns_subtitles.doc(parser=patch_request_parser)
-    @api_ns_subtitles.response(204, "Success")
-    @api_ns_subtitles.response(202, "Mod queued as a job")
+    @api_ns_subtitles.response(204, "Movie or sports sync/translation accepted")
+    @api_ns_subtitles.response(202, "Episode tool or subtitle mod queued as a job", patch_job_model)
     @api_ns_subtitles.response(401, "Not Authenticated")
     @api_ns_subtitles.response(400, "Generated sync output files cannot be synchronized again")
     @api_ns_subtitles.response(404, "Episode/movie not found")
@@ -498,7 +501,7 @@ class Subtitles(Resource):
                                    sports_guard, sports_path):
                     if media_type == "sports":
                         video_path = sports_path
-                    sync_subtitles(
+                    job_id = sync_subtitles(
                         video_path=video_path,
                         srt_path=subtitles_path,
                         srt_lang=language,
@@ -541,7 +544,10 @@ class Subtitles(Resource):
                         context=sports_context,
                         validate=sports_validate,
                         publication_guard=sports_guard,
+                        return_job_id=media_type == "episode",
                     )
+                if media_type == "episode":
+                    return {"job_id": job_id or None}, 202
             except OSError:
                 return "Unable to edit subtitles file. Check logs.", 409
         elif action == "translate":
@@ -584,7 +590,7 @@ class Subtitles(Resource):
                         id, arr_instance_id, subtitles_path, dest_language,
                         from_language=from_language, forced=forced, hi=hi,
                     )
-                translate_subtitles_file(
+                job_id = translate_subtitles_file(
                     video_path=video_path,
                     source_srt_file=subtitles_path,
                     from_lang=from_language,
@@ -602,6 +608,8 @@ class Subtitles(Resource):
                     sports_operation=sports_operation,
                     embedded_source=embedded_source,
                 )
+                if media_type == "episode":
+                    return {"job_id": job_id or None}, 202
             except ValueError as exc:
                 return str(exc), 409
             except OSError:

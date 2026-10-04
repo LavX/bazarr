@@ -1,6 +1,7 @@
 # coding=utf-8
 
 from flask import Flask
+import pytest
 
 
 def test_provider_movie_missing_recompute_keeps_instance_scope(schema_session, tmp_path, monkeypatch):
@@ -214,7 +215,7 @@ def test_provider_episode_post_passes_upstream_id_not_local_id(schema_session, m
     ):
         response = providers_episodes.ProviderEpisodes.post.__wrapped__(providers_episodes.ProviderEpisodes())
 
-    assert response == ("", 204)
+    assert response == ({"job_id": None}, 202)
     assert calls[0]["sonarr_series_id"] == 999
     assert calls[0]["sonarr_episode_id"] == 1001
     assert calls[0]["arr_instance_id"] == 8
@@ -269,7 +270,8 @@ def test_movie_blacklist_post_keeps_instance_scope(schema_session, tmp_path, mon
     assert download_calls == [((3,), {"arr_instance_id": 9})]
 
 
-def test_episode_blacklist_post_keeps_instance_scope(schema_session, tmp_path, monkeypatch):
+@pytest.mark.parametrize('job_id', [73, None])
+def test_episode_blacklist_post_keeps_instance_scope(schema_session, tmp_path, monkeypatch, job_id):
     from api.episodes import blacklist
     from app.database import TableEpisodes, TableShows
 
@@ -314,7 +316,11 @@ def test_episode_blacklist_post_keeps_instance_scope(schema_session, tmp_path, m
         return True
 
     monkeypatch.setattr(blacklist, "delete_subtitles", delete_with_callback)
-    monkeypatch.setattr(blacklist, "episode_download_subtitles", lambda *args, **kwargs: download_calls.append((args, kwargs)))
+    def queue_replacement(*args, **kwargs):
+        download_calls.append((args, kwargs))
+        return job_id
+
+    monkeypatch.setattr(blacklist, "episode_download_subtitles", queue_replacement)
 
     app = Flask(__name__)
     with app.test_request_context(
@@ -324,7 +330,7 @@ def test_episode_blacklist_post_keeps_instance_scope(schema_session, tmp_path, m
     ):
         result = blacklist.EpisodesBlacklist.post.__wrapped__(blacklist.EpisodesBlacklist())
 
-    assert result == ("", 200)
+    assert result == ({"job_id": job_id}, 200)
     assert delete_calls[0]["arr_instance_id"] == 10
     assert [call["arr_instance_id"] for call in logged] == [10]
     assert download_calls == [((), {"no": 5, "arr_instance_id": 10})]

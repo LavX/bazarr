@@ -93,4 +93,9 @@ def history_log(action, sonarr_series_id, sonarr_episode_id, result, fake_provid
         return
 
     database.execute(insert(TableHistory).values(**values))
-    event_stream(type='episode-history')
+    # Preserve the general history event, with the local owner for scoped score
+    # refreshes. Missing media has no detail page to refresh.
+    if values.get('series_id') is not None:
+        event_stream(type='episode-history', payload=values['series_id'])
+    else:
+        event_stream(type='episode-history')

@@ -1,3 +1,4 @@
+import { MantineProvider } from "@mantine/core";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { customRender, screen } from "@/tests";
@@ -109,15 +110,17 @@ describe("Subtitle badge score", () => {
     missing = false,
   ) =>
     customRender(
-      <Subtitle
-        seriesId={1}
-        episodeId={2}
-        arrInstanceId={1}
-        missing={missing}
-        subtitle={subtitle}
-        availableSubtitles={[]}
-        scoreInfo={scoreInfo}
-      />,
+      <MantineProvider env="test">
+        <Subtitle
+          seriesId={1}
+          episodeId={2}
+          arrInstanceId={1}
+          missing={missing}
+          subtitle={subtitle}
+          availableSubtitles={[]}
+          scoreInfo={scoreInfo}
+        />
+      </MantineProvider>,
     );
 
   const sub = (path: string | null) =>
@@ -155,6 +158,45 @@ describe("Subtitle badge score", () => {
     expect(badge).toHaveTextContent(/^en$/i);
     expect(badge).not.toHaveTextContent("%");
   });
+
+  it.each([
+    ["98.0%", "green", "file"],
+    ["72.0%", "yellow", "file"],
+    ["50.0%", "red", "file"],
+    ["100.0%", "green", "embedded"],
+  ])(
+    "highlights an open menu over the %s score colour",
+    async (score, colour, source) => {
+      const user = userEvent.setup();
+      renderBadge(
+        sub(
+          source === "embedded" ? null : "/tv/Show/Season 1/Show S01E08.en.srt",
+        ),
+        { score },
+      );
+      const label = await findScoredBadge(/^en \d+%$/i);
+      const badge = await screen.findByText(
+        (_content, element) =>
+          element?.classList.contains("mantine-Badge-root") ?? false,
+      );
+      expect(badge).toHaveStyle({
+        color: `var(--mantine-color-${colour}-light-color)`,
+      });
+
+      await user.click(label);
+      expect(await screen.findByRole("menu")).toBeInTheDocument();
+      expect(badge).toHaveAttribute("data-variant", "highlight");
+      expect(badge.style.color).toBe("");
+      expect(badge.style.backgroundColor).toBe("");
+      expect(badge.style.border).toBe("");
+
+      await user.keyboard("{Escape}");
+      expect(badge).toHaveAttribute("data-variant", "light");
+      expect(badge).toHaveStyle({
+        color: `var(--mantine-color-${colour}-light-color)`,
+      });
+    },
+  );
 
   it("scores an embedded track badge", async () => {
     renderBadge(sub(null), {

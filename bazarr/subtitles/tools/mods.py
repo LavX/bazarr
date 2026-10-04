@@ -92,7 +92,7 @@ def apply_subtitle_mods(language, subtitle_path, mods, video_path,
         return jobs_queue.add_job_from_function(
             (lambda m, p: f'{MOD_LABELS.get(m, m)}: {os.path.basename(p)}')(
                 mods[0] if mods else 'mods', subtitle_path),
-            is_progress=False,
+            is_progress=False, return_existing=media_type == 'episode',
         )
 
     from app.job_errors import reason_of

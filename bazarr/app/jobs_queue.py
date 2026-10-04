@@ -578,7 +578,7 @@ class JobsQueue:
         return False
 
     def add_job_from_function(self, job_name: str, is_progress: bool, progress_max: int = 0,
-                              wait_for_completion: bool = False) -> int | bool:
+                              wait_for_completion: bool = False, return_existing: bool = False) -> int | bool:
         """
         Adds a job to the pending queue using the details of the calling function. The job is then executed.
 
@@ -590,6 +590,8 @@ class JobsQueue:
         :type progress_max: int
         :param wait_for_completion: Flag indicating whether to wait for the job to complete before returning.
         :type wait_for_completion: bool
+        :param return_existing: Return the matching active job's id when this call is already queued.
+        :type return_existing: bool
         :return: ID of the added job.
         :rtype: int | bool
         """
@@ -623,7 +625,8 @@ class JobsQueue:
 
         # Feed the job to the pending queue
         job_id = self.feed_jobs_pending_queue(job_name=job_name, module=parent_function_path, func=parent_function_name,
-                                              kwargs=arguments, is_progress=is_progress, progress_max=progress_max)
+                                              kwargs=arguments, is_progress=is_progress, progress_max=progress_max,
+                                              return_existing=return_existing)
 
         if not job_id:
             return False

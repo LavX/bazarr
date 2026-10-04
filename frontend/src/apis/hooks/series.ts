@@ -5,9 +5,11 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import { invalidateEpisodeHistory } from "@/apis/queries/episodeHistory";
 import { usePaginationQuery } from "@/apis/queries/hooks";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
+import { whenJobFinishes } from "./jobWatch";
 
 function cacheSeries(client: QueryClient, series: Item.Series[]) {
   series.forEach((item) => {
@@ -99,10 +101,23 @@ export function useSeriesAction() {
     mutationKey: [QueryKeys.Actions, QueryKeys.Series],
     mutationFn: (form: FormType.SeriesAction) => api.series.action(form),
 
-    onSuccess: () => {
-      client.invalidateQueries({
-        queryKey: [QueryKeys.Series],
-      });
+    onSuccess: (data, form) => {
+      const refresh = () => {
+        void client.invalidateQueries({
+          queryKey: [QueryKeys.Series],
+        });
+        if ("seriesid" in form) {
+          return invalidateEpisodeHistory(client, {
+            seriesId: form.seriesid,
+            arrInstanceId: form.arr_instance_id,
+          });
+        }
+      };
+      if (typeof data?.job_id === "number") {
+        whenJobFinishes(client, data.job_id, () => void refresh());
+        return;
+      }
+      return refresh();
     },
   });
 }

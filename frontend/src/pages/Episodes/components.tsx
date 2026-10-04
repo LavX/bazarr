@@ -176,30 +176,30 @@ export const Subtitle: FunctionComponent<Props> = ({
   const scoreColor =
     scorePct === undefined ? undefined : scoreBandColor(scorePct);
   const scored = scoreColor !== undefined;
+  const highlighted = opened;
 
   const variant: MantineColor | undefined = useMemo(() => {
-    // A scored badge is painted by its band color (below) over the light
-    // variant, which clears the custom variant styling first.
-    if (scored) {
-      return "light";
-    } else if (opened && (missing || !isEmbedded)) {
+    if (highlighted) {
       return "highlight";
+    } else if (scored) {
+      return "light";
     } else if (missing) {
       return "missing";
     } else if (isEmbedded) {
       return "disabled";
     }
-  }, [isEmbedded, missing, opened, scored]);
+  }, [highlighted, isEmbedded, missing, scored]);
 
   // The repo's badge.module.scss neutralizes the light variant's own color, so
   // paint the score band explicitly with Mantine's theme-aware light tokens.
-  const scoreStyle: CSSProperties = scored
-    ? {
-        color: `var(--mantine-color-${scoreColor}-light-color)`,
-        backgroundColor: `var(--mantine-color-${scoreColor}-light)`,
-        border: "1px solid transparent",
-      }
-    : {};
+  const scoreStyle: CSSProperties =
+    scored && !highlighted
+      ? {
+          color: `var(--mantine-color-${scoreColor}-light-color)`,
+          backgroundColor: `var(--mantine-color-${scoreColor}-light)`,
+          border: "1px solid transparent",
+        }
+      : {};
 
   const selections = useMemo<FormType.ModifySubtitle[]>(() => {
     return buildEpisodeSubtitleToolSelections({
