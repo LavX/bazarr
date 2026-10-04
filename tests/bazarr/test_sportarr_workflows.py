@@ -1151,7 +1151,7 @@ def test_scheduled_sports_sync_queues_one_named_job_and_forwards_the_queued_run(
     monkeypatch.setattr(
         leagues,
         "update_sports_for_instance",
-        lambda owner, **kwargs: synced.append((owner, kwargs)),
+        lambda owner, **kwargs: synced.append((owner, kwargs)) or [1, 2, 3],
     )
 
     leagues.sync_sports_for_instance(1)
@@ -1172,10 +1172,35 @@ def test_scheduled_sports_sync_queues_one_named_job_and_forwards_the_queued_run(
     assert queue._run_job(job)
     assert synced == [(1, {"job_id": job.job_id})]
     assert job.job_name == "Synced sports library with Sportarr (Main)"
+    assert job.progress_message == "3 leagues synced"
 
     leagues.sync_sports_for_instance(2, job_id=77)
     assert synced[-1] == (2, {"job_id": 77})
     assert not queue.jobs_pending_queue
+
+
+@pytest.mark.parametrize("synced_ids, summary", [([2, 4], "2 leagues synced"),
+                                                ([1], "1 league synced")])
+def test_a_stop_landing_after_the_last_checkpoint_still_records_the_summary(
+    workflow_library, monkeypatch, synced_ids, summary
+):
+    """A Stop that landed after the sync's last checkpoint must not turn a
+    committed sync into "Cancelled by user": the summary is the final
+    accounting of work that already happened."""
+    leagues, _, queue, session = _scheduled_sync_queue(workflow_library, monkeypatch)
+
+    def committed(owner, **kwargs):
+        queue.jobs_running_queue[0].cancelled = True
+        return synced_ids
+
+    monkeypatch.setattr(leagues, "update_sports_for_instance", committed)
+    leagues.sync_sports_for_instance(1)
+    job = queue.jobs_pending_queue.popleft()
+    queue.jobs_running_queue.append(job)
+    assert queue._run_job(job)
+    assert job.progress_message == summary
+    assert not job.stopped and job.status == "completed"
+    assert list(queue.jobs_completed_queue) == [job]
 
 
 def test_a_queued_scheduled_sync_is_cancelled_when_the_master_toggle_goes_off(

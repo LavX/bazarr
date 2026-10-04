@@ -313,7 +313,7 @@ def sync_sports_for_instance(arr_instance_id, job_id=None, wait_for_completion=F
         raise JobCancelled('Use Sportarr was switched off')
 
     try:
-        update_sports_for_instance(arr_instance_id, job_id=job_id)
+        ids = update_sports_for_instance(arr_instance_id, job_id=job_id)
     except ValueError:
         # An instance change stops the event streams before it cancels this
         # job, so the sync can reach its missing owner first. That is the
@@ -325,3 +325,10 @@ def sync_sports_for_instance(arr_instance_id, job_id=None, wait_for_completion=F
     jobs_queue.update_job_name(
         job_id=job_id,
         new_job_name=f'Synced sports library with Sportarr ({_sync_job_label(arr_instance_id)})')
+    noun = 'league' if len(ids) == 1 else 'leagues'
+    # A Stop that landed after the sync's last checkpoint must not turn a
+    # committed sync into "Cancelled by user".
+    jobs_queue.update_job_progress(
+        job_id=job_id,
+        progress_message=f'{len(ids)} {noun} synced',
+        allow_cancelled=True)
