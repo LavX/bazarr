@@ -42,6 +42,19 @@ interface NotificationDrawerProps {
   onClose: () => void;
 }
 
+// A job the user stopped never finished, so it must not wear the completed
+// ring; its card still shows the queue's "Cancelled by user" line. A progress
+// job keeps the partial ring it had already earned.
+function jobShowsRing(job: Jobs | undefined, status: string) {
+  if (status === "pending") {
+    return false;
+  }
+  if (job?.is_progress) {
+    return true;
+  }
+  return status === "failed" || (status === "completed" && !job?.stopped);
+}
+
 const NotificationDrawer: FunctionComponent<NotificationDrawerProps> = ({
   opened,
   onClose,
@@ -265,7 +278,7 @@ const NotificationDrawer: FunctionComponent<NotificationDrawerProps> = ({
                                   align="flex-start"
                                   wrap="nowrap"
                                 >
-                                  {job?.is_progress && status !== "pending" && (
+                                  {jobShowsRing(job, status) && (
                                     <Tooltip
                                       label={`${job.progress_value}/${job.progress_max}`}
                                       position="right"
