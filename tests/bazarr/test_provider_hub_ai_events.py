@@ -268,6 +268,118 @@ def test_quota_latest_event_wins_and_concurrent_providers_stay_isolated():
         runtime_status.clear()
 
 
+def test_quota_status_past_reset_is_not_returned():
+    from datetime import timedelta
+
+    from provider_hub import runtime_status
+
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    runtime_status.clear()
+    try:
+        runtime_status.consume("examplehub", [
+            {"type": "translation_quota", "exhausted": True, "reset_at": yesterday},
+        ])
+        assert runtime_status.get("examplehub") is None
+        # A date-only reset counts as passed from the start of that day, UTC.
+        runtime_status.consume("examplehub", [
+            {"type": "translation_quota", "exhausted": True,
+             "reset_at": datetime.now(timezone.utc).date().isoformat()},
+        ])
+        assert runtime_status.get("examplehub") is None
+    finally:
+        runtime_status.clear()
+
+
+def test_quota_status_future_reset_is_returned():
+    from datetime import timedelta
+
+    from provider_hub import runtime_status
+
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    runtime_status.clear()
+    try:
+        runtime_status.consume("expiredhub", [
+            {"type": "translation_quota", "exhausted": True, "reset_at": yesterday},
+        ])
+        assert runtime_status.get("expiredhub") is None
+        runtime_status.consume("examplehub", [
+            {"type": "translation_quota", "exhausted": True, "reset_at": tomorrow},
+        ])
+        status = runtime_status.get("examplehub")
+        assert status["exhausted"] is True
+        assert status["reset_at"] == tomorrow
+    finally:
+        runtime_status.clear()
+
+
+def test_quota_status_without_usable_reset_is_returned():
+    from datetime import timedelta
+
+    from provider_hub import runtime_status
+
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    runtime_status.clear()
+    try:
+        runtime_status.consume("expiredhub", [
+            {"type": "translation_quota", "exhausted": True, "reset_at": yesterday},
+        ])
+        assert runtime_status.get("expiredhub") is None
+        runtime_status.consume("examplehub", [
+            {"type": "translation_quota", "exhausted": True, "reset_at": None},
+        ])
+        assert runtime_status.get("examplehub")["exhausted"] is True
+        runtime_status.consume("examplehub", [
+            {"type": "translation_quota", "exhausted": True, "reset_at": "not a date"},
+        ])
+        assert runtime_status.get("examplehub")["reset_at"] == "not a date"
+    finally:
+        runtime_status.clear()
+
+
+def test_quota_status_not_entitled_survives_passed_reset():
+    from datetime import timedelta
+
+    from provider_hub import runtime_status
+
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    runtime_status.clear()
+    try:
+        runtime_status.consume("examplehub", [
+            {"type": "translation_quota", "exhausted": True, "reset_at": yesterday},
+        ])
+        assert runtime_status.get("examplehub") is None
+        runtime_status.consume("examplehub", [
+            {"type": "translation_quota", "entitled": False, "reset_at": yesterday},
+        ])
+        assert runtime_status.get("examplehub")["entitled"] is False
+    finally:
+        runtime_status.clear()
+
+
+def test_quota_new_event_replaces_expired_status():
+    from datetime import timedelta
+
+    from provider_hub import runtime_status
+
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    runtime_status.clear()
+    try:
+        runtime_status.consume("examplehub", [
+            {"type": "translation_quota", "exhausted": True, "reset_at": yesterday},
+        ])
+        assert runtime_status.get("examplehub") is None
+        runtime_status.consume("examplehub", [
+            {"type": "translation_quota", "remaining": 5, "reset_at": tomorrow},
+        ])
+        status = runtime_status.get("examplehub")
+        assert status["remaining"] == 5
+        assert status["reset_at"] == tomorrow
+    finally:
+        runtime_status.clear()
+
+
 def test_provider_updates_and_removal_clear_account_quota(tmp_path, monkeypatch):
     from provider_hub import runtime_status, service
     from provider_hub.state import load_state, save_state
