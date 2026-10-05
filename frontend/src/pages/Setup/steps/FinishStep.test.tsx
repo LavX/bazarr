@@ -222,10 +222,10 @@ describe("FinishStep", () => {
   });
 
   it("does not call a server connected whose kind is switched off", async () => {
-    // "Continue anyway" on a configure step whose master switch write failed
-    // leaves an enabled row under a use_<kind> that is still false. The
-    // dispatcher reads that switch before any row, so nothing refreshes at
-    // all; the recap counted the row, reported the server connected and
+    // Skipping or backing out of a configure step whose master switch write
+    // failed leaves an enabled row under a use_<kind> that is still false.
+    // The dispatcher reads that switch before any row, so nothing refreshes
+    // at all; the recap counted the row, reported the server connected and
     // dropped the line saying where to finish the job.
     setMediaServers({ emby: ["Emby"], silo: ["Silo"] });
     setGeneral({

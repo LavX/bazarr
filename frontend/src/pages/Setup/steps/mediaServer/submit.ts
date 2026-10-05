@@ -2,7 +2,7 @@
 
 import { useCallback, useState } from "react";
 import { AxiosError } from "axios";
-import { useSettingsMutation } from "@/apis/hooks";
+import { isSettingsFollowupError, useSettingsMutation } from "@/apis/hooks";
 import {
   SaveMediaServerInput,
   useSaveMediaServerInstance,
@@ -202,7 +202,11 @@ export function useMediaServerSubmit() {
           // does. The promise then never settled: the caller's then never ran,
           // the draft was never marked saved, its step stayed in the wizard,
           // and submitting it again wrote a second row for a server that was
-          // already there. mutateAsync settles either way.
+          // already there. mutateAsync settles either way. Not every rejection
+          // means the switches are off: a 503 whose code is
+          // settings_refresh_failed says the configuration reached the disk
+          // and only applying it failed, so the switches count as on and the
+          // step advances without the warning.
           switchesFailed = await settings
             .mutateAsync(
               Object.fromEntries(
@@ -213,7 +217,7 @@ export function useMediaServerSubmit() {
               ),
             )
             .then(() => false)
-            .catch(() => true);
+            .catch((error) => !isSettingsFollowupError(error));
         }
         return { errors: {}, outcomes, switchesFailed };
       } finally {
@@ -223,5 +227,28 @@ export function useMediaServerSubmit() {
     [save, settings],
   );
 
-  return { submit, isPending };
+  // Retries the master switch of a row a save already wrote. One settings
+  // write and no create: the row exists, and writing it again would leave two
+  // of the same server. The answer is the whole verdict, and a 503 whose code
+  // is settings_refresh_failed counts as on: the configuration reached the
+  // disk, and only what the backend does after the write failed. Anything else
+  // leaves the switch off and the step where it was.
+  const retrySwitch = useCallback(
+    async (kind: MediaServerKind): Promise<boolean> => {
+      setPending(true);
+      try {
+        await settings.mutateAsync({
+          [`settings-general-use_${kind}`]: true,
+        });
+        return true;
+      } catch (error) {
+        return isSettingsFollowupError(error);
+      } finally {
+        setPending(false);
+      }
+    },
+    [settings],
+  );
+
+  return { submit, retrySwitch, isPending };
 }

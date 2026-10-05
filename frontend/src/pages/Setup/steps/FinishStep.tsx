@@ -141,10 +141,10 @@ const FinishStep: FC<WizardStepProps> = ({ onBack }) => {
   //
   // The kind's master switch counts for the same reason. The dispatcher reads
   // use_<kind> before it reads any row, so a server saved on a step whose
-  // switch write failed, which is exactly what "Continue anyway" walks past,
-  // refreshes nothing however enabled its own row is. Reporting it connected
-  // was the one place left that could still tell the reader setup was done
-  // when it was not.
+  // switch write failed and was then left through Skip or Back refreshes
+  // nothing however enabled its own row is. Reporting it connected was the
+  // one place left that could still tell the reader setup was done when it
+  // was not.
   const activeRows = (
     kind: MediaServerKind,
     rows: MediaServerInstance[] | undefined,
