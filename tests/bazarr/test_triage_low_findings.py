@@ -277,6 +277,26 @@ def test_an_announcement_with_an_empty_timestamp_is_dated_now(announcements, tim
     assert [(item['text'], item['timestamp']) for item in listed] == [('Undated', 'now')]
 
 
+def test_entries_without_a_timestamp_sort_ahead_of_dated_ones(announcements):
+    """pretty_date dates an empty timestamp as now, so the integer sort has
+    to compare it with dated entries instead of raising, and it keeps the
+    entry ahead of the dated ones, where the age-text sort put it."""
+    now = int(datetime.now().timestamp())
+    _write_announcements(announcements, {'data': [
+        {'text': 'Undated first', 'timestamp': None},
+        {'text': 'Four months old', 'timestamp': now - 120 * 86400},
+        {'text': 'Undated second', 'timestamp': None},
+        {'text': 'Ten hours old', 'timestamp': now - 10 * 3600},
+    ]})
+
+    listed = announcements.get_all_announcements()
+
+    assert [item['text'] for item in listed] == [
+        'Undated first', 'Undated second', 'Ten hours old', 'Four months old']
+    assert [item['timestamp'] for item in listed] == [
+        'now', 'now', '10 hours ago', '4 months ago']
+
+
 def test_the_announcements_feed_lists_the_newer_entry_first(announcements):
     """The feed is ordered by date, not by the relative-age text, whose order
     disagrees here: '10 hours ago' sorts below '4 months ago', so sorting the

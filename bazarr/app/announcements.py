@@ -11,7 +11,6 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from datetime import datetime
-from operator import itemgetter
 
 from app.database import TableAnnouncements, database, insert, select
 
@@ -152,8 +151,10 @@ def get_all_announcements():
                                        .first())]
 
     # sort on the integer timestamp before parse_announcement_dict replaces it
-    # with the relative-age text, which does not sort newest-first
-    announcements = sorted(announcements, key=itemgetter('timestamp'), reverse=True)
+    # with the relative-age text, which does not sort newest-first; an empty
+    # timestamp sorts as current, matching the now age pretty_date gives it
+    now = int(datetime.now().timestamp())
+    announcements = sorted(announcements, key=lambda x: x['timestamp'] or now, reverse=True)
 
     return [parse_announcement_dict(x) for x in announcements]
 
