@@ -1,12 +1,13 @@
 /* eslint-disable camelcase -- API fixtures retain transport field names. */
 import { cleanNotifications } from "@mantine/notifications";
+import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 import queryClient from "@/apis/queries";
 import { QueryKeys } from "@/apis/queries/keys";
 import NotificationDrawer from "@/App/NotificationDrawer";
 import { AllProviders } from "@/providers";
-import { rawRender, screen, within } from "@/tests";
+import { rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 
 let nextId = 6000;
@@ -123,5 +124,95 @@ describe("NotificationDrawer job cards", () => {
       }),
     );
     expect(within(drawer).getByText("14%")).toBeInTheDocument();
+  });
+
+  it("renders a stopped job under a Stopped heading, not Completed", async () => {
+    const drawer = await openDrawer(
+      job({
+        job_name: "Syncing sports library with Sportarr (Main)",
+        stopped: true,
+        progress_message: "Cancelled by user",
+      }),
+    );
+    expect(
+      within(drawer).queryByRole("heading", { name: "Completed" }),
+    ).toBeNull();
+    expect(
+      within(drawer).getByRole("heading", { name: "Stopped" }),
+    ).toBeInTheDocument();
+  });
+
+  it("counts stopped jobs in their own group, not the Completed one", async () => {
+    const drawer = await openDrawer(
+      job({ job_name: "Synced series with Sonarr" }),
+      job({
+        job_name: "Syncing sports library with Sportarr (Main)",
+        stopped: true,
+        progress_message: "Cancelled by user",
+      }),
+      job({
+        job_name: "Syncing movies with Radarr",
+        stopped: true,
+        progress_message: "Cancelled by user",
+      }),
+    );
+    expect(within(drawer).getByText("1 job")).toBeInTheDocument();
+    expect(within(drawer).getByText("2 jobs")).toBeInTheDocument();
+    expect(within(drawer).queryByText("3 jobs")).toBeNull();
+  });
+
+  it("keeps a stopped progress job's partial ring in the Stopped group, and none for a job without progress", async () => {
+    const drawer = await openDrawer(
+      job({
+        job_name: "Syncing series with Sonarr",
+        is_progress: true,
+        stopped: true,
+        progress_value: 40,
+        progress_max: 286,
+      }),
+      job({
+        job_name: "Syncing sports library with Sportarr (Main)",
+        stopped: true,
+        progress_message: "Cancelled by user",
+      }),
+    );
+    expect(
+      within(drawer).getByRole("heading", { name: "Stopped" }),
+    ).toBeInTheDocument();
+    expect(within(drawer).getByText("14%")).toBeInTheDocument();
+    expect(within(drawer).getAllByText(/^\d+%$/)).toHaveLength(1);
+  });
+
+  it("clears the completed queue, where stopped jobs are recorded, from the Stopped group's menu", async () => {
+    const user = userEvent.setup();
+    let cleared: FormData | undefined;
+    server.use(
+      http.patch("/api/system/jobs", async ({ request }) => {
+        cleared = await request.formData();
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    const drawer = await openDrawer(
+      job({
+        job_name: "Syncing sports library with Sportarr (Main)",
+        stopped: true,
+        progress_message: "Cancelled by user",
+      }),
+    );
+    expect(
+      within(drawer).getByRole("heading", { name: "Stopped" }),
+    ).toBeInTheDocument();
+    // The group's ellipsis menu has no accessible name, and the drawer's
+    // other button is the header close, so the menu is found by its icon.
+    const groupMenu = within(drawer).getByRole("button", {
+      name: (_, element) =>
+        // eslint-disable-next-line testing-library/no-node-access
+        element.querySelector('svg[data-icon="ellipsis"]') !== null,
+    });
+    await user.click(groupMenu);
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Clear this queue" }),
+    );
+    await waitFor(() => expect(cleared?.get("queueName")).toBe("completed"));
   });
 });
