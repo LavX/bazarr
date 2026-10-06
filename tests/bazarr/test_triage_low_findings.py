@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import threading
+from datetime import datetime
 
 import pytest
 
@@ -274,6 +275,36 @@ def test_an_announcement_with_an_empty_timestamp_is_dated_now(announcements, tim
     listed = announcements.get_all_announcements()
 
     assert [(item['text'], item['timestamp']) for item in listed] == [('Undated', 'now')]
+
+
+def test_the_announcements_feed_lists_the_newer_entry_first(announcements):
+    """The feed is ordered by date, not by the relative-age text, whose order
+    disagrees here: '10 hours ago' sorts below '4 months ago', so sorting the
+    text lists the older entry first."""
+    now = int(datetime.now().timestamp())
+    _write_announcements(announcements, {'data': [
+        {'text': 'Four months old', 'timestamp': now - 120 * 86400},
+        {'text': 'Ten hours old', 'timestamp': now - 10 * 3600},
+    ]})
+
+    listed = announcements.get_all_announcements()
+
+    assert [item['text'] for item in listed] == ['Ten hours old', 'Four months old']
+    assert [item['timestamp'] for item in listed] == ['10 hours ago', '4 months ago']
+
+
+def test_announcements_sharing_a_timestamp_keep_their_file_order(announcements):
+    """Entries with the same date keep the order the announcements.json file
+    lists them in, since the sort is stable. This also holds while the sort is
+    on the age text, where both entries share one string; it guards the
+    equal-timestamp criterion of the date sort."""
+    _write_announcements(announcements, {'data': [
+        {'text': 'First in the file', 'timestamp': 1_700_000_000},
+        {'text': 'Second in the file', 'timestamp': 1_700_000_000},
+    ]})
+
+    assert [item['text'] for item in announcements.get_all_announcements()] == [
+        'First in the file', 'Second in the file']
 
 
 @pytest.mark.parametrize('payload, count', [
