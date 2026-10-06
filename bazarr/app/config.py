@@ -108,6 +108,20 @@ def normalize_stored_provider_routing(stored_routing):
     return UPGRADED_PROVIDER_ROUTING
 
 
+def normalize_translator_type(stored_translator_type):
+    """The translator an existing config should run with, given its stored value.
+
+    "No translator" reaches storage under several spellings: the installer writes
+    the literal string ``none``, a value cast from nothing lands on ``'None'``,
+    and an emptied picker can leave an empty string. They are all one setting,
+    so they are all kept under the one spelling the rest of Bazarr reads, and
+    anything else is kept verbatim for the availability gate to answer for.
+    """
+    if stored_translator_type is None or stored_translator_type in ('', 'None'):
+        return 'none'
+    return stored_translator_type if isinstance(stored_translator_type, str) else str(stored_translator_type)
+
+
 def migrate_upgrade_subtitle_toggles(settings, existing_config) -> bool:
     """Split the combined manual/translated upgrade toggle.
 
@@ -378,7 +392,8 @@ validators = [
     Validator('translator.gemini_model', must_exist=True, default='gemini-2.0-flash', is_type_of=str, cast=str),
     Validator('translator.gemini_batch_size', must_exist=True, default=300, is_type_of=int, gte=1),
     Validator('translator.translator_info', must_exist=True, default=True, is_type_of=bool),
-    Validator('translator.translator_type', must_exist=True, default='google_translate', is_type_of=str, cast=str),
+    Validator('translator.translator_type', must_exist=True, default='google_translate', is_type_of=str,
+              cast=normalize_translator_type),
     Validator('translator.lingarr_url', must_exist=True, default='http://lingarr:9876', is_type_of=str),
     Validator('translator.openrouter_url', must_exist=True, default='http://subtitle-translator:8765', is_type_of=str),
     Validator('translator.openrouter_api_key', must_exist=True, default='', is_type_of=str, cast=str),
@@ -868,6 +883,17 @@ if os.path.getsize(config_yaml_file) > 0:
         logging.info("Existing configuration has no usable OpenRouter provider routing (%r); keeping %s, "
                      "which every AI Subtitle Translator version serves.", stored_routing,
                      UPGRADED_PROVIDER_ROUTING)
+    # "No translator" has reached storage under several spellings, and they have
+    # to be folded onto the one spelling here, before the validation loop below
+    # resets a stored null onto the shipped default instead of off. A value that
+    # is merely absent is a fresh install and keeps getting that default.
+    if settings.exists('translator.translator_type'):
+        stored_translator_type = settings.get('translator.translator_type')
+        normalized_translator_type = normalize_translator_type(stored_translator_type)
+        if normalized_translator_type != stored_translator_type:
+            settings['translator.translator_type'] = normalized_translator_type
+            logging.info("Existing configuration has no usable translator type (%r); keeping the "
+                         "translator switched off.", stored_translator_type)
     migrate_upgrade_subtitle_toggles(settings, existing_config=True)
     migrate_search_timeout_default(settings)
 
@@ -1545,6 +1571,7 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
     undefined_subtitles_track_default_changed = False
     audio_tracks_parsing_changed = False
     adaptive_searching_max_age_changed = False
+    translator_settings_changed = False
     reset_providers = False
     provider_caches_to_clear = set()
     reset_fanout_pool = False
@@ -1615,6 +1642,13 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
 
         if key == 'settings-general-embedded_subtitles_parser':
             embedded_subtitles_parser_changed = value != settings.general.embedded_subtitles_parser
+
+        # A hold the failed-translation record put on an item describes the
+        # translator as it was, so any changed translator setting clears the
+        # whole record and the next scan may offer those items again.
+        if settings_keys[:2] == ['settings', 'translator'] and len(settings_keys) == 3 \
+                and value != _settings_value(settings, settings_keys[1:]):
+            translator_settings_changed = True
 
         if key == 'settings-general-adaptive_searching_max_age':
             if value != settings.general.adaptive_searching_max_age:
@@ -2076,6 +2110,14 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
         if configure_proxy:
             with follow_ups.step():
                 configure_proxy_func()
+
+        if translator_settings_changed:
+            # The translator the record described a failure for may have been
+            # fixed, switched or re-keyed by this save, so the hold it put on
+            # those items has nothing left to describe.
+            with follow_ups.step():
+                from subtitles.tools.translate.failure_record import clear_failed_translations
+                clear_failed_translations()
 
         if exclusion_updated:
             with follow_ups.step():

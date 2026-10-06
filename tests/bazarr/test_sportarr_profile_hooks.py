@@ -55,7 +55,10 @@ def profile_library(manual_library, monkeypatch):
     monkeypatch.setattr(settings.translator, "openrouter_url", "http://fixture")
     monkeypatch.setattr(settings.translator, "lingarr_url", "http://fixture/base")
     monkeypatch.setattr(settings.translator, "lingarr_token", "")
-    monkeypatch.setattr(settings.translator, "openrouter_api_key", "")
+    # A configured key, not a blank one: the translation availability gate
+    # refuses an openrouter engine without one, and this fixture's transport
+    # is fully mocked, so the value is only ever read, never used.
+    monkeypatch.setattr(settings.translator, "openrouter_api_key", "fixture")
     monkeypatch.setattr(settings.translator, "openrouter_encryption_key", "")
     for queue in (
         "jobs_pending_queue",

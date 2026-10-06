@@ -16,6 +16,7 @@ from app.config import (save_settings, get_settings, validate_metadata_settings,
 from app.scheduler import scheduler  # noqa: F401
 from subtitles.indexer.missing_refresh import queue_missing_subtitles_recalculation
 from subtitles.language_profiles import validate_combine_rule, CombineRuleError
+from subtitles.tools.translate.failure_record import clear_failed_translations
 from arr_instances.resolution import forget_deleted_language_profiles
 
 from ..utils import authenticate
@@ -96,6 +97,11 @@ def _write_settings_rows(enabled_languages, profiles, notifications):
 
         # invalidate cache
         update_profile_id_list.invalidate()
+
+        # A hold the failed-translation record put on an item describes the
+        # profile as it was, so a saved profile clears it: the next scan may
+        # offer those items again under the new rules.
+        clear_failed_translations()
 
     # Update Notification
     for item in notifications:

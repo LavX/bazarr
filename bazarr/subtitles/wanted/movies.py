@@ -25,10 +25,11 @@ from subliminal_patch.score import MAX_SCORES
 from ..adaptive_searching import is_search_active, updateFailedAttempts
 from ..download import generate_subtitles
 from ..language_profiles import build_translate_from_map
-from .utils import _find_existing_subtitle_path, _provider_file_on_disk
+from ..tools.translate.failure_record import translation_recently_failed
+from .utils import _find_existing_subtitle_path, _provider_file_on_disk, evaluate_translation_gate
 
 
-def _wanted_movie(movie, providers_list, job_id=None):
+def _wanted_movie(movie, providers_list, job_id=None, translation_gate=True):
     arr_instance_id = getattr(movie, 'arr_instance_id', None)
     audio_language_list = get_audio_profile_languages(movie.audio_language)
     if len(audio_language_list) > 0:
@@ -47,13 +48,26 @@ def _wanted_movie(movie, providers_list, job_id=None):
         lang_code = language.split(':')[0]
 
         translate_cfg = translate_from_map.get(language)
-        if translate_cfg:
+        # A closed gate leaves the language to the provider search exactly as
+        # if the profile had no translate-from for it at all: the reason was
+        # logged once when the gate was read for this run.
+        if translate_cfg and translation_gate:
             source_srt = _find_existing_subtitle_path(
                 movie.subtitles,
                 translate_cfg['from'],
                 path_replace_fn=path_mappings.path_replace_movie,
             )
-            if source_srt:
+            if source_srt and translation_recently_failed(
+                    arr_instance_id, 'movies', movie.radarrId, translate_cfg['from'], lang_code):
+                # The last translation of this item died inside the job, so
+                # re-offering it would only queue another doomed job every
+                # scan; the hold expires and every settings save clears it.
+                logging.debug(
+                    "BAZARR auto-translate (wanted-scan) skipped for %s: a recent translation of "
+                    "%s -> %s failed (falling back to provider search)",
+                    video_path, translate_cfg['from'], lang_code,
+                )
+            elif source_srt:
                 min_score = settings.translator.min_source_score
                 history = database.execute(
                     scoped(
@@ -158,12 +172,18 @@ def _wanted_movie(movie, providers_list, job_id=None):
                             radarr_id=movie.radarrId,
                             metadata=metadata,
                             arr_instance_id=arr_instance_id,
+                            sports_operation=None,
+                            embedded_source=None,
                         )
                         # Guard: skip if an identical translate job is already
                         # pending or running. Why: history guard (action=6) only
                         # blocks re-queue after successful completion; without
                         # this check, every wanted-scan tick during a pending
                         # translation would enqueue a duplicate job.
+                        # The kwargs have to name every parameter the queued
+                        # job binds, including the defaulted ones: the queue
+                        # compares the whole dict, so a partial dict never
+                        # matched and this guard never fired.
                         if jobs_queue._is_an_existing_job(
                             module='subtitles.tools.translate.main',
                             func='translate_subtitles_file',
@@ -229,7 +249,11 @@ def _wanted_movie(movie, providers_list, job_id=None):
             database.execute(stmt)
 
 
-def wanted_download_subtitles_movie(radarr_id, job_id=None, arr_instance_id=None):
+def wanted_download_subtitles_movie(radarr_id, job_id=None, arr_instance_id=None, translation_gate=None):
+    # A single-item search reads the gate for itself, unless the run that
+    # spawned it already read the gate for every item in it.
+    if translation_gate is None:
+        translation_gate = evaluate_translation_gate()
     stmt = scoped(
         select(TableMovies.path,
                TableMovies.missing_subtitles,
@@ -260,7 +284,7 @@ def wanted_download_subtitles_movie(radarr_id, job_id=None, arr_instance_id=None
     providers_list = get_providers()
 
     if providers_list:
-        _wanted_movie(movie, providers_list, job_id=job_id)
+        _wanted_movie(movie, providers_list, job_id=job_id, translation_gate=translation_gate)
     else:
         logging.info("BAZARR All providers are throttled")
 
@@ -322,6 +346,9 @@ def wanted_search_missing_subtitles_movies(job_id=None, wait_for_completion=Fals
         jobs_queue.update_job_progress(job_id=job_id, progress_value='max')
 
     throttled = False
+    # Read once for the whole run: a closed gate is one fact about the
+    # configuration and one log line, not one per movie in the library.
+    translation_gate = evaluate_translation_gate()
     observed = activity.register(activity.activity_id_for_job(job_id), operation='wanted_search',
                                  scope_kind='server')
     for i, movie in enumerate(movies, start=1):
@@ -339,7 +366,8 @@ def wanted_search_missing_subtitles_movies(job_id=None, wait_for_completion=Fals
         providers = get_providers()
         if providers:
             wanted_download_subtitles_movie(movie.radarrId, job_id=job_id,
-                                            arr_instance_id=movie.arr_instance_id)
+                                            arr_instance_id=movie.arr_instance_id,
+                                            translation_gate=translation_gate)
 
             # make sure to override the progress value updated by the subtitles synchronization
             jobs_queue.update_job_progress(job_id=job_id, progress_value=i, progress_max=count_movies)

@@ -498,6 +498,8 @@ jobs:
             tests/bazarr/test_supervisor_stages.py \
             tests/bazarr/test_system_logs_api.py \
             tests/bazarr/test_tracemalloc_dumper.py \
+            tests/bazarr/test_translate_availability.py \
+            tests/bazarr/test_translate_failure_record.py \
             tests/bazarr/test_translate_job_media_name.py \
             tests/bazarr/test_translator_auth.py \
             tests/bazarr/test_upgrade_embedded_history.py \
@@ -580,6 +582,7 @@ jobs:
             tests/bazarr/test_history_owner_resolution.py \
             tests/bazarr/test_navigation_local_ids.py \
             tests/bazarr/test_wanted_instance_scope.py \
+            tests/bazarr/test_wanted_translate_gate.py \
             tests/bazarr/test_api_utils_images.py \
             tests/bazarr/test_blacklist_delete_scope.py \
             tests/bazarr/test_threading_followup.py \
@@ -720,6 +723,7 @@ jobs:
             tests/bazarr/test_sportarr_kind_migration.py \
             tests/bazarr/test_sportarr_events.py \
             tests/bazarr/test_sportarr_profile_hooks.py \
+            tests/bazarr/test_sportarr_translate_dedupe.py \
             tests/bazarr/test_subtitle_ownership_revision.py \
             tests/bazarr/test_sportarr_artifact_migration.py \
             tests/bazarr/test_sportarr_settings.py \

@@ -25,6 +25,7 @@ from sportarr.library import _event_query, _serialize_event, get_league, parse_s
 from sportarr.pagination import validate_page
 from sportarr.sync.leagues import require_sportarr
 from sportarr.errors import SportsNotFound
+from subtitles.wanted.utils import evaluate_translation_gate
 
 
 class SportsJobSignal:
@@ -158,6 +159,10 @@ def wanted_badge(session):
 def _run_events(rows, job_id, adaptive=False, language=None):
     outcomes = []
     failures = []
+    # Read once for the whole run, with the reason logged there when it is
+    # closed: the events then translate nothing, and every missing language
+    # they would have kept from the providers goes to them instead.
+    translation_gate = evaluate_translation_gate()
     jobs_queue.update_job_progress(job_id, progress_max=len(rows) or 1)
     try:
         for position, row in enumerate(rows, 1):
@@ -170,6 +175,7 @@ def _run_events(rows, job_id, adaptive=False, language=None):
                     job_id=job_id,
                     cancel=signal,
                     adaptive=adaptive,
+                    translation_gate=translation_gate,
                     # A per-row language lets one missing-language badge run alone.
                     language=row.get("language", language),
                 )
