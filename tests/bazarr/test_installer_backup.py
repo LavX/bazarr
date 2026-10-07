@@ -37,7 +37,7 @@ GUIDE = os.path.join(ROOT, 'site', 'guides', 'migration.html')
 
 FUNCTIONS = ('compose_services', 'compose_bazarr_service', 'compose_env', 'compose_config_mount',
              'config_postgres_value', 'url_query_value', 'url_query_count', 'url_decode', 'detect_database',
-             'dump_postgres', 'discard_backup', 'restart_and_fail', 'do_backup')
+             'dump_postgres', 'discard_backup', 'restart_and_fail', 'backup_interrupted', 'do_backup')
 
 STUBS = r'''
 info() { printf 'INFO %s\n' "$*"; }; success() { printf 'SUCCESS %s\n' "$*"; }
@@ -76,6 +76,22 @@ cp() {
 KILLED_CONFIG_COPY = r'''
 cp() {
   if [[ "$3" == */config ]]; then mkdir -p "$3/db"; printf half > "$3/db/bazarr.db"; kill -KILL $$; fi
+  command cp "$@"
+}
+'''
+
+# A catchable signal partway through the config copy, which leaves the folder the
+# interrupted run has to remove. The copy waits on a step the signal lands in: bash runs
+# the pending trap as soon as the wait it interrupted returns, still inside do_backup's
+# call. SIGNAL is the name the test substitutes.
+INTERRUPTED_CONFIG_COPY = r'''
+cp() {
+  if [[ "$3" == */config ]]; then
+    mkdir -p "$3/db"; printf half > "$3/db/bazarr.db"
+    ( sleep 5 ) >/dev/null 2>&1 & local waiter=$!
+    ( sleep 1; kill -SIGNAL $$ ) >/dev/null 2>&1 &
+    wait "$waiter"
+  fi
   command cp "$@"
 }
 '''
@@ -134,9 +150,9 @@ def install(tmp_path):
     rendered = tmp_path / 'rendered.yml'
     log = tmp_path / 'docker.log'
 
-    def run(config_text, succeed=True, stubs='', **fake):
+    def run(config_text, succeed=True, stubs='', status=None, after='', **fake):
         rendered.write_text(config_text, encoding='utf-8')
-        program = (_functions() + STUBS + stubs + 'do_backup "$1"\n'
+        program = (_functions() + STUBS + stubs + 'do_backup "$1"\n' + after +
                    'printf "CONFIG_DIR=%s\\nDB_ENGINE=%s\\n" "$CONFIG_DIR" "$DB_ENGINE"\n')
         env = dict(os.environ, FAKE_COMPOSE_CONFIG=str(rendered), FAKE_LOG=str(log),
                    FAKE_INSTALL=str(install_dir))
@@ -147,6 +163,10 @@ def install(tmp_path):
         docker_log = log.read_text(encoding='utf-8') if log.exists() else ''
         if not succeed:
             assert result.returncode != 0, f'do_backup went ahead:\n{result.stdout}\n{result.stderr}'
+            if status is not None:
+                assert result.returncode == status, (
+                    f'do_backup ended with status {result.returncode}, not {status}:\n'
+                    f'{result.stdout}\n{result.stderr}')
             return result.stdout, backups, docker_log
         assert result.returncode == 0, f'do_backup failed:\n{result.stdout}\n{result.stderr}'
         [backup] = backups
@@ -571,6 +591,37 @@ def test_a_run_killed_mid_copy_leaves_only_a_folder_marked_incomplete(install):
     assert re.fullmatch(r'backup_\d{8}_\d{6}\.partial', left.name)
 
 
+@pytest.mark.parametrize('signal', ['INT', 'TERM', 'HUP'])
+def test_a_backup_interrupted_mid_copy_discards_the_partial_and_starts_the_old_services(
+        install, signal):
+    # A catchable signal during the backup is handled like a failed step: the .partial
+    # folder goes before the old services start again, and the run ends with the
+    # script's interrupted status, not with a half-made backup left under its name.
+    install_dir, run = install
+    _config_tree(install_dir / 'config', 'general:\n  port: 6767\n')
+
+    output, backups, docker_log = run(_rendered_config(install_dir / 'config'), succeed=False,
+                                      stubs=INTERRUPTED_CONFIG_COPY.replace('SIGNAL', signal),
+                                      status=130)
+
+    assert 'INFO Removed the incomplete backup' in output
+    assert backups == []
+    assert docker_log.splitlines() == ['stop', 'start (backup folders: none)']
+    assert (install_dir / 'config' / 'db' / 'bazarr.db').read_text(encoding='utf-8') == 'sqlite-bytes'
+
+
+def test_the_signal_trap_ends_with_do_backup(install):
+    # The trap is the backup's own: once do_backup returns, the script handles signals
+    # the way it did before, so the steps after the backup keep their own handling.
+    install_dir, run = install
+    _config_tree(install_dir / 'config', 'general:\n  port: 6767\n')
+
+    output, backup, _ = run(_rendered_config(install_dir / 'config'),
+                            after='trap -p INT; trap -p TERM; trap -p HUP\n')
+
+    assert 'trap --' not in output
+
+
 @pytest.mark.parametrize('suffix', ['', '.partial'])
 def test_a_backup_folder_that_already_exists_is_left_alone(install, suffix):
     # Two runs in the same second get the same name. The folder that is there is not this
@@ -704,32 +755,73 @@ def test_the_guide_restore_swaps_the_backup_in(stack, backup_name):
     _config_tree(stack_dir / backup_name, 'general:\n  port: 6768\n')
     before = _tree(stack_dir / 'config')
     backup = _tree(stack_dir / backup_name)
+    moved = 'config-bazarr-plus-20260924-143015'
 
-    run(_restore_snippet(backup_name))
+    output, docker_log = run(_restore_snippet(backup_name))
 
     assert _tree(stack_dir / 'config') == backup
-    assert _tree(stack_dir / 'config-bazarr-plus') == before
+    assert _tree(stack_dir / moved) == before
     assert _tree(stack_dir / backup_name) == backup
     assert not (stack_dir / 'config-restore').exists()
+    assert f'the config you had is at ./{moved}' in output
 
 
-@pytest.mark.parametrize('leftover', ['config-restore', 'config-bazarr-plus'])
-def test_the_guide_restore_refuses_a_folder_left_by_an_earlier_attempt(stack, leftover):
-    # A leftover ./config-restore is what an interrupted restore leaves, and ./config-bazarr-plus
-    # what the previous revert moved aside. `cp -a` and `mv` put the new copy inside either
-    # one, and the stale folder became ./config.
+def test_the_guide_restore_refuses_a_leftover_config_restore(stack):
+    # A leftover ./config-restore is what an interrupted restore leaves. `cp -a` would
+    # copy the new backup inside it, so the commands refuse, delete nothing, and tell
+    # the reader to move it away.
     stack_dir, run = stack
     backup_name = 'config-backup-20260924-143015'
     _config_tree(stack_dir / backup_name, 'general:\n  port: 6768\n')
-    _config_tree(stack_dir / leftover, 'general:\n  port: 1111\n')
-    before = {name: _tree(stack_dir / name) for name in ('config', backup_name, leftover)}
+    _config_tree(stack_dir / 'config-restore', 'general:\n  port: 1111\n')
+    before = {name: _tree(stack_dir / name) for name in ('config', backup_name, 'config-restore')}
 
     output, docker_log = run(_restore_snippet(backup_name))
 
     assert {name: _tree(stack_dir / name) for name in before} == before
     assert sorted(path.name for path in stack_dir.iterdir()) == sorted(before)
     assert docker_log == '', 'Bazarr+ was stopped for a restore that could not run'
-    assert f'./{leftover}' in output
+    assert './config-restore is already there' in output and 'Move it away' in output
+
+
+def test_the_guide_restore_moves_aside_without_touching_an_earlier_revert(stack):
+    # ./config-bazarr-plus is where an older version of these commands put the config it
+    # moved aside. The fresh name never aims at it: it neither blocks the restore nor is
+    # written into.
+    stack_dir, run = stack
+    backup_name = 'config-backup-20260924-143015'
+    _config_tree(stack_dir / backup_name, 'general:\n  port: 6768\n')
+    _config_tree(stack_dir / 'config-bazarr-plus', 'general:\n  port: 1111\n')
+    earlier = _tree(stack_dir / 'config-bazarr-plus')
+    before = _tree(stack_dir / 'config')
+    moved = 'config-bazarr-plus-20260924-143015'
+
+    output, docker_log = run(_restore_snippet(backup_name))
+
+    assert _tree(stack_dir / 'config-bazarr-plus') == earlier
+    assert _tree(stack_dir / moved) == before
+    assert _tree(stack_dir / 'config') == _tree(stack_dir / backup_name)
+    assert not (stack_dir / 'config-restore').exists()
+    assert f'the config you had is at ./{moved}' in output
+
+
+def test_a_second_revert_never_meets_the_folder_the_first_one_moved(stack):
+    # The name of the moved-aside config carries the time of the restore, so running the
+    # revert again needs nothing moved out of the way first.
+    stack_dir, run = stack
+    original = _tree(stack_dir / 'config')
+    _config_tree(stack_dir / 'config-backup-20260924-143015', 'general:\n  port: 6768\n')
+    _config_tree(stack_dir / 'config-backup-20260925-090102', 'general:\n  port: 6769\n')
+    first_backup = _tree(stack_dir / 'config-backup-20260924-143015')
+
+    first, _ = run(_restore_snippet('config-backup-20260924-143015'), now='2026-09-24 14:30:15')
+    second, _ = run(_restore_snippet('config-backup-20260925-090102'), now='2026-09-25 09:01:02')
+
+    assert 'the config you had is at ./config-bazarr-plus-20260924-143015' in first
+    assert 'the config you had is at ./config-bazarr-plus-20260925-090102' in second
+    assert _tree(stack_dir / 'config-bazarr-plus-20260924-143015') == original
+    assert _tree(stack_dir / 'config-bazarr-plus-20260925-090102') == first_backup
+    assert _tree(stack_dir / 'config') == _tree(stack_dir / 'config-backup-20260925-090102')
 
 
 @pytest.mark.parametrize('backup_name', ['config-backup-20260924-143015.partial',

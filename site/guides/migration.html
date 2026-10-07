@@ -254,23 +254,25 @@ image: ghcr.io/lavx/bazarr:latest</code></pre>
 
       <ol class="steps">
         <li>
-          <strong>Stop Bazarr+ and restore your backup.</strong> Run <code>ls -d ./config-backup-*</code> to list your backups and put the exact folder you made before migrating in <code>BACKUP</code>. A name ending in <code>.partial</code> is a copy that did not finish, and the commands refuse it. The commands check that folder exists, stop Bazarr+, copy the backup next to your config, and only then swap it in. If Bazarr+ does not stop, nothing is copied or moved. Your current config is moved to <code>./config-bazarr-plus</code>, not deleted, and if any step fails the config you had stays where it is. If <code>./config-restore</code> or <code>./config-bazarr-plus</code> is already there, from an earlier attempt or an earlier revert, the commands stop before anything else happens. Move that folder somewhere else, then run them again.
+          <strong>Stop Bazarr+ and restore your backup.</strong> Run <code>ls -d ./config-backup-*</code> to list your backups and put the exact folder you made before migrating in <code>BACKUP</code>. A name ending in <code>.partial</code> is a copy that did not finish, and the commands refuse it. The commands check that folder exists, stop Bazarr+, copy the backup next to your config, and only then swap it in. If Bazarr+ does not stop, nothing is copied or moved. Your current config is moved to <code>./config-bazarr-plus-YYYYMMDD-HHMMSS</code>, not deleted: the name carries the time of the restore, and the last line prints where the config went, so reverting a second time never has anything to move out of the way first. If any step fails, the config you had stays where it is. If <code>./config-restore</code> is already there, from an interrupted restore, the commands stop before anything else happens and delete nothing. Move that folder somewhere else, then run them again.
           <div class="code" style="margin-top: 12px;">
             <div class="code-head">
               <span class="code-lang">Shell</span>
               <button class="copy" data-copy-from="migration-restore-code" aria-label="Copy restore commands">Copy</button>
             </div>
             <pre id="migration-restore-code"><code>BACKUP=./config-backup-YYYYMMDD-HHMMSS   # your backup folder's exact name
+MOVED=./config-bazarr-plus-$(date +%Y%m%d-%H%M%S)
 if [ ! -d "$BACKUP" ]; then
   echo "No backup folder at $BACKUP"
 elif [ "${BACKUP%.partial*}" != "$BACKUP" ]; then
   echo "$BACKUP is a copy that did not finish, so nothing was restored"
-elif [ -e ./config-restore ] || [ -e ./config-bazarr-plus ]; then
-  echo "./config-restore or ./config-bazarr-plus is already there, so nothing was restored"
+elif [ -e ./config-restore ]; then
+  echo "./config-restore is already there, so nothing was restored. Move it away, then run the commands again"
 elif docker compose down; then
   cp -a "$BACKUP" ./config-restore &amp;&amp;
-  mv ./config ./config-bazarr-plus &amp;&amp;
-  mv ./config-restore ./config
+  mv ./config "$MOVED" &amp;&amp;
+  mv ./config-restore ./config &amp;&amp;
+  echo "Your config is now the backup; the config you had is at $MOVED"
 else
   echo "Bazarr+ did not stop, so nothing was restored"
 fi</code></pre>

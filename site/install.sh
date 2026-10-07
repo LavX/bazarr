@@ -556,19 +556,44 @@ restart_and_fail() {
   fatal "$why Nothing was upgraded or reinstalled, and the old services did not start again. Start them with: docker compose -f $compose start"
 }
 
+# What do_backup does when one of the signals it catches arrives while the backup is being
+# built: the incomplete backup is removed first and the old services started again, the
+# same way a failed step ends the run, and then the run ends with the script's interrupted
+# status. do_backup passes its own folders to it.
+backup_interrupted() {
+  local compose="$1" partial="$2"
+  # The spinner of the step the signal landed in: the start below would overwrite its pid,
+  # and the EXIT cleanup only kills the last one.
+  [[ -n "$SPINNER_PID" ]] && kill "$SPINNER_PID" 2>/dev/null; SPINNER_PID=""
+  discard_backup "$partial"
+  if run_with_spinner "Starting the old services again" sudo docker compose -f "$compose" start; then
+    error "Interrupted. Nothing was upgraded or reinstalled, and the old services were started again."
+  else
+    warn "Interrupted. Nothing was upgraded or reinstalled, and the old services did not start again. Start them with: docker compose -f $compose start"
+  fi
+  exit 130
+}
+
 # Backs up docker-compose.yml, .env, the config directory and the database. The services are stopped
 # first so the SQLite database is not copied mid-write, and a PostgreSQL database in this
 # compose stack is dumped once Bazarr+ has stopped. Any failed step ends the script before
 # anything is upgraded or reinstalled, with the old services started again. The summary
 # names only what was actually backed up.
 # The backup is built in backup_<ts>.partial and only renamed to backup_<ts> once every
-# step has worked, so a folder with the final name is always complete. A failed step
-# removes the .partial folder; a run that is killed leaves it, named for what it is.
+# step has worked, so a folder with the final name is always complete. A failed step or a
+# catchable signal removes the .partial folder and starts the old services again; a run
+# that is killed outright leaves it, named for what it is. The signal trap is do_backup's
+# own and is gone once it returns.
 do_backup() {
   local dir="$1" ts; ts=$(date +%Y%m%d_%H%M%S)
   local backup="${dir}/backup_${ts}" compose="${dir}/docker-compose.yml"
   local partial="${dir}/backup_${ts}.partial"
   local saved=("docker-compose.yml") database_item="" list i config_item
+  local previous_int_trap; previous_int_trap=$(trap -p INT)
+  # INT, TERM and HUP while the backup is being built end it the way a failed step does.
+  # The trap fires with this call still on the stack, so it hands backup_interrupted this
+  # call's own folders, and the INT handler the script had is put back before it returns.
+  trap 'backup_interrupted "$compose" "$partial"' INT TERM HUP
   detect_database "$dir"
   config_item="$CONFIG_DIR"; [[ "$CONFIG_DIR" == "$dir/config" ]] && config_item="./config"
   if [[ "$DB_ENGINE" == external ]]; then
@@ -629,6 +654,10 @@ do_backup() {
   if [[ "$DB_ENGINE" == external ]]; then
     warn "The PostgreSQL database is NOT in this backup. See $PG_BACKUP_DOCS"
   fi
+  # The signal handling was the backup's own: INT goes back to the handler the script had
+  # before, or to the default when it had none, and TERM and HUP to the default.
+  if [[ -n "$previous_int_trap" ]]; then eval "$previous_int_trap"; else trap - INT; fi
+  trap - TERM HUP
 }
 
 do_upgrade() {
