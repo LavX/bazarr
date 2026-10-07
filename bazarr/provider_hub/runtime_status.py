@@ -25,6 +25,20 @@ def _nullable_reset(value: Any) -> str | None:
     return value if isinstance(value, str) and len(value) <= 64 else None
 
 
+def _reset_has_passed(reset_at: str | None) -> bool:
+    """A date-only reset counts as passed from the start of that day, UTC. A
+    null or unparseable reset never counts as passed."""
+    if not reset_at:
+        return False
+    try:
+        parsed = datetime.fromisoformat(reset_at)
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed <= datetime.now(timezone.utc)
+
+
 def generation(provider_id: str) -> int:
     with _lock:
         return _generations.get(provider_id, 0)
@@ -70,7 +84,13 @@ def consume(provider_id: str, events: Any, expected_generation: int | None = Non
 def get(provider_id: str) -> dict[str, Any] | None:
     with _lock:
         status = _statuses.get(provider_id)
-        return dict(status) if status is not None else None
+        if status is None:
+            return None
+        # A passed reset makes the status stale, so it reads as unknown. A
+        # not-entitled status carries no reset promise and stays visible.
+        if status["entitled"] is not False and _reset_has_passed(status["reset_at"]):
+            return None
+        return dict(status)
 
 
 def clear(provider_id: str | None = None) -> None:
