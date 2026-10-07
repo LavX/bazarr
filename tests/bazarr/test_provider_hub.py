@@ -491,6 +491,7 @@ def test_worker_protocol_round_trips_language_video_and_download_payload():
     )
     movie.hashes["opensubtitles"] = "abc123"
     movie.radarrId = 12
+    movie.anilist_id = 12345
     episode = Episode(
         "/media/anime.mkv",
         "Solo Leveling",
@@ -499,6 +500,7 @@ def test_worker_protocol_round_trips_language_video_and_download_payload():
         series_anidb_id=17495,
         series_anidb_episode_id=277518,
     )
+    episode.anilist_id = 151807
 
     candidate = candidate_from_worker(
         provider_name="examplehub",
@@ -522,6 +524,8 @@ def test_worker_protocol_round_trips_language_video_and_download_payload():
     assert language_to_payload(language)["hi"] is True
     assert video_to_payload(movie)["hashes"]["opensubtitles"] == "abc123"
     assert video_to_payload(movie)["media_ids"]["radarrId"] == 12
+    assert video_to_payload(movie)["anilist_id"] == 12345
+    assert video_to_payload(episode)["anilist_id"] == 151807
     assert video_to_payload(episode)["series_anidb_id"] == 17495
     assert video_to_payload(episode)["series_anidb_series_id"] == 17495
     assert video_to_payload(episode)["series_anidb_episode_id"] == 277518
@@ -542,6 +546,24 @@ def test_worker_protocol_round_trips_language_video_and_download_payload():
         },
     )
     assert candidate.content == content
+
+
+def test_worker_video_payload_sends_a_null_anilist_id_when_it_is_unknown():
+    """An unrefined video still carries the key, as null, so every worker sees
+    the same payload shape, and a video object without the attribute must not
+    raise."""
+    from provider_hub.protocol import video_to_payload
+
+    movie = Movie("/media/example.mkv", "Example Movie", year=2024)
+    episode = Episode("/media/show.mkv", "Example Show", 1, 2)
+    bare = Episode("/media/show.mkv", "Example Show", 1, 2)
+    del bare.anilist_id
+
+    for video in (movie, episode, bare):
+        payload = video_to_payload(video)
+        assert "anilist_id" in payload
+        assert payload["anilist_id"] is None
+        json.dumps(payload)
 
 
 def test_hub_subtitle_release_matches_persist_for_download_scoring():
