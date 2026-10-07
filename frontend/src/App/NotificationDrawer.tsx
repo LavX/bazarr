@@ -170,7 +170,12 @@ const NotificationDrawer: FunctionComponent<NotificationDrawerProps> = ({
               (() => {
                 const grouped = (jobs as Jobs[]).reduce<Record<string, Jobs[]>>(
                   (acc, job) => {
-                    const key = job?.status ?? "unknown";
+                    // A stopped job still reads as completed, but it never
+                    // finished, so it gets a group of its own.
+                    const key =
+                      job?.status === "completed" && job?.stopped
+                        ? "stopped"
+                        : (job?.status ?? "unknown");
                     (acc[key] ||= []).push(job);
                     return acc;
                   },
@@ -181,6 +186,7 @@ const NotificationDrawer: FunctionComponent<NotificationDrawerProps> = ({
                   "running",
                   "pending",
                   "failed",
+                  "stopped",
                   "completed",
                   "unknown",
                 ];
@@ -229,12 +235,21 @@ const NotificationDrawer: FunctionComponent<NotificationDrawerProps> = ({
                                   leftSection={
                                     <FontAwesomeIcon icon={faXmark} />
                                   }
-                                  onClick={() =>
-                                    handleMenuAction(
-                                      0,
-                                      () => clearQueue(status),
-                                      `queue-${status}`,
-                                    )
+                                  onClick={
+                                    // Stopped jobs are recorded in the
+                                    // completed queue, so that is the queue
+                                    // their group clears.
+                                    () =>
+                                      handleMenuAction(
+                                        0,
+                                        () =>
+                                          clearQueue(
+                                            status === "stopped"
+                                              ? "completed"
+                                              : status,
+                                          ),
+                                        `queue-${status}`,
+                                      )
                                   }
                                 >
                                   Clear this queue
