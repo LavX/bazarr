@@ -16,7 +16,15 @@ import logging
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
-from app.database import TableLanguagesProfiles, TableMovies, TableShows
+from app.database import (
+    TableArrInstances,
+    TableEpisodes,
+    TableLanguagesProfiles,
+    TableMovies,
+    TableMoviesRootfolder,
+    TableShows,
+    TableShowsRootfolder,
+)
 from utilities.sql_limits import in_chunks
 
 from .media_defaults import (instance_default_profile, merge_media_defaults_into_options,
@@ -834,3 +842,70 @@ def reconcile_sportarr_enable_flag(session):
         except Exception:
             logging.exception("Refresh after Sportarr enable reconcile failed; continuing startup")
     return enabled_any
+
+
+# The library tables the Discover summary and the library pages read, each
+# with the kind whose default instance takes over its rows. History and
+# blacklist rows are the provenance of an event, not library rows, and stay
+# as recorded.
+_LIBRARY_OWNER_TABLES = (
+    ("sonarr", (TableShows, TableEpisodes, TableShowsRootfolder)),
+    ("radarr", (TableMovies, TableMoviesRootfolder)),
+)
+
+
+def reconcile_dangling_library_owners(session):
+    """Give library rows whose owning instance is gone an owner again.
+
+    Deleting an instance keeps its rows unless its library goes with it, and a
+    one-item write already past its owner lookup still lands naming it
+    afterwards (see delete_instance). Nothing ever rewrites that id: no sync
+    runs for an instance nothing owns, and Discover counts such a row like one
+    with no owner. At startup every one goes back under the default instance
+    of its kind, or to no owner when the kind has none, so the pages, the
+    totals and the rows themselves agree from the first read.
+
+    Cheap when nothing dangles: one read of the instances and one
+    distinct-owner scan per table, no default looked up and no row written.
+    Idempotent, and never raises: the startup caller guards this.
+    """
+    known = set(session.execute(select(TableArrInstances.id)).scalars())
+    for kind, tables in _LIBRARY_OWNER_TABLES:
+        dangling = []
+        for table in tables:
+            owners = set(session.execute(
+                select(table.arr_instance_id).distinct()).scalars())
+            missing = sorted(owner for owner in owners
+                             if owner is not None and owner not in known)
+            if missing:
+                dangling.append((table, missing))
+        if not dangling:
+            continue
+        # The row flagged as this kind's default: it is enabled by definition
+        # (a check constraint on the instances table), and the other kind's
+        # default never takes a row.
+        default = ArrInstanceRepository(session).get_default(kind)
+        default_id = default.id if default is not None else None
+        for table, missing in dangling:
+            # The ORM-enabled update would also synchronize any loaded library
+            # rows: none are loaded at boot, and the fallback strategy SELECTs
+            # every row this writes, so skip the sync.
+            statement = update(table).values(arr_instance_id=default_id).execution_options(
+                synchronize_session=False)
+            moved = 0
+            for chunk in in_chunks(missing):
+                result = session.execute(
+                    statement.where(table.arr_instance_id.in_(chunk)))
+                moved += result.rowcount or 0
+            if not moved:
+                continue
+            if default_id is not None:
+                logging.info(
+                    "Reassigned %s rows on %s from a deleted instance to the "
+                    "default %s instance (id=%s)",
+                    moved, table.__tablename__, kind, default_id)
+            else:
+                logging.info(
+                    "Cleared the deleted instance from %s rows on %s: "
+                    "%s has no default instance",
+                    moved, table.__tablename__, kind)

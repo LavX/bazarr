@@ -1143,6 +1143,22 @@ def migrate_db(app):
         database.rollback()
         logging.exception("Multi-instance default backfill failed; continuing startup")
 
+    # A library row can name an instance that is gone: deleting an instance
+    # keeps its rows, and a one-item write past its owner lookup still lands
+    # naming it. Discover counts such a row like one with no owner, so put
+    # every one back under the default instance of its kind, or to no owner
+    # when the kind has no default. Runs after the backfill above, which would
+    # otherwise stamp rows cleared here onto an instance rebuilt from the
+    # scalar config of the server just deleted. Idempotent and guarded so a
+    # hiccup never blocks startup.
+    try:
+        from arr_instances.service import reconcile_dangling_library_owners
+        reconcile_dangling_library_owners(database)
+        database.commit()
+    except Exception:
+        database.rollback()
+        logging.exception("Dangling library owner reconcile failed; continuing startup")
+
     # Heal installs whose default instance was created directly via the API
     # (onboarding wizard / Connections page) rather than backfilled from the
     # scalar config: their scalar settings.<kind>.* never got populated, so the

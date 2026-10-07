@@ -528,6 +528,126 @@ def test_library_counts_keep_rows_that_predate_the_instance_migration(summary_da
     assert get_summary()["library"]["series"] == 2
 
 
+def test_rows_whose_instance_is_gone_count_like_rows_with_no_owner(summary_database, quiet_queue,
+                                                                  libraries_on):
+    """The Series, Movies and Wanted pages list a row that names a deleted
+    instance, so the header and the wanted figure came up one short of them.
+    A disabled instance's rows still stay out."""
+    from discover.summary import get_summary
+    session = summary_database.session
+    add_instance(session, 1, name="Main")
+    add_instance(session, 2, kind="radarr", name="Films")
+    add_instance(session, 5, name="Retired", enabled=0, is_default=0)
+    add_show(session, 100, 1, title="Owned")
+    add_show(session, 110, 4, upstream=11, title="Its instance was deleted")
+    add_show(session, 120, 5, upstream=12, title="On a disabled instance")
+    add_episode(session, 111, 110, 4, missing="['en']")
+    add_episode(session, 121, 120, 5, missing="['en']", upstream=21)
+    add_movie(session, 200, 2, missing="[]")
+    add_movie(session, 210, 3, missing="['en']", upstream=31)
+    session.commit()
+
+    summary = get_summary()
+    library = summary["library"]
+    assert (library["series"], library["movies"], library["episodes"]) == (2, 2, 1)
+    wanted = summary["wanted"]
+    assert (wanted["episode_media_count"], wanted["movie_media_count"]) == (1, 1)
+
+
+def owners(session, table):
+    """The owning instance of every row of a library table, by local id."""
+    return dict(session.execute(
+        sa.select(table.id, table.arr_instance_id).order_by(table.id)).all())
+
+
+def test_dangling_rows_are_reassigned_to_their_kind_s_default_instance(summary_database):
+    """A row that names a deleted instance is the reader's library, so the
+    boot reconcile puts it back under the default instance of its kind and the
+    owner, the totals and the pages agree again. A live instance keeps its
+    rows, enabled or not, and a row with no owner keeps none."""
+    from app.database import (TableEpisodes, TableMovies, TableMoviesRootfolder,
+                              TableShows, TableShowsRootfolder)
+    from arr_instances.service import reconcile_dangling_library_owners
+    session = summary_database.session
+    add_instance(session, 1, name="Main")
+    add_instance(session, 2, kind="radarr", name="Films")
+    add_instance(session, 5, name="Retired", enabled=0, is_default=0)
+    add_show(session, 100, 1, title="Owned")
+    add_show(session, 110, 4, upstream=11, title="Its instance was deleted")
+    add_show(session, 120, 5, upstream=12, title="On a disabled instance")
+    add_show(session, 130, None, upstream=13, title="Never migrated")
+    add_episode(session, 111, 110, 4, missing="['en']")
+    add_movie(session, 200, 2, missing="[]")
+    add_movie(session, 210, 3, missing="['en']", upstream=31)
+    session.add(TableShowsRootfolder(local_rootfolder_id=1, arr_instance_id=4,
+                                     upstream_rootfolder_id=1, id=1, accessible=1,
+                                     path="/series"))
+    session.add(TableMoviesRootfolder(local_rootfolder_id=1, arr_instance_id=3,
+                                      upstream_rootfolder_id=1, id=1, accessible=1,
+                                      path="/films"))
+    session.commit()
+
+    reconcile_dangling_library_owners(session)
+
+    assert owners(session, TableShows) == {100: 1, 110: 1, 120: 5, 130: None}
+    assert owners(session, TableEpisodes) == {111: 1}
+    assert owners(session, TableMovies) == {200: 2, 210: 2}
+    assert session.execute(
+        sa.select(TableShowsRootfolder.arr_instance_id)).scalar_one() == 1
+    assert session.execute(
+        sa.select(TableMoviesRootfolder.arr_instance_id)).scalar_one() == 2
+
+
+def test_dangling_rows_are_cleared_when_their_kind_has_no_default(summary_database):
+    """With no default of its kind, a dangling row goes back to no owner,
+    where the summary counts it like a row from before the migration. The
+    other kind's default never takes it, and a live instance keeps its rows,
+    default or not."""
+    from app.database import TableEpisodes, TableMovies, TableShows
+    from arr_instances.service import reconcile_dangling_library_owners
+    session = summary_database.session
+    add_instance(session, 2, kind="radarr", name="Films")
+    add_instance(session, 5, name="Retired", enabled=0, is_default=0)
+    add_instance(session, 6, name="Second", is_default=0)
+    add_show(session, 110, 4, upstream=11, title="Its instance was deleted")
+    add_show(session, 120, 5, upstream=12, title="On a disabled instance")
+    add_show(session, 140, 6, upstream=14, title="On a live non-default instance")
+    add_episode(session, 111, 110, 4, missing="['en']")
+    add_movie(session, 210, 3, missing="['en']", upstream=31)
+    session.commit()
+
+    reconcile_dangling_library_owners(session)
+
+    assert owners(session, TableShows) == {110: None, 120: 5, 140: 6}
+    assert owners(session, TableEpisodes) == {111: None}
+    assert owners(session, TableMovies) == {210: 2}
+
+
+def test_the_reconciliation_is_idempotent(summary_database):
+    """A second run finds nothing left to change and writes no row, so a
+    database with nothing dangling costs its boot scan and nothing else."""
+    from app.database import TableMovies, TableShows
+    from arr_instances.service import reconcile_dangling_library_owners
+    session = summary_database.session
+    add_instance(session, 1, name="Main")
+    add_instance(session, 2, kind="radarr", name="Films")
+    add_show(session, 110, 4, upstream=11, title="Its instance was deleted")
+    add_movie(session, 210, 3, missing="['en']", upstream=31)
+    session.commit()
+
+    before = (owners(session, TableShows), owners(session, TableMovies))
+    reconcile_dangling_library_owners(session)
+    reconciled = (owners(session, TableShows), owners(session, TableMovies))
+    assert reconciled == ({110: 1}, {210: 2})
+    assert reconciled != before
+    _, statements = counted(summary_database.engine,
+                             lambda: reconcile_dangling_library_owners(session))
+
+    assert (owners(session, TableShows), owners(session, TableMovies)) == reconciled
+    assert not any(statement.lstrip().upper().startswith("UPDATE")
+                   for statement in statements)
+
+
 def test_media_items_and_language_requirements_are_published_separately(
         summary_database, quiet_queue, libraries_on):
     """One item needing two languages is one item and two requirements.
@@ -664,7 +784,8 @@ def test_wanted_counts_only_what_a_live_integration_owns(summary_database, quiet
 
 
 def test_a_retired_instance_raises_no_path_warning(summary_database, quiet_queue, monkeypatch):
-    """Its last recorded root-folder check kept Discover degraded for good."""
+    """Its last recorded root-folder check kept Discover degraded for good.
+    A deleted instance's row is never rechecked either."""
     from app.config import settings
     from app.database import TableMoviesRootfolder, TableShowsRootfolder
     from discover.summary import get_summary
@@ -677,6 +798,9 @@ def test_a_retired_instance_raises_no_path_warning(summary_database, quiet_queue
     session.add(TableShowsRootfolder(local_rootfolder_id=1, arr_instance_id=2,
                                      upstream_rootfolder_id=1, id=1, accessible=0,
                                      error="No such directory", path="/retired"))
+    session.add(TableShowsRootfolder(local_rootfolder_id=2, arr_instance_id=4,
+                                     upstream_rootfolder_id=2, id=2, accessible=0,
+                                     error="No such directory", path="/deleted"))
     session.add(TableMoviesRootfolder(local_rootfolder_id=1, arr_instance_id=3,
                                       upstream_rootfolder_id=1, id=1, accessible=0,
                                       error="No such directory", path="/films"))
