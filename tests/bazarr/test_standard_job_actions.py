@@ -1107,3 +1107,177 @@ def test_a_sports_download_published_with_warnings_says_so_on_its_job(queue, mon
     assert job["status"] == "completed"
     assert job["job_name"] == "Downloaded Subtitles with warnings for Final"
     assert job["progress_message"] == warning
+
+
+# ---------------------------------------------------------------------------
+# Job origin: who started the work
+# ---------------------------------------------------------------------------
+
+def test_an_authenticated_request_marks_its_jobs_but_a_webhook_does_not(monkeypatch):
+    # The queue records who started a job from the thread that enqueues it,
+    # so the request itself has to mark its own thread before the handler
+    # queues anything. A webhook is a media server's machine call, not a
+    # user's, so it stays unmarked and the jobs it triggers stay routine.
+    from flask import Flask
+
+    from api.utils import authenticate
+    from app import activity
+    from app.config import settings
+
+    seen = []
+
+    @authenticate
+    def handler():
+        seen.append(activity.current_job_origin())
+        return "done"
+
+    monkeypatch.setattr(settings.auth, "apikey", "test-key")
+    app = Flask(__name__)
+    with app.test_request_context("/api/system/jobs", headers={"X-API-KEY": "test-key"}):
+        assert handler() == "done"
+    with app.test_request_context("/api/webhooks/sonarr", headers={"X-API-KEY": "test-key"}):
+        assert handler() == "done"
+    assert seen == ["user", None]
+
+
+def test_run_now_records_the_press_the_user_made(monkeypatch):
+    # Run Now runs the task through the scheduler's pool like every routine
+    # run, so the mark taken here is the only thing that tells the pool the
+    # next execution of the task is the user's own.
+    from types import SimpleNamespace
+
+    from flask import Flask
+
+    from api import api_bp
+    from api.system import tasks as system_tasks
+    from app import activity
+    from app.config import settings
+
+    pressed = []
+    monkeypatch.setattr(system_tasks, "scheduler",
+                        SimpleNamespace(execute_job_now=lambda taskid: pressed.append(taskid)))
+    monkeypatch.setattr(settings.auth, "apikey", "test-key")
+    app = Flask(__name__)
+    app.register_blueprint(api_bp)
+    response = app.test_client().post("/api/system/tasks",
+                                      headers={"X-API-KEY": "test-key"},
+                                      data={"taskid": "wanted_search_missing_subtitles_series"})
+
+    assert response.status_code == 204
+    assert pressed == ["wanted_search_missing_subtitles_series"]
+    assert activity.take_user_run("wanted_search_missing_subtitles_series") is True
+
+
+def test_the_signalr_reconnect_presses_do_not_mark_their_runs_as_a_user(monkeypatch):
+    # The SignalR clients press execute_job_now on every (re)connect for
+    # their live syncs, so that path records no mark: those runs stay
+    # routine, and only the Tasks page's Run Now announces.
+    from types import SimpleNamespace
+
+    from app import activity
+    from app.scheduler import scheduler
+
+    pressed = []
+    monkeypatch.setattr(scheduler, "aps_scheduler",
+                        SimpleNamespace(modify_job=lambda taskid, **rest: pressed.append(taskid)))
+
+    scheduler.execute_job_now(taskid="update_series_1")
+
+    assert pressed == ["update_series_1"]
+    assert activity.take_user_run("update_series_1") is False
+
+
+def test_a_failed_run_now_press_leaves_no_mark_behind(monkeypatch):
+    # A task id the scheduler never registered fails the press, so the mark
+    # goes with it: a later periodic run never announces as the user's own.
+    from types import SimpleNamespace
+
+    from apscheduler.jobstores.base import JobLookupError
+    from flask import Flask
+
+    from api import api_bp
+    from app import activity
+    from app.config import settings
+    from app.scheduler import scheduler
+
+    def refuse(taskid, **rest):
+        raise JobLookupError(taskid)
+
+    monkeypatch.setattr(scheduler, "aps_scheduler", SimpleNamespace(modify_job=refuse))
+    monkeypatch.setattr(settings.auth, "apikey", "test-key")
+    app = Flask(__name__)
+    app.register_blueprint(api_bp)
+    response = app.test_client().post("/api/system/tasks",
+                                      headers={"X-API-KEY": "test-key"},
+                                      data={"taskid": "no_such_task"})
+
+    assert response.status_code == 500
+    assert activity.take_user_run("no_such_task") is False
+
+
+def test_the_queue_records_a_job_the_user_started(queue, mod_job):
+    mods, subtitle = mod_job
+    from app import activity
+
+    with activity.user_action():
+        mods.apply_subtitle_mods("en", str(subtitle), ["remove_HI"], str(subtitle.parent / "Movie.mkv"),
+                                media_type="movie", media_id=5, arr_instance_id=2)
+
+    [job] = pending(queue)
+    assert job.origin == "user"
+
+
+def test_the_queue_records_a_job_a_scheduled_task_started(queue, mod_job):
+    mods, subtitle = mod_job
+    from app import activity
+
+    with activity.scheduler_run("wanted_search_missing_subtitles_series"):
+        mods.apply_subtitle_mods("en", str(subtitle), ["remove_HI"], str(subtitle.parent / "Movie.mkv"),
+                                media_type="movie", media_id=5, arr_instance_id=2)
+
+    [job] = pending(queue)
+    assert job.origin == "scheduled"
+
+
+def test_the_queue_leaves_a_job_unattributed_when_nothing_knows(queue, mod_job):
+    mods, subtitle = mod_job
+
+    mods.apply_subtitle_mods("en", str(subtitle), ["remove_HI"], str(subtitle.parent / "Movie.mkv"),
+                             media_type="movie", media_id=5, arr_instance_id=2)
+
+    [job] = pending(queue)
+    assert job.origin is None
+
+
+def test_force_starting_a_pending_job_makes_its_outcome_the_users(monkeypatch, queue, mod_job):
+    # Force Start runs a job that was already queued by whoever scheduled
+    # it, so its origin is not written at creation: the API serving the
+    # press says the user chose this start, and the outcome is theirs to
+    # hear. Internal force starts leave the origin as it was.
+    mods, subtitle = mod_job
+    from flask import Flask
+
+    from api import api_bp
+    from api.system import jobs as system_jobs
+    from app import activity
+    from app.config import settings
+
+    with activity.scheduler_run("wanted_search_missing_subtitles_series"):
+        mods.apply_subtitle_mods("en", str(subtitle), ["remove_HI"], str(subtitle.parent / "Movie.mkv"),
+                                media_type="movie", media_id=5, arr_instance_id=2)
+
+    [job] = pending(queue)
+    assert job.origin == "scheduled"
+
+    # The api package was imported by earlier tests before this queue existed,
+    # so its reference is pointed at this test's own queue by hand.
+    monkeypatch.setattr(system_jobs, "jobs_queue", queue)
+    monkeypatch.setattr(settings.auth, "apikey", "test-key")
+    app = Flask(__name__)
+    app.register_blueprint(api_bp)
+    response = app.test_client().post("/api/system/jobs",
+                                      headers={"X-API-KEY": "test-key"},
+                                      data={"id": job.job_id, "action": "force_start"})
+
+    assert response.status_code == 204
+    assert queue.list_jobs_from_queue(job_id=job.job_id)[0]["origin"] == "user"

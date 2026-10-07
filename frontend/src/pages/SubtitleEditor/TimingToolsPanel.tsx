@@ -8,6 +8,12 @@ import {
 } from "react";
 import { Button, Group, Modal, Radio, Stack, Text } from "@mantine/core";
 import { showNotification } from "@mantine/notifications";
+import api from "@/apis/raw";
+import {
+  claimJobCompletion,
+  notifyJobOutcome,
+  releaseJobClaim,
+} from "@/modules/jobs";
 import { Environment } from "@/utilities/env";
 import { isSyncOutputLanguageKey } from "@/utilities/subtitles";
 import { createEditTiming, type CueOperation } from "./document";
@@ -36,6 +42,21 @@ type TabId = "shift" | "linear" | "autosync";
 interface SyncEngineContentResult {
   engine: string;
   content: string;
+}
+
+// A sync this panel gave up on may already have finished without the poll
+// seeing it, its one served result lost or cleaned away. Whoever learns the
+// outcome tells it: ask the queue once, and let the standard outcome
+// announce a finish that is already terminal.
+async function tellAbandonedSyncOutcome(jobId: number) {
+  try {
+    const [job] = await api.system.jobs(jobId);
+    if (job && (job.status === "completed" || job.status === "failed")) {
+      notifyJobOutcome(job);
+    }
+  } catch {
+    // Nothing more to tell.
+  }
 }
 
 function syncEngineLabel(engine: string) {
@@ -616,11 +637,20 @@ function AutoSyncTab({
       }
 
       const jobKey = submitResult.jobKey;
+      // This panel drives the sync's outcome itself: its own poll, progress and
+      // toasts. Claiming the queued job's completion keeps the standard outcome
+      // from announcing the same finish a second time.
+      claimJobCompletion(submitResult.jobId);
       setProgressMsg("Synchronization engines running...");
 
       // Poll for completion
       for (let i = 0; i < 600; i++) {
         await new Promise((r) => setTimeout(r, 2000));
+
+        // A jobs-socket reconnect resets notification state mid-sync; the
+        // claim renews here each round so the finish stays owned by this
+        // panel even across one.
+        claimJobCompletion(submitResult.jobId);
 
         try {
           const pollResp = await fetch(
@@ -667,6 +697,11 @@ function AutoSyncTab({
           }
 
           if (pollResult.status === "not_found") {
+            // The job left the queue without this panel seeing its finish:
+            // give back the claim and ask the queue once, so a finish that
+            // already happened is told instead of lost in silence.
+            releaseJobClaim(submitResult.jobId);
+            void tellAbandonedSyncOutcome(submitResult.jobId);
             showNotification({
               title: "Sync",
               message:
@@ -686,6 +721,12 @@ function AutoSyncTab({
         }
       }
 
+      // The poll gave up but the backend's sync may still finish, an ALASS
+      // sync can outlast this patience: give back the claim so the late
+      // finish is announced after all, and ask once for one that already
+      // happened, so neither outcome is lost in silence.
+      releaseJobClaim(submitResult.jobId);
+      void tellAbandonedSyncOutcome(submitResult.jobId);
       showNotification({
         title: "Sync",
         message: "Timed out waiting for sync",

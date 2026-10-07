@@ -158,6 +158,70 @@ def test_scheduler_run_is_thread_local_and_restored():
     assert seen["inside_other_thread"] is None
 
 
+def test_user_action_is_thread_local_and_restored():
+    from app import activity
+    assert activity.current_job_origin() is None
+
+    seen = {}
+
+    def worker():
+        seen["inside_other_thread"] = activity.current_job_origin()
+
+    with activity.user_action():
+        assert activity.current_job_origin() == "user"
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join()
+    assert activity.current_job_origin() is None
+    assert seen["inside_other_thread"] is None
+
+
+def test_current_job_origin_prefers_a_user_action_over_a_scheduler_run():
+    from app import activity
+    with activity.scheduler_run("wanted_search_missing_subtitles_series"):
+        assert activity.current_job_origin() == "scheduled"
+        with activity.user_action():
+            assert activity.current_job_origin() == "user"
+        assert activity.current_job_origin() == "scheduled"
+    assert activity.current_job_origin() is None
+
+
+def test_a_run_now_mark_is_taken_by_the_next_execution_of_its_task_and_expires(monkeypatch):
+    from app import activity
+    activity.request_user_run("wanted_search_missing_subtitles_series")
+    assert activity.take_user_run("wanted_search_missing_subtitles_series") is True
+    assert activity.take_user_run("wanted_search_missing_subtitles_series") is False
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(activity.time, "monotonic", lambda: clock["now"])
+    activity.request_user_run("wanted_search_missing_subtitles_movies")
+    clock["now"] += activity.RUN_NOW_GRACE_SECONDS + 1
+    assert activity.take_user_run("wanted_search_missing_subtitles_movies") is False
+
+
+def test_the_scheduler_pool_runs_a_pressed_task_as_a_user_action():
+    from types import SimpleNamespace
+
+    from app import activity
+
+    origins = []
+
+    class InlinePool:
+        def submit(self, fn, *args):
+            fn(*args)
+
+    pool = activity.tagged_scheduler_pool(InlinePool())
+
+    def run_job(job, *rest):
+        origins.append(activity.current_job_origin())
+
+    activity.request_user_run("example-task")
+    pool.submit(run_job, SimpleNamespace(id="example-task"), "alias", [], "logger")
+    pool.submit(run_job, SimpleNamespace(id="another-task"), "alias", [], "logger")
+
+    assert origins == ["user", "scheduled"]
+
+
 def test_observed_operation_records_running_work_and_clears_on_exit():
     from app import activity
     with activity.observed_operation("discover_search", scope_kind="request",

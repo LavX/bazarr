@@ -1,6 +1,7 @@
 # coding=utf-8
 
 import ast
+import contextlib
 import hmac
 import logging
 
@@ -9,6 +10,7 @@ from flask import request, abort
 from operator import itemgetter
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from app import activity
 from app.config import settings, base_url
 from languages.get_languages import language_from_alpha2, alpha3_from_alpha2
 from app.database import get_audio_profile_languages, get_desired_languages
@@ -116,6 +118,17 @@ def _safe_apikey_compare(provided, expected):
     return hmac.compare_digest(str(provided), str(expected))
 
 
+def _user_request_scope():
+    """Mark the request thread as a user's own for the authenticated handler.
+
+    A webhook is a media server's machine call, not a user's, so its requests
+    stay unmarked: the jobs one triggers deeper in the chain announce nothing.
+    """
+    if '/webhooks/' in request.path:
+        return contextlib.nullcontext()
+    return activity.user_action()
+
+
 def authenticate(actual_method):
     @wraps(actual_method)
     def wrapper(*args, **kwargs):
@@ -123,7 +136,8 @@ def authenticate(actual_method):
         apikey_header = request.headers.get('X-API-KEY')
 
         if _safe_apikey_compare(apikey_header, apikey_settings):
-            return actual_method(*args, **kwargs)
+            with _user_request_scope():
+                return actual_method(*args, **kwargs)
 
         # Legacy: accept API key from query string or an urlencoded form body, with
         # a deprecation warning. Suppress the warning for webhook endpoints (Plex
@@ -143,7 +157,8 @@ def authenticate(actual_method):
                     'Use the X-API-KEY header instead. '
                     'Endpoint: %s %s', request.method, request.path
                 )
-            return actual_method(*args, **kwargs)
+            with _user_request_scope():
+                return actual_method(*args, **kwargs)
 
         return abort(401)
 

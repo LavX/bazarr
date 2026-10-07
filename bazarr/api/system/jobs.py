@@ -6,7 +6,7 @@ from flask_restx import Resource, Namespace, reqparse, fields, marshal
 
 from app.jobs_queue import jobs_queue
 
-from ..swaggerui import NullableInteger, NullableRaw, job_queued_model
+from ..swaggerui import NullableInteger, NullableRaw, NullableString, job_queued_model
 from ..utils import authenticate
 
 api_ns_system_jobs = Namespace('System Jobs', description='List, force start, move or delete jobs from the queue')
@@ -47,6 +47,8 @@ class SystemJobs(Resource):
         'action': NullableRaw(),
         # Stop leaves a job completed, so this is what says it did not finish.
         'stopped': fields.Boolean(),
+        # Who started the job: 'user' or 'scheduled'. Null when nothing knows.
+        'origin': NullableString(),
         'retryable': fields.Boolean(),
         # Null unless the job is a retry.
         'retry_of': NullableInteger(),
@@ -93,7 +95,9 @@ class SystemJobs(Resource):
         job_id = args.get('id')
         action = args.get('action')
         if action == "force_start":
-            jobs_queue.force_start_pending_job(job_id=job_id)
+            # The Force Start press is the user choosing to run this job, so
+            # its outcome is theirs to hear even though someone else queued it.
+            jobs_queue.force_start_pending_job(job_id=job_id, user_start=True)
         elif action == "move_top":
             jobs_queue.move_job_in_pending_queue(job_id=job_id, move_destination="top")
         elif action == "move_bottom":

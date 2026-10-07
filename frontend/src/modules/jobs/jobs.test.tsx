@@ -14,6 +14,7 @@ import {
   dismissJobOutcome,
   notifyJobOutcome,
   registerJobAction,
+  releaseJobClaim,
   resetJobNotifications,
 } from ".";
 
@@ -34,6 +35,8 @@ function job(overrides: Partial<System.Jobs>): System.Jobs {
     action: null,
     retryable: false,
     retry_of: null,
+    origin: "scheduled",
+    stopped: false,
     ...overrides,
   };
 }
@@ -69,6 +72,39 @@ describe("standard job outcome notification", () => {
     ).toBeNull();
     expect(screen.queryByText(/Example job .* completed/)).toBeNull();
     expect(screen.getAllByRole("alert")).toHaveLength(1);
+  });
+
+  it("announces a job the user started themselves, once, with its message", async () => {
+    rawRender(<AllProviders>{null}</AllProviders>);
+    const done = job({ origin: "user", progress_message: "Ready" });
+    act(() => {
+      notifyJobOutcome(done);
+      notifyJobOutcome(done);
+    });
+    expect(await screen.findByText(done.job_name)).toBeInTheDocument();
+    expect(screen.getAllByText(done.job_name)).toHaveLength(1);
+    expect(within(toast(done.job_name)).getByText("Ready")).toBeInTheDocument();
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+  });
+
+  it("keeps quiet a completion with no known starter, one the scheduler ran, and a job that ended at Stop", () => {
+    rawRender(<AllProviders>{null}</AllProviders>);
+    act(() => {
+      notifyJobOutcome(
+        job({ origin: null, progress_message: "Somebody else" }),
+      );
+      notifyJobOutcome(
+        job({ origin: "scheduled", progress_message: "Routine" }),
+      );
+      notifyJobOutcome(
+        job({
+          origin: "user",
+          stopped: true,
+          progress_message: "Cancelled by user",
+        }),
+      );
+    });
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("offers a completed job's action through the handler registered for its kind", async () => {
@@ -209,4 +245,40 @@ it("claims a completion once until the job ids restart with a new socket session
   expect(claimJobCompletion(id)).toBe(false);
   resetJobNotifications();
   expect(claimJobCompletion(id)).toBe(true);
+});
+
+it("keeps quiet a completion its feature claimed before the job finished", () => {
+  rawRender(<AllProviders>{null}</AllProviders>);
+  // The editor's sync drives its own outcome: it claims the queued job's
+  // completion when it starts, so the user who pressed Sync hears about the
+  // finish once, from the editor itself, not from the standard outcome too.
+  const own = job({ progress_message: "Sync complete", origin: "user" });
+  act(() => claimJobCompletion(own.job_id));
+  act(() => notifyJobOutcome(own));
+  expect(screen.queryByText(own.job_name)).toBeNull();
+});
+
+it("keeps quiet a claimed finish a socket reconnect reset mid-run once its feature renewed the claim", () => {
+  rawRender(<AllProviders>{null}</AllProviders>);
+  // A transient jobs-socket reconnect mid-sync resets notification state,
+  // dropping the claim. The sync panel renews its claim every poll round, so
+  // its finish stays owned, and quiet, even across one.
+  const own = job({ progress_message: "Sync complete", origin: "user" });
+  act(() => claimJobCompletion(own.job_id));
+  act(() => resetJobNotifications());
+  act(() => claimJobCompletion(own.job_id));
+  act(() => notifyJobOutcome(own));
+  expect(screen.queryByText(own.job_name)).toBeNull();
+});
+
+it("announces the late finish of a job its feature gave up following", async () => {
+  rawRender(<AllProviders>{null}</AllProviders>);
+  // An editor sync can outlast its panel's patience: once the poll gives up
+  // and releases the claim, the job's late finish belongs to the standard
+  // outcome again, so it is announced instead of lost in silence.
+  const own = job({ progress_message: "Sync complete", origin: "user" });
+  act(() => claimJobCompletion(own.job_id));
+  act(() => releaseJobClaim(own.job_id));
+  act(() => notifyJobOutcome(own));
+  await screen.findByText(own.job_name);
 });
