@@ -13,6 +13,8 @@ name: CI
 #   versions, with exactly the same jobs and steps on each.
 # - A change that touches documentation only runs the Docs job and skips the
 #   rest; .github/scripts/ci_plan.py decides, and fails towards running more.
+# - Release hero runs for a change to what it builds from, and on the
+#   release pull request, the schedule and a manual run; the planner decides.
 #
 # scripts/ci/run-local.sh runs the same suites on a workstation, in parallel,
 # against a throwaway PostgreSQL.
@@ -62,6 +64,7 @@ jobs:
       code: ${{ steps.plan.outputs.code }}
       docs: ${{ steps.plan.outputs.docs }}
       python: ${{ steps.plan.outputs.python }}
+      hero: ${{ steps.plan.outputs.hero }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -230,6 +233,44 @@ jobs:
           fi
           npx vitest run --merge-reports=.vitest-reports --coverage
         working-directory: ${{ env.UI_DIRECTORY }}
+
+  # The Remotion project that renders each release's hero artwork. Nothing else
+  # builds it, so a broken tree used to surface only at the release cut. Plan
+  # starts it when the change touches what it builds from.
+  release-hero:
+    name: Release hero
+    needs: changes
+    if: ${{ needs.changes.outputs.hero == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - *checkout
+
+      - name: Cache node_modules
+        # An exact key and no restore-keys, so a hit is the tree `npm ci` would
+        # build. It also holds the headless Chrome that Remotion downloads.
+        id: hero-modules
+        uses: actions/cache@v6
+        with:
+          path: scripts/release/hero/node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('frontend/.nvmrc') }}-hero-${{ hashFiles('scripts/release/hero/package.json', 'scripts/release/hero/package-lock.json') }}
+
+      - *setup-node
+
+      - name: Install dependencies
+        if: ${{ steps.hero-modules.outputs.cache-hit != 'true' }}
+        run: npm ci
+        working-directory: scripts/release/hero
+
+      - name: Check Types
+        run: npx tsc --noEmit
+        working-directory: scripts/release/hero
+
+      - name: Render one still
+        # Frame 0 of the Hero composition, to the runner's temp folder rather
+        # than out/, which is where release artwork is written.
+        run: npm run still -- "$RUNNER_TEMP/hero.png" --frame=0
+        working-directory: scripts/release/hero
 
   # The backend is split into seven jobs per Python version. They share their
   # setup through YAML anchors, so every job installs exactly what the single
@@ -804,6 +845,7 @@ jobs:
       - frontend-checks
       - frontend-tests
       - frontend-coverage
+      - release-hero
       - backend-core
       - backend-suites
       - backend-isolation-1
@@ -828,10 +870,28 @@ jobs:
           problems = []
           if plan["result"] != "success":
               problems.append(f"Plan finished as {plan['result']}")
-          wanted = {"docs": outputs.get("docs") == "true"}
+          # The Plan output that gates each job, named per job rather than
+          # defaulted, so a test can compare this map with the jobs' own `if:`
+          # conditions. A job missing from it is a KeyError, which fails here.
+          gates = {
+              "docs": "docs",
+              "frontend-build": "code",
+              "frontend-checks": "code",
+              "frontend-tests": "code",
+              "frontend-coverage": "code",
+              "release-hero": "hero",
+              "backend-core": "code",
+              "backend-suites": "code",
+              "backend-isolation-1": "code",
+              "backend-isolation-2": "code",
+              "backend-isolation-3": "code",
+              "backend-isolation-4": "code",
+              "backend-isolation-5": "code",
+          }
+          wanted = {}
           for name in needs:
-              if name not in ("changes", "docs"):
-                  wanted[name] = outputs.get("code") == "true"
+              if name != "changes":
+                  wanted[name] = outputs.get(gates[name]) == "true"
           for name, required in sorted(wanted.items()):
               result = needs[name]["result"]
               expected = "success" if required else "skipped"

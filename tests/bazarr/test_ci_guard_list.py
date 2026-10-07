@@ -162,6 +162,7 @@ workflow can reach, and no amount of parsing gets to them:
   everything, but reading a diff is not something a workflow parser can check.
 """
 
+import ast
 import configparser
 import importlib.util
 import os
@@ -2147,6 +2148,60 @@ def test_exclusions_are_not_also_enumerated():
 @pytest.mark.parametrize("name,reason", sorted(EXCLUDED.items()))
 def test_every_exclusion_states_a_reason(name, reason):
     assert reason and len(reason) > 15, f"{name} needs a real reason, got {reason!r}"
+
+
+def test_ci_ok_needs_every_other_job():
+    """ci-ok is the one required check, and it judges only the jobs it needs.
+
+    A job missing from its `needs:` can fail, or never start, while ci-ok and
+    with it the pull request stay green.
+    """
+    jobs = _workflow()["jobs"]
+    missing = sorted(set(jobs) - {"ci-ok"} - set(jobs["ci-ok"]["needs"]))
+    assert not missing, f"ci-ok does not need these jobs, so it ignores them: {missing}"
+
+
+def test_ci_ok_expects_the_gate_each_job_declares():
+    """The ci-ok script and each job state the same gate, so both are checked.
+
+    The script maps every job to the Plan output that decides whether it owes a
+    result, and each job's own `if:` condition is that decision read from the
+    other end. The two are compared here, because a map that guesses `code` for
+    a job Plan actually gates on `hero` would wait for a result that never comes
+    and let a red pull request through. A job the map does not name at all is a
+    KeyError the script dies on, so the map has to cover every job.
+    """
+    jobs = _workflow()["jobs"]
+    steps = jobs["ci-ok"].get("steps") or []
+    run = next((step.get("run") for step in steps if "gates" in str(step.get("run"))), None)
+    assert run, "ci-ok no longer maps each job to the Plan output that gates it"
+    match = re.search(r"gates = (\{.*?\})", run, flags=re.DOTALL)
+    assert match, "ci-ok no longer maps each job to the Plan output that gates it"
+    gates = ast.literal_eval(match.group(1))
+    assert set(gates) == set(jobs) - {"changes", "ci-ok"}, (
+        "The ci-ok gates map and the jobs it judges have to name the same jobs: "
+        f"the map has {sorted(gates)}"
+    )
+    for name, output in sorted(gates.items()):
+        expected = f"${{{{ needs.changes.outputs.{output} == 'true' }}}}"
+        assert jobs[name]["if"] == expected, (
+            f"ci-ok expects {name} on the {output} output, but the job gates "
+            f"itself with {jobs[name]['if']!r}"
+        )
+
+
+def test_the_dev_frontend_image_runs_the_node_ci_runs():
+    """dev-setup builds the frontend on its own Node image, and CI on frontend/.nvmrc.
+
+    The dev image stayed on Node 20 after the lockfile moved to a Vitest that
+    needs 22 or later, so `npm ci` in it no longer matched what CI tested.
+    """
+    dockerfile = (REPO_ROOT / "dev-setup" / "Dockerfile.frontend").read_text()
+    pinned = re.search(r"^ARG NODE_VERSION=(\S+)$", dockerfile, flags=re.MULTILINE)
+    assert pinned, "dev-setup/Dockerfile.frontend no longer pins ARG NODE_VERSION"
+    assert re.search(r"^FROM node:\$\{NODE_VERSION\}-", dockerfile, flags=re.MULTILINE)
+    nvmrc = (REPO_ROOT / "frontend" / ".nvmrc").read_text().strip()
+    assert pinned.group(1) == nvmrc
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,46 @@
+# The ignore file BuildKit uses in place of the root .dockerignore when it
+# builds dev-setup/Dockerfile.backend. The compose file builds this dev image
+# with the repository root as its context, so the root file applied to it too,
+# and it excludes dev-requirements.txt: the requirements this image copies never
+# reached the build. Because this file replaces the root one, it has to keep
+# the heavy paths out on its own. Paths are relative to the build context, the
+# repository root, and only what this image does not copy is kept out.
+
+# Git
+.git
+
+# Working-copy trees this machine grows, none of which the image copies
+.worktrees/
+.ast-translator-wt/
+claude-remotion-skill/
+
+# Submodules the dev images do not copy
+ai-subtitle-translator/
+bazarr-binaries/
+bazarr-provider-catalog/
+
+# Node modules at any depth; no dev image copies them
+**/node_modules/
+
+# Caches a local run leaves behind
+.cache/
+.pytest_cache/
+.ruff_cache/
+.playwright-mcp/
+.coverage
+htmlcov/
+__builds__/
+**/__pycache__/
+**/*.py[cod]
+
+# Runtime data, mounted from the host while the containers run
+data/
+config/
+dev-setup/data/
+dev-setup/autopulse/data/
+
+# Heavy trees no dev image copies
+screenshot/
+site/
+docs/
+tests/

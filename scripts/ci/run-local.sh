@@ -5,16 +5,18 @@
 # frontend build, checks, unit tests and coverage floor; ruff and every backend
 # pytest group, with the isolation files each in their own process; the
 # application startup check; and the docs checks against origin/development.
+# The Release hero job runs too when the change touches what it builds from.
 # The suites are read out of ci.yml, so nothing here lists a test file.
 #
 # Usage: scripts/ci/run-local.sh [--backend-only | --frontend-only]
-#                                [--python VERSION] [--jobs N]
+#                                [--python VERSION] [--jobs N] [--hero]
 #
 #   --backend-only   ruff, pytest groups and the startup check (the UI is
 #                    still built, because the backend jobs run with it)
 #   --frontend-only  frontend build, checks, tests and coverage
 #   --python X.Y     backend interpreter; default: the Docker image's version
 #   --jobs N         processes at a time; default: the number of CPUs
+#   --hero           run Release hero even when nothing it builds from changed
 #
 # Needs python X.Y (found through uv when it is installed), node and npm, and
 # docker for a throwaway PostgreSQL 16 on a random local port, removed on exit.
@@ -26,8 +28,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MODE=all
 PYTHON_VERSION=""
 JOBS="$(nproc 2>/dev/null || echo 4)"
+HERO=()
 
-usage() { sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -37,6 +40,7 @@ while [[ $# -gt 0 ]]; do
     --python=*) PYTHON_VERSION="${1#*=}" ;;
     --jobs) JOBS="${2:?--jobs needs a number}"; shift ;;
     --jobs=*) JOBS="${1#*=}" ;;
+    --hero) HERO=(--hero) ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -75,7 +79,7 @@ if [[ "$(cat "$ROOT/frontend/node_modules/.bazarr-ci-stamp" 2>/dev/null)" != "$L
 fi
 
 ARGS=(--mode "$MODE" --python "$PYTHON_VERSION" --jobs "$JOBS" --logs "$LOGS"
-      --work "$WORK" --history "$CACHE/durations.json")
+      --work "$WORK" --history "$CACHE/durations.json" ${HERO[@]+"${HERO[@]}"})
 
 if [[ "$MODE" != frontend ]]; then
   PYTHON=""
