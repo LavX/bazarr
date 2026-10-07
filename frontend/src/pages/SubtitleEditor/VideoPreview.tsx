@@ -50,6 +50,91 @@ interface VideoPreviewProps {
   audioTrack?: number;
 }
 
+// Native HLS playback (Safari, iOS) cannot send the X-API-KEY header on the
+// playlist and segment requests the browser makes itself, so those URLs
+// carry a media-scoped stream token instead of the API key. The token is
+// minted over a header-authenticated call, renewed while playback runs, and
+// is bound to one media item, one audio track and one arr instance.
+interface StreamTokenScope {
+  mediaType: string;
+  mediaId: number;
+  arrInstanceId: number | null;
+  audioTrack: number;
+}
+
+interface StreamTokenRecord {
+  value: string;
+  lifetime: number;
+  mintedAt: number;
+  scope: StreamTokenScope;
+}
+
+// One mint request is in flight at a time. `adopted` marks a mint that an
+// error event claimed: its answer, whatever it is, now belongs to the error
+// recovery path.
+type StreamTokenMintPurpose =
+  | "source"
+  | "renewal"
+  | "expiry"
+  | "probe"
+  | "error";
+
+interface StreamTokenMint {
+  id: number;
+  purpose: StreamTokenMintPurpose;
+  scope: StreamTokenScope;
+  adopted: boolean;
+  controller: AbortController;
+}
+
+// A completed recovery, bound to the token its mint produced and to that
+// token's scope: only a failure of that very token reads it, so a source
+// or track change, or a replacement token for the same scope, starts its
+// own recovery budget.
+interface StreamTokenRecovery {
+  tokenValue: string;
+  scope: StreamTokenScope;
+  at: number;
+}
+
+// A src change resets the video element, so between src and loadedmetadata
+// the user's position and play state are held here. The rate is not: the
+// load algorithm resets the element's rate, and loadedmetadata re-applies
+// the speed the user has chosen by then.
+interface NativeRestoreWindow {
+  sessionKey: string;
+  localSec: number;
+  absoluteMs: number;
+  playing: boolean;
+}
+
+const STREAM_TOKEN_MINT_DEADLINE_MS = 45 * 1000;
+const STREAM_TOKEN_RETRY_MS = 10 * 1000;
+// After a failed renewal the play, seek and progress rules stay quiet for
+// a minute before they ask again.
+const STREAM_TOKEN_EVENT_BLOCK_MS = 60 * 1000;
+const STREAM_TOKEN_GIVE_UP_MS = 120 * 1000;
+// A fresh recovery that fails again within a minute means retrying the same
+// mint will keep answering the same way, so the error state shows at once.
+const STREAM_TOKEN_RECOVERY_WINDOW_MS = 60 * 1000;
+const STREAM_TOKEN_PROBE_INTERVAL_MS = 15 * 1000;
+// An old token is renewed on user interaction: a third of its lifetime old,
+// and never more eagerly than the 20 minute floor of a full token. A token
+// with 15 minutes left is renewed when the rest of the playback, at the
+// current rate, plus a 10 minute margin, would outlast it.
+const STREAM_TOKEN_RENEWAL_FLOOR_MS = 20 * 60 * 1000;
+const STREAM_TOKEN_RENEWAL_THRESHOLD_MS = 15 * 60 * 1000;
+const STREAM_TOKEN_RENEWAL_MARGIN_MS = 10 * 60 * 1000;
+const STREAM_TOKEN_EXPIRY_MINT_MS = 60 * 1000;
+// Bazarr marks its own answers on the token route. A 404 without the marker
+// is a reverse proxy answering while Bazarr is down or restarting: a
+// transient failure worth retrying, not a refusal.
+const TERMINAL_STREAM_TOKEN_STATUSES = [400, 401, 403, 404];
+
+function streamTokenRenewalFloorSec(lifetimeSec: number) {
+  return Math.min(STREAM_TOKEN_RENEWAL_FLOOR_MS / 1000, lifetimeSec / 3);
+}
+
 export function formatTime(ms: number): string {
   const totalSec = Math.floor(ms / 1000);
   const h = Math.floor(totalSec / 3600);
@@ -204,8 +289,674 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
       hlsSessionRef.current = hlsSession;
     }, [hlsSession]);
 
+    // The scope the media-change reset last saw, so a real change of media
+    // or arr instance is told apart from the initial mount.
+    const prevScopeRef = useRef<{
+      mediaType?: string;
+      mediaId?: number;
+      arrInstanceId?: number;
+    } | null>(null);
+
     const hasMedia = mediaType != null && mediaId != null;
     const apiKey = Environment.apiKey ?? "";
+
+    // Full source duration, readable from the memoized play/pause handlers.
+    // The /info call fills the state; this ref always carries its latest
+    // value so a stale closure never renews against an unknown duration.
+    const durationRef = useRef(0);
+    durationRef.current = duration;
+
+    // Native HLS path: the stream token and its bookkeeping. Everything the
+    // async paths touch lives in refs, because mint answers and timers land
+    // long after the render that started them.
+    const isNativeRef = useRef(false);
+    const hlsUrlRef = useRef("");
+    const scopeRef = useRef<StreamTokenScope | null>(null);
+    const streamTokenRef = useRef<StreamTokenRecord | null>(null);
+    const mintPendingRef = useRef<StreamTokenMint | null>(null);
+    const mintIdRef = useRef(0);
+    const renewalFailedAtRef = useRef<number | null>(null);
+    // Two recovery stamps, one per recovery path, each bound to the token
+    // its recovery minted. The error handler reads only the error stamp
+    // and the probe's 401 check only the probe stamp, and both honor a
+    // stamp only when the request failed for the token it recovered: an
+    // error recovery is no reason to refuse a probe reset, a probe
+    // recovery is no reason to give up on the next media error, and
+    // neither is carried across a source or track change or a replacement
+    // token, each of which starts its own budget.
+    const lastErrorRecoveryRef = useRef<StreamTokenRecovery | null>(null);
+    const lastProbeRecoveryRef = useRef<StreamTokenRecovery | null>(null);
+    const firstFailedProbeMintRef = useRef<number | null>(null);
+    // The probe path's give-up: a timer armed at the first failed probe or
+    // expiry mint, cleared together with the budget it belongs to.
+    const probeGiveUpTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+      null,
+    );
+    const errorStateRef = useRef(false);
+    const appliedSrcRef = useRef<string | null>(null);
+    const appliedSessionRef = useRef<string | null>(null);
+    const restoreWindowRef = useRef<NativeRestoreWindow | null>(null);
+    const sourceChainRef = useRef<{
+      retryTimer: ReturnType<typeof setTimeout> | null;
+      giveUpTimer: ReturnType<typeof setTimeout> | null;
+    } | null>(null);
+    const errorChainRef = useRef<{
+      retryTimer: ReturnType<typeof setTimeout> | null;
+      hardTimer: ReturnType<typeof setTimeout> | null;
+    } | null>(null);
+    const probeChainRef = useRef<{
+      active: boolean;
+      timer: ReturnType<typeof setTimeout> | null;
+      generation: number;
+      controller: AbortController | null;
+    }>({ active: false, timer: null, generation: 0, controller: null });
+
+    const nativeSessionKey = useCallback(
+      () =>
+        `${hlsSessionRef.current.audioTrack}@${hlsSessionRef.current.startSec}`,
+      [],
+    );
+
+    const scopeMatches = useCallback(
+      (a: StreamTokenScope, b: StreamTokenScope) =>
+        a.mediaType === b.mediaType &&
+        a.mediaId === b.mediaId &&
+        a.arrInstanceId === b.arrInstanceId &&
+        a.audioTrack === b.audioTrack,
+      [],
+    );
+
+    // The user-facing position. While a reset window is open the element has
+    // been rewound by the src change, so the saved position is the truth.
+    const currentAbsoluteMs = useCallback(() => {
+      const win = restoreWindowRef.current;
+      if (win) return win.absoluteMs;
+      return Math.round(
+        (hlsSessionRef.current.startSec +
+          (videoRef.current?.currentTime ?? 0)) *
+          1000,
+      );
+    }, []);
+
+    const stopProbeChain = useCallback(() => {
+      probeChainRef.current.active = false;
+      if (probeChainRef.current.timer) {
+        clearTimeout(probeChainRef.current.timer);
+        probeChainRef.current.timer = null;
+      }
+      // Late answers of an aborted or stale probe must not drive anything.
+      probeChainRef.current.generation += 1;
+      probeChainRef.current.controller?.abort();
+      probeChainRef.current.controller = null;
+      // The wait this chain belonged to is over: the next one is a new
+      // episode with a fresh probe budget.
+      firstFailedProbeMintRef.current = null;
+      if (probeGiveUpTimerRef.current) {
+        clearTimeout(probeGiveUpTimerRef.current);
+        probeGiveUpTimerRef.current = null;
+      }
+    }, []);
+
+    // Retires a pending probe or expiry mint when the wait it belonged to
+    // ends with no owner left: an answer that lands after the wait is over
+    // must settle nothing, not even a fresh token onto a stopped player.
+    // A mint the error path adopted keeps running for its new owner, and so
+    // does one a source chain is waiting on: while the chain exists, every
+    // pending probe or expiry mint is that one, since none can start
+    // beside it.
+    const retireUnownedProbeMint = useCallback(() => {
+      const pending = mintPendingRef.current;
+      if (
+        pending &&
+        !pending.adopted &&
+        !sourceChainRef.current &&
+        (pending.purpose === "probe" || pending.purpose === "expiry")
+      ) {
+        mintPendingRef.current = null;
+        pending.controller.abort();
+      }
+    }, []);
+
+    const clearErrorChain = useCallback(() => {
+      const chain = errorChainRef.current;
+      if (!chain) return;
+      if (chain.retryTimer) clearTimeout(chain.retryTimer);
+      if (chain.hardTimer) clearTimeout(chain.hardTimer);
+      errorChainRef.current = null;
+    }, []);
+
+    const cancelSourceChain = useCallback(() => {
+      const chain = sourceChainRef.current;
+      if (!chain) return;
+      if (chain.retryTimer) clearTimeout(chain.retryTimer);
+      if (chain.giveUpTimer) clearTimeout(chain.giveUpTimer);
+      sourceChainRef.current = null;
+    }, []);
+
+    function showVideoErrorState() {
+      errorStateRef.current = true;
+      stopProbeChain();
+      clearErrorChain();
+      cancelSourceChain();
+      const pending = mintPendingRef.current;
+      if (pending) {
+        mintPendingRef.current = null;
+        pending.controller.abort();
+      }
+      setVideoError(true);
+    }
+
+    function scheduleSourceRetry() {
+      const chain = sourceChainRef.current;
+      if (!chain || chain.retryTimer) return;
+      chain.retryTimer = setTimeout(() => {
+        if (sourceChainRef.current) {
+          sourceChainRef.current.retryTimer = null;
+        }
+        if (errorStateRef.current || !scopeRef.current) return;
+        startMint("source", scopeRef.current);
+      }, STREAM_TOKEN_RETRY_MS);
+    }
+
+    function scheduleErrorRetry() {
+      const chain = errorChainRef.current;
+      if (!chain || chain.retryTimer) return;
+      chain.retryTimer = setTimeout(() => {
+        if (errorChainRef.current) {
+          errorChainRef.current.retryTimer = null;
+        }
+        if (errorStateRef.current || !scopeRef.current) return;
+        startMint("error", scopeRef.current);
+      }, STREAM_TOKEN_RETRY_MS);
+    }
+
+    function settleMintSuccess(
+      mint: StreamTokenMint,
+      data: { token: string; lifetime: number },
+    ) {
+      // The body is usable only when its lifetime is a finite number: the
+      // renewal rules floor and divide by it, and anything else would
+      // renew on every event. A body without one is a failed mint, so the
+      // retry chain of the path that asked stays intact.
+      if (
+        typeof data.lifetime !== "number" ||
+        !Number.isFinite(data.lifetime)
+      ) {
+        settleMintFailure(mint, false);
+        return;
+      }
+      mintPendingRef.current = null;
+      streamTokenRef.current = {
+        value: data.token,
+        lifetime: data.lifetime,
+        mintedAt: Date.now(),
+        scope: mint.scope,
+      };
+      // The source this mint puts on the air ends every episode of the
+      // older source: the error chain stops retrying, and the probe
+      // budget of the episode it belonged to is spent.
+      clearErrorChain();
+      firstFailedProbeMintRef.current = null;
+      if (probeGiveUpTimerRef.current) {
+        clearTimeout(probeGiveUpTimerRef.current);
+        probeGiveUpTimerRef.current = null;
+      }
+      if (mint.purpose === "error" || mint.adopted) {
+        // The source is back after a media error: another error within a
+        // minute of now is a fresh recovery failing, and the error state
+        // shows instead of another reset. The stamp binds to the token
+        // this recovery minted, so only a failure of that token reads it.
+        lastErrorRecoveryRef.current = {
+          tokenValue: data.token,
+          scope: mint.scope,
+          at: Date.now(),
+        };
+      }
+      if (mint.purpose === "probe") {
+        // The source is back after a refused playlist: a new refusal
+        // within a minute of now shows the error state, not another
+        // reset, and only for the token minted here.
+        lastProbeRecoveryRef.current = {
+          tokenValue: data.token,
+          scope: mint.scope,
+          at: Date.now(),
+        };
+      }
+      applyNativeSource();
+    }
+
+    function settleMintFailure(mint: StreamTokenMint, terminal: boolean) {
+      if (mintPendingRef.current !== mint) return;
+      mintPendingRef.current = null;
+      const now = Date.now();
+      if (terminal) {
+        if (
+          mint.purpose === "renewal" &&
+          !mint.adopted &&
+          !sourceChainRef.current
+        ) {
+          // A plain refused renewal keeps the current source playing; the
+          // event rules wait a minute before asking again. A renewal an
+          // error adopted, or one a new source is already waiting on,
+          // leaves nothing to play: its refusal shows the error state.
+          renewalFailedAtRef.current = now;
+        } else {
+          showVideoErrorState();
+        }
+        return;
+      }
+      if (sourceChainRef.current) {
+        // A source is waiting for a token: keep it off the air and retry,
+        // giving up two minutes after the request began.
+        scheduleSourceRetry();
+        return;
+      }
+      if (mint.purpose === "error" || mint.adopted) {
+        scheduleErrorRetry();
+        return;
+      }
+      if (mint.purpose === "probe" || mint.purpose === "expiry") {
+        // The wait this mint belonged to has already ended, at a pause, a
+        // canplay or an error takeover: its late failure arms nothing, or
+        // a fresh timer for a wait that is over would eventually replace
+        // the recovered player with the error state.
+        if (!probeChainRef.current.active) return;
+        // No retry timer: the next 15 second probe answers again. The
+        // two-minute budget is a real timer from the first failed mint:
+        // a path whose probes answer nothing but 503s cannot wait
+        // forever, and the error state shows even when no later mint
+        // fails. The timer is cleared with the budget it belongs to, on
+        // a stop, a reset or any success, and its expiry aborts whatever
+        // attempt is still pending.
+        if (firstFailedProbeMintRef.current === null) {
+          firstFailedProbeMintRef.current = now;
+          probeGiveUpTimerRef.current = setTimeout(() => {
+            showVideoErrorState();
+          }, STREAM_TOKEN_GIVE_UP_MS);
+        }
+        return;
+      }
+      renewalFailedAtRef.current = now;
+    }
+
+    function startMint(
+      purpose: StreamTokenMintPurpose,
+      scope: StreamTokenScope,
+    ) {
+      if (errorStateRef.current) return;
+      // One mint at a time, whatever path asked for it.
+      if (mintPendingRef.current) return;
+      const mint: StreamTokenMint = {
+        id: (mintIdRef.current += 1),
+        purpose,
+        scope,
+        adopted: false,
+        controller: new AbortController(),
+      };
+      mintPendingRef.current = mint;
+      // A mint that never answers must not hold every path hostage: at the
+      // deadline the request is aborted and treated as a failure. The
+      // deadline spans the body parse too, so a stalled stream after the
+      // headers cannot hold the guard past it.
+      const deadline = setTimeout(() => {
+        if (mintPendingRef.current !== mint) return;
+        mint.controller.abort();
+        settleMintFailure(mint, false);
+      }, STREAM_TOKEN_MINT_DEADLINE_MS);
+      const url = appendArrInstanceParam(
+        `${Environment.baseUrl}/api/editor/stream-token?mediaType=${encodeURIComponent(scope.mediaType)}&mediaId=${scope.mediaId}&audioTrack=${scope.audioTrack}`,
+        scope.arrInstanceId ?? undefined,
+      );
+      fetch(url, {
+        headers: { "X-API-KEY": apiKey },
+        cache: "no-store",
+        signal: mint.controller.signal,
+      })
+        .then(async (response) => {
+          try {
+            if (mintPendingRef.current !== mint || errorStateRef.current) {
+              return;
+            }
+            if (!response.ok) {
+              const terminal =
+                TERMINAL_STREAM_TOKEN_STATUSES.includes(response.status) &&
+                response.headers.get("X-Bazarr-Stream-Token-Route") === "1";
+              settleMintFailure(mint, terminal);
+              return;
+            }
+            const data = await response.json();
+            if (mintPendingRef.current !== mint || errorStateRef.current) {
+              return;
+            }
+            settleMintSuccess(mint, data);
+          } finally {
+            clearTimeout(deadline);
+          }
+        })
+        .catch(() => {
+          clearTimeout(deadline);
+          if (mintPendingRef.current !== mint) return;
+          settleMintFailure(mint, false);
+        });
+    }
+
+    function applyNativeSource() {
+      const video = videoRef.current;
+      const token = streamTokenRef.current;
+      if (!video || !token || !isNativeRef.current || !hlsUrlRef.current) {
+        return;
+      }
+      const sessionKey = nativeSessionKey();
+      const previous = restoreWindowRef.current;
+      if (appliedSessionRef.current === sessionKey && appliedSrcRef.current) {
+        // Same session, new token: a browser resets the element on a src
+        // change, so the user's position and play state are held until
+        // loadedmetadata restores them.
+        restoreWindowRef.current = {
+          sessionKey,
+          localSec: previous ? previous.localSec : video.currentTime,
+          absoluteMs: currentAbsoluteMs(),
+          playing: previous ? previous.playing : isPlayingRef.current,
+        };
+      } else {
+        // A new session begins at its own start time; nothing to restore.
+        restoreWindowRef.current = null;
+      }
+      const separator = hlsUrlRef.current.includes("?") ? "&" : "?";
+      const src = `${hlsUrlRef.current}${separator}st=${encodeURIComponent(token.value)}`;
+      video.src = src;
+      appliedSrcRef.current = src;
+      appliedSessionRef.current = sessionKey;
+      // The reset ends the current wait and makes any probe in flight
+      // stale: its answer must not mint against the session it left.
+      stopProbeChain();
+      cancelSourceChain();
+    }
+
+    function clearNativeSrc() {
+      const video = videoRef.current;
+      if (video && appliedSrcRef.current) {
+        video.removeAttribute("src");
+        video.load();
+      }
+      appliedSrcRef.current = null;
+      appliedSessionRef.current = null;
+    }
+
+    // Runs whenever the native source changes: mount, media change, audio
+    // switch or a new start-time session. Puts the element on the air only
+    // once a token for the current scope is at hand.
+    function nativeSourceForSession() {
+      const scope = scopeRef.current;
+      if (!scope) return;
+      // A source change begins here: the probes of the source being
+      // replaced are stale from this point, whatever they answer, and the
+      // position of the source being replaced stops being the truth as
+      // soon as this one needs its own token. The audio-switch effect has
+      // read the window by the time it lands here.
+      stopProbeChain();
+      restoreWindowRef.current = null;
+      // A pending mint is settled before any stored token is reused: a
+      // young token cannot put this source on the air while a mint is
+      // still in flight, and a mint of another scope can never serve it.
+      const pending = mintPendingRef.current;
+      if (pending && scopeMatches(pending.scope, scope)) {
+        // A mint binding this scope is already in flight; its answer will
+        // put the new session on the air. The chain of an error-owned
+        // mint stays: its failure still drives the error retries, so a
+        // pending error mint is never orphaned by the wait.
+        if (pending.purpose !== "error" && !pending.adopted) {
+          clearErrorChain();
+        }
+        cancelSourceChain();
+        sourceChainRef.current = {
+          retryTimer: null,
+          giveUpTimer: setTimeout(
+            () => showVideoErrorState(),
+            STREAM_TOKEN_GIVE_UP_MS,
+          ),
+        };
+        clearNativeSrc();
+        return;
+      }
+      if (pending) {
+        // The pending mint binds another scope and can never serve this
+        // source: abort it and ignore its late answer.
+        mintPendingRef.current = null;
+        pending.controller.abort();
+      }
+      const token = streamTokenRef.current;
+      if (
+        token &&
+        scopeMatches(token.scope, scope) &&
+        (Date.now() - token.mintedAt) / 1000 <
+          streamTokenRenewalFloorSec(token.lifetime)
+      ) {
+        // A young token already binds this scope: reuse it.
+        clearErrorChain();
+        applyNativeSource();
+        return;
+      }
+      clearErrorChain();
+      cancelSourceChain();
+      clearNativeSrc();
+      sourceChainRef.current = {
+        retryTimer: null,
+        giveUpTimer: setTimeout(
+          () => showVideoErrorState(),
+          STREAM_TOKEN_GIVE_UP_MS,
+        ),
+      };
+      startMint("source", scope);
+    }
+
+    function probeTick() {
+      if (!probeChainRef.current.active) return;
+      probeChainRef.current.timer = setTimeout(
+        probeTick,
+        STREAM_TOKEN_PROBE_INTERVAL_MS,
+      );
+      if (errorStateRef.current || mintPendingRef.current) return;
+      const src = appliedSrcRef.current;
+      if (!src) return;
+      if (errorChainRef.current || sourceChainRef.current) {
+        // An error or source change is in flight and will reset the element
+        // itself; the probes of the episode it ends are over.
+        return;
+      }
+      const token = streamTokenRef.current;
+      if (token) {
+        const remainingSec =
+          token.lifetime - (Date.now() - token.mintedAt) / 1000;
+        if (remainingSec <= STREAM_TOKEN_EXPIRY_MINT_MS / 1000) {
+          // The token expires before the next probe is due: mint now, on
+          // the waiting path's rules rather than the renewal rules.
+          if (scopeRef.current) startMint("expiry", scopeRef.current);
+          return;
+        }
+      }
+      probeChainRef.current.generation += 1;
+      probeChainRef.current.controller?.abort();
+      const generation = probeChainRef.current.generation;
+      const controller = new AbortController();
+      probeChainRef.current.controller = controller;
+      fetch(src, { cache: "no-store", signal: controller.signal })
+        .then((response) => {
+          if (generation !== probeChainRef.current.generation) return;
+          // A 503 or a network error means the server is transiently
+          // unreachable: keep waiting, do not error, do not mint.
+          if (response.status !== 401) return;
+          // An error or source change took over while this probe was in
+          // flight: it owns the reset now, and this answer belongs to the
+          // episode it ended.
+          if (errorChainRef.current || sourceChainRef.current) return;
+          const recovery = lastProbeRecoveryRef.current;
+          if (
+            recovery !== null &&
+            token !== null &&
+            recovery.tokenValue === token.value &&
+            scopeRef.current !== null &&
+            scopeMatches(recovery.scope, scopeRef.current) &&
+            Date.now() - recovery.at < STREAM_TOKEN_RECOVERY_WINDOW_MS
+          ) {
+            // The token this fresh recovery minted was refused again within
+            // a minute: retrying will answer the same way. A replacement
+            // token for the same scope is not that token, and its refusal
+            // starts a fresh recovery instead.
+            showVideoErrorState();
+            return;
+          }
+          if (scopeRef.current) startMint("probe", scopeRef.current);
+        })
+        .catch(() => {
+          // The probe was aborted or failed to connect; the next one is due
+          // in 15 seconds.
+        });
+    }
+
+    function startProbeChain() {
+      if (probeChainRef.current.active) return;
+      probeChainRef.current.active = true;
+      if (!probeChainRef.current.timer) {
+        probeChainRef.current.timer = setTimeout(
+          probeTick,
+          STREAM_TOKEN_PROBE_INTERVAL_MS,
+        );
+      }
+    }
+
+    // Renewal on playback events. `interactive` covers play and seeking: a
+    // user interaction with an old token renews it outright. The progress
+    // events renew only when the token cannot cover the rest of the
+    // playback, at the current rate, plus the margin.
+    function maybeRenewToken(interactive: boolean) {
+      if (!isNativeRef.current) return;
+      // An error or source chain in flight occupies the guard with it: it
+      // will either reset the element or show the error state, and a
+      // renewal minted beside it could never be applied anyway.
+      if (
+        errorStateRef.current ||
+        mintPendingRef.current ||
+        errorChainRef.current ||
+        sourceChainRef.current
+      ) {
+        return;
+      }
+      const now = Date.now();
+      const failedAt = renewalFailedAtRef.current;
+      if (failedAt !== null && now - failedAt < STREAM_TOKEN_EVENT_BLOCK_MS) {
+        return;
+      }
+      const token = streamTokenRef.current;
+      const scope = scopeRef.current;
+      if (!token || !scope) return;
+      const ageSec = (now - token.mintedAt) / 1000;
+      // Both rules share the old-token floor: neither of them renews a
+      // token still young for its lifetime.
+      if (ageSec <= streamTokenRenewalFloorSec(token.lifetime)) return;
+      if (interactive) {
+        startMint("renewal", scope);
+        return;
+      }
+      const remainingSec = token.lifetime - ageSec;
+      if (remainingSec > STREAM_TOKEN_RENEWAL_THRESHOLD_MS / 1000) return;
+      if (durationRef.current > 0) {
+        const video = videoRef.current;
+        const rate = video?.playbackRate || 1;
+        const remainingMediaSec =
+          durationRef.current / 1000 - currentAbsoluteMs() / 1000;
+        const neededSec =
+          remainingMediaSec / rate + STREAM_TOKEN_RENEWAL_MARGIN_MS / 1000;
+        if (neededSec <= remainingSec) return;
+      }
+      startMint("renewal", scope);
+    }
+
+    // While the element waits, the token is checked against the real server
+    // every 15 seconds, because a stalled stream can mean an expired token
+    // that the element swallowed as a network stall.
+    function handleNativeWaiting() {
+      if (!isNativeRef.current || errorStateRef.current) return;
+      const token = streamTokenRef.current;
+      const chainInFlight =
+        mintPendingRef.current ||
+        errorChainRef.current ||
+        sourceChainRef.current;
+      if (
+        !chainInFlight &&
+        token &&
+        scopeRef.current &&
+        token.lifetime - (Date.now() - token.mintedAt) / 1000 <=
+          STREAM_TOKEN_EXPIRY_MINT_MS / 1000
+      ) {
+        // The token is about to expire; mint before anything else. The
+        // expiry mint answers to the probe rules, not the renewal rules:
+        // its refusal counts toward the probe budget, and its success
+        // resets the source without opening a recovery window.
+        startMint("expiry", scopeRef.current);
+      }
+      startProbeChain();
+    }
+
+    function handleNativeMediaError() {
+      if (!isNativeRef.current || errorStateRef.current) return;
+      const now = Date.now();
+      const recovery = lastErrorRecoveryRef.current;
+      const token = streamTokenRef.current;
+      if (
+        recovery !== null &&
+        token !== null &&
+        recovery.tokenValue === token.value &&
+        scopeRef.current !== null &&
+        scopeMatches(recovery.scope, scopeRef.current) &&
+        now - recovery.at < STREAM_TOKEN_RECOVERY_WINDOW_MS
+      ) {
+        // The token this fresh recovery minted is failing again within a
+        // minute: retrying will answer the same way. A replacement token
+        // for the same scope is not that token, and its error starts a
+        // fresh recovery instead.
+        showVideoErrorState();
+        return;
+      }
+      if (errorChainRef.current) return;
+      errorChainRef.current = {
+        retryTimer: null,
+        hardTimer: setTimeout(
+          () => showVideoErrorState(),
+          STREAM_TOKEN_GIVE_UP_MS,
+        ),
+      };
+      // A probe of the stalled source may still be in flight: the error
+      // path owns the recovery now, so the probe chain ends here with its
+      // budget and its timer, and the error path's own two minutes govern.
+      // A pending mint is adopted below and its answer belongs to the
+      // error path.
+      stopProbeChain();
+      const pending = mintPendingRef.current;
+      if (pending) {
+        // The error path takes over the pending mint: its failure now
+        // drives the error retries, and its success is the recovery.
+        pending.adopted = true;
+        return;
+      }
+      if (scopeRef.current) startMint("error", scopeRef.current);
+    }
+
+    // Nothing may outlive the component: timers stop at unmount.
+    useEffect(
+      () => () => {
+        stopProbeChain();
+        retireUnownedProbeMint();
+        clearErrorChain();
+        cancelSourceChain();
+      },
+      [
+        stopProbeChain,
+        retireUnownedProbeMint,
+        clearErrorChain,
+        cancelSourceChain,
+      ],
+    );
 
     // Codec info popup data is purely informational now; the HLS encoder
     // server-side picks copy vs transcode based on its own probe. Aspect ratio
@@ -292,12 +1043,41 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
       onAudioTracksLoaded,
     ]);
 
-    // Media-change reset: fresh session at start of file. Bail out if the
-    // session is already in the right state (initial mount with default props).
+    // Media-change reset: fresh session at start of file. The initial mount
+    // with default props bails out, but a real change of media or arr
+    // instance always resets, even from a zero-start session: the old
+    // item's playing state and position reports must not survive into the
+    // new item, or its first click pauses instead of playing.
     useEffect(() => {
-      const prev = hlsSessionRef.current;
-      if (prev.audioTrack === audioTrack && prev.startSec === 0) return;
+      const prevSession = hlsSessionRef.current;
+      const prevScope = prevScopeRef.current;
+      prevScopeRef.current = { mediaType, mediaId, arrInstanceId };
+      const scopeChanged =
+        prevScope !== null &&
+        (prevScope.mediaType !== mediaType ||
+          prevScope.mediaId !== mediaId ||
+          prevScope.arrInstanceId !== arrInstanceId);
+      if (
+        !scopeChanged &&
+        prevSession.audioTrack === audioTrack &&
+        prevSession.startSec === 0
+      ) {
+        return;
+      }
       shouldAutoplayAfterAttachRef.current = false;
+      // A changed item is a new playback: the old item's playing state and
+      // its position reports stop here, so the first click on the new item
+      // plays instead of pausing a playback that no longer exists.
+      if (isPlayingRef.current) {
+        isPlayingRef.current = false;
+        setPlaying(false);
+        onPlayStateChange?.(false);
+      }
+      stopTimeReporting();
+      // The new item is a new source: the terminal verdict of the old one
+      // ends with it, so this source may mint and go on the air again.
+      errorStateRef.current = false;
+      setVideoError(false);
       setHlsSession({ audioTrack, startSec: 0 });
       // audioTrack is intentionally outside the deps; we only reset on media
       // swap. Audio-track changes are handled by their own effect below so
@@ -312,8 +1092,17 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
       const prev = hlsSessionRef.current;
       if (prev.audioTrack === audioTrack) return;
       const video = videoRef.current;
-      const userTarget = prev.startSec + (video?.currentTime ?? 0);
+      // A reset window may be open: the element has been rewound by a src
+      // change, so the saved position is where the user actually is.
+      const win = restoreWindowRef.current;
+      const userTarget = win
+        ? win.absoluteMs / 1000
+        : prev.startSec + (video?.currentTime ?? 0);
       shouldAutoplayAfterAttachRef.current = isPlayingRef.current;
+      // The new track is a new source: the terminal verdict of the old one
+      // ends with it, so this source may mint and go on the air again.
+      errorStateRef.current = false;
+      setVideoError(false);
       setHlsSession({
         audioTrack,
         startSec: userTarget,
@@ -374,9 +1163,18 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
         });
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
         // Safari / iOS native HLS: can't inject custom headers on segment
-        // fetches, so the API key has to ride in the URL.
-        const separator = hlsUrl.includes("?") ? "&" : "?";
-        video.src = `${hlsUrl}${separator}apikey=${encodeURIComponent(apiKey)}`;
+        // fetches, so the playlist URL carries a media-scoped stream token
+        // instead of the API key. The source goes on the air only once a
+        // token minted for this exact media, track and instance is at hand.
+        isNativeRef.current = true;
+        hlsUrlRef.current = hlsUrl;
+        scopeRef.current = {
+          mediaType: mediaType as string,
+          mediaId: mediaId as number,
+          arrInstanceId: arrInstanceId ?? null,
+          audioTrack: hlsSessionRef.current.audioTrack,
+        };
+        nativeSourceForSession();
       } else {
         setVideoError(true);
       }
@@ -387,19 +1185,29 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
           video.removeAttribute("src");
           video.load();
         }
+        appliedSrcRef.current = null;
+        appliedSessionRef.current = null;
       };
-    }, [hlsUrl, apiKey]);
+      // nativeSourceForSession reads only refs and the scope values above,
+      // which all change together with hlsUrl; listing the function itself
+      // would re-run the effect every render.
+      // The latch clear is a dep for the same reason: a terminal error
+      // unmounted the element this effect last attached, and the remount
+      // lands in the commit after the media change, where a zero-start
+      // session reset leaves the URL unchanged. Only the clear re-runs
+      // the attach the fresh element needs, and the URL never will.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [hlsUrl, apiKey, mediaType, mediaId, arrInstanceId, videoError]);
 
     // Time reporting: video.currentTime is local to the current HLS session;
-    // the user-facing absolute position is startSec + local.
+    // the user-facing absolute position is startSec + local, except while a
+    // reset window is open, when the saved position is the truth.
     const startTimeReporting = useCallback(() => {
       if (timerRef.current) return;
       timerRef.current = setInterval(() => {
         const video = videoRef.current;
         if (!video) return;
-        const absoluteMs = Math.round(
-          (hlsSessionRef.current.startSec + video.currentTime) * 1000,
-        );
+        const absoluteMs = currentAbsoluteMs();
         setCurrentMs(absoluteMs);
         if (
           onTimeUpdate &&
@@ -409,7 +1217,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
           onTimeUpdate(absoluteMs);
         }
       }, 100);
-    }, [onTimeUpdate]);
+    }, [onTimeUpdate, currentAbsoluteMs]);
 
     const stopTimeReporting = useCallback(() => {
       if (timerRef.current) {
@@ -461,11 +1269,23 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
           ...prev,
           startSec: targetAbsoluteSec,
         }));
-      } else if (Math.abs(localTargetSec - video.currentTime) > 0.25) {
-        video.currentTime = localTargetSec;
+      } else {
+        // A same-source seek lands on its target: the open window moves to
+        // the target even when the reset element already sits there, so a
+        // pending restore lands on the target and not on the position the
+        // window was opened at. A window of a different session is stale
+        // and stays dropped.
+        const win = restoreWindowRef.current;
+        if (win && win.sessionKey === nativeSessionKey()) {
+          win.localSec = localTargetSec;
+          win.absoluteMs = currentTimeMs;
+        }
+        if (Math.abs(localTargetSec - video.currentTime) > 0.25) {
+          video.currentTime = localTargetSec;
+        }
         setCurrentMs(currentTimeMs);
       }
-    }, [currentTimeMs, seekId, hasMedia]);
+    }, [currentTimeMs, seekId, hasMedia, nativeSessionKey]);
 
     // Sync volume and playback rate
     useEffect(() => {
@@ -476,15 +1296,33 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
       }
     }, [volume, playbackRate]);
 
+    // The latest handlePause, reachable from the stable togglePlayPause.
+    // handlePause closes over the latest onTimeUpdate, so the button must
+    // always find the current one.
+    const handlePauseRef = useRef<(() => void) | null>(null);
+
     const togglePlayPause = useCallback(() => {
       const video = videoRef.current;
       if (!video) return;
-      if (video.paused) {
+      // The component's own flag decides, not video.paused: a play() call
+      // whose play event has not landed yet (autoplay permission, native
+      // HLS attach) must not read as paused.
+      if (isPlayingRef.current) {
+        video.pause();
+        // The user's pause outranks a source change that asked for
+        // autoplay: if a new source is still waiting on its token mint,
+        // the loadedmetadata that lands once it arrives must not start
+        // playback on its own. Cleared here and not in handlePause: the
+        // element can fire pause during a src reset without the user
+        // meaning it.
+        shouldAutoplayAfterAttachRef.current = false;
+        // The browser queues the pause event; the state moves now, and the
+        // event handler is a no-op when the flag already says paused.
+        handlePauseRef.current?.();
+      } else {
         video.play().catch(() => {
           /* ignored */
         });
-      } else {
-        video.pause();
       }
     }, []);
 
@@ -585,11 +1423,20 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
           }));
         } else {
           video.currentTime = localTargetSec;
+          // A same-source seek lands on its target: the open window moves
+          // to the target with it, keeping the rate and play state it
+          // captured, so the pending restore still lands on the target.
+          // A window of a different session is stale and stays dropped.
+          const win = restoreWindowRef.current;
+          if (win && win.sessionKey === nativeSessionKey()) {
+            win.localSec = localTargetSec;
+            win.absoluteMs = clampedMs;
+          }
           setCurrentMs(clampedMs);
           onTimeUpdate?.(clampedMs);
         }
       },
-      [duration, onTimeUpdate],
+      [duration, onTimeUpdate, nativeSessionKey],
     );
 
     const seekRelative = useCallback(
@@ -617,25 +1464,50 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
 
     const handlePlay = useCallback(() => {
       isPlayingRef.current = true;
+      const win = restoreWindowRef.current;
+      if (win) win.playing = true;
       setPlaying(true);
       onPlayStateChange?.(true);
       startTimeReporting();
+      maybeRenewToken(true);
+      // maybeRenewToken reads only refs, so the memoized handler may hold
+      // the render it was created in.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [onPlayStateChange, startTimeReporting]);
 
     const handlePause = useCallback(() => {
+      // The wait ends on any pause, even one the element fires while already
+      // paused (a src reset can do that in the browser).
+      stopProbeChain();
+      retireUnownedProbeMint();
+      // The pause event and the pause button both land here; only the first
+      // of them moves the state.
+      if (!isPlayingRef.current) return;
       isPlayingRef.current = false;
+      const win = restoreWindowRef.current;
+      if (win) win.playing = false;
       setPlaying(false);
       onPlayStateChange?.(false);
       stopTimeReporting();
-      const video = videoRef.current;
-      if (video && onTimeUpdate) {
-        const absoluteMs = Math.round(
-          (hlsSessionRef.current.startSec + video.currentTime) * 1000,
-        );
+      if (onTimeUpdate) {
+        const absoluteMs = currentAbsoluteMs();
         setCurrentMs(absoluteMs);
         onTimeUpdate(absoluteMs);
       }
-    }, [onPlayStateChange, stopTimeReporting, onTimeUpdate]);
+    }, [
+      onPlayStateChange,
+      stopTimeReporting,
+      onTimeUpdate,
+      stopProbeChain,
+      retireUnownedProbeMint,
+      currentAbsoluteMs,
+    ]);
+
+    // togglePlayPause is stable, so it must always reach this latest
+    // handlePause and the onTimeUpdate it closes over.
+    useEffect(() => {
+      handlePauseRef.current = handlePause;
+    }, [handlePause]);
 
     const handleLoadedMetadata = useCallback(() => {
       const video = videoRef.current;
@@ -655,6 +1527,23 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
       setVideoError(false);
       video.volume = volume;
       video.playbackRate = playbackRate;
+      // A native token swap within one session left the element reset: put
+      // the user back where they were, playing if they were playing. The
+      // playbackRate assignment above already holds the speed the user has
+      // chosen by now. A window left over from a session that no longer
+      // exists restores nothing.
+      const win = restoreWindowRef.current;
+      restoreWindowRef.current = null;
+      if (win && win.sessionKey === nativeSessionKey()) {
+        if (Number.isFinite(win.localSec)) video.currentTime = win.localSec;
+        if (win.playing || shouldAutoplayAfterAttachRef.current) {
+          shouldAutoplayAfterAttachRef.current = false;
+          video.play().catch(() => {
+            /* user-gesture restrictions or transient: ignored */
+          });
+        }
+        return;
+      }
       // Resume playback after a session change (track switch or seek-before-
       // start) if the user was playing prior to the tear-down. hls.js attach
       // resets the video to paused, so we explicitly call play() here.
@@ -664,7 +1553,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
           /* user-gesture restrictions or transient: ignored */
         });
       }
-    }, [duration, aspectRatio, volume, playbackRate]);
+    }, [duration, aspectRatio, volume, playbackRate, nativeSessionKey]);
 
     const handleKeyDown = useCallback(
       (e: React.KeyboardEvent) => {
@@ -753,8 +1642,21 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
             onPlay={handlePlay}
             onPause={handlePause}
             onLoadedMetadata={handleLoadedMetadata}
-            onWaiting={() => setBuffering(true)}
-            onCanPlay={() => setBuffering(false)}
+            onWaiting={() => {
+              setBuffering(true);
+              handleNativeWaiting();
+            }}
+            onCanPlay={() => {
+              setBuffering(false);
+              // The stream moves again; the wait is over, and a probe or
+              // expiry mint still in flight settles nothing.
+              stopProbeChain();
+              retireUnownedProbeMint();
+            }}
+            onSeeking={() => maybeRenewToken(true)}
+            onTimeUpdate={() => maybeRenewToken(false)}
+            onRateChange={() => maybeRenewToken(false)}
+            onError={handleNativeMediaError}
           />
 
           {/* Loading spinner */}
