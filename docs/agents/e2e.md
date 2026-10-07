@@ -54,6 +54,10 @@ least its area.
 | `@status`       | System status and health                                              |
 | `@jobs`         | Jobs and tasks                                                        |
 | `@mediaservers` | Plex, Jellyfin, Emby and Silo connections                             |
+| `@library`      | A real media file of an enabled library; skips where there is none    |
+| `@sports`       | The Sports pages and an enabled Sportarr                              |
+| `@auth`         | Form authentication, the session and the login lockout                |
+| `@postgres`     | The PostgreSQL variant, selected by `BAZARR_E2E_POSTGRES`             |
 | `@live`         | Needs the real provider network or catalog; left out of `npm run e2e` |
 | `@harness`      | Checks the harness itself on pages it writes; needs no container      |
 
@@ -172,6 +176,27 @@ Helpers live in `frontend/e2e/lib/`: `container.ts` starts and stops
 instances, `wizard.ts` walks the onboarding steps, `auth.ts` logs in,
 `fit.ts` checks layout, `providers.ts` installs the recommended providers, and
 `network.ts` reloads a page a host network change broke.
+
+### Media a spec cannot make itself
+
+A spec that needs a real media file, such as the subtitle tools menu, a manual
+search or an upload, gets it from the library the instance already has
+(`lib/library.ts`). A fresh container has no library at all and the suite has
+no way to seed one, so no run of the suite has a library today. The read-only
+tools-menu spec skips with a message saying why and runs against a real
+install, which is the only run that has a library. The specs that also change
+the instance or need the provider network (manual search, upload,
+translation) are marked fixme with that reason, so they report themselves as
+missing a run rather than reading as coverage: they turn on when the suite
+grows a seeded-library run.
+
+### The PostgreSQL variant
+
+With `BAZARR_E2E_POSTGRES=1`, every container this suite starts boots against
+a throwaway Postgres of its own, on a network of its own, so no run touches a
+Postgres that matters. The image is `postgres:16-alpine` unless
+`BAZARR_E2E_POSTGRES_IMAGE` names another. The `@postgres` spec proves the
+variant: without the variable it skips, so an ordinary run stays on SQLite.
 
 The browser runs with the `en-US` locale, so anything the app guesses from the
 browser guesses the same on every machine. The wizard's languages step, for

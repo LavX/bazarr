@@ -41,6 +41,27 @@ export const REMOVAL_ALLOWANCE_MS = 180_000;
 export const E2E_LABEL = "bazarr-e2e";
 /** The label that says which run a container or volume belongs to. */
 export const E2E_RUN_LABEL = `${E2E_LABEL}-run`;
+/** The throwaway Postgres image of the PostgreSQL variant, overridable. */
+const DEFAULT_POSTGRES_IMAGE = "postgres:16-alpine";
+/** How long the throwaway Postgres is given to accept connections. */
+const POSTGRES_READY_CAP_MS = 60_000;
+const POSTGRES_POLL_MS = 2_000;
+/** The credentials the throwaway Postgres and the instance share. */
+const POSTGRES_USER = "bazarr";
+const POSTGRES_DATABASE = "bazarr";
+
+/**
+ * Whether this run boots every instance against a throwaway Postgres, selected
+ * by the environment. With it on, each Bazarr+ container gets a Postgres of
+ * its own on a network of its own, and onboarding proves the write path.
+ */
+export function postgresVariant(): boolean {
+  return process.env.BAZARR_E2E_POSTGRES === "1";
+}
+
+function postgresImage(): string {
+  return process.env.BAZARR_E2E_POSTGRES_IMAGE ?? DEFAULT_POSTGRES_IMAGE;
+}
 
 /** The run id of a process that did not come through global setup. */
 const PROCESS_RUN = randomUUID().slice(0, 8);
@@ -97,6 +118,8 @@ export interface ReadyOptions {
 export interface StartOptions {
   image?: string;
   port?: number;
+  /** Test seam: how long the variant's Postgres is given to accept connections. */
+  postgresReadyCapMs?: number;
 }
 
 /** Why the suite cannot start a container here, or null when it can. */
@@ -110,6 +133,19 @@ export async function dockerUnavailable(image: string): Promise<string | null> {
     await run("docker", ["image", "inspect", image, "--format", "{{.Id}}"]);
   } catch {
     return `the image ${image} is missing. Build it (see docs/agents/e2e.md) or set BAZARR_E2E_IMAGE to one that exists.`;
+  }
+  if (postgresVariant()) {
+    try {
+      await run("docker", [
+        "image",
+        "inspect",
+        postgresImage(),
+        "--format",
+        "{{.Id}}",
+      ]);
+    } catch {
+      return `the image ${postgresImage()} is missing, and the PostgreSQL variant needs it. Pull it or set BAZARR_E2E_POSTGRES_IMAGE to one that exists.`;
+    }
   }
   return null;
 }
@@ -245,11 +281,120 @@ export async function removeRunLeftovers(): Promise<void> {
       () => undefined,
     );
   }
+  // The PostgreSQL variant also leaves a network per instance behind.
+  const networks = await list(["network", "ls", "-q", "--filter", filter]);
+  if (networks.length > 0) {
+    await run("docker", ["network", "rm", ...networks]).catch(() => undefined);
+  }
+}
+
+/**
+ * Answers whether the throwaway Postgres accepts connections yet, bounded to
+ * one short probe per call.
+ */
+async function postgresAccepts(
+  name: string,
+  timeout: number,
+): Promise<boolean> {
+  try {
+    await run(
+      "docker",
+      [
+        "exec",
+        name,
+        "pg_isready",
+        // TCP, not the unix socket: during initdb the image runs a
+        // temporary server on the socket only, which would answer ready.
+        "-h",
+        "127.0.0.1",
+        "-U",
+        POSTGRES_USER,
+        "-d",
+        POSTGRES_DATABASE,
+      ],
+      { timeout },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The Postgres container of a network, whose name is derived from it. `stop`
+ * removes this name whenever the network is set, so a container that started
+ * and then failed its readiness wait is never left behind by an assignment
+ * that never happened.
+ */
+function postgresOf(network: string): string {
+  return `${network}-postgres`;
+}
+
+/**
+ * Starts the throwaway Postgres of the PostgreSQL variant on `network`, and
+ * resolves once it accepts connections. Both containers share the run's
+ * labels, so cleanup finds them whoever left them behind.
+ */
+async function startPostgres(
+  network: string,
+  labels: string[],
+  capMs: number,
+): Promise<{ name: string; password: string }> {
+  const name = postgresOf(network);
+  const password = randomUUID();
+  await run("docker", ["network", "create", ...labels, network]);
+  await run("docker", [
+    "run",
+    "--detach",
+    "--name",
+    name,
+    ...labels,
+    "--network",
+    network,
+    // The image declares VOLUME /var/lib/postgresql/data, so without this
+    // every run would also leave an anonymous unlabelled volume behind.
+    // A tmpfs also skips initdb's fsync phase, so it starts faster.
+    "--tmpfs",
+    "/var/lib/postgresql/data",
+    "--env",
+    `POSTGRES_USER=${POSTGRES_USER}`,
+    "--env",
+    `POSTGRES_PASSWORD=${password}`,
+    "--env",
+    `POSTGRES_DB=${POSTGRES_DATABASE}`,
+    postgresImage(),
+  ]);
+  const deadline = Date.now() + capMs;
+  while (!(await postgresAccepts(name, within(DOCKER_MS, deadline)))) {
+    if (Date.now() >= deadline) {
+      // The caller's stop() removes this container through the network's
+      // own name for it, so a readiness failure leaks nothing.
+      throw new Error(
+        `the Postgres ${name} was not ready after ${capMs / 1000}s`,
+      );
+    }
+    await new Promise((resolve) =>
+      setTimeout(
+        resolve,
+        Math.max(0, Math.min(POSTGRES_POLL_MS, deadline - Date.now())),
+      ),
+    );
+  }
+  return { name, password };
+}
+
+/** Removes a docker network this suite created, if it still exists. */
+async function removeNetwork(network: string): Promise<void> {
+  await run("docker", ["network", "rm", network]).catch(() => undefined);
 }
 
 /**
  * Starts a fresh Bazarr+ on its own volume and resolves once it is ready.
  * Tries the next free port when docker loses a race for the first one.
+ *
+ * With the PostgreSQL variant on, each instance also gets a throwaway
+ * Postgres on a network of its own, and boots pointed at it through the
+ * environment; both go away with the instance.
  */
 export async function startBazarr(
   options: StartOptions = {},
@@ -268,14 +413,50 @@ export async function startBazarr(
     // Unique to this attempt: another worker or run that picked the same
     // port gets a name of its own, so the cleanup below cannot reach it.
     const name = `${E2E_LABEL}-${runId()}-${port}-${randomUUID().slice(0, 8)}`;
+    const network = postgresVariant() ? `${name}-net` : null;
+    let postgres: { name: string; password: string } | null = null;
+    // The Postgres container is removed by the network's own name for it,
+    // never by an assignment, so a start that failed at any point after its
+    // creation still leaves stop() able to reach it.
+    const stop = async () => {
+      await remove(name);
+      if (network) {
+        await remove(postgresOf(network));
+        await removeNetwork(network);
+      }
+    };
     try {
       await run("docker", ["volume", "create", ...labels, name]);
+      if (network)
+        postgres = await startPostgres(
+          network,
+          labels,
+          options.postgresReadyCapMs ?? POSTGRES_READY_CAP_MS,
+        );
       await run("docker", [
         "run",
         "--detach",
         "--name",
         name,
         ...labels,
+        ...(network && postgres
+          ? [
+              "--network",
+              network,
+              "--env",
+              "POSTGRES_ENABLED=true",
+              "--env",
+              `POSTGRES_HOST=${postgres.name}`,
+              "--env",
+              "POSTGRES_PORT=5432",
+              "--env",
+              `POSTGRES_USERNAME=${POSTGRES_USER}`,
+              "--env",
+              `POSTGRES_PASSWORD=${postgres.password}`,
+              "--env",
+              `POSTGRES_DATABASE=${POSTGRES_DATABASE}`,
+            ]
+          : []),
         "--publish",
         `127.0.0.1:${port}:6767`,
         "--volume",
@@ -283,17 +464,24 @@ export async function startBazarr(
         image,
       ]);
     } catch (error) {
-      lastError = error;
-      await remove(name);
-      continue;
+      const message = String((error as Error)?.message);
+      await stop();
+      // Only a lost race for the host port is another port's business. A
+      // database that would not start is the same on every port, so it is
+      // cleaned up and reported rather than retried sixty times over.
+      if (/port is already allocated|address already in use/.test(message)) {
+        lastError = error;
+        continue;
+      }
+      throw error;
     }
     const baseURL = `http://127.0.0.1:${port}`;
     try {
       await waitUntilReady(baseURL, name);
       const apiKey = await readApiKey(name);
-      return { baseURL, apiKey, name, stop: () => remove(name) };
+      return { baseURL, apiKey, name, stop };
     } catch (error) {
-      await remove(name);
+      await stop();
       throw error;
     }
   }

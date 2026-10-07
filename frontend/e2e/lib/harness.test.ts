@@ -19,6 +19,7 @@ import {
   E2E_LABEL,
   E2E_RUN_LABEL,
   externalBazarr,
+  postgresVariant,
   REMOVAL_ALLOWANCE_MS,
   runId,
   startBazarr,
@@ -30,9 +31,11 @@ import { readSharedRecord, sharedBazarr } from "./shared";
 
 interface FakeContainer {
   name: string;
-  port: number;
+  port: number | undefined;
   labels: string[];
   volume: string;
+  network?: string;
+  env?: string[];
   running: boolean;
 }
 
@@ -49,18 +52,24 @@ interface DockerCall {
 const docker = vi.hoisted(() => {
   const containers = new Map<string, FakeContainer>();
   const volumes = new Map<string, string[]>();
+  const networks = new Map<string, string[]>();
   const calls: DockerCall[] = [];
   const state = {
     containers,
     volumes,
+    networks,
     calls,
     /** Runs at the start of each `docker run`, to let another run win. */
     beforeRun: null as ((port: number) => void) | null,
+    /** Makes every pg_isready probe fail, as an unreachable Postgres does. */
+    pgNeverReady: false,
     reset() {
       containers.clear();
       volumes.clear();
+      networks.clear();
       calls.length = 0;
       state.beforeRun = null;
+      state.pgNeverReady = false;
     },
   };
 
@@ -109,25 +118,62 @@ const docker = vi.hoisted(() => {
           .join("");
       }
     }
+    if (command === "network") {
+      const [sub, ...more] = rest;
+      if (sub === "create") {
+        const name = more[more.length - 1];
+        networks.set(name, labelsOf(more));
+        return `${name}\n`;
+      }
+      if (sub === "rm") {
+        for (const name of operands(more)) networks.delete(name);
+        return "";
+      }
+      if (sub === "ls") {
+        // The suite must list network names, not the table docker prints
+        // without -q, whose header and driver columns would be fed to rm.
+        if (!more.includes("-q")) {
+          throw fail("docker network ls must pass -q");
+        }
+        const match = matches(more);
+        return [...networks]
+          .filter(([, labels]) => match(labels))
+          .map(([name]) => `${name}\n`)
+          .join("");
+      }
+    }
     if (command === "run") {
       const name = option(rest, "--name") as string;
-      const port = Number((option(rest, "--publish") as string).split(":")[1]);
-      const volume = (option(rest, "--volume") as string).split(":")[0];
-      state.beforeRun?.(port);
+      const publish = option(rest, "--publish");
+      const port = publish ? Number(publish.split(":")[1]) : undefined;
+      const volume = option(rest, "--volume");
+      const env = args.flatMap((arg, index) =>
+        args[index - 1] === "--env" ? [arg] : [],
+      );
+      const network = option(rest, "--network");
+      state.beforeRun?.(port as number);
       if (containers.has(name)) {
         throw fail(`Conflict. The container name "/${name}" is already in use`);
       }
-      if (!volumes.has(volume)) volumes.set(volume, []);
-      const taken = [...containers.values()].some(
-        (c) => c.running && c.port === port,
-      );
+      if (network && !networks.has(network)) {
+        throw fail(`network ${network} not found`);
+      }
+      const taken =
+        port === undefined
+          ? false
+          : [...containers.values()].some((c) => c.running && c.port === port);
       containers.set(name, {
         name,
         port,
         labels: labelsOf(rest),
-        volume,
+        volume: volume?.split(":")[0] ?? name,
+        network,
+        env,
         running: !taken,
       });
+      if (!volume || !volumes.has(volume.split(":")[0])) {
+        if (volume) volumes.set(volume.split(":")[0], []);
+      }
       if (taken) {
         throw fail(
           `Bind for 127.0.0.1:${port} failed: port is already allocated`,
@@ -150,6 +196,13 @@ const docker = vi.hoisted(() => {
       const name = rest[0];
       if (!containers.get(name)?.running) {
         throw fail(`No such container: ${name}`);
+      }
+      if (
+        command === "exec" &&
+        rest.includes("pg_isready") &&
+        state.pgNeverReady
+      ) {
+        throw fail("pg_isready: no response");
       }
       return command === "logs" ? "BAZARR is started\n" : `key-of-${name}`;
     }
@@ -342,6 +395,137 @@ describe("container names and labels", () => {
 
     expect([...docker.state.containers.keys()]).toEqual([other]);
     expect([...docker.state.volumes.keys()]).toEqual([other]);
+  });
+});
+
+describe("the PostgreSQL variant", () => {
+  // A shell that exports the variant must not leak it into these tests, and
+  // whatever it set is given back when the block is done.
+  let postgresEnv: string | undefined;
+  beforeEach(() => {
+    postgresEnv = process.env.BAZARR_E2E_POSTGRES;
+    delete process.env.BAZARR_E2E_POSTGRES;
+  });
+  afterEach(() => {
+    if (postgresEnv === undefined) {
+      delete process.env.BAZARR_E2E_POSTGRES;
+    } else {
+      process.env.BAZARR_E2E_POSTGRES = postgresEnv;
+    }
+  });
+
+  it("is off unless the environment selects it", () => {
+    expect(postgresVariant()).toBe(false);
+    process.env.BAZARR_E2E_POSTGRES = "1";
+    expect(postgresVariant()).toBe(true);
+  });
+
+  it("boots a Postgres beside the instance and points the instance at it", async () => {
+    process.env.BAZARR_E2E_POSTGRES = "1";
+    const runLabel = `${E2E_RUN_LABEL}=${runId()}`;
+
+    const instance = await startBazarr({ image: "bazarr:test" });
+    const name = instance.name as string;
+    const network = `${name}-net`;
+    const postgresName = `${network}-postgres`;
+    const postgres = docker.state.containers.get(postgresName);
+    const bazarr = docker.state.containers.get(name) as FakeContainer;
+
+    // One network per instance, named for it, labelled for the run.
+    expect(docker.state.networks.get(network)).toEqual(
+      expect.arrayContaining([E2E_LABEL, runLabel]),
+    );
+    // The Postgres runs on that network, and so does the instance.
+    expect(postgres?.running).toBe(true);
+    expect(postgres?.network).toBe(network);
+    expect(bazarr.network).toBe(network);
+    // The instance is told, through the environment, to use that Postgres.
+    expect(bazarr.env).toEqual(
+      expect.arrayContaining([
+        "POSTGRES_ENABLED=true",
+        `POSTGRES_HOST=${postgresName}`,
+        "POSTGRES_PORT=5432",
+        "POSTGRES_USERNAME=bazarr",
+        "POSTGRES_DATABASE=bazarr",
+      ]),
+    );
+    expect(bazarr.env?.join("\n")).toMatch(/POSTGRES_PASSWORD=.+/);
+    // The Postgres is mounted on a tmpfs, not the volume the image would
+    // declare, so the run leaves no anonymous volume behind.
+    expect(docker.state.calls).toContainEqual(
+      expect.objectContaining({
+        args: expect.arrayContaining([
+          "run",
+          "--name",
+          postgresName,
+          "--tmpfs",
+          "/var/lib/postgresql/data",
+        ]),
+      }),
+    );
+    // Readiness was polled against the Postgres itself, over TCP.
+    expect(docker.state.calls).toContainEqual({
+      args: expect.arrayContaining([
+        "exec",
+        postgresName,
+        "pg_isready",
+        "-h",
+        "127.0.0.1",
+        "-U",
+        "bazarr",
+        "-d",
+        "bazarr",
+      ]),
+      timeout: expect.any(Number),
+    });
+  });
+
+  it("a Postgres that never answers is cleaned up, not retried or leaked", async () => {
+    process.env.BAZARR_E2E_POSTGRES = "1";
+    docker.state.pgNeverReady = true;
+
+    // The start fails with the readiness error rather than trying every
+    // port on the machine for a database that is the same dead on each.
+    await expect(
+      startBazarr({ image: "bazarr:test", postgresReadyCapMs: 300 }),
+    ).rejects.toThrow(/was not ready/);
+
+    // Nothing survives the failure: no container, no volume, no network.
+    expect([...docker.state.containers.keys()]).toEqual([]);
+    expect([...docker.state.volumes.keys()]).toEqual([]);
+    expect([...docker.state.networks.keys()]).toEqual([]);
+  });
+
+  it("stopping the instance removes its Postgres and network with it", async () => {
+    process.env.BAZARR_E2E_POSTGRES = "1";
+
+    const instance = await startBazarr({ image: "bazarr:test" });
+    await instance.stop();
+
+    expect([...docker.state.containers.keys()]).toEqual([]);
+    expect([...docker.state.networks.keys()]).toEqual([]);
+  });
+
+  it("a start without the variant runs no Postgres and no network", async () => {
+    const instance = await startBazarr({ image: "bazarr:test" });
+    const bazarr = docker.state.containers.get(
+      instance.name as string,
+    ) as FakeContainer;
+
+    expect([...docker.state.networks.keys()]).toEqual([]);
+    expect(bazarr.network).toBeUndefined();
+    expect(bazarr.env ?? []).toEqual([]);
+  });
+
+  it("global teardown removes the networks this run left behind", async () => {
+    process.env.BAZARR_E2E_POSTGRES = "1";
+    const instance = await startBazarr({ image: "bazarr:test" });
+    // The worker that owned the instance died without stopping it.
+    docker.state.containers.delete(instance.name as string);
+
+    await globalTeardown();
+
+    expect([...docker.state.networks.keys()]).toEqual([]);
   });
 });
 
