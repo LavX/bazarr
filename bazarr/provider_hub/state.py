@@ -151,6 +151,30 @@ def load_state(path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
         data = json.load(handle)
     if not isinstance(data, dict):
         return default_state()
+    return _normalized_state(data)
+
+
+def load_state_strict(path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
+    """The state as stored, refusing a document whose root is not an object.
+
+    ``load_state`` answers a default for a malformed document, which is the
+    resilient answer for every reader that only wants the state there now. A
+    rule that refuses work when the state cannot be read needs the
+    distinction: a document whose root is not an object is the state being
+    unreadable, not an empty installation inventory, so this reader raises
+    and the caller fails closed instead of reading no installations.
+    """
+    current = Path(path) if path is not None else state_file()
+    if not current.exists():
+        return default_state()
+    with current.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    if not isinstance(data, dict):
+        raise ValueError("the Provider Hub state document is not an object")
+    return _normalized_state(data)
+
+
+def _normalized_state(data: dict[str, Any]) -> dict[str, Any]:
     sources = data.setdefault("catalog_sources", {})
     if not isinstance(sources, dict):
         sources = {}

@@ -30,6 +30,7 @@ class NativeConfiguration:
 
     def __init__(self, settings, *, snapshots=(), blocked_kinds=()):
         self.lock = RLock()
+        self.settings = settings
         self.blocked_kinds = frozenset(blocked_kinds)
         self.snapshots = {snapshot.id: snapshot for snapshot in snapshots}
         self.masters = {kind: getattr(settings.general, 'use_' + kind) is True for kind in _SERVERS}
@@ -66,14 +67,60 @@ class NativeConfiguration:
     def read(self, instance_id):
         with self.lock:
             snapshot = self.snapshots.get(instance_id)
-            if snapshot is None:
-                raise MediaServerError('not_found')
-            return snapshot.revision, snapshot, False
+        if snapshot is None:
+            raise MediaServerError('not_found')
+        released = self._release_held(snapshot)
+        if released is not snapshot:
+            # The ask ran without the lock every dispatcher caller shares, so
+            # a publication or a deletion landing meanwhile is not
+            # overwritten: only a row the answer still finds current is
+            # released, and any other row answers as it now is.
+            with self.lock:
+                current = self.snapshots.get(instance_id)
+                if current is snapshot:
+                    self.publish(released)
+                    snapshot = self.snapshots[instance_id]
+                elif current is not None:
+                    snapshot = current
+        return snapshot.revision, snapshot, False
+
+    def _release_held(self, snapshot):
+        """Re-ask plex.tv for a held account row, once its pause has passed.
+
+        Snapshots are computed once and republished only by an instance write
+        or an account sync, so without this one plex.tv failure at the wrong
+        moment would hold the Plex refreshes until a restart. The ask is the
+        same consult the snapshot build made: it is remembered for the
+        credential, so it costs nothing while plex.tv answers and repeats at
+        most once per short pause while it does not. Only the account's own
+        row is released, and only by an answer about the credential the row
+        would actually send; a row holding a credential the account replaced
+        stays held until a save or an account transition carries the new one
+        onto it. A configuration with no Plex section to consult cannot
+        re-ask, and its held snapshot stays as it was published.
+
+        The ask can reach plex.tv and outlast it, so the caller runs it
+        without the lock every dispatcher caller shares and publishes the
+        released row itself, only when the answer still finds it current.
+        """
+        if snapshot.kind != 'plex' or snapshot.sendable or not snapshot.apikey:
+            return snapshot
+        section = getattr(self.settings, 'plex', None)
+        token = getattr(section, 'token', '') or ''
+        if (section is None or not isinstance(token, str) or not token
+                or snapshot.apikey != token):
+            return snapshot
+        from .plex_account import account_row_uri
+        listed = account_row_uri(self.settings, snapshot.url, credential=snapshot.apikey)
+        if listed is None:
+            return snapshot
+        return replace(snapshot, url=listed, sendable=True)
 
     def ensure_current(self, instance_id, revision):
         with self.lock:
             snapshot = self.snapshots.get(instance_id)
-            if snapshot is None or snapshot.revision != revision or not snapshot.enabled:
+            if (snapshot is None or snapshot.revision != revision or not snapshot.enabled
+                    or not snapshot.sendable):
                 raise MediaServerError('configuration_changed')
 
 
@@ -261,7 +308,8 @@ class RefreshDispatcher:
                 server = snapshot.id
                 state = self._server(server)
                 _revision, snapshot, changing = self._connection(server, state)
-                if not snapshot.enabled or not snapshot.refreshes(media_type):
+                if (not snapshot.enabled or not snapshot.sendable
+                        or not snapshot.refreshes(media_type)):
                     continue
                 # A destination that cannot reach this video is not asked to.
                 # For Emby and Silo that is a path no mapping covers; for
@@ -441,14 +489,16 @@ class RefreshDispatcher:
                     self.condition.notify_all()
                     return
                 target_pair = next(((key, value) for key, value in state.targets.items() if value.ready), None)
-                if target_pair is None or changing or not snapshot.enabled:
+                if (target_pair is None or changing or not snapshot.enabled
+                        or not snapshot.sendable):
                     if state.targets:
                         state.state = 'unconfirmed'
                         state.error_code = next((target.error_code for target in state.targets.values()
                                                  if target.error_code), 'configuration_changed')
-                    if state.targets and (changing or not snapshot.enabled):
+                    if state.targets and (changing or not snapshot.enabled or not snapshot.sendable):
                         state.state = "unconfirmed"
-                        state.error_code = "configuration_changed" if changing else "connection_disabled"
+                        state.error_code = ("configuration_changed" if changing
+                                            else "connection_disabled")
                     state.worker = None
                     self.condition.notify_all()
                     return
@@ -575,7 +625,13 @@ def get_native_configuration():
             from app.database import database, TableMediaServerImports
             from .repository import MediaServerInstanceRepository
             kinds = [kind for kind in _SERVERS if database.get(TableMediaServerImports, kind) is not None]
-            snapshots = MediaServerInstanceRepository(database).snapshots(settings, kinds=kinds)
+            # The account row's sendable check consults plex.tv, and this
+            # initialization holds the one lock every dispatcher caller
+            # shares: the row is published held instead, and the read path
+            # asks plex.tv outside the initialization and releases it once
+            # the answer says the credential may be sent.
+            snapshots = MediaServerInstanceRepository(database).snapshots(
+                settings, kinds=kinds, hold_account_row=True)
             _configuration = NativeConfiguration(settings, snapshots=snapshots,
                                                  blocked_kinds=set(_SERVERS) - set(kinds))
         return _configuration

@@ -102,6 +102,12 @@ it.each(["emby", "silo"] as const)(
     await userEvent.click(
       form.getByRole("switch", { name: "Verify SSL certificate" }),
     );
+    // Moving the destination switches Keep off: the stored key cannot
+    // follow the new address, so it is typed again.
+    expect(
+      form.getByText(/stored api key cannot be kept/i),
+    ).toBeInTheDocument();
+    await userEvent.type(form.getByLabelText("API Key"), "opaque-key");
     await userEvent.click(form.getByRole("button", { name: "Test" }));
     expect(
       await form.findByText("Connected to Living room."),
@@ -113,6 +119,7 @@ it.each(["emby", "silo"] as const)(
     expect(testBody).toEqual({
       url: `https://${kind}.example/prefix`,
       verify_ssl: false,
+      api_key: "opaque-key",
     });
     const beforeSave = settingsReads;
     await userEvent.click(form.getByRole("button", { name: "Save instance" }));
@@ -123,8 +130,8 @@ it.each(["emby", "silo"] as const)(
     expect(writes[0]).toMatchObject({
       url: `https://${kind}.example/prefix`,
       verify_ssl: false,
+      api_key: "opaque-key",
     });
-    expect(writes[0]).not.toHaveProperty("api_key");
     expect(settingsReads).toBe(beforeSave);
     expect(screen.getByRole("switch", { name: "Enabled" })).toBeChecked();
     expect(

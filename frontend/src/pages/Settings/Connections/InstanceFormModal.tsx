@@ -131,6 +131,22 @@ interface Props {
   onClose: () => void;
 }
 
+// The stored base URL the way the client builds its request URL from it: the
+// leading slash added and one trailing slash dropped, no more. The form's own
+// spelling strips every boundary slash, so a stored path with repeated ones
+// still serves a different path than the single-slash spelling, and the
+// comparison has to read the stored side the way the client does.
+function storedClientBaseUrl(value: string) {
+  let base = value || "/";
+  if (!base.startsWith("/")) {
+    base = `/${base}`;
+  }
+  if (base.endsWith("/")) {
+    base = base.slice(0, -1);
+  }
+  return base;
+}
+
 const InstanceFormModal: FunctionComponent<Props> = ({
   opened,
   kind,
@@ -195,6 +211,34 @@ const InstanceFormModal: FunctionComponent<Props> = ({
   }, [opened, kind, instance]);
 
   const meta = ARR_META[form.values.kind];
+
+  // A destination change means the stored key cannot be kept: it was typed
+  // with the address it is allowed to travel to. The moment a destination
+  // field differs from the loaded row, the Keep mode is switched off and the
+  // reason is shown, so the key is entered again rather than the save being
+  // refused by the server with no explanation. The base URL is compared the
+  // way the save compares it: the outgoing form path against the stored path
+  // the way the client builds it, so a repeated boundary slash the form's
+  // own spelling would strip away still counts as the move it is. Turning
+  // certificate verification back on only hardens the connection, so it is
+  // not a change.
+  const destinationChanged =
+    instance !== null &&
+    (form.values.ip.trim() !== instance.ip ||
+      Number(form.values.port) !== instance.port ||
+      normalizeBaseUrl(form.values.baseUrl) !==
+        storedClientBaseUrl(instance.base_url) ||
+      form.values.ssl !== instance.ssl ||
+      (instance.verify_ssl && !form.values.verifySsl));
+  useEffect(() => {
+    if (destinationChanged && hasStoredKey && keyMode === "keep") {
+      setKeyMode("replace");
+      resetTests();
+    }
+    // The form object is recreated every render; only the comparison result
+    // matters here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [destinationChanged]);
 
   // "Use the global default" is a real, selectable choice rather than a blank
   // field: an instance that has not opted in must READ as inheriting.
@@ -490,7 +534,15 @@ const InstanceFormModal: FunctionComponent<Props> = ({
                   resetTests();
                 }}
                 data={[
-                  { value: "keep", label: "Keep current key" },
+                  // The stored key was typed for the saved address, so Keep
+                  // cannot be picked while the destination differs; a typed
+                  // replacement key stays in the form across mode switches,
+                  // so switching back to Replace does not lose it.
+                  {
+                    value: "keep",
+                    label: "Keep current key",
+                    disabled: destinationChanged,
+                  },
                   { value: "replace", label: "Replace" },
                   { value: "clear", label: "Clear" },
                 ]}
@@ -499,6 +551,13 @@ const InstanceFormModal: FunctionComponent<Props> = ({
                 <Text size="xs" c="dimmed">
                   The stored key never leaves the server, so it is not shown
                   here. Connection tests use it automatically.
+                </Text>
+              )}
+              {destinationChanged && hasStoredKey && (
+                <Text size="xs" c="orange">
+                  The address changed or certificate verification was turned
+                  off, so the stored key cannot be kept. Enter the API key again
+                  to save or test the new address.
                 </Text>
               )}
               {keyMode === "replace" && (

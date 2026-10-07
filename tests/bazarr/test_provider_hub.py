@@ -3314,6 +3314,193 @@ def test_stage_install_local_repairs_a_malformed_persisted_path_set(
     assert load_state()["plugin_secret_paths"] == ["locallyinstalled.api_key"]
 
 
+def test_a_hub_config_save_moving_a_declared_destination_asks_for_the_key_again(tmp_path, monkeypatch):
+    """The Hub's update path writes the installation's own config, the second
+    of a plugin's two config stores, so it follows the same destination rule
+    the settings save follows: moving a field the manifest formats as a uri is
+    refused while the plugin's stored key is retained, in whichever store it
+    sits, and the refusal carries the same re-enter message the settings path
+    returns. The unfixed path wrote the move with the kept token."""
+    from flask import Flask
+
+    import api.provider_hub.provider_hub as hub_api
+    from provider_hub.service import SECRET_PLACEHOLDER
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    state = load_state()
+    state["installations"]["examplehub"] = {
+        "provider_id": "examplehub",
+        "name": "Example",
+        "active_version": "1.0.0",
+        "state": "active",
+        "pending_restart": False,
+        "enabled": True,
+        "config": {"api_url": "https://old.example:9", "api_token": "stored-token"},
+        "manifest": {
+            "provider_id": "examplehub",
+            "version": "1.0.0",
+            "config_schema": {"type": "object", "properties": {
+                "api_url": {"type": "string", "format": "uri"},
+                "api_token": {"type": "string"},
+            }},
+            "secret_fields": ["api_token"],
+        },
+    }
+    save_state(state)
+
+    app = Flask(__name__)
+
+    def patch_config(config):
+        # The route answers a tuple on its refusals and the provider on success.
+        with app.test_request_context("/api/provider-hub/providers/examplehub", method="PATCH",
+                                      json={"config": config}):
+            result = hub_api.ProviderHubProvider.patch.__wrapped__(
+                hub_api.ProviderHubProvider(), "examplehub")
+        return result if isinstance(result, tuple) else (result, 200)
+
+    body, status = patch_config({"api_url": "https://moved.example:9"})
+    assert status == 400
+    assert body == "Re-enter the key to use a different address"
+    assert load_state()["installations"]["examplehub"]["config"]["api_url"] == "https://old.example:9"
+
+    # The placeholder keeps the stored token, so the move is still refused.
+    body, status = patch_config({"api_url": "https://moved.example:9",
+                                 "api_token": SECRET_PLACEHOLDER})
+    assert status == 400
+    assert body == "Re-enter the key to use a different address"
+    assert load_state()["installations"]["examplehub"]["config"]["api_url"] == "https://old.example:9"
+
+    # Typed again, the move lands, the way the settings path lets it, and the
+    # answer carries the token the way the installation API hands a stored
+    # secret back: write-only, an empty value with the descriptor.
+    body, status = patch_config({"api_url": "https://moved.example:9",
+                                 "api_token": "typed-again"})
+    assert status == 200
+    assert body["config"]["api_url"] == "https://moved.example:9"
+    assert body["config"]["api_token"] == ""
+    assert body["config"]["__secret_fields"]["api_token"]["configured"] is True
+
+
+def test_a_structurally_invalid_manifest_refuses_a_hub_config_move(tmp_path, monkeypatch):
+    """An installed row whose manifests carry none of the structure their
+    declarations are read from, `manifest: {}` among them, is a provider whose
+    fields cannot be vouched for, not a plugin without secrets: the Hub's own
+    save path refuses the address move with the token still stored, the same
+    fail-closed answer a row without readable manifest data gets. The
+    unfixed rule read the empty document as empty declarations and wrote the
+    move with the kept token."""
+    from provider_hub.state import load_state, save_state
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    state = load_state()
+    state["installations"]["examplehub"] = {
+        "provider_id": "examplehub",
+        "name": "Example",
+        "active_version": "1.0.0",
+        "state": "active",
+        "pending_restart": False,
+        "enabled": True,
+        "config": {"api_url": "https://old.example:9", "api_token": "stored-token"},
+        "manifest": {},
+        "staged_manifest": {},
+    }
+    save_state(state)
+
+    body, status = _patch_provider_config({"api_url": "https://moved.example:9"})
+
+    assert status == 400, body
+    assert body == ("The provider data needed to check this address change "
+                    "could not be read, so the address was not changed")
+    assert load_state()["installations"]["examplehub"]["config"]["api_url"] == "https://old.example:9"
+
+
+def test_a_hub_config_save_moving_a_uri_formatted_field_without_readable_provider_data_is_refused(
+        tmp_path, monkeypatch):
+    """A field a manifest formats as a uri is a destination only the
+    declarations can name, so while they cannot be read no field can be
+    vouched for: the Hub's own save path refuses the service_uri move with the
+    token still stored, the same refusal a key-shaped move gets, rather than
+    reading it as a field the unreadable data says nothing about. A
+    submission that changes nothing is not refused by the move rule, because
+    nothing moves; the write layer still refuses every field a row without a
+    manifest cannot declare, so the submission never writes."""
+    from provider_hub.service import SECRET_PLACEHOLDER
+    from provider_hub.state import load_state, save_state
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    state = load_state()
+    state["installations"]["examplehub"] = {
+        "provider_id": "examplehub",
+        "name": "Example",
+        "active_version": "1.0.0",
+        "state": "active",
+        "pending_restart": False,
+        "enabled": True,
+        "config": {"service_uri": "https://old.example:1", "api_token": "stored-token"},
+    }
+    save_state(state)
+
+    body, status = _patch_provider_config({"service_uri": "https://moved.example:1"})
+
+    assert status == 400, body
+    assert body == ("The provider data needed to check this address change "
+                    "could not be read, so the address was not changed")
+    assert load_state()["installations"]["examplehub"]["config"]["service_uri"] == "https://old.example:1"
+
+    # Nothing moves, so the move rule does not refuse the submission: the
+    # placeholder keeps the stored token the way a value that changes nothing
+    # does. The write layer still refuses it, because a row without a
+    # manifest cannot declare the field it is asked to keep, so no field a
+    # manifest-less row holds can be written back, and the state is left
+    # exactly as it was.
+    body, status = _patch_provider_config({"service_uri": "https://old.example:1",
+                                           "api_token": SECRET_PLACEHOLDER})
+    assert status == 400, body
+    assert body == ("The configuration field service_uri is not declared by the "
+                    "provider's manifest, so the configuration was not saved.")
+    assert load_state()["installations"]["examplehub"]["config"]["service_uri"] == "https://old.example:1"
+    assert load_state()["installations"]["examplehub"]["config"]["api_token"] == "stored-token"
+
+
+def test_a_hub_save_storing_an_empty_uri_blocks_the_default_it_reaches_back_to(
+        tmp_path, monkeypatch):
+    """Key presence is read the way the provider reader reads it on the Hub's
+    own save path too: a field the manifest gives a default to reaches that
+    default only while the key is absent from the installation's config, so
+    storing an empty string moves the effective destination from the default
+    to the empty address, and the move is refused while the token stays
+    retained. The unfixed comparison treated the empty value as absent, so
+    the save landed with the kept token."""
+    from provider_hub.state import load_state, save_state
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    state = load_state()
+    state["installations"]["examplehub"] = {
+        "provider_id": "examplehub",
+        "name": "Example",
+        "active_version": "1.0.0",
+        "state": "active",
+        "pending_restart": False,
+        "enabled": True,
+        "config": {"api_token": "stored-token"},
+        "manifest": {
+            "provider_id": "examplehub",
+            "version": "1.0.0",
+            "config_schema": {"type": "object", "properties": {
+                "service_uri": {"type": "string", "format": "uri",
+                                "default": "https://default.example:9"},
+                "api_token": {"type": "string"},
+            }},
+            "secret_fields": ["api_token"],
+        },
+    }
+    save_state(state)
+
+    body, status = _patch_provider_config({"service_uri": ""})
+
+    assert status == 400, body
+    assert body == "Re-enter the key to use a different address"
+    assert load_state()["installations"]["examplehub"]["config"] == {"api_token": "stored-token"}
+
+
 def test_get_providers_auth_includes_active_provider_hub_config(tmp_path, monkeypatch):
     from app.get_providers import get_providers_auth
     from provider_hub.service import update_provider
@@ -8154,3 +8341,97 @@ def test_compare_calls_still_run_for_a_commit_not_yet_checked(tmp_path, monkeypa
     refresh_catalog()
 
     assert compares
+
+
+def _patch_provider_config(config):
+    """The provider config route, answered as (body, status)."""
+    from flask import Flask
+
+    import api.provider_hub.provider_hub as hub_api
+    app = Flask(__name__)
+
+    with app.test_request_context("/api/provider-hub/providers/examplehub", method="PATCH",
+                                  json={"config": config}):
+        result = hub_api.ProviderHubProvider.patch.__wrapped__(
+            hub_api.ProviderHubProvider(), "examplehub")
+    return result if isinstance(result, tuple) else (result, 200)
+
+
+def test_a_hub_key_replacement_does_not_vouch_for_the_settings_stores_copy(tmp_path, monkeypatch):
+    """The Hub's own save path writes the installation's config, the second of
+    a plugin's two stores, and the reader sends the settings section's value
+    first: a Hub save that replaces the Hub's token while the section still
+    holds one moves the address under the section's old token, so the move is
+    refused until the section's copy is cleared too. The unfixed rule skipped
+    both stored checks whenever the submission typed a value, so the token
+    that stayed effective was never asked for again."""
+    from app.config import remove_settings_section, settings
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    state = load_state()
+    state["installations"]["examplehub"] = {
+        "provider_id": "examplehub",
+        "name": "Example",
+        "active_version": "1.0.0",
+        "state": "active",
+        "pending_restart": False,
+        "enabled": True,
+        "config": {"api_url": "https://old.example:9"},
+        "manifest": {
+            "provider_id": "examplehub",
+            "version": "1.0.0",
+            "config_schema": {"type": "object", "properties": {
+                "api_url": {"type": "string", "format": "uri"},
+                "api_token": {"type": "string"},
+            }},
+            "secret_fields": ["api_token"],
+        },
+    }
+    save_state(state)
+    settings.set("examplehub", {"api_token": "settings-side-token"})
+
+    try:
+        body, status = _patch_provider_config({"api_url": "https://moved.example:9",
+                                                "api_token": "typed-again"})
+        assert status == 400, body
+        assert body == "Re-enter the key to use a different address"
+        assert load_state()["installations"]["examplehub"]["config"]["api_url"] \
+            == "https://old.example:9", 'the refused move was not written'
+
+        # The section's copy is what the moved address would have received, so
+        # clearing it lets the typed replacement travel with the move.
+        settings.set("examplehub", {"api_token": ""})
+        body, status = _patch_provider_config({"api_url": "https://moved.example:9",
+                                                "api_token": "typed-again"})
+        assert status == 200, body
+        assert body["config"]["api_url"] == "https://moved.example:9"
+    finally:
+        remove_settings_section("examplehub")
+
+
+def test_a_malformed_state_document_refuses_a_hub_config_move(tmp_path, monkeypatch):
+    """The state document is read strictly for the destination rule: a
+    document whose root is not an object is the state being unreadable, not an
+    empty installation inventory, so the Hub's own save path refuses a
+    destination move the same fail-closed way the settings path does. The
+    unfixed reader answered a default state for a malformed document, and the
+    move was checked against an installation list that no longer existed."""
+    from app.config import remove_settings_section, settings
+
+    state_path = tmp_path / "provider_hub" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    # A raw malformed document, not a state the loader would produce: its
+    # root is an array, so no installation inventory can be read from it.
+    state_path.write_text("[]")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_path))
+    settings.set("examplehub", {"api_url": "https://old.example:9",
+                                "api_token": "settings-side-token"})
+
+    try:
+        body, status = _patch_provider_config({"api_url": "https://moved.example:9"})
+        assert status == 400, body
+        assert body == ("The provider data needed to check this address change "
+                        "could not be read, so the address was not changed")
+    finally:
+        remove_settings_section("examplehub")

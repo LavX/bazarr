@@ -79,6 +79,9 @@ function makeInstance(
     kind: "sonarr" | "radarr";
     name: string;
     api_key_set: boolean;
+    ssl: boolean;
+    verify_ssl: boolean;
+    base_url: string;
   }> = {},
 ): ArrInstance {
   return {
@@ -91,9 +94,9 @@ function makeInstance(
     is_default: false,
     ip: "192.168.1.10",
     port: 8989,
-    base_url: "",
-    ssl: false,
-    verify_ssl: true,
+    base_url: overrides.base_url ?? "",
+    ssl: overrides.ssl ?? false,
+    verify_ssl: overrides.verify_ssl ?? true,
     http_timeout: 60,
     api_key_set: overrides.api_key_set ?? true,
   };
@@ -480,6 +483,178 @@ describe("InstanceFormModal, edit mode", () => {
       unknown,
     ];
     expect(args.body.clear_api_key).toBe(true);
+  });
+
+  it("switches Keep current key off and explains why when the address is typed over", async () => {
+    const user = userEvent.setup();
+    renderEdit(makeInstance({ api_key_set: true }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("radio", { name: /keep current key/i }),
+      ).toBeInTheDocument();
+    });
+    // Nothing moved yet: the replace field is not shown.
+    expect(
+      screen.queryByPlaceholderText("Enter the new API key"),
+    ).not.toBeInTheDocument();
+
+    const address = screen.getByRole("textbox", { name: /address/i });
+    await user.clear(address);
+    await user.type(address, "10.9.9.9");
+
+    await waitFor(() => {
+      expect(
+        screen.getByPlaceholderText("Enter the new API key"),
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByText(/stored key cannot be kept/i)).toBeInTheDocument();
+  });
+
+  it("switches Keep current key off when certificate verification is switched off", async () => {
+    const user = userEvent.setup();
+    // The instance ships with verify_ssl true, so the switch reads as on.
+    renderEdit(makeInstance({ api_key_set: true }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("radio", { name: /keep current key/i }),
+      ).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("switch", { name: /use ssl/i }));
+    await user.click(
+      screen.getByRole("switch", { name: /verify certificate/i }),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByPlaceholderText("Enter the new API key"),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("keeps the stored key when certificate verification is switched back on", async () => {
+    const user = userEvent.setup();
+    // SSL is already on and verification off, so the only change is turning
+    // verification on, which hardens the connection rather than moving it.
+    renderEdit(
+      makeInstance({ api_key_set: true, ssl: true, verify_ssl: false }),
+    );
+
+    await user.click(
+      screen.getByRole("switch", { name: /verify certificate/i }),
+    );
+
+    expect(
+      screen.queryByPlaceholderText("Enter the new API key"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/stored key cannot be kept/i),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", { name: /keep current key/i }),
+    ).toBeEnabled();
+  });
+
+  it("keeps the stored key for a stored trailing-slash base URL and submits the normalized path", async () => {
+    const user = userEvent.setup();
+    mockUpdateMutate.mockClear();
+    // The stored spelling carries the trailing slash the client drops when it
+    // builds the request URL, and the form normalizes the same way: the two
+    // spellings are one path, so the stored key is kept and the save carries
+    // the normalized one.
+    renderEdit(makeInstance({ api_key_set: true, base_url: "/sonarr/" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("radio", { name: /keep current key/i }),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByPlaceholderText("Enter the new API key"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/stored key cannot be kept/i),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /save changes/i }));
+
+    await waitFor(() => {
+      expect(mockUpdateMutate).toHaveBeenCalled();
+    });
+    const [args] = mockUpdateMutate.mock.calls[0] as [
+      { id: number; body: ArrInstanceUpdate },
+      unknown,
+    ];
+    expect(args.body.base_url).toBe("/sonarr");
+    expect(args.body).not.toHaveProperty("clear_api_key");
+    expect(args.body).not.toHaveProperty("api_key");
+  });
+
+  it("does not keep the stored key for a repeated trailing slash the save would refuse", async () => {
+    // The stored spelling ends in two slashes, and the client drops only one
+    // when it builds its request URL, so the stored path stays '/sonarr/',
+    // while the form's own spelling submits '/sonarr'. The comparison used to
+    // strip every boundary slash on both sides, so the stored key was kept
+    // for a destination the save refuses; the outgoing form path is now read
+    // against the stored path the way the client builds it, so the key is
+    // asked for from the moment the row loads.
+    renderEdit(makeInstance({ api_key_set: true, base_url: "/sonarr//" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByPlaceholderText("Enter the new API key"),
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByText(/stored key cannot be kept/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", { name: /keep current key/i }),
+    ).toBeDisabled();
+  });
+
+  it("switches Keep current key off when verification is turned off with SSL already on", async () => {
+    const user = userEvent.setup();
+    renderEdit(
+      makeInstance({ api_key_set: true, ssl: true, verify_ssl: true }),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("radio", { name: /keep current key/i }),
+      ).toBeInTheDocument();
+    });
+
+    await user.click(
+      screen.getByRole("switch", { name: /verify certificate/i }),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByPlaceholderText("Enter the new API key"),
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByText(/stored key cannot be kept/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", { name: /keep current key/i }),
+    ).toBeDisabled();
+  });
+
+  it("keeps a typed replacement key across mode switches", async () => {
+    const user = userEvent.setup();
+    renderEdit(makeInstance({ api_key_set: true }));
+
+    await user.click(screen.getByRole("radio", { name: /replace/i }));
+    const key = screen.getByPlaceholderText("Enter the new API key");
+    await user.type(key, "typed-replacement");
+
+    // Switching away and back, including through Keep, never drops it.
+    await user.click(screen.getByRole("radio", { name: /keep current key/i }));
+    await user.click(screen.getByRole("radio", { name: /replace/i }));
+
+    expect(screen.getByPlaceholderText("Enter the new API key")).toHaveValue(
+      "typed-replacement",
+    );
   });
 });
 

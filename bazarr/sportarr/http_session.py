@@ -16,6 +16,11 @@ class _SportarrSession(requests.Session):
         # Inherited proxies and netrc authentication must not redirect or
         # replace an instance's explicitly configured connection and API key.
         self.trust_env = False
+        # The API key never follows a redirect: a server that answers with one
+        # is not the instance the key belongs to, and the next hop is never
+        # contacted. Belt to the per-request refusal below, so a caller that
+        # forgets it cannot reopen the path.
+        self.max_redirects = 0
 
     def request(self, method, url, **kwargs):
         # requests can forward X-Api-Key to another origin on redirects.

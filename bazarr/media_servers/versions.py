@@ -120,7 +120,11 @@ def statuses(session, settings, *, refresh=True):
     for snapshot in MediaServerInstanceRepository(session).snapshots(settings):
         key = _key(snapshot.id, snapshot.revision)
         live.add(key)
-        if not snapshot.enabled or snapshot.configuration_error or not snapshot.apikey:
+        # A snapshot the destination rule holds back carries a credential that
+        # is sent nowhere, so no probe goes out for it either: the page shows
+        # nothing rather than asking the server it must not talk to.
+        if (not snapshot.enabled or snapshot.configuration_error
+                or not snapshot.apikey or not snapshot.sendable):
             continue
         with _lock:
             cached = _recorded.get(key)

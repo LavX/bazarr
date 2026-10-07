@@ -9,7 +9,7 @@ import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote_plus
 from flask import request
 from flask_restx import Resource, reqparse, abort
 import plexapi
@@ -34,7 +34,7 @@ def _validate_state_token(state: str, stored_state: str) -> bool:
     return _secrets.compare_digest(state, stored_state)
 from plex.operations import plex_account_verify_ssl  # noqa: E402
 from app.config import settings, write_config  # noqa: E402
-from utilities.security_guards import is_trusted_plex_target  # noqa: E402
+from utilities.security_guards import normalized_origin  # noqa: E402
 from app.logger import logger  # noqa: E402
 from utilities.plex_utils import _get_library_locations  # noqa: E402
 from ..utils import authenticate  # noqa: E402
@@ -182,7 +182,8 @@ def validate_plex_token(token):
         response = requests.get(
             'https://plex.tv/api/v2/user',
             headers=headers,
-            timeout=10
+            timeout=10,
+            allow_redirects=False
         )
         if response.status_code == 401:
             raise InvalidTokenError("Plex server rejected the authentication token. Token may be invalid or expired.")  # noqa: F405
@@ -216,7 +217,8 @@ def refresh_token(token):
         response = requests.get(
             'https://plex.tv/api/v2/ping',
             headers=headers,
-            timeout=10
+            timeout=10,
+            allow_redirects=False
         )
 
         if response.status_code == 401:
@@ -251,11 +253,14 @@ def test_plex_connection(uri, token, verify):
         }
 
         start_time = time.time()
+        # The token never follows a redirect: a server that answers with one
+        # is not the server this address was verified for.
         response = requests.get(
             f"{uri}/identity",
             headers=headers,
             timeout=3,
-            verify=verify
+            verify=verify,
+            allow_redirects=False
         )
         latency_ms = int((time.time() - start_time) * 1000)
 
@@ -385,59 +390,65 @@ class PlexPinCheck(Resource):
                 user_id = user_data.get('id')
                 user_id_str = str(user_id) if user_id is not None else ''
 
-                settings.plex.apikey = ""
-                settings.plex.ip = "127.0.0.1"
-                settings.plex.port = 32400
-                settings.plex.ssl = False
+                # An account transition: every write to the account's own
+                # settings runs under the account lock, so a verification whose
+                # plex.tv answer is still in flight can neither read half of
+                # one nor write over one.
+                from media_servers.plex_account import ACCOUNT_LOCK
+                with ACCOUNT_LOCK:
+                    settings.plex.apikey = ""
+                    settings.plex.ip = "127.0.0.1"
+                    settings.plex.port = 32400
+                    settings.plex.ssl = False
 
-                settings.plex.token = encrypted_token
-                settings.plex.username = user_data.get('username') or ''
-                settings.plex.email = user_data.get('email') or ''
-                settings.plex.user_id = user_id_str
-                settings.plex.auth_method = 'oauth'
-                settings.general.use_plex = True
+                    settings.plex.token = encrypted_token
+                    settings.plex.username = user_data.get('username') or ''
+                    settings.plex.email = user_data.get('email') or ''
+                    settings.plex.user_id = user_id_str
+                    settings.plex.auth_method = 'oauth'
+                    settings.general.use_plex = True
 
-                # Signing in replaces the account's credentials, exactly as
-                # signing out clears them: end the decrypt failures of the
-                # paths this branch sets before the write, or the health
-                # issue would keep asking for an API key the user has
-                # replaced, and the preserve pass would keep the old token's
-                # recoverable ciphertext over the fresh one.
-                from secret_store.migration import clear_decrypt_failure_path
-                for path in ("plex.token", "plex.apikey", "plex.username", "plex.email"):
-                    clear_decrypt_failure_path(path)
+                    # Signing in replaces the account's credentials, exactly as
+                    # signing out clears them: end the decrypt failures of the
+                    # paths this branch sets before the write, or the health
+                    # issue would keep asking for an API key the user has
+                    # replaced, and the preserve pass would keep the old token's
+                    # recoverable ciphertext over the fresh one.
+                    from secret_store.migration import clear_decrypt_failure_path
+                    for path in ("plex.token", "plex.apikey", "plex.username", "plex.email"):
+                        clear_decrypt_failure_path(path)
 
-                try:
-                    write_config()
-                    # The account now holds the credential the refresh worker
-                    # needs, so its destination row has to hold it too, and a
-                    # completed sign-in switches it back on after a sign-out.
-                    sync_plex_account(signed_in=True)
-                    pin_cache.delete(pin_id)
+                    try:
+                        write_config()
+                        # The account now holds the credential the refresh worker
+                        # needs, so its destination row has to hold it too, and a
+                        # completed sign-in switches it back on after a sign-out.
+                        sync_plex_account(signed_in=True)
+                        pin_cache.delete(pin_id)
 
-                    logger.info(
-                        f"OAuth authentication successful for user: {sanitize_log_data(user_data.get('username', ''))}")
+                        logger.info(
+                            f"OAuth authentication successful for user: {sanitize_log_data(user_data.get('username', ''))}")
 
-                    return {
-                        'data': {
-                            'authenticated': True,
-                            'username': user_data.get('username'),
-                            'email': user_data.get('email')
+                        return {
+                            'data': {
+                                'authenticated': True,
+                                'username': user_data.get('username'),
+                                'email': user_data.get('email')
+                            }
                         }
-                    }
-                except Exception as config_error:
-                    logger.error(f"Failed to save OAuth settings: {config_error}")
+                    except Exception as config_error:
+                        logger.error(f"Failed to save OAuth settings: {config_error}")
 
-                    settings.plex.token = ""
-                    settings.plex.username = ""
-                    settings.plex.email = ""
-                    settings.plex.user_id = ""
-                    settings.plex.auth_method = 'apikey'
+                        settings.plex.token = ""
+                        settings.plex.username = ""
+                        settings.plex.email = ""
+                        settings.plex.user_id = ""
+                        settings.plex.auth_method = 'apikey'
 
-                    return {
-                        'error': 'Failed to save authentication settings',
-                        'code': 'CONFIG_SAVE_ERROR'
-                    }, 500
+                        return {
+                            'error': 'Failed to save authentication settings',
+                            'code': 'CONFIG_SAVE_ERROR'
+                        }, 500
 
             return {
                 'data': {
@@ -508,7 +519,8 @@ class PlexServers(Resource):
                 'https://plex.tv/pms/resources',
                 headers=headers,
                 params={'includeHttps': '1', 'includeRelay': '1'},
-                timeout=10
+                timeout=10,
+                allow_redirects=False
             )
 
             if response.status_code in (401, 403):
@@ -631,27 +643,62 @@ class PlexLibraries(Resource):
                 logger.debug("No decrypted token available for Plex library fetching")
                 return {'data': []}
 
-            # Get all stored server connections for round-robin fallback
-            primary_url = settings.plex.get('server_url')
-            all_connections = settings.plex.get('server_connections', [])
-            
-            # Build connection list: primary URL first, then others as fallback
-            server_connections = []
-            if primary_url:
-                server_connections.append(primary_url)
-                # Add other connections as fallback (skip duplicates)
-                server_connections.extend([url for url in all_connections if url != primary_url])
-            elif all_connections:
-                server_connections = all_connections
-            else:
-                logger.debug("No Plex server connections available")
+            # No stored address is trusted on its word: the stored selection is
+            # kept only while plex.tv lists it for the signed-in account, and
+            # while plex.tv cannot be reached the token goes nowhere. The check
+            # is remembered per credential, so it costs one plex.tv call per
+            # start; an address plex.tv does not list is dropped and the card
+            # asks the user to choose the server again. The credential the
+            # listing was verified with is the one every send below carries, so
+            # a sign-in landing between the verification and the sends cannot
+            # put a stale one on a freshly verified address.
+            # The credential, the destination and the TLS choice are one
+            # coherent capture: the credential and the choice are read
+            # together under the account lock, the one every account save
+            # holds, and the destination is the listing the plex.tv ask
+            # captures for that same credential and confirms under the same
+            # lock, so a selection the verification prunes or rewrites moves
+            # only through it. The ask runs outside the lock, and the captured
+            # credential and choice are confirmed before any send, so an
+            # account transition landing between the capture and the send can
+            # neither carry its replacement token under the weaker choice the
+            # capture read nor send the captured token once the account left it
+            # behind.
+            from media_servers.plex_account import (ACCOUNT_LOCK, account_credential,
+                                                    verified_server_addresses)
+            with ACCOUNT_LOCK:
+                verify = plex_account_verify_ssl()
+                captured_token = account_credential(settings.plex)
+            server_connections, status, verified_token = verified_server_addresses(settings,
+                                                                                    persist=write_config)
+            if status == 'sign-in':
+                logger.debug("Plex rejected the stored token while listing libraries; sign in again")
                 return {'data': []}
+            if status == 'unreachable' or not server_connections:
+                if settings.plex.get('server_url'):
+                    # A selection exists but cannot be verified right now: say
+                    # so once, rather than warning on every call for an
+                    # account that has not picked a server at all.
+                    logger.warning('BAZARR could not verify the stored Plex server address; '
+                                   'no token is sent until Plex lists it')
+                return {'data': []}
+            if not verified_token or not verified_token.strip():
+                return {'data': []}
+            with ACCOUNT_LOCK:
+                # The captured account, confirmed against what is stored now:
+                # a credential or a choice that moved while plex.tv was being
+                # asked is re-read on the next call instead of being sent
+                # what an older account was captured with.
+                if (account_credential(settings.plex) != captured_token
+                        or plex_account_verify_ssl() != verify):
+                    logger.debug('The Plex account changed while its libraries were being '
+                                 'listed; no token was sent')
+                    return {'data': []}
 
             logger.debug(f"Fetching Plex libraries for server: {settings.plex.get('server_name', 'Unknown')}")
-            verify = plex_account_verify_ssl()
-            
+
             headers = {
-                'X-Plex-Token': decrypted_token,
+                'X-Plex-Token': verified_token,
                 'Accept': 'application/json'
             }
 
@@ -663,12 +710,15 @@ class PlexLibraries(Resource):
                 try:
                     logger.debug(f"Attempting to fetch libraries from connection {idx}/{len(server_connections)}: {sanitize_server_url(server_url)}")
                     
-                    # Get libraries from this server URL
+                    # Get libraries from this server URL. The token never
+                    # follows a redirect: a server that answers with one is not
+                    # the server this address was verified for.
                     lib_response = requests.get(
                         f"{server_url}/library/sections",
                         headers=headers,
                         timeout=10,
-                        verify=verify
+                        verify=verify,
+                        allow_redirects=False
                     )
 
                     if lib_response.status_code in (401, 403):
@@ -732,9 +782,10 @@ class PlexLibraries(Resource):
                         section_key = section.get('key')
                         count_response = requests.get(
                             f"{successful_server_url}/library/sections/{section_key}/all",
-                            headers={'X-Plex-Token': decrypted_token, 'Accept': 'application/json'},
+                            headers={'X-Plex-Token': verified_token, 'Accept': 'application/json'},
                             timeout=5,
-                            verify=verify
+                            verify=verify,
+                            allow_redirects=False
                         )
                         
                         actual_count = 0
@@ -762,8 +813,8 @@ class PlexLibraries(Resource):
                         'uuid': section.get('uuid', ''),
                         'updatedAt': int(section.get('updatedAt', 0)),
                         'createdAt': int(section.get('createdAt', 0)),
-                        'locations': _get_library_locations(successful_server_url, section_key, decrypted_token,
-                                                        verify)
+                        'locations': _get_library_locations(
+                            successful_server_url, section_key, verified_token, verify)
                     })
 
             logger.debug(f"Successfully retrieved {len(libraries)} movie/show libraries from Plex")
@@ -785,37 +836,40 @@ class PlexLogout(Resource):
     @api_ns_plex.doc(parser=post_request_parser)
     def post(self):
         try:
-            settings.plex.token = ""
-            settings.plex.apikey = ""
-            settings.plex.apikey_encrypted = False
-            settings.plex.ip = "127.0.0.1"
-            settings.plex.port = 32400
-            settings.plex.ssl = False
-            settings.plex.username = ""
-            settings.plex.email = ""
-            settings.plex.user_id = ""
-            settings.plex.auth_method = 'apikey'
-            settings.plex.server_machine_id = ""
-            settings.plex.server_name = ""
-            settings.plex.server_url = ""
-            settings.plex.server_local = False
-            settings.plex.encryption_key = ""
-            settings.general.use_plex = False
+            # An account transition, under the account lock like every other.
+            from media_servers.plex_account import ACCOUNT_LOCK
+            with ACCOUNT_LOCK:
+                settings.plex.token = ""
+                settings.plex.apikey = ""
+                settings.plex.apikey_encrypted = False
+                settings.plex.ip = "127.0.0.1"
+                settings.plex.port = 32400
+                settings.plex.ssl = False
+                settings.plex.username = ""
+                settings.plex.email = ""
+                settings.plex.user_id = ""
+                settings.plex.auth_method = 'apikey'
+                settings.plex.server_machine_id = ""
+                settings.plex.server_name = ""
+                settings.plex.server_url = ""
+                settings.plex.server_local = False
+                settings.plex.encryption_key = ""
+                settings.general.use_plex = False
 
-            # Signing out is a purposeful clear of the account credentials.
-            # End any decrypt failure they carry before the write, or the
-            # preserve pass would keep the recoverable ciphertext on disk
-            # and the health issue would keep asking for an account the
-            # user just signed out of (and the old token would return with
-            # the right master key after a restart).
-            from secret_store.migration import clear_decrypt_failure_path
-            for path in ("plex.token", "plex.apikey", "plex.username", "plex.email"):
-                clear_decrypt_failure_path(path)
+                # Signing out is a purposeful clear of the account credentials.
+                # End any decrypt failure they carry before the write, or the
+                # preserve pass would keep the recoverable ciphertext on disk
+                # and the health issue would keep asking for an account the
+                # user just signed out of (and the old token would return with
+                # the right master key after a restart).
+                from secret_store.migration import clear_decrypt_failure_path
+                for path in ("plex.token", "plex.apikey", "plex.username", "plex.email"):
+                    clear_decrypt_failure_path(path)
 
-            write_config()
-            # Switched off and stripped of its credential, not deleted: signing
-            # back in keeps the libraries and toggles the user chose.
-            sync_plex_account(signed_out=True)
+                write_config()
+                # Switched off and stripped of its credential, not deleted: signing
+                # back in keeps the libraries and toggles the user chose.
+                sync_plex_account(signed_out=True)
 
             return {'success': True}
         except Exception as e:
@@ -856,16 +910,20 @@ class PlexApiKey(Resource):
             # write_config(). The legacy apikey_encrypted=True flag is no
             # longer needed - leave it cleared so the legacy migration
             # path doesn't get re-triggered on reboot.
-            settings.plex.apikey = apikey
-            settings.plex.apikey_encrypted = False
-            settings.plex.auth_method = 'apikey'
-            # Signing out switched Plex off. Typing in a key is the user asking
-            # for it back, so the master switch goes with the destination.
-            settings.general.use_plex = True
+            #
+            # An account transition, under the account lock like every other.
+            from media_servers.plex_account import ACCOUNT_LOCK
+            with ACCOUNT_LOCK:
+                settings.plex.apikey = apikey
+                settings.plex.apikey_encrypted = False
+                settings.plex.auth_method = 'apikey'
+                # Signing out switched Plex off. Typing in a key is the user asking
+                # for it back, so the master switch goes with the destination.
+                settings.general.use_plex = True
 
-            write_config()
-            # Typing in a key is the same explicit "use Plex" as signing in.
-            sync_plex_account(signed_in=True)
+                write_config()
+                # Typing in a key is the same explicit "use Plex" as signing in.
+                sync_plex_account(signed_in=True)
 
             logger.debug("API key saved")
             return {'success': True, 'message': 'API key saved securely'}
@@ -886,43 +944,111 @@ class PlexTestConnection(Resource):
         args = self.post_request_parser.parse_args()
         uri = args.get('uri')
 
-        # SSRF / token-exfiltration guard (#GHSA): validate the destination
-        # BEFORE touching the token. The token must only be sent to the user's
-        # own Plex server or a Plex-owned domain, never to an arbitrary public
-        # host. Local/LAN/loopback targets stay allowed (the common case).
-        trusted_hosts = []
-        server_url = settings.plex.get('server_url') or ''
-        if server_url:
-            server_host = urlparse(
-                server_url if '://' in server_url else 'https://' + server_url
-            ).hostname
-            if server_host:
-                trusted_hosts.append(server_host)
-        plex_ip = settings.plex.get('ip') or ''
-        if plex_ip:
-            trusted_hosts.append(plex_ip)
-        if not is_trusted_plex_target(uri, trusted_hosts=trusted_hosts):
-            return {
-                'success': False,
-                'error': 'Refusing to send Plex credentials to an untrusted host'
-            }, 400
+        # Token-exfiltration guard: the credential is sent only to a stored
+        # origin, compared on scheme, host and port. Under the sign-in method
+        # that origin is a verified stored server address, one plex.tv lists
+        # for the account, and what the credential is sent to is the URI
+        # plex.tv listed for it, never the string the request typed or the
+        # string stored, since a parser can read either two ways. Under the
+        # API key method it is the origin the host, port and TLS settings
+        # build. The credential the listing was verified with is the one the
+        # request below sends.
 
-        decrypted_token = get_decrypted_token()
-        if not decrypted_token:
-            return _plex_sign_in_required('Sign in to Plex to test the connection.')
-
+        # The guard's own reads, the API key snapshot included, are part of the
+        # test: a read that raises, such as the account's instance lookup
+        # hitting a database error, is answered as the route's own failure
+        # rather than escaping its handler.
         try:
+            # The credential, the destination and the TLS choice are one
+            # coherent capture: the credential and the choice are read together
+            # under the account lock, the one every account save holds, and the
+            # destination is the listing the plex.tv verification captures for
+            # that same credential and confirms under the same lock, so a
+            # selection the verification prunes or rewrites moves only through
+            # it. The verification runs outside the lock, and the captured
+            # credential and choice are confirmed before the send, so an
+            # account transition landing between the capture and the send can
+            # neither carry its replacement token under the weaker choice the
+            # capture read nor send the captured token once the account left it
+            # behind. The API key method takes its own snapshot below, under the
+            # same lock.
+            from media_servers.plex_account import ACCOUNT_LOCK, account_credential
+            with ACCOUNT_LOCK:
+                account_verify = plex_account_verify_ssl()
+                captured_token = account_credential(settings.plex)
+            if settings.plex.get('auth_method', 'apikey') == 'oauth':
+                if not get_decrypted_token():
+                    return _plex_sign_in_required('Sign in to Plex to test the connection.')
+                from media_servers.plex_account import verified_server_addresses
+                addresses, status, verified_token = verified_server_addresses(settings,
+                                                                              persist=write_config)
+                if status == 'sign-in':
+                    return _plex_sign_in_required('Sign in to Plex again to test the connection.')
+                if status == 'unreachable':
+                    return {'success': False,
+                            'error': 'Plex could not be reached to verify the server address'}, 400
+                if not addresses:
+                    return {'success': False,
+                            'error': 'Plex does not list a server address for the signed-in account; '
+                                     'choose the server again'}, 400
+                listed = {normalized_origin(address): address for address in addresses}
+                origin = normalized_origin(uri)
+                if origin is None or origin not in listed:
+                    return {
+                        'success': False,
+                        'error': 'Refusing to send Plex credentials to an untrusted host'
+                    }, 400
+                uri = listed[origin]
+                with ACCOUNT_LOCK:
+                    # The captured account, confirmed against what is stored
+                    # now: a credential or a choice that moved while plex.tv
+                    # was being asked makes the test fail rather than send
+                    # what an older account was captured with.
+                    if (account_credential(settings.plex) != captured_token
+                            or plex_account_verify_ssl() != account_verify):
+                        return {'success': False,
+                                'error': 'The Plex account changed while the connection was '
+                                         'being tested. Test it again.'}, 400
+            else:
+                # The trusted origin is the configured address itself, normalized
+                # the same way the submitted one is, so the two sides agree on
+                # every spelling of the host, a bracketed IPv6 literal included.
+                # The method, the credential, that address and the TLS choice are
+                # one snapshot under the account lock, the one every account save
+                # holds, so a method switch or an address save landing mid-test
+                # cannot make the credential answer for the origin the earlier
+                # settings checked: the send carries the snapshot's own credential
+                # to its own origin, or nothing at all once the account it
+                # captured is no longer the API key one.
+                from media_servers.plex_account import ACCOUNT_LOCK, account_url
+                with ACCOUNT_LOCK:
+                    auth_method = settings.plex.get('auth_method', 'apikey')
+                    verified_token = settings.plex.get('token' if auth_method == 'oauth'
+                                                       else 'apikey') or None
+                    trusted = normalized_origin(account_url(settings.plex))
+                    account_verify = plex_account_verify_ssl()
+                if auth_method != 'apikey' or trusted is None or normalized_origin(uri) != trusted:
+                    return {
+                        'success': False,
+                        'error': 'Refusing to send Plex credentials to an untrusted host'
+                    }, 400
+                if not verified_token:
+                    return _plex_sign_in_required('Sign in to Plex to test the connection.')
+
             headers = {
-                'X-Plex-Token': decrypted_token,
+                'X-Plex-Token': verified_token,
                 'Accept': 'application/json',
                 'X-Plex-Client-Identifier': generate_client_id()
             }
 
+            # No redirects are followed: a server that answers with one is not
+            # the server this address was verified for.
             response = requests.get(
                 f"{uri}/identity",
                 headers=headers,
                 timeout=3,
-                verify=plex_account_verify_ssl()
+                verify=account_verify,
+                allow_redirects=False
             )
 
             if response.status_code == 200:
@@ -977,31 +1103,87 @@ class PlexSelectServer(Resource):
         connection_local = args.get('local', 'false').lower() == 'true'
         connections = args.get('connections', [])
 
-        settings.plex.server_machine_id = machine_identifier
-        settings.plex.server_name = name
-        settings.plex.server_url = connection_uri
-        settings.plex.server_local = connection_local
-        # Store all connection URIs for round-robin fallback
-        settings.plex.server_connections = connections if connections else [connection_uri]
-        write_config()
-        # A different server is a different destination URL. The token is
-        # unchanged and is deliberately not resent, and switching servers is not
-        # itself a sign-in, so it leaves the instance toggle alone: the PIN step
-        # above already switched the row back on, and a first sign-in creates
-        # the row here already enabled.
-        sync_plex_account()
+        # The sign-in token cannot be typed again, so a new server address is
+        # accepted only when plex.tv itself lists it for this server: the token
+        # never follows an address the caller just typed. Every address the
+        # selection would store is checked, and nothing is stored when plex.tv
+        # cannot be reached. What is stored is the URI plex.tv listed, never
+        # the caller's string, so a URL one parser reads differently from
+        # another cannot name a listed host while connecting elsewhere.
+        #
+        # The pick is verified for the account it was read from, and a sign-in
+        # landing while plex.tv answers moves it to the account there now: the
+        # writes run under the account lock, and the pick retries against the
+        # new credential rather than storing an older account's choice beside
+        # it.
+        from media_servers.plex_account import (ACCOUNT_LOCK, SIGN_IN_AGAIN,
+                                                plex_tv_server_origins,
+                                                remember_listed_origins)
+        if not isinstance(connection_uri, str) or not connection_uri:
+            return {'error': 'A server address is required to select a server',
+                    'error_code': 'server_not_listed'}, 400
+        if any(not isinstance(url, str) for url in (connections or [])):
+            return {'error': 'Plex did not list every connection for the selected server',
+                    'error_code': 'server_not_listed'}, 400
+        unique_addresses = []
+        for url in (connection_uri, *(connections or [])):
+            if url and url not in unique_addresses:
+                unique_addresses.append(url)
+        for _attempt in range(3):
+            token = get_decrypted_token()
+            if not token:
+                return _plex_sign_in_required('Sign in to Plex to choose a server.')
+            listed = plex_tv_server_origins(token, machine_identifier)
+            if listed is SIGN_IN_AGAIN:
+                return _plex_sign_in_required('Sign in to Plex again to choose a server.')
+            if listed is None:
+                return {'error': 'Plex could not be reached to verify the server address',
+                        'error_code': 'plex_unreachable'}, 400
+            origins, uris = listed
+            missing = [url for url in unique_addresses if normalized_origin(url) not in origins]
+            if not unique_addresses or missing:
+                return {'error': 'Plex does not list this address for the selected server',
+                        'error_code': 'server_not_listed'}, 400
+            with ACCOUNT_LOCK:
+                if get_decrypted_token() != token:
+                    # A newer account signed in under the ask, so its own pick,
+                    # already stored by its own flow, is not overwritten by
+                    # this one. The pick is verified for the account there now.
+                    continue
+                # Store the URI plex.tv returned for each connection, not the string
+                # the request typed.
+                stored_uri = uris[normalized_origin(connection_uri)]
+                stored_connections = [uris[normalized_origin(url)] for url in unique_addresses]
+                remember_listed_origins('oauth', token, machine_identifier, listed)
 
-        return {
-            'data': {
-                'success': True,
-                'server': {
-                    'machineIdentifier': machine_identifier,
-                    'name': name,
-                    'url': settings.plex.server_url,
-                    'local': settings.plex.server_local
+                settings.plex.server_machine_id = machine_identifier
+                settings.plex.server_name = name
+                settings.plex.server_url = stored_uri
+                settings.plex.server_local = connection_local
+                # Store all connection URIs for round-robin fallback
+                settings.plex.server_connections = stored_connections
+                write_config()
+                # A different server is a different destination URL. The token is
+                # unchanged and is deliberately not resent, and switching servers is not
+                # itself a sign-in, so it leaves the instance toggle alone: the PIN step
+                # above already switched the row back on, and a first sign-in creates
+                # the row here already enabled.
+                sync_plex_account()
+
+                return {
+                    'data': {
+                        'success': True,
+                        'server': {
+                            'machineIdentifier': machine_identifier,
+                            'name': name,
+                            'url': settings.plex.server_url,
+                            'local': settings.plex.server_local
+                        }
+                    }
                 }
-            }
-        }
+        return {'error': 'The Plex account changed while the server was being chosen; '
+                         'choose the server again',
+                'error_code': 'account_changed'}, 400
 
 
 @api_ns_plex.route('plex/webhook/create')
@@ -1266,7 +1448,7 @@ class PlexAutopulseConfig(Resource):
 
             # Use config generator from utilities (handles OAuth and decryption internally)
             from utilities.autopulse_webhook import generate_autopulse_config
-            config = generate_autopulse_config(decrypted_token)
+            config = generate_autopulse_config()
             
             if config:
                 return {

@@ -1801,7 +1801,26 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
         _persist_plugin_secret_paths(state, provider)
         return dict(provider)
 
-    provider = mutate_state(update_installation)
+    if config is None:
+        provider = mutate_state(update_installation)
+    else:
+        # A config save follows the same destination rule the settings save
+        # follows, and its check and its write share the boundary the
+        # settings save commits under, the config lock: the check re-reads
+        # the two stores inside it, so a settings save cannot land a token
+        # between this check and this write, and this save cannot land a move
+        # between the settings save's check and its write either. The state
+        # lock is taken first, because a mutation under it reaches the
+        # enabled-providers sync, which takes the config lock itself: the
+        # other order would let a config save and an enable toggle wait on
+        # each other's locks.
+        from app.config import refuse_unverified_provider_hub_config_move
+        from discover.metadata import CONFIG_LOCK
+
+        from .state import state_write_lock
+        with state_write_lock(), CONFIG_LOCK:
+            refuse_unverified_provider_hub_config_move(provider_id, config)
+            provider = mutate_state(update_installation)
     if provider is None:
         return None
     if config is not None:

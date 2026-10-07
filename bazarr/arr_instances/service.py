@@ -207,6 +207,85 @@ def whole_number(value):
     return int(value)
 
 
+# A stored key is never used with a destination the request changed: moving an
+# instance means typing its API key again.
+REENTER_KEY = "Re-enter the key to use a different address"
+
+
+def _normalized_base_url(value):
+    """The base URL the way the client builds it: the leading slash added and
+    the trailing one dropped, the same normalization the edit form applies, so
+    '/sonarr' and '/sonarr/' are one path everywhere a destination is
+    compared."""
+    base = value or "/"
+    if not base.startswith("/"):
+        base = f"/{base}"
+    if base.endswith("/"):
+        base = base[:-1]
+    return base
+
+
+def _destination_changed(args, row, *, probe=False):
+    """Whether these request values move the instance away from its stored address.
+
+    The comparison is on the connection each side would actually use, the
+    writer's own values for a save and the probe's own fallbacks for a test,
+    so a value that falls back to what is stored is not a change, and neither
+    is a field the request leaves out. ``ssl`` counts either way, and so does
+    ``verify_ssl`` when it turns certificate verification off: turning it back
+    on only makes the connection harder to sit in front of.
+    """
+    ip = args.get("ip")
+    if ip is not None:
+        effective_ip = row.ip if (probe and not ip) else ip
+        if effective_ip != (row.ip or ""):
+            return True
+    port = args.get("port")
+    if port is not None:
+        try:
+            effective_port = int(port)
+        except (TypeError, ValueError):
+            return True  # not a number: a value the writer cannot keep
+        if effective_port != int(row.port or 0):
+            return True
+    base_url = args.get("base_url")
+    if base_url is not None:
+        if probe and not base_url:
+            # The probe keeps the saved prefix when its override is empty,
+            # the same fallback the client it builds applies, so an empty
+            # submission is the saved connection and not a move to the root.
+            effective_base_url = row.base_url or "/"
+        else:
+            effective_base_url = base_url or "/"
+        # The client sends the path with its leading slash added and its
+        # trailing one dropped, so a stored spelling that only differs in
+        # those reaches the same endpoint: not a move.
+        if (_normalized_base_url(effective_base_url)
+                != _normalized_base_url(row.base_url or "/")):
+            return True
+    ssl = args.get("ssl")
+    if ssl is not None and bool(ssl) != bool(row.ssl):
+        return True
+    verify_ssl = args.get("verify_ssl")
+    if verify_ssl is not None and bool(row.verify_ssl) and not bool(verify_ssl):
+        return True
+    return False
+
+
+def _whole_or_none(value):
+    """int(value) the way the route parser reads a port or a timeout.
+
+    A direct service call can carry the raw form value, so this reads the same
+    values the parser reads: a whole number, never a boolean, and a float only
+    when it is whole.
+    """
+    if isinstance(value, bool):
+        raise ValueError("must be a whole number")
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError("must be a whole number")
+    return int(value)
+
+
 def _connection_arg_error(args):
     """Return a validation message for out-of-range connection args, else None.
 
@@ -215,11 +294,21 @@ def _connection_arg_error(args):
     A boolean is refused too, since Python counts True as 1.
     """
     port = args.get("port")
-    if port is not None and (isinstance(port, bool) or not (1 <= port <= 65535)):
-        return "port must be between 1 and 65535"
+    if port is not None:
+        try:
+            number = _whole_or_none(port)
+        except (TypeError, ValueError):
+            return "port must be between 1 and 65535"
+        if not 1 <= number <= 65535:
+            return "port must be between 1 and 65535"
     timeout = args.get("http_timeout")
-    if timeout is not None and (isinstance(timeout, bool) or timeout <= 0):
-        return "http_timeout must be a positive number of seconds"
+    if timeout is not None:
+        try:
+            number = _whole_or_none(timeout)
+        except (TypeError, ValueError):
+            return "http_timeout must be a positive number of seconds"
+        if number <= 0:
+            return "http_timeout must be a positive number of seconds"
     return None
 
 
@@ -279,6 +368,12 @@ def test_connection_for_instance(session, instance_id, args=None, http_get=None)
     arg_error = _connection_arg_error(args)
     if arg_error:
         return {"ok": False, "error": "invalid", "message": arg_error}, 400
+    if row.api_key and _destination_changed(args, row, probe=True):
+        # The stored key never follows an address the caller just typed. This
+        # route carries no key by design, so a test of a moved address is
+        # refused outright and the caller tests again with the key typed in.
+        return {"ok": False, "error": "reenter_key",
+                "message": REENTER_KEY}, 200
 
     def pick(key, fallback):
         value = args.get(key)
@@ -389,75 +484,96 @@ def update_instance(session, instance_id, args):
     arg_error = _connection_arg_error(args)
     if arg_error:
         return {"error": "invalid", "message": arg_error}, 400
-    repo = ArrInstanceRepository(session)
-    existing = repo.get(instance_id)
-    if existing is None:
-        return {"error": "not_found"}, 404
-    if existing.kind == 'sportarr':
-        from sportarr.db import needs_sports_transaction, sports_transaction
-        if needs_sports_transaction(session):
-            with sports_transaction(session) as transaction:
-                result = update_instance(transaction, instance_id, args)
-                if result[1] >= 400:
-                    transaction.rollback()
-            session.expire_all()
-            return result
+    # The check and the write share the boundary the settings save commits
+    # under, the account and config locks it holds, and the row is re-read
+    # inside it: a save that paused between its check and its write cannot
+    # land a move a second save's stored key enables, because the re-read
+    # sees the key the second save stored in the window, and the refusal
+    # names the same re-enter message the sequential path returns.
+    from discover.metadata import CONFIG_LOCK
+    from media_servers.plex_account import ACCOUNT_LOCK
+    with ACCOUNT_LOCK, CONFIG_LOCK:
+        repo = ArrInstanceRepository(session)
+        existing = repo.get(instance_id)
+        if existing is None:
+            return {"error": "not_found"}, 404
+        if existing.kind == 'sportarr':
+            from sportarr.db import needs_sports_transaction, sports_transaction
+            if needs_sports_transaction(session):
+                with sports_transaction(session) as transaction:
+                    result = update_instance(transaction, instance_id, args)
+                    if result[1] >= 400:
+                        transaction.rollback()
+                session.expire_all()
+                return result
 
-    kwargs = {}
-    if 'path_mappings' in args:
-        from utilities.path_mappings import validate_sports_mappings
-        try:
-            if existing.kind != 'sportarr':
-                raise ValueError('path_mappings require a Sportarr instance')
-            mappings = validate_sports_mappings(args['path_mappings'])
-            kwargs['path_mappings'] = json.dumps(mappings) if mappings else None
-        except ValueError as exc:
-            return {'error': 'invalid', 'message': str(exc)}, 400
-    for field in ("name", "ip", "port", "base_url", "ssl", "verify_ssl",
-                  "http_timeout", "enabled", "is_default"):
-        if args.get(field) is not None:
-            kwargs[field] = args[field]
-    if args.get("clear_api_key"):
-        kwargs["clear_api_key"] = True
-    elif args.get("api_key") is not None:
-        kwargs["api_key"] = args["api_key"]
+        kwargs = {}
+        if 'path_mappings' in args:
+            from utilities.path_mappings import validate_sports_mappings
+            try:
+                if existing.kind != 'sportarr':
+                    raise ValueError('path_mappings require a Sportarr instance')
+                mappings = validate_sports_mappings(args['path_mappings'])
+                kwargs['path_mappings'] = json.dumps(mappings) if mappings else None
+            except ValueError as exc:
+                return {'error': 'invalid', 'message': str(exc)}, 400
+        for field in ("name", "ip", "port", "base_url", "ssl", "verify_ssl",
+                      "http_timeout", "enabled", "is_default"):
+            if args.get(field) is not None:
+                kwargs[field] = args[field]
+        if args.get("clear_api_key"):
+            kwargs["clear_api_key"] = True
+        elif args.get("api_key") is not None:
+            kwargs["api_key"] = args["api_key"]
 
-    if args.get("subtitle_settings") is not None:
+        if args.get("subtitle_settings") is not None:
+            try:
+                ss_blob = validate_subtitle_settings(args.get("subtitle_settings"))
+            except ValueError as exc:
+                return {"error": "invalid", "message": str(exc)}, 400
+            kwargs["options"] = merge_subtitle_settings_into_options(existing.options, ss_blob)
+
+        if args.get("media_defaults") is not None:
+            try:
+                md_blob = validate_media_defaults(
+                    args.get("media_defaults"), known_profile_ids=_known_profile_ids(session))
+            except ValueError as exc:
+                return {"error": "invalid", "message": str(exc)}, 400
+            # Merge onto whatever the subtitle_settings edit above already produced,
+            # so a request carrying both blobs does not drop one of them.
+            kwargs["options"] = merge_media_defaults_into_options(
+                kwargs.get("options", existing.options), md_blob)
+
+        if args.get('sports_settings') is not None:
+            from sportarr.settings import merge_sports_settings
+            try:
+                if existing.kind != 'sportarr':
+                    raise ValueError('sports_settings require a Sportarr instance')
+                kwargs['options'] = merge_sports_settings(
+                    kwargs.get('options', existing.options), args['sports_settings'])
+            except ValueError as exc:
+                return {'error': 'invalid', 'message': str(exc)}, 400
+
+        # A save follows the same rule as a test: the stored key never follows an
+        # address the request changed, so moving the instance needs the key typed
+        # again rather than silently keeping it. The decision reads the same flags
+        # the writer acts on, so a replaced key (any non-empty value) and an
+        # explicit clear both move the address with no stored secret travelling,
+        # while an omitted or empty key keeps the stored one and is refused. It
+        # runs after the validations, so a body that cannot be saved anyway is
+        # answered as invalid rather than as a destination refusal.
+        if (existing.api_key and _destination_changed(args, existing)
+                and not (args.get("clear_api_key") or args.get("api_key"))):
+            return {"error": "reenter_key", "message": REENTER_KEY}, 400
+
         try:
-            ss_blob = validate_subtitle_settings(args.get("subtitle_settings"))
+            row = repo.update(instance_id, **kwargs)
         except ValueError as exc:
             return {"error": "invalid", "message": str(exc)}, 400
-        kwargs["options"] = merge_subtitle_settings_into_options(existing.options, ss_blob)
-
-    if args.get("media_defaults") is not None:
-        try:
-            md_blob = validate_media_defaults(
-                args.get("media_defaults"), known_profile_ids=_known_profile_ids(session))
-        except ValueError as exc:
-            return {"error": "invalid", "message": str(exc)}, 400
-        # Merge onto whatever the subtitle_settings edit above already produced,
-        # so a request carrying both blobs does not drop one of them.
-        kwargs["options"] = merge_media_defaults_into_options(
-            kwargs.get("options", existing.options), md_blob)
-
-    if args.get('sports_settings') is not None:
-        from sportarr.settings import merge_sports_settings
-        try:
-            if existing.kind != 'sportarr':
-                raise ValueError('sports_settings require a Sportarr instance')
-            kwargs['options'] = merge_sports_settings(
-                kwargs.get('options', existing.options), args['sports_settings'])
-        except ValueError as exc:
-            return {'error': 'invalid', 'message': str(exc)}, 400
-
-    try:
-        row = repo.update(instance_id, **kwargs)
-    except ValueError as exc:
-        return {"error": "invalid", "message": str(exc)}, 400
-    except IntegrityError:
-        session.rollback()
-        return {"error": "conflict", "message": _CONFLICT_MESSAGE}, 409
-    return to_safe_dict(row), 200
+        except IntegrityError:
+            session.rollback()
+            return {"error": "conflict", "message": _CONFLICT_MESSAGE}, 409
+        return to_safe_dict(row), 200
 
 
 def delete_instance(session, instance_id, remove_library=False):
