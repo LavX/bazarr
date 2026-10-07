@@ -300,27 +300,219 @@ def _parse_github_file_url(url: str) -> tuple[str, str, str, str]:
     return owner, repo, ref, "/".join(path_parts)
 
 
-def _resolve_github_ref(owner: str, repo: str, ref: str) -> str:
+# The git smart-HTTP ref advertisement the catalog refresh resolves refs
+# against: protocol v0, one GET, answered unauthenticated and outside the
+# GitHub REST quota. The bounds are constants, not settings.
+_GIT_ADVERTISEMENT_TIMEOUT = 20
+_GIT_ADVERTISEMENT_MAX_BYTES = 10 * 1024 * 1024
+_GIT_ADVERTISEMENT_CHUNK_BYTES = 64 * 1024
+_PKT_LINE_MAX_PAYLOAD = 65516
+_GIT_ADVERTISEMENT_CONTENT_TYPE = "application/x-git-upload-pack-advertisement"
+_PKT_LINE_PREFIX_RE = re.compile(b"^[0-9a-f]{4}$")
+
+
+_STREAMED_ERROR_BODY_LIMIT = 8193
+
+
+def _retain_streamed_error_body(response) -> None:
+    """Keep a bounded, decoded slice of a streamed error body, then close.
+
+    The refresh's error mapper reads the body to tell a secondary rate limit
+    from a plain access denial, but a streamed response that is closed unread
+    has none, and the raw stream is content-encoded, so its undecoded bytes
+    are not the body yet. Retain up to one byte over the mapper's 8,192-byte
+    size boundary through iter_content, which decodes, so both the size
+    distinction and the message survive the close. A chunked transfer yields
+    one HTTP chunk at a time, so the decoded chunks are accumulated until the
+    limit or end of stream, whichever comes first."""
+    try:
+        read = getattr(response, "iter_content", None)
+        if callable(read):
+            retained = bytearray()
+            for chunk in read(_STREAMED_ERROR_BODY_LIMIT):
+                retained += chunk
+                if len(retained) >= _STREAMED_ERROR_BODY_LIMIT:
+                    break
+            response._content = bytes(retained[:_STREAMED_ERROR_BODY_LIMIT])
+        else:
+            response._content = b""
+    except Exception:
+        response._content = b""
+    finally:
+        close = getattr(response, "close", None)
+        if callable(close):
+            close()
+
+
+def _fetch_git_ref_advertisement(owner: str, repo: str) -> bytes:
+    """The v0 ref advertisement body of ``owner/repo``, fail-closed and
+    size-capped while it is read, so an oversized body stops the download."""
+    response = requests.get(
+        f"https://github.com/{owner}/{repo}/info/refs?service=git-upload-pack",
+        timeout=_GIT_ADVERTISEMENT_TIMEOUT,
+        stream=True,
+    )
+    try:
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError:
+            _retain_streamed_error_body(response)
+            raise
+        headers = getattr(response, "headers", None) or {}
+        media_type = str(headers.get("Content-Type", "")).split(";", 1)[0].strip().lower()
+        if media_type != _GIT_ADVERTISEMENT_CONTENT_TYPE:
+            raise CatalogSourceError("GitHub did not return a git ref advertisement")
+        content_length = str(headers.get("Content-Length", "")).strip()
+        if content_length.isdigit() and int(content_length) > _GIT_ADVERTISEMENT_MAX_BYTES:
+            raise CatalogSourceError("GitHub's ref advertisement is too large to read")
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in response.iter_content(chunk_size=_GIT_ADVERTISEMENT_CHUNK_BYTES):
+            total += len(chunk)
+            if total > _GIT_ADVERTISEMENT_MAX_BYTES:
+                raise CatalogSourceError("GitHub's ref advertisement is too large to read")
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        close = getattr(response, "close", None)
+        if callable(close):
+            close()
+
+
+def _parse_git_ref_advertisement(body: bytes) -> dict[str, str]:
+    """The branch and tag refs a v0 ref advertisement lists, by full name.
+
+    A pkt-line stream in this exact shape: the service banner line, a flush,
+    zero or more ``<sha> <ref>`` lines (the first carrying the capability
+    list after a NUL), and one closing flush with nothing after it. Each
+    line's 4-hex length prefix is four literal hex digits. An annotated tag
+    line is followed by the line of its peeled commit. Only ``refs/heads/``
+    and ``refs/tags/`` are read; every other namespace a real repository
+    advertises, such as ``refs/pull/``, is skipped. The one line an empty
+    repository advertises, the all-zero sha with the capabilities peel, is
+    skipped, so the resolver reports the missing branch. Anything else fails
+    closed.
+    """
+    if len(body) > _GIT_ADVERTISEMENT_MAX_BYTES:
+        raise CatalogSourceError("GitHub's ref advertisement is too large to read")
+    refs: dict[str, str] = {}
+    peeled: dict[str, str] = {}
+    empty_repository = False
+    # banner: before the service line; banner_flush: between the service line
+    # and its flush; refs: ref lines; terminated: after the closing flush.
+    stage = "banner"
+    previous_name: str | None = None
+    offset = 0
+    while offset < len(body):
+        if len(body) - offset < 4:
+            raise CatalogSourceError("GitHub sent a truncated ref advertisement")
+        prefix = body[offset:offset + 4]
+        if not _PKT_LINE_PREFIX_RE.match(prefix):
+            raise CatalogSourceError("GitHub sent a malformed ref advertisement")
+        length = int(prefix, 16)
+        offset += 4
+        if length == 0:  # A flush packet.
+            if stage == "banner" or stage == "terminated":
+                raise CatalogSourceError("GitHub sent a malformed ref advertisement")
+            stage = "refs" if stage == "banner_flush" else "terminated"
+            continue
+        if stage == "terminated":
+            raise CatalogSourceError("GitHub sent a malformed ref advertisement")
+        if length < 4 or length - 4 > _PKT_LINE_MAX_PAYLOAD:
+            raise CatalogSourceError("GitHub sent a malformed ref advertisement")
+        if offset + length - 4 > len(body):
+            raise CatalogSourceError("GitHub sent a truncated ref advertisement")
+        line = body[offset:offset + length - 4].rstrip(b"\n")
+        offset += length - 4
+        if empty_repository:
+            # The empty-repository marker must be the only ref line.
+            raise CatalogSourceError("GitHub sent a malformed ref advertisement")
+        if line.startswith(b"# service="):
+            if stage != "banner" or line != b"# service=git-upload-pack":
+                raise CatalogSourceError("GitHub sent a malformed ref advertisement")
+            stage = "banner_flush"
+            continue
+        if stage != "refs":
+            # An ordinary ref line belongs after the service banner and its
+            # flush; the protocol's first pkt-line is the service banner.
+            raise CatalogSourceError("GitHub sent a malformed ref advertisement")
+        ref_part, _separator, _capabilities = line.partition(b"\0")
+        sha, _space, name = ref_part.partition(b" ")
+        try:
+            sha_text = sha.decode("ascii")
+            name_text = name.decode("utf-8")
+        except UnicodeDecodeError:
+            raise CatalogSourceError("GitHub sent a malformed ref advertisement") from None
+        if not _is_commit_sha(sha_text) or not name_text:
+            raise CatalogSourceError("GitHub sent a malformed ref advertisement")
+        if name_text.endswith("^{}"):
+            if (sha_text == "0" * 40 and name_text == "capabilities^{}"
+                    and previous_name is None and not refs and not peeled):
+                # git's documented advertisement of a repository with no
+                # refs: one line, the all-zero sha and the capabilities
+                # peel. No branch is advertised, so the resolver reports the
+                # missing ref instead of blaming GitHub's framing.
+                empty_repository = True
+                continue
+            # The peeled commit of the annotated tag on the line before it.
+            target = name_text[:-3]
+            if (previous_name != target or not target.startswith("refs/tags/")
+                    or target not in refs):
+                raise CatalogSourceError("GitHub sent a malformed ref advertisement")
+            if target in peeled and peeled[target] != sha_text.lower():
+                raise CatalogSourceError(
+                    f"GitHub advertised '{target}' peeled at two different commits")
+            peeled[target] = sha_text.lower()
+            continue
+        previous_name = name_text
+        if not (name_text.startswith("refs/heads/") or name_text.startswith("refs/tags/")):
+            continue
+        if name_text in refs and refs[name_text] != sha_text.lower():
+            raise CatalogSourceError(f"GitHub advertised '{name_text}' at two different commits")
+        refs[name_text] = sha_text.lower()
+    if stage != "terminated":
+        raise CatalogSourceError("GitHub sent a truncated ref advertisement")
+    return {name: peeled.get(name, sha) for name, sha in refs.items()}
+
+
+def _resolve_github_ref(
+    owner: str, repo: str, ref: str, advertisement_sink=None
+) -> str:
     if len(ref) == 40 and all(char in "0123456789abcdefABCDEF" for char in ref):
         return ref.lower()
-    response = requests.get(
-        f"https://api.github.com/repos/{owner}/{repo}/commits/{ref}",
-        timeout=20,
+    refs = _parse_git_ref_advertisement(_fetch_git_ref_advertisement(owner, repo))
+    if advertisement_sink is not None:
+        advertisement_sink(owner, repo, refs)
+    for name in (f"refs/heads/{ref}", f"refs/tags/{ref}"):
+        if name in refs:
+            return refs[name]
+    raise CatalogSourceError(
+        f"GitHub did not advertise '{ref}' as a branch or tag of {owner}/{repo}. "
+        "Use a full commit SHA, a branch name or a tag name."
     )
-    response.raise_for_status()
-    commit = response.json().get("sha")
-    if not isinstance(commit, str) or len(commit) != 40:
-        raise CatalogSourceError("GitHub did not return an immutable commit SHA")
-    return commit.lower()
 
 
 def _fetch_github_catalog(
-    url: str, override_ref: str | None = None
-) -> tuple[dict[str, Any], str]:
+    url: str, override_ref: str | None = None, unchanged_commit: str | None = None,
+    advertisement_sink=None,
+) -> tuple[dict[str, Any] | None, str]:
+    """The catalog ``url`` serves and the commit it was resolved to. The
+    catalog is None when the resolved commit equals ``unchanged_commit``:
+    raw at a pinned commit is immutable, so there is nothing to fetch.
+    ``advertisement_sink`` is told the parsed advertisement when one was
+    read, so a caller that needs the same advertisement does not fetch it
+    again."""
     owner, repo, ref, path = _parse_github_file_url(url)
     if override_ref:
         ref = override_ref
-    commit = _resolve_github_ref(owner, repo, ref)
+    commit = _resolve_github_ref(owner, repo, ref, advertisement_sink=advertisement_sink)
+    if (unchanged_commit is not None and commit == unchanged_commit.lower()
+            and not _is_commit_sha(ref)):
+        # The skip is the ADVERTISED sha equaling the stored commit. A 40-hex
+        # ref resolves through the short-circuit without an advertisement, so
+        # a source pinned to a commit still fetches raw, and a deleted,
+        # renamed or private repository keeps showing at refresh.
+        return None, commit
     raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{commit}/{path}"
     response = requests.get(raw_url, timeout=30)
     response.raise_for_status()
@@ -343,6 +535,18 @@ class _NoAnswer(Exception):
     Not an answer either way: no trust is granted or taken on it."""
 
 
+def _github_verification_failure_reason(status: Any) -> str:
+    """The reason a trust-verification question went unanswered, for the HTTP
+    ``status`` GitHub answered with (None when there was no answer to read,
+    or the body could not be parsed). One mapping serves the REST compare
+    calls and the advertisement read, so the two cannot drift apart."""
+    if status in (403, 429):
+        return "could not verify: rate limited"
+    if status:
+        return f"could not verify: GitHub returned HTTP {status}"
+    return "could not verify: GitHub could not be reached"
+
+
 def _github_api(path: str) -> Any:
     """GET ``api.github.com/repos/<path>``. None is GitHub's 404: it does not know
     the commit, which is an answer, unlike any other failure."""
@@ -354,11 +558,9 @@ def _github_api(path: str) -> Any:
         status = getattr(getattr(error, "response", None), "status_code", None)
         if status == 404:
             return None
-        if status in (403, 429):
-            raise _NoAnswer("could not verify: rate limited") from error
-        raise _NoAnswer(f"could not verify: GitHub returned HTTP {status}") from error
+        raise _NoAnswer(_github_verification_failure_reason(status)) from error
     except (requests.exceptions.RequestException, ValueError) as error:
-        raise _NoAnswer("could not verify: GitHub could not be reached") from error
+        raise _NoAnswer(_github_verification_failure_reason(None)) from error
 
 
 def _is_commit_sha(value: Any) -> bool:
@@ -397,22 +599,48 @@ class _OfficialAncestry:
         self._cache = cache
         self._heads_read = False
         self._heads_failure: str | None = None
+        self._noted_refs: dict[str, str] | None = None
+
+    def note_advertisement(self, owner: str, repo: str, refs: dict[str, str]) -> None:
+        """Keep a successfully parsed advertisement of the official catalog
+        repository for this refresh, so the installed-trust recheck does not
+        fetch the same advertisement again. Any other repository's refs are
+        ignored."""
+        if f"{owner}/{repo}" == OFFICIAL_CATALOG_REPO and not self._heads_read:
+            self._noted_refs = refs
 
     def _read_heads(self) -> None:
         if self._heads_read:
             return
         self._heads_read = True
-        try:
-            refs = _github_api(f"{OFFICIAL_CATALOG_REPO}/git/matching-refs/heads/")
-        except _NoAnswer as error:
-            self._heads_failure = str(error)
-            return
+        refs = self._noted_refs
+        if refs is None:
+            try:
+                owner, repo = OFFICIAL_CATALOG_REPO.split("/", 1)
+                refs = _parse_git_ref_advertisement(_fetch_git_ref_advertisement(owner, repo))
+            except requests.exceptions.HTTPError as error:
+                status = getattr(getattr(error, "response", None), "status_code", None)
+                if status in (401, 404):
+                    # github.com answers an anonymous request for a missing or
+                    # private repository with 401, so it lists no branches,
+                    # like an advertisement without them.
+                    pass
+                else:
+                    self._heads_failure = _github_verification_failure_reason(status)
+                    return
+            except (requests.exceptions.RequestException, CatalogSourceError):
+                # A body that could not be read or parsed maps to the same
+                # unreachable wording the REST path gave a body it could not
+                # parse, so the reason strings keep their base meaning.
+                self._heads_failure = _github_verification_failure_reason(None)
+                return
+            if refs is None:
+                refs = {}
         heads: dict[str, str] = {}
-        for ref in refs if isinstance(refs, list) else []:
-            name = str((ref or {}).get("ref") or "").removeprefix("refs/heads/")
-            sha = ((ref or {}).get("object") or {}).get("sha")
-            if name in _TRUSTED_BRANCHES and _is_commit_sha(sha):
-                heads[name] = sha.lower()
+        for branch in _TRUSTED_BRANCHES:
+            sha = refs.get(f"refs/heads/{branch}")
+            if _is_commit_sha(sha):
+                heads[branch] = sha.lower()
         if set(heads) != set(_TRUSTED_BRANCHES):
             # Both branches always exist, so an answer without them is not one.
             self._heads_failure = "could not verify: GitHub did not list main and beta"
@@ -506,6 +734,10 @@ def _catalog_source_error_message(error: Exception) -> str:
             return f"GitHub temporarily limited catalog requests. {recovery} Your cached catalog is unchanged."
         if status_code == 403:
             return "GitHub denied access to this catalog source. Check the repository URL and access permissions."
+        if status_code in (401, 404):
+            # github.com answers an anonymous request for a missing or private
+            # repository with 401, so it means the same as a 404 here.
+            return "GitHub does not have this catalog source. Check the repository URL and that its catalog file exists."
         if status_code:
             return f"GitHub returned HTTP {status_code} while refreshing this catalog source."
         return "GitHub returned an error while refreshing this catalog source."
@@ -646,6 +878,11 @@ def update_catalog_source(name: str, dev_ref=_UNSET) -> dict[str, Any] | None:
                 return None, None
             previous_dev_ref = source.get("dev_ref")
             if dev_ref is not _UNSET:
+                # The stored commit stays: update_catalog_source only takes a
+                # dev_ref, so the URL cannot change, and raw content at a
+                # fixed commit never changes, so an unchanged-commit skip
+                # stays correct for a new ref that resolves to the same one.
+                # The official trust input (previous_commit) keeps its value.
                 source["dev_ref"] = validated_dev_ref
             return dict(source), previous_dev_ref
 
@@ -1000,20 +1237,70 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                 sources_count += 1
                 source["last_attempted_at"] = now
                 previous_commit = source.get("resolved_commit")
+                source_id = source.get("id") or source["name"]
+                is_official = source_key == OFFICIAL_CATALOG_SOURCE_ID
+                # An unchanged commit means an unchanged catalog: the refresh
+                # can end after the advertisement. A skip needs the source's
+                # entries to exist, else there is nothing to keep. The
+                # official source skips only when its effective ref is one of
+                # the trusted branches, and never on a dev_ref, whose trust
+                # verdict depends on where the commit sits in the graph and is
+                # re-derived on every refresh. It also needs the stored
+                # trusted flag already true: the skip keeps the reserved
+                # provider-id list of the last fetch, and a refresh on main
+                # or beta with no dev_ref always assigns trusted, so a stored
+                # false means that last fetch was untrusted and the list may
+                # be stale.
+                skip_commit = None
+                if isinstance(previous_commit, str) and any(
+                    isinstance(entry, dict) and entry.get("source") == source_id
+                    for entry in entries.values()
+                ):
+                    if not is_official:
+                        skip_commit = previous_commit
+                    elif not source.get("dev_ref") and source.get("trusted") is True:
+                        try:
+                            url_ref = _parse_github_file_url(source["url"])[2]
+                        except CatalogSourceError:
+                            url_ref = None
+                        if url_ref in _TRUSTED_BRANCHES:
+                            skip_commit = previous_commit
                 try:
                     catalog, commit = _fetch_github_catalog(
-                        source["url"], override_ref=source.get("dev_ref")
+                        source["url"], override_ref=source.get("dev_ref"),
+                        unchanged_commit=skip_commit,
+                        advertisement_sink=ancestry.note_advertisement,
                     )
                     source["resolved_commit"] = commit
                     source["last_checked_at"] = now
                     source["last_error"] = None
-                    refreshed_sources.add(source.get("id") or source["name"])
                 except Exception as error:
                     source["last_error"] = _catalog_source_error_message(error)
                     failed_sources.append(source.get("name") or source.get("id") or "?")
                     continue
+                if catalog is None:
+                    # Unchanged: keep the stored entries, provider ids and
+                    # trust, and stay out of refreshed_sources so the prune
+                    # below does not run against a catalog not fetched.
+                    # Everything the skip bypasses for this source (entry
+                    # building and the official published-ids list) reads
+                    # only the fetched catalog and the source's own stored
+                    # fields; the installed-trust recheck runs after the
+                    # loop on every refresh. Nothing the skip skips reads
+                    # the app version or installed state. The one stored
+                    # input that can change is "trusted", which the trust
+                    # update below rewrites in this same refresh, so the
+                    # skip requires it to be true before it is taken.
+                    if is_official:
+                        _set_official_trust(source, commit, previous_commit, ancestry)
+                    # The kept entries still count toward the refresh summary.
+                    entries_count += sum(
+                        1 for entry in entries.values()
+                        if isinstance(entry, dict) and entry.get("source") == source_id
+                    )
+                    continue
+                refreshed_sources.add(source_id)
 
-                is_official = source_key == OFFICIAL_CATALOG_SOURCE_ID
                 if is_official:
                     _set_official_trust(source, commit, previous_commit, ancestry)
                     published_ids = set()

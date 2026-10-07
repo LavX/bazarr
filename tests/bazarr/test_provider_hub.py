@@ -2280,8 +2280,8 @@ def test_list_catalog_auto_refreshes_unchecked_sources(tmp_path, monkeypatch):
     from provider_hub.service import list_catalog
 
     def fake_get(url, timeout, **_kwargs):
-        if "api.github.com" in url:
-            return _FakeResponse({"sha": "d" * 40})
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([("d" * 40, "refs/heads/main")]))
         return _FakeResponse(
             {
                 "providers": [
@@ -2322,8 +2322,8 @@ def test_catalog_refresh_fetches_github_catalog_entries(tmp_path, monkeypatch):
 
     def fake_get(url, timeout, **_kwargs):
         calls.append((url, timeout))
-        if "api.github.com" in url:
-            return _FakeResponse({"sha": "d" * 40})
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([("d" * 40, "refs/heads/main")]))
         if "LavX/bazarr-provider-catalog" in url:
             return _FakeResponse({"providers": []})
         return _FakeResponse({"providers": [{"manifest": _manifest(provider_id="cataloghub")} ]})
@@ -2341,7 +2341,9 @@ def test_catalog_refresh_fetches_github_catalog_entries(tmp_path, monkeypatch):
     catalog = list_catalog()
     assert catalog["entries"][0]["provider_id"] == "cataloghub"
     assert catalog["entries"][0]["trusted"] is False
-    assert any(call[0].endswith("/repos/example/providers/commits/main") for call in calls)
+    assert "https://github.com/example/providers/info/refs?service=git-upload-pack" in [
+        call[0] for call in calls
+    ]
     assert (
         "https://raw.githubusercontent.com/example/providers/" + ("d" * 40) + "/catalog.json",
         30,
@@ -2353,8 +2355,8 @@ def test_catalog_refresh_prunes_stale_entries_for_successful_source(tmp_path, mo
     from provider_hub.service import list_catalog, refresh_catalog
 
     def fake_get(url, timeout, **_kwargs):
-        if "api.github.com" in url:
-            return _FakeResponse({"sha": "d" * 40})
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([("d" * 40, "refs/heads/main")]))
         if "LavX/bazarr-provider-catalog" in url:
             return _FakeResponse({"providers": []})
         return _FakeResponse({"providers": [{"manifest": _manifest(provider_id="freshhub")} ]})
@@ -3184,8 +3186,11 @@ def test_refresh_catalog_uses_dev_ref_when_set(tmp_path, monkeypatch):
 
     def fake_get(url, timeout, **_kwargs):
         calls.append(url)
-        if "api.github.com" in url:
-            return _FakeResponse({"sha": "f" * 40})
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([
+                ("a" * 40, "refs/heads/main"),
+                ("f" * 40, "refs/heads/feat/test-branch"),
+            ]))
         return _FakeResponse({"providers": []})
 
     monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
@@ -3203,10 +3208,11 @@ def test_refresh_catalog_uses_dev_ref_when_set(tmp_path, monkeypatch):
     update_catalog_source("community", dev_ref="feat/test-branch")
     refresh_catalog()
 
-    assert any(
-        url.endswith("/repos/example/providers/commits/feat/test-branch")
-        for url in calls
-    ), f"calls were: {calls}"
+    from provider_hub.state import load_state
+
+    assert load_state()["catalog_sources"]["community"]["resolved_commit"] == "f" * 40, (
+        f"calls were: {calls}"
+    )
 
 
 def test_refresh_catalog_reports_network_errors_for_users(tmp_path, monkeypatch):
@@ -3252,8 +3258,11 @@ def test_patch_catalog_source_updates_dev_ref(tmp_path, monkeypatch):
     )
 
     def fake_get(url, timeout, **_kwargs):
-        if "api.github.com" in url:
-            return _FakeResponse({"sha": "9" * 40})
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([
+                ("9" * 40, "refs/heads/main"),
+                ("9" * 40, "refs/heads/feat/branch"),
+            ]))
         return _FakeResponse({"providers": []})
 
     monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
@@ -3516,8 +3525,8 @@ def test_refresh_catalog_records_summary(tmp_path, monkeypatch):
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
 
     def fake_get(url, timeout, **_kwargs):
-        if "api.github.com" in url:
-            return _FakeResponse({"sha": "f" * 40})
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([("f" * 40, "refs/heads/main")]))
         return _FakeResponse({"providers": []})
 
     monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
@@ -5088,11 +5097,9 @@ class _FakeGitHub:
         monkeypatch.setattr("provider_hub.service.requests.get", self.get)
 
     def get(self, url, timeout, **_kwargs):
-        if url.startswith(_OFFICIAL_REPO_API + "/commits/"):
-            return _GitHubAnswer({"sha": self.heads[url.rsplit("/", 1)[1]]})
-        if url == _OFFICIAL_REPO_API + "/git/matching-refs/heads/":
-            return _GitHubAnswer([{"ref": f"refs/heads/{name}", "object": {"sha": sha}}
-                                  for name, sha in self.heads.items()])
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement(
+                [(sha, f"refs/heads/{name}") for name, sha in self.heads.items()]))
         if url.startswith(_OFFICIAL_REPO_API + "/compare/"):
             base, head = url.rsplit("/", 1)[1].split("...")
             self.compares.append((base, head))
@@ -5430,10 +5437,10 @@ def test_one_source_failing_does_not_block_other_sources(tmp_path, monkeypatch):
                                  "catalog_url": f"https://github.com/{repo}/catalog/blob/main/catalog.json"})
 
     def get(url, timeout, **_kwargs):
-        if url.startswith("https://api.github.com/repos/broken/catalog/"):
+        if url.startswith("https://github.com/broken/catalog/"):
             raise requests.exceptions.ConnectionError("could not reach GitHub")
-        if url == "https://api.github.com/repos/live/catalog/commits/main":
-            return _FakeResponse({"sha": live_commit})
+        if url == "https://github.com/live/catalog/info/refs?service=git-upload-pack":
+            return _AdvertisementResponse(_git_advertisement([(live_commit, "refs/heads/main")]))
         if url == f"https://raw.githubusercontent.com/live/catalog/{live_commit}/catalog.json":
             return _FakeResponse({"providers": [
                 {"manifest": community("live", "livehub", "2.0.0", live_commit)}]})
@@ -5453,3 +5460,1309 @@ def test_one_source_failing_does_not_block_other_sources(tmp_path, monkeypatch):
     live = state["catalog_sources"]["live"]
     assert (live["last_error"], live["resolved_commit"]) == (None, live_commit)
     assert set(state["catalog_entries"]) == {"broken:brokenhub:1.0.0", "live:livehub:2.0.0"}
+
+
+# Catalog ref resolution over the git smart-HTTP protocol: the ref
+# advertisement every git client reads, parsed with bounds, plus the
+# unchanged-commit skip that ends a refresh after the advertisement.
+
+_OFFICIAL_AD = "https://github.com/LavX/bazarr-provider-catalog/info/refs?service=git-upload-pack"
+_COMMUNITY_AD = "https://github.com/community/catalog/info/refs?service=git-upload-pack"
+
+_FROZEN_NOW = "2026-10-08T12:00:00Z"
+_OLD_CHECK = "2020-01-01T00:00:00Z"
+
+
+def _seed_a_successful_check(tmp_path, monkeypatch, source):
+    """Seed an old successful check on ``source`` and freeze the clock, so a
+    refresh that records a fresh check at the current time is provable."""
+    from provider_hub.state import load_state, save_state
+
+    state = load_state()
+    state["catalog_sources"][source]["last_checked_at"] = _OLD_CHECK
+    state["catalog_sources"][source]["last_error"] = None
+    save_state(state)
+    monkeypatch.setattr("provider_hub.service.utcnow_iso", lambda: _FROZEN_NOW)
+
+
+def _pkt_line(payload: bytes) -> bytes:
+    return ("%04x" % (len(payload) + 4)).encode("ascii") + payload
+
+
+def _git_advertisement(refs) -> bytes:
+    """A protocol v0 ref advertisement body: the service banner, a flush, one
+    ``<sha> <ref>`` line per entry (the first carrying the symref capability a
+    real server sends), then the closing flush."""
+    body = [_pkt_line(b"# service=git-upload-pack\n"), b"0000"]
+    for index, (sha, name) in enumerate(refs):
+        capabilities = b"\0symref=HEAD:refs/heads/main agent=git/2.43.0" if index == 0 else b""
+        body.append(_pkt_line(f"{sha} {name}".encode("utf-8") + capabilities + b"\n"))
+    body.append(b"0000")
+    return b"".join(body)
+
+
+class _AdvertisementResponse(_FakeResponse):
+    def __init__(self, content=b"", content_type="application/x-git-upload-pack-advertisement",
+                 status_code=200, content_length=None):
+        super().__init__(content=content)
+        self.status_code = status_code
+        self.headers = {"Content-Type": content_type}
+        if content_length is None:
+            content_length = len(content)
+        if content_length:
+            self.headers["Content-Length"] = str(content_length)
+        self.closed = False
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import requests
+            raise requests.exceptions.HTTPError(f"HTTP {self.status_code}", response=self)
+
+    def close(self):
+        self.closed = True
+
+    def iter_content(self, chunk_size=None):
+        yield self.content
+
+
+def test_advertisement_parser_reads_heads_and_peeled_tags_only():
+    from provider_hub.service import _parse_git_ref_advertisement
+
+    body = _git_advertisement([
+        ("a" * 40, "refs/heads/main"),
+        ("b" * 40, "refs/heads/feature/slash-bearing"),
+        ("c" * 40, "refs/tags/v1.0.0"),
+        ("d" * 40, "refs/tags/v1.0.0^{}"),
+        ("e" * 40, "refs/pull/1/head"),
+        ("f" * 40, "refs/remotes/origin/old"),
+        ("0" * 40, "HEAD"),
+    ])
+
+    refs = _parse_git_ref_advertisement(body)
+
+    assert refs == {
+        "refs/heads/main": "a" * 40,
+        "refs/heads/feature/slash-bearing": "b" * 40,
+        "refs/tags/v1.0.0": "d" * 40,
+    }
+
+
+def test_advertisement_parser_accepts_a_real_shaped_body_with_pull_refs():
+    from provider_hub.service import _parse_git_ref_advertisement
+
+    # Not a capture: the capture lives in the fixture parsed by the test
+    # below. This synthetic body stresses the parser with a large block of
+    # namespaces it must skip, the shape a busy repository advertises.
+    refs = [(_MAIN, "refs/heads/main"), (_BETA, "refs/heads/beta")]
+    for number in range(1, 155):
+        refs.append(("%040x" % number, f"refs/pull/{number}/head"))
+        refs.append(("%040x" % (number + 1000), f"refs/pull/{number}/merge"))
+    refs.append(("c" * 40, "refs/tags/v2.7.1"))
+    refs.append(("d" * 40, "refs/tags/v2.7.1^{}"))
+
+    parsed = _parse_git_ref_advertisement(_git_advertisement(refs))
+
+    assert parsed == {
+        "refs/heads/main": _MAIN,
+        "refs/heads/beta": _BETA,
+        "refs/tags/v2.7.1": "d" * 40,
+    }
+
+
+_ADVERTISEMENT_BANNER_FLUSH = _pkt_line(b"# service=git-upload-pack\n") + b"0000"
+
+
+@pytest.mark.parametrize("body", [
+    b"",
+    b"0001",
+    b"0003",
+    b"zzzzjunk",
+    # A complete receive-pack advertisement: the exact service line is the
+    # rule that rejects it, not a missing closing flush.
+    _pkt_line(b"# service=git-receive-pack\n") + b"0000"
+    + _pkt_line((_MAIN + " refs/heads/main\n").encode()) + b"0000",
+    _pkt_line(b"# service=git-upload-pack\n") + b"0000" + _pkt_line(b"not a ref line\n"),
+    _pkt_line(b"# service=git-upload-pack\n") + b"0000" + _pkt_line(b"deadbeef refs/heads/main\n"),
+    _git_advertisement([(_MAIN, "refs/heads/main")])[:-6],
+    _git_advertisement([(_MAIN, "refs/heads/main")])[:-3],
+    # No closing flush: the ref list was cut off after a complete line.
+    _git_advertisement([(_MAIN, "refs/heads/main")])[:-4],
+    # Data appended after the closing flush.
+    _git_advertisement([(_MAIN, "refs/heads/main")])
+    + _pkt_line((_BETA + " refs/heads/beta\n").encode()),
+    # A ref line before the service banner: the protocol's first pkt-line
+    # is the service banner, and both flushes cannot legitimize it after.
+    _pkt_line((_MAIN + " refs/heads/main\n").encode())
+    + _pkt_line(b"# service=git-upload-pack\n") + b"0000" + b"0000",
+    # Length prefixes int(..., 16) tolerates when the regex is gone. Each
+    # reads as 61 against the 57-byte ref line that follows it, so without
+    # the regex the body parses clean instead of failing closed.
+    *(_ADVERTISEMENT_BANNER_FLUSH + bad_prefix
+       + (_MAIN + " refs/heads/main\n").encode() + b"0000"
+       for bad_prefix in (b" 03d", b"0x3d", b"+03d", b"0_3d")),
+    # A well-formed ref line whose 65,517-byte payload is over the bound.
+    _ADVERTISEMENT_BANNER_FLUSH
+    + _pkt_line((_MAIN + " refs/heads/main" + "-" * 65460 + "\n").encode()) + b"0000",
+    # The empty-repository marker with a real ref line after it: the marker
+    # is only the whole advertisement git sends for a repository with no refs.
+    _ADVERTISEMENT_BANNER_FLUSH
+    + _pkt_line(b"0" * 40 + b" capabilities^{}\0agent=git/2.43.0\n")
+    + _pkt_line((_MAIN + " refs/heads/main\n").encode()) + b"0000",
+    # A flush before the banner.
+    b"0000" + _pkt_line(b"# service=git-upload-pack\n"),
+    # A ref line after a second flush closed the list early.
+    _pkt_line(b"# service=git-upload-pack\n") + b"0000" + b"0000"
+    + _pkt_line((_MAIN + " refs/heads/main\n").encode()) + b"0000",
+])
+def test_advertisement_parser_fails_closed_on_malformed_bodies(body):
+    from provider_hub.service import CatalogSourceError, _parse_git_ref_advertisement
+
+    with pytest.raises(CatalogSourceError):
+        _parse_git_ref_advertisement(body)
+
+
+def test_advertisement_parser_rejects_a_ref_advertised_at_two_commits():
+    from provider_hub.service import CatalogSourceError, _parse_git_ref_advertisement
+
+    body = _git_advertisement([(_MAIN, "refs/heads/main"), (_BETA, "refs/heads/main")])
+
+    with pytest.raises(CatalogSourceError):
+        _parse_git_ref_advertisement(body)
+
+
+def test_advertisement_parser_peels_only_a_tag_advertised_on_the_line_before():
+    from provider_hub.service import CatalogSourceError, _parse_git_ref_advertisement
+
+    # A peeled line that does not follow its own tag line.
+    not_after_its_tag = _git_advertisement([
+        (_MAIN, "refs/heads/main"),
+        ("a" * 40, "refs/tags/v1.0.0"),
+        ("b" * 40, "refs/tags/v2.0.0^{}"),
+    ])
+    # A peel that does not directly follow its own tag: v1, then v2, then
+    # the v1 peel, which is out of order even though v1 was advertised.
+    out_of_order_peel = _git_advertisement([
+        ("a" * 40, "refs/tags/v1"),
+        ("b" * 40, "refs/tags/v2"),
+        ("c" * 40, "refs/tags/v1^{}"),
+    ])
+    # A peeled line for a branch, which must never override its sha.
+    peel_of_a_branch = _git_advertisement([
+        (_MAIN, "refs/heads/main"),
+        (_BETA, "refs/heads/main^{}"),
+    ])
+    # A peeled line whose tag was never advertised.
+    peel_without_a_tag = _git_advertisement([("b" * 40, "refs/tags/v2.0.0^{}")])
+
+    for body in (not_after_its_tag, out_of_order_peel, peel_of_a_branch, peel_without_a_tag):
+        with pytest.raises(CatalogSourceError):
+            _parse_git_ref_advertisement(body)
+
+
+def test_advertisement_parser_rejects_a_tag_peeled_at_two_commits():
+    from provider_hub.service import CatalogSourceError, _parse_git_ref_advertisement
+
+    body = _git_advertisement([
+        ("a" * 40, "refs/tags/v1.0.0"),
+        ("b" * 40, "refs/tags/v1.0.0^{}"),
+        ("a" * 40, "refs/tags/v1.0.0"),
+        ("c" * 40, "refs/tags/v1.0.0^{}"),
+    ])
+
+    with pytest.raises(CatalogSourceError):
+        _parse_git_ref_advertisement(body)
+
+
+class _StreamingAdvertisement:
+    """A streamed advertisement answer that counts the chunks it gave out."""
+
+    def __init__(self, chunks, content_length=None):
+        self.headers = {"Content-Type": "application/x-git-upload-pack-advertisement"}
+        if content_length is not None:
+            self.headers["Content-Length"] = str(content_length)
+        self.status_code = 200
+        self._chunks = chunks
+        self.consumed = 0
+        self.closed = False
+
+    def raise_for_status(self):
+        return None
+
+    def close(self):
+        self.closed = True
+
+    def iter_content(self, chunk_size=None):
+        for chunk in self._chunks:
+            self.consumed += 1
+            yield chunk
+
+
+def test_an_oversized_advertisement_stops_reading_early(monkeypatch):
+    from provider_hub import service
+    from provider_hub.service import CatalogSourceError
+
+    chunks = [b"\0" * (2 * 1024 * 1024) for _ in range(20)]
+    response = _StreamingAdvertisement(chunks)
+    streams = []
+
+    def fake_get(url, timeout, stream=None, **_kwargs):
+        streams.append(stream)
+        return response
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+
+    with pytest.raises(CatalogSourceError):
+        service._fetch_git_ref_advertisement("owner", "repo")
+
+    # The 10 MB cap stopped the download at the sixth 2 MB chunk of twenty,
+    # the advertisement was streamed, and the response was closed.
+    assert streams == [True]
+    assert response.consumed == 6
+    assert response.closed
+
+
+def test_an_advertisement_content_length_over_the_cap_is_never_read(monkeypatch):
+    from provider_hub import service
+    from provider_hub.service import CatalogSourceError
+
+    chunks = [b"\0" * (2 * 1024 * 1024) for _ in range(20)]
+    response = _StreamingAdvertisement(chunks, content_length=20 * 1024 * 1024)
+    streams = []
+
+    def fake_get(url, timeout, stream=None, **_kwargs):
+        streams.append(stream)
+        return response
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+
+    with pytest.raises(CatalogSourceError):
+        service._fetch_git_ref_advertisement("owner", "repo")
+
+    assert streams == [True]
+    assert response.consumed == 0
+    assert response.closed
+
+
+def _streamed_github_error(body, content_encoding=None):
+    """A requests response over a live urllib3 stream, the way the real
+    advertisement fetch receives an error: preloaded nowhere, decoded only on
+    an explicit read."""
+    import io
+    import urllib3
+    import requests
+
+    headers = {"Content-Encoding": content_encoding} if content_encoding else {}
+    response = requests.Response()
+    response.status_code = 403
+    response.headers = dict(headers)
+    response.raw = urllib3.HTTPResponse(
+        body=io.BytesIO(body), headers=headers, status=403,
+        preload_content=False, decode_content=False,
+    )
+    return response
+
+
+def _spy_on_close(response):
+    """Replace a response's close with one that records its calls.
+
+    The raw side of a consumed response closes itself at end-of-file, so
+    ``response.raw.closed`` is true whether or not anything called close.
+    Recording the calls is the only way to tell the two apart."""
+    import requests
+
+    calls = []
+    original_close = requests.Response.close.__get__(response)
+
+    def spy_close():
+        calls.append(1)
+        original_close()
+
+    response.close = spy_close
+    return calls
+
+
+def test_a_streamed_secondary_rate_limit_body_survives_the_close(monkeypatch):
+    import requests
+    from provider_hub import service
+    from provider_hub.service import _fetch_git_ref_advertisement
+
+    # A streamed 403 whose only rate-limit evidence is the body: the JSON
+    # secondary-rate-limit message, with no rate-limit headers. The body is
+    # retained and the response closed before the error mapper runs, so the
+    # mapper must see the retained slice, not a misclassified plain access
+    # denial.
+    body = (b'{"message": "You have exceeded a secondary rate limit. Please '
+            b'wait a few minutes before you try again."}')
+    response = _streamed_github_error(body)
+    close_calls = _spy_on_close(response)
+
+    monkeypatch.setattr(
+        "provider_hub.service.requests.get",
+        lambda url, timeout, stream=None: response,
+    )
+
+    with pytest.raises(requests.exceptions.HTTPError) as caught:
+        _fetch_git_ref_advertisement("owner", "repo")
+
+    assert "temporarily limited" in service._catalog_source_error_message(caught.value)
+    assert response.raw.closed
+    assert close_calls
+
+
+def test_a_gzip_encoded_secondary_rate_limit_body_is_decoded_before_retention(monkeypatch):
+    import gzip
+    import requests
+    from provider_hub import service
+    from provider_hub.service import _fetch_git_ref_advertisement
+
+    # requests asks GitHub for gzip on every request, and the advertisement
+    # stream is opened with decode_content=False, so the raw stream carries
+    # compressed bytes. A secondary rate limit sent gzip-encoded must still
+    # be read as its JSON message, not classified as a plain access denial,
+    # and the response must be closed either way.
+    body = (b'{"message": "You have exceeded a secondary rate limit. Please '
+            b'wait a few minutes before you try again."}')
+    response = _streamed_github_error(gzip.compress(body), content_encoding="gzip")
+    close_calls = _spy_on_close(response)
+
+    monkeypatch.setattr(
+        "provider_hub.service.requests.get",
+        lambda url, timeout, stream=None: response,
+    )
+
+    with pytest.raises(requests.exceptions.HTTPError) as caught:
+        _fetch_git_ref_advertisement("owner", "repo")
+
+    assert "temporarily limited" in service._catalog_source_error_message(caught.value)
+    assert response.raw.closed
+    assert close_calls
+
+
+class _ChunkedRaw:
+    """The raw side of a Transfer-Encoding: chunked answer: stream() hands
+    out one HTTP chunk at a time, running the content decoding incrementally
+    across the chunks the way urllib3 does. It never closes itself, so its
+    closed flag moves only when something calls close."""
+
+    def __init__(self, chunks, gzip_encoded=False):
+        self._chunks = chunks
+        self._gzip_encoded = gzip_encoded
+        self.closed = False
+
+    def stream(self, amt, decode_content=None):
+        import zlib
+
+        decoder = (zlib.decompressobj(16 + zlib.MAX_WBITS)
+                   if self._gzip_encoded and decode_content else None)
+        for chunk in self._chunks:
+            yield decoder.decompress(chunk) if decoder is not None else chunk
+
+    def close(self):
+        self.closed = True
+
+
+def _chunked_github_error(pieces, gzip_encoded=False):
+    """A requests response whose raw stream yields its 403 body one HTTP
+    chunk at a time, the shape a chunked denial arrives in on a live
+    connection: the first read does not carry the whole body."""
+    import requests
+
+    response = requests.Response()
+    response.status_code = 403
+    response.headers = {"Content-Encoding": "gzip"} if gzip_encoded else {}
+    response.raw = _ChunkedRaw(pieces, gzip_encoded=gzip_encoded)
+    return response
+
+
+_SECONDARY_RATE_LIMIT_BODY = (b'{"message": "You have exceeded a secondary '
+                              b'rate limit. Please wait a few minutes before '
+                              b'you try again."}')
+
+
+@pytest.mark.parametrize("gzip_encoded", [False, True])
+def test_a_chunked_secondary_rate_limit_body_is_retained_across_chunks(monkeypatch, gzip_encoded):
+    import gzip
+    import requests
+    from provider_hub import service
+    from provider_hub.service import _fetch_git_ref_advertisement
+
+    # A chunked 403 does not arrive as one read: the raw stream yields one
+    # HTTP chunk at a time, and the first chunk stops inside the message.
+    # The retention must accumulate the decoded chunks until it has the
+    # body, or the mapper sees a cut-off body and reports a plain access
+    # denial instead of the secondary rate limit.
+    body = _SECONDARY_RATE_LIMIT_BODY
+    split = 40
+    encoded = gzip.compress(body) if gzip_encoded else body
+    response = _chunked_github_error([encoded[:split], encoded[split:]], gzip_encoded=gzip_encoded)
+    close_calls = _spy_on_close(response)
+
+    monkeypatch.setattr(
+        "provider_hub.service.requests.get",
+        lambda url, timeout, stream=None: response,
+    )
+
+    with pytest.raises(requests.exceptions.HTTPError) as caught:
+        _fetch_git_ref_advertisement("owner", "repo")
+
+    assert "temporarily limited" in service._catalog_source_error_message(caught.value)
+    assert close_calls
+
+
+def test_advertisement_parser_reads_the_captured_catalog_advertisement():
+    from provider_hub.service import _parse_git_ref_advertisement
+
+    # Captured 2026-10-07 from the public catalog repository's own
+    # advertisement, the response every git ls-remote reads:
+    # https://github.com/LavX/bazarr-provider-catalog/info/refs?service=git-upload-pack
+    body = (Path(__file__).parent / "fixtures" / "provider_hub"
+            / "catalog_info_refs_v0.bin").read_bytes()
+
+    refs = _parse_git_ref_advertisement(body)
+
+    assert refs["refs/heads/main"] == "be946567da192b9b9f05a18ef43acf9bb7668620"
+    assert refs["refs/heads/beta"] == "7bcd0a3a82fa068496111993f08ef93f7f33182e"
+    assert b"refs/pull/" in body
+    assert all(name.startswith(("refs/heads/", "refs/tags/")) for name in refs)
+
+
+def test_advertisement_parser_fails_closed_on_an_oversized_body():
+    from provider_hub.service import (
+        _GIT_ADVERTISEMENT_MAX_BYTES,
+        _parse_git_ref_advertisement,
+        CatalogSourceError,
+    )
+
+    with pytest.raises(CatalogSourceError):
+        _parse_git_ref_advertisement(b"\0" * (_GIT_ADVERTISEMENT_MAX_BYTES + 1))
+
+
+def test_advertisement_parser_accepts_a_line_at_the_exact_payload_bound():
+    from provider_hub.service import _PKT_LINE_MAX_PAYLOAD, _parse_git_ref_advertisement
+
+    # A well-formed ref line whose payload is exactly 65,516 bytes: the
+    # bound rejects only what is over it, not the boundary itself.
+    name = "refs/heads/main" + "-" * (_PKT_LINE_MAX_PAYLOAD - 57)
+    body = _ADVERTISEMENT_BANNER_FLUSH + _pkt_line((_MAIN + " " + name + "\n").encode()) + b"0000"
+
+    assert _parse_git_ref_advertisement(body) == {name: _MAIN}
+
+
+def test_advertisement_parser_accepts_the_empty_repository_advertisement(monkeypatch):
+    from provider_hub import service
+    from provider_hub.service import CatalogSourceError, _parse_git_ref_advertisement
+
+    # git's documented advertisement for a repository with no refs: one
+    # line, the all-zero sha and the capabilities peel.
+    body = (_ADVERTISEMENT_BANNER_FLUSH
+            + _pkt_line(b"0" * 40 + b" capabilities^{}"
+                        + b"\0symref=HEAD:refs/heads/main agent=git/2.43.0\n")
+            + b"0000")
+
+    assert _parse_git_ref_advertisement(body) == {}
+
+    # No branch is advertised, so the resolver reports the missing branch
+    # instead of blaming GitHub's framing.
+    monkeypatch.setattr(
+        "provider_hub.service.requests.get",
+        lambda url, timeout, **_kwargs: _AdvertisementResponse(body),
+    )
+    with pytest.raises(CatalogSourceError, match="did not advertise 'main'"):
+        service._resolve_github_ref("owner", "repo", "main")
+
+
+def test_resolve_github_ref_short_circuits_a_full_sha_without_a_request(monkeypatch):
+    from provider_hub import service
+
+    def unexpected(url, timeout, **_kwargs):
+        raise AssertionError(f"the 40-hex short-circuit must not call GitHub: {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", unexpected)
+
+    assert service._resolve_github_ref("owner", "repo", "A" * 40) == "a" * 40
+
+
+def test_resolve_github_ref_reads_heads_first_and_peeled_tags_second(monkeypatch):
+    from provider_hub import service
+
+    body = _git_advertisement([
+        ("a" * 40, "refs/heads/main"),
+        ("b" * 40, "refs/tags/main"),
+        ("c" * 40, "refs/tags/v1.0.0"),
+        ("d" * 40, "refs/tags/v1.0.0^{}"),
+    ])
+    calls = []
+    answers = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append((url, timeout))
+        answer = _AdvertisementResponse(body)
+        answers.append(answer)
+        return answer
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+
+    assert service._resolve_github_ref("owner", "repo", "main") == "a" * 40
+    assert service._resolve_github_ref("owner", "repo", "v1.0.0") == "d" * 40
+    # A successful resolve closes its advertisement response too, not only
+    # the error path.
+    assert [answer.closed for answer in answers] == [True, True]
+    assert calls == [
+        ("https://github.com/owner/repo/info/refs?service=git-upload-pack", 20),
+        ("https://github.com/owner/repo/info/refs?service=git-upload-pack", 20),
+    ]
+
+
+def test_resolve_github_ref_fails_closed_on_a_ref_the_advertisement_lacks(monkeypatch):
+    from provider_hub import service
+    from provider_hub.service import CatalogSourceError
+
+    monkeypatch.setattr(
+        "provider_hub.service.requests.get",
+        lambda url, timeout, **_kwargs: _AdvertisementResponse(
+            _git_advertisement([(_MAIN, "refs/heads/main")])),
+    )
+
+    with pytest.raises(CatalogSourceError, match="branch name or a tag name"):
+        service._resolve_github_ref("owner", "repo", "v2.0.0")
+
+
+@pytest.mark.parametrize("content_type", [
+    "text/html",
+    "text/plain; marker=x-git-upload-pack-advertisement",
+    "application/x-git-upload-pack-advertisement-malicious",
+    "application/octet-stream",
+])
+def test_resolve_github_ref_fails_closed_on_a_non_git_content_type(monkeypatch, content_type):
+    from provider_hub import service
+    from provider_hub.service import CatalogSourceError
+
+    monkeypatch.setattr(
+        "provider_hub.service.requests.get",
+        lambda url, timeout, **_kwargs: _AdvertisementResponse(
+            _git_advertisement([(_MAIN, "refs/heads/main")]), content_type=content_type),
+    )
+
+    with pytest.raises(CatalogSourceError):
+        service._resolve_github_ref("owner", "repo", "main")
+
+
+def test_the_advertisement_content_type_allows_parameters(monkeypatch):
+    from provider_hub import service
+
+    monkeypatch.setattr(
+        "provider_hub.service.requests.get",
+        lambda url, timeout, **_kwargs: _AdvertisementResponse(
+            _git_advertisement([(_MAIN, "refs/heads/main")]),
+            content_type="application/x-git-upload-pack-advertisement; charset=utf-8"),
+    )
+
+    assert service._resolve_github_ref("owner", "repo", "main") == _MAIN
+
+
+@pytest.mark.parametrize("failure, expected", [
+    # github.com answers an anonymous request for a missing or private
+    # repository with 401, so it means the same as a 404 here.
+    (401, "GitHub does not have this catalog source"),
+    (429, "temporarily limited"),
+    (503, "GitHub returned HTTP 503 while refreshing this catalog source."),
+    ("timeout", "Could not reach GitHub while refreshing this catalog source."),
+    ("connection", "Could not reach GitHub while refreshing this catalog source."),
+])
+def test_advertisement_failures_keep_the_refresh_messages(
+    tmp_path, monkeypatch, failure, expected
+):
+    import requests
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    def fake_get(url, timeout, **_kwargs):
+        if url == _OFFICIAL_AD:
+            if failure == "timeout":
+                raise requests.exceptions.Timeout("advertisement timed out")
+            if failure == "connection":
+                raise requests.exceptions.ConnectionError("connection reset")
+            return _AdvertisementResponse(status_code=failure)
+        if url.startswith("https://api.github.com/"):
+            # The REST commits call is gone: a refresh must never ask it.
+            raise AssertionError(f"a refresh must not use the REST API: {url}")
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    refresh_catalog(source_ids={"official"})
+
+    assert expected in load_state()["catalog_sources"]["official"]["last_error"]
+
+
+def test_advertisement_404_is_a_hard_error(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    monkeypatch.setattr(
+        "provider_hub.service.requests.get",
+        lambda url, timeout, **_kwargs: _AdvertisementResponse(status_code=404),
+    )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+
+    refresh_catalog(source_ids={"official"})
+
+    last_error = load_state()["catalog_sources"]["official"]["last_error"]
+    assert "does not have" in last_error
+    assert "temporarily" not in last_error
+
+
+def test_refresh_skips_the_catalog_fetch_when_the_commit_is_unchanged(tmp_path, monkeypatch):
+    from provider_hub.service import list_jobs, refresh_catalog
+    from provider_hub.state import load_state
+
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url == _COMMUNITY_AD:
+            return _AdvertisementResponse(_git_advertisement([("c" * 40, "refs/heads/main")]))
+        raise AssertionError(f"an unchanged commit must not be fetched: {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
+               entries=_entry("community", _manifest()))
+    _seed_a_successful_check(tmp_path, monkeypatch, "community")
+
+    result = refresh_catalog(source_ids={"community"})
+
+    assert calls == [_COMMUNITY_AD]
+    source = load_state()["catalog_sources"]["community"]
+    assert source["resolved_commit"] == "c" * 40
+    assert source["last_error"] is None
+    # The skip records a fresh check at the current time, not the old one.
+    assert source["last_checked_at"] == _FROZEN_NOW
+    assert list(load_state()["catalog_entries"]) == ["community:examplehub:1.0.0"]
+    # A skip keeps the stored entries, so the summary reports them, not zero.
+    assert result["entries"] == 1
+    job = list_jobs()[-1]
+    assert job["message"] == "Refreshed 1 source(s), 1 entries"
+    assert job["details"]["entries"] == 1
+
+
+def test_a_skipped_source_never_prunes_entries(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url == _COMMUNITY_AD:
+            return _AdvertisementResponse(
+                _git_advertisement([("c" * 40, "refs/heads/main")]))
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
+               entries=_entry("community", _manifest(provider_id="stalehub")))
+
+    refresh_catalog(source_ids={"community"})
+
+    # Only the advertisement was asked, the refresh recorded no error, and
+    # the stored entry was kept: a skip is a success that prunes nothing.
+    assert calls == [_COMMUNITY_AD]
+    source = load_state()["catalog_sources"]["community"]
+    assert source["last_error"] is None
+    assert "community:stalehub:1.0.0" in load_state()["catalog_entries"]
+
+
+def test_refresh_fetches_when_the_unchanged_commit_has_no_entries(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    raw_url = "https://raw.githubusercontent.com/community/catalog/" + "c" * 40 + "/catalog.json"
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url == _COMMUNITY_AD:
+            return _AdvertisementResponse(_git_advertisement([("c" * 40, "refs/heads/main")]))
+        if url == raw_url:
+            return _FakeResponse({"providers": []})
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"))
+    _seed_a_successful_check(tmp_path, monkeypatch, "community")
+
+    refresh_catalog(source_ids={"community"})
+
+    assert calls == [_COMMUNITY_AD, raw_url]
+    source = load_state()["catalog_sources"]["community"]
+    assert source["last_error"] is None
+    # A fetch that found no entries still records a fresh check.
+    assert source["last_checked_at"] == _FROZEN_NOW
+
+
+def test_refresh_fetches_when_the_advertised_commit_moved(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    raw_url = "https://raw.githubusercontent.com/community/catalog/" + "d" * 40 + "/catalog.json"
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url == _COMMUNITY_AD:
+            return _AdvertisementResponse(_git_advertisement([("d" * 40, "refs/heads/main")]))
+        if url == raw_url:
+            return _FakeResponse({"providers": []})
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
+               entries=_entry("community", _manifest()))
+
+    refresh_catalog(source_ids={"community"})
+
+    assert calls == [_COMMUNITY_AD, raw_url]
+    assert load_state()["catalog_sources"]["community"]["resolved_commit"] == "d" * 40
+
+
+def test_a_user_source_on_a_dev_ref_skips_like_any_user_source(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    community = _community_source("community")
+    community["community"]["dev_ref"] = "feat/x"
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url == _COMMUNITY_AD:
+            return _AdvertisementResponse(
+                _git_advertisement([("c" * 40, "refs/heads/feat/x")]))
+        raise AssertionError(f"an unchanged dev ref must not be fetched: {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, sources=community, entries=_entry("community", _manifest()))
+
+    refresh_catalog(source_ids={"community"})
+
+    assert calls == [_COMMUNITY_AD]
+    assert load_state()["catalog_sources"]["community"]["last_error"] is None
+
+
+def test_a_source_pinned_to_a_full_sha_still_fetches_raw(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    raw_url = "https://raw.githubusercontent.com/community/catalog/" + "c" * 40 + "/catalog.json"
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url == raw_url:
+            return _FakeResponse({"providers": [{"manifest": _manifest()}]})
+        raise AssertionError(f"a pinned commit needs no advertisement: {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    pinned = _community_source("community")
+    pinned["community"]["dev_ref"] = "c" * 40
+    _hub_state(tmp_path, monkeypatch, sources=pinned, entries=_entry("community", _manifest()))
+
+    refresh_catalog(source_ids={"community"})
+
+    # The skip needs an advertised sha equal to the stored commit. A
+    # pinned source has no advertisement, so it still fetches raw, and a
+    # deleted, renamed or private repository keeps showing at refresh.
+    assert calls == [raw_url]
+    source = load_state()["catalog_sources"]["community"]
+    assert source["last_error"] is None
+    assert source["resolved_commit"] == "c" * 40
+    assert list(load_state()["catalog_entries"]) == ["community:examplehub:1.0.0"]
+
+
+def test_a_short_sha_failure_keeps_the_cached_catalog(tmp_path, monkeypatch):
+    from provider_hub import service
+    from provider_hub.service import CatalogSourceError, refresh_catalog
+    from provider_hub.state import load_state
+
+    monkeypatch.setattr(
+        "provider_hub.service.requests.get",
+        lambda url, timeout, **_kwargs: _AdvertisementResponse(
+            _git_advertisement([("c" * 40, "refs/heads/main")])),
+    )
+    short = _community_source("community")
+    short["community"]["dev_ref"] = "abc1234"
+    _hub_state(tmp_path, monkeypatch, sources=short, entries=_entry("community", _manifest()))
+
+    refresh_catalog(source_ids={"community"})
+
+    source = load_state()["catalog_sources"]["community"]
+    # The resolver's advice reaches the user verbatim through the refresh's
+    # error mapping, and the stored entries and commit survive it, so the
+    # cached catalog stays visible and usable.
+    with pytest.raises(CatalogSourceError) as caught:
+        service._resolve_github_ref("community", "catalog", "abc1234")
+    expected = service._catalog_source_error_message(caught.value)
+    assert "full commit SHA" in expected
+    assert source["last_error"] == expected
+    assert source["resolved_commit"] == "c" * 40
+    assert list(load_state()["catalog_entries"]) == ["community:examplehub:1.0.0"]
+
+
+def test_a_malformed_advertisement_failure_keeps_the_cached_catalog(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    monkeypatch.setattr(
+        "provider_hub.service.requests.get",
+        lambda url, timeout, **_kwargs: _AdvertisementResponse(b"zzzzjunk"),
+    )
+    _hub_state(tmp_path, monkeypatch, sources=_community_source("community"),
+               entries=_entry("community", _manifest()))
+
+    refresh_catalog(source_ids={"community"})
+
+    source = load_state()["catalog_sources"]["community"]
+    assert source["last_error"] == "GitHub sent a malformed ref advertisement"
+    assert source["resolved_commit"] == "c" * 40
+    assert list(load_state()["catalog_entries"]) == ["community:examplehub:1.0.0"]
+
+
+def test_a_trust_failure_on_the_skip_path_fails_the_refresh_not_the_source(
+    tmp_path, monkeypatch
+):
+    from provider_hub import service
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setattr(
+        "provider_hub.service.requests.get",
+        lambda url, timeout, **_kwargs: _AdvertisementResponse(
+            _git_advertisement([(_MAIN, "refs/heads/main"), (_BETA, "refs/heads/beta")])),
+    )
+
+    def broken_trust(source, commit, previous_commit, ancestry):
+        raise RuntimeError("trust machinery broke")
+
+    monkeypatch.setattr(service, "_set_official_trust", broken_trust)
+    _hub_state(tmp_path, monkeypatch, entries=_entry("official", _official_manifest()))
+    state = load_state()
+    state["catalog_sources"]["official"]["resolved_commit"] = _MAIN
+    save_state(state)
+    before = load_state()
+
+    with pytest.raises(RuntimeError):
+        service.refresh_catalog(source_ids={"official"})
+
+    # The trust update runs outside the fetch on the skip path too, so its
+    # failure propagates like on the fetch path instead of marking a source
+    # failed after its success fields were already written. The one-write
+    # refresh leaves the catalog exactly as it was (the failed job record is
+    # the only thing written).
+    after = load_state()
+    assert after["catalog_sources"] == before["catalog_sources"]
+    assert after["catalog_entries"] == before["catalog_entries"]
+    assert after["catalog_sources"]["official"]["last_error"] is None
+
+
+def test_an_official_source_on_main_skips_an_unchanged_commit(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url == _OFFICIAL_AD:
+            return _AdvertisementResponse(
+                _git_advertisement([(_MAIN, "refs/heads/main"), (_BETA, "refs/heads/beta")]))
+        raise AssertionError(f"an unchanged official commit on main must not be fetched: {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, entries=_entry("official", _official_manifest()))
+    from provider_hub.state import load_state as _load, save_state
+    state = _load()
+    state["catalog_sources"]["official"]["resolved_commit"] = _MAIN
+    state["catalog_sources"]["official"]["last_checked_at"] = _OLD_CHECK
+    save_state(state)
+    monkeypatch.setattr("provider_hub.service.utcnow_iso", lambda: _FROZEN_NOW)
+
+    # The official skip's kept entry still counts toward the refresh summary.
+    assert refresh_catalog()["entries"] == 1
+
+    assert calls == [_OFFICIAL_AD]
+    official = load_state()["catalog_sources"]["official"]
+    assert official["last_error"] is None
+    # The official skip records a fresh check at the current time.
+    assert official["last_checked_at"] == _FROZEN_NOW
+    assert (official["trusted"], official["trust_reason"]) == (True, "default branch")
+    assert list(load_state()["catalog_entries"]) == ["official:examplehub:1.0.0"]
+
+
+def test_an_unchanged_refresh_with_a_trusted_install_costs_one_advertisement(
+    tmp_path, monkeypatch
+):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state, save_state
+
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url == _OFFICIAL_AD:
+            return _AdvertisementResponse(
+                _git_advertisement([(_MAIN, "refs/heads/main"), (_BETA, "refs/heads/beta")]))
+        raise AssertionError(f"an unchanged commit must not be fetched: {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, entries=_entry("official", _official_manifest()),
+               installations=_installed(_official_manifest(), trusted=True))
+    state = load_state()
+    official = state["catalog_sources"]["official"]
+    official["resolved_commit"] = _MAIN
+    official["provider_ids"] = ["examplehub"]
+    state["trust_cache"] = {
+        "heads": {"main": _MAIN, "beta": _BETA},
+        "answers": {_MAIN: {"main": True, "beta": False}},
+    }
+    save_state(state)
+
+    refresh_catalog()
+
+    # The skip means no raw fetch, and the installed-trust recheck reuses the
+    # advertisement the resolve step already read: one request in total.
+    assert calls == [_OFFICIAL_AD]
+    official = load_state()["catalog_sources"]["official"]
+    assert official["last_error"] is None
+    assert official["trusted"] is True
+
+
+def test_a_community_advertisement_never_feeds_official_ancestry(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state, save_state
+
+    # Only the official repository's advertisement may answer the ancestry
+    # check. A community source that sorts after the official one and
+    # advertises its own main and beta must not become the heads the
+    # installed-trust recheck compares against.
+    community_ad = "https://github.com/zcommunity/catalog/info/refs?service=git-upload-pack"
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url == _OFFICIAL_AD:
+            return _AdvertisementResponse(_git_advertisement([
+                (_MAIN, "refs/heads/main"), (_BETA, "refs/heads/beta")]))
+        if url == community_ad:
+            return _AdvertisementResponse(_git_advertisement([
+                ("a" * 40, "refs/heads/main"), ("b" * 40, "refs/heads/beta")]))
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(
+        tmp_path, monkeypatch,
+        sources=_community_source("zcommunity", resolved_commit="a" * 40),
+        entries={**_entry("official", _official_manifest()),
+                 **_entry("zcommunity", _manifest(provider_id="communityhub", name="Community Hub"))},
+        installations=_installed(_official_manifest(), trusted=True),
+    )
+    state = load_state()
+    state["catalog_sources"]["official"]["resolved_commit"] = _MAIN
+    state["trust_cache"] = {
+        "heads": {"main": _MAIN, "beta": _BETA},
+        "answers": {_MAIN: {"main": True, "beta": False}},
+    }
+    save_state(state)
+
+    # Each source's skip counts exactly its own kept entry, so the community
+    # advertisement adds one to the official source's one.
+    assert refresh_catalog()["entries"] == 2
+
+    # Both sources skip on their stored commits, so the refresh reads each
+    # advertisement once: no raw catalog fetch and no compare call, whose
+    # answers the trust cache already holds for the current official heads.
+    # The install stays trusted and the official heads stay official.
+    assert calls == [_OFFICIAL_AD, community_ad]
+    after = load_state()
+    assert after["installations"]["examplehub"]["trusted"] is True
+    assert after["trust_cache"]["heads"] == {"main": _MAIN, "beta": _BETA}
+
+
+def test_an_untrusted_official_commit_never_skips_the_published_ids_rebuild(
+    tmp_path, monkeypatch
+):
+    from provider_hub import service
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state, save_state
+
+    # The last trusted refresh published examplehub. Then the source sat on
+    # a feature dev_ref at a commit outside main and beta, untrusted, and the
+    # repository fast-forwarded that commit onto main before the dev_ref was
+    # cleared.
+    fast_forwarded = _OLD_MAIN
+    raw_url = (f"https://raw.githubusercontent.com/LavX/bazarr-provider-catalog/"
+               f"{fast_forwarded}/catalog.json")
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url == _OFFICIAL_AD:
+            return _AdvertisementResponse(_git_advertisement([
+                (fast_forwarded, "refs/heads/main"), (_BETA, "refs/heads/beta")]))
+        if url == raw_url:
+            return _GitHubAnswer({"providers": [
+                {"manifest": _official_manifest(commit=fast_forwarded)},
+                {"manifest": _official_manifest("newhub", commit=fast_forwarded)},
+            ]})
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, entries=_entry("official", _official_manifest()))
+    state = load_state()
+    official = state["catalog_sources"]["official"]
+    official["resolved_commit"] = fast_forwarded
+    official["trusted"] = False
+    official["trust_reason"] = "outside main and beta"
+    official["provider_ids"] = ["examplehub"]
+    save_state(state)
+
+    refresh_catalog()
+
+    # The dev_ref is gone and main's head equals the stored commit, but the
+    # stored verdict is untrusted, so the skip is refused: the catalog is
+    # fetched again and the id the fast-forwarded commit published is
+    # reserved again.
+    official = load_state()["catalog_sources"]["official"]
+    assert calls == [_OFFICIAL_AD, raw_url]
+    assert official["trusted"] is True
+    assert official["provider_ids"] == ["examplehub", "newhub"]
+    assert "newhub" in service._reserved_provider_ids(load_state())
+
+
+@pytest.mark.parametrize("dev_ref, advertised", [
+    # A branch name resolving through the advertisement: the pinned-SHA guard
+    # cannot be what blocks this skip.
+    ("feat/x", [(_OLD_MAIN, "refs/heads/feat/x"),
+                (_MAIN, "refs/heads/main"), (_BETA, "refs/heads/beta")]),
+    (_OLD_MAIN, [(_MAIN, "refs/heads/main"), (_BETA, "refs/heads/beta")]),
+])
+def test_an_official_source_with_a_dev_ref_never_skips_the_fetch(
+    tmp_path, monkeypatch, dev_ref, advertised
+):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state, save_state
+
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement(advertised))
+        if url.startswith(_OFFICIAL_REPO_API + "/compare/"):
+            return _GitHubAnswer({"status": "behind"})
+        if url.startswith("https://raw.githubusercontent.com/LavX/bazarr-provider-catalog/"):
+            return _GitHubAnswer({"providers": [{"manifest": _official_manifest()}]})
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, dev_ref=dev_ref,
+               entries=_entry("official", _official_manifest(commit=_OLD_MAIN)))
+    state = load_state()
+    state["catalog_sources"]["official"]["resolved_commit"] = _OLD_MAIN
+    save_state(state)
+
+    refresh_catalog()
+
+    # A dev_ref never skips, branch name or pinned commit alike: the catalog
+    # is fetched again at the stored commit, the trust verdict is re-derived
+    # from the graph, and the recheck reuses the advertisement the resolve
+    # step read, so it too costs a single advertisement request.
+    assert any(url.startswith("https://raw.githubusercontent.com/") for url in calls)
+    assert any("/compare/" in url for url in calls)
+    assert calls.count(_OFFICIAL_AD) == 1
+    official = load_state()["catalog_sources"]["official"]
+    assert (official["trusted"], official["trust_reason"]) == (True, "ancestor of main")
+
+
+def test_ancestry_heads_come_from_the_ref_advertisement(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    def fake_get(url, timeout, **_kwargs):
+        if url == _OFFICIAL_AD:
+            return _AdvertisementResponse(
+                _git_advertisement([(_MAIN, "refs/heads/main"), (_BETA, "refs/heads/beta")]))
+        if url.startswith(_OFFICIAL_REPO_API + "/compare/"):
+            return _GitHubAnswer({"status": "behind"})
+        if url.startswith("https://raw.githubusercontent.com/LavX/bazarr-provider-catalog/"):
+            return _GitHubAnswer({"providers": [{"manifest": _official_manifest()}]})
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, dev_ref=_OLD_MAIN)
+
+    refresh_catalog()
+
+    official = load_state()["catalog_sources"]["official"]
+    assert (official["trusted"], official["trust_reason"]) == (True, "ancestor of main")
+
+
+def test_a_one_branch_advertisement_cannot_verify_trust(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    def fake_get(url, timeout, **_kwargs):
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            return _AdvertisementResponse(_git_advertisement([(_MAIN, "refs/heads/main")]))
+        if url.startswith("https://raw.githubusercontent.com/LavX/bazarr-provider-catalog/"):
+            return _GitHubAnswer({"providers": [{"manifest": _official_manifest()}]})
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, dev_ref=_OLD_MAIN)
+
+    refresh_catalog()
+
+    official = load_state()["catalog_sources"]["official"]
+    assert (official["trusted"], official["trust_reason"]) == (
+        False, "could not verify: GitHub did not list main and beta")
+
+
+@pytest.mark.parametrize("failure, expected", [
+    # github.com answers an anonymous request for a missing or private
+    # repository with 401, so it lists no branches, like a 404.
+    (401, "could not verify: GitHub did not list main and beta"),
+    (404, "could not verify: GitHub did not list main and beta"),
+    (403, "could not verify: rate limited"),
+    (429, "could not verify: rate limited"),
+    (503, "could not verify: GitHub returned HTTP 503"),
+    ("timeout", "could not verify: GitHub could not be reached"),
+    ("reset", "could not verify: GitHub could not be reached"),
+    ("malformed", "could not verify: GitHub could not be reached"),
+])
+def test_ancestry_failures_keep_the_base_reason_strings(tmp_path, monkeypatch, failure, expected):
+    import requests
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    def fake_get(url, timeout, **_kwargs):
+        if url == _OFFICIAL_AD:
+            if failure == "timeout":
+                raise requests.exceptions.Timeout("advertisement timed out")
+            if failure == "reset":
+                raise requests.exceptions.ConnectionError("connection reset")
+            if failure == "malformed":
+                return _AdvertisementResponse(b"not an advertisement", content_type="text/html")
+            return _AdvertisementResponse(status_code=failure)
+        if url.startswith("https://raw.githubusercontent.com/"):
+            return _GitHubAnswer({"providers": [{"manifest": _official_manifest()}]})
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, dev_ref=_OLD_MAIN)
+
+    refresh_catalog()
+
+    official = load_state()["catalog_sources"]["official"]
+    assert (official["trusted"], official["trust_reason"]) == (False, expected)
+
+
+def test_updating_a_dev_ref_keeps_the_resolved_commit_and_the_skip(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog, update_catalog_source
+    from provider_hub.state import load_state
+
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url == _COMMUNITY_AD:
+            return _AdvertisementResponse(_git_advertisement([
+                ("c" * 40, "refs/heads/feat/x"),
+                ("c" * 40, "refs/heads/feat/y"),
+            ]))
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    community = _community_source("community")
+    community["community"]["dev_ref"] = "feat/x"
+    _hub_state(tmp_path, monkeypatch, sources=community, entries=_entry("community", _manifest()))
+
+    # A dev_ref change keeps the stored commit: update_catalog_source cannot
+    # change the source URL, and raw content at a fixed commit never changes,
+    # so a new ref that resolves to the same commit still skips, and the
+    # official trust input (previous_commit) keeps its value.
+    update_catalog_source("community", dev_ref="feat/y")
+    assert load_state()["catalog_sources"]["community"]["resolved_commit"] == "c" * 40
+
+    refresh_catalog(source_ids={"community"})
+
+    assert calls == [_COMMUNITY_AD]
+    assert load_state()["catalog_sources"]["community"]["last_error"] is None
+
+
+def test_an_official_source_on_an_untrusted_url_ref_never_skips(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state, save_state
+
+    staging = "9" * 40
+    calls = []
+
+    def fake_get(url, timeout, **_kwargs):
+        calls.append(url)
+        if url == _OFFICIAL_AD:
+            return _AdvertisementResponse(_git_advertisement([(staging, "refs/heads/staging")]))
+        if url.startswith("https://raw.githubusercontent.com/LavX/bazarr-provider-catalog/"):
+            return _GitHubAnswer({"providers": [{"manifest": _official_manifest()}]})
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    # load_state rebuilds the official record from this constant, and drops
+    # any stored url, so the only way its ref is not a trusted branch is the
+    # official catalog itself moving off main or beta.
+    monkeypatch.setattr(
+        "provider_hub.state.OFFICIAL_CATALOG_URL",
+        "https://github.com/LavX/bazarr-provider-catalog/blob/staging/catalog.json")
+    _hub_state(tmp_path, monkeypatch, entries=_entry("official", _official_manifest()))
+    state = load_state()
+    state["catalog_sources"]["official"]["resolved_commit"] = staging
+    save_state(state)
+
+    refresh_catalog()
+
+    # The URL's ref is not a trusted branch, so the skip never applies: the
+    # catalog is fetched again at the same commit.
+    assert f"https://raw.githubusercontent.com/LavX/bazarr-provider-catalog/{staging}/catalog.json" in calls
+    assert load_state()["catalog_sources"]["official"]["last_error"] is None
+
+
+def test_compare_calls_still_run_for_a_commit_not_yet_checked(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    compares = []
+
+    def fake_get(url, timeout, **_kwargs):
+        if url == _OFFICIAL_AD:
+            return _AdvertisementResponse(
+                _git_advertisement([(_MAIN, "refs/heads/main"), (_BETA, "refs/heads/beta")]))
+        if url.startswith(_OFFICIAL_REPO_API + "/compare/"):
+            compares.append(url)
+            return _GitHubAnswer({"status": "behind"})
+        if url.startswith("https://raw.githubusercontent.com/LavX/bazarr-provider-catalog/"):
+            return _GitHubAnswer({"providers": [{"manifest": _official_manifest()}]})
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr("provider_hub.service.requests.get", fake_get)
+    _hub_state(tmp_path, monkeypatch, dev_ref=_OLD_MAIN)
+
+    # The heads did not move between the two refreshes; the second refresh
+    # still re-asks nothing, but a commit never checked before is compared.
+    refresh_catalog()
+    assert compares
+    saved = load_state()
+    saved["trust_cache"]["answers"].pop(_OLD_MAIN)
+    from provider_hub.state import save_state
+    save_state(saved)
+    compares.clear()
+    refresh_catalog()
+
+    assert compares
