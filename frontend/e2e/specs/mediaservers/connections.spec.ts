@@ -6,6 +6,7 @@
  * server nothing listens on, so no test depends on what an earlier one left.
  */
 import { expect, test } from "@e2e/fixtures";
+import { appPath } from "@e2e/lib/base";
 import type { MediaServerInstance } from "@e2e/lib/mediaservers";
 import {
   BOGUS_KEY,
@@ -56,7 +57,7 @@ test.describe(
     });
 
     test("each instance is listed under its own kind", async ({ page }) => {
-      await page.goto("/settings/connections");
+      await page.goto(appPath("/settings/connections"));
 
       await page.getByRole("tab", { name: "Emby", exact: true }).click();
       await expect(page.getByRole("region", { name: emby.name })).toBeVisible();
@@ -72,7 +73,7 @@ test.describe(
     });
 
     test("a renamed instance keeps its new name", async ({ page, api }) => {
-      await page.goto("/settings/connections");
+      await page.goto(appPath("/settings/connections"));
       await page.getByRole("tab", { name: "Emby", exact: true }).click();
       await page
         .getByRole("region", { name: emby.name })
@@ -98,7 +99,7 @@ test.describe(
     });
 
     test("a deleted instance is gone", async ({ page, api }) => {
-      await page.goto("/settings/connections");
+      await page.goto(appPath("/settings/connections"));
       await page.getByRole("tab", { name: "Silo", exact: true }).click();
       await page
         .getByRole("region", { name: silo.name })
@@ -121,7 +122,7 @@ test.describe(
       api,
     }) => {
       await deleteMediaServer(api, silo.id);
-      await page.goto("/system/status");
+      await page.goto(appPath("/system/status"));
 
       // The first probe runs in the background and the page asks again every
       // few seconds until it has an answer.

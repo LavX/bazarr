@@ -16,18 +16,33 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BazarrInstance, ContainerSlot } from "./container";
 import {
   containerForFile,
+  DOCKER_MS,
   E2E_LABEL,
   E2E_RUN_LABEL,
   externalBazarr,
+  POLL_MS,
+  PORT_RETRIES,
   postgresVariant,
+  READY_CAP_MS,
   REMOVAL_ALLOWANCE_MS,
+  REQUEST_MS,
+  RESTART_MS,
   runId,
   startBazarr,
-  STARTUP_ALLOWANCE_MS,
+  STARTUP_STAGES_MS,
+  startupAllowanceMs,
   waitUntilReady,
 } from "./container";
 import { ensureRecommendedProviders, INSTALL_ALLOWANCE_MS } from "./providers";
 import { readSharedRecord, sharedBazarr } from "./shared";
+
+/**
+ * A real event loop turn, held before any test replaces the timers with fake
+ * ones. The fake clock only moves where a test drives it, and a real turn is
+ * how the real filesystem the lock and the record live on gets to answer
+ * while the clock is being driven.
+ */
+const realTimeout = setTimeout;
 
 interface FakeContainer {
   name: string;
@@ -42,6 +57,8 @@ interface FakeContainer {
 interface DockerCall {
   args: string[];
   timeout?: number;
+  /** When the call happened, on the same clock as the stubbed fetch's calls. */
+  seq: number;
 }
 
 /**
@@ -59,8 +76,12 @@ const docker = vi.hoisted(() => {
     volumes,
     networks,
     calls,
+    /** The shared clock of the stubbed docker and the stubbed fetch. */
+    clock: 0,
     /** Runs at the start of each `docker run`, to let another run win. */
     beforeRun: null as ((port: number) => void) | null,
+    /** How long a docker call takes, on the same clock as everything else. */
+    delay: null as ((args: string[]) => number) | null,
     /** Makes every pg_isready probe fail, as an unreachable Postgres does. */
     pgNeverReady: false,
     /** Makes every Bazarr run fail with this message, as a missing image does. */
@@ -71,6 +92,7 @@ const docker = vi.hoisted(() => {
       networks.clear();
       calls.length = 0;
       state.beforeRun = null;
+      state.delay = null;
       state.pgNeverReady = false;
       state.bazarrRunFails = "";
     },
@@ -190,6 +212,13 @@ const docker = vi.hoisted(() => {
       }
       return `${name}\n`;
     }
+    if (command === "restart") {
+      const name = rest[0];
+      if (!containers.get(name)?.running) {
+        throw fail(`No such container: ${name}`);
+      }
+      return `${name}\n`;
+    }
     if (command === "rm") {
       for (const name of operands(rest)) containers.delete(name);
       return "";
@@ -228,9 +257,30 @@ vi.mock("node:child_process", () => ({
       result?: { stdout: string; stderr: string },
     ) => void;
     const options = rest[0] as { timeout?: number } | undefined;
-    docker.state.calls.push({ args, timeout: options?.timeout });
+    docker.state.calls.push({
+      args,
+      timeout: options?.timeout,
+      seq: docker.state.clock++,
+    });
     // Answered on a later turn, as a real process is, so that concurrent
-    // callers interleave.
+    // callers interleave. A test may stretch a call on the shared clock,
+    // which under fake timers is time the test drives itself. A call
+    // stretched past its own bound is killed with SIGTERM, as Node's
+    // execFile kills a call that outlives its timeout.
+    const wait = docker.state.delay?.(args) ?? 1;
+    if (options?.timeout !== undefined && wait > options.timeout) {
+      setTimeout(
+        () =>
+          done(
+            Object.assign(
+              new Error(`Command failed: ${file} ${args.join(" ")}\n`),
+              { killed: true, signal: "SIGTERM", code: null },
+            ),
+          ),
+        options.timeout,
+      );
+      return;
+    }
     setTimeout(() => {
       try {
         if (file !== "docker") throw new Error(`unexpected: ${file}`);
@@ -238,32 +288,63 @@ vi.mock("node:child_process", () => ({
       } catch (error) {
         done(error as Error);
       }
-    }, 1);
+    }, wait);
   },
 }));
 
 interface FetchCall {
   url: string;
   init?: RequestInit;
+  /** When the request happened, on the same clock as the stubbed docker's calls. */
+  seq: number;
 }
 
 const http: {
   calls: FetchCall[];
   /** The status a request is answered with. */
   status: (url: string, init?: RequestInit) => number;
+  /** A per-URL answer the stub stands in for, or null for the default. */
+  route: (url: string, init?: RequestInit) => Response | null;
+  /** How long a request takes, on the same clock as the stubbed docker's. */
+  delay: ((url: string, init?: RequestInit) => number) | null;
 } = {
   calls: [],
   status: () => 200,
+  route: () => null,
+  delay: null,
 };
 
 function stubFetch() {
   http.calls = [];
   http.status = (_url, init) => (init?.method === "POST" ? 204 : 200);
+  http.delay = null;
+  // The settings API echoes the base the URL is under, as an instance
+  // configured with that base does: what the start checks to prove the
+  // base took effect.
+  http.route = (url, init) => {
+    if (init?.method !== "POST" && url.endsWith("/api/system/settings")) {
+      const base = new URL(url).pathname.replace(
+        /\/api\/system\/settings$/,
+        "",
+      );
+      return Response.json({ general: { base_url: base } });
+    }
+    // The supervisor answers its status route with JSON, and only ever has
+    // that route under a base it booted with, which the start relies on.
+    if (init?.method !== "POST" && url.endsWith("/_supervisor/status")) {
+      return Response.json({ state: "running" });
+    }
+    return null;
+  };
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: string | URL, init?: RequestInit) => {
       const url = String(input);
-      http.calls.push({ url, init });
+      http.calls.push({ url, init, seq: docker.state.clock++ });
+      const wait = http.delay?.(url, init);
+      if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
+      const routed = http.route(url, init);
+      if (routed) return routed;
       const status = http.status(url, init);
       return new Response(status === 204 ? null : "", { status });
     }),
@@ -278,6 +359,11 @@ async function newRunDir() {
 }
 
 beforeEach(async () => {
+  // The instance the harness answers to is the environment's, so each test
+  // starts from none of it, not from the shell's or the last test's.
+  delete process.env.BAZARR_E2E_URL;
+  delete process.env.BAZARR_E2E_API_KEY;
+  delete process.env.BAZARR_E2E_BASE_PATH;
   docker.state.reset();
   stubFetch();
   // A shell that exports the PostgreSQL variant or an external instance
@@ -295,6 +381,9 @@ beforeEach(async () => {
 afterEach(async () => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
+  delete process.env.BAZARR_E2E_URL;
+  delete process.env.BAZARR_E2E_API_KEY;
+  delete process.env.BAZARR_E2E_BASE_PATH;
   await rm(runDir, { recursive: true, force: true });
   delete process.env.BAZARR_E2E_RUN_DIR;
 });
@@ -306,6 +395,104 @@ function budget(timeout: number) {
       this.timeout = value;
     },
     annotations: [] as { type: string; description?: string }[],
+  };
+}
+
+/**
+ * Stretches every bounded stage of a sub-path start to all but one second
+ * of its own bound, on the fake clock: the docker calls and the requests
+ * between and after the readiness phases, and the two readiness phases
+ * themselves, which answer 503 until their time is up. `phases` is how
+ * long each readiness phase takes, within its cap, and `collisions` is
+ * how many port races the start loses first, each at the whole bound of
+ * its own stages: the two docker calls that made the attempt and the
+ * removal of what they left, both calls of the removal sharing its
+ * allowance. The settings request under the base doubles as the readiness
+ * probe while its phase runs, so it stays inside the probe's own bound,
+ * and takes its own share once the phases are done; with both phases
+ * near their caps, the whole start takes all but seconds of the startup
+ * allowance, which is what the whole-time checks cut into.
+ */
+function delayedStages(
+  start: number,
+  phases: { first: number; second: number },
+  collisions = 0,
+) {
+  // Each stage at its own bound less a second: the docker calls that
+  // create the container and the key read (DOCKER_MS), the save, the
+  // verification requests and the onboarding (REQUEST_MS), the restart
+  // (RESTART_MS), and the two calls of a lost attempt's removal sharing
+  // the removal allowance (REMOVAL_ALLOWANCE_MS).
+  const DOCKER_CALL = DOCKER_MS - 1_000;
+  const KEY_READ = DOCKER_MS - 1_000;
+  const REQUEST = REQUEST_MS - 1_000;
+  const RESTART = RESTART_MS - 1_000;
+  const REMOVE_CALL = (REMOVAL_ALLOWANCE_MS - 1_000) / 2;
+  const collisionMs = collisions * (2 * DOCKER_CALL + 2 * REMOVE_CALL);
+  const firstEnd = collisionMs + 2 * DOCKER_CALL + phases.first;
+  const secondEnd = firstEnd + KEY_READ + REQUEST + RESTART + phases.second;
+  docker.state.delay = (args) => {
+    if (args[0] === "run") return DOCKER_CALL;
+    if (args[0] === "rm") return REMOVE_CALL;
+    if (args[0] === "volume") {
+      return args[1] === "rm" ? REMOVE_CALL : DOCKER_CALL;
+    }
+    if (args[0] === "exec") return KEY_READ;
+    if (args[0] === "restart") return RESTART;
+    return 0;
+  };
+  if (collisions > 0) {
+    let runs = 0;
+    docker.state.beforeRun = (port) => {
+      if (runs >= collisions) return;
+      runs += 1;
+      // Another run on this machine got to this free port first and
+      // holds it, so the start loses the race and tries the next port.
+      const theirs = `${E2E_LABEL}-theirs-${runs}`;
+      docker.state.containers.set(theirs, {
+        name: theirs,
+        port,
+        labels: [E2E_LABEL],
+        volume: theirs,
+        running: true,
+      });
+      docker.state.volumes.set(theirs, []);
+    };
+  }
+  http.delay = (url, init) => {
+    // The save and the onboarding are POSTs, never readiness probes, so
+    // they can wait for their share; so can the verification requests,
+    // which carry the API key the probes never send, once their phase is
+    // done. Everything else stays at once: the probes have 10 seconds
+    // each, and the settings request under the base is one while its
+    // phase runs.
+    if (init?.method === "POST") return REQUEST;
+    if (Date.now() - start < secondEnd) return 0;
+    const pathname = new URL(url).pathname;
+    if (
+      init?.headers &&
+      (pathname.endsWith("/_supervisor/status") ||
+        pathname.endsWith("/api/system/settings") ||
+        pathname.endsWith("/api/system/status"))
+    ) {
+      return REQUEST;
+    }
+    return 0;
+  };
+  const plain = http.route;
+  http.route = (url, init) => {
+    if (init?.method === "POST") return plain(url, init);
+    const parsed = new URL(url);
+    const probe =
+      parsed.pathname.endsWith("/setup") ||
+      parsed.pathname.endsWith("/api/system/settings");
+    if (!probe) return plain(url, init);
+    const t = Date.now() - start;
+    const firstPhase = !parsed.pathname.startsWith("/bazarr");
+    if ((firstPhase && t < firstEnd) || (!firstPhase && t < secondEnd)) {
+      return new Response("not ready", { status: 503 });
+    }
+    return plain(url, init);
   };
 }
 
@@ -403,6 +590,64 @@ describe("container names and labels", () => {
     expect([...docker.state.containers.keys()]).toEqual([]);
     expect([...docker.state.volumes.keys()]).toEqual([]);
     expect([...docker.state.networks.keys()]).toEqual([]);
+  });
+
+  it("begins each worker's port scan at its own parallel index", async () => {
+    // Workers that start at once and scan from the same port race one
+    // another for it; each scans from its own place in the range
+    // instead, so this one, the second, tries 6792 first, 6790 being the
+    // range's first port.
+    process.env.TEST_PARALLEL_INDEX = "2";
+    let firstPort = 0;
+    docker.state.beforeRun = (port) => {
+      docker.state.beforeRun = null;
+      firstPort = port;
+    };
+    try {
+      await startBazarr({ image: "bazarr:test" });
+    } finally {
+      delete process.env.TEST_PARALLEL_INDEX;
+    }
+    expect(firstPort).toBe(6792);
+  });
+
+  it("a start whose docker call is killed fails once instead of walking the ports", async () => {
+    vi.useFakeTimers();
+    try {
+      // A busy host can hold a docker call past its bound, and Node kills
+      // it with SIGTERM. That is not another worker winning the port, so
+      // the start does not answer it by trying the next one, which would
+      // pay a fresh volume and container for every port in the range: it
+      // removes what it made and fails with the kill's own error.
+      docker.state.delay = (args) => (args[0] === "run" ? 900_000 : 0);
+      let outcome: { ok: boolean; error?: unknown } | null = null;
+      const start = startBazarr({ image: "bazarr:test" });
+      start.then(
+        () => {
+          outcome = { ok: true };
+        },
+        (error) => {
+          outcome = { ok: false, error };
+        },
+      );
+      for (let step = 0; outcome === null && step < 300; step += 1) {
+        await vi.advanceTimersByTimeAsync(5_000);
+        await new Promise((resolve) => realTimeout(resolve, 0));
+      }
+      expect(outcome).toMatchObject({
+        ok: false,
+        error: { killed: true, signal: "SIGTERM" },
+      });
+      // One attempt only, and what it made is gone: the kill is the
+      // start's own failure, not a port somebody else won.
+      expect(
+        docker.state.calls.filter((call) => call.args[0] === "run"),
+      ).toHaveLength(1);
+      expect(docker.state.containers.size).toBe(0);
+      expect(docker.state.volumes.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("every container and its volume carry the run's label and name", async () => {
@@ -514,21 +759,24 @@ describe("the PostgreSQL variant", () => {
         ]),
       }),
     );
-    // Readiness was polled against the Postgres itself, over TCP.
-    expect(docker.state.calls).toContainEqual({
-      args: expect.arrayContaining([
-        "exec",
-        postgresName,
-        "pg_isready",
-        "-h",
-        "127.0.0.1",
-        "-U",
-        "bazarr",
-        "-d",
-        "bazarr",
-      ]),
-      timeout: expect.any(Number),
-    });
+    // Readiness was polled against the Postgres itself, over TCP, through
+    // a bounded probe call; the shared clock field says when it happened.
+    expect(docker.state.calls).toContainEqual(
+      expect.objectContaining({
+        args: expect.arrayContaining([
+          "exec",
+          postgresName,
+          "pg_isready",
+          "-h",
+          "127.0.0.1",
+          "-U",
+          "bazarr",
+          "-d",
+          "bazarr",
+        ]),
+        timeout: expect.any(Number),
+      }),
+    );
   });
 
   it("a Postgres that never answers is cleaned up, not retried or leaked", async () => {
@@ -600,11 +848,15 @@ describe("the PostgreSQL variant", () => {
 });
 
 describe("external instances", () => {
-  it("refuses a URL with a path, which the specs cannot address", async () => {
-    await expect(
-      externalBazarr("https://bazarr.example.lan/bazarr"),
-    ).rejects.toThrow(/sub-path|path/i);
-    expect(http.calls).toHaveLength(0);
+  it("accepts an instance served under a sub-path, keeping its path", async () => {
+    process.env.BAZARR_E2E_API_KEY = "key";
+    for (const url of [
+      "https://bazarr.example.lan/bazarr",
+      "https://bazarr.example.lan/bazarr/",
+    ]) {
+      const instance = await externalBazarr(url);
+      expect(instance.baseURL).toBe("https://bazarr.example.lan/bazarr");
+    }
   });
 
   it("accepts the root of an instance, with or without a slash", async () => {
@@ -615,6 +867,231 @@ describe("external instances", () => {
     ]) {
       const instance = await externalBazarr(url);
       expect(instance.baseURL).toBe("https://bazarr.example.lan");
+    }
+  });
+
+  it("refuses a URL that is not a URL, before any request is made", async () => {
+    await expect(externalBazarr("bazarr.example.lan")).rejects.toThrow();
+    expect(http.calls).toHaveLength(0);
+  });
+});
+
+describe("the sub-path variant", () => {
+  it("starts its container and then serves it under the configured base path", async () => {
+    process.env.BAZARR_E2E_BASE_PATH = "/bazarr";
+    const instance = await startBazarr({ image: "bazarr:test" });
+
+    expect(instance.baseURL).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/bazarr$/);
+
+    // general.base_url is saved through the settings API, at the root the
+    // fresh install still answers on, and applied by a restart.
+    const settings = http.calls.find(
+      (call) =>
+        call.init?.method === "POST" &&
+        call.url.endsWith("/api/system/settings"),
+    );
+    expect(settings).toBeDefined();
+    expect(
+      (settings?.init?.body as FormData).get("settings-general-base_url"),
+    ).toBe("/bazarr");
+
+    // The container is restarted whole, after the save, and readiness is
+    // polled under the base path only after that, so the instance handed out
+    // answers there on its own.
+    const restart = docker.state.calls.find(
+      (call) => call.args[0] === "restart" && call.args[1] === instance.name,
+    );
+    expect(restart).toBeDefined();
+    expect(restart?.timeout).toBeGreaterThan(0);
+    const save = http.calls.find(
+      (call) =>
+        call.init?.method === "POST" &&
+        call.url.endsWith("/api/system/settings"),
+    );
+    expect((save?.seq ?? Infinity) < (restart?.seq ?? -1)).toBe(true);
+    const underBase = http.calls.filter((call) => call.url.includes("/bazarr"));
+    expect(underBase.length).toBeGreaterThan(0);
+    for (const call of underBase) {
+      expect(call.seq).toBeGreaterThan(restart?.seq ?? -1);
+    }
+
+    // The start proves the base took effect: the settings under the base
+    // report it, and the root no longer answers the API.
+    expect(
+      http.calls.some(
+        (call) =>
+          call.init?.method !== "POST" &&
+          call.url === `${instance.baseURL}/api/system/settings`,
+      ),
+    ).toBe(true);
+    expect(
+      http.calls.some(
+        (call) =>
+          call.url.endsWith("/api/system/status") &&
+          !call.url.includes("/bazarr"),
+      ),
+    ).toBe(true);
+  });
+
+  it("fails and removes the container when the base path does not take effect", async () => {
+    process.env.BAZARR_E2E_BASE_PATH = "/bazarr";
+    // A stale process keeps answering at the root: the base's settings say
+    // the base, but the root still speaks JSON.
+    const plain = http.route;
+    http.route = (url, init) => {
+      if (
+        init?.method !== "POST" &&
+        new URL(url).pathname === "/api/system/status"
+      ) {
+        return Response.json({ stale: true });
+      }
+      return plain(url, init);
+    };
+
+    await expect(startBazarr({ image: "bazarr:test" })).rejects.toThrow(
+      /did not take effect/,
+    );
+
+    expect(docker.state.containers.size).toBe(0);
+    expect(docker.state.volumes.size).toBe(0);
+  });
+
+  it("fails and removes the container when a save is accepted but ignored, answering the app's front page", async () => {
+    process.env.BAZARR_E2E_BASE_PATH = "/bazarr";
+    // The save was accepted and ignored: under the base the instance does
+    // not answer the settings API but its own front page, HTML, the way a
+    // real install does in this case.
+    http.route = (url, init) => {
+      if (
+        init?.method !== "POST" &&
+        url.endsWith("/bazarr/api/system/settings")
+      ) {
+        return new Response("<html>the app's front page</html>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        });
+      }
+      return null;
+    };
+
+    await expect(startBazarr({ image: "bazarr:test" })).rejects.toThrow(
+      /did not take effect/,
+    );
+
+    expect(docker.state.containers.size).toBe(0);
+    expect(docker.state.volumes.size).toBe(0);
+  });
+
+  it("fails and removes the container when the settings under the base report another base", async () => {
+    process.env.BAZARR_E2E_BASE_PATH = "/bazarr";
+    // The save stored something else: the settings under the base report
+    // it, and the start hands out no instance whose base is a lie.
+    http.route = (url, init) => {
+      if (
+        init?.method !== "POST" &&
+        url.endsWith("/bazarr/api/system/settings")
+      ) {
+        return Response.json({ general: { base_url: "/other" } });
+      }
+      return null;
+    };
+
+    await expect(startBazarr({ image: "bazarr:test" })).rejects.toThrow(
+      /general\.base_url/,
+    );
+
+    expect(docker.state.containers.size).toBe(0);
+    expect(docker.state.volumes.size).toBe(0);
+  });
+
+  it("fails and removes the container when the supervisor under the base answers the app's front page", async () => {
+    process.env.BAZARR_E2E_BASE_PATH = "/bazarr";
+    // The supervisor in front of the app booted without the base, so it
+    // never registered the base's status route and its catch-all serves the
+    // SPA instead: the in-app-restart failure the whole-container restart
+    // exists to avoid.
+    const plain = http.route;
+    http.route = (url, init) => {
+      if (
+        init?.method !== "POST" &&
+        url.endsWith("/bazarr/_supervisor/status")
+      ) {
+        return new Response("<html>the app's front page</html>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        });
+      }
+      return plain(url, init);
+    };
+
+    await expect(startBazarr({ image: "bazarr:test" })).rejects.toThrow(
+      /did not take effect/,
+    );
+
+    expect(docker.state.containers.size).toBe(0);
+    expect(docker.state.volumes.size).toBe(0);
+  });
+
+  it("leaves a run with no base path at the root of its host", async () => {
+    const instance = await startBazarr({ image: "bazarr:test" });
+    expect(instance.baseURL).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+    expect(
+      http.calls.some(
+        (call) =>
+          call.init?.method !== "POST" &&
+          call.url.endsWith("/api/system/status"),
+      ),
+    ).toBe(false);
+  });
+
+  it("gives a start under a base path the time of both readiness phases", async () => {
+    vi.useFakeTimers();
+    process.env.BAZARR_E2E_BASE_PATH = "/bazarr";
+    try {
+      // Boot and the base-path restart each take 150 of the 180 seconds
+      // their phase is given: 300 seconds in all, which the one-phase
+      // allowance never covered. The clock is the fake one, so the test
+      // itself takes milliseconds.
+      const start = Date.now();
+      const plain = http.route;
+      http.route = (url, init) => {
+        if (init?.method === "POST") return plain(url, init);
+        if (Date.now() - start < 150_000) {
+          return new Response("not ready", { status: 503 });
+        }
+        // The second phase is the restart's, not the boot's.
+        if (Date.now() - start < 300_000 && url.includes("/bazarr")) {
+          return new Response("not ready", { status: 503 });
+        }
+        return plain(url, init);
+      };
+
+      const slot: ContainerSlot = { held: null };
+      const budgeted = budget(60_000);
+      let outcome: { ok: boolean; error?: unknown } | null = null;
+      const started = containerForFile(slot, "a.spec.ts", budgeted);
+      started.then(
+        () => {
+          outcome = { ok: true };
+        },
+        (error) => {
+          outcome = { ok: false, error };
+        },
+      );
+      // Keep the fake clock moving until the start finishes; it never
+      // advances on its own. Two phases of 150 seconds need well under
+      // this many 5-second steps, and the caps end the loop anyway.
+      for (let step = 0; outcome === null && step < 200; step += 1) {
+        await vi.advanceTimersByTimeAsync(5_000);
+      }
+      expect(outcome).toEqual({ ok: true });
+      // The delayed start fits the test's budget: the allowance covers the
+      // second readiness phase, which a one-phase budget would not.
+      const elapsed = Date.now() - start;
+      expect(elapsed).toBeGreaterThan(250_000);
+      expect(elapsed).toBeLessThanOrEqual(budgeted.timeout - 60_000);
+    } finally {
+      vi.useRealTimers();
     }
   });
 });
@@ -667,6 +1144,41 @@ describe("bounded probes", () => {
   });
 });
 
+describe("the startup allowance", () => {
+  it("is at least its readiness phases' caps plus every other stage's bound", () => {
+    // The slack is the sum of the other stages' bounds, so a start in
+    // which every stage takes its whole time fits the one test's budget;
+    // cutting it below that sum fails here instead of passing such a
+    // start.
+    expect(startupAllowanceMs()).toBeGreaterThanOrEqual(
+      READY_CAP_MS + STARTUP_STAGES_MS,
+    );
+    process.env.BAZARR_E2E_BASE_PATH = "/bazarr";
+    try {
+      expect(startupAllowanceMs()).toBeGreaterThanOrEqual(
+        2 * READY_CAP_MS + STARTUP_STAGES_MS,
+      );
+    } finally {
+      delete process.env.BAZARR_E2E_BASE_PATH;
+    }
+  });
+
+  it("counts every one of the stages' bounds in the sum", () => {
+    // The stage sum is checked against this test's own count of the
+    // bounds it is made of, not against the code that adds them, so a
+    // term dropped from the sum, the restart's or a lost race's say,
+    // fails here instead of quietly shrinking the allowance and every
+    // budget built on it.
+    expect(STARTUP_STAGES_MS).toBe(
+      3 * DOCKER_MS + // the docker calls that create the container and the key read
+        REQUEST_MS + // the save of the base
+        RESTART_MS + // the restart that applies it
+        4 * REQUEST_MS + // the verification requests and the onboarding
+        PORT_RETRIES * (2 * DOCKER_MS + REMOVAL_ALLOWANCE_MS), // the lost races for a port
+    );
+  });
+});
+
 describe("the shared instance", () => {
   it("is removed when onboarding fails, so nothing is left for teardown to miss", async () => {
     http.status = (_url, init) => (init?.method === "POST" ? 500 : 200);
@@ -683,7 +1195,7 @@ describe("the shared instance", () => {
     const first = budget(60_000);
     await sharedBazarr(first);
     expect(first.timeout).toBeGreaterThan(60_000);
-    expect(first.timeout - 60_000).toBe(STARTUP_ALLOWANCE_MS);
+    expect(first.timeout - 60_000).toBe(startupAllowanceMs());
   });
 
   it("gives no allowance to a test that finds it running", async () => {
@@ -699,6 +1211,113 @@ describe("the shared instance", () => {
     const debugging = budget(0);
     await sharedBazarr(debugging);
     expect(debugging.timeout).toBe(0);
+  });
+
+  it("covers a start in which every bounded stage takes its whole time", async () => {
+    vi.useFakeTimers();
+    process.env.BAZARR_E2E_BASE_PATH = "/bazarr";
+    try {
+      // Every bounded stage takes all but one second of its own bound,
+      // both readiness phases answer 503 until one poll before their
+      // cap, and the start loses PORT_RETRIES races for its port first,
+      // each race paying the whole bound of its own stages: the two
+      // docker calls that made the attempt and the removal of what they
+      // left. The whole start then finishes well inside the startup
+      // allowance, so a stage dropped from the sum, or slack cut off
+      // it, no longer fits the one test's budget and fails here
+      // instead of passing such a start.
+      const start = Date.now();
+      delayedStages(
+        start,
+        {
+          first: READY_CAP_MS - POLL_MS,
+          second: READY_CAP_MS - POLL_MS,
+        },
+        PORT_RETRIES,
+      );
+      const budgeted = budget(60_000);
+      let outcome: { ok: boolean; error?: unknown } | null = null;
+      const started = sharedBazarr(budgeted);
+      started.then(
+        () => {
+          outcome = { ok: true };
+        },
+        (error) => {
+          outcome = { ok: false, error };
+        },
+      );
+      // The clock is driven in small steps: the real I/O of the start
+      // (the port scan, the lock, the record) is answered in real turns
+      // the fake clock never moves in, and a big blind step would charge
+      // it fake time that has nothing to do with the stages.
+      for (let step = 0; outcome === null && step < 2_500; step += 1) {
+        await vi.advanceTimersByTimeAsync(1_000);
+        await new Promise((resolve) => realTimeout(resolve, 0));
+      }
+      expect(outcome).toEqual({ ok: true });
+      const elapsed = Date.now() - start;
+      const allowance = startupAllowanceMs();
+      expect(elapsed).toBeLessThanOrEqual(allowance);
+      expect(elapsed).toBeGreaterThan(allowance - 60_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("lets a waiter for the shared instance outlast such a start", async () => {
+    vi.useFakeTimers();
+    process.env.BAZARR_E2E_BASE_PATH = "/bazarr";
+    try {
+      // Two workers ask for the shared instance at once. The one that
+      // loses the lock waits for the other's whole start: both readiness
+      // phases at one poll inside their cap, every bounded stage at
+      // all but a second of its own bound, and PORT_RETRIES lost port
+      // races first, each at the whole bound of its own stages, so the
+      // start ends close enough to the lock's deadline that a deadline
+      // short of a whole retry-inclusive start would time the waiter out
+      // here.
+      const start = Date.now();
+      delayedStages(
+        start,
+        {
+          first: READY_CAP_MS - POLL_MS,
+          second: READY_CAP_MS - POLL_MS,
+        },
+        PORT_RETRIES,
+      );
+      const instances: Array<BazarrInstance | null> = [null, null];
+      const outcomes: Array<{ ok: boolean; error?: unknown } | null> = [
+        null,
+        null,
+      ];
+      const callers = [0, 1].map((index) =>
+        sharedBazarr(budget(60_000)).then(
+          (instance) => {
+            instances[index] = instance;
+            outcomes[index] = { ok: true };
+          },
+          (error) => {
+            outcomes[index] = { ok: false, error };
+          },
+        ),
+      );
+      for (
+        let step = 0;
+        outcomes.some((outcome) => outcome === null) && step < 400;
+        step += 1
+      ) {
+        await vi.advanceTimersByTimeAsync(5_000);
+        await new Promise((resolve) => realTimeout(resolve, 0));
+      }
+      await Promise.allSettled(callers);
+      // The waiter got the starter's record, not the timeout message.
+      expect(outcomes[0]).toEqual({ ok: true });
+      expect(outcomes[1]).toEqual({ ok: true });
+      expect(instances[1]?.name).toBe(instances[0]?.name);
+      expect(instances[1]?.apiKey).toBe(instances[0]?.apiKey);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -719,7 +1338,7 @@ describe("the container a stateful spec file gets", () => {
     const slot: ContainerSlot = { held: null };
     const starting = budget(60_000);
     await containerForFile(slot, "a.spec.ts", starting);
-    expect(starting.timeout - 60_000).toBe(STARTUP_ALLOWANCE_MS);
+    expect(starting.timeout - 60_000).toBe(startupAllowanceMs());
 
     const replacing = budget(60_000);
     const old = slot.held?.instance as BazarrInstance;
@@ -738,7 +1357,7 @@ describe("the container a stateful spec file gets", () => {
 
     expect(whileRemoving - 60_000).toBe(REMOVAL_ALLOWANCE_MS);
     expect(replacing.timeout - 60_000).toBe(
-      REMOVAL_ALLOWANCE_MS + STARTUP_ALLOWANCE_MS,
+      REMOVAL_ALLOWANCE_MS + startupAllowanceMs(),
     );
   });
 
