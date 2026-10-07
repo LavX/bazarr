@@ -260,6 +260,7 @@ def get_health_issues():
     # decrypt (the API key): nothing to re-enter, but the tools holding the
     # old value still have to be told.
     health_issues.extend(replaced_secret_issues())
+    health_issues.extend(_host_allowlist_issues())
 
     return health_issues
 
@@ -302,6 +303,20 @@ def translate_from_profile_issues():
                      f'and translation is unavailable: {availability.reason}. Those languages '
                      f'are searched on providers instead of being translated.'})
     return issues
+
+
+def _host_allowlist_issues():
+    """The request-host check's items: the wildcard switch and refused hosts.
+
+    Never raises: a health check that throws takes the whole page with it.
+    """
+    from app.host_allowlist import health_issues
+
+    try:
+        return health_issues()
+    except Exception:
+        logging.exception("BAZARR could not report the request-host health issues")
+        return []
 
 
 def _postprocessing_command_issues():

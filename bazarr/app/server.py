@@ -17,7 +17,8 @@ from .ui import ui_bp
 from .get_args import args
 from .config import settings, base_url
 from .database import close_database
-from .app import BACKEND_HOST_ENV, create_app, supervisor_token, trusted_proxy_value
+from .app import (BACKEND_HOST_ENV, create_app, supervisor_token, trusted_proxy_value)
+from .host_allowlist import announce_code
 
 app = create_app()
 from compat import register as register_compat  # noqa: E402
@@ -177,6 +178,12 @@ class Server:
     def restart(self):
         self.close_all()
         restart_bazarr()
+
+
+# The one-time code an operator enters on the refused-host page is announced
+# to the console at boot, so a hostname refused right after a restart has one
+# to use. It appears only on the console, never in bazarr.log.
+announce_code()
 
 
 webserver = Server()

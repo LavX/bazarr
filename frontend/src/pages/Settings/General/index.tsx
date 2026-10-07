@@ -330,6 +330,17 @@ const SettingsGeneralView: FunctionComponent = () => {
           }
           settingKey={settingApiKey}
         ></Text>
+        <Chips
+          label="Allowed Hosts"
+          settingKey="settings-general-allowed_hosts"
+        ></Chips>
+        <Message>
+          Hostnames Bazarr answers while no login is configured. Exact names, or
+          *.example.com for a domain. Addresses, localhost, single-label names
+          and names ending in .local, .lan, .home.arpa, .internal or .localhost
+          are always answered. A lone * answers every hostname and is not
+          recommended
+        </Message>
         <Check
           label="Enable CORS headers"
           settingKey="settings-cors-enabled"

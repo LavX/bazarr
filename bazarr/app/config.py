@@ -220,6 +220,12 @@ validators = [
     # list matches no one and would silently trust less than the old hardcoded
     # default did.
     Validator('general.trusted_proxy', must_exist=True, default='127.0.0.1', is_type_of=str, cast=str),
+    # Hostnames the request-host check answers while no login is configured:
+    # exact names, *.example.com for a domain, or a lone '*' to answer every
+    # hostname (the health page names that switch). The default set (IP
+    # literals, localhost, single-label names and local-only suffixes) always
+    # applies; entries here add to it.
+    Validator('general.allowed_hosts', must_exist=True, default=[], is_type_of=list),
     Validator('general.base_url', must_exist=True, default='', is_type_of=str),
     Validator('general.instance_name', must_exist=True, default='Bazarr+', is_type_of=str,
               apply_default_on_none=True),
@@ -1128,6 +1134,7 @@ base_url = settings.general.base_url.rstrip('/')
 
 array_keys = ['excluded_tags',
               'exclude',
+              'allowed_hosts',
               'included_codecs',
               'subzero_mods',
               'excluded_series_types',

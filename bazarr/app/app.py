@@ -18,6 +18,7 @@ from .auth import is_session_authenticated
 from .database import database
 from .get_args import args
 from .config import settings, base_url
+from .host_allowlist import HostAllowlistMiddleware
 
 socketio = SocketIO()
 
@@ -230,6 +231,10 @@ def create_app():
     socketio.init_app(app, path=f'{base_url.rstrip("/")}/api/socket.io',
                       cors_allowed_origins=socket_allowed_origins(),
                       async_mode='threading', allow_upgrades=False, transports='polling', engineio_logger=False)
+    # The request-host gate wraps the whole WSGI stack, the Socket.IO
+    # transport included, and sits inside the supervisor token wrapper so a
+    # refusal still carries the token the Docker supervisor relays.
+    app.wsgi_app = HostAllowlistMiddleware(app.wsgi_app)
     # Outermost, so it also covers what Flask-SocketIO's middleware answers.
     app.wsgi_app = SupervisorTokenMiddleware(app.wsgi_app)
 
