@@ -646,3 +646,48 @@ def test_dispatcher_always_refreshes_the_badges_and_never_raises(monkeypatch, ou
 
     assert signalr_client.dispatcher(data) is None
     assert emitted == [{"type": "badges"}]
+
+
+def test_a_queued_series_refresh_for_a_disabled_instance_touches_nothing(monkeypatch, schema_session,
+                                                                        caplog):
+    """The feed queue is drained asynchronously, so an event can be dispatched
+    after its instance was disabled or deleted. Its episode sync would fetch
+    through the default Sonarr connection while the deletion keeps the named
+    instance's scope, and an empty default answer would delete that instance's
+    rows. The dispatcher skips the event instead, the way the per-instance entry
+    points skip an unknown instance, so nothing is fetched or deleted."""
+    from sqlalchemy import select
+
+    from app.database import TableArrInstances, TableEpisodes
+
+    schema_session.add(TableArrInstances(
+        id=2, kind='sonarr', stable_key='sonarr-4k', name='Sonarr 4K',
+        enabled=0, is_default=0, ip='127.0.0.1', port=8990, base_url='/', ssl=0,
+        verify_ssl=0, http_timeout=60, api_key='k'))
+    schema_session.flush()
+    schema_session.add(TableEpisodes(
+        id=706, series_id=None, sonarrEpisodeId=46, sonarrSeriesId=7,
+        arr_instance_id=2, path="/series/gamma/s01e01.mkv", title="Kept",
+        season=1, episode=1, monitored="True", subtitles="[]"))
+
+    monkeypatch.setattr(signalr_client, "database", schema_session)
+    monkeypatch.setattr(signalr_client, "event_stream", lambda **event: None)
+    synced = []
+    monkeypatch.setattr(signalr_client, "sync_episodes",
+                        lambda **kwargs: synced.append(kwargs))
+
+    event = {"name": "series", "_arr_instance_id": 2,
+             "body": {"action": "updated",
+                      "resource": {"id": 7, "title": "Gamma", "year": 2020,
+                                   "episodesChanged": True}}}
+
+    with caplog.at_level(logging.WARNING):
+        signalr_client.dispatcher(event)
+
+    assert synced == [], (
+        "an event for a disabled or deleted instance reached the episode sync")
+    remaining = sorted(schema_session.execute(select(TableEpisodes.id)).scalars().all())
+    assert remaining == [706], (
+        "a queued event for a disabled or deleted instance deleted rows")
+    assert "unknown or disabled instance" in caplog.text, (
+        "the skipped event was not reported")
