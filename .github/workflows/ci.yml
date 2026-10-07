@@ -562,6 +562,7 @@ jobs:
             tests/bazarr/test_translate_availability.py \
             tests/bazarr/test_translate_failure_record.py \
             tests/bazarr/test_translate_job_media_name.py \
+            tests/bazarr/test_translate_surface_refusals.py \
             tests/bazarr/test_translator_auth.py \
             tests/bazarr/test_upgrade_embedded_history.py \
             tests/bazarr/test_upgrade_subtitle_toggles.py \

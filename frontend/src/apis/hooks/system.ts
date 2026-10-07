@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { showNotification } from "@mantine/notifications";
 import {
   keepPreviousData,
@@ -383,6 +383,90 @@ export function useSystemStatus() {
     queryKey: [QueryKeys.System, "status"],
     queryFn: () => api.system.status(),
   });
+}
+
+/**
+ * The configured translator's answer to "can a translation run", from the
+ * system status. Treated as available while the status has not answered yet or
+ * on responses that predate the field, so a loading page never disables a
+ * working action.
+ */
+export function useTranslationAvailability(): System.TranslationAvailability {
+  const { data } = useSystemStatus();
+  return data?.translation_availability ?? { available: true, reason: "" };
+}
+
+/**
+ * The editor's own gate answer, from the same status: the editor translates
+ * through the AI Subtitle Translator service whatever the settings page has
+ * selected, so this field answers for that engine and the editor's controls
+ * match the 409 its endpoint gives. Treated as available while the status has
+ * not answered yet or on responses that predate the field, so a loading page
+ * never disables a working action.
+ */
+export function useEditorTranslationAvailability(): System.TranslationAvailability {
+  const { data } = useSystemStatus();
+  return (
+    data?.editor_translation_availability ?? { available: true, reason: "" }
+  );
+}
+
+/**
+ * What a 409 on a translate endpoint owes the status its controls read: the
+ * answer can be stale, so the next one is fetched before the user can try
+ * again.
+ */
+export function useTranslationStatusRefetch(): () => void {
+  const queryClient = useQueryClient();
+  return useCallback(() => {
+    void queryClient.invalidateQueries({
+      queryKey: [QueryKeys.System, "status"],
+    });
+  }, [queryClient]);
+}
+
+/**
+ * What a translate control learns from a 409 refusal. The status answer those
+ * controls read is cached for a minute, and the gate can close elsewhere in
+ * the meantime: another tab, another user, the config file. When that happens
+ * the server answers 409 with its reason, and the shared client leaves that
+ * status to the caller, so without this the refusal was invisible (the tools
+ * menu's rejection was uncaught) or replaced with a generic sentence. The
+ * same endpoints also answer 409 for refusals of their own, from a sports
+ * target that is already satisfied to a translation that could not be
+ * queued, so the title says only that nothing was queued and the reason
+ * carries the server's answer. Show the reason, then refetch the status so
+ * every gate-reading control flips to its disabled state. Returns whether the
+ * error was a 409, so a caller can keep its own message for the rest.
+ */
+export function useTranslationRefusal(): (error: unknown) => boolean {
+  const refetchStatus = useTranslationStatusRefetch();
+  return useCallback(
+    (error: unknown) => {
+      if (!isAxiosError(error) || error.response?.status !== 409) {
+        return false;
+      }
+      // The refusal's reason is the response's error field when the endpoint
+      // answers with one, and the whole body when it answers with a bare
+      // sentence, which is what the subtitles endpoint's (reason, 409)
+      // arrives as.
+      const data: unknown = error.response.data;
+      const field =
+        typeof data === "object" && data !== null
+          ? (data as { error?: unknown }).error
+          : undefined;
+      const reason =
+        typeof field === "string" && field
+          ? field
+          : typeof data === "string" && data
+            ? data
+            : error.message;
+      showNotification(notification.error("Translation not queued", reason));
+      refetchStatus();
+      return true;
+    },
+    [refetchStatus],
+  );
 }
 
 export function useSystemHealth() {

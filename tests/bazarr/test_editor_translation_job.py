@@ -319,9 +319,48 @@ class TestEditorTranslationEndpoint:
         assert self._call('post', json={'lines': ['bare'], 'targetLanguage': 'hu'})[1] == 400
         assert queue.list_jobs_from_queue() == []
 
-    def test_post_without_a_configured_service_is_unavailable(self, queue, monkeypatch):
+    def test_post_without_a_configured_service_refuses_with_the_gate_reason(self, queue,
+                                                                             monkeypatch):
+        """The editor asks the translation gate about the AI Subtitle Translator
+        service it actually uses, so the URL check it used to make answers with
+        the gate's reason rather than its own."""
         monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_url', '')
-        assert self._call('post', json={'lines': LINES, 'targetLanguage': 'hu'})[1] == 503
+        assert self._call('post', json={'lines': LINES, 'targetLanguage': 'hu'}) == (
+            {'error': 'The AI Subtitle Translator service URL is not configured'}, 409)
+        assert queue.list_jobs_from_queue() == []
+
+    def test_post_with_a_malformed_encryption_key_refuses_with_the_gate_reason(
+            self, queue, sidecar, monkeypatch):
+        """The client cannot encrypt anything for a key that is not exactly 64
+        hexadecimal characters, so the gate refuses before a job is queued."""
+        monkeypatch.setattr(openrouter_translator.settings.translator,
+                            'openrouter_encryption_key', 'zz')
+        assert self._call('post', json={'lines': LINES, 'targetLanguage': 'hu'}) == (
+            {'error': 'The AI Subtitle Translator encryption key must be exactly '
+                      '64 hexadecimal characters'}, 409)
+        assert queue.list_jobs_from_queue() == []
+
+    def test_post_with_a_sidecar_key_and_no_api_key_still_queues(self, queue, sidecar,
+                                                                 monkeypatch):
+        """The sidecar can hold its own OpenRouter key, so the editor refuses a
+        translation the service would happily run when the gate demands a
+        Bazarr-side API key."""
+        monkeypatch.setattr(openrouter_translator.settings.translator, 'openrouter_api_key', '')
+        monkeypatch.setattr(openrouter_translator.settings.translator,
+                            'openrouter_encryption_key', '0123456789abcdef' * 4)
+        body, status = self._call('post', json={'lines': LINES, 'targetLanguage': 'Hungarian'})
+        assert status == 202
+        assert body == {'jobId': _only_job(queue)['job_id']}
+
+    def test_post_asks_about_the_service_not_the_configured_engine(self, queue, sidecar,
+                                                                  monkeypatch):
+        """The editor translates through the AI Subtitle Translator service
+        whatever the settings page has selected, so a switched-off engine does
+        not refuse the editor its own translation."""
+        monkeypatch.setattr(openrouter_translator.settings.translator, 'translator_type', 'none')
+        body, status = self._call('post', json={'lines': LINES, 'targetLanguage': 'Hungarian'})
+        assert status == 202
+        assert body == {'jobId': _only_job(queue)['job_id']}
 
     def test_delete_stops_the_job(self, queue, sidecar):
         job_id = editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')

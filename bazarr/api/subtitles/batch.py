@@ -10,6 +10,7 @@ from app.database import (TableArrInstances, TableEpisodes, TableHistory, TableH
 from app.jobs_queue import jobs_queue
 from sportarr.workflows import require_sports_enabled
 from subtitles.mass_operations import mass_batch_operation, VALID_ACTIONS  # noqa: F401
+from subtitles.tools.translate.availability import translation_available
 from ..utils import authenticate
 
 ACTION_LABELS = {
@@ -68,6 +69,7 @@ class BatchOperation(Resource):
     @api_ns_batch.response(200, 'Success', post_response_model)
     @api_ns_batch.response(400, 'Bad Request')
     @api_ns_batch.response(401, 'Not Authenticated')
+    @api_ns_batch.response(409, 'Translation unavailable: the gate refuses before queuing')
     def post(self):
         """Execute a batch operation on multiple items"""
         from flask import request
@@ -105,6 +107,14 @@ class BatchOperation(Resource):
 
         if not items:
             return {'error': 'No valid items after sanitization'}, 400
+
+        # A translate batch refuses before it queues anything: without the gate
+        # a switched-off or half-configured translator turned one request into
+        # one doomed job per item.
+        if action == 'translate':
+            availability = translation_available()
+            if not availability.available:
+                return {'error': availability.reason}, 409
 
         # Use Sportarr off leaves the instance rows enabled, so the Sports
         # pages could still queue work here. The sports rows are dropped and

@@ -107,6 +107,27 @@ declare namespace System {
     timezone: string;
     cpu_cores: number;
     compat_active: boolean;
+    /**
+     * The configured translator's answer to "can a translation run", with the
+     * reason when it cannot. Absent on responses from before the gate was
+     * reported, so every reader must tolerate undefined rather than assume an
+     * answer.
+     */
+    translation_availability?: System.TranslationAvailability;
+    /**
+     * The editor's own answer to the same question: it translates through the
+     * AI Subtitle Translator service whatever the settings page has selected,
+     * so this field answers for that engine and the editor's controls match
+     * the 409 its endpoint gives, instead of the configured engine's answer,
+     * which can differ in both directions. Absent on responses from before
+     * the field existed, so every reader must tolerate undefined.
+     */
+    editor_translation_availability?: System.TranslationAvailability;
+  }
+
+  interface TranslationAvailability {
+    available: boolean;
+    reason: string;
   }
 
   interface Backups {
