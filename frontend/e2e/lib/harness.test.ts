@@ -63,6 +63,8 @@ const docker = vi.hoisted(() => {
     beforeRun: null as ((port: number) => void) | null,
     /** Makes every pg_isready probe fail, as an unreachable Postgres does. */
     pgNeverReady: false,
+    /** Makes every Bazarr run fail with this message, as a missing image does. */
+    bazarrRunFails: "" as string,
     reset() {
       containers.clear();
       volumes.clear();
@@ -70,6 +72,7 @@ const docker = vi.hoisted(() => {
       calls.length = 0;
       state.beforeRun = null;
       state.pgNeverReady = false;
+      state.bazarrRunFails = "";
     },
   };
 
@@ -157,6 +160,12 @@ const docker = vi.hoisted(() => {
       }
       if (network && !networks.has(network)) {
         throw fail(`network ${network} not found`);
+      }
+      // A failure of the instance's own run that no other port would fix,
+      // such as an image the daemon does not have. The Postgres run is
+      // left alone: only the Bazarr one is made to fail.
+      if (state.bazarrRunFails && !name.endsWith("-postgres")) {
+        throw fail(state.bazarrRunFails);
       }
       const taken =
         port === undefined
@@ -271,13 +280,21 @@ async function newRunDir() {
 beforeEach(async () => {
   docker.state.reset();
   stubFetch();
+  // A shell that exports the PostgreSQL variant or an external instance
+  // must not leak either into any test: every start in this file would
+  // boot an extra container and network, and an exported URL makes the
+  // global teardown, which some tests here call, skip its cleanup.
+  // Stubbed empty here and restored in the afterEach below, so the tests
+  // that select the variant or an instance do it for themselves.
+  vi.stubEnv("BAZARR_E2E_POSTGRES", "");
+  vi.stubEnv("BAZARR_E2E_URL", "");
+  vi.stubEnv("BAZARR_E2E_API_KEY", "");
   await newRunDir();
 });
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   vi.unstubAllGlobals();
-  delete process.env.BAZARR_E2E_URL;
-  delete process.env.BAZARR_E2E_API_KEY;
   await rm(runDir, { recursive: true, force: true });
   delete process.env.BAZARR_E2E_RUN_DIR;
 });
@@ -344,6 +361,50 @@ describe("container names and labels", () => {
     );
   });
 
+  it("a Bazarr failure that is no port's business is reported, not retried", async () => {
+    docker.state.bazarrRunFails = "Unable to find image bazarr:test locally";
+
+    // The start gives up with the error it got, rather than trying the
+    // same failure again on every free port the machine has.
+    await expect(startBazarr({ image: "bazarr:test" })).rejects.toThrow(
+      /Unable to find image/,
+    );
+
+    // Exactly one Bazarr run was made to reach that error.
+    expect(
+      docker.state.calls.filter(
+        (call) => call.args[call.args.length - 1] === "bazarr:test",
+      ),
+    ).toHaveLength(1);
+    // Nothing survives the failure: no container, no volume, no network.
+    expect([...docker.state.containers.keys()]).toEqual([]);
+    expect([...docker.state.volumes.keys()]).toEqual([]);
+    expect([...docker.state.networks.keys()]).toEqual([]);
+  });
+
+  it("the same failure with the variant on leaves no network behind", async () => {
+    process.env.BAZARR_E2E_POSTGRES = "1";
+    docker.state.bazarrRunFails = "Unable to find image bazarr:test locally";
+
+    await expect(startBazarr({ image: "bazarr:test" })).rejects.toThrow(
+      /Unable to find image/,
+    );
+
+    // Still exactly one Bazarr run: the Postgres beside it is not the
+    // failure's business, and its removal is what the assertion below is
+    // about.
+    expect(
+      docker.state.calls.filter(
+        (call) => call.args[call.args.length - 1] === "bazarr:test",
+      ),
+    ).toHaveLength(1);
+    // Nothing survives the failure: no container, no volume, and the
+    // network the variant created went with them.
+    expect([...docker.state.containers.keys()]).toEqual([]);
+    expect([...docker.state.volumes.keys()]).toEqual([]);
+    expect([...docker.state.networks.keys()]).toEqual([]);
+  });
+
   it("every container and its volume carry the run's label and name", async () => {
     const instance = await startBazarr({ image: "bazarr:test" });
     const name = instance.name as string;
@@ -399,20 +460,10 @@ describe("container names and labels", () => {
 });
 
 describe("the PostgreSQL variant", () => {
-  // A shell that exports the variant must not leak it into these tests, and
-  // whatever it set is given back when the block is done.
-  let postgresEnv: string | undefined;
-  beforeEach(() => {
-    postgresEnv = process.env.BAZARR_E2E_POSTGRES;
-    delete process.env.BAZARR_E2E_POSTGRES;
-  });
-  afterEach(() => {
-    if (postgresEnv === undefined) {
-      delete process.env.BAZARR_E2E_POSTGRES;
-    } else {
-      process.env.BAZARR_E2E_POSTGRES = postgresEnv;
-    }
-  });
+  // The variant is stubbed empty before every test of this file and the
+  // environment is restored after it, so a shell that exports the variant
+  // reaches no test that does not ask for it, and the ones that do set it
+  // for themselves.
 
   it("is off unless the environment selects it", () => {
     expect(postgresVariant()).toBe(false);
@@ -489,6 +540,25 @@ describe("the PostgreSQL variant", () => {
     await expect(
       startBazarr({ image: "bazarr:test", postgresReadyCapMs: 300 }),
     ).rejects.toThrow(/was not ready/);
+
+    // Exactly one Postgres was started to reach that error: one network,
+    // one run naming the Postgres container. The retry loop the ports
+    // exist for starts another of each per port, which is what this test
+    // fails without the no-retry fix.
+    expect(
+      docker.state.calls.filter(
+        (call) => call.args[0] === "network" && call.args[1] === "create",
+      ),
+    ).toHaveLength(1);
+    expect(
+      docker.state.calls.filter(
+        (call) =>
+          call.args[0] === "run" &&
+          call.args.some(
+            (arg) => typeof arg === "string" && arg.endsWith("-postgres"),
+          ),
+      ),
+    ).toHaveLength(1);
 
     // Nothing survives the failure: no container, no volume, no network.
     expect([...docker.state.containers.keys()]).toEqual([]);

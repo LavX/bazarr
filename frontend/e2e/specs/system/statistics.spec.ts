@@ -59,13 +59,61 @@ test.describe("statistics", { tag: ["@status"] }, () => {
     await expect(page.getByText("Languages downloaded")).toBeVisible();
     await expect(page.getByText("How subtitles arrived")).toBeVisible();
 
-    // The translator panel either reports the sidecar's figures or says it
-    // cannot reach it; it never renders nothing.
+    // The translator panel never renders nothing, and which of its states
+    // it is in is decided by the same two endpoints the panel queries:
+    // both failing is the full outage the panel reports in its own words,
+    // only the status one failing is a supported partial outage that keeps
+    // its job figures beside the queue-status notice, and with the status
+    // answering, its queue tiles render instead.
+    //
+    // The tabs do not stay mounted, so the panel mounts here and both of
+    // its queries start now. The two answers are waited out and are the
+    // panel's own, so the branch below follows what the panel actually
+    // received, and an answer that has arrived is not yet a render that
+    // shows it: the answered branch first waits for the one text only the
+    // settled render carries.
+    const answered = Promise.all([
+      page.waitForResponse((response) =>
+        response.url().endsWith("/api/translator/status"),
+      ),
+      page.waitForResponse((response) =>
+        response.url().endsWith("/api/translator/jobs"),
+      ),
+    ]);
     await page.getByRole("tab", { name: "Translator" }).click();
-    await expect(
-      page
-        .getByText("Translator unavailable")
-        .or(page.getByText("Queued", { exact: true })),
-    ).toBeVisible();
+    const [statusResponse, jobsResponse] = await answered;
+    const statusFailed = !statusResponse.ok();
+    const jobsFailed = !jobsResponse.ok();
+
+    const unavailable = page.getByText("Translator unavailable");
+    const queueStatus = page.getByText("Queue status could not be loaded");
+    const queued = page.getByText("Queued", { exact: true });
+    if (statusFailed && jobsFailed) {
+      // The full outage, in the panel's own words, and nothing else.
+      await expect(unavailable).toBeVisible();
+      await expect(queued).toHaveCount(0);
+    } else if (statusFailed) {
+      // The partial outage: its notice beside the job figures it kept.
+      await expect(queueStatus).toBeVisible();
+      await expect(page.getByText("Cost, recent jobs")).toBeVisible();
+      await expect(
+        page.getByText("Lines delivered", { exact: true }),
+      ).toBeVisible();
+    } else {
+      // The status answered, so the queue tiles render. The settled
+      // render is told apart from the loading one by the processing
+      // tile's hint first: it names the queue's own limit, where the
+      // loading render reads a dash in its place.
+      const status = (await statusResponse.json()) as {
+        queue?: { maxConcurrent?: unknown };
+      };
+      expect(typeof status.queue?.maxConcurrent).toBe("number");
+      const maxConcurrent = status.queue?.maxConcurrent as number;
+      await expect(
+        page.getByText(`max ${maxConcurrent} concurrent`),
+      ).toBeVisible();
+      await expect(queued).toBeVisible();
+      await expect(unavailable).toHaveCount(0);
+    }
   });
 });

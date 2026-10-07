@@ -62,21 +62,19 @@ test.describe("form authentication", { tag: ["@auth", "@stateful"] }, () => {
     ).toBeVisible();
     await expect(password).toHaveCount(0);
 
-    // Sign out from the browser session itself. The app has no logout
-    // control for its own session (only Plex accounts have one), so this is
-    // the app's own call, made from the page so the session cookie that
-    // carries it is the one the answer clears.
-    const signedOut = page.evaluate(async (url) => {
-      const response = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "logout" }),
-      });
-      return response.status;
-    }, ACCOUNT);
-    expect(await signedOut).toBe(204);
+    // Sign out through the app's own control. The Controls menu carries a
+    // Logout item whenever authentication is form-based, which it is here.
+    // The menu sits at the very bottom of the window, where its last item
+    // can fall outside the viewport, so it is driven by keyboard: focus,
+    // then Enter, the way a keyboard user reaches it.
+    await page.getByRole("button", { name: "App controls" }).click();
+    const logout = page.getByRole("menuitem", { name: "Logout" });
+    await logout.focus();
+    await logout.press("Enter");
 
-    // The session is over: the next page asks for the login again.
+    // The session is over: the login comes back on its own, and the next
+    // page asks for it again.
+    await expect(password).toBeVisible();
     await page.goto("/");
     await expect(passwordField(page)).toBeVisible();
   });

@@ -39,13 +39,28 @@ test.describe("manual search", { tag: ["@library", "@live"] }, () => {
       return;
     }
     // The modal needs a movie with a language profile to search for; the
-    // search itself does not need an existing subtitle.
+    // search itself does not need an existing subtitle. The profile must
+    // also exist and offer a language, read the way the upload spec reads
+    // it, so a profile with no items or a dangling id cannot pass for a
+    // searchable movie and turn the search into a guaranteed no-result.
     const library = await movies(api);
-    const movie = library.find((entry) => entry.profileId !== null);
+    const withProfile = library.filter((movie) => movie.profileId !== null);
+    const profiles = await api.get("/api/system/languages/profiles");
+    expect(profiles.ok()).toBe(true);
+    const profileList = (await profiles.json()) as {
+      profileId: number;
+      items: { language: string }[];
+    }[];
+    const movie = withProfile.find((entry) => {
+      const profile = profileList.find(
+        (candidate) => candidate.profileId === entry.profileId,
+      );
+      return (profile?.items ?? []).some((item) => item.language);
+    });
     if (movie === undefined) {
       test.skip(
         true,
-        "Skipped: this instance has no movie with a language profile to search for",
+        "Skipped: this instance has no movie whose language profile offers a language to search for",
       );
       return;
     }

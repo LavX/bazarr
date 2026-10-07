@@ -258,7 +258,9 @@ safe: those specs only read, or clean up after themselves, and the Status spec
 expects exactly the arr and media server rows the instance has configured.
 `@stateful` specs change settings, add connections, install providers, restart
 Bazarr and run onboarding, so point them only at an instance you can throw
-away. `@live` specs need the real provider network, and every one of them is
-also `@stateful`. Add `--grep-invert "@stateful|@live"` to any run against an
-install you care about. Keep the credentials in your shell or a secret
+away. `@live` specs need the real provider network, and a live spec is not
+necessarily `@stateful`: the manual search, for example, only reads. The
+exclusion stands for both tags either way. Add
+`--grep-invert "@stateful|@live"` to any run against an install you care
+about. Keep the credentials in your shell or a secret
 store, never in a spec or a commit.

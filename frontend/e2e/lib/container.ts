@@ -433,6 +433,14 @@ export async function startBazarr(
           labels,
           options.postgresReadyCapMs ?? POSTGRES_READY_CAP_MS,
         );
+    } catch (error) {
+      // A volume or a database that would not start is the same on every
+      // port, so it is cleaned up and reported rather than retried sixty
+      // times over.
+      await stop();
+      throw error;
+    }
+    try {
       await run("docker", [
         "run",
         "--detach",
@@ -464,12 +472,18 @@ export async function startBazarr(
         image,
       ]);
     } catch (error) {
-      const message = String((error as Error)?.message);
       await stop();
-      // Only a lost race for the host port is another port's business. A
-      // database that would not start is the same on every port, so it is
-      // cleaned up and reported rather than retried sixty times over.
-      if (/port is already allocated|address already in use/.test(message)) {
+      // Only the instance's own run reaches here, and only its published
+      // host port can lose a race, so a bind failure is the one error that
+      // is another port's business. execFile puts docker's stderr in the
+      // message it rejects with, which is what the pattern reads. Any other
+      // failure of this run, whatever its text says about addresses, is
+      // cleaned up and reported rather than retried.
+      if (
+        /port is already allocated|address already in use/.test(
+          String((error as Error)?.message),
+        )
+      ) {
         lastError = error;
         continue;
       }

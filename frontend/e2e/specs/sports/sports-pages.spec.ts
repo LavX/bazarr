@@ -94,7 +94,16 @@ test.describe(
       page,
     }) => {
       // The sidebar starts without Sports, so its arrival is the gain.
-      await page.goto("/");
+      // The Sports page renders its empty state only once the router's
+      // status queries have settled, so that text is also the proof that
+      // the sidebar below it is settled: the absence check then reads a
+      // live sidebar, not a page whose queries are still pending.
+      await page.goto("/sports");
+      await expect(
+        page.getByText(
+          "Enable a Sportarr instance in Connections to view sports.",
+        ),
+      ).toBeVisible();
       const sidebar = page.getByRole("navigation", { name: "Main navigation" });
       await expect(
         sidebar.getByRole("link", { name: "Sports", exact: true }),
@@ -122,12 +131,28 @@ test.describe(
 
       await page.goto("/wanted/sports");
       await expect(page).toHaveTitle(/Wanted Sports - /);
+      // The wanted page's own toolbox, empty league table or not.
+      await expect(
+        page.getByRole("button", { name: "Search All" }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "Scan All" }),
+      ).toBeVisible();
 
       await page.goto("/history/sports");
       await expect(page).toHaveTitle(/Sports History - /);
+      // The history page's own filters and its embedded-records switch.
+      await expect(
+        page.getByText("Show Embedded Source records"),
+      ).toBeVisible();
+      await expect(
+        page.getByRole("combobox", { name: "Action" }),
+      ).toBeVisible();
 
       await page.goto("/blacklist/sports");
       await expect(page).toHaveTitle(/Sports Excluded - /);
+      // The excluded page's own empty state, the leagues table being empty.
+      await expect(page.getByText("Nothing Excluded for Sports")).toBeVisible();
     });
   },
 );

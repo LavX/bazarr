@@ -5,8 +5,7 @@
  * Postgres, a settings write round-trips through the database, and the Status
  * page names the engine it is on. Without the variant the whole block skips
  * before any fixture runs, so an ordinary run stays on SQLite and boots
- * nothing for this file. A run with the variant on is still outstanding: the
- * container-based suite runs at candidate time.
+ * nothing for this file.
  */
 /* eslint-disable camelcase -- API bodies keep their transport field names. */
 import { expect, test } from "@e2e/fixtures";

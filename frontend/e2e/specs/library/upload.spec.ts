@@ -69,6 +69,16 @@ test.describe("subtitle upload", { tag: ["@library", "@stateful"] }, () => {
       profileId: number;
       items: { language: string }[];
     }[];
+    // The name of a language code, the way the languages endpoint and the
+    // modal's own options spell it.
+    const languageName = new Map(
+      (
+        (await (await api.get("/api/system/languages")).json()) as {
+          code2: string;
+          name: string;
+        }[]
+      ).map((language) => [language.code2, language.name]),
+    );
     const movie =
       withProfile.find((entry) => {
         const profile = profileList.find(
@@ -85,6 +95,15 @@ test.describe("subtitle upload", { tag: ["@library", "@stateful"] }, () => {
       );
       return;
     }
+    // The language this upload will use: the chosen profile's first item,
+    // which the movie has no subtitle in yet.
+    const chosenProfile = profileList.find(
+      (candidate) => candidate.profileId === movie.profileId,
+    );
+    const chosenLanguage = chosenProfile?.items[0]?.language;
+    expect(chosenLanguage).toBeTruthy();
+    const chosenName = languageName.get(chosenLanguage as string);
+    expect(chosenName).toBeTruthy();
     const before = new Set(
       movie.subtitles
         .map((subtitle) => subtitle.path)
@@ -107,14 +126,18 @@ test.describe("subtitle upload", { tag: ["@library", "@stateful"] }, () => {
     await expect(dialog).toBeVisible();
     await expect(dialog.getByText(UPLOAD_NAME)).toBeVisible();
 
-    // The movie's profile supplies the languages; the first one is what the
-    // upload uses. It is preselected when the profile has one, and chosen
-    // here when it is not.
+    // The movie's profile supplies the languages; its first item is what
+    // the upload uses. It is preselected when the profile has one, and
+    // chosen here when it is not: the option that matches the chosen
+    // language by name, never just the first option, which could be
+    // another language the movie already has a subtitle in.
     const row = dialog.getByRole("row").filter({ hasText: UPLOAD_NAME });
     const language = row.getByRole("combobox").first();
     if ((await language.inputValue()) === "") {
       await language.click();
-      await page.getByRole("option").first().click();
+      await page
+        .getByRole("option", { name: chosenName as string, exact: true })
+        .click();
     }
 
     await dialog.getByRole("button", { name: "Upload", exact: true }).click();

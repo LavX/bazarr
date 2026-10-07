@@ -110,9 +110,13 @@ test.describe(
       const before = new Set((await failedJobs(api)).map((job) => job.job_id));
 
       await openApp(page);
-      // The toast the page will show when the job dies. The wait starts before
-      // the job does, because the toast closes on its own and the job may end
-      // while the queue poll below is still running.
+      // The toast the page will show when the job dies. The wait starts
+      // before the job does, because the toast closes on its own and the
+      // job may end while the queue poll below is still running. Starting
+      // the job through the API is safe for this assertion: the app
+      // announces every failure to every open client, whatever origin the
+      // job carries. Only a completed job with no action to offer is
+      // limited to the user who started it.
       const toast = expect(
         page.getByRole("alert").filter({ hasText: CONNECTION_FAILURE }),
       ).toBeVisible({ timeout: JOB_CAP_MS });
