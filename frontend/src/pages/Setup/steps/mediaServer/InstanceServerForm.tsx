@@ -87,7 +87,7 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
     mapped && draft.pathMappings.length === 0
       ? [{ local_path: "", remote_path: "" }]
       : draft.pathMappings;
-  const { submit, isPending } = useMediaServerSubmit();
+  const { submit, retrySwitch, isPending } = useMediaServerSubmit();
 
   const [errors, setErrors] = useState<DraftFieldErrors>({});
   const [failure, setFailure] = useState<string | null>(null);
@@ -186,12 +186,33 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
       onNext();
       return;
     }
-    // The server was written on an earlier press and only its master switch
-    // failed, so this press is the reader accepting that and moving on. It must
-    // not write the same server a second time.
-    if (draft.savedInstanceId !== undefined) {
-      markSaved(draft.draftId, draft.savedInstanceId);
-      onNext();
+    const savedInstanceId = draft.savedInstanceId;
+    // The server was written on an earlier press, so nothing from here may
+    // write it a second time: a repeat create would leave two rows for one
+    // server.
+    if (savedInstanceId !== undefined) {
+      // The master switch write from that press has not been refused, so it
+      // is still in the air: this press accepts the row that is already
+      // there and moves on.
+      if (!savedButNotSwitchedOn) {
+        markSaved(draft.draftId, savedInstanceId);
+        onNext();
+        return;
+      }
+      // Only the master switch failed, so Continue retries that one write
+      // and advances once the switch is on. A retry that fails too keeps the
+      // step and the warning where they are; leaving the switch off is what
+      // Skip and Back are for.
+      void retrySwitch(kind).then((written) => {
+        if (!written) {
+          return;
+        }
+        updateDraft(draft.draftId, { switchFailed: false });
+        markSaved(draft.draftId, savedInstanceId);
+        if (onScreen.current) {
+          onNext();
+        }
+      });
       return;
     }
     // A create is still in the air from an earlier press on this draft. The
@@ -285,8 +306,8 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
       {savedButNotSwitchedOn && (
         <Alert color="red" title={`${name} is saved but switched off`}>
           The instance was saved, but its {name} master switch could not be
-          turned on, so nothing refreshes yet. Enable it in Settings,
-          Connections, then continue.
+          turned on, so nothing refreshes yet. Continue tries to turn it on
+          again.
         </Alert>
       )}
 
@@ -375,7 +396,7 @@ const InstanceServerForm: FC<Props> = ({ draft, onNext, onBack }) => {
           }
           continueLabel={
             savedButNotSwitchedOn
-              ? "Continue anyway"
+              ? `Turn on ${name} and continue`
               : !touched
                 ? `Continue without ${name}`
                 : failure
