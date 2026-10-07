@@ -11,11 +11,11 @@
  */
 import type { APIRequestContext, TestInfo } from "@playwright/test";
 import { execFile } from "node:child_process";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { BazarrInstance } from "./container";
-import { waitUntilReady } from "./container";
+import { allow, waitUntilReady } from "./container";
 import { runDir } from "./shared";
 
 const run = promisify(execFile);
@@ -24,8 +24,12 @@ const POLL_MS = 2_000;
 /** Installs, the enable and the restart, all under this cap. */
 const INSTALL_CAP_MS = 300_000;
 const RESTART_CAP_MS = 180_000;
-/** Extra test time for the call that has to install or wait for another worker. */
-const INSTALL_ALLOWANCE_MS = INSTALL_CAP_MS + RESTART_CAP_MS;
+/**
+ * Extra test time for a call that installs, enables, restarts or waits for
+ * another worker's install. A call that finds everything in place gives it
+ * back.
+ */
+export const INSTALL_ALLOWANCE_MS = INSTALL_CAP_MS + RESTART_CAP_MS;
 
 const CATALOG_REPO = "https://github.com/LavX/bazarr-provider-catalog";
 const OFFICIAL_SOURCE = "official";
@@ -44,7 +48,15 @@ interface Installation {
   provider_id: string;
   state?: string;
   pending_restart?: boolean;
+  last_error?: string | null;
 }
+
+/**
+ * A provider that is in place, or will be after the next restart. A failed
+ * install keeps its row, with the reason in last_error, and is neither.
+ */
+const usable = (row: Installation) =>
+  row.state === "active" || row.state === "staged";
 
 function manifestOf(entry: CatalogEntry): Loose | null {
   const raw = entry.manifest;
@@ -185,6 +197,7 @@ async function waitForJobs(api: APIRequestContext, ids: number[]) {
   );
 }
 
+/** Adds the providers to the enabled ones; says whether it had to. */
 async function enable(api: APIRequestContext, ids: string[]) {
   const settings = await getJson<{ general: { enabled_providers?: string[] } }>(
     api,
@@ -192,7 +205,7 @@ async function enable(api: APIRequestContext, ids: string[]) {
   );
   const current = settings.general.enabled_providers ?? [];
   const wanted = Array.from(new Set([...current, ...ids]));
-  if (wanted.length === current.length) return;
+  if (wanted.length === current.length) return false;
   const form = new FormData();
   for (const id of wanted)
     form.append("settings-general-enabled_providers", id);
@@ -200,6 +213,7 @@ async function enable(api: APIRequestContext, ids: string[]) {
   if (!response.ok()) {
     throw new Error(`enabling providers answered ${response.status()}`);
   }
+  return true;
 }
 
 /** Restarts the backend and waits until every staged provider is loaded. */
@@ -228,15 +242,21 @@ async function restartIntoPlace(
   );
 }
 
+/** Names the run directory's files for one instance. */
+const instanceKey = (bazarr: BazarrInstance) =>
+  (bazarr.name ?? new URL(bazarr.baseURL).host).replace(/\W/g, "-");
+
+/** Runs `work` under the instance's lock; says whether it had to wait. */
 async function withLock<T>(bazarr: BazarrInstance, work: () => Promise<T>) {
-  const key = (bazarr.name ?? new URL(bazarr.baseURL).host).replace(/\W/g, "-");
-  const lock = join(runDir(), `providers-${key}.lock`);
+  const lock = join(runDir(), `providers-${instanceKey(bazarr)}.lock`);
   const deadline = Date.now() + INSTALL_ALLOWANCE_MS;
+  let waited = false;
   for (;;) {
     try {
       await mkdir(lock);
       break;
     } catch {
+      waited = true;
       if (Date.now() > deadline) {
         throw new Error(
           "timed out waiting for another worker's provider install",
@@ -246,22 +266,107 @@ async function withLock<T>(bazarr: BazarrInstance, work: () => Promise<T>) {
     }
   }
   try {
-    return await work();
+    return { value: await work(), waited };
   } finally {
     await rm(lock, { recursive: true, force: true });
   }
 }
 
-async function activeRecommended(
+/** The providers of an instance this run has already installed again. */
+async function readRetried(file: string): Promise<Set<string>> {
+  try {
+    return new Set(JSON.parse(await readFile(file, "utf8")) as string[]);
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * Installs, enables and loads the recommended providers, or reuses them when
+ * an earlier call already did, and says whether it had anything to do.
+ *
+ * A provider whose install failed counts as missing and is installed again,
+ * once a run: a passing fault gets its second chance, and one that lasts is
+ * not paid for by every test. It is never enabled while it stays failed, and
+ * the test is annotated with the reason the backend recorded.
+ */
+async function provision(
   api: APIRequestContext,
-  recommended: string[],
-): Promise<string[]> {
+  bazarr: BazarrInstance,
+  testInfo: TestInfo,
+): Promise<{ ready: string[]; worked: boolean }> {
+  const entries = new Map(
+    (await catalogEntries(api))
+      .filter(isRecommended)
+      .map((entry) => [entry.provider_id, entry]),
+  );
+  const recommended = Array.from(entries.keys());
+  const retriedFile = join(
+    runDir(),
+    `providers-${instanceKey(bazarr)}.retried.json`,
+  );
+  const retried = await readRetried(retriedFile);
+  const rows = await installations(api);
+  const present = new Set(rows.filter(usable).map((row) => row.provider_id));
+  const failed = new Set(
+    rows.filter((row) => row.state === "failed").map((row) => row.provider_id),
+  );
+  const missing = recommended.filter(
+    (id) => !present.has(id) && !(failed.has(id) && retried.has(id)),
+  );
+  let worked = false;
+  if (missing.length > 0) {
+    worked = true;
+    const again = missing.filter((id) => failed.has(id));
+    if (again.length > 0) {
+      await writeFile(retriedFile, JSON.stringify([...retried, ...again]));
+    }
+    const jobs: number[] = [];
+    for (const id of missing) {
+      const response = await api.post("/api/provider-hub/installations", {
+        data: { manifest: manifestOf(entries.get(id) as CatalogEntry) },
+      });
+      if (response.status() !== 202) {
+        throw new Error(`installing ${id} answered ${response.status()}`);
+      }
+      jobs.push(((await response.json()) as { job_id: number }).job_id);
+    }
+    await waitForJobs(api, jobs);
+  }
+  const installed = new Set(
+    (await installations(api)).filter(usable).map((row) => row.provider_id),
+  );
+  if (
+    await enable(
+      api,
+      recommended.filter((id) => installed.has(id)),
+    )
+  ) {
+    worked = true;
+  }
+  if ((await installations(api)).some((row) => row.pending_restart)) {
+    await restartIntoPlace(api, bazarr);
+    worked = true;
+  }
+  const settled = await installations(api);
+  for (const row of settled) {
+    if (entries.has(row.provider_id) && row.state === "failed") {
+      testInfo.annotations.push({
+        type: "provider install failed",
+        description: `${row.provider_id}: ${row.last_error ?? "no reason recorded"}`,
+      });
+    }
+  }
   const active = new Set(
-    (await installations(api))
+    settled
       .filter((row) => row.state === "active" && !row.pending_restart)
       .map((row) => row.provider_id),
   );
-  return recommended.filter((id) => active.has(id));
+  const ready = recommended.filter((id) => active.has(id));
+  if (ready.length === 0) {
+    throw new Error("no recommended provider is active after the install");
+  }
+  return { ready, worked };
 }
 
 /**
@@ -273,50 +378,17 @@ export async function ensureRecommendedProviders(
   bazarr: BazarrInstance,
   testInfo: TestInfo,
 ): Promise<string[]> {
-  const active = (await installations(api)).filter(
-    (row) => row.state === "active" && !row.pending_restart,
+  // Only the lock and the rows say whether this call has to install, restart
+  // or wait for another worker, so the allowance comes first and goes back
+  // when none of that happened. The time the call itself took stays spent.
+  const base = testInfo.timeout;
+  const started = Date.now();
+  allow(testInfo, INSTALL_ALLOWANCE_MS);
+  const { value, waited } = await withLock(bazarr, () =>
+    provision(api, bazarr, testInfo),
   );
-  if (active.length === 0) {
-    testInfo.setTimeout(testInfo.timeout + INSTALL_ALLOWANCE_MS);
+  if (base > 0 && !waited && !value.worked) {
+    testInfo.setTimeout(base + (Date.now() - started));
   }
-  return withLock(bazarr, async () => {
-    const entries = new Map(
-      (await catalogEntries(api))
-        .filter(isRecommended)
-        .map((entry) => [entry.provider_id, entry]),
-    );
-    const recommended = Array.from(entries.keys());
-    const present = new Set(
-      (await installations(api)).map((row) => row.provider_id),
-    );
-    const missing = recommended.filter((id) => !present.has(id));
-    if (missing.length > 0) {
-      const jobs: number[] = [];
-      for (const id of missing) {
-        const response = await api.post("/api/provider-hub/installations", {
-          data: { manifest: manifestOf(entries.get(id) as CatalogEntry) },
-        });
-        if (response.status() !== 202) {
-          throw new Error(`installing ${id} answered ${response.status()}`);
-        }
-        jobs.push(((await response.json()) as { job_id: number }).job_id);
-      }
-      await waitForJobs(api, jobs);
-    }
-    const installed = new Set(
-      (await installations(api)).map((row) => row.provider_id),
-    );
-    await enable(
-      api,
-      recommended.filter((id) => installed.has(id)),
-    );
-    if ((await installations(api)).some((row) => row.pending_restart)) {
-      await restartIntoPlace(api, bazarr);
-    }
-    const ready = await activeRecommended(api, recommended);
-    if (ready.length === 0) {
-      throw new Error("no recommended provider is active after the install");
-    }
-    return ready;
-  });
+  return value.ready;
 }

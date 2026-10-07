@@ -162,6 +162,19 @@ jobs:
         run: npm run check:fmt
         working-directory: ${{ env.UI_DIRECTORY }}
 
+      - name: Check e2e harness tests are collected
+        # The e2e harness's own tests run in the Frontend tests shards as a
+        # vitest project of their own. A glob or a move that left it with no
+        # files would pass without a word, so it must find at least one.
+        run: |
+          files=$(npx vitest list --project e2e-harness --filesOnly)
+          if [ -z "$files" ]; then
+            echo "The e2e-harness vitest project collected no test files"
+            exit 1
+          fi
+          echo "$files"
+        working-directory: ${{ env.UI_DIRECTORY }}
+
   frontend-tests:
     name: Frontend tests ${{ matrix.shard }}/3
     needs: changes

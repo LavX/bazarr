@@ -1,6 +1,7 @@
 /**
  * Asserts that a screen fits the window it is shown in: the page itself does
- * not scroll, and no scroll container on it hides content behind a scrollbar.
+ * not scroll either way, and no scroll container on it hides content behind a
+ * scrollbar.
  */
 import type { Page } from "@playwright/test";
 import { expect } from "@playwright/test";
@@ -17,6 +18,12 @@ export const WIZARD_VIEWPORT = SUITE_VIEWPORT;
 interface FitReport {
   /** How far the document runs past the bottom of the window, in pixels. */
   pageOverflow: number;
+  /**
+   * How far it runs past the right edge. Measured on the document, because a
+   * wide child in a box that lets it spill widens the page without any
+   * scroll container of its own to report it.
+   */
+  pageOverflowX: number;
   /** Scroll containers whose content is taller or wider than they are. */
   clipped: string[];
 }
@@ -46,6 +53,8 @@ function measure(page: Page): Promise<FitReport> {
     const root = document.documentElement;
     return {
       pageOverflow: Math.max(0, root.scrollHeight - window.innerHeight),
+      // clientWidth leaves out a vertical scrollbar; innerWidth would not.
+      pageOverflowX: Math.max(0, root.scrollWidth - root.clientWidth),
       clipped,
     };
   });
@@ -60,5 +69,5 @@ export async function expectFitsViewport(page: Page, what = "the screen") {
     .poll(() => measure(page), {
       message: `${what} should fit the window without scrolling`,
     })
-    .toEqual({ pageOverflow: 0, clipped: [] });
+    .toEqual({ pageOverflow: 0, pageOverflowX: 0, clipped: [] });
 }
