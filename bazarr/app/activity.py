@@ -314,6 +314,73 @@ def scheduler_run(task_id, name=None):
         _local.scheduler_run = previous
 
 
+@contextmanager
+def user_action():
+    """Mark the calling thread as acting on a user's own request.
+
+    A job the queue takes on this thread is the user's own work, so the client
+    can announce its finish. It says nothing else: the request itself still
+    decides what it enqueues.
+    """
+    previous = getattr(_local, "user_action", False)
+    _local.user_action = True
+    try:
+        yield
+    finally:
+        _local.user_action = previous
+
+
+def current_job_origin():
+    """Who the calling thread's work is for: ``"user"``, ``"scheduled"`` or None.
+
+    A job enqueued on the thread inherits this as its origin. A user action
+    wins over a scheduler run, because Run Now presses a task through the
+    scheduler's pool while still being the user's own request.
+    """
+    if getattr(_local, "user_action", False):
+        return "user"
+    if getattr(_local, "scheduler_run", None) is not None:
+        return "scheduled"
+    return None
+
+
+# A Run Now press, waiting for the execution it pressed. The mark crosses the
+# thread boundary between the request that records it and the pool execution
+# that consumes it.
+_user_runs_lock = RLock()
+_user_runs = {}
+RUN_NOW_GRACE_SECONDS = 60.0
+
+
+def request_user_run(task_id):
+    """Mark the next execution of ``task_id`` as a user's Run Now press.
+
+    Run Now presses a task through the scheduler's own pool like any periodic
+    run, so nothing in the execution itself says a user asked for it. This mark
+    is the handoff across that boundary.
+    """
+    with _user_runs_lock:
+        _user_runs[task_id] = time.monotonic()
+
+
+def drop_user_run(task_id):
+    """Discard ``task_id``'s Run Now mark so a failed press waits for nothing."""
+    with _user_runs_lock:
+        _user_runs.pop(task_id, None)
+
+
+def take_user_run(task_id):
+    """Consume ``task_id``'s Run Now mark, or False when none is waiting.
+
+    A periodic execution can take a press's mark only by starting in the same
+    instant, which announces one routine run as the user's instead of leaving
+    the press itself unannounced. A mark nobody takes expires.
+    """
+    with _user_runs_lock:
+        pressed = _user_runs.pop(task_id, None)
+    return pressed is not None and time.monotonic() - pressed <= RUN_NOW_GRACE_SECONDS
+
+
 class _TaggedSchedulerPool:
     """Wraps a worker pool so each scheduled execution knows its task id.
 
@@ -328,7 +395,14 @@ class _TaggedSchedulerPool:
 
     def submit(self, run_job, job, *rest):
         def observed(job, *arguments):
-            with scheduler_run(getattr(job, "id", "task")):
+            task_id = getattr(job, "id", "task")
+            with scheduler_run(task_id):
+                # A Run Now press arrives here like every periodic run; the
+                # mark its request left says this one is the user's own, so
+                # the jobs it enqueues are the user's, not routine work.
+                if take_user_run(task_id):
+                    with user_action():
+                        return run_job(job, *arguments)
                 return run_job(job, *arguments)
 
         return self._pool.submit(observed, job, *rest)
@@ -361,4 +435,7 @@ def reset():
         _active.clear()
         _retained.clear()
         _aliases.clear()
+    with _user_runs_lock:
+        _user_runs.clear()
     _local.scheduler_run = None
+    _local.user_action = False

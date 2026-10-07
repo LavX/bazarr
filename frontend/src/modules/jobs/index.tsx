@@ -163,6 +163,16 @@ export function isJobCompletionClaimed(jobId: number) {
 }
 
 /**
+ * Give back a job its feature claimed but stopped following. The job's
+ * finish is announced by the standard outcome after all, so a sync that
+ * outlives the editor's patience is not lost in silence.
+ */
+export function releaseJobClaim(jobId: number) {
+  claimed.delete(jobId);
+  notified.delete(jobId);
+}
+
+/**
  * Forget which jobs were announced or claimed. Job ids restart with the backend, so this
  * runs whenever the socket connects; no terminal event is ever replayed on a
  * reconnect, so nothing is announced twice.
@@ -176,17 +186,23 @@ export function resetJobNotifications() {
  * Tell the user a job finished, once. Called from the jobs socket handler
  * with the job's fresh state, so only a finish that happens while the app is
  * open is announced: a reload lists old finished jobs without toasting them.
- * A failure is always announced; a completion only when it offers an action,
- * so routine scheduled jobs stay quiet, and not when the feature that owns the
- * action is already handling it.
+ * A failure is always announced. A completion is announced when it offers an
+ * action, when the feature that owns the action is not already handling it,
+ * and when nobody offers anything but the user started the job themselves:
+ * routine scheduled work stays quiet, and a job that ended at Stop never
+ * finished, so nothing is announced for it.
  */
 export function notifyJobOutcome(job: System.Jobs) {
   if (job.status !== "completed" && job.status !== "failed") return;
   if (notified.has(job.job_id)) return;
   if (job.status === "completed") {
+    if (job.stopped) return;
     const action = runnable(job);
-    if (!action) return;
-    if (options.get(action.kind)?.handlesCompletion?.(job)) {
+    if (!action) {
+      // No feature owns this finish, so the only one who wants to hear about
+      // it is whoever started the job.
+      if (job.origin !== "user") return;
+    } else if (options.get(action.kind)?.handlesCompletion?.(job)) {
       notified.add(job.job_id);
       return;
     }

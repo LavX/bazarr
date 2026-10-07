@@ -1454,7 +1454,10 @@ class EditorSync(Resource):
             daemon=True,
         ).start()
 
-        return {'jobKey': job_key, 'status': 'running'}, 202
+        # The editor drives this job's outcome itself, through its own poll and
+        # toasts, so the response carries the queued job's id for the frontend
+        # to claim the standard completion announcement.
+        return {'jobKey': job_key, 'jobId': queue_job_id, 'status': 'running'}, 202
 
     @authenticate
     def get(self):

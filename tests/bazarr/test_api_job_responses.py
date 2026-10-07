@@ -71,3 +71,29 @@ def test_the_jobs_list_documents_the_fields_a_new_job_sends_as_null(spec):
     assert job["properties"]["error"]["type"] == "object"
     assert job["properties"]["action"]["type"] == "object"
     assert job["properties"]["retry_of"]["type"] == "integer"
+
+
+def test_the_jobs_list_documents_who_started_the_job(spec):
+    # 'user' for a job an authenticated request enqueued, 'scheduled' for one
+    # the scheduler's task pool ran, null when nothing knows.
+    from flask_restx import marshal
+
+    from api.system.jobs import SystemJobs
+    from app import activity
+    from app.jobs_queue import Job
+
+    with activity.user_action():
+        users = marshal([vars(Job(job_id=1, job_name="Example", module="m", func="f"))],
+                        SystemJobs.get_response_model)[0]
+    with activity.scheduler_run("example_task"):
+        scheduled = marshal([vars(Job(job_id=2, job_name="Example", module="m", func="f"))],
+                            SystemJobs.get_response_model)[0]
+    bare = marshal([vars(Job(job_id=3, job_name="Example", module="m", func="f"))],
+                   SystemJobs.get_response_model)[0]
+    assert (users["origin"], scheduled["origin"], bare["origin"]) == ("user", "scheduled", None)
+
+    responses = spec["paths"]["/system/jobs"]["get"]["responses"]
+    envelope = spec["definitions"][_schema_ref(responses["200"])]
+    job = spec["definitions"][envelope["properties"]["data"]["items"]["$ref"].rsplit("/", 1)[-1]]
+    assert job["properties"]["origin"]["type"] == "string"
+    assert job["properties"]["origin"]["x-nullable"] is True

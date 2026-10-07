@@ -1117,6 +1117,7 @@ class TestEditorSyncPost:
             assert status == 202
             assert body['status'] == 'running'
             assert 'jobKey' in body
+            assert body['jobId'] == 'queue_id_1'
 
     def test_video_not_found_on_disk(self):
         mock_request = self._make_post_request({

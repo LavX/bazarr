@@ -1,7 +1,9 @@
 # coding=utf-8
 
+from apscheduler.jobstores.base import JobLookupError
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
 
+from app import activity
 from app.scheduler import scheduler
 
 from ..utils import authenticate
@@ -54,6 +56,15 @@ class SystemTasks(Resource):
         args = self.post_request_parser.parse_args()
         taskid = args.get('taskid')
 
-        scheduler.execute_job_now(taskid)
+        # Run Now is the user's own press, so the mark tells the next execution
+        # of the task through the scheduler's pool that its jobs announce. A
+        # task id the scheduler never registered fails the press, so the mark
+        # goes with it instead of waiting for a routine run to consume.
+        activity.request_user_run(taskid)
+        try:
+            scheduler.execute_job_now(taskid)
+        except JobLookupError:
+            activity.drop_user_run(taskid)
+            raise
 
         return '', 204

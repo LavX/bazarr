@@ -126,6 +126,10 @@ class Job:
     :ivar stopped: Whether the job ended at Stop instead of finishing. It is still recorded as completed.
         ``cancelled`` only records that Stop was pressed, and a job past its last checkpoint finishes anyway.
     :type stopped: bool
+    :ivar origin: Who started the job: ``"user"`` for one an authenticated request enqueued, ``"scheduled"``
+        for one the scheduler's task pool enqueued, None when nothing knows. Sent with the job, so the
+        client can announce the user's own work and leave routine work quiet.
+    :type origin: str, optional
     """
     def __init__(self, job_id: int, job_name: str, module: str, func: str, args: list = None, kwargs: dict = None,
                  is_progress: bool = False, is_signalr: bool = False, progress_max: int = 0, job_returned_value=None,
@@ -150,6 +154,11 @@ class Job:
         self.retry_of = retry_of
         self.cancelled = False
         self.stopped = False
+        # Who started the job, read from the enqueuing thread: an
+        # authenticated request says the user, and the scheduler's task pool
+        # says routine work. Unlike the observations below it is sent with
+        # the job.
+        self.origin = activity.current_job_origin()
         # Observation only. ``last_run_time`` is overwritten at creation, start
         # and terminal state, so it cannot tell those three apart; these can.
         # They never take part in equality, scheduling or execution.
@@ -721,7 +730,7 @@ class JobsQueue:
                 return True
         return False
 
-    def force_start_pending_job(self, job_id: int) -> bool:
+    def force_start_pending_job(self, job_id: int, user_start: bool = False) -> bool:
         """
         Forces the execution of a job currently in the pending queue. Only jobs with
         a status of 'pending' will be processed. If a matching job is found and
@@ -729,6 +738,11 @@ class JobsQueue:
 
         :param job_id: Identifier of the job to be forcefully started.
         :type job_id: int
+        :param user_start: Whether the user chose this start, which makes the job's
+            outcome theirs to hear. The job was already queued by whoever first
+            scheduled it, so its origin is written here and not at creation. Internal
+            callers leave it off and the origin stays as it was.
+        :type user_start: bool
         :return: A boolean value indicating whether the job was successfully initiated.
         :rtype: bool
         """
@@ -743,6 +757,8 @@ class JobsQueue:
             # is counted exactly once and never sits in neither queue.
             self.jobs_pending_queue.remove(job)
             self.jobs_running_queue.append(job)
+            if user_start:
+                job.origin = 'user'
 
         job_thread = Thread(target=self._run_job, args=(job,))
         job_thread.daemon = True
