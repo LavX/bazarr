@@ -28,6 +28,7 @@ from .utils import _get_scores
 from .language_profiles import profile_item_language_code
 from .tools.combine.main import try_combine_for_video
 from .tools.subsync_engines import subtitle_write_locks
+from .tools.translate.availability import translation_available
 
 
 class ProcessSubtitlesResult:
@@ -68,6 +69,14 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
     subtitles cover only foreign-language inserts and are not a valid
     translation seed, so we skip auto-translate for them.
     """
+    # The download already happened; the gate only decides whether anything
+    # gets queued for it. A closed gate leaves the language to the next
+    # wanted scan, which asks the same gate before keeping a language away
+    # from the provider search.
+    availability = translation_available()
+    if not availability.available:
+        logging.debug('BAZARR auto-translate skipped after this download: %s', availability.reason)
+        return
     if media_type == 'sports':
         from sportarr.profile_hooks import queue_translations
         if sports_operation is None:

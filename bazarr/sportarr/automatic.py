@@ -157,6 +157,7 @@ def search_event(
     adaptive=False,
     previous_artifact=None,
     replacement_state=None,
+    translation_gate=None,
 ):
     check_cancelled(cancel)
     context = resolve_event_in_session(database, event_id, arr_instance_id)
@@ -230,7 +231,8 @@ def search_event(
                 from sportarr.profile_hooks import translate_from_existing
 
                 try:
-                    if translate_from_existing(context, code, cancel=cancel):
+                    if translate_from_existing(context, code, cancel=cancel,
+                                               translation_gate=translation_gate):
                         downloads += 1
                         continue
                 except JobCancelled:
