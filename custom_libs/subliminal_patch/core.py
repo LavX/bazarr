@@ -112,6 +112,121 @@ def provider_search_failure(provider, error):
     return ProviderSearchResult(provider, status=status, reason=reason, retry_after=retry_after)
 
 
+# Expected, named provider conditions: a site rationing, refusing or timing
+# out service, each of which already earns a backoff in
+# app.get_providers.provider_throttle_map. A failure of one of these shapes is
+# routine operation rather than a defect, so the handlers log nothing of their
+# own for it and the one line is written where the backoff is decided. The
+# list is explicit, class names only: everything else, ParseResponseError
+# included, keeps its ERROR record and traceback, because a misclassified
+# defect loses the traceback the log was keeping for whoever reads it next.
+#
+# The keys are the worker envelope's remote class names as well: a plugin's
+# IPAddressBlocked, ForbiddenError or CloudflareBlockedError is not rebuilt
+# into a host class, so it arrives as a WorkerError carrying the name, and
+# classifier and backoff have to agree on the same failure.
+_EXPECTED_FAILURE_WORDS = {
+    "DownloadLimitExceeded": "download quota reached",
+    "TooManyRequests": "rate limited",
+    "RateLimited": "rate limited",
+    "APIThrottled": "rate limited",
+    "ServiceUnavailable": "service unavailable",
+    "AuthenticationError": "authentication failed",
+    "AuthenticationRequired": "authentication failed",
+    "ConfigurationError": "configuration invalid",
+    "IPAddressBlocked": "address blocked by the provider",
+    "SearchLimitReached": "search limit reached",
+    "ForbiddenError": "request refused by the provider",
+    "CloudflareBlockedError": "automated access blocked",
+    "URLError": "connection failure",
+    "TimeoutError": "timed out",
+    # The plugins raise PermissionError with a message of their own for a
+    # refused login and never with an errno; see provider_failure_words, which
+    # keeps the operating system's form of the class off this entry.
+    "PermissionError": "access refused by the provider",
+}
+
+
+def provider_failure_words(error):
+    """Words for a provider failure the pool treats as routine, or None.
+
+    One classifier behind the search and download handlers, reading the
+    worker envelope the same way provider_search_failure does, so the two
+    paths cannot drift. None means the failure is unexpected: it keeps its
+    ERROR record and traceback.
+    """
+    code = getattr(error, "code", None)
+    if code == "timeout":
+        # The host's own deadline fired; no request reached the provider.
+        return "timed out"
+    if isinstance(error, (requests.exceptions.Timeout, socket.timeout)):
+        return "timed out"
+    if isinstance(error, (requests.exceptions.ConnectionError, requests.exceptions.ProxyError,
+                          requests.exceptions.SSLError)):
+        # Only the requests classes: the built-in ConnectionError also covers
+        # BrokenPipeError and its siblings, which Bazarr's own code can raise,
+        # and classifying those as routine would cost them their traceback.
+        return "connection failure"
+
+    # A plugin's failure arrives as a WorkerError with the remote class name;
+    # a built-in raises the class itself. The remote names are untrusted
+    # strings, matched only against the fixed list above, never trusted as
+    # classes. The built-ins raise the exact classes the backoff map keys on.
+    name = getattr(error, "remote_class_name", None) if code == "provider" else type(error).__name__
+    words = _EXPECTED_FAILURE_WORDS.get(name) if isinstance(name, str) else None
+    if words is None:
+        return None
+    if name == "PermissionError":
+        # A plugin raising its own PermissionError for a refused login never
+        # sets an errno. The operating system raises the same class for a
+        # file it could not touch and sets one, which the worker envelope
+        # carries back: that form is a defect in the plugin, not a refusal
+        # the site sent, so it stays loud.
+        errno = getattr(error, "remote_errno", None) if code == "provider" else getattr(error, "errno", None)
+        if errno is not None:
+            return None
+    return words
+
+
+def _single_line(text):
+    """Escape CR and LF so a plugin-supplied string cannot span log lines.
+
+    With no exc_info there is no formatter between the record and the file,
+    so an embedded newline in a plugin's class name or message would split
+    the one line into several physical ones.
+    """
+    return str(text).replace("\r", "\\r").replace("\n", "\\n")
+
+
+def _log_unexpected_provider_error(provider, error):
+    """One ERROR record for a provider failure no expected shape matches.
+
+    A plugin's unexpected exception carries its own traceback in the worker
+    envelope: the host's would end in the transport for every plugin and
+    every cause, so the record takes the plugin's instead, with no exc_info.
+    The envelope is the error itself when it is the WorkerError, or the
+    WorkerError a rebuilt class keeps as its __cause__. Everything else
+    keeps the host traceback, through exc_info, exactly once.
+    """
+    envelope = error
+    if getattr(error, "code", None) != "provider":
+        cause = getattr(error, "__cause__", None)
+        if getattr(cause, "code", None) == "provider":
+            envelope = cause
+    if getattr(envelope, "code", None) == "provider":
+        remote_name = getattr(envelope, "remote_class_name", None)
+        remote_name = remote_name if isinstance(remote_name, str) and remote_name else type(error).__name__
+        remote_traceback = getattr(envelope, "remote_traceback", None)
+        if remote_traceback is not None:
+            logger.error('Unexpected error in provider %r: %s: %s. Plugin traceback: %r',
+                         provider, _single_line(remote_name), _single_line(error), remote_traceback)
+        else:
+            logger.error('Unexpected error in provider %r: %s: %s',
+                         provider, _single_line(remote_name), _single_line(error))
+        return
+    logger.exception('Unexpected error in provider %r', provider)
+
+
 def parse_for_hi_regex(subtitle_text, alpha3_language):
     if alpha3_language in HI_REGEX_PARENTHESIS_EXCLUDED_LANGUAGES:
         return bool(re.search(HI_REGEX_WITHOUT_PARENTHESIS, subtitle_text))
@@ -315,7 +430,14 @@ def _outcome_recorded(provider):
 
 
 def _adapt_throttle_callback(callback):
-    """Negotiate the optional context once, without retrying callback failures."""
+    """Negotiate the optional context once, without retrying callback failures.
+
+    A callback written before the operation and announce keywords must keep
+    working: the wrapper drops what the callback does not take, the same way
+    it has always dropped sports_context. It also forwards only the keywords
+    the caller actually passed, so a callback's own default survives a caller
+    that omits one: forwarding an explicit None would override it.
+    """
     import inspect
     from functools import wraps
 
@@ -323,13 +445,24 @@ def _adapt_throttle_callback(callback):
         parameters = inspect.signature(callback).parameters
     except (TypeError, ValueError):
         parameters = {}
-    context = parameters.get("sports_context")
-    if ((context is not None and context.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY))
-            or any(item.kind == inspect.Parameter.VAR_KEYWORD for item in parameters.values())):
+    if any(item.kind == inspect.Parameter.VAR_KEYWORD for item in parameters.values()):
         return callback
 
+    unsupported = [name for name in ("sports_context", "operation", "announce")
+                   if not (name in parameters
+                           and parameters[name].kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                                         inspect.Parameter.KEYWORD_ONLY))]
+    if not unsupported:
+        return callback
+
+    unset = object()
+
     @wraps(callback)
-    def legacy(*args, sports_context=None, **kwargs):
+    def legacy(*args, sports_context=unset, operation=unset, announce=unset, **kwargs):
+        for name, value in (("sports_context", sports_context), ("operation", operation),
+                            ("announce", announce)):
+            if value is not unset and name not in unsupported:
+                kwargs[name] = value
         return callback(*args, **kwargs)
     return legacy
 
@@ -378,7 +511,7 @@ class SZProviderPool(ProviderPool):
 
     def __init__(self, providers=None, provider_configs=None, blacklist=None, ban_list=None, throttle_callback=None,
                  pre_download_hook=None, post_download_hook=None, language_hook=None, language_equals=None,
-                 adoption_gate=None):
+                 adoption_gate=None, throttle_announce=None):
         #: Name of providers to use
         self.providers = self._dedupe_provider_names(providers)
 
@@ -410,12 +543,20 @@ class SZProviderPool(ProviderPool):
         #: any registered provider (the historical behaviour).
         self.adoption_gate = adoption_gate
 
+        #: Optional callable(name, error, operation=None) writing the one line
+        #: for a backoff a download recorded across its retries, once the
+        #: download stops. None announces nothing, the callback's no-op
+        #: default: only a pool built without one (tests) goes without.
+        self.throttle_announce = throttle_announce or (lambda name, error, operation=None: None)
+
         if not self.throttle_callback:
             # Mirrors the prod callback shape (see provider_throttle), which
-            # Sports invokes with sports_context. The default is a no-op, so
-            # accepting and ignoring the extra keyword keeps the classifier
-            # chain intact for callers that never configure a callback.
-            self.throttle_callback = lambda x, y, ids=None, language=None, sports_context=None: x
+            # Sports invokes with sports_context and the handlers with the
+            # operation and announce keywords. The default is a no-op
+            # returning nothing, so a pool without a real callback records no
+            # backoff and has nothing to announce.
+            self.throttle_callback = lambda x, y, ids=None, language=None, sports_context=None, \
+                operation=None, announce=None: None
 
         self.throttle_callback = _adapt_throttle_callback(self.throttle_callback)
 
@@ -543,6 +684,10 @@ class SZProviderPool(ProviderPool):
     def _notify_throttle(self, name, error, **context):
         """Pass a provider failure to throttle_callback from an error handler.
 
+        Returns what the callback returned: for the production callback,
+        whether it recorded a backoff, which is what tells a download whether
+        it has anything to announce at the end.
+
         A callback that raises is logged and otherwise ignored. Letting its
         exception out would replace the provider's own failure, so the search
         status, the backoff and the health record would all be derived from
@@ -551,8 +696,10 @@ class SZProviderPool(ProviderPool):
         call is never retried; see _adapt_throttle_callback.
         """
         try:
-            self.throttle_callback(name, error, **context)
+            return self.throttle_callback(name, error, **context)
         except Exception as callback_error:
+            # Nothing was recorded through a callback that raised, so the
+            # caller has nothing to announce either way.
             # Provider messages can carry URLs with credentials in them, so
             # the provider error is named by its type only.
             if callback_error is error:
@@ -560,11 +707,26 @@ class SZProviderPool(ProviderPool):
                 # traceback would end in that message; log without it.
                 logger.error('Throttle callback failed for provider %r by re-raising the %s it was recording',
                              name, type(error).__name__)
-                return
+                return False
             # No exc_info: a formatter would print every message in the
             # callback's chain, and any of them can quote the provider error.
             logger.error('Throttle callback failed for provider %r while recording %s, messages left out:\n%s',
                          name, type(error).__name__, _format_callback_failure(callback_error, error).rstrip())
+            return False
+
+    def _announce_throttle(self, name, error, **context):
+        """Write the one line for a backoff this download's attempts recorded.
+
+        Runs in a finally path, so it is guarded like the throttle callback:
+        letting its exception out would replace the download's own outcome.
+        """
+        try:
+            self.throttle_announce(name, error, **context)
+        except Exception:
+            # No exc_info and no message, for the same reason as the callback
+            # failure above: the announce's chain can quote the provider error.
+            logger.error('Throttle announce failed for provider %r while naming the %s it recorded',
+                         name, type(error).__name__)
 
     def retire_provider(self, name):
         """Terminate an initialized provider without throttling its name.
@@ -758,9 +920,12 @@ class SZProviderPool(ProviderPool):
                 'sonarrEpisodeId': video.sonarrEpisodeId if hasattr(video, 'sonarrEpisodeId') else None,
                 'arr_instance_id': getattr(video, 'arr_instance_id', None),
             }
-            logger.warning('Provider %r throttled: %s', provider, e)
+            # No line of its own: the throttle callback writes the one line
+            # where the backoff is decided, so a second one here would give the
+            # same event two records.
             self._notify_throttle(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None,
-                                  sports_context=getattr(video, 'sports_context', None))
+                                  sports_context=getattr(video, 'sports_context', None), operation="search",
+                                  announce=True)
             if detailed:
                 return provider_search_failure(provider, e)
             discard()
@@ -772,9 +937,13 @@ class SZProviderPool(ProviderPool):
                 'sonarrEpisodeId': video.sonarrEpisodeId if hasattr(video, 'sonarrEpisodeId') else None,
                 'arr_instance_id': getattr(video, 'arr_instance_id', None),
             }
-            logger.exception('Unexpected error in provider %r: %s', provider, traceback.format_exc())
+            # An expected condition logs nothing here: the one line belongs to
+            # the throttle callback, which knows the backoff it recorded.
+            if provider_failure_words(e) is None:
+                _log_unexpected_provider_error(provider, e)
             self._notify_throttle(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None,
-                                  sports_context=getattr(video, 'sports_context', None))
+                                  sports_context=getattr(video, 'sports_context', None), operation="search",
+                                  announce=True)
             if detailed:
                 return provider_search_failure(provider, e)
             discard()
@@ -958,95 +1127,134 @@ class SZProviderPool(ProviderPool):
             'arr_instance_id': getattr(subtitle, 'arr_instance_id', None),
         }
 
-        # retry downloading on failure until settings' download retry limit hit
-        while True:
-            tries += 1
-            initialized_provider = None
-            try:
-                if self.pre_download_hook:
-                    self.pre_download_hook(subtitle)
+        # Whether any of this download's own throttle calls recorded a backoff,
+        # and the last exception that recorded one. The exception is saved only
+        # together with a successful recording: an attempt whose callback
+        # recorded nothing has no deadline of its own to name, and its
+        # exception would only mislabel the backoff an earlier attempt left.
+        # Every call below passes announce=False, so the attempts write their
+        # line below the default filter; when the download stops, the one
+        # visible line is written once, naming the deadline the throttle table
+        # now holds.
+        recorded = False
+        recorded_error = None
 
+        # retry downloading on failure until settings' download retry limit hit
+        try:
+            while True:
+                tries += 1
+                initialized_provider = None
                 try:
-                    initialized_provider = self[subtitle.provider_name]
+                    if self.pre_download_hook:
+                        self.pre_download_hook(subtitle)
+
+                    try:
+                        initialized_provider = self[subtitle.provider_name]
+                    except ProviderExcludedError:
+                        logger.info('Provider %r is currently excluded (disabled, '
+                                    'throttled or discarded); not downloading from it',
+                                    subtitle.provider_name)
+                        subtitle.skip_reason = 'provider_excluded'
+                        return False
+                    initialized_provider.download_subtitle(subtitle)
+                    if self.post_download_hook:
+                        self.post_download_hook(subtitle)
+
+                    break
                 except ProviderExcludedError:
-                    logger.info('Provider %r is currently excluded (disabled, '
-                                'throttled or discarded); not downloading from it',
-                                subtitle.provider_name)
+                    # Refused by the worker once the request got its turn.
+                    logger.info('Provider %r was excluded (throttled or discarded) while its request '
+                                'waited for its turn; not downloading from it', subtitle.provider_name)
                     subtitle.skip_reason = 'provider_excluded'
                     return False
-                initialized_provider.download_subtitle(subtitle)
-                if self.post_download_hook:
-                    self.post_download_hook(subtitle)
 
-                break
-            except ProviderExcludedError:
-                # Refused by the worker once the request got its turn.
-                logger.info('Provider %r was excluded (throttled or discarded) while its request '
-                            'waited for its turn; not downloading from it', subtitle.provider_name)
-                subtitle.skip_reason = 'provider_excluded'
+                except ProviderBusyError:
+                    logger.info('Provider %r did not get a turn within its timeout; not downloading from it',
+                                subtitle.provider_name)
+                    subtitle.skip_reason = 'provider_busy'
+                    return False
+
+                except SubtitleCandidateRejected as e:
+                    logger.warning('Subtitle candidate rejected: %s', e)
+                    # Callers that only see False can still tell "nothing usable in
+                    # this candidate" apart from a provider error, and name either.
+                    subtitle.rejected_reason = str(e)
+                    return False
+
+                except (requests.ConnectionError,
+                        requests.exceptions.ProxyError,
+                        requests.exceptions.SSLError,
+                        requests.Timeout,
+                        socket.timeout) as e:
+                    # Every attempt still records its backoff, exactly as
+                    # before; only where the visible line is written differs.
+                    subtitle.download_error = e
+                    if self._notify_throttle(subtitle.provider_name, e, ids=ids, language=subtitle.language,
+                                             sports_context=getattr(subtitle, 'sports_context', None),
+                                             operation="download", announce=False):
+                        recorded = True
+                        recorded_error = e
+
+                except (rarfile.BadRarFile, MustGetBlacklisted) as e:
+                    if self._notify_throttle(subtitle.provider_name, e, ids=ids, language=subtitle.language,
+                                             sports_context=getattr(subtitle, 'sports_context', None),
+                                             operation="download", announce=False):
+                        recorded = True
+                        recorded_error = e
+                    return False
+
+                except Exception as e:
+                    # Expected conditions are the callback's to say; everything
+                    # else is a defect worth a traceback, once.
+                    if provider_failure_words(e) is None:
+                        _log_unexpected_provider_error(subtitle.provider_name, e)
+                    subtitle.download_error = e
+                    if self._notify_throttle(subtitle.provider_name, e, ids=ids, language=subtitle.language,
+                                             sports_context=getattr(subtitle, 'sports_context', None),
+                                             operation="download", announce=False):
+                        recorded = True
+                        recorded_error = e
+                    self.discarded_providers.add(subtitle.provider_name)
+                    return False
+
+                finally:
+                    # After the throttle callback and the discard, so the next
+                    # request queued on this provider sees them.
+                    _outcome_recorded(initialized_provider)
+
+                if tries == DOWNLOAD_TRIES:
+                    self.discarded_providers.add(subtitle.provider_name)
+                    # The one line already says the provider is out of rotation,
+                    # and the discard itself is unchanged, so this stays below
+                    # the default filter.
+                    logger.debug('Maximum retries reached for provider %r, discarding it',
+                                 subtitle.provider_name)
+                    return False
+
+                # don't hammer the provider
+                logger.debug('Errors while downloading subtitle, retrying provider %r in %s seconds',
+                             subtitle.provider_name, DOWNLOAD_RETRY_SLEEP)
+                time.sleep(DOWNLOAD_RETRY_SLEEP)
+
+            # check subtitle validity
+            if not subtitle.is_valid():
+                logger.error('Invalid subtitle')
                 return False
 
-            except ProviderBusyError:
-                logger.info('Provider %r did not get a turn within its timeout; not downloading from it',
-                            subtitle.provider_name)
-                subtitle.skip_reason = 'provider_busy'
-                return False
+            if not os.environ.get("SZ_KEEP_ENCODING", False):
+                subtitle.normalize()
 
-            except SubtitleCandidateRejected as e:
-                logger.warning('Subtitle candidate rejected: %s', e)
-                # Callers that only see False can still tell "nothing usable in
-                # this candidate" apart from a provider error, and name either.
-                subtitle.rejected_reason = str(e)
-                return False
-
-            except (requests.ConnectionError,
-                    requests.exceptions.ProxyError,
-                    requests.exceptions.SSLError,
-                    requests.Timeout,
-                    socket.timeout) as e:
-                logger.error('Provider %r connection error', subtitle.provider_name)
-                subtitle.download_error = e
-                self._notify_throttle(subtitle.provider_name, e, ids=ids, language=subtitle.language,
-                                      sports_context=getattr(subtitle, 'sports_context', None))
-
-            except (rarfile.BadRarFile, MustGetBlacklisted) as e:
-                self._notify_throttle(subtitle.provider_name, e, ids=ids, language=subtitle.language,
-                                      sports_context=getattr(subtitle, 'sports_context', None))
-                return False
-
-            except Exception as e:
-                logger.exception('Unexpected error in provider %r, Traceback: %s', subtitle.provider_name,
-                                 traceback.format_exc())
-                subtitle.download_error = e
-                self._notify_throttle(subtitle.provider_name, e, ids=ids, language=subtitle.language,
-                                      sports_context=getattr(subtitle, 'sports_context', None))
-                self.discarded_providers.add(subtitle.provider_name)
-                return False
-
-            finally:
-                # After the throttle callback and the discard, so the next
-                # request queued on this provider sees them.
-                _outcome_recorded(initialized_provider)
-
-            if tries == DOWNLOAD_TRIES:
-                self.discarded_providers.add(subtitle.provider_name)
-                logger.error('Maximum retries reached for provider %r, discarding it', subtitle.provider_name)
-                return False
-
-            # don't hammer the provider
-            logger.debug('Errors while downloading subtitle, retrying provider %r in %s seconds',
-                         subtitle.provider_name, DOWNLOAD_RETRY_SLEEP)
-            time.sleep(DOWNLOAD_RETRY_SLEEP)
-
-        # check subtitle validity
-        if not subtitle.is_valid():
-            logger.error('Invalid subtitle')
-            return False
-
-        if not os.environ.get("SZ_KEEP_ENCODING", False):
-            subtitle.normalize()
-
-        return True
+            return True
+        finally:
+            # Whatever way the download ended, by success, discard or refusal:
+            # a backoff any attempt of this download recorded is standing and
+            # the reader gets exactly one line for it, written once, after the
+            # retries, naming the exception whose call recorded it. A download
+            # whose calls recorded nothing announces nothing, even when the
+            # table holds an older entry some other search left for the
+            # provider.
+            if recorded and recorded_error is not None:
+                self._announce_throttle(subtitle.provider_name, recorded_error, operation="download")
 
     @classmethod
     def _score_subtitles(cls, subtitles, video, languages, hearing_impaired):

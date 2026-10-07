@@ -8,8 +8,8 @@ from inspect import getfullargspec
 
 from radarr.blacklist import get_blacklist_movie
 from sonarr.blacklist import get_blacklist
-from app.get_providers import get_providers, get_providers_auth, provider_throttle, provider_pool, get_language_equals, \
-    get_provider_language_hook, get_providers_sorted, provider_is_usable  # noqa: F401
+from app.get_providers import announce_provider_throttle, get_providers, get_providers_auth, provider_throttle, \
+    provider_pool, get_language_equals, get_provider_language_hook, get_providers_sorted, provider_is_usable  # noqa: F401
 
 from .utils import get_ban_list
 
@@ -22,6 +22,9 @@ def _init_pool(media_type, profile_id=None, providers=None, context=None):
         provider_configs=get_providers_auth(),
         blacklist=_blacklist(media_type, context),
         throttle_callback=provider_throttle,
+        # A download announces its one line once its attempts are done, naming
+        # the deadline the throttle table holds; see announce_provider_throttle.
+        throttle_announce=announce_provider_throttle,
         ban_list=get_ban_list(profile_id),
         language_hook=get_provider_language_hook(),
         language_equals=get_language_equals(),

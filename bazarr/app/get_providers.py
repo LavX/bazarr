@@ -33,6 +33,11 @@ from radarr.blacklist import blacklist_log_movie
 from sonarr.blacklist import blacklist_log
 
 _TRACEBACK_RE = re.compile(r'File "(.*?providers[\\/].*?)", line (\d+)')
+# The same identifier rule the search-failure path applies to the same field:
+# a plugin supplies the remote class name, and the file formatter does not
+# escape newlines, so a name that is not an identifier would split the one line
+# across physical lines and let a forged record masquerade as a real one.
+_REMOTE_CLASS_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,79}\Z")
 _PROVIDER_HUB_REGISTRATION_DONE = False
 # Plugin ids already reported for claiming a Bazarr settings section. The overlay
 # below runs on every search and download, so without this the same install
@@ -659,7 +664,38 @@ def _handle_mgb(name, exception, ids, language, sports_context=None):
                             arr_instance_id=ids.get('arr_instance_id'))
 
 
-def provider_throttle(name, exception, ids=None, language=None, sports_context=None, wait=True):
+def _provider_failure_words(exception):
+    """The reason in words for the one line a recorded backoff writes.
+
+    One classifier, the pool handlers' own (subliminal_patch.core), so the
+    line the reader sees cannot disagree with what the handler classified.
+    An unexpected exception still earns its line, beside its ERROR record:
+    the words just say what the backoff is for, and stay neutral about it:
+    only the ERROR record can back the word "unexpected" up, and the
+    handler, not this line, decides whether there is one."""
+    from subliminal_patch.core import provider_failure_words
+    return provider_failure_words(exception) or "error"
+
+
+def _failure_class_name(exception):
+    """The class the one line names: a plugin's own class when the envelope
+    carries one the search path would also accept, the exception's own
+    otherwise. A plugin's name that is not an identifier is refused rather
+    than printed, falling back the same way provider_search_failure does."""
+    code = getattr(exception, "code", None)
+    if code == "timeout":
+        return "Timeout"
+    if code == "provider":
+        remote_name = getattr(exception, "remote_class_name", None)
+        if isinstance(remote_name, str) and remote_name:
+            if _REMOTE_CLASS_NAME_RE.fullmatch(remote_name):
+                return remote_name
+            return "UnknownError"
+    return type(exception).__name__
+
+
+def provider_throttle(name, exception, ids=None, language=None, sports_context=None, wait=True,
+                      operation=None, announce=True):
     """Record a provider failure in the throttle table.
 
     ``wait`` is the caller's promise about its own deadline. The count gate
@@ -671,9 +707,17 @@ def provider_throttle(name, exception, ids=None, language=None, sports_context=N
     other providers are still living on, and there is no retry for it to buy,
     so the first rate limit is the only evidence there will be. Such a caller
     passes ``wait=False`` and the backoff is recorded at once, without a pause.
+
+    ``operation`` names the path that failed, search or download, for the one
+    line. ``announce`` is whether this call may write that line at WARNING: a
+    download passes False for every attempt, because its one line is written
+    once it stops retrying, naming the deadline actually in force. Returns
+    whether a backoff was recorded; False is the caller's signal that there is
+    nothing to announce later.
     """
     if isinstance(exception, MustGetBlacklisted) and isinstance(ids, dict) and isinstance(language, Language):
-        return _handle_mgb(name, exception, ids, language, sports_context)
+        _handle_mgb(name, exception, ids, language, sports_context)
+        return False
 
     cls = getattr(exception, "__class__")
     cls_name = getattr(cls, "__name__")
@@ -724,7 +768,9 @@ def provider_throttle(name, exception, ids=None, language=None, sports_context=N
 
     throttle_until = datetime.datetime.now() + throttle_delta
 
-    if cls_name not in VALID_COUNT_EXCEPTIONS or throttled_count(name, exception, wait=wait):
+    recorded = False
+    if cls_name not in VALID_COUNT_EXCEPTIONS or throttled_count(name, exception, wait=wait,
+                                                                 operation=operation):
         if cls_name == 'ValueError' and isinstance(exception.args, tuple) and len(exception.args) and exception.args[
             0].startswith('unsupported pickle protocol'):
             for fn in subliminal_cache_region.backend.all_filenames:
@@ -732,6 +778,8 @@ def provider_throttle(name, exception, ids=None, language=None, sports_context=N
                     os.remove(fn)
                 except (IOError, OSError):
                     logging.debug("Couldn't remove cache file: %s", os.path.basename(fn))
+            # A cache reset records no backoff, so there is nothing for a
+            # caller to announce either.
         else:
             with _THROTTLE_LOCK:
                 # Two searches can have the same provider in flight and compute
@@ -749,10 +797,44 @@ def provider_throttle(name, exception, ids=None, language=None, sports_context=N
 
             trac_info = _get_traceback_info(exception)
 
-            logging.info("Throttling %s for %s, until %s, because of: %s. Exception info: %r", name,
-                         throttle_description, throttle_until.strftime("%y/%m/%d %H:%M"), cls_name, trac_info)
+            if announce:
+                # The one line for a provider failure that takes the provider
+                # out of rotation: what failed, in words, and when it is used
+                # again. The backoff itself is unchanged; only the level and
+                # the wording differ from the line this replaces.
+                logging.warning("Provider %s %s: %s (%s). Not using it for %s, until %s. Exception info: %r",
+                                name, f"{operation} failed" if operation else "failed",
+                                _provider_failure_words(exception), _failure_class_name(exception),
+                                throttle_description, throttle_until.strftime("%y/%m/%d %H:%M"), trac_info)
+            else:
+                logging.debug("Throttling %s for %s, until %s, because of: %s. Exception info: %r", name,
+                              throttle_description, throttle_until.strftime("%y/%m/%d %H:%M"), cls_name, trac_info)
+            recorded = True
 
     update_throttled_provider()
+    return recorded
+
+
+def announce_provider_throttle(name, exception, operation=None):
+    """Write the one line for a backoff a download recorded across its retries.
+
+    Every attempt recorded with announce=False, below the default filter, so
+    a line per attempt would write three where the reader needs one. This
+    reads the entry the last attempt left and names the deadline actually
+    enforced, which the table already holds as the later of the attempts'
+    deadlines. A caller whose calls recorded nothing never reaches this, and
+    an entry that expired or was cleared writes nothing: there is no deadline
+    in force to name."""
+    with _THROTTLE_LOCK:
+        entry = tp.get(name)
+    _reason, until, throttle_description = entry or (None, None, None)
+    if not until or datetime.datetime.now() >= until:
+        return
+    trac_info = _get_traceback_info(exception)
+    logging.warning("Provider %s %s: %s (%s). Not using it for %s, until %s. Exception info: %r",
+                    name, f"{operation} failed" if operation else "failed",
+                    _provider_failure_words(exception), _failure_class_name(exception),
+                    throttle_description, until.strftime("%y/%m/%d %H:%M"), trac_info)
 
 
 def _get_traceback_info(exc: Exception):
@@ -776,7 +858,7 @@ def _get_traceback_info(exc: Exception):
     return message + extra
 
 
-def throttled_count(name, exception=None, wait=True):
+def throttled_count(name, exception=None, wait=True, operation=None):
     global throttle_count
     if name in list(throttle_count.keys()):
         if 'count' in list(throttle_count[name].keys()):
@@ -805,12 +887,22 @@ def throttled_count(name, exception=None, wait=True):
         # provider to redeem itself on. Record the backoff its exception class
         # earns now, or the caller re-asks a rate-limited provider on its very
         # next request and the per-provider cool-offs never apply to it.
-        logging.info("Provider %s throttle count %s of 5, recorded without waiting", name,
-                     throttle_count[name]['count'])
+        # Below the default filter: the recorded backoff's own line follows at
+        # once and says everything this one would.
+        logging.debug("Provider %s throttle count %s of 5, recorded without waiting", name,
+                      throttle_count[name]['count'])
         return True
 
-    logging.info("Provider %s throttle count %s of 5, waiting %ds and trying again", name,
-                 throttle_count[name]['count'], wait_seconds)
+    # While the gate has not tripped, this is the one line for the event: the
+    # pool still leaves the provider out until its next refresh, so the reader
+    # has to be told, with the operation, the reason in words, the exception
+    # class and that no backoff is recorded yet. The wait itself is the gate's
+    # timing and does not change.
+    logging.warning("Provider %s %s: %s (%s). Throttle count %s of 5, no backoff recorded yet; leaving the provider "
+                    "out until the pool's next refresh",
+                    name, f"{operation} failed" if operation else "failed",
+                    _provider_failure_words(exception or Exception()), _failure_class_name(exception or Exception()),
+                    throttle_count[name]['count'])
     time.sleep(wait_seconds)
     return False
 

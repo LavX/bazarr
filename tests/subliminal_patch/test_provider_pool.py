@@ -6,8 +6,16 @@ adopts registered providers instead of raising. These tests pin that behaviour
 and the ordered-list shape of pool.providers that it relies on.
 """
 
+import logging
+from types import SimpleNamespace
+
 import pytest
 import requests
+from subliminal.exceptions import (AuthenticationError, ConfigurationError, DownloadLimitExceeded,
+                                   ServiceUnavailable)
+from subliminal_patch.exceptions import (ForbiddenError, IPAddressBlocked, ParseResponseError,
+                                         SearchLimitReached, TooManyRequests)
+from provider_hub.worker import WorkerError
 
 from subliminal_patch import core
 
@@ -860,3 +868,524 @@ def test_a_detailed_search_skips_a_held_provider_the_pool_discarded(monkeypatch)
     assert pool.list_subtitles_provider("alpha", video, {language}) is None
     assert calls == [("list", "beta")]
     assert throttled == []
+
+
+# Expected provider conditions are routine operation, not defects: the
+# handlers log nothing of their own for them, and the throttle callback
+# writes the one line where the backoff is decided. Everything else keeps an
+# ERROR record and a traceback, exactly once, and a plugin's unexpected
+# exception carries the plugin's own traceback from the worker envelope
+# rather than the host transport's.
+
+
+def _plugin_error(remote, message="plugin fixture failure", **fields):
+    return WorkerError(message, remote_class_name=remote, code="provider", **fields)
+
+
+# One row per expected condition, in its built-in form and in the form a
+# Provider Hub plugin's failure arrives in: a rebuilt class, or a WorkerError
+# carrying the remote class name for everything the boundary does not rebuild.
+_EXPECTED_SEARCH_FAILURES = [
+    DownloadLimitExceeded("fixture quota"),
+    TooManyRequests("fixture rate"),
+    core.APIThrottled("fixture throttle"),
+    ServiceUnavailable("fixture outage"),
+    AuthenticationError("fixture auth"),
+    ConfigurationError("fixture config"),
+    requests.exceptions.Timeout("fixture timeout"),
+    TimeoutError("fixture socket"),
+    requests.exceptions.ConnectionError("fixture connection"),
+    IPAddressBlocked("fixture blocked address"),
+    SearchLimitReached("fixture search limit"),
+    ForbiddenError("fixture refused"),
+    _plugin_error("DownloadLimitExceeded"),
+    _plugin_error("PermissionError"),
+    _plugin_error("IPAddressBlocked"),
+    _plugin_error("SearchLimitReached"),
+    _plugin_error("ForbiddenError"),
+    _plugin_error("CloudflareBlockedError"),
+    _plugin_error("URLError"),
+    _plugin_error("TimeoutError"),
+    WorkerError("fixture deadline", code="timeout"),
+]
+
+
+def _loud_records(caplog):
+    return [record for record in caplog.records
+            if record.name == core.logger.name and record.levelno >= logging.WARNING]
+
+
+def _searching_provider(monkeypatch, error):
+    """Register a provider whose search raises error. Returns the language to
+    ask it for."""
+    language = core.Language("eng")
+
+    class Provider(_FakeProvider):
+        languages = {language}
+
+        def list_subtitles(self, video, languages):
+            raise error
+
+    monkeypatch.setattr(core, "provider_registry", {"alpha": Provider})
+    return language
+
+
+def _failing_provider(monkeypatch, error):
+    """Register a provider that raises error on both operations. Returns the
+    language to ask it for, and the list its downloads are counted in."""
+    language = core.Language("eng")
+    downloads = []
+
+    class Provider(_FakeProvider):
+        languages = {language}
+
+        def list_subtitles(self, video, languages):
+            raise error
+
+        def download_subtitle(self, subtitle):
+            downloads.append(subtitle)
+            raise error
+
+    monkeypatch.setattr(core, "provider_registry", {"alpha": Provider})
+    return language, downloads
+
+
+def _run_operation(pool, operation, language):
+    if operation == "search":
+        return pool.list_subtitles_provider("alpha", SimpleNamespace(), {language})
+    return pool.download_subtitle(SimpleNamespace(provider_name="alpha", language=language,
+                                                   sports_context=None))
+
+
+@pytest.mark.parametrize("error", _EXPECTED_SEARCH_FAILURES,
+                         ids=lambda error: type(error).__name__)
+def test_an_expected_search_failure_logs_no_line_of_its_own(monkeypatch, caplog, error):
+    language = _searching_provider(monkeypatch, error)
+    calls = []
+    pool = core.SZProviderPool(["alpha"], {},
+                               throttle_callback=lambda name, exc, **context: calls.append(name) or True)
+
+    with caplog.at_level("DEBUG", logger=core.logger.name):
+        detailed = pool.list_subtitles_provider("alpha", SimpleNamespace(), {language}, detailed=True,
+                                                discard_on_failure=True)
+
+    assert calls == ["alpha"]
+    assert (detailed.provider, detailed.subtitles) == ("alpha", [])
+    assert _loud_records(caplog) == []
+    assert "Unexpected error" not in caplog.text
+
+
+def test_an_api_throttled_search_logs_no_line_of_its_own(monkeypatch, caplog):
+    """APIThrottled has its own handler; its WARNING line would be a second
+    record for the one event, so the one line is the callback's alone."""
+    _searching_provider(monkeypatch, core.APIThrottled("fixture throttle"))
+    calls = []
+    pool = core.SZProviderPool(["alpha"], {},
+                               throttle_callback=lambda name, exc, **context: calls.append(name) or True)
+    language = core.Language("eng")
+
+    with caplog.at_level("DEBUG", logger=core.logger.name):
+        assert pool.list_subtitles_provider("alpha", SimpleNamespace(), {language}) is None
+
+    assert calls == ["alpha"]
+    assert _loud_records(caplog) == []
+    assert "throttled" not in caplog.text
+
+
+# The download handler retries only the connection tuple; every other
+# expected failure is one attempt and a discard.
+_GENERIC_DOWNLOAD_FAILURES = [
+    DownloadLimitExceeded("fixture quota"),
+    TooManyRequests("fixture rate"),
+    core.APIThrottled("fixture throttle"),
+    ServiceUnavailable("fixture outage"),
+    AuthenticationError("fixture auth"),
+    ConfigurationError("fixture config"),
+    IPAddressBlocked("fixture blocked address"),
+    SearchLimitReached("fixture search limit"),
+    ForbiddenError("fixture refused"),
+    _plugin_error("DownloadLimitExceeded"),
+    _plugin_error("PermissionError"),
+    _plugin_error("IPAddressBlocked"),
+    _plugin_error("SearchLimitReached"),
+    _plugin_error("ForbiddenError"),
+    _plugin_error("CloudflareBlockedError"),
+    _plugin_error("TimeoutError"),
+    _plugin_error("URLError"),
+    WorkerError("fixture deadline", code="timeout"),
+]
+
+
+def _downloading_provider(monkeypatch, error):
+    downloads = []
+
+    class Provider(_FakeProvider):
+        def download_subtitle(self, subtitle):
+            downloads.append(subtitle)
+            raise error
+
+    monkeypatch.setattr(core, "provider_registry", {"alpha": Provider})
+    return downloads
+
+
+@pytest.mark.parametrize("error", _GENERIC_DOWNLOAD_FAILURES,
+                         ids=lambda error: type(error).__name__)
+def test_an_expected_download_failure_logs_no_line_of_its_own(monkeypatch, caplog, error):
+    downloads = _downloading_provider(monkeypatch, error)
+    calls = []
+    pool = core.SZProviderPool(["alpha"], {},
+                               throttle_callback=lambda name, exc, **context: calls.append(name) or True)
+    subtitle = SimpleNamespace(provider_name="alpha", language=core.Language("eng"), sports_context=None)
+
+    with caplog.at_level("DEBUG", logger=core.logger.name):
+        assert pool.download_subtitle(subtitle) is False
+
+    assert len(downloads) == 1
+    assert calls == ["alpha"]
+    assert "alpha" in pool.discarded_providers
+    assert subtitle.download_error is error
+    assert _loud_records(caplog) == []
+    assert "Unexpected error" not in caplog.text
+
+
+def _announcing_pool(monkeypatch, error, callback):
+    """A pool recording every throttle callback and announce call, in order."""
+    downloads = _downloading_provider(monkeypatch, error)
+    monkeypatch.setattr(core, "DOWNLOAD_RETRY_SLEEP", 0)
+    events = []
+    pool = core.SZProviderPool(
+        ["alpha"], {},
+        throttle_callback=lambda name, exc, **context: events.append(("throttle", context.get("announce")))
+        or callback(),
+        throttle_announce=lambda name, exc, operation=None: events.append(("announce", name, exc, operation)))
+    return pool, downloads, events
+
+
+def test_a_retried_connection_error_announces_once_after_the_retries(monkeypatch):
+    error = requests.exceptions.ConnectionError("fixture connection")
+    pool, downloads, events = _announcing_pool(monkeypatch, error, lambda: True)
+    subtitle = SimpleNamespace(provider_name="alpha", language=core.Language("eng"), sports_context=None)
+
+    assert pool.download_subtitle(subtitle) is False
+    assert len(downloads) == core.DOWNLOAD_TRIES
+    # Every attempt still records its backoff, so the backoff is unchanged;
+    # only the announce, with the last exception, is new.
+    assert events == [("throttle", False)] * core.DOWNLOAD_TRIES + \
+                     [("announce", "alpha", error, "download")]
+
+
+def test_a_download_that_recovers_still_announces_the_backoff_in_force(monkeypatch):
+    """A retry that succeeds leaves the failed attempts' backoff standing, so
+    the one line is written with the deadline those attempts recorded."""
+    error = requests.exceptions.ConnectionError("fixture connection")
+    downloads = []
+    monkeypatch.setattr(core, "DOWNLOAD_RETRY_SLEEP", 0)
+
+    class Provider(_FakeProvider):
+        def download_subtitle(self, subtitle):
+            downloads.append(subtitle)
+            if len(downloads) == 1:
+                raise error
+
+    monkeypatch.setattr(core, "provider_registry", {"alpha": Provider})
+    events = []
+    pool = core.SZProviderPool(
+        ["alpha"], {},
+        throttle_callback=lambda name, exc, **context: events.append(("throttle", context.get("announce"))) or True,
+        throttle_announce=lambda name, exc, operation=None: events.append(("announce", name, exc, operation)))
+    subtitle = SimpleNamespace(provider_name="alpha", language=core.Language("eng"), sports_context=None,
+                               is_valid=lambda: True, normalize=lambda: None)
+
+    assert pool.download_subtitle(subtitle) is True
+    assert len(downloads) == 2
+    assert events == [("throttle", False), ("announce", "alpha", error, "download")]
+
+
+@pytest.mark.parametrize("callback_result", [None, False])
+def test_a_download_that_records_nothing_announces_nothing(monkeypatch, callback_result):
+    """The announce reads the deadline the download's own attempts recorded,
+    so a callback that recorded nothing leaves nothing to announce even when
+    the table has an older entry for the provider."""
+    pool, _downloads, events = _announcing_pool(monkeypatch, requests.exceptions.ConnectionError("fixture"),
+                                                 lambda: callback_result)
+    subtitle = SimpleNamespace(provider_name="alpha", language=core.Language("eng"), sports_context=None)
+
+    assert pool.download_subtitle(subtitle) is False
+    assert events == [("throttle", False)] * core.DOWNLOAD_TRIES
+
+
+def test_a_throttle_callback_that_raises_records_nothing_to_announce(monkeypatch):
+    error = requests.exceptions.ConnectionError("fixture connection")
+
+    def callback():
+        raise _CallbackBroke("throttle callback fixture failure")
+
+    pool, _downloads, events = _announcing_pool(monkeypatch, error, callback)
+    subtitle = SimpleNamespace(provider_name="alpha", language=core.Language("eng"), sports_context=None)
+
+    assert pool.download_subtitle(subtitle) is False
+    assert [event for event in events if event[0] == "announce"] == []
+
+
+@pytest.mark.parametrize("second_error", [
+    core.MustGetBlacklisted("fixture-id", "movie"),
+    TooManyRequests("fixture rate"),
+], ids=["blacklist_demand", "count_gated_rate_limit"])
+def test_the_announce_names_the_exception_that_recorded_the_backoff(monkeypatch, second_error):
+    """An attempt whose callback recorded nothing must not have its exception
+    announced as the backoff an earlier attempt recorded: the words and the
+    class in the line belong to the exception whose call recorded, or the
+    line would mix one attempt's reason with another's duration."""
+    first_error = requests.exceptions.ConnectionError("fixture connection")
+    downloads = []
+    monkeypatch.setattr(core, "DOWNLOAD_RETRY_SLEEP", 0)
+
+    class Provider(_FakeProvider):
+        def download_subtitle(self, subtitle):
+            downloads.append(subtitle)
+            raise first_error if len(downloads) == 1 else second_error
+
+    monkeypatch.setattr(core, "provider_registry", {"alpha": Provider})
+    events = []
+
+    def callback(name, exc, **context):
+        events.append(("throttle", exc))
+        return exc is first_error
+
+    pool = core.SZProviderPool(
+        ["alpha"], {},
+        throttle_callback=callback,
+        throttle_announce=lambda name, exc, operation=None: events.append(("announce", name, exc)))
+    subtitle = SimpleNamespace(provider_name="alpha", language=core.Language("eng"), sports_context=None)
+
+    assert pool.download_subtitle(subtitle) is False
+    assert len(downloads) == 2, "the second failure should have ended the retries"
+    assert [event for event in events if event[0] == "announce"] == [("announce", "alpha", first_error)]
+
+
+def test_a_broken_announce_callback_does_not_take_the_download_down(monkeypatch, caplog):
+    error = requests.exceptions.ConnectionError("fixture connection")
+    downloads = _downloading_provider(monkeypatch, error)
+    monkeypatch.setattr(core, "DOWNLOAD_RETRY_SLEEP", 0)
+
+    def broken_announce(name, exc, operation=None):
+        raise _CallbackBroke("announce fixture failure")
+
+    pool = core.SZProviderPool(["alpha"], {},
+                               throttle_callback=lambda name, exc, **context: True,
+                               throttle_announce=broken_announce)
+    subtitle = SimpleNamespace(provider_name="alpha", language=core.Language("eng"), sports_context=None)
+
+    with caplog.at_level("ERROR", logger=core.logger.name):
+        assert pool.download_subtitle(subtitle) is False
+
+    assert len(downloads) == core.DOWNLOAD_TRIES
+    failures = [record for record in caplog.records
+                if record.getMessage().startswith("Throttle announce failed")]
+    assert len(failures) == 1
+
+
+@pytest.mark.parametrize("operation", ["search", "download"])
+def test_the_handler_tells_the_callback_which_operation_failed(monkeypatch, operation):
+    """A modern callback learns the operation and whether it may announce, so
+    it can write the one line for the path that failed."""
+    error = core.APIThrottled("fixture throttle")
+    language, _downloads = _failing_provider(monkeypatch, error)
+    received = []
+
+    def callback(name, exc, ids=None, language=None, sports_context=None, operation=None, announce=None):
+        received.append((operation, announce))
+        return True
+
+    pool = core.SZProviderPool(["alpha"], {}, throttle_callback=callback)
+    _run_operation(pool, operation, language)
+
+    assert received == [("search", True) if operation == "search" else ("download", False)]
+
+
+def test_the_legacy_adapter_forwards_only_the_keywords_the_caller_passed():
+    """A callback's own defaults must survive a caller that omits a keyword:
+    the adapter forwards what it was handed, never an explicit None that
+    would override the default."""
+    seen = []
+
+    def callback(name, exc, operation="search", announce=True):
+        seen.append((name, operation, announce))
+        return announce
+
+    adapted = core._adapt_throttle_callback(callback)
+
+    # The callback takes operation and announce but not sports_context, so it
+    # is wrapped; an empty call leaves both defaults alone.
+    assert adapted("alpha", ValueError("fixture")) is True
+    assert seen == [("alpha", "search", True)]
+    assert adapted("alpha", ValueError("fixture"), announce=False) is False
+    assert seen[-1] == ("alpha", "search", False)
+    assert adapted("alpha", ValueError("fixture"), operation="download") is True
+    assert seen[-1] == ("alpha", "download", True)
+
+
+_PLUGIN_TRACEBACK = ('Traceback (most recent call last):\n'
+                     '  File "provider.py", line 3, in search\n'
+                     '    raise KeyError("fixture plugin defect")\n'
+                     "KeyError: 'fixture plugin defect'\n")
+
+# The remote class, the message its failure carries, and the envelope fields.
+# Constructed per test, so a run against a worker boundary without the fields
+# reports the failing test, not a broken collection. The PermissionError rows
+# are the two operating-system forms of the class, whose errno the envelope
+# carries back: the split the classifier draws is between them and a plugin
+# raising the class with a message of its own, never an errno, for a refused
+# login.
+_PLUGIN_UNEXPECTED_FAILURES = [
+    ("KeyError", "plugin fixture failure", {"remote_traceback": _PLUGIN_TRACEBACK}),
+    ("RuntimeError", "plugin fixture failure", {"remote_traceback": _PLUGIN_TRACEBACK}),
+    ("BSPlayerServiceError", "plugin fixture failure", {"remote_traceback": _PLUGIN_TRACEBACK}),
+    ("PermissionError", "[Errno 13] Permission denied",
+     {"remote_errno": 13, "remote_traceback": _PLUGIN_TRACEBACK}),
+    ("PermissionError", "[WinError 5] Access is denied",
+     {"remote_errno": 5, "remote_traceback": _PLUGIN_TRACEBACK}),
+]
+
+
+@pytest.mark.parametrize("remote_name,message,fields", _PLUGIN_UNEXPECTED_FAILURES,
+                         ids=["KeyError", "RuntimeError", "BSPlayerServiceError", "PermissionError-errno-13",
+                              "PermissionError-winerror-5"])
+@pytest.mark.parametrize("operation", ["search", "download"])
+def test_a_plugins_unexpected_failure_carries_the_plugins_traceback(monkeypatch, caplog, operation,
+                                                                    remote_name, message, fields):
+    """The host's own traceback ends in the transport for every plugin and
+    every cause, so the record carries the plugin's instead, and no exc_info:
+    one line, naming the plugin's class, message and frame."""
+    error = _plugin_error(remote_name, message, **fields)
+    language, downloads = _failing_provider(monkeypatch, error)
+    pool = core.SZProviderPool(["alpha"], {})
+
+    with caplog.at_level("ERROR", logger=core.logger.name):
+        _run_operation(pool, operation, language)
+
+    assert len(downloads) == (0 if operation == "search" else 1)
+    failures = _pool_error_records(caplog)
+    assert len(failures) == 1
+    record = failures[0]
+    assert record.exc_info is None
+    record_message = record.getMessage()
+    assert "\n" not in record_message
+    assert record_message == (f"Unexpected error in provider 'alpha': {error.remote_class_name}: "
+                              f"{message}. Plugin traceback: {_PLUGIN_TRACEBACK!r}")
+    assert "provider.py" in record_message
+    assert "_raise_worker_error" not in caplog.text
+
+
+@pytest.mark.parametrize("operation", ["search", "download"])
+def test_a_plugin_failure_without_a_traceback_field_names_class_and_message(monkeypatch, caplog, operation):
+    """An older worker, or a transport that lost the field, still gets its one
+    ERROR record; there is simply no traceback to carry."""
+    error = _plugin_error("KeyError")
+    language, _downloads = _failing_provider(monkeypatch, error)
+    pool = core.SZProviderPool(["alpha"], {})
+
+    with caplog.at_level("ERROR", logger=core.logger.name):
+        _run_operation(pool, operation, language)
+
+    failures = _pool_error_records(caplog)
+    assert len(failures) == 1
+    assert failures[0].exc_info is None
+    assert failures[0].getMessage() == "Unexpected error in provider 'alpha': KeyError: plugin fixture failure"
+    assert "Traceback" not in caplog.text
+
+
+@pytest.mark.parametrize("fields", [
+    {"remote_traceback": _PLUGIN_TRACEBACK},
+    {},
+], ids=["with_traceback", "without_traceback"])
+@pytest.mark.parametrize("operation", ["search", "download"])
+def test_a_multiline_plugin_message_stays_one_log_line(monkeypatch, caplog, operation, fields):
+    """A plugin supplies its class name and its message, and with no exc_info
+    there is no formatter standing between the record and the file, so an
+    embedded newline would split the one line across several physical ones.
+    Both fields reach the log escaped."""
+    error = _plugin_error("Key\nError", "first line\nsecond line\r\nthird line", **fields)
+    language, _downloads = _failing_provider(monkeypatch, error)
+    pool = core.SZProviderPool(["alpha"], {})
+
+    with caplog.at_level("ERROR", logger=core.logger.name):
+        _run_operation(pool, operation, language)
+
+    failures = _pool_error_records(caplog)
+    assert len(failures) == 1
+    message = failures[0].getMessage()
+    assert "\n" not in message
+    assert "\r" not in message
+    assert "Key\\nError: first line\\nsecond line\\r\\nthird line" in message
+
+
+@pytest.mark.parametrize("operation", ["search", "download"])
+def test_a_transport_failure_keeps_the_host_traceback(monkeypatch, caplog, operation):
+    """A WorkerError without the provider code is Bazarr's own transport
+    failing, so the host traceback is the informative one."""
+    error = WorkerError("malformed JSON")
+    language, _downloads = _failing_provider(monkeypatch, error)
+    pool = core.SZProviderPool(["alpha"], {})
+
+    with caplog.at_level("ERROR", logger=core.logger.name):
+        _run_operation(pool, operation, language)
+
+    failures = _pool_error_records(caplog)
+    assert len(failures) == 1
+    record = failures[0]
+    assert record.getMessage() == "Unexpected error in provider 'alpha'"
+    assert record.exc_info and record.exc_info[0] is WorkerError
+    assert caplog.text.count("Traceback (most recent call last)") == 1
+
+
+@pytest.mark.parametrize("operation", ["search", "download"])
+def test_a_rebuilt_class_keeps_the_plugins_traceback(monkeypatch, caplog, operation):
+    """A class the worker rebuilds arrives as the host class with the
+    WorkerError kept as its __cause__. When that class is unexpected, the
+    plugin's own traceback is still the informative one, so the record takes
+    it from the cause and attaches no host exc_info."""
+    error = ParseResponseError("plugin fixture failure")
+    error.__cause__ = _plugin_error("ParseResponseError", remote_traceback=_PLUGIN_TRACEBACK)
+    language, _downloads = _failing_provider(monkeypatch, error)
+    pool = core.SZProviderPool(["alpha"], {})
+
+    with caplog.at_level("ERROR", logger=core.logger.name):
+        _run_operation(pool, operation, language)
+
+    failures = _pool_error_records(caplog)
+    assert len(failures) == 1
+    record = failures[0]
+    assert record.exc_info is None
+    message = record.getMessage()
+    assert message == (f"Unexpected error in provider 'alpha': ParseResponseError: plugin fixture failure. "
+                       f"Plugin traceback: {_PLUGIN_TRACEBACK!r}")
+    assert "provider.py" in message
+
+
+@pytest.mark.parametrize("error", [
+    KeyError("fixture defect"),
+    ParseResponseError("fixture markup change"),
+    BrokenPipeError("fixture pipe"),
+], ids=lambda error: type(error).__name__)
+@pytest.mark.parametrize("operation", ["search", "download"])
+def test_an_unexpected_failure_keeps_one_error_record_with_one_traceback(monkeypatch, caplog, operation, error):
+    """A genuinely unexpected exception is a defect worth reading: one ERROR
+    record, the traceback attached once through exc_info, and never pasted
+    into the message a second time. The built-in ConnectionError subclasses
+    (a broken pipe, a reset or an aborted connection) are on this side too:
+    Bazarr's own code can raise them, and classifying them as a routine
+    provider connection failure would cost them their traceback."""
+    language, _downloads = _failing_provider(monkeypatch, error)
+    pool = core.SZProviderPool(["alpha"], {})
+
+    with caplog.at_level("ERROR", logger=core.logger.name):
+        _run_operation(pool, operation, language)
+
+    failures = _pool_error_records(caplog)
+    assert len(failures) == 1
+    record = failures[0]
+    assert record.getMessage() == "Unexpected error in provider 'alpha'"
+    assert record.exc_info and record.exc_info[0] is type(error)
+    assert "Traceback" not in record.getMessage()
+    assert caplog.text.count("Traceback (most recent call last)") == 1
