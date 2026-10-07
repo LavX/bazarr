@@ -12,13 +12,15 @@ from flask_compress import Compress
 from flask_cors import CORS
 from flask_socketio import SocketIO
 
+from waitress.proxy_headers import proxy_headers_middleware
+
 from utilities.security_guards import api_key_matches
 
 from .auth import is_session_authenticated
 from .database import database
 from .get_args import args
 from .config import settings, base_url
-from .host_allowlist import HostAllowlistMiddleware
+from .host_allowlist import HostAllowlistMiddleware, RAW_HOST_ENVIRON, front_refusal_notice
 
 socketio = SocketIO()
 
@@ -233,10 +235,30 @@ def create_app():
                       async_mode='threading', allow_upgrades=False, transports='polling', engineio_logger=False)
     # The request-host gate wraps the whole WSGI stack, the Socket.IO
     # transport included, and sits inside the supervisor token wrapper so a
-    # refusal still carries the token the Docker supervisor relays.
+    # refusal still carries the token the Docker supervisor relays. The
+    # forwarded headers are parsed outside it: the shim below keeps the Host
+    # header the request arrived with, and proxy_headers_middleware then
+    # replaces environ['HTTP_HOST'] when the peer is general.trusted_proxy,
+    # so the gate judges the name it was given and the name it was handed at
+    # once. A peer that is not the trusted proxy has its forwarded headers
+    # stripped first, as before.
     app.wsgi_app = HostAllowlistMiddleware(app.wsgi_app)
+    app.wsgi_app = proxy_headers_middleware(
+        app.wsgi_app,
+        trusted_proxy=trusted_proxy_value(),
+        trusted_proxy_count=1,
+        trusted_proxy_headers={'x-forwarded-host', 'x-forwarded-proto', 'x-forwarded-for'},
+        clear_untrusted=True,
+        log_untrusted=False)
+    app.wsgi_app = _raw_host_shim(app.wsgi_app)
     # Outermost, so it also covers what Flask-SocketIO's middleware answers.
     app.wsgi_app = SupervisorTokenMiddleware(app.wsgi_app)
+
+    # The front listener in front of this backend reports the hostnames its
+    # own request-host check refused here, authenticated with the token it
+    # started this process with.
+    app.add_url_rule(f'{base_url}/_supervisor/host_refusal', 'front_refusal_notice',
+                     front_refusal_notice, methods=['POST'])
 
     @app.errorhandler(404)
     def page_not_found(_):
@@ -255,6 +277,19 @@ def create_app():
         database.close()
 
     return app
+
+
+def _raw_host_shim(wsgi_app):
+    """Keep the Host header a request arrived with, before it is replaced.
+
+    proxy_headers_middleware overwrites environ['HTTP_HOST'] with the
+    forwarded host of a trusted proxy, and the request-host gate wants both
+    values, so this runs first and stores the original.
+    """
+    def shim(environ, start_response):
+        environ[RAW_HOST_ENVIRON] = environ.get('HTTP_HOST', '')
+        return wsgi_app(environ, start_response)
+    return shim
 
 
 class ReverseProxied(object):

@@ -7,11 +7,18 @@ hostnames the install does not recognize, the default set of hostnames that are
 always answered, the way an operator allows one more, and the same check in the
 Docker supervisor, which is the only layer that sees the client-facing hostname
 when general.trusted_proxy names an outer proxy.
+
+The middleware tests run against the real application factory wherever the
+answer depends on the wiring: a stub app cannot produce the settings shell or
+the Socket.IO transport, so its body assertions say nothing about them.
 """
+import asyncio
 import importlib.util
 import json
 import logging
 import re
+import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -99,12 +106,74 @@ def _app_with_check(config):
 
 
 def _announced_code(console_log):
-    """The 16 hex characters of the approval code, as announced on the console."""
-    for message in console_log.messages:
+    """The 16 hex characters of the current approval code, as announced last
+    on the console (a code that was used is announced in its place)."""
+    for message in reversed(console_log.messages):
         found = re.search(r"\b[0-9a-f]{16}\b", message)
         if found:
             return found.group(0)
     return None
+
+
+@pytest.fixture
+def real_factory(monkeypatch):
+    """The application as the server builds it: create_app plus both blueprints.
+
+    create_app puts the request-host gate, the forwarded-header middleware and
+    the supervisor token wrapper in place; the two blueprints are what
+    bazarr/app/server.py registers around it. The Socket.IO state is put back
+    afterwards, as test_logging_filters does, because the module's one SocketIO
+    object is shared with the rest of the suite.
+    """
+    from api import api_bp
+    from app import app as app_module
+    from app import config as config_module
+    from app import ui as ui_module
+    from app import host_allowlist
+
+    socketio = app_module.socketio
+    for name in ("server", "sockio_mw", "async_mode"):
+        monkeypatch.setattr(socketio, name, getattr(socketio, name, None), raising=False)
+    monkeypatch.setattr(socketio, "server_options", dict(socketio.server_options))
+    monkeypatch.setattr(host_allowlist, "_refusals", host_allowlist.BoundedRefusalRecorder())
+    monkeypatch.setattr(host_allowlist, "_approval_code", host_allowlist._ApprovalCode())
+
+    flask_app = app_module.create_app()
+    flask_app.register_blueprint(api_bp, url_prefix=config_module.base_url.rstrip('/') + '/api')
+    flask_app.register_blueprint(ui_module.ui_bp, url_prefix=config_module.base_url.rstrip('/'))
+
+    # The api package's import leaves a transaction open on this thread's
+    # session, and every request's own begin() would refuse it otherwise.
+    from app.database import database as shared_database
+    shared_database.close()
+
+    from api.system.account import _login_attempts
+    _login_attempts.clear()
+    yield flask_app
+    _login_attempts.clear()
+    shared_database.close()
+
+
+@pytest.fixture
+def shell_template():
+    """A minimal build output, so the settings shell render is the real one.
+
+    In CI the UI artifact is downloaded into frontend/build; a bare checkout
+    has no build, so this writes one index.html and removes it again.
+    """
+    from app import ui
+
+    template = Path(ui.frontend_build_path) / "index.html"
+    existed = template.exists()
+    if not existed:
+        template.parent.mkdir(parents=True, exist_ok=True)
+        template.write_text(
+            '<!DOCTYPE html><html><body>'
+            '<div id="shell">BAZARR_SERVER_INJECT = {{ BAZARR_SERVER_INJECT | tojson }}</div>'
+            '</body></html>', encoding="utf-8")
+    yield template
+    if not existed:
+        template.unlink()
 
 
 # ---------------------------------------------------------------------------
@@ -122,8 +191,67 @@ def test_effective_host_strips_case_ports_brackets_and_a_trailing_dot():
     assert effective_host("Bazarr.Local:6767") == "bazarr.local"
     assert effective_host("evil.example.com:80") == "evil.example.com"
     assert effective_host("bazarr.") == "bazarr"
+    # The port goes first, then one trailing dot.
+    assert effective_host("bazarr.example.com.:8443") == "bazarr.example.com"
+    assert effective_host("host..") == "host."
     assert effective_host("  ") == ""
     assert effective_host(None) == ""
+
+
+def test_a_scalar_entry_string_is_read_as_a_list():
+    from app.host_policy import normalize_entries
+
+    assert normalize_entries("hand.example.com") == ["hand.example.com"]
+    assert normalize_entries("one.example.com, TWO.example.com") == ["one.example.com",
+                                                                     "two.example.com"]
+    assert normalize_entries(" , , ") == []
+
+
+def test_the_approval_form_accepts_only_names_the_allowlist_can_match():
+    from app.host_policy import is_approvable_host
+
+    assert is_approvable_host("bazarr.example.com") is True
+    assert is_approvable_host("bazarr") is True
+    assert is_approvable_host("192.168.1.5") is True
+    assert is_approvable_host("fe80::1") is True
+    # A wildcard cannot be added through the form, in any spelling.
+    assert is_approvable_host("*") is False
+    assert is_approvable_host("*.example.com") is False
+    assert is_approvable_host("* .example.com") is False
+    # Nor can anything that is not a hostname.
+    assert is_approvable_host("") is False
+    assert is_approvable_host("bad name.example.com") is False
+    assert is_approvable_host("<script>alert(1)</script>") is False
+    assert is_approvable_host("example.com/path") is False
+    assert is_approvable_host(None) is False
+    assert is_approvable_host("a" * 254) is False
+
+
+@pytest.mark.parametrize("remote, trusted_proxy, expected", [
+    # The setting's default applies when it is absent: loopback may name the
+    # hostname, as in the backend.
+    ("127.0.0.1", None, True),
+    ("192.168.1.5", None, False),
+    # An explicitly empty one trusts nobody.
+    ("127.0.0.1", "", False),
+    # The configured address, its mapped form, a network, a list, the star.
+    ("172.18.0.5", "172.18.0.5", True),
+    ("172.18.0.9", "172.18.0.5", False),
+    ("::ffff:172.18.0.5", "172.18.0.5", True),
+    ("10.0.0.9", "10.0.0.0/8", True),
+    ("10.0.0.9", "192.168.0.0/16", False),
+    ("10.0.0.9", "10.0.0.8, 10.0.0.9", True),
+    ("10.0.0.9", "10.0.0.8, 10.0.0.7", False),
+    ("10.0.0.9", "*", True),
+    ("proxy.local", "proxy.local", True),
+    ("proxy.local", "proxy.other", False),
+    (None, "*", False),
+    ("127.0.0.1", "localhost", False),
+])
+def test_a_peer_may_name_the_client_hostname_only_as_configured(remote, trusted_proxy, expected):
+    from app.host_policy import peer_is_trusted_proxy
+
+    assert peer_is_trusted_proxy(remote, trusted_proxy) is expected
 
 
 @pytest.mark.parametrize("host", [
@@ -297,13 +425,18 @@ def test_a_lone_star_switches_the_check_off(fresh_state):
     assert response.status_code == 200
 
 
-def test_the_approval_path_is_exempt_from_the_check(fresh_state):
+def test_only_the_approval_submission_is_exempt_from_the_check(fresh_state):
+    """Exactly the one POST the refusal page's form submits is left open; a
+    GET or HEAD for the path is judged by its hostname like everything else."""
     client = _app_with_check(_config()).test_client()
 
-    response = client.post("/host-approval", headers={"Host": FOREIGN_HOST_HEADER})
-
-    assert response.status_code == 200
-    assert response.get_data(as_text=True) == "approval-route"
+    assert client.post("/host-approval", headers={"Host": FOREIGN_HOST_HEADER}).status_code == 200
+    for method in ("get", "head"):
+        response = getattr(client, method)("/host-approval", headers={"Host": FOREIGN_HOST_HEADER})
+        body = response.get_data(as_text=True)
+        assert response.status_code == 421
+        assert "approval-route" not in body
+        assert API_KEY not in body
 
 
 def test_base_url_moves_the_exempt_paths(fresh_state):
@@ -312,7 +445,10 @@ def test_base_url_moves_the_exempt_paths(fresh_state):
 
     assert client.post("/bazarr/host-approval",
                       headers={"Host": FOREIGN_HOST_HEADER}).get_data(as_text=True) == "approval-route"
+    # Every other method and every other spelling is judged like any request.
     assert client.get("/host-approval",
+                     headers={"Host": FOREIGN_HOST_HEADER}).status_code == 421
+    assert client.get("/bazarr/host-approval",
                      headers={"Host": FOREIGN_HOST_HEADER}).status_code == 421
     payload = json.loads(client.get("/bazarr/api/system/status",
                                     headers={"Host": FOREIGN_HOST_HEADER}).get_data(as_text=True))
@@ -325,9 +461,9 @@ def test_base_url_moves_the_exempt_paths(fresh_state):
 
 
 def test_the_refusal_record_and_log_are_bounded(fresh_state):
-    """A page can cycle hostnames at the gate, so the record holds the 50 most
-    recent refused hosts and the log holds at most 20 refusal lines and one
-    counting line per hour."""
+    """Many distinct hostnames may be refused in quick succession, so the
+    record holds the 50 most recently refused ones and the log holds at most
+    20 refusal lines and one counting line per hour."""
     recorder = fresh_state.BoundedRefusalRecorder()
     lines = 0
 
@@ -339,6 +475,65 @@ def test_the_refusal_record_and_log_are_bounded(fresh_state):
 
     assert len(recorder.recent(86400)) == 50
     assert lines <= 21
+
+
+def test_a_repeated_host_moves_to_the_end_of_the_record(fresh_state):
+    """The record is the most recently refused, not the first sighted: an
+    operator's real proxy hostname, refused again and again, is not pushed out
+    by 50 one-off names."""
+    recorder = fresh_state.BoundedRefusalRecorder()
+
+    for index in range(50):
+        recorder.note(f"h{index}.example.com")
+    recorder.note("h0.example.com")
+    recorder.note("new.example.com")
+
+    recent = recorder.recent(86400)
+    assert recent[:3] == ["new.example.com", "h0.example.com", "h49.example.com"]
+    assert "h1.example.com" not in recent
+
+
+def test_the_per_host_log_pace_survives_record_eviction(fresh_state):
+    """Evicting a hostname from the record must not reset its once-per-hour
+    log pace."""
+    clock = [0]
+    recorder = fresh_state.BoundedRefusalRecorder(now=lambda: clock[0])
+
+    assert recorder.note("h0.example.com") is True
+    for index in range(1, 120):
+        recorder.note(f"h{index}.example.com")
+    assert "h0.example.com" not in recorder.recent(86400)
+
+    # Still inside the hour of its last line, so no second one.
+    clock[0] = 1800
+    assert recorder.note("h0.example.com") is False
+
+    # Past the hour, and the line cap has rolled over with it.
+    clock[0] = 3700
+    assert recorder.note("h0.example.com") is True
+
+
+def test_the_summary_counts_the_whole_window(fresh_state):
+    """The summary line opens at the first suppressed refusal and reports the
+    full count once its hour has run, not the first suppression on its own."""
+    clock = [0]
+    recorder = fresh_state.BoundedRefusalRecorder(now=lambda: clock[0])
+
+    for index in range(40):
+        recorder.note(f"h{index}.example.com")
+        # The first suppressed refusal opens the window; nothing is due yet.
+        assert recorder.take_summary() == 0
+
+    clock[0] = 3600
+    assert recorder.take_summary() == 20
+
+    # The count is reset, and the next suppression opens a fresh window.
+    assert recorder.take_summary() == 0
+    for index in range(40, 62):
+        recorder.note(f"h{index}.example.com")
+    assert recorder.take_summary() == 0
+    clock[0] = 7300
+    assert recorder.take_summary() == 2
 
 
 def test_a_refusal_is_recorded_for_the_health_page(fresh_state):
@@ -453,7 +648,7 @@ def test_the_console_code_allows_a_refused_host(approval_app, console_log):
     assert client.get("/probe", headers={"Host": FOREIGN_HOST_HEADER}).status_code == 200
 
 
-def test_a_used_code_is_replaced(approval_app, console_log):
+def test_a_used_code_is_replaced_and_the_replacement_is_announced(approval_app, console_log):
     flask_app, config, _ = approval_app
     client = flask_app.test_client()
 
@@ -463,11 +658,38 @@ def test_a_used_code_is_replaced(approval_app, console_log):
                         data={"host": FOREIGN_HOST_HEADER, "code": code})
     assert first.status_code == 302
 
+    # The code just used is gone, and its replacement is on the console
+    # straight away: no restart and no further refusal is needed before the
+    # next hostname can be allowed.
     second = client.post("/host-approval", headers={"Host": "second.example.com"},
                          data={"host": "second.example.com", "code": code})
-
     assert second.status_code == 403
-    assert "second.example.com" not in config.general.allowed_hosts
+    replacement = _announced_code(console_log)
+    assert replacement is not None and replacement != code
+
+    third = client.post("/host-approval", headers={"Host": "second.example.com"},
+                        data={"host": "second.example.com", "code": replacement})
+    assert third.status_code == 302
+    assert config.general.allowed_hosts == [FOREIGN_HOST, "second.example.com"]
+
+
+def test_concurrent_submissions_cannot_reuse_the_code(fresh_state, console_log):
+    """The comparison, the consumption and the replacement share one lock: a
+    code submitted many times in the same moment is accepted exactly once."""
+    code = fresh_state._approval_code
+    code.announce()
+    supplied = _announced_code(console_log)
+    assert supplied is not None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        answers = list(pool.map(code.verify, [supplied] * 8))
+
+    assert answers.count(True) == 1
+    # The replacement is announced, and it is the only code accepted next.
+    replacement = _announced_code(console_log)
+    assert replacement is not None and replacement != supplied
+    assert code.verify(replacement) is True
+    assert code.verify("wrong" * 4) is False
 
 
 def test_a_wrong_code_counts_against_the_login_throttle(approval_app, console_log):
@@ -496,11 +718,305 @@ def test_a_star_cannot_be_allowed_through_the_form(approval_app, console_log):
     client.get("/probe", headers={"Host": FOREIGN_HOST_HEADER})
     code = _announced_code(console_log)
 
-    response = client.post("/host-approval", headers={"Host": FOREIGN_HOST_HEADER},
-                           data={"host": "*", "code": code})
+    for host in ("*", "*.example.com", "bad name.example.com", "<script>alert(1)</script>"):
+        response = client.post("/host-approval", headers={"Host": FOREIGN_HOST_HEADER},
+                               data={"host": host, "code": code})
+        assert response.status_code == 403, host
+        assert config.general.allowed_hosts == []
 
-    assert response.status_code == 403
-    assert config.general.allowed_hosts == []
+
+def test_the_approval_endpoint_answers_404_once_a_login_is_configured(monkeypatch):
+    from app import ui
+
+    config = _config(auth_type="form")
+    monkeypatch.setattr(ui, "settings", config)
+    flask_app = Flask(__name__)
+    flask_app.config["SECRET_KEY"] = "test-secret-key"
+    flask_app.register_blueprint(ui.ui_bp)
+
+    response = flask_app.test_client().post("/host-approval", data={"host": "x.example.com"})
+
+    assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# The settings and health surfaces
+# ---------------------------------------------------------------------------
+
+
+class _FakeUpdate:
+    def values(self, **_kwargs):
+        return self
+
+
+@pytest.fixture
+def saveable(monkeypatch):
+    """save_settings with the disk write and the database stubbed out, as the
+    other settings round-trip suites do. The validators stay real, because the
+    point here is what they accept."""
+    from app import config
+
+    monkeypatch.setattr(config, "write_config", lambda: True)
+    monkeypatch.setattr(config, "validate_log_regex", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.database",
+        SimpleNamespace(
+            database=SimpleNamespace(execute=lambda statement: None),
+            update=lambda _model: _FakeUpdate(),
+            System=object,
+        ),
+    )
+    return config
+
+
+def test_a_one_entry_allowed_hosts_list_round_trips_through_the_settings_save(saveable):
+    """A list saved through the settings editor stays a list: without the
+    array-keys entry, one hostname would collapse into a bare string."""
+    original = saveable.settings.general.allowed_hosts
+    try:
+        saveable.save_settings([("settings-general-allowed_hosts", ["one.example.com"])])
+        assert saveable.settings.general.allowed_hosts == ["one.example.com"]
+        saveable.settings.validators.validate()
+    finally:
+        saveable.settings.general.allowed_hosts = original
+
+
+def test_a_scalar_allowed_hosts_hand_edit_stays_a_list():
+    """config.yaml names one hostname most naturally as a scalar; the
+    validator reads it as a one-entry list instead of resetting it to none."""
+    from app.config import settings
+
+    original = settings.general.allowed_hosts
+    try:
+        settings.set("general.allowed_hosts", "hand.example.com")
+        settings.validators.validate()
+        assert settings.general.allowed_hosts == ["hand.example.com"]
+    finally:
+        settings.set("general.allowed_hosts", original)
+
+
+def test_get_health_issues_reports_a_refused_host(schema_session, monkeypatch, fresh_state):
+    """The System > Status list carries the hostnames the gate refused."""
+    from utilities import health as health_module
+
+    monkeypatch.setattr(health_module, "database", schema_session)
+    fresh_state._refusals.note(FOREIGN_HOST)
+
+    issues = health_module.get_health_issues()
+    reported = [issue for issue in issues if FOREIGN_HOST in issue["issue"]]
+
+    assert len(reported) == 1
+    assert "Allowed Hosts" in reported[0]["issue"]
+
+
+# ---------------------------------------------------------------------------
+# The gate through the real application factory
+# ---------------------------------------------------------------------------
+
+
+REAL_FOREIGN_TARGETS = [
+    "/",
+    "/settings",
+    "/host-approval",
+    "/api/system/status",
+    "/assets/app.js",
+    "/api/socket.io/?EIO=4&transport=polling",
+]
+
+
+def _real_apikey():
+    from app.config import settings
+
+    return settings.auth.apikey
+
+
+def test_the_real_application_refuses_a_foreign_host_everywhere(real_factory, shell_template):
+    client = real_factory.test_client()
+    apikey = _real_apikey()
+
+    for path in REAL_FOREIGN_TARGETS:
+        for method in ("get", "head"):
+            response = getattr(client, method)(path, headers={"Host": FOREIGN_HOST_HEADER})
+            body = response.get_data(as_text=True)
+            assert response.status_code == 421, (path, method)
+            assert apikey not in body, (path, method)
+            assert "BAZARR_SERVER_INJECT" not in body, (path, method)
+            # The answer names the hostname and the ways in.
+            if method == "get":
+                assert FOREIGN_HOST in body, path
+                assert "host_not_allowed" in body or "general.allowed_hosts" in body, path
+
+
+def test_the_real_application_answers_a_recognized_host_with_the_shell(real_factory,
+                                                                       shell_template):
+    client = real_factory.test_client()
+    apikey = _real_apikey()
+
+    response = client.get("/", headers={"Host": "bazarr:6767"})
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert "BAZARR_SERVER_INJECT" in body
+    assert apikey in body
+
+
+def test_a_login_mode_leaves_the_unauthenticated_shell_without_the_key(real_factory,
+                                                                       shell_template):
+    from app.config import settings
+
+    client = real_factory.test_client()
+    apikey = _real_apikey()
+    original = settings.auth.type
+    try:
+        settings.set("auth.type", "form")
+        response = client.get("/", headers={"Host": FOREIGN_HOST_HEADER})
+        body = response.get_data(as_text=True)
+    finally:
+        settings.set("auth.type", original)
+
+    assert response.status_code == 200
+    assert "BAZARR_SERVER_INJECT" in body
+    assert apikey not in body
+
+
+def test_the_forwarded_host_is_believed_only_from_the_trusted_proxy(real_factory, shell_template):
+    """Through the real forwarded-header middleware: a trusted peer may name
+    the hostname, and then both the name it carried and the name it was given
+    have to pass. Any other peer's forwarded headers never arrive."""
+    client = real_factory.test_client()
+
+    # The test client's peer is loopback, which the default trusted_proxy
+    # names: the forwarded host is believed, and both are judged.
+    assert client.get("/", headers={"Host": FOREIGN_HOST_HEADER,
+                                    "X-Forwarded-Host": "localhost:6767"}).status_code == 421
+    assert client.get("/", headers={"Host": "localhost:6767",
+                                    "X-Forwarded-Host": FOREIGN_HOST_HEADER}).status_code == 421
+    assert client.get("/", headers={"Host": "localhost:6767",
+                                    "X-Forwarded-Host": "nas.local:6767"}).status_code == 200
+
+    # Any other peer: the forwarded headers are stripped before the gate,
+    # and only the hostname it sent decides.
+    client.environ_base["REMOTE_ADDR"] = "192.168.1.50"
+    assert client.get("/", headers={"Host": FOREIGN_HOST_HEADER,
+                                    "X-Forwarded-Host": "localhost:6767"}).status_code == 421
+    assert client.get("/", headers={"Host": "localhost:6767",
+                                    "X-Forwarded-Host": FOREIGN_HOST_HEADER}).status_code == 200
+
+
+def test_the_approval_path_get_is_refused_under_a_base_url_too(real_factory, shell_template):
+    """With a base_url configured the exemption moves with it, and still
+    covers only the one POST: a GET for the path, at the base or at the root,
+    carries no shell."""
+    from app.config import settings
+
+    client = real_factory.test_client()
+    original = settings.general.base_url
+    try:
+        settings.set("general.base_url", "/bazarr")
+        for method in ("get", "head"):
+            for path in ("/bazarr/host-approval", "/host-approval"):
+                response = getattr(client, method)(path, headers={"Host": FOREIGN_HOST_HEADER})
+                body = response.get_data(as_text=True)
+                assert response.status_code == 421, (method, path)
+                assert _real_apikey() not in body
+                assert "BAZARR_SERVER_INJECT" not in body
+    finally:
+        settings.set("general.base_url", original)
+
+
+def test_the_boot_announcement_writes_to_the_console_only(fresh_state, console_log, root_log):
+    """server.py calls this once at boot; the console is the only place the
+    code appears, and the logger that carries it never reaches the root."""
+    from app import host_allowlist
+
+    assert host_allowlist.announce_code() is True
+    code = _announced_code(console_log)
+
+    assert code is not None
+    assert code not in " ".join(root_log.messages)
+    assert logging.getLogger(host_allowlist.CODE_LOGGER_NAME).propagate is False
+
+
+def test_a_thousand_refused_hosts_leave_the_log_bounded(real_factory, console_log, root_log):
+    """The PRD's own ceiling: at most 21 refusal-path lines in the log that
+    bazarr.log is fed from, and at most one code line on the console."""
+    client = real_factory.test_client()
+
+    for index in range(1000):
+        assert client.get("/", headers={"Host": f"h{index}.example.com"}).status_code == 421
+
+    refusal_lines = [message for message in root_log.messages
+                     if "refused a request for an unrecognized host" in message
+                     or "suppressed" in message]
+    code_lines = [message for message in console_log.messages if "approval code" in message]
+
+    assert len(refusal_lines) <= 21
+    assert len(code_lines) == 1
+
+
+def test_the_code_is_absent_from_the_log_endpoints(real_factory, console_log, monkeypatch):
+    """The two ways an operator reads the log over HTTP: neither carries the
+    approval code, while both carry the refusal line that belongs there."""
+    from app.logger import FileHandlerFormatter
+    from utilities.central import get_log_file_path
+
+    client = real_factory.test_client()
+    handler = logging.FileHandler(get_log_file_path(), encoding="utf-8")
+    handler.setFormatter(FileHandlerFormatter('%(asctime)s|%(levelname)-8s|%(name)-32s|%(message)s|',
+                                              '%Y-%m-%d %H:%M:%S'))
+    root = logging.getLogger()
+    root.addHandler(handler)
+    try:
+        assert client.get("/", headers={"Host": FOREIGN_HOST_HEADER}).status_code == 421
+    finally:
+        root.removeHandler(handler)
+        handler.close()
+
+    code = _announced_code(console_log)
+    assert code is not None
+
+    download = client.get("/bazarr.log", headers={"Host": "bazarr:6767"})
+    assert download.status_code == 200
+    assert FOREIGN_HOST in download.get_data(as_text=True)
+    assert code not in download.get_data(as_text=True)
+
+    from app.config import settings
+
+    page = client.get("/api/system/logs?limit=500", headers={"Host": "bazarr:6767",
+                                                             "X-API-KEY": settings.auth.apikey})
+    assert page.status_code == 200
+    body = page.get_data(as_text=True)
+    assert FOREIGN_HOST in body
+    assert code not in body
+
+
+def test_the_front_listener_report_records_the_host_and_announces(real_factory, console_log,
+                                                                  monkeypatch):
+    """The report the Docker supervisor's refusals arrive through: with the
+    supervisor token it records the hostname and announces the code, and
+    without the right token it changes nothing."""
+    from app import host_allowlist
+    from app.config import settings
+
+    client = real_factory.test_client()
+    monkeypatch.setenv("BAZARR_SUPERVISOR_TOKEN", "supervisor-token")
+
+    wrong = client.post("/_supervisor/host_refusal", headers={"Host": "127.0.0.1:6767",
+                                                              "X-Bazarr-Supervisor-Token": "wrong"},
+                        data={"host": "front.example.com"})
+    assert wrong.status_code == 403
+    assert host_allowlist.health_issues(settings) == []
+
+    report = client.post("/_supervisor/host_refusal", headers={"Host": "127.0.0.1:6767",
+                                                               "X-Bazarr-Supervisor-Token":
+                                                                   "supervisor-token"},
+                         data={"host": "front.example.com"})
+    assert report.status_code == 204
+
+    issues = host_allowlist.health_issues(settings)
+    assert any("front.example.com" in issue["issue"] for issue in issues)
+    assert _announced_code(console_log) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -519,10 +1035,10 @@ def test_the_supervisor_decision_matrix():
                     forwarded_host="", auth_type=None, trusted_proxy=None,
                     allowed_hosts=[]) == (True, "192.168.1.10")
     # The forwarded host is believed only from the configured proxy address.
-    assert decision(request_host="upstream.name:6767", remote="172.18.0.5",
+    assert decision(request_host="upstream:6767", remote="172.18.0.5",
                     forwarded_host="attacker.example.com:443", auth_type=None,
                     trusted_proxy="172.18.0.5", allowed_hosts=[]) == (False, "attacker.example.com")
-    assert decision(request_host="upstream.name:6767", remote="172.18.0.5",
+    assert decision(request_host="upstream:6767", remote="172.18.0.5",
                     forwarded_host="bazarr.local", auth_type=None,
                     trusted_proxy="172.18.0.5", allowed_hosts=[]) == (True, "bazarr.local")
     # From any other address the forwarded header is not believed.
@@ -540,6 +1056,24 @@ def test_the_supervisor_decision_matrix():
     assert decision(request_host="anything.example", remote="192.168.1.10",
                     forwarded_host="", auth_type=None, trusted_proxy=None,
                     allowed_hosts=["*"]) == (True, "anything.example")
+    # An absent trusted_proxy keeps the backend's loopback default; an
+    # explicitly empty one trusts nobody.
+    assert decision(request_host="upstream:6767", remote="127.0.0.1",
+                    forwarded_host="bazarr.local", auth_type=None, trusted_proxy=None,
+                    allowed_hosts=[]) == (True, "bazarr.local")
+    assert decision(request_host="upstream:6767", remote="127.0.0.1",
+                    forwarded_host="bazarr.local", auth_type=None, trusted_proxy="",
+                    allowed_hosts=[]) == (True, "upstream")
+    # When a forwarded host is believed, both hostnames have to pass.
+    assert decision(request_host="localhost:6767", remote="172.18.0.5",
+                    forwarded_host="attacker.example.com", auth_type=None,
+                    trusted_proxy="172.18.0.5", allowed_hosts=[]) == (False, "attacker.example.com")
+    assert decision(request_host="attacker.example.com:6767", remote="172.18.0.5",
+                    forwarded_host="bazarr.local", auth_type=None, trusted_proxy="172.18.0.5",
+                    allowed_hosts=[]) == (False, "bazarr.local")
+    assert decision(request_host="localhost:6767", remote="127.0.0.1",
+                    forwarded_host="bazarr.local", auth_type=None, trusted_proxy=None,
+                    allowed_hosts=[]) == (True, "bazarr.local")
 
 
 class _Backend:
@@ -554,14 +1088,19 @@ async def _proxy_marker(request):
     return web.Response(text="proxied")
 
 
-async def _supervisor_client(tmp_path, monkeypatch):
+def _write_supervisor_config(tmp_path, text=None):
+    (tmp_path / "config").mkdir(exist_ok=True)
+    (tmp_path / "config" / "config.yaml").write_text(
+        text if text is not None else "general: {}\nauth: {}\n", encoding="utf-8")
+
+
+async def _supervisor_client(tmp_path, monkeypatch, text=None):
     """A started front listener over a throwaway config, proxying to a marker.
 
     The TestClient must be built inside a running loop, so this is a coroutine
     each test starts and closes rather than a fixture.
     """
-    (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "config.yaml").write_text("general: {}\n", encoding="utf-8")
+    _write_supervisor_config(tmp_path, text)
     monkeypatch.setattr(supervisor, "proxy_handler", _proxy_marker)
 
     app = supervisor.create_app(str(tmp_path), _Backend())
@@ -614,16 +1153,21 @@ async def test_the_supervisor_proxies_a_recognized_host(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_the_supervisor_exempts_the_approval_path(tmp_path, monkeypatch):
+async def test_only_the_approval_submission_is_exempt_at_the_front_listener(tmp_path, monkeypatch):
     client = await _supervisor_client(tmp_path, monkeypatch)
     try:
-        response = await client.post("/host-approval", headers={"Host": FOREIGN_HOST_HEADER})
-        body = await response.text()
+        posted = await client.post("/host-approval", headers={"Host": FOREIGN_HOST_HEADER})
+        assert posted.status == 200
+        assert await posted.text() == "proxied"
+
+        for method in ("get", "head"):
+            response = await getattr(client, method)("/host-approval",
+                                                      headers={"Host": FOREIGN_HOST_HEADER})
+            body = await response.text()
+            assert response.status == 421
+            assert "proxied" not in body
     finally:
         await client.close()
-
-    assert response.status == 200
-    assert body == "proxied"
 
 
 @pytest.mark.asyncio
@@ -633,8 +1177,8 @@ async def test_the_supervisor_picks_up_an_allowed_host_saved_by_the_backend(tmp_
         refused = await client.get("/", headers={"Host": "proxy.example.com:6767"})
         assert refused.status == 421
 
-        (tmp_path / "config" / "config.yaml").write_text(
-            "general:\n  allowed_hosts:\n  - proxy.example.com\n", encoding="utf-8")
+        _write_supervisor_config(tmp_path,
+                                 "general:\n  allowed_hosts:\n  - proxy.example.com\nauth: {}\n")
 
         response = await client.get("/", headers={"Host": "proxy.example.com:6767"})
         body = await response.text()
@@ -643,6 +1187,108 @@ async def test_the_supervisor_picks_up_an_allowed_host_saved_by_the_backend(tmp_
 
     assert response.status == 200
     assert body == "proxied"
+
+
+@pytest.mark.asyncio
+async def test_the_supervisor_reads_a_scalar_allowed_host_hand_edit(tmp_path, monkeypatch):
+    """The same hand edit the backend accepts: one hostname without the list
+    syntax still answers that hostname."""
+    client = await _supervisor_client(
+        tmp_path, monkeypatch, "general:\n  allowed_hosts: proxy.example.com\nauth: {}\n")
+    try:
+        refused = await client.get("/", headers={"Host": "other.example.com:6767"})
+        admitted = await client.get("/", headers={"Host": "proxy.example.com:6767"})
+        body = await admitted.text()
+    finally:
+        await client.close()
+
+    assert refused.status == 421
+    assert admitted.status == 200
+    assert body == "proxied"
+
+
+@pytest.mark.asyncio
+async def test_the_supervisor_judges_both_hostnames_of_a_forwarded_request(tmp_path, monkeypatch):
+    """Under a trusted-proxy peer (host networking, the loopback default), a
+    forwarded hostname is believed and both hostnames have to pass."""
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    try:
+        # The test client's peer is loopback, which the absent setting's
+        # default names, so the forwarded host is believed.
+        refused = await client.get("/", headers={"Host": "localhost:6767",
+                                                 "X-Forwarded-Host": "attacker.example.com"})
+        refused_other = await client.get("/", headers={"Host": "attacker.example.com:6767",
+                                                       "X-Forwarded-Host": "bazarr.local"})
+        admitted = await client.get("/", headers={"Host": "localhost:6767",
+                                                  "X-Forwarded-Host": "bazarr.local:6767"})
+        body = await admitted.text()
+    finally:
+        await client.close()
+
+    assert refused.status == 421
+    assert refused_other.status == 421
+    assert admitted.status == 200
+    assert body == "proxied"
+
+
+@pytest.mark.asyncio
+async def test_a_base_url_without_a_leading_slash_still_starts_the_front_listener(tmp_path,
+                                                                                  monkeypatch):
+    """The base is normalized the way the route code does it, so a hand-typed
+    baseUrl does not take the whole listener down at startup."""
+    client = await _supervisor_client(
+        tmp_path, monkeypatch, "general:\n  base_url: bazarr\nauth: {}\n")
+    try:
+        refused = await client.get("/", headers={"Host": FOREIGN_HOST_HEADER})
+        at_base = await client.post("/bazarr/host-approval", headers={"Host": FOREIGN_HOST_HEADER})
+        at_root = await client.post("/host-approval", headers={"Host": FOREIGN_HOST_HEADER})
+    finally:
+        await client.close()
+
+    assert refused.status == 421
+    assert at_base.status == 200
+    assert at_root.status == 200
+
+
+@pytest.mark.asyncio
+async def test_the_supervisor_reports_its_refusals_to_the_backend(tmp_path, monkeypatch):
+    """A refusal the front listener answers reaches the backend's record and
+    its console code: at most one report per hostname per hour, carrying this
+    supervisor's token."""
+    reports = []
+
+    async def notice(request):
+        reports.append((request.headers.get("X-Bazarr-Supervisor-Token"),
+                         await request.post()))
+        return web.Response(status=204)
+
+    backend_app = web.Application()
+    backend_app.router.add_route("POST", "/_supervisor/host_refusal", notice)
+    backend = TestClient(TestServer(backend_app))
+    await backend.start_server()
+    try:
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", backend.server.port)
+        monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+        client = await _supervisor_client(tmp_path, monkeypatch)
+        try:
+            await client.get("/", headers={"Host": FOREIGN_HOST_HEADER})
+            for _ in range(100):
+                if reports:
+                    break
+                await asyncio.sleep(0.01)
+            assert reports == [("the-supervisor-token", {"host": FOREIGN_HOST})]
+
+            # The same hostname within the hour reports nothing more.
+            reports.clear()
+            await client.get("/", headers={"Host": FOREIGN_HOST_HEADER})
+            for _ in range(20):
+                if reports:
+                    raise AssertionError("the same hostname reported twice")
+                await asyncio.sleep(0.01)
+        finally:
+            await client.close()
+    finally:
+        await backend.close()
 
 
 @pytest.mark.asyncio

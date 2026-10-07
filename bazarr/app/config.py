@@ -191,6 +191,19 @@ def check_parser_binary(value):
     return True
 
 
+def _allowed_hosts_from_config(value):
+    """The comma-separated form of general.allowed_hosts, as a list.
+
+    A config.yaml edited by hand names one hostname most naturally as a
+    scalar, and the validator would otherwise reset that to an empty list,
+    so the scalar is read as a one-entry list the same way the environment
+    variable is.
+    """
+    if isinstance(value, str):
+        return [entry.strip() for entry in value.split(',') if entry.strip()]
+    return value
+
+
 validators = [
     # general section
     Validator('general.flask_secret_key', must_exist=True, default=hexlify(os.urandom(16)).decode(),
@@ -224,8 +237,10 @@ validators = [
     # exact names, *.example.com for a domain, or a lone '*' to answer every
     # hostname (the health page names that switch). The default set (IP
     # literals, localhost, single-label names and local-only suffixes) always
-    # applies; entries here add to it.
-    Validator('general.allowed_hosts', must_exist=True, default=[], is_type_of=list),
+    # applies; entries here add to it. The cast accepts the comma-separated
+    # string a hand edit writes, as _allowed_hosts_from_config does.
+    Validator('general.allowed_hosts', must_exist=True, default=[], is_type_of=list,
+              cast=_allowed_hosts_from_config),
     Validator('general.base_url', must_exist=True, default='', is_type_of=str),
     Validator('general.instance_name', must_exist=True, default='Bazarr+', is_type_of=str,
               apply_default_on_none=True),

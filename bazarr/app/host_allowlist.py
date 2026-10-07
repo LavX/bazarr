@@ -35,6 +35,10 @@ CODE_BYTES = 8
 # The logger that writes the approval code to the console and nowhere else.
 CODE_LOGGER_NAME = 'bazarr.host_approval'
 
+# Where the shim in app.py keeps the Host header the request arrived with,
+# before the forwarded-header middleware replaces environ['HTTP_HOST'].
+RAW_HOST_ENVIRON = 'bazarr.raw_host'
+
 
 def check_active(config=settings):
     """The check runs only while no login mode is configured.
@@ -66,9 +70,9 @@ def _is_api_path(path, config):
 def host_page(host, message=None, config=settings):
     """The static refusal page, which doubles as the approval form.
 
-    It names the refused hostname and every way to allow it, and carries
-    neither the API key nor the application shell: a refused request is
-    answered with exactly this page and nothing else.
+    It names the refused hostname and every way to allow it, and it is the
+    entire response: nothing from the application or its settings is rendered
+    into it.
     """
     shown = html.escape(host or '')
     named = shown if shown else 'a request that carried no hostname'
@@ -96,7 +100,7 @@ in config.yaml (a file edited by hand applies after a restart), or set
 approval code below. The code is printed to the console Bazarr+ runs in:
 the terminal, <code>docker logs</code> for a container, or
 <code>journalctl</code> for a service. It never appears in bazarr.log, and it
-is replaced after each use.</p>
+is replaced after each use and by every restart: use the most recent line.</p>
 {message_html}
 <form method="post" action="{action}">
 <input type="hidden" name="host" value="{shown}">
@@ -141,6 +145,8 @@ class _ApprovalCode:
 
     It is announced at boot and then at most once an hour while refusals
     continue, so a refused hostname always has a code in the console to use.
+    Every restart mints and announces a new one, which is why the refusal page
+    sends the operator to the most recent line.
     """
 
     def __init__(self, now=time.time):
@@ -154,34 +160,50 @@ class _ApprovalCode:
             self._code = None
             self._announced = 0.0
 
-    def announce(self):
-        """Write the current code to the console, if the hour allows it."""
+    def _announce_locked(self):
+        """Write the current code to the console, if the hour allows it.
+
+        The caller holds the lock: announcing and consuming share it, so two
+        submissions of the same code cannot both be accepted.
+        """
         now = self._now()
-        with self._lock:
-            if self._code is None:
-                self._code = secrets.token_hex(CODE_BYTES)
-            if self._announced and now - self._announced < HOUR_SECONDS:
-                return False
-            self._announced = now
-            code = self._code
+        if self._code is None:
+            self._code = secrets.token_hex(CODE_BYTES)
+        if self._announced and now - self._announced < HOUR_SECONDS:
+            return False
+        self._announced = now
         _console_logger().info(
             'Bazarr+ approval code for refused hostnames: %s. Enter it on the refused-host page to allow '
-            'this hostname. It is replaced after each use and appears only here, never in bazarr.log.', code)
+            'this hostname. It is replaced after each use and appears only here, never in bazarr.log.',
+            self._code)
         return True
 
+    def announce(self):
+        """Write the current code to the console, if the hour allows it."""
+        with self._lock:
+            return self._announce_locked()
+
     def verify(self, supplied):
-        """Whether this is the current code; using it replaces it."""
+        """Whether this is the current code; using it replaces it.
+
+        The comparison, the consumption and the replacement all run under the
+        one lock, so a code that is submitted twice in the same moment is
+        accepted exactly once, and the replacement is announced straight away:
+        the operator who just allowed one hostname has the next code on the
+        console already, and the Docker front listener refusals cannot ask
+        for a new one themselves.
+        """
         with self._lock:
             code = self._code
-        if not supplied or not code:
-            return False
-        supplied_bytes = str(supplied).strip().encode('utf-8')
-        if not secrets.compare_digest(supplied_bytes, code.encode('utf-8')):
-            return False
-        with self._lock:
-            self._code = None
+            if not code or not supplied:
+                return False
+            supplied_bytes = str(supplied).strip().encode('utf-8')
+            if not secrets.compare_digest(supplied_bytes, code.encode('utf-8')):
+                return False
+            self._code = secrets.token_hex(CODE_BYTES)
             self._announced = 0.0
-        return True
+            self._announce_locked()
+            return True
 
 
 _refusals = BoundedRefusalRecorder()
@@ -198,6 +220,47 @@ def announce_code(config=settings):
 def verify_approval_code(supplied):
     """Whether the supplied approval code is the current one."""
     return _approval_code.verify(supplied)
+
+
+def record_refusal(host, config=settings):
+    """Record a refused hostname and keep a code on the console.
+
+    The backend's own refusals call this, and so does the report the front
+    listener in front of this backend sends: the hostnames that layer refuses
+    never reach this process, so without the report they would never appear on
+    the health page and the console code would never be repeated while they
+    continue.
+    """
+    shown = effective_host(host)
+    if not shown or not check_active(config):
+        return
+    if _refusals.note(shown):
+        logging.warning('BAZARR refused a request for an unrecognized host: %s. Allow it under '
+                        'Settings > General > Allowed Hosts, or set %s.', shown, ALLOWED_HOSTS_ENV)
+    suppressed = _refusals.take_summary()
+    if suppressed:
+        logging.info('BAZARR suppressed %d host-refusal log lines in the last hour.', suppressed)
+    # Announce the code so a refused hostname has one in the console to
+    # use; the announcement itself repeats at most once an hour.
+    _approval_code.announce()
+
+
+def front_refusal_notice(config=settings):
+    """The report the front listener in front of this backend sends.
+
+    It carries the token the supervisor started this process with, and the
+    sender bounds it to at most one report per hostname per hour, so the work
+    here is only the bookkeeping and the announcement.
+    """
+    from flask import request
+
+    from .app import SUPERVISOR_TOKEN_HEADER, supervisor_token
+    expected = supervisor_token()
+    supplied = request.headers.get(SUPERVISOR_TOKEN_HEADER, '')
+    if not expected or not secrets.compare_digest(supplied.encode('utf-8'), expected.encode('utf-8')):
+        return '', 403
+    record_refusal(request.form.get('host', ''), config=config)
+    return '', 204
 
 
 def health_issues(config=settings):
@@ -232,12 +295,17 @@ class HostAllowlistMiddleware:
     """WSGI middleware in front of Flask that refuses unrecognized hosts.
 
     It sits around the whole WSGI stack, so the API, the shell, static
-    assets and the Socket.IO transport are all behind it, and it reads only
-    the host the server hands it: waitress has already replaced it with the
-    forwarded host when the peer is general.trusted_proxy, and it ignores
-    every forwarded header otherwise. The refusal answers nothing but itself,
-    and the approval path stays open for a refused hostname, because
-    approving one is what it is for.
+    assets and the Socket.IO transport are all behind it. The approval path
+    stays open for exactly the one POST that submits the form on the refusal
+    page: any other request for it is judged by its hostname like everything
+    else.
+
+    The hostnames it judges are the two a forwarded request can carry. The
+    shim in app.py keeps the Host header the request arrived with, and the
+    forwarded-header middleware that wraps this gate has since replaced
+    environ['HTTP_HOST'] when the peer is general.trusted_proxy; both have to
+    pass, and the two are one value for every request that carries no trusted
+    forwarded host.
     """
 
     def __init__(self, wsgi_app, config=settings):
@@ -247,24 +315,19 @@ class HostAllowlistMiddleware:
     def __call__(self, environ, start_response):
         if not check_active(self.config):
             return self.wsgi_app(environ, start_response)
-        if environ.get('PATH_INFO', '') == approval_path(self.config):
+        if (environ.get('REQUEST_METHOD') == 'POST'
+                and environ.get('PATH_INFO', '') == approval_path(self.config)):
             return self.wsgi_app(environ, start_response)
+        entries = _configured_hosts(self.config)
+        raw_host = environ.get(RAW_HOST_ENVIRON) or environ.get('HTTP_HOST', '')
         host = environ.get('HTTP_HOST', '')
-        if host_is_allowed(host, _configured_hosts(self.config)):
+        if host_is_allowed(raw_host, entries) and host_is_allowed(host, entries):
             return self.wsgi_app(environ, start_response)
         return self._refuse(environ, start_response, host)
 
     def _refuse(self, environ, start_response, host):
+        record_refusal(host, config=self.config)
         shown = effective_host(host)
-        if _refusals.note(shown):
-            logging.warning('BAZARR refused a request for an unrecognized host: %s. Allow it under '
-                            'Settings > General > Allowed Hosts, or set %s.', shown, ALLOWED_HOSTS_ENV)
-        suppressed = _refusals.take_summary()
-        if suppressed:
-            logging.info('BAZARR suppressed %d host-refusal log lines in the last hour.', suppressed)
-        # Announce the code so a refused hostname has one in the console to
-        # use; the announcement itself repeats at most once an hour.
-        _approval_code.announce()
         if _is_api_path(environ.get('PATH_INFO', ''), self.config):
             body = host_json(shown)
             content_type = 'application/json'

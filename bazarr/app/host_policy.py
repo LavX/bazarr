@@ -12,10 +12,11 @@ layers share, so neither can record or log more than the agreed ceiling.
 """
 
 import os
+import re
 import threading
 import time
 from collections import OrderedDict
-from ipaddress import ip_address
+from ipaddress import ip_address, ip_network
 
 # The environment variable that carries extra allowed hosts, comma-separated,
 # for an operator who cannot reach the UI or edit config.yaml.
@@ -54,7 +55,7 @@ def effective_host(host):
     dot dropped, so ``Bazarr.Local:6767`` and ``bazarr.local`` compare equal
     and an operator can paste either form into the allowlist.
     """
-    host = str(host or '').strip().lower().rstrip('.')
+    host = str(host or '').strip().lower()
     if not host:
         return ''
     if host.startswith('['):
@@ -65,7 +66,12 @@ def effective_host(host):
     if host.count(':') == 1:
         name, _, port = host.rpartition(':')
         if port.isdigit() and name:
-            return name
+            host = name
+    # The port goes first, then one trailing dot: the dot is the zone root
+    # ("bazarr.example.com."), and "name.:8443" otherwise keeps its dot and
+    # never matches the entry an operator pasted.
+    if host.endswith('.'):
+        host = host[:-1]
     return host
 
 
@@ -94,7 +100,14 @@ def in_default_set(host):
 
 
 def normalize_entries(entries):
-    """Configured entries in effective form, blanks and non-strings dropped."""
+    """Configured entries in effective form, blanks and non-strings dropped.
+
+    A single string is the comma-separated form: a config.yaml edited by hand
+    names one hostname most naturally as a scalar, and it reads back as that
+    one entry the same way the environment variable does.
+    """
+    if isinstance(entries, str):
+        entries = entries.split(',')
     if not isinstance(entries, (list, tuple)):
         return []
     normalized = []
@@ -153,14 +166,83 @@ def host_is_allowed(host, configured_entries, environ=None):
     return any(host_matches(host, entry) for entry in entries)
 
 
+# One label of a hostname: letters, digits and inner hyphens, at most 63
+# characters, neither starting nor ending in a hyphen.
+_HOSTNAME_LABEL = r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?'
+_APPROVABLE_HOSTNAME = re.compile(rf'^(?:{_HOSTNAME_LABEL})(?:\.{_HOSTNAME_LABEL})*$')
+
+
+def is_approvable_host(host):
+    """Whether the approval form may add this hostname to the allowlist.
+
+    An IP literal or a plain name of labels. Anything else (a wildcard,
+    whitespace, punctuation or text that is not a hostname) is refused, so the
+    form can only ever add a name the allowlist can match.
+    """
+    host = str(host or '').strip().lower()
+    if not host or len(host) > MAX_HOSTNAME_LENGTH:
+        return False
+    if _is_address(host):
+        return True
+    return bool(_APPROVABLE_HOSTNAME.match(host))
+
+
+def _comparable_address(value):
+    """The value as an address, with an IPv4-mapped IPv6 form as its IPv4."""
+    try:
+        parsed = ip_address(value)
+    except ValueError:
+        return None
+    if parsed.version == 6 and parsed.ipv4_mapped is not None:
+        return parsed.ipv4_mapped
+    return parsed
+
+
+def peer_is_trusted_proxy(remote, trusted_proxy=None):
+    """Whether a peer address may name the hostname the client arrived for.
+
+    The rule mirrors the backend: the one address in
+    ``general.trusted_proxy`` (its default applies when the setting is
+    absent, an explicitly empty one trusts nobody), a ``*`` that names every
+    address, or a comma-separated list of those. A peer is compared as an
+    address when both sides parse as one, so a mapped IPv6 form of a
+    configured IPv4 address matches, and an address may also be named as a
+    network.
+    """
+    if not remote:
+        return False
+    spec = '127.0.0.1' if trusted_proxy is None else str(trusted_proxy).strip()
+    remote_text = str(remote).strip()
+    peer = _comparable_address(remote_text)
+    for item in spec.split(','):
+        item = item.strip()
+        if not item:
+            continue
+        if item == '*' or item.lower() == remote_text.lower():
+            return True
+        if peer is None:
+            continue
+        candidate = _comparable_address(item)
+        if candidate is not None and peer == candidate:
+            return True
+        try:
+            if peer in ip_network(item, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 class BoundedRefusalRecorder:
     """Bookkeeping for refusals, bounded on every axis.
 
-    The record holds the ``REFUSED_HOSTS_LIMIT`` most recent refused hosts with
-    the time of their last refusal. A host gets a log line at most once per
-    hour, refusal lines are capped at ``REFUSAL_LOG_LINES_PER_HOUR`` per hour
-    in total, and past the cap one summary line per hour counts the suppressed
-    ones. The caller owns the wording and the channel: ``note`` returns
+    The record holds the ``REFUSED_HOSTS_LIMIT`` most recently refused hosts
+    (a repeated one moves to the end, so the record is the most recent and not
+    the first-sighted). The once-per-host log pace is kept apart from that
+    record, so evicting a hostname does not reset its pace. Refusal lines are
+    capped at ``REFUSAL_LOG_LINES_PER_HOUR`` per hour in total, and past the
+    cap one summary line counts the suppressed ones once the hour it opened in
+    has run. The caller owns the wording and the channel: ``note`` returns
     whether a per-host line may be written now, and ``take_summary`` returns
     the suppressed count when a summary line is due (and resets it).
     """
@@ -168,47 +250,57 @@ class BoundedRefusalRecorder:
     def __init__(self, now=time.time):
         self._now = now
         self._lock = threading.Lock()
-        self._hosts = OrderedDict()  # host -> [last_refused, last_log_line]
+        self._hosts = OrderedDict()  # host -> time of its last refusal
+        self._last_lines = OrderedDict()  # host -> time of its last log line
         self._line_times = []  # times of per-host refusal lines this hour
         self._suppressed = 0
-        self._last_summary = 0.0
+        self._window_opens = None  # when the current suppressed count started
 
     def note(self, host):
         """Record a refusal; True when a per-host line may be written now."""
         now = self._now()
         with self._lock:
-            record = self._hosts.get(host)
-            if record is None:
-                self._hosts[host] = [now, 0.0]
-                while len(self._hosts) > REFUSED_HOSTS_LIMIT:
-                    self._hosts.popitem(last=False)
-                record = self._hosts[host]
-            record[0] = now
-            self._line_times = [stamp for stamp in self._line_times if now - stamp < HOUR_SECONDS]
-            within_hour = (now - record[1]) < HOUR_SECONDS
-            if within_hour or len(self._line_times) >= REFUSAL_LOG_LINES_PER_HOUR:
+            if host in self._hosts:
+                self._hosts.move_to_end(host)
+            self._hosts[host] = now
+            while len(self._hosts) > REFUSED_HOSTS_LIMIT:
+                self._hosts.popitem(last=False)
+            self._prune(now)
+            if host in self._last_lines or len(self._line_times) >= REFUSAL_LOG_LINES_PER_HOUR:
                 self._suppressed += 1
                 return False
-            record[1] = now
+            self._last_lines[host] = now
             self._line_times.append(now)
             return True
 
+    def _prune(self, now):
+        self._line_times = [stamp for stamp in self._line_times if now - stamp < HOUR_SECONDS]
+        self._last_lines = OrderedDict(
+            (name, stamp) for name, stamp in self._last_lines.items() if now - stamp < HOUR_SECONDS)
+
     def take_summary(self):
-        """The suppressed count when a summary line is due, else 0."""
+        """The suppressed count when a summary line is due, else 0.
+
+        The count is held for the hour it opened in, so the line reports every
+        refusal suppressed in that window rather than only the first one.
+        """
         now = self._now()
         with self._lock:
             if not self._suppressed:
                 return 0
-            if self._last_summary and now - self._last_summary < HOUR_SECONDS:
+            if self._window_opens is None:
+                self._window_opens = now
+                return 0
+            if now - self._window_opens < HOUR_SECONDS:
                 return 0
             suppressed = self._suppressed
             self._suppressed = 0
-            self._last_summary = now
+            self._window_opens = None
             return suppressed
 
     def recent(self, within_seconds):
-        """The refused hosts of the window, oldest first."""
+        """The refused hosts of the window, newest first."""
         now = self._now()
         with self._lock:
-            return [host for host, record in self._hosts.items()
-                    if now - record[0] < within_seconds]
+            return [host for host, stamp in reversed(self._hosts.items())
+                    if now - stamp < within_seconds]

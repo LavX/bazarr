@@ -310,9 +310,8 @@ def _host_allowlist_issues():
 
     Never raises: a health check that throws takes the whole page with it.
     """
-    from app.host_allowlist import health_issues
-
     try:
+        from app.host_allowlist import health_issues
         return health_issues()
     except Exception:
         logging.exception("BAZARR could not report the request-host health issues")

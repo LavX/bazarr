@@ -26,8 +26,8 @@ from .auth import is_session_authenticated
 from .config import SettingsFollowupError, settings, base_url, get_ssl_verify, save_settings
 from .database import database, System
 from .get_args import args
-from .host_allowlist import host_page, verify_approval_code
-from .host_policy import (APPROVAL_SEGMENT, MAX_HOSTNAME_LENGTH, effective_host, in_default_set,
+from .host_allowlist import check_active, host_page, verify_approval_code
+from .host_policy import (APPROVAL_SEGMENT, effective_host, in_default_set, is_approvable_host,
                           normalize_entries)
 from .logger import CoverStreamAborted
 
@@ -170,13 +170,18 @@ def approve_refused_host():
     The endpoint is open to a refused hostname on purpose: the page that names
     the hostname is the only place that can submit it, and the one-time code
     is the credential. A wrong code counts against the same in-memory throttle
-    login uses, so guessing is slow and expensive. The save goes through the
-    settings path, so config.yaml and the live settings agree without a
-    restart, and the same write is what the Docker supervisor re-reads.
+    login uses. The save goes through the settings path, so config.yaml and
+    the live settings agree without a restart, and the same write is what the
+    Docker supervisor re-reads. Only a hostname the allowlist can match may be
+    added, and the endpoint answers 404 once a login mode is configured,
+    because the check it serves is off then.
     """
     # Imported here: api.system.account reads app.config at import time, and
     # pulling it in at module scope would tie the ui blueprint to it.
     from api.system.account import _is_rate_limited, _record_failed_attempt
+
+    if not check_active(settings):
+        return abort(404)
 
     host = effective_host(request.form.get('host', ''))
     code = (request.form.get('code') or '').strip()
@@ -185,15 +190,15 @@ def approve_refused_host():
     if _is_rate_limited(address):
         return host_page(host, 'Too many attempts. Try again in 5 minutes.'), 429
 
-    if (not host or host == '*' or len(host) > MAX_HOSTNAME_LENGTH
-            or any(character.isspace() for character in host)):
+    if not is_approvable_host(host):
         _record_failed_attempt(address)
         return host_page(host, 'That hostname cannot be allowed.'), 403
 
     if not code or not verify_approval_code(code):
         _record_failed_attempt(address)
-        return host_page(host, 'Wrong or missing approval code. A fresh one is printed to the console '
-                                'Bazarr+ runs in, never to bazarr.log.'), 403
+        return host_page(host, 'Wrong or missing approval code. Use the most recent approval-code line '
+                                'printed to the console Bazarr+ runs in; it never appears in '
+                                'bazarr.log.'), 403
 
     existing = normalize_entries(getattr(settings.general, 'allowed_hosts', None))
     if host in existing or in_default_set(host):

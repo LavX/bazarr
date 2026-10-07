@@ -555,23 +555,28 @@ class _HostCheckState:
 
     The backend rewrites config.yaml on every settings save, and an approval
     reaches it through this proxy, so the inputs are re-read whenever the
-    file's mtime moves. A read that fails keeps the last good values rather
-    than answering a new question with none.
+    file's stamp moves. The stamp carries the nanosecond mtime, the size and
+    the inode, so a rewrite inside one coarse-mtime tick still reads fresh,
+    and the route that relays an approval invalidates the cache besides. A
+    read that fails, or one that comes back without both the general and auth
+    sections (a write that is still in flight can), keeps the last good
+    values rather than answering a new question with none.
     """
 
     def __init__(self, config_dir: str):
         self._path = _config_yaml(config_dir)
-        self._mtime = None
+        self._stamp = None
         self._auth_type = None
-        self._trusted_proxy = None
+        self._trusted_proxy = None  # None: the setting is absent, its default applies
         self._allowed_hosts: list = []
 
     def refresh(self) -> None:
         try:
-            mtime = self._path.stat().st_mtime
+            info = self._path.stat()
+            stamp = (info.st_mtime_ns, info.st_size, info.st_ino)
         except OSError:
             return
-        if mtime == self._mtime:
+        if stamp == self._stamp:
             return
         try:
             with open(self._path, encoding="utf-8") as handle:
@@ -579,14 +584,24 @@ class _HostCheckState:
         except Exception as error:
             print(f"[supervisor] Could not read config.yaml for the host check: {error}")
             return
-        general = config.get("general") or {}
-        auth = config.get("auth") or {}
+        general = config.get("general") if isinstance(config, dict) else None
+        auth = config.get("auth") if isinstance(config, dict) else None
+        if not isinstance(general, dict) or not isinstance(auth, dict):
+            return
         auth_type = auth.get("type")
         allowed = general.get("allowed_hosts")
+        if isinstance(allowed, str):
+            # The same hand-edit form the backend accepts: one name on its
+            # own line reads as a comma-separated string.
+            allowed = [part.strip() for part in allowed.split(",") if part.strip()]
+        raw_trusted = general.get("trusted_proxy")
         self._auth_type = auth_type if isinstance(auth_type, str) else None
-        self._trusted_proxy = str(general.get("trusted_proxy") or "").strip() or None
+        self._trusted_proxy = None if raw_trusted is None else str(raw_trusted).strip()
         self._allowed_hosts = allowed if isinstance(allowed, list) else []
-        self._mtime = mtime
+        self._stamp = stamp
+
+    def invalidate(self) -> None:
+        self._stamp = None
 
     def auth_type(self):
         return self._auth_type
@@ -602,18 +617,22 @@ def host_check_decision(request_host, remote, forwarded_host, auth_type, trusted
                         allowed_hosts, environ=None):
     """(allowed, effective host): the same rule the backend applies.
 
-    The forwarded host is believed only from the one address in
-    general.trusted_proxy, mirroring waitress at the backend: any other peer
-    is judged by the hostname it sent. A configured form or basic login turns
-    the check off, and the policy answers the rest.
+    The forwarded host is believed only from an address in
+    general.trusted_proxy, mirroring the backend: any other peer is judged by
+    the hostname it sent. When a forwarded host is believed, the hostname the
+    peer sent has to pass too, so one request cannot arrive carrying two names
+    where only one is recognized. A configured form or basic login turns the
+    check off, and the policy answers the rest.
     """
     effective = request_host
-    if trusted_proxy and remote == trusted_proxy and forwarded_host:
+    if forwarded_host and host_policy.peer_is_trusted_proxy(remote, trusted_proxy):
         effective = forwarded_host.split(",")[-1].strip()
     normalized = host_policy.effective_host(effective)
     if auth_type in ("form", "basic"):
         return True, normalized
-    return host_policy.host_is_allowed(effective, allowed_hosts, environ), normalized
+    allowed = (host_policy.host_is_allowed(request_host, allowed_hosts, environ)
+               and host_policy.host_is_allowed(effective, allowed_hosts, environ))
+    return allowed, normalized
 
 
 def _host_refusal_html(host: str, base: str) -> str:
@@ -640,7 +659,7 @@ recognizes. This one arrived for <code>{named}</code>.</p>
 in config.yaml, or set <code>{host_policy.ALLOWED_HOSTS_ENV}</code> in the
 environment, or enter the one-time approval code below. The code is printed to
 this container's logs (<code>docker logs</code>) and nowhere else; it is
-replaced after each use.</p>
+replaced after each use and by every restart: use the most recent line.</p>
 <form method="post" action="{action}">
 <input type="hidden" name="host" value="{shown}">
 <p><label for="host-approval-code">Approval code</label>
@@ -670,6 +689,38 @@ def _host_refusal_response(request: web.Request, host: str, base: str) -> web.Re
                         content_type="text/html", headers={"Cache-Control": "no-store"})
 
 
+_notice_tasks = set()
+
+
+async def _send_refusal_notice(host: str, notice_path: str) -> None:
+    """Report a hostname this listener refused to the backend behind it.
+
+    The backend never sees the request, so its health page and its console
+    code know nothing about it until this arrives. The report carries the
+    token this supervisor started the backend with, and the caller sends at
+    most one per hostname per hour, so a backend that is still starting, or
+    one that has gone away, only means the next refused request reports it.
+    """
+    port, token = BACKEND_PORT, BACKEND_TOKEN
+    if not port or not token:
+        return
+    try:
+        async with ClientSession(timeout=ClientTimeout(total=5)) as session:
+            async with session.post(f"http://{BACKEND_HOST}:{port}{notice_path}",
+                                   headers={TOKEN_HEADER: token},
+                                   data={"host": host}) as response:
+                await response.read()
+    except Exception:
+        pass
+
+
+def _schedule_refusal_notice(host: str, notice_path: str) -> None:
+    """Send the report without holding the refusal's answer for it."""
+    task = asyncio.create_task(_send_refusal_notice(host, notice_path))
+    _notice_tasks.add(task)
+    task.add_done_callback(_notice_tasks.discard)
+
+
 def create_host_check_middleware(config_dir: str, base_url: str = "/"):
     """The front listener's share of the request-host check.
 
@@ -680,18 +731,22 @@ def create_host_check_middleware(config_dir: str, base_url: str = "/"):
     127.0.0.1 the backend sees a loopback literal and its own check answers
     everything. Both layers enforce, so a hostname has to pass both.
 
-    The approval path stays open for a refused hostname: the endpoint behind
-    the backend owns the code and the settings write, and this proxy relays
-    the submission to it.
+    The approval path stays open for exactly the one POST that submits the
+    form on the refusal page, at the base and at the root (a proxy that
+    strips the prefix reaches the root one); any other request for it is
+    judged by its hostname like everything else.
     """
     state = _HostCheckState(config_dir)
-    base = (base_url or "/").rstrip("/")
-    approval_path = f"{base}/{host_policy.APPROVAL_SEGMENT}"
+    base = str(base_url or "").strip().strip("/")
+    prefix = f"/{base}" if base else ""
+    segment = host_policy.APPROVAL_SEGMENT
+    approval_paths = {f"/{segment}"} if not prefix else {f"{prefix}/{segment}", f"/{segment}"}
+    notice_path = f"{prefix}/_supervisor/host_refusal"
     recorder = host_policy.BoundedRefusalRecorder()
 
     @web.middleware
     async def host_check_middleware(request: web.Request, handler):
-        if request.path == approval_path:
+        if request.method == "POST" and request.path in approval_paths:
             return await handler(request)
         state.refresh()
         allowed, shown = host_check_decision(
@@ -708,13 +763,16 @@ def create_host_check_middleware(config_dir: str, base_url: str = "/"):
             _print_refusal_line(
                 f"Refused a request for an unrecognized host: {shown}. Allow it under "
                 f"general.allowed_hosts in config.yaml, or set {host_policy.ALLOWED_HOSTS_ENV}.")
+            _schedule_refusal_notice(shown, notice_path)
         suppressed = recorder.take_summary()
         if suppressed:
             _print_refusal_line(f"Suppressed {suppressed} host-refusal lines in the last hour.")
-        return _host_refusal_response(request, shown, base)
+        return _host_refusal_response(request, shown, prefix)
 
     host_check_middleware.recorder = recorder
-    host_check_middleware.approval_path = approval_path
+    host_check_middleware.state = state
+    host_check_middleware.approval_paths = approval_paths
+    host_check_middleware.notice_path = notice_path
     return host_check_middleware
 
 
@@ -1240,9 +1298,18 @@ def create_app(config_dir: str, backend: BackendManager) -> web.Application:
         app.router.add_route("GET", f"/{base}/_supervisor/events", sse_handler)
 
     # The approval endpoint for a refused hostname: not proxied by any
-    # PROXY_PREFIXES, so it gets its own route to the backend, and the host
-    # check above leaves the path open for exactly this submission.
-    app.router.add_route("POST", host_check.approval_path, proxy_handler)
+    # PROXY_PREFIXES, so it gets its own route to the backend, at the base and
+    # at the root (a prefix-stripping proxy reaches the root one), and the
+    # host check above leaves exactly the one submission open. The backend
+    # rewrites config.yaml to add the hostname, so the cached read of it does
+    # not survive the answer.
+    async def approval_proxy(request: web.Request) -> web.StreamResponse:
+        response = await proxy_handler(request)
+        host_check.state.invalidate()
+        return response
+
+    for path in sorted(host_check.approval_paths):
+        app.router.add_route("POST", path, approval_proxy)
 
     # API/image proxy routes: register both root and base_url-prefixed versions
     # so deployments with general.base_url (e.g. /bazarr) work correctly
