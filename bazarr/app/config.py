@@ -928,6 +928,10 @@ from secret_store import (  # noqa: E402
     has_plaintext_secrets_on_disk,
     migrate_legacy_plex_encryption,
 )
+from secret_store.migration import (LAST_FOUR_MIN_LENGTH, clear_decrypt_failure_path,  # noqa: E402
+                                    decrypt_failure_paths, note_replaced_secret)
+from secret_store.registry import (SECRET_DESCRIPTOR_KEY, HubSecretRegistrationError,  # noqa: E402
+                                   at_rest_secret_paths, manifest_boolean_secret_paths)
 
 # Legacy Plex encryption (URLSafeSerializer + plex.encryption_key) used a
 # different at-rest format with no marker prefix. If we hand its
@@ -937,6 +941,22 @@ from secret_store import (  # noqa: E402
 # Migrate FIRST so the rest of the pipeline only sees plaintext.
 migrate_legacy_plex_encryption(settings)
 
+# Register the Provider Hub plugin secret paths before the boot secret
+# pass: the plaintext detection and the in-place decrypt below have to
+# walk them, or a plugin credential stays in the clear (and one left by a
+# removed plugin never decrypts). Reads state.json directly; the service
+# layer is not up while settings load.
+try:
+    from secret_store.registry import load_plugin_secret_paths
+    load_plugin_secret_paths(settings)
+except HubSecretRegistrationError:
+    # No covering of the plaintext plugin leftovers could be vouched for,
+    # so the boot does not complete while they stay readable. The broad
+    # catch below is for the failures the durable registrations survive.
+    raise
+except Exception:
+    logging.exception("Unable to load the Provider Hub plugin secret registry")
+
 # Detect plaintext credentials BEFORE decrypt_settings_in_place runs - it
 # is a passthrough on plaintext, so afterwards the in-memory state and
 # the on-disk state match for plaintext fields and write_config's
@@ -945,6 +965,30 @@ migrate_legacy_plex_encryption(settings)
 _force_first_save_migration = has_plaintext_secrets_on_disk(settings)
 
 decrypt_settings_in_place(settings)
+
+# A stored API key that will not decrypt is the one failure Bazarr can and
+# must repair itself: the key is Bazarr's own, the SPA sends it on every
+# request, and withheld as empty it locks the UI and the API out entirely,
+# with the remedy (a health issue the API serves) unreachable. Mint a fresh
+# key with the same generator the auth.apikey validator's default uses, end
+# the failure, and raise a health notice saying the key was replaced and
+# that the tools holding the old one must be updated. The boot write below
+# persists the fresh key encrypted, and its failure refuses the boot: an
+# unsaved key would serve this boot only, and a restart would mint another
+# while the stored one stays undecryptable. An empty key is NOT
+# regenerated: an install that stores an empty key keeps it, exactly as
+# before.
+_replaced_undecryptable_api_key = "auth.apikey" in decrypt_failure_paths()
+if _replaced_undecryptable_api_key:
+    settings.auth.apikey = hexlify(os.urandom(16)).decode()
+    clear_decrypt_failure_path("auth.apikey")
+    note_replaced_secret(
+        "auth.apikey",
+        "The stored API key could not be decrypted and was replaced. Update the "
+        "tools and scripts that use the API key."
+    )
+    logging.warning("The stored API key could not be decrypted and was replaced; "
+                    "update the tools that use it.")
 
 
 class MetadataPersistenceError(Exception):
@@ -965,12 +1009,19 @@ def write_config(*, strict_metadata=False):
         return _write_config(strict_metadata=strict_metadata)
 
 
+# Why the last write_config call failed, when it failed: write_config answers
+# True/False, so the save path re-attaches this to its refusal instead of the
+# caller learning only that a save did not happen.
+_last_write_error: Exception | None = None
+
+
 def _write_config(*, strict_metadata=False):
     from secret_store.crypto import mark_master_key_persisted
     # On-disk shape compared in plaintext form: encrypt_secret is non-
     # deterministic (per-payload salt + timestamp), so naive ciphertext
     # comparison would always diff and rewrite config.yaml on every save.
     global _force_first_save_migration
+    global _last_write_error
     in_memory_plaintext = {k.lower(): v for k, v in settings.as_dict().items()}
     on_disk_dict = {
         k.lower(): v for k, v in Dynaconf(
@@ -983,6 +1034,7 @@ def _write_config(*, strict_metadata=False):
     if in_memory_plaintext == on_disk_plaintext and not _force_first_save_migration:
         logging.debug("Nothing changed when comparing to config file. Skipping write to file.")
         mark_master_key_persisted(in_memory_plaintext.get("general", {}).get("secrets_encryption_key"))
+        _last_write_error = None
         return True
 
     forced_migration = _force_first_save_migration
@@ -991,10 +1043,17 @@ def _write_config(*, strict_metadata=False):
 
     try:
         encrypted_payload = encrypt_settings_dict(in_memory_plaintext)
+        # A credential whose decryption failed at boot is withheld as an
+        # empty value in the live settings; keep the on-disk ciphertext for
+        # it so this save does not overwrite recoverable bytes, unless the
+        # snapshot carries a re-entered value.
+        from secret_store.migration import preserve_recoverable_ciphertexts
+        preserve_recoverable_ciphertexts(encrypted_payload, in_memory_plaintext, on_disk_dict)
         write(settings_path=config_yaml_file + '.tmp',
               settings_data=encrypted_payload,
               merge=False)
     except Exception as error:
+        _last_write_error = error
         if strict_metadata:
             raise MetadataPersistenceError("Metadata settings could not be saved. Try again.") from None
         logging.exception(f"Exception raised while trying to save temporary settings file: {error}")  # noqa: G004
@@ -1003,6 +1062,7 @@ def _write_config(*, strict_metadata=False):
         try:
             move(config_yaml_file + '.tmp', config_yaml_file)
         except Exception as error:
+            _last_write_error = error
             if strict_metadata:
                 raise MetadataPersistenceError("Metadata settings could not be saved. Try again.") from None
             logging.exception(f"Exception raised while trying to overwrite settings file with temporary settings "  # noqa: G004
@@ -1018,7 +1078,16 @@ def _write_config(*, strict_metadata=False):
             # never retry, leaving credentials unencrypted on disk.
             if forced_migration:
                 _force_first_save_migration = False
+            _last_write_error = None
             mark_master_key_persisted(encrypted_payload.get("general", {}).get("secrets_encryption_key"))
+            # The write landed: a failed scalar path whose live value is
+            # non-empty was replaced by this write, so its failure is over
+            # no matter which writer set the value. Without this, only the
+            # settings API's save ended a failure, and a writer that set a
+            # credential directly kept the health issue asking for a
+            # re-entry that had already happened.
+            from secret_store.migration import clear_replaced_secret_paths
+            clear_replaced_secret_paths(in_memory_plaintext)
             return True
 
 
@@ -1126,8 +1195,41 @@ if hasattr(settings.translator, 'gemini_key'):
 
 migrate_retired_openrouter_model(settings)
 
-# save updated settings to file
-write_config()
+# save updated settings to file. The boot write is what carries the
+# encryption migration to disk, so while a plaintext credential remains
+# there its failure is not survivable: write_config keeps the migration
+# pending on failure, and the boot refuses instead of completing with the
+# credential readable in the clear. The next boot retries the rewrite once
+# the write works. The same write persists a replacement API key minted
+# for one that could not be decrypted, and that failure is not survivable
+# either: unwritten, this boot would serve a key nothing on disk holds,
+# and a restart would mint another while the stored one stays
+# undecryptable, so that boot refuses too.
+if not write_config():
+    if _force_first_save_migration:
+        raise RuntimeError(
+            "The settings file could not be rewritten, so the plaintext "
+            "credentials on disk could not be encrypted; startup does not "
+            "complete while they remain readable in the clear"
+        ) from _last_write_error
+    if _replaced_undecryptable_api_key:
+        raise RuntimeError(
+            "The settings file could not be rewritten, so the replacement "
+            "API key minted for the stored one that could not be decrypted "
+            "was not persisted; startup does not complete while the stored "
+            "API key remains undecryptable"
+        ) from _last_write_error
+
+# Plugin credentials held in Provider Hub's state.json encrypt only under a
+# master key that is durably saved: the boot write above just put this
+# process's key on disk, and encrypting before that (under a key that exists
+# only in memory) would commit ciphertext a failed write could leave with no
+# key that ever opens it. The migration raises when plaintext credentials
+# remain but cannot be encrypted, so a boot does not complete while they are
+# still readable in the clear.
+from secret_store.registry import migrate_installation_config_secrets  # noqa: E402
+
+migrate_installation_config_secrets()
 
 
 def get_settings():
@@ -1141,8 +1243,14 @@ def _get_settings():
     # with '***' (key still present so the wire shape is stable, value
     # hidden); USER_VISIBLE_SECRETS pass through unchanged because the
     # in-memory settings already hold their decrypted plaintext.
+    # Registered Provider Hub plugin secrets are write-only: an empty value
+    # plus a per-section descriptor that says one is configured and, for a
+    # long secret, how it ends.
     from secret_store import is_system_secret, is_write_only_secret  # noqa: PLC0415, RUF100
-    from secret_store.registry import IMPORT_ONLY_SECTIONS
+    from secret_store.migration import decrypt_failure_paths
+    from secret_store.registry import (IMPORT_ONLY_SECTIONS,
+                                        hidden_leftover_paths, is_plugin_secret)
+    hidden_paths = hidden_leftover_paths()
     settings_to_return = {}
     for k, v in settings.as_dict().items():
         if isinstance(v, dict):
@@ -1150,9 +1258,54 @@ def _get_settings():
             if k in IMPORT_ONLY_SECTIONS:
                 continue
             settings_to_return[k] = dict()
+            # The write-only descriptor map for this section. The key is not a
+            # valid plugin config-schema field name (manifest validation
+            # rejects a leading underscore), so it can never collide with a
+            # real field.
+            secret_descriptors = {}
             for subk, subv in v.items():
                 full_path = f"{k}.{subk.lower()}"
                 if is_write_only_secret(full_path):
+                    continue
+                if is_plugin_secret(full_path):
+                    if full_path in decrypt_failure_paths():
+                        # The stored value would not decrypt at boot: say the
+                        # credential is there but must be re-entered, and give
+                        # nothing away.
+                        settings_to_return[k][subk] = ""
+                        secret_descriptors[subk.lower()] = {"configured": True,
+                                                            "decrypt_failed": True}
+                        continue
+                    if isinstance(subv, str) and subv:
+                        settings_to_return[k][subk] = ""
+                        descriptor = {"configured": True}
+                        if len(subv) >= LAST_FOUR_MIN_LENGTH:
+                            descriptor["last_four"] = subv[-4:]
+                        secret_descriptors[subk.lower()] = descriptor
+                        continue
+                    if isinstance(subv, (list, dict)) and not subv:
+                        # An empty collection an earlier write left at a
+                        # secret path reads exactly like an empty string:
+                        # the field is not a configured credential, and the
+                        # payload never carries the raw collection.
+                        settings_to_return[k][subk] = ""
+                        continue
+                    if subv not in (None, ""):
+                        # A non-string value in a secret slot (an older save
+                        # coerced a numeric-looking token): it is a stored
+                        # credential all the same, so it is withheld too,
+                        # with no last four to show for it.
+                        settings_to_return[k][subk] = ""
+                        secret_descriptors[subk.lower()] = {"configured": True}
+                        continue
+                    # An empty or missing value is not a configured secret;
+                    # it flows through the normal handling below.
+                if full_path in hidden_paths:
+                    # The leftover scan could not run and the fallback could
+                    # not register this path safely either, so the value is
+                    # withheld for this boot rather than handed out: the next
+                    # boot with the scan working covers it for real.
+                    settings_to_return[k][subk] = ""
                     continue
                 if k == "discover" and subk.lower() in {"tmdb_configured", "tmdb_token_stored",
                                                         "metadata_revision"}:
@@ -1169,6 +1322,8 @@ def _get_settings():
                     settings_to_return[k].update({subk: get_array_from(subv)})
                 else:
                     settings_to_return[k].update({subk: subv})
+            if secret_descriptors:
+                settings_to_return[k][SECRET_DESCRIPTOR_KEY] = secret_descriptors
     from discover.metadata import configuration, reader_token_stored
     metadata_config = configuration()
     # Two separate facts: metadata works at all, which the built-in key makes
@@ -1551,6 +1706,32 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
     ]
     _require_provider_order_for_custom_routing(settings_items)
     _validate_postprocessing_command(settings_items)
+
+    def _registered_credential(key):
+        """Whether a submitted settings key names a registered at-rest
+        credential. The dotted path the registry knows is built from the
+        lowercased section and field, which is also the shape the settings
+        store itself is case-insensitive about."""
+        parts = key.split('-')
+        return (parts[0] == 'settings' and len(parts) == 3
+                and f"{parts[1].lower()}.{parts[2].lower()}" in at_rest_secret_paths())
+
+    # The type of a credential's value is checked before anything is applied.
+    # A repeated form key arrives as a list, and refusing it inside the loop
+    # below would leave the items earlier in the same request already applied
+    # in memory: the next unrelated save would write them, and the recoverable
+    # ciphertext the refusal was protecting would be gone. The single-value
+    # shape the loop unwraps is checked as unwrapped, and a list with more
+    # than one element is refused here, so a refusal is always atomic: every
+    # rejection a credential can cause happens before the first item of the
+    # request is applied.
+    for key, value in settings_items:
+        if not _registered_credential(key):
+            continue
+        checked = value[0] if isinstance(value, list) and len(value) == 1 else value
+        if not isinstance(checked, (str, type(None))):
+            raise ValidationError(f'{key.split("-")[-1]} must be text')
+
     configure_debug = False
     configure_log_rotation = False
     hi_extension_changed = False
@@ -1592,20 +1773,47 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
 
         settings_keys = key.split('-')
 
+        if settings_keys[-1].startswith('__'):
+            # The settings API's own descriptor key and anything else the
+            # serializer reserves. A caller echoing one back must not be
+            # able to write it into the config, where _get_settings would
+            # hand it out again as if it were a setting.
+            continue
+
         if key in {'settings-discover-tmdb_access_token', 'settings-discover-locale'}:
             if key.endswith('tmdb_access_token') and value[0] == '***':
                 continue
             settings.discover[settings_keys[-1]] = value[0]
             continue
 
-        # Make sure that text based form values aren't passed as list
-        if isinstance(value, list) and len(value) == 1 and settings_keys[-1] not in array_keys:
+        # A registered credential is identified before any generic
+        # normalization below: every conversion that follows exists for
+        # ordinary settings and would mangle a credential. It keeps its
+        # string shape all the way to disk; a value that is not text is
+        # refused (the pre-validation pass already caught the shapes that
+        # reach here as lists, this is the backstop inside the loop, on the
+        # unwrapped value).
+        registered_credential = _registered_credential(key)
+
+        # Make sure that text based form values aren't passed as list. A
+        # registered credential unwraps its single element independently of
+        # array_keys: a secret named like an array-typed setting is still a
+        # scalar credential, and leaving it wrapped would push it into the
+        # generic array handling below that exists for ordinary settings.
+        if isinstance(value, list) and len(value) == 1 and (
+                registered_credential or settings_keys[-1] not in array_keys):
             value = value[0]
-            if value in empty_values and value != '':
+            if not registered_credential and value in empty_values and value != '':
+                # A sentinel like 'null' or 'undefined' is an empty ordinary
+                # setting. Typed into a credential it is the credential:
+                # stored as the literal text, never converted into a clear.
                 value = None
 
+        if registered_credential and not isinstance(value, (str, type(None))):
+            raise ValidationError(f'{settings_keys[2]} must be text')
+
         # try to cast string as integer or float
-        if isinstance(value, str) and settings_keys[-1] not in str_keys:
+        if not registered_credential and isinstance(value, str) and settings_keys[-1] not in str_keys:
             try:
                 value = int(value)
             except ValueError:
@@ -1615,22 +1823,35 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
                     pass
 
         # Make sure empty language list are stored correctly
-        if (settings_keys[-1] in array_keys and settings_keys[-1] != 'openrouter_provider_order'
+        if (not registered_credential
+                and settings_keys[-1] in array_keys and settings_keys[-1] != 'openrouter_provider_order'
                 and value and value[0] in empty_values):
             value = []
 
         # Handle path mappings settings since they are array in array
-        if settings_keys[-1] in ['path_mappings', 'path_mappings_movie', 'path_mappings_sports']:
+        if not registered_credential and settings_keys[-1] in ['path_mappings', 'path_mappings_movie', 'path_mappings_sports']:
             value = [x.split(',') for x in value if isinstance(x, str)]
 
-        if value == 'true':
+        # A field the active manifest declares boolean is a toggle even
+        # when a registered credential owns its name: the submitted text
+        # "false" is the off state the worker reads, never a truthy string
+        # stored under the secret path.
+        boolean_toggle = (registered_credential
+                          and f"{settings_keys[1].lower()}.{settings_keys[2].lower()}"
+                          in manifest_boolean_secret_paths())
+        if value == 'true' and (not registered_credential or boolean_toggle):
             value = True
-        elif value == 'false':
+        elif value == 'false' and (not registered_credential or boolean_toggle):
             value = False
 
-        # Handle JSON strings for dict settings
-        if settings_keys[-1] in ['provider_priorities', 'provider_languages',
-                                'provider_score_modifiers', 'tiers'] and isinstance(value, str):
+        # Handle JSON strings for dict settings. A registered credential is
+        # never parsed: a secret field whose name collides with a dict-typed
+        # setting (a plugin secret named 'tiers' holding JSON text) is stored
+        # as the typed text, or the parsed dict would ride past both the
+        # encryption at rest and the API masking.
+        if (not registered_credential and settings_keys[-1] in [
+                'provider_priorities', 'provider_languages',
+                'provider_score_modifiers', 'tiers'] and isinstance(value, str)):
             try:
                 value = json.loads(value)
             except ValueError:
@@ -1850,6 +2071,14 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
 
         if settings_keys[0] == 'settings':
             if len(settings_keys) == 3:
+                # A save that carries a credential path ends its decrypt
+                # failure, whatever it carries: a new value replaces the
+                # credential and an explicit clear removes it, and from
+                # here on neither the descriptor nor the preserve pass may
+                # hold on to the old value. This runs before the write, so
+                # a refused save's reload from disk re-adds the failure if
+                # the stored ciphertext still will not decrypt.
+                clear_decrypt_failure_path(f"{settings_keys[1].lower()}.{settings_keys[2].lower()}")
                 _settings_mapping(settings, settings_keys[1])[settings_keys[2]] = value
             elif len(settings_keys) == 4:
                 section = _settings_mapping(settings, settings_keys[1])
@@ -1903,9 +2132,11 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
             # the process would keep running values that reached no file, tell
             # the user they were saved, and revert them at the next restart.
             # Nothing about that is particular to a master switch, so the check
-            # covers every save rather than only those.
+            # covers every save rather than only those. The cause write_config
+            # swallowed (an encryption failure, a permission error) stays in
+            # the chain so the refusal says what happened.
             restore_persisted_settings()
-            raise ValidationError('Unable to save settings to disk')
+            raise ValidationError('Unable to save settings to disk') from _last_write_error
 
         # Before anything below can fail: the save is on disk now, and a failure
         # from here on must not be taken for an unsaved one, which would put the

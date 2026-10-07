@@ -13,6 +13,7 @@ from app.database import (TableArrInstances, TableShowsRootfolder, TableMoviesRo
                           TableShows, TableMovies)
 from app.event_handler import event_stream
 from app.jobs_queue import jobs_queue
+from secret_store.migration import decrypt_failure_issues, replaced_secret_issues
 from utilities.path_mappings import path_mappings
 from sonarr.rootfolder import check_sonarr_rootfolder
 from radarr.rootfolder import check_radarr_rootfolder
@@ -250,6 +251,15 @@ def get_health_issues():
 
     health_issues.extend(_postprocessing_command_issues())
     health_issues.extend(translate_from_profile_issues())
+
+    # A stored credential that will not decrypt is withheld from every
+    # consumer, so the provider it belongs to stops authenticating with no
+    # visible cause. The issue names the setting path, never the value.
+    health_issues.extend(decrypt_failure_issues())
+    # Credentials this boot replaced because their stored value would not
+    # decrypt (the API key): nothing to re-enter, but the tools holding the
+    # old value still have to be told.
+    health_issues.extend(replaced_secret_issues())
 
     return health_issues
 

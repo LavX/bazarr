@@ -88,6 +88,10 @@ def default_state() -> dict[str, Any]:
         "catalog_entries": {},
         "installations": {},
         "jobs": [],
+        # `provider_id.field` paths of plugin secret fields. Persisted so a
+        # removed plugin keeps its registrations: the row goes at the next
+        # restart, the path never leaves.
+        "plugin_secret_paths": [],
     }
 
 
@@ -114,6 +118,18 @@ def provider_hub_dir() -> Path:
 def state_write_lock():
     with _STATE_LOCK:
         yield
+
+
+# Bumped by every successful state write, so caches derived from state.json
+# (the decrypt-blocked provider set in the Hub service) can key on it and be
+# invalidated by mutate_state deterministically, even where the filesystem's
+# mtime granularity would leave a rewritten file looking unchanged.
+_STATE_VERSION = 0
+
+
+def state_version() -> int:
+    """How many times state.json has been written by this process."""
+    return _STATE_VERSION
 
 
 def mutate_state(
@@ -176,10 +192,12 @@ def load_state(path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
             entry["trusted"] = bool(source.get("trusted", False))
     data.setdefault("installations", {})
     data.setdefault("jobs", [])
+    data.setdefault("plugin_secret_paths", [])
     return data
 
 
 def save_state(data: dict[str, Any], path: str | os.PathLike[str] | None = None) -> None:
+    global _STATE_VERSION
     with state_write_lock():
         current = Path(path) if path is not None else state_file()
         current.parent.mkdir(parents=True, exist_ok=True)
@@ -187,6 +205,29 @@ def save_state(data: dict[str, Any], path: str | os.PathLike[str] | None = None)
         with tmp.open("w", encoding="utf-8") as handle:
             json.dump(data, handle, indent=2, sort_keys=True)
         os.replace(tmp, current)
+        _STATE_VERSION += 1
+
+
+def _installation_from_row(provider_id: str, item: dict[str, Any],
+                          manifest: dict[str, Any]) -> ProviderHubInstallation:
+    """One installation row as the typed record the callers walk."""
+    return ProviderHubInstallation(
+        provider_id=str(item.get("provider_id") or provider_id),
+        name=str(item.get("name") or manifest.get("name") or provider_id),
+        active_version=item.get("active_version"),
+        state=str(item.get("state")),
+        pending_restart=bool(item.get("pending_restart", False)),
+        manifest=manifest,
+        active_path=item.get("active_path"),
+        python_path=item.get("python_path"),
+        staged_version=item.get("staged_version"),
+        staged_path=item.get("staged_path"),
+        staged_python_path=item.get("staged_python_path"),
+        last_error=item.get("last_error"),
+        trusted=bool(item.get("trusted", False)),
+        origin=str(item.get("origin") or "catalog"),
+        source_id=item.get("source_id"),
+    )
 
 
 def active_installations(path: str | os.PathLike[str] | None = None) -> list[ProviderHubInstallation]:
@@ -200,23 +241,28 @@ def active_installations(path: str | os.PathLike[str] | None = None) -> list[Pro
         manifest = item.get("manifest")
         if not isinstance(manifest, dict):
             continue
-        installations.append(
-            ProviderHubInstallation(
-                provider_id=str(item.get("provider_id") or provider_id),
-                name=str(item.get("name") or manifest.get("name") or provider_id),
-                active_version=item.get("active_version"),
-                state=str(item.get("state")),
-                pending_restart=bool(item.get("pending_restart", False)),
-                manifest=manifest,
-                active_path=item.get("active_path"),
-                python_path=item.get("python_path"),
-                staged_version=item.get("staged_version"),
-                staged_path=item.get("staged_path"),
-                staged_python_path=item.get("staged_python_path"),
-                last_error=item.get("last_error"),
-                trusted=bool(item.get("trusted", False)),
-                origin=str(item.get("origin") or "catalog"),
-                source_id=item.get("source_id"),
-            )
-        )
+        installations.append(_installation_from_row(provider_id, item, manifest))
+    return installations
+
+
+def running_installations(path: str | os.PathLike[str] | None = None) -> list[ProviderHubInstallation]:
+    """Installations whose active code is running, keyed off active_version.
+
+    The active provider class stays registered until restart, even while an
+    update or a removal is staged, so the population the worker uses is
+    every row with an active_version, whatever its state and restart
+    flag. The settings overlay walks exactly this population: cutting it to
+    the non-pending rows would let a provider be admitted on a
+    settings-section credential that never reaches its worker config."""
+    data = load_state(path)
+    installations = []
+    for provider_id, item in (data.get("installations") or {}).items():
+        if not isinstance(item, dict):
+            continue
+        if not item.get("active_version"):
+            continue
+        manifest = item.get("manifest")
+        if not isinstance(manifest, dict):
+            continue
+        installations.append(_installation_from_row(provider_id, item, manifest))
     return installations

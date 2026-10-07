@@ -115,6 +115,15 @@ def _subtitle_language_details(language_code):
 def _safe_apikey_compare(provided, expected):
     if not provided:
         return False
+    if not expected:
+        # An empty stored key authenticates nothing, by rule. The compare
+        # below would not give that rule by itself: compare_digest answers
+        # that two empty strings match, so a boot that withholds an
+        # undecryptable key as an empty string would otherwise pair with an
+        # empty presented key and let the request through. The guard is
+        # defense in depth on top of the presented-side check, which already
+        # refuses an empty or missing key before the stored one is read.
+        return False
     return hmac.compare_digest(str(provided), str(expected))
 
 

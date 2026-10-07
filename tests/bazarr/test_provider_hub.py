@@ -99,6 +99,14 @@ def _manifest(**overrides):
     return manifest
 
 
+def _manifest_with_region(**overrides):
+    """The standard test manifest plus a declared plain `region` field, for
+    the tests that PATCH one through the update route."""
+    manifest = _manifest(**overrides)
+    manifest["config_schema"]["properties"]["region"] = {"type": "string"}
+    return manifest
+
+
 def _provider_zip(manifest, file_payloads, *, manifest_name="provider.json", prefix=""):
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
@@ -1888,8 +1896,217 @@ def test_provider_hub_uninstall_stages_active_removal_and_discards_staged_update
     assert installation["staged_manifest"] is None
 
 
-def test_provider_hub_config_redacts_secret_and_preserves_placeholder(tmp_path, monkeypatch):
-    from provider_hub.service import SECRET_PLACEHOLDER, runtime_provider_configs, update_provider
+def test_provider_hub_config_is_write_only_with_descriptor(tmp_path, monkeypatch):
+    """The Provider Hub installation API never returns a secret's value or
+    the old asterisk placeholder: a configured secret comes back empty with a
+    sibling descriptor, an absent key keeps the stored value, an explicit
+    empty value clears it, and a new value replaces it."""
+    from provider_hub.service import (
+        SECRET_PLACEHOLDER,
+        get_provider,
+        runtime_provider_configs,
+        update_provider,
+    )
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    state = load_state()
+    state["installations"] = {
+        "examplehub": {
+            "provider_id": "examplehub",
+            "name": "Example Hub Provider",
+            "active_version": "1.0.0",
+            "state": "active",
+            "pending_restart": False,
+            "manifest": _manifest_with_region(dependencies={"requirements": []}),
+            "config": {},
+        }
+    }
+    save_state(state)
+
+    secret_value = "real-secret-value-1234"  # pragma: allowlist secret
+    redacted = update_provider(
+        "examplehub",
+        enabled=True,
+        config={"api_key": secret_value, "region": "eu"},
+    )
+
+    assert redacted["enabled"] is True
+    # Write-only: the value is empty and the descriptor says how it ends.
+    assert redacted["config"]["api_key"] == ""
+    descriptor = redacted["config"]["__secret_fields"]["api_key"]
+    assert descriptor == {"configured": True, "last_four": "1234"}
+    assert secret_value not in json.dumps(redacted)
+    assert SECRET_PLACEHOLDER not in json.dumps(redacted)
+    assert runtime_provider_configs()["examplehub"]["api_key"] == secret_value
+
+    # An absent key keeps the stored value; a non-secret field updates.
+    redacted = update_provider("examplehub", config={"region": "us"})
+    assert runtime_provider_configs()["examplehub"] == {
+        "api_key": secret_value,
+        "region": "us",
+    }
+
+    # The descriptor the API echoes back is never stored as config.
+    update_provider(
+        "examplehub",
+        config={"__secret_fields": {"api_key": {"configured": True}}, "region": "de"},
+    )
+    stored = load_state()["installations"]["examplehub"]["config"]
+    assert "__secret_fields" not in stored
+    assert stored["region"] == "de"
+
+    # An explicit empty value clears the stored secret.
+    cleared = update_provider("examplehub", config={"api_key": ""})
+    assert cleared["config"]["__secret_fields"]["api_key"] == {"configured": False}
+    assert runtime_provider_configs()["examplehub"]["api_key"] == ""
+    assert get_provider("examplehub")["config"]["api_key"] == ""
+
+    # A new value replaces it.
+    update_provider("examplehub", config={"api_key": "replacement-secret-value-5678"})  # pragma: allowlist secret
+    assert runtime_provider_configs()["examplehub"]["api_key"] == "replacement-secret-value-5678"  # pragma: allowlist secret
+
+
+def test_an_empty_collection_in_a_stored_secret_is_delivered_to_the_worker_as_empty_text(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """An empty list an earlier write left in a stored installation config
+    is not a credential: the worker config build reads it as an empty
+    string, so the plugin's setup logic cannot treat the leftover
+    collection as a present value."""
+    from provider_hub.service import runtime_provider_configs
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    state = load_state()
+    state["installations"] = {
+        "examplehub": {
+            "provider_id": "examplehub",
+            "name": "Example Hub Provider",
+            "active_version": "1.0.0",
+            "state": "active",
+            "pending_restart": False,
+            "manifest": _manifest(dependencies={"requirements": []}),
+            "config": {"api_key": [], "region": "eu"},
+        }
+    }
+    save_state(state)
+
+    configs = runtime_provider_configs()
+    assert configs["examplehub"]["api_key"] == ""
+    assert configs["examplehub"]["region"] == "eu"
+
+
+def test_manifest_secret_fields_honours_secret_true():
+    """A field declared secret only through `secret: true` in the config
+    schema is a secret field too, matching what the frontend renders as a
+    password input."""
+    from provider_hub.service import _manifest_secret_fields
+
+    installation = {
+        "manifest": {
+            "secret_fields": ["api_key"],
+            "config_schema": {
+                "type": "object",
+                "properties": {
+                    "api_key": {"type": "string"},
+                    "solver_token": {"type": "string", "secret": True},
+                    "plain_url": {"type": "string"},
+                },
+            },
+        },
+    }
+
+    assert _manifest_secret_fields(installation) == {"api_key", "solver_token"}
+
+
+def test_update_provider_with_failing_encrypter_stores_nothing(tmp_path, monkeypatch):
+    """A credential that cannot be encrypted is not stored: the save is
+    refused with the reason, the Hub state is not written at all, and the
+    enabled toggle travelling with the request does not stay behind in
+    Bazarr's own settings store either."""
+    from provider_hub.service import update_provider
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    state = load_state()
+    state["installations"] = {
+        "examplehub": {
+            "provider_id": "examplehub",
+            "name": "Example Hub Provider",
+            "active_version": "1.0.0",
+            "state": "active",
+            "pending_restart": False,
+            "manifest": _manifest_with_region(dependencies={"requirements": []}),
+            "config": {},
+        }
+    }
+    save_state(state)
+
+    enabled_calls = []
+    monkeypatch.setattr(
+        "provider_hub.service._set_bazarr_provider_enabled",
+        lambda provider_id, enabled: enabled_calls.append((provider_id, enabled)) or True,
+    )
+
+    def broken_encrypt(value, master_key=None):
+        raise RuntimeError("key unavailable")
+
+    monkeypatch.setattr("secret_store.encrypt_secret", broken_encrypt)
+
+    with pytest.raises(ValueError) as error:
+        update_provider("examplehub", enabled=True,
+                        config={"api_key": "unit-secret", "region": "eu"})  # pragma: allowlist secret
+
+    assert "could not be encrypted" in str(error.value).lower()
+
+    # Nothing was stored, in the secret or in the rest of the request: the
+    # encryption happens before anything persists, so the toggle never
+    # reached the settings store either.
+    stored = load_state()["installations"]["examplehub"]["config"]
+    assert stored == {}
+    assert enabled_calls == []
+    assert "unit-secret" not in json.dumps(load_state())
+
+
+def test_runtime_config_omits_provider_with_undecryptable_secret(tmp_path, monkeypatch):
+    """A stored secret that will not decrypt never reaches the worker as the
+    credential: the provider is left out of the runtime configs and the
+    installation says the credential has to be re-entered."""
+    from secret_store.crypto import SECRET_MARKER_PREFIX
+
+    from provider_hub.service import runtime_provider_configs
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    state = load_state()
+    state["installations"] = {
+        "examplehub": {
+            "provider_id": "examplehub",
+            "name": "Example Hub Provider",
+            "active_version": "1.0.0",
+            "state": "active",
+            "pending_restart": False,
+            "manifest": _manifest(dependencies={"requirements": []}),
+            "config": {"api_key": SECRET_MARKER_PREFIX + "tampered-payload", "region": "eu"},
+        }
+    }
+    save_state(state)
+
+    configs = runtime_provider_configs()
+
+    assert "examplehub" not in configs
+    assert "tampered-payload" not in json.dumps(configs)
+    installation = load_state()["installations"]["examplehub"]
+    assert installation["last_error"] == "Stored credential could not be decrypted; re-enter it"
+
+
+def test_a_reentered_credential_clears_the_decrypt_failed_note(tmp_path, monkeypatch):
+    """Re-entering a working credential ends the re-enter-it note: the
+    installation stops asking for the key the moment its stored config
+    decrypts again, and the provider returns to the runtime configs."""
+    from secret_store.crypto import SECRET_MARKER_PREFIX
+
+    from provider_hub.service import runtime_provider_configs, update_provider
     from provider_hub.state import load_state, save_state
 
     monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
@@ -1907,33 +2124,1194 @@ def test_provider_hub_config_redacts_secret_and_preserves_placeholder(tmp_path, 
     }
     save_state(state)
 
-    redacted = update_provider(
-        "examplehub",
-        enabled=True,
-        config={"api_key": "real-secret", "region": "eu"},  # pragma: allowlist secret
+    # A credential that will not decrypt parks the note on the installation.
+    update_provider("examplehub",
+                    config={"api_key": SECRET_MARKER_PREFIX + "tampered-payload"})
+    runtime_provider_configs()
+    installation = load_state()["installations"]["examplehub"]
+    assert installation["last_error"] == "Stored credential could not be decrypted; re-enter it"
+
+    # Re-entering it clears the note and restores the provider.
+    update_provider("examplehub", config={"api_key": "unit-fresh-secret"})  # pragma: allowlist secret
+    installation = load_state()["installations"]["examplehub"]
+    assert installation.get("last_error") is None
+    assert runtime_provider_configs()["examplehub"]["api_key"] == "unit-fresh-secret"
+
+
+def test_a_schema_change_cannot_expose_a_retained_secret(tmp_path, monkeypatch):
+    """A newer version that drops a secret field from its schema does not
+    make the retained value visible again: the persisted registration keeps
+    it redacted in the installation API and out of the worker config."""
+    from secret_store.crypto import encrypt_secret
+
+    from provider_hub.service import list_providers, runtime_provider_configs
+
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    # The current schema (v2) knows only region; the earlier version's
+    # legacy_token value is still stored, and the persisted registration
+    # still names it.
+    state_file.write_text(json.dumps({
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "2.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": {
+                    "provider_id": "examplehub",
+                    "version": "2.0.0",
+                    "config_schema": {"properties": {"region": {"type": "string"}}},
+                },
+                "config": {"legacy_token": encrypt_secret("unit-legacy-secret"),
+                           "region": "eu"},
+            }
+        },
+        "plugin_secret_paths": ["examplehub.legacy_token"],
+        "jobs": [],
+    }), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    # The installation API redacts the retained value, with a descriptor.
+    providers = list_providers()
+    installation = next(p for p in providers if p["provider_id"] == "examplehub")
+    assert installation["config"]["legacy_token"] == ""
+    assert installation["config"]["__secret_fields"]["legacy_token"]["configured"] is True
+    assert "unit-legacy-secret" not in json.dumps(providers)
+    # The worker config leaves the undeclared retained field out entirely.
+    configs = runtime_provider_configs()
+    assert "legacy_token" not in configs["examplehub"]
+    assert configs["examplehub"]["region"] == "eu"
+
+
+def test_a_decrypt_failed_provider_is_blocked_from_searches(tmp_path, monkeypatch):
+    """A provider whose stored credential will not decrypt is out of the
+    searches completely: no runtime config, no rebuild from the
+    installation row, not selected for the pool, and not admitted by a
+    stale cached search, so no worker request occurs for it."""
+    from types import SimpleNamespace
+
+    from secret_store.crypto import SECRET_MARKER_PREFIX
+
+    from provider_hub.service import update_provider
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    state = load_state()
+    state["installations"] = {
+        "examplehub": {
+            "provider_id": "examplehub",
+            "name": "Example Hub Provider",
+            "active_version": "1.0.0",
+            "state": "active",
+            "pending_restart": False,
+            "manifest": _manifest(dependencies={"requirements": []}),
+            "config": {},
+        }
+    }
+    save_state(state)
+    update_provider("examplehub",
+                    config={"api_key": SECRET_MARKER_PREFIX + "tampered-payload"})
+
+    from app import get_providers
+
+    # Configuration: neither the runtime configs nor the installation-row
+    # rebuild carries it, so the pool has nothing to build a request from.
+    assert "examplehub" not in get_providers.get_providers_auth()
+
+    # Selection and admission, against a settings tree that has it enabled.
+    with monkeypatch.context() as context:
+        context.setattr(
+            get_providers, "settings",
+            SimpleNamespace(general=SimpleNamespace(enabled_providers=["examplehub"])))
+        context.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
+        context.setattr(get_providers.provider_registry, "names", lambda: ["examplehub"])
+        assert "examplehub" not in (get_providers.get_providers() or [])
+        assert get_providers.provider_is_usable("examplehub") is False
+    # The control: the same fake settings with a working credential keeps
+    # the provider selectable, so the block above is the credential's.
+    with monkeypatch.context() as context:
+        context.setattr(
+            get_providers, "settings",
+            SimpleNamespace(general=SimpleNamespace(enabled_providers=["examplehub"])))
+        context.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
+        context.setattr(get_providers.provider_registry, "names", lambda: ["examplehub"])
+        update_provider("examplehub", config={"api_key": "unit-fresh-secret"})  # pragma: allowlist secret
+        assert "examplehub" in (get_providers.get_providers() or [])
+        assert get_providers.provider_is_usable("examplehub") is True
+
+
+def test_removed_plugin_keeps_registered_secret_paths(tmp_path, monkeypatch):
+    """Removing a plugin deletes its installation row but keeps its secret
+    paths in the persisted set, so the value still decrypts and stays
+    write-only. The set starts empty: the installation's own row is what
+    persists the path, which is exactly the registration the removal must
+    survive."""
+    from provider_hub.service import remove_installation, update_provider
+    from provider_hub.state import load_state
+
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(
+        json.dumps(
+            {
+                "installations": {
+                    "examplehub": {
+                        "provider_id": "examplehub",
+                        "name": "Example Hub Provider",
+                        "active_version": "1.0.0",
+                        "state": "active",
+                        "pending_restart": False,
+                        "manifest": _manifest(provider_id="examplehub"),
+                    }
+                },
+                "plugin_secret_paths": [],
+                "jobs": [],
+            }
+        ),
+        encoding="utf-8",
     )
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    monkeypatch.setattr("provider_hub.service._set_bazarr_provider_enabled", lambda provider_id, enabled: True)
 
-    assert redacted["enabled"] is True
-    assert redacted["config"]["api_key"] == SECRET_PLACEHOLDER
-    assert redacted["config"]["region"] == "eu"
-    assert "real-secret" not in json.dumps(redacted)
-    assert runtime_provider_configs()["examplehub"]["api_key"] == "real-secret"  # pragma: allowlist secret
+    # Configuring the plugin persists its manifest's secret path.
+    update_provider("examplehub", config={"api_key": "unit-secret"})  # pragma: allowlist secret
+    assert "examplehub.api_key" in (load_state().get("plugin_secret_paths") or [])
 
-    redacted = update_provider(
-        "examplehub",
-        config={"api_key": SECRET_PLACEHOLDER, "region": "us"},
-    )
+    from provider_hub.service import activate_staged_installations
 
-    assert redacted["config"]["api_key"] == SECRET_PLACEHOLDER
-    assert redacted["config"]["region"] == "us"
-    assert runtime_provider_configs()["examplehub"] == {
-        "api_key": "real-secret",  # pragma: allowlist secret
-        "region": "us",
+    assert remove_installation("examplehub") is True
+    # The row goes at the next restart, and the restart's own state write
+    # keeps the persisted paths.
+    activate_staged_installations()
+
+    state = load_state()
+    assert "examplehub" not in (state.get("installations") or {})
+    persisted_paths = state.get("plugin_secret_paths") or []
+    assert "examplehub.api_key" in persisted_paths
+
+
+# The registry must stay hermetic around the retained-field tests: the
+# runtime plugin paths live for the whole process, and one test's
+# registrations must not decide another test's field classification.
+@pytest.fixture
+def isolated_plugin_registry():
+    from secret_store import registry
+
+    saved_paths = set(registry.plugin_secret_paths())
+    registry.reset_plugin_secret_paths()
+    yield registry
+    registry.reset_plugin_secret_paths(saved_paths)
+
+
+class _EmptyScanSettings:
+    """A settings stand-in for the boot registry loader: no sections at
+    all, so the leftover scan finds nothing and the loader registers only
+    what state.json names."""
+
+    def as_dict(self):
+        return {}
+
+
+def _write_state(tmp_path, state):
+    state_file = tmp_path / "state.json"
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text(json.dumps(state), encoding="utf-8")
+    return state_file
+
+
+def test_update_provider_rejects_a_non_string_secret(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """The Hub API refuses a new secret value that is not text. A number or
+    a boolean in a secret slot is exactly the shape an older save coerced
+    typed tokens into, and accepting it would store a credential that
+    neither encrypts at rest nor masks in the API. Nothing is stored, and a
+    text value still stores encrypted."""
+    from provider_hub.service import update_provider
+    from provider_hub.state import load_state, save_state
+    from secret_store.crypto import is_encrypted
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+    state = load_state()
+    state["installations"] = {
+        "examplehub": {
+            "provider_id": "examplehub",
+            "name": "Example Hub Provider",
+            "active_version": "1.0.0",
+            "state": "active",
+            "pending_restart": False,
+            "manifest": _manifest(dependencies={"requirements": []}),
+            "config": {},
+        }
+    }
+    save_state(state)
+
+    for bad in (12345, 1.5, True):
+        with pytest.raises(ValueError):
+            update_provider("examplehub", config={"api_key": bad})
+    assert load_state()["installations"]["examplehub"]["config"] == {}
+
+    # The refusal is the credential's, not the field's: text still stores.
+    update_provider("examplehub", config={"api_key": "unit-text-secret"})  # pragma: allowlist secret
+    stored = load_state()["installations"]["examplehub"]["config"]
+    assert is_encrypted(stored["api_key"])
+
+
+def test_updating_a_retained_secret_field_stores_it_encrypted(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """A PATCH to a field the current schema dropped but the registry still
+    calls a secret is stored encrypted, not written verbatim in the clear
+    until the next boot, and the installation API keeps redacting it with
+    a descriptor."""
+    from provider_hub.service import update_provider
+    from secret_store.crypto import encrypt_secret, is_encrypted
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "2.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": {
+                    "provider_id": "examplehub",
+                    "version": "2.0.0",
+                    "config_schema": {"properties": {"region": {"type": "string"}}},
+                },
+                "config": {"legacy_token": encrypt_secret("unit-old-secret"),  # pragma: allowlist secret
+                           "region": "eu"},
+            }
+        },
+        "plugin_secret_paths": ["examplehub.legacy_token"],
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    update_provider("examplehub", config={"legacy_token": "unit-fresh-secret"})  # pragma: allowlist secret
+
+    stored = json.loads(state_file.read_text(encoding="utf-8"))["installations"]["examplehub"]["config"]
+    assert is_encrypted(stored["legacy_token"])
+    assert stored["region"] == "eu"
+    from provider_hub.service import get_provider
+    provider = get_provider("examplehub")
+    assert provider["config"]["legacy_token"] == ""
+    assert provider["config"]["__secret_fields"]["legacy_token"]["configured"] is True
+    assert "unit-fresh-secret" not in json.dumps(provider)
+
+
+def test_a_staged_schema_cannot_put_a_retained_secret_in_the_active_worker(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """A field only the staged version declares never reaches the current
+    worker: the exclusion filters against the active manifest alone, so an
+    update waiting for a restart does not hand the plugin a credential its
+    running code does not read. Ciphertext of that field does not block the
+    provider either, because a retained field counts as undecryptable only
+    when the active manifest declares it."""
+    from secret_store.crypto import SECRET_MARKER_PREFIX
+
+    from provider_hub.service import (decrypt_blocked_provider_ids,
+                                     runtime_provider_configs)
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "2.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": {
+                    "provider_id": "examplehub",
+                    "version": "2.0.0",
+                    "config_schema": {"properties": {"region": {"type": "string"}}},
+                },
+                "staged_manifest": {
+                    "provider_id": "examplehub",
+                    "version": "3.0.0",
+                    "config_schema": {"properties": {
+                        "region": {"type": "string"},
+                        "legacy_token": {"type": "string", "secret": True},
+                    }},
+                },
+                "config": {"legacy_token": SECRET_MARKER_PREFIX + "tampered-payload",
+                           "region": "eu"},
+            }
+        },
+        "plugin_secret_paths": ["examplehub.legacy_token"],
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    configs = runtime_provider_configs()
+    assert "examplehub" in configs
+    assert "legacy_token" not in configs["examplehub"]
+    assert configs["examplehub"]["region"] == "eu"
+    assert decrypt_blocked_provider_ids() == set()
+
+
+def test_a_pre_registry_installations_retained_secret_is_covered(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """A pre-registry upgrade: a stored legacy credential no current
+    manifest declares and no persisted registration names is discovered
+    from the installation config itself, registered and persisted at boot,
+    encrypted in state.json, redacted by the installation API and kept out
+    of the worker config."""
+    from provider_hub import service
+    from provider_hub.state import load_state
+    from secret_store.crypto import is_encrypted
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "2.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": {
+                    "provider_id": "examplehub",
+                    "version": "2.0.0",
+                    "config_schema": {"properties": {"region": {"type": "string"}}},
+                },
+                "config": {"legacy_token": "unit-legacy-secret", "region": "eu"},  # pragma: allowlist secret
+            }
+        },
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    # The boot: the loader discovers the field, the boot-migration encrypts
+    # it once the master key is durable.
+    isolated_plugin_registry.load_plugin_secret_paths(_EmptyScanSettings())
+    assert isolated_plugin_registry.is_plugin_secret("examplehub.legacy_token")
+    isolated_plugin_registry.migrate_installation_config_secrets()
+    state = load_state()
+    assert "examplehub.legacy_token" in (state.get("plugin_secret_paths") or [])
+    stored = state["installations"]["examplehub"]["config"]
+    assert is_encrypted(stored["legacy_token"])
+    assert stored["region"] == "eu"
+
+    # The installation API redacts it; the worker config leaves it out.
+    providers = service.list_providers()
+    installation = next(p for p in providers if p["provider_id"] == "examplehub")
+    assert installation["config"]["legacy_token"] == ""
+    assert installation["config"]["__secret_fields"]["legacy_token"]["configured"] is True
+    assert "unit-legacy-secret" not in json.dumps(providers)
+    configs = service.runtime_provider_configs()
+    assert "legacy_token" not in configs["examplehub"]
+    assert configs["examplehub"]["region"] == "eu"
+
+
+def test_a_settings_section_value_satisfies_a_blocked_provider(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """A provider whose stored credential will not decrypt is unblocked the
+    moment its own settings section supplies a live value for the field:
+    the worker config is laid over that section, so the plugin runs on the
+    section's value. With no section value the provider stays out of the
+    runtime configs, the selection and the admission."""
+    from types import SimpleNamespace
+
+    from app import get_providers
+    from app.config import settings
+    from secret_store.crypto import SECRET_MARKER_PREFIX
+
+    from provider_hub.service import (decrypt_blocked_provider_ids,
+                                      runtime_provider_configs)
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": _manifest(dependencies={"requirements": []}),
+                "config": {"api_key": SECRET_MARKER_PREFIX + "tampered-payload",
+                           "region": "eu"},
+            }
+        },
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    try:
+        # No section value: blocked in every direction.
+        assert "examplehub" not in runtime_provider_configs()
+        assert decrypt_blocked_provider_ids() == {"examplehub"}
+        with monkeypatch.context() as context:
+            context.setattr(
+                get_providers, "settings",
+                SimpleNamespace(general=SimpleNamespace(enabled_providers=["examplehub"])))
+            context.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
+            context.setattr(get_providers.provider_registry, "names", lambda: ["examplehub"])
+            assert "examplehub" not in (get_providers.get_providers() or [])
+            assert get_providers.provider_is_usable("examplehub") is False
+
+        # The section supplies a working value: the block lifts, the stored
+        # side keeps serving the rest of the config, and the provider is
+        # selectable and admissible again.
+        settings.set("examplehub", {"api_key": "unit-live-secret"})  # pragma: allowlist secret
+        configs = runtime_provider_configs()
+        assert "examplehub" in configs
+        assert "api_key" not in configs["examplehub"]
+        assert configs["examplehub"]["region"] == "eu"
+        assert decrypt_blocked_provider_ids() == set()
+        with monkeypatch.context() as context:
+            context.setattr(
+                get_providers, "settings",
+                SimpleNamespace(general=SimpleNamespace(enabled_providers=["examplehub"])))
+            context.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
+            context.setattr(get_providers.provider_registry, "names", lambda: ["examplehub"])
+            assert "examplehub" in (get_providers.get_providers() or [])
+            assert get_providers.provider_is_usable("examplehub") is True
+    finally:
+        from app.config import remove_settings_section
+        remove_settings_section("examplehub")
+
+
+def test_an_empty_section_collection_does_not_unblock_a_decrypt_failed_provider(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """An empty list or dict at the field is an absent credential, not a
+    supplied one, so it must not lift the decrypt block: the provider stays
+    out of the runtime configs, the selection and the admission until a
+    real value is supplied."""
+    from types import SimpleNamespace
+
+    from app import get_providers
+    from app.config import remove_settings_section, settings
+    from provider_hub import service
+    from secret_store.crypto import SECRET_MARKER_PREFIX
+
+    from provider_hub.service import (decrypt_blocked_provider_ids,
+                                      runtime_provider_configs)
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": _manifest(dependencies={"requirements": []}),
+                "config": {"api_key": SECRET_MARKER_PREFIX + "tampered-payload",
+                           "region": "eu"},
+            }
+        },
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    try:
+        # No section value at all: blocked in every direction.
+        assert "examplehub" not in runtime_provider_configs()
+        assert decrypt_blocked_provider_ids() == {"examplehub"}
+
+        # The section holds an empty collection at the field: an absent
+        # value, so the block stands in every direction.
+        for empty in ([], {}):
+            settings.set("examplehub", {"api_key": empty})
+            assert "examplehub" not in runtime_provider_configs()
+            assert decrypt_blocked_provider_ids() == {"examplehub"}
+            with monkeypatch.context() as context:
+                context.setattr(
+                    get_providers, "settings",
+                    SimpleNamespace(general=SimpleNamespace(enabled_providers=["examplehub"])))
+                context.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
+                context.setattr(get_providers.provider_registry, "names", lambda: ["examplehub"])
+                assert "examplehub" not in (get_providers.get_providers() or [])
+                assert get_providers.provider_is_usable("examplehub") is False
+
+        # A real value in the section is a supplied credential: the block
+        # lifts and the provider is searched again.
+        settings.set("examplehub", {"api_key": "unit-live-secret"})  # pragma: allowlist secret
+        assert "examplehub" in runtime_provider_configs()
+        assert decrypt_blocked_provider_ids() == set()
+        with monkeypatch.context() as context:
+            context.setattr(
+                get_providers, "settings",
+                SimpleNamespace(general=SimpleNamespace(enabled_providers=["examplehub"])))
+            context.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
+            context.setattr(get_providers.provider_registry, "names", lambda: ["examplehub"])
+            assert "examplehub" in (get_providers.get_providers() or [])
+            assert get_providers.provider_is_usable("examplehub") is True
+    finally:
+        remove_settings_section("examplehub")
+        service._BLOCK_CACHE["key"] = None
+
+
+def test_a_failed_settings_section_credential_blocks_selection_and_admission(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """A credential in the plugin's own config.yaml section that failed to
+    decrypt at boot is withheld from the overlay, so with no working stored
+    value behind it the provider is left out of configuration, selection
+    and admission, exactly like a broken stored credential. A working
+    stored value for the same declared field satisfies it."""
+    from types import SimpleNamespace
+
+    from app import get_providers
+    from provider_hub import service
+    from provider_hub.service import (decrypt_blocked_provider_ids,
+                                      update_provider)
+    from secret_store.migration import reset_decrypt_failures
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": _manifest(dependencies={"requirements": []}),
+                "config": {"region": "eu"},
+            }
+        },
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    # The post-boot state of a failed section credential: the live value is
+    # withheld as empty and its path is in the failure set.
+    from secret_store.migration import _FAILED_DECRYPT_PATHS
+    _FAILED_DECRYPT_PATHS.add("examplehub.api_key")
+
+    try:
+        assert decrypt_blocked_provider_ids() == {"examplehub"}
+        # Configuration: the withheld empty value is never laid over the
+        # stored config, and the broken credential travels nowhere.
+        auth = get_providers.get_providers_auth()
+        assert "api_key" not in auth["examplehub"]
+        assert "tampered" not in json.dumps(auth)
+        with monkeypatch.context() as context:
+            context.setattr(
+                get_providers, "settings",
+                SimpleNamespace(general=SimpleNamespace(enabled_providers=["examplehub"])))
+            context.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
+            context.setattr(get_providers.provider_registry, "names", lambda: ["examplehub"])
+            assert "examplehub" not in (get_providers.get_providers() or [])
+            assert get_providers.provider_is_usable("examplehub") is False
+
+        # A working stored value for the same declared field satisfies the
+        # failed section credential: the overlay is empty, the stored one
+        # stands, and the provider is searched again.
+        update_provider("examplehub", config={"api_key": "unit-stored-secret"})  # pragma: allowlist secret
+        assert decrypt_blocked_provider_ids() == set()
+        with monkeypatch.context() as context:
+            context.setattr(
+                get_providers, "settings",
+                SimpleNamespace(general=SimpleNamespace(enabled_providers=["examplehub"])))
+            context.setattr(get_providers, "_ensure_provider_hub_registered", lambda: None)
+            context.setattr(get_providers.provider_registry, "names", lambda: ["examplehub"])
+            assert "examplehub" in (get_providers.get_providers() or [])
+            assert get_providers.provider_is_usable("examplehub") is True
+        assert get_providers.get_providers_auth()["examplehub"]["api_key"] == "unit-stored-secret"
+    finally:
+        reset_decrypt_failures()
+        service._BLOCK_CACHE["key"] = None
+
+
+def test_the_blocked_set_is_cached_and_invalidated_by_a_state_mutation(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """The admission gate runs before every provider call, so the blocked
+    set is computed once per state.json version: repeated calls do not
+    re-read and re-walk the file, and a mutation that fixes a credential
+    invalidates the cache on the spot."""
+    from provider_hub import service
+    from provider_hub.service import decrypt_blocked_provider_ids, update_provider
+    from secret_store.crypto import SECRET_MARKER_PREFIX
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": _manifest(dependencies={"requirements": []}),
+                "config": {"api_key": SECRET_MARKER_PREFIX + "tampered-payload"},
+            }
+        },
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    assert decrypt_blocked_provider_ids() == {"examplehub"}
+
+    # The cached answer: no re-walk of the state behind it.
+    original = service._effective_installation_config
+    calls = []
+
+    def counting(installation, state=None):
+        calls.append(installation.get("provider_id"))
+        return original(installation, state)
+
+    monkeypatch.setattr(service, "_effective_installation_config", counting)
+    try:
+        assert decrypt_blocked_provider_ids() == {"examplehub"}
+        assert calls == []
+
+        # A mutation invalidates the cache: the next call recomputes.
+        update_provider("examplehub", config={"api_key": "unit-fresh-secret"})  # pragma: allowlist secret
+        assert decrypt_blocked_provider_ids() == set()
+        assert calls == ["examplehub"]
+    finally:
+        monkeypatch.setattr(service, "_effective_installation_config", original)
+        service._BLOCK_CACHE["key"] = None
+
+
+def test_a_cache_hit_never_loads_state(tmp_path, monkeypatch, isolated_plugin_registry):
+    """The cache key is read before anything else, so a hit answers without
+    loading and parsing state.json: the admission gate runs before every
+    provider call, and the file read it saved was the point of the cache."""
+    from provider_hub import service
+    from provider_hub.service import decrypt_blocked_provider_ids
+    from secret_store.crypto import SECRET_MARKER_PREFIX
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": _manifest(dependencies={"requirements": []}),
+                "config": {"api_key": SECRET_MARKER_PREFIX + "tampered-payload"},
+            }
+        },
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    try:
+        # The first call computes and caches under the state's identity.
+        assert decrypt_blocked_provider_ids() == {"examplehub"}
+
+        original = service.load_state
+        loads = []
+
+        def counting():
+            loads.append(1)
+            return original()
+
+        monkeypatch.setattr(service, "load_state", counting)
+        assert decrypt_blocked_provider_ids() == {"examplehub"}
+        assert loads == []
+    finally:
+        service._BLOCK_CACHE["key"] = None
+
+
+def test_a_save_during_the_cache_computation_is_not_cached(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """A credential corrected while the gate is computing its answer must not
+    have the pre-save answer cached under the post-save state identity: the
+    provider would stay out of searches until some other write, exactly what
+    the correction was supposed to end. The answer computed from the
+    pre-save state is served for that one call and never stored."""
+    from provider_hub import service
+    from provider_hub.service import (decrypt_blocked_provider_ids,
+                                      update_provider)
+    from secret_store.crypto import SECRET_MARKER_PREFIX
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": _manifest(dependencies={"requirements": []}),
+                "config": {"api_key": SECRET_MARKER_PREFIX + "tampered-payload"},
+            }
+        },
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    original_load = service.load_state
+    saved = {"done": False}
+
+    def load_then_save():
+        state = original_load()
+        if not saved["done"]:
+            saved["done"] = True
+            # The correction lands while the gate holds the pre-save state.
+            update_provider("examplehub", config={"api_key": "unit-fresh-secret"})  # pragma: allowlist secret
+        return state
+
+    monkeypatch.setattr(service, "load_state", load_then_save)
+    try:
+        assert decrypt_blocked_provider_ids() == {"examplehub"}
+        # The next call sees the corrected state, not the stale answer.
+        assert decrypt_blocked_provider_ids() == set()
+    finally:
+        service._BLOCK_CACHE["key"] = None
+
+
+def test_the_update_path_refuses_to_encrypt_under_a_memory_only_master_key(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """The Hub update path makes the master key durable before any secret it
+    encrypts is committed. Without that, a settings write that keeps failing
+    would leave ciphertext in state.json under a key that exists only in
+    memory, and a restart would mint a different one: a credential no boot
+    can ever open. The refusal is the existing could-not-be-encrypted one,
+    and nothing is stored."""
+    from provider_hub.state import load_state
+    from secret_store import crypto
+    from provider_hub.service import update_provider
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": _manifest(dependencies={"requirements": []}),
+                "config": {"region": "eu"},
+            }
+        },
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    # A master key that exists only in this process's memory: the boot has
+    # not written it to disk, and the settings write that would keeps
+    # failing.
+    monkeypatch.setattr(crypto, "_unpersisted_master_keys", set())
+    original_get_master_key = crypto.get_master_key
+
+    def memory_only_key(settings_obj=None):
+        key = original_get_master_key(settings_obj)
+        crypto._unpersisted_master_keys.add(key)
+        return key
+
+    monkeypatch.setattr(crypto, "get_master_key", memory_only_key)
+    monkeypatch.setattr("app.config.write_config", lambda: False)
+
+    with pytest.raises(ValueError) as refused:
+        update_provider("examplehub", config={"api_key": "unit-fresh-secret"})  # pragma: allowlist secret
+    assert "could not be encrypted" in str(refused.value)
+    stored = load_state()["installations"]["examplehub"]["config"]
+    assert stored == {"region": "eu"}
+    assert "enc:v1:" not in json.dumps(stored)
+
+
+def test_the_update_route_refuses_config_keys_no_manifest_declares(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """A PATCH can only write fields a manifest declares or the registry
+    names. An undeclared key would sit in plaintext in state, the API
+    response and the worker config until the next boot's discovery
+    disagreed with what this write did, so the route refuses it, and the
+    refusal is atomic: a declared field in the same request is not applied
+    either."""
+    from provider_hub.state import load_state
+    from provider_hub.service import update_provider
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": _manifest_with_region(dependencies={"requirements": []}),
+                "config": {"region": "eu"},
+            }
+        },
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    with pytest.raises(ValueError) as refused:
+        update_provider("examplehub", config={"undeclared_token": "unit-value"})  # pragma: allowlist secret
+    assert "not declared" in str(refused.value)
+
+    before = load_state()["installations"]["examplehub"]["config"]
+    with pytest.raises(ValueError):
+        update_provider("examplehub", config={"region": "us", "undeclared_token": "unit-value"})  # pragma: allowlist secret
+    assert load_state()["installations"]["examplehub"]["config"] == before
+    assert "undeclared_token" not in json.dumps(before)
+
+    # A declared plain field and a declared secret still store, together.
+    provider = update_provider("examplehub", config={"region": "us", "api_key": "unit-text-secret"})  # pragma: allowlist secret
+    assert provider["config"]["region"] == "us"
+    assert load_state()["installations"]["examplehub"]["config"]["region"] == "us"
+
+
+def test_a_mixed_case_secret_key_is_stored_under_its_canonical_name(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """A PATCH naming a declared secret with the wrong case (API_KEY for
+    api_key) is canonicalized before classification, encryption and
+    storage, the same lowercase spelling the manifest declares and the
+    reader walks. Stored as typed it would sit beside the declared field
+    in plaintext under its mixed-case name, and the redaction, which
+    answers for the declared name, would hand it back as it stood."""
+    from provider_hub.service import runtime_provider_configs, update_provider
+    from provider_hub.state import load_state
+    from secret_store.crypto import decrypt_secret, is_encrypted
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": _manifest_with_region(dependencies={"requirements": []}),
+                "config": {"region": "eu"},
+            }
+        },
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    provider = update_provider("examplehub", config={"API_KEY": "unit-secret-value"})  # pragma: allowlist secret
+
+    # Stored under the canonical name only, encrypted at rest.
+    stored = load_state()["installations"]["examplehub"]["config"]
+    assert "API_KEY" not in stored
+    assert is_encrypted(stored["api_key"])
+    assert decrypt_secret(stored["api_key"]) == "unit-secret-value"  # pragma: allowlist secret
+    # The reader treats the key the way the writer does: the redaction
+    # answers for the canonical name, and no value comes back under
+    # either spelling.
+    assert provider["config"]["api_key"] == ""
+    assert "API_KEY" not in provider["config"]
+    assert "unit-secret-value" not in json.dumps(provider)  # pragma: allowlist secret
+    # The worker receives the decrypted credential under the canonical
+    # name.
+    assert runtime_provider_configs()["examplehub"]["api_key"] == "unit-secret-value"  # pragma: allowlist secret
+
+
+def test_a_persisted_mixed_case_credential_is_never_served_or_stored_as_it_stood(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """A credential an earlier version persisted under a mixed-case alias
+    of a declared secret field (API_KEY for api_key) is the credential the
+    canonical name answers for. The installation API never returns it,
+    whatever spelling it sits under, and the next update canonicalizes it
+    away: an update that replaces the credential drops the alias with the
+    old value, and one that touches nothing related moves the alias's
+    value under the canonical name, encrypted. The alias never survives
+    to ride another response."""
+    from provider_hub.service import get_provider, update_provider
+    from provider_hub.state import load_state
+    from secret_store.crypto import decrypt_secret, is_encrypted
+
+    alias_state = {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": _manifest_with_region(dependencies={"requirements": []}),
+                "config": {"region": "eu", "API_KEY": "unit-alias-secret"},
+            }
+        },
+        "jobs": [],
     }
 
-    update_provider("examplehub", config={"api_key": "new-secret"})  # pragma: allowlist secret
+    # The redaction answers for every spelling: the stored alias value
+    # never comes back.
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_write_state(tmp_path, alias_state)))
+    served = get_provider("examplehub")["config"]
+    assert served["API_KEY"] == ""
+    assert served["api_key"] == ""
+    assert "unit-alias-secret" not in json.dumps(served)  # pragma: allowlist secret
 
-    assert runtime_provider_configs()["examplehub"]["api_key"] == "new-secret"  # pragma: allowlist secret
+    # An update that replaces the credential stores the canonical writer's
+    # value and drops the alias with it.
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_write_state(tmp_path, alias_state)))
+    update_provider("examplehub", config={"api_key": "unit-new-secret"})  # pragma: allowlist secret
+    stored = load_state()["installations"]["examplehub"]["config"]
+    assert "API_KEY" not in stored
+    assert is_encrypted(stored["api_key"])
+    assert decrypt_secret(stored["api_key"]) == "unit-new-secret"  # pragma: allowlist secret
+    assert "unit-alias-secret" not in json.dumps(get_provider("examplehub"))  # pragma: allowlist secret
+
+    # An unrelated update canonicalizes the alias away too: the stored
+    # value moves under the canonical name, encrypted at rest.
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_write_state(tmp_path, alias_state)))
+    update_provider("examplehub", config={"region": "us"})
+    stored = load_state()["installations"]["examplehub"]["config"]
+    assert stored["region"] == "us"
+    assert set(stored) == {"region", "api_key"}
+    assert is_encrypted(stored["api_key"])
+    assert decrypt_secret(stored["api_key"]) == "unit-alias-secret"  # pragma: allowlist secret
+
+
+def test_an_unrelated_update_encrypts_a_stored_non_text_alias(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """A stored alias holding a non-string scalar (a typed token an older
+    save coerced into a number) moves under the canonical name as the typed
+    text it stands for, encrypted: the move is a write to a secret slot, so
+    the canonical secret name never holds plaintext after it, and the
+    worker receives the decrypted token rather than a bare number."""
+    from provider_hub.service import runtime_provider_configs, update_provider
+    from provider_hub.state import load_state
+    from secret_store.crypto import decrypt_secret, is_encrypted
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": _manifest_with_region(dependencies={"requirements": []}),
+                "config": {"region": "eu", "API_KEY": 12345678901234567},
+            }
+        },
+        "jobs": [],
+    })))
+
+    update_provider("examplehub", config={"region": "us"})
+
+    stored = load_state()["installations"]["examplehub"]["config"]
+    assert "API_KEY" not in stored
+    assert stored["region"] == "us"
+    assert is_encrypted(stored["api_key"])
+    assert decrypt_secret(stored["api_key"]) == "12345678901234567"
+    assert runtime_provider_configs()["examplehub"]["api_key"] == "12345678901234567"
+
+
+def test_a_mixed_case_alias_colliding_with_a_canonical_value_keeps_the_canonical(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """The stored alias never displaces the canonical value: whichever
+    order the config holds them in, the value the canonical writer
+    exposes is the one that stays and the alias drops."""
+    from provider_hub.service import update_provider
+    from provider_hub.state import load_state
+    from secret_store.crypto import decrypt_secret, encrypt_secret
+
+    for stored_config in ({"region": "eu", "API_KEY": "unit-alias-left",
+                           "api_key": encrypt_secret("unit-canonical")},
+                          {"region": "eu", "api_key": encrypt_secret("unit-canonical"),
+                           "API_KEY": "unit-alias-left"}):
+        monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_write_state(tmp_path, {
+            "installations": {
+                "examplehub": {
+                    "provider_id": "examplehub",
+                    "name": "Example Hub Provider",
+                    "active_version": "1.0.0",
+                    "state": "active",
+                    "pending_restart": False,
+                    "manifest": _manifest_with_region(dependencies={"requirements": []}),
+                    "config": dict(stored_config),
+                }
+            },
+            "jobs": [],
+        })))
+
+        update_provider("examplehub", config={"region": "us"})
+
+        stored = load_state()["installations"]["examplehub"]["config"]
+        assert set(stored) == {"region", "api_key"}
+        assert stored["region"] == "us"
+        assert decrypt_secret(stored["api_key"]) == "unit-canonical"  # pragma: allowlist secret
+
+
+def test_a_lifted_block_clears_the_stale_re_enter_it_note(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """The re-enter-it note is the echo of the block, so it goes when the
+    block lifts on its own: a settings-section value starts covering the
+    field, the provider is searched again, and the installation stops
+    asking for a credential it already has. While the block stands, the
+    note stays."""
+    from app.config import remove_settings_section, settings
+    from provider_hub import service
+    from provider_hub.service import (DECRYPT_FAILED_MESSAGE,
+                                      runtime_provider_configs)
+    from provider_hub.state import load_state
+    from secret_store.crypto import SECRET_MARKER_PREFIX
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": False,
+                "manifest": _manifest(dependencies={"requirements": []}),
+                "config": {"api_key": SECRET_MARKER_PREFIX + "tampered-payload",
+                           "region": "eu"},
+                "last_error": DECRYPT_FAILED_MESSAGE,
+            }
+        },
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    try:
+        # Blocked: out of the runtime configs, and the note stands.
+        assert "examplehub" not in runtime_provider_configs()
+        assert load_state()["installations"]["examplehub"]["last_error"] == DECRYPT_FAILED_MESSAGE
+
+        # The settings section starts supplying the credential: the block
+        # lifts, the provider is admitted, and the note is cleared with it.
+        settings.set("examplehub", {"api_key": "unit-live-secret"})  # pragma: allowlist secret
+        configs = runtime_provider_configs()
+        assert "examplehub" in configs
+        assert "api_key" not in configs["examplehub"]
+        assert load_state()["installations"]["examplehub"]["last_error"] is None
+    finally:
+        remove_settings_section("examplehub")
+        service._BLOCK_CACHE["key"] = None
+
+
+def test_the_settings_overlay_covers_a_pending_restart_installation(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """A pending update keeps the active version running, and the runtime
+    configs admit it with its settings-section value standing in for a
+    credential the stored config can no longer supply. The overlay walks the
+    same active-version population with the active manifest, so the
+    replacement actually reaches the worker; a field only the staged schema
+    declares never does, because the code that is running is the active
+    version's."""
+    from app import get_providers
+    from app.config import remove_settings_section, settings
+    from provider_hub import service
+    from provider_hub.service import (decrypt_blocked_provider_ids,
+                                      runtime_provider_configs)
+    from secret_store.crypto import SECRET_MARKER_PREFIX
+
+    state_file = _write_state(tmp_path, {
+        "installations": {
+            "examplehub": {
+                "provider_id": "examplehub",
+                "name": "Example Hub Provider",
+                "active_version": "1.0.0",
+                "state": "active",
+                "pending_restart": True,
+                "manifest": _manifest(dependencies={"requirements": []}),
+                "staged_manifest": _manifest(
+                    version="2.0.0",
+                    config_schema={
+                        "type": "object",
+                        "properties": {
+                            "api_key": {"type": "string", "secret": True},
+                            "staged_only_token": {"type": "string", "secret": True},
+                        },
+                    },
+                    secret_fields=["api_key", "staged_only_token"],
+                    dependencies={"requirements": []},
+                ),
+                "config": {"api_key": SECRET_MARKER_PREFIX + "tampered-payload",
+                           "region": "eu"},
+            }
+        },
+        "jobs": [],
+    })
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+
+    try:
+        # The section supplies the replacement, so the provider is admitted.
+        settings.set("examplehub", {"api_key": "unit-live-secret",  # pragma: allowlist secret
+                                    "staged_only_token": "unit-staged-value"})
+        assert "examplehub" in runtime_provider_configs()
+        assert decrypt_blocked_provider_ids() == set()
+
+        auth = get_providers.get_providers_auth()
+        assert auth["examplehub"]["api_key"] == "unit-live-secret"
+        # A field only the staged version declares is never overlaid: the
+        # active code does not read it.
+        assert "staged_only_token" not in auth["examplehub"]
+        assert "tampered" not in json.dumps(auth)
+    finally:
+        remove_settings_section("examplehub")
+        service._BLOCK_CACHE["key"] = None
+
+
+def test_stage_install_local_persists_plugin_secret_paths(tmp_path, monkeypatch):
+    """Installing a plugin registers its schema's secret paths in the live
+    registry and in the persisted set, so the plugin's credentials are
+    write-only from the moment it is configured."""
+    from provider_hub.service import stage_install_local
+    from provider_hub.state import load_state
+
+    provider_content = b"class LocalProvider: pass\n"
+    file_payloads = {"provider.py": provider_content}
+    manifest = _manifest(
+        provider_id="locallyinstalled",
+        name="Locally Installed",
+        provider_content=provider_content,
+        dependencies={"requirements": []},
+    )
+    package = _provider_zip(manifest, file_payloads, prefix="locallyinstalled/")
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(json.dumps({"installations": {}, "jobs": []}), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    _patch_local_install_env(monkeypatch, tmp_path)
+
+    from secret_store import registry
+
+    saved_paths = set(registry.plugin_secret_paths())
+    registry.reset_plugin_secret_paths()
+    try:
+        stage_install_local(package)
+
+        # The manifest's api_key is a declared secret, so it is registered in
+        # the live registry and persisted with the installation.
+        assert registry.is_plugin_secret("locallyinstalled.api_key")
+        persisted_paths = load_state().get("plugin_secret_paths") or []
+        assert "locallyinstalled.api_key" in persisted_paths
+    finally:
+        registry.reset_plugin_secret_paths(saved_paths)
+
+
+def test_stage_install_local_repairs_a_malformed_persisted_path_set(
+        tmp_path, monkeypatch, isolated_plugin_registry):
+    """A persisted plugin_secret_paths that is not a list survives a boot
+    that discovers nothing (the boot only rewrites the set when it has a
+    path to add), so the next plugin installation is what meets the
+    value. That installation reads the persisted set through the shared
+    persisted-path validator rather than iterating the raw value: it does
+    not break on the malformed shape, and its write repairs the set to
+    the valid union of what it held and what it adds."""
+    from provider_hub.service import stage_install_local
+    from provider_hub.state import load_state
+    from secret_store.registry import load_plugin_secret_paths
+
+    provider_content = b"class LocalProvider: pass\n"
+    file_payloads = {"provider.py": provider_content}
+    manifest = _manifest(
+        provider_id="locallyinstalled",
+        name="Locally Installed",
+        provider_content=provider_content,
+        dependencies={"requirements": []},
+    )
+    package = _provider_zip(manifest, file_payloads, prefix="locallyinstalled/")
+    state_file = tmp_path / "provider_hub" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(json.dumps({
+        "installations": {}, "jobs": [], "plugin_secret_paths": 42,
+    }), encoding="utf-8")
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(state_file))
+    _patch_local_install_env(monkeypatch, tmp_path)
+
+    # The boot discovers no paths, so the malformed value survives it.
+    load_plugin_secret_paths(_EmptyScanSettings())
+    assert load_state()["plugin_secret_paths"] == 42
+
+    stage_install_local(package)
+
+    # The credentialed installation neither broke on the value nor kept
+    # it: the set is the valid union now.
+    assert isolated_plugin_registry.is_plugin_secret("locallyinstalled.api_key")
+    assert load_state()["plugin_secret_paths"] == ["locallyinstalled.api_key"]
 
 
 def test_get_providers_auth_includes_active_provider_hub_config(tmp_path, monkeypatch):
@@ -1950,7 +3328,7 @@ def test_get_providers_auth_includes_active_provider_hub_config(tmp_path, monkey
             "active_version": "1.0.0",
             "state": "active",
             "pending_restart": False,
-            "manifest": _manifest(dependencies={"requirements": []}),
+            "manifest": _manifest_with_region(dependencies={"requirements": []}),
             "config": {},
         }
     }
@@ -3761,32 +5139,42 @@ def test_runtime_provider_configs_includes_pending_restart_with_active_version(
 ):
     from provider_hub import service
     from provider_hub.state import load_state, save_state
+    from secret_store import registry
 
-    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
-    state = load_state()
-    state["installations"]["examplehub"] = {
-        "provider_id": "examplehub",
-        "name": "Example",
-        "active_version": "1.0.0",
-        "state": "staged",
-        "pending_restart": True,
-        "config": {"api_key": "abc"},
-        "manifest": {"provider_id": "examplehub", "version": "1.0.0"},
-    }
-    state["installations"]["nokey"] = {
-        "provider_id": "nokey",
-        "active_version": None,
-        "state": "staged",
-        "pending_restart": True,
-        "config": {},
-        "manifest": {"provider_id": "nokey", "version": "1.0.0"},
-    }
-    save_state(state)
+    # The manifest declares no schema at all, so nothing in this config is a
+    # secret: keep earlier tests' registrations out, or this fixture's
+    # api_key would be judged as a retained field the schema does not
+    # declare and excluded from the worker config.
+    saved_paths = set(registry.plugin_secret_paths())
+    registry.reset_plugin_secret_paths()
+    try:
+        monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(_empty_state_file(tmp_path)))
+        state = load_state()
+        state["installations"]["examplehub"] = {
+            "provider_id": "examplehub",
+            "name": "Example",
+            "active_version": "1.0.0",
+            "state": "staged",
+            "pending_restart": True,
+            "config": {"api_key": "abc"},
+            "manifest": {"provider_id": "examplehub", "version": "1.0.0"},
+        }
+        state["installations"]["nokey"] = {
+            "provider_id": "nokey",
+            "active_version": None,
+            "state": "staged",
+            "pending_restart": True,
+            "config": {},
+            "manifest": {"provider_id": "nokey", "version": "1.0.0"},
+        }
+        save_state(state)
 
-    configs = service.runtime_provider_configs()
-    assert "examplehub" in configs
-    assert configs["examplehub"].get("api_key") == "abc"
-    assert "nokey" not in configs
+        configs = service.runtime_provider_configs()
+        assert "examplehub" in configs
+        assert configs["examplehub"].get("api_key") == "abc"
+        assert "nokey" not in configs
+    finally:
+        registry.reset_plugin_secret_paths(saved_paths)
 
 
 def test_remove_catalog_source_purges_catalog_entries(tmp_path, monkeypatch):

@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import logging
 import re
 import shutil
 import tempfile
@@ -19,6 +20,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 from subliminal_patch.extensions import provider_registry
+
+from secret_store.registry import SECRET_DESCRIPTOR_KEY as SECRET_DESCRIPTORS_KEY
 
 from .manifest import validate_manifest
 from .bundle import verify_bundle_tree
@@ -1379,35 +1382,159 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
 
 
 def _manifest_secret_fields(installation: dict[str, Any]) -> set[str]:
+    """The secret fields of an installation's current manifest. The field
+    list itself comes from the one shared helper the settings registry uses
+    (`secret_fields` and `secret: true` by the same rule the frontend
+    renders a password input by), so the three copies cannot drift."""
     manifest = installation.get("manifest")
     if not isinstance(manifest, dict):
         manifest = installation.get("staged_manifest")
     if not isinstance(manifest, dict):
         return set()
-    secret_fields = manifest.get("secret_fields") or []
-    if not isinstance(secret_fields, list):
-        return set()
-    return {item for item in secret_fields if isinstance(item, str)}
+    from secret_store.registry import manifest_secret_fields
+    return manifest_secret_fields(manifest)
+
+
+def _retained_secret_fields(provider_id: Any, state: dict[str, Any] | None = None) -> set[str]:
+    """Fields the persisted registry still calls secrets for this provider,
+    on top of the current manifest's own.
+
+    A newer version can drop a field from its schema while the stored
+    value survives in state.json; the persisted registration keeps that
+    value covered (redacted in the API, kept out of the worker config)
+    rather than letting a schema change expose it.
+
+    `state`, when the caller already holds the loaded state.json, is used
+    instead of reading the file again: the admission gate walks every
+    provider on every call, and re-reading the file per installation was
+    most of its cost."""
+    fields = set()
+    provider_id = str(provider_id or "").lower()
+    if not provider_id:
+        return fields
+    prefix = f"{provider_id}."
+    try:
+        from secret_store.registry import plugin_secret_paths
+        for path in plugin_secret_paths():
+            if path.startswith(prefix) and "." not in path[len(prefix):]:
+                fields.add(path[len(prefix):])
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Unable to read the registered plugin secret paths for %s", provider_id)
+    try:
+        if state is None:
+            from .state import load_state
+            state = load_state()
+        # The persisted set is read through the shared persisted-path
+        # validator, the same one the boot loader uses: a malformed value
+        # is skipped until the state is repaired rather than costing the
+        # retained coverage of the valid entries, and an entry that never
+        # matched the persisted path shapes never reaches a field name.
+        from secret_store.registry import _valid_persisted_paths
+        for path in _valid_persisted_paths(state.get("plugin_secret_paths")):
+            if path.startswith(prefix) and "." not in path[len(prefix):]:
+                fields.add(path[len(prefix):])
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Unable to read the persisted plugin secret paths for %s", provider_id)
+    return fields
 
 
 def _encrypt_secret_value(value: Any) -> Any:
+    """Encrypt a secret for storage, or raise: a credential that cannot be
+    encrypted is not stored. Failing open here would put plaintext into
+    state.json whenever the master key is broken."""
     if not isinstance(value, str) or not value:
         return value
-    try:
-        from secret_store import encrypt_secret
-        return encrypt_secret(value)
-    except Exception:
-        return value
+    from secret_store import encrypt_secret
+    from secret_store.crypto import persist_master_key
+    # The master key is durable before any ciphertext is committed. Without
+    # this the runtime update path could store ciphertext under a key that
+    # exists only in memory, and a failing settings write would leave a
+    # credential no restart can ever decrypt. A persistence failure raises
+    # and becomes the caller's could-not-be-encrypted refusal.
+    persist_master_key()
+    return encrypt_secret(value)
 
 
 def _decrypt_secret_value(value: Any) -> Any:
+    """Decrypt a stored secret, or raise: a value that will not decrypt is
+    never handed out as the credential. Failing open here sent the stored
+    ciphertext to the provider as if it were the key. An empty collection
+    reads as an empty string: a leftover [] or {} is an absent credential,
+    not a value the plugin's setup logic can treat as present."""
+    if isinstance(value, (list, dict)) and not value:
+        return ""
     if not isinstance(value, str) or not value:
         return value
+    from secret_store import decrypt_secret
+    return decrypt_secret(value)
+
+
+# The installation last_error for a stored credential that will not decrypt.
+# The provider is left out of searches until the credential is re-entered.
+DECRYPT_FAILED_MESSAGE = "Stored credential could not be decrypted; re-enter it"
+
+
+def _plugin_secret_paths(provider_id, *manifests) -> set[str]:
+    """The `provider_id.field` registry paths for a plugin's manifests."""
+    paths = set()
+    for manifest in manifests:
+        if not isinstance(manifest, dict):
+            continue
+        for field in _manifest_secret_fields({"manifest": manifest}):
+            paths.add(f"{str(provider_id).lower()}.{field.lower()}")
+    return paths
+
+
+def _persist_plugin_secret_paths(state: dict[str, Any], provider: dict[str, Any]) -> set[str]:
+    """Add the plugin's secret paths to the persisted set in `state` and
+    register them in the live secret store.
+
+    Called inside the state mutation on install, update and configuration
+    change, so the paths survive the removal of the plugin that owns them,
+    and in the live registry so the running process covers the plugin's
+    secrets without a restart."""
+    provider_id = provider.get("provider_id") if isinstance(provider, dict) else None
+    if not provider_id:
+        return set()
+    paths = _plugin_secret_paths(
+        provider_id, provider.get("manifest"), provider.get("staged_manifest"))
+    if not paths:
+        return set()
+    # The persisted set is read through the shared persisted-path
+    # validator, the same one the boot loader uses: a value that is not a
+    # list (a number a broken state left behind, which a boot that
+    # discovers nothing never repairs) must neither break the
+    # registration nor ride along, and the write repairs the set to the
+    # valid union.
+    from secret_store.registry import _valid_persisted_paths
+    known = _valid_persisted_paths(state.get("plugin_secret_paths"))
+    state["plugin_secret_paths"] = sorted(known | paths)
     try:
-        from secret_store import decrypt_secret
-        return decrypt_secret(value)
+        from secret_store.registry import register_plugin_secret_paths
+        register_plugin_secret_paths(paths)
     except Exception:
-        return value
+        logging.getLogger(__name__).exception(
+            "Unable to register the plugin secret paths for %s", provider_id)
+    return paths
+
+
+def _secret_descriptor(stored_value: Any) -> dict[str, Any]:
+    """The write-only descriptor for one stored secret value."""
+    descriptor: dict[str, Any] = {"configured": False}
+    if not isinstance(stored_value, str) or not stored_value:
+        return descriptor
+    descriptor["configured"] = True
+    try:
+        plaintext = _decrypt_secret_value(stored_value)
+    except Exception:
+        descriptor["decrypt_failed"] = True
+        return descriptor
+    from secret_store.migration import LAST_FOUR_MIN_LENGTH
+    if isinstance(plaintext, str) and len(plaintext) >= LAST_FOUR_MIN_LENGTH:
+        descriptor["last_four"] = plaintext[-4:]
+    return descriptor
 
 
 def _redact_installation(installation: dict[str, Any]) -> dict[str, Any]:
@@ -1420,25 +1547,73 @@ def _redact_installation(installation: dict[str, Any]) -> dict[str, Any]:
     config = redacted.get("config")
     if not isinstance(config, dict):
         return redacted
-    secret_fields = _manifest_secret_fields(redacted)
+    # The current manifest's secret fields plus every field the persisted
+    # registry still calls a secret: a value retained after a schema change
+    # stays redacted instead of becoming visible again.
+    secret_fields = _manifest_secret_fields(redacted) | _retained_secret_fields(provider_id)
     redacted_config = dict(config)
-    for field in secret_fields:
-        if redacted_config.get(field):
-            redacted_config[field] = SECRET_PLACEHOLDER
+    descriptors = {}
+    for field in sorted(secret_fields):
+        # Write-only: an empty value plus the descriptor, never the stored
+        # value and never a placeholder a caller might echo back as real.
+        redacted_config[field] = ""
+        descriptors[field] = _secret_descriptor(config.get(field))
+    for stored_key in sorted(key for key in config if isinstance(key, str)):
+        if stored_key != stored_key.lower() and stored_key.lower() in secret_fields:
+            # A mixed-case alias of a secret field never comes back either:
+            # the value is the credential's, whatever spelling an earlier
+            # write left it under, until the next boot or update
+            # canonicalizes it away.
+            redacted_config[stored_key] = ""
+    if descriptors:
+        redacted_config[SECRET_DESCRIPTORS_KEY] = descriptors
     redacted["config"] = redacted_config
     return redacted
 
 
-def _effective_installation_config(installation: dict[str, Any]) -> dict[str, Any]:
+def _effective_installation_config(installation: dict[str, Any],
+                                    state: dict[str, Any] | None = None) -> tuple[dict[str, Any], set[str]]:
+    """The decrypted config for the worker, plus the set of secret fields
+    whose stored value would not decrypt.
+
+    Fail closed: an undecryptable field is omitted from the config (never
+    handed out as the credential), and its name is returned so the caller
+    can leave the provider out of searches and say why. A registered
+    secret the ACTIVE schema no longer declares is left out entirely: the
+    plugin stopped reading it, a retained credential does not travel to
+    the worker as ordinary config, and a staged schema that still
+    declares it cannot put it there ahead of the activation. A retained
+    field counts as undecryptable only when the active schema declares
+    it: ciphertext of a field the plugin no longer reads withholds
+    nothing the plugin needs, so it must not block the provider either.
+
+    `state` spares the caller's own load_state pass-through; see
+    _retained_secret_fields."""
     config = installation.get("config")
     if not isinstance(config, dict):
-        return {}
-    secret_fields = _manifest_secret_fields(installation)
+        return {}, set()
+    retained = _retained_secret_fields(installation.get("provider_id"), state)
+    active_manifest = installation.get("manifest")
+    if not isinstance(active_manifest, dict):
+        active_manifest = {}
+    from secret_store.registry import _manifest_field_names, manifest_secret_fields
+    secret_fields = manifest_secret_fields(active_manifest) | retained
     effective = dict(config)
+    undecryptable = set()
     for field in secret_fields:
         if field in effective:
-            effective[field] = _decrypt_secret_value(effective[field])
-    return effective
+            try:
+                effective[field] = _decrypt_secret_value(effective[field])
+            except Exception:
+                del effective[field]
+                undecryptable.add(field)
+    declared = _manifest_field_names(active_manifest)
+    if retained:
+        for field in sorted(retained):
+            if field not in declared:
+                effective.pop(field, None)
+                undecryptable.discard(field)
+    return effective, undecryptable
 
 
 def _forget_credential_throttle(provider_id: str) -> None:
@@ -1476,10 +1651,131 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
         if not isinstance(config, dict):
             raise ValueError("config must be an object")
 
+    def _encrypt_provider_config(provider: dict[str, Any],
+                                  config: dict[str, Any]) -> dict[str, Any]:
+        """The submitted config with its secrets encrypted, computed before
+        anything persists. A credential that cannot be encrypted raises, and
+        no part of the request survives it: not the configuration, and not
+        the enabled toggle, which writes Bazarr's own settings store and
+        must not stay behind on a refused update.
+
+        The covered set is the current manifest's secret fields plus every
+        field the persisted registry still calls a secret: a PATCH to a
+        retained field (one a newer schema dropped) is stored encrypted
+        exactly like a declared one, not written verbatim in the clear. A
+        new value that is not text is refused outright: a number or a
+        boolean in a secret slot is the shape an older save coerced typed
+        tokens into, and accepting it would store a credential that
+        neither encrypts at rest nor masks in the API.
+
+        A key no manifest declares is refused too. The boot rule covers
+        undeclared credentials by discovering and registering them, so
+        accepting one here would leave it sitting in plaintext in state,
+        the API response and the worker config until the next boot
+        disagrees with what this write did. The route is API-only and the
+        UI edits declared fields, so refusing costs no interface.
+
+        Every submitted key is canonicalized first, to the one lowercase
+        spelling manifest validation admits and the reader walks: a
+        mixed-case name (API_KEY for api_key) is classified, encrypted
+        and stored under the canonical name, never parked beside the
+        declared field in the clear under the mixed-case spelling, where
+        the redaction answering for the declared name would hand it back
+        as it stood. The stored copy is canonicalized the same way, so a
+        mixed-case alias an earlier version persisted never outlives the
+        next update either, and a non-string scalar the alias holds moves
+        as the typed text it stands for, never verbatim."""
+        from secret_store.migration import _coerced_secret_text
+        from secret_store.registry import (_manifest_field_names,
+                                           manifest_boolean_secret_paths)
+
+        secret_fields = _manifest_secret_fields(provider) | _retained_secret_fields(provider_id)
+        declared_fields = set()
+        for manifest in (provider.get("manifest"), provider.get("staged_manifest")):
+            if isinstance(manifest, dict):
+                declared_fields |= {str(field).lower() for field in _manifest_field_names(manifest)}
+        next_config = dict(provider.get("config") if isinstance(provider.get("config"), dict) else {})
+        # The stored case variants of a credential key resolve the same
+        # way the submitted ones do: the value at the canonical name is
+        # the one the canonical writer exposes, so an alias beside it
+        # drops as a stale duplicate, while an alias with no canonical
+        # name beside it moves under the canonical name, encrypted the
+        # way a submitted credential is, so the name the reader walks
+        # never holds plaintext. Whatever order the config holds them
+        # in, the alias never survives the update it rode in on.
+        for stored_key in sorted(key for key in next_config if isinstance(key, str)):
+            canonical = stored_key.lower()
+            if canonical == stored_key or canonical not in secret_fields:
+                continue
+            if canonical in next_config:
+                del next_config[stored_key]
+                continue
+            try:
+                stored_value = next_config.pop(stored_key)
+                if (isinstance(stored_value, bool)
+                        and f"{provider_id}.{canonical}" in manifest_boolean_secret_paths()):
+                    # A stored toggle under a mixed-case alias keeps its
+                    # value: the manifest declares the field boolean, and
+                    # stringifying its False would hand the plugin the
+                    # truthy text.
+                    next_config[canonical] = stored_value
+                elif not isinstance(stored_value, str):
+                    # A non-string scalar at the alias (a typed token an
+                    # older save coerced into a number or a boolean) moves
+                    # as the typed text it stands for, encrypted like a
+                    # submitted credential, so the canonical secret name
+                    # never holds plaintext after a write.
+                    next_config[canonical] = _encrypt_secret_value(
+                        _coerced_secret_text(stored_value))
+                else:
+                    next_config[canonical] = _encrypt_secret_value(stored_value)
+            except Exception as error:
+                raise ValueError(
+                    "The credential could not be encrypted, so the configuration "
+                    "was not saved. Check the encryption key and try again."
+                ) from error
+        for submitted_key, value in config.items():
+            key = str(submitted_key).lower()
+            if key == SECRET_DESCRIPTORS_KEY:
+                # The write-only descriptor the API echoes back, never a
+                # config field. Manifest validation rejects a field name
+                # with a leading underscore, so this can only be an echo.
+                continue
+            if key in secret_fields:
+                if value == SECRET_PLACEHOLDER:
+                    # Kept for callers that still echo the placeholder:
+                    # absent means unchanged, so this does too.
+                    continue
+                if value is not None and not isinstance(value, str):
+                    raise ValueError(
+                        f"The credential {key} must be text; the configuration "
+                        "was not saved."
+                    )
+                try:
+                    next_config[key] = _encrypt_secret_value(value)
+                except Exception as error:
+                    raise ValueError(
+                        "The credential could not be encrypted, so the configuration "
+                        "was not saved. Check the encryption key and try again."
+                    ) from error
+            elif key not in declared_fields:
+                raise ValueError(
+                    f"The configuration field {key} is not declared by the "
+                    "provider's manifest, so the configuration was not saved."
+                )
+            else:
+                next_config[key] = value
+        return next_config
+
     def update_installation(state: dict[str, Any]) -> dict[str, Any] | None:
         provider = (state.get("installations") or {}).get(provider_id)
         if not isinstance(provider, dict):
             return None
+
+        # Encrypt and validate before anything is written: the toggle below
+        # persists Bazarr's own settings store even if the Hub state save
+        # fails, so a refused configuration must refuse it too.
+        next_config = _encrypt_provider_config(provider, config) if config is not None else None
 
         if enabled is not None:
             provider["enabled"] = bool(enabled)
@@ -1491,17 +1787,18 @@ def update_provider(provider_id: str, enabled: bool | None = None, config: dict[
                     f"{ENABLED_PROVIDERS_NOT_SAVED}"
                 )
 
-        if config is not None:
-            secret_fields = _manifest_secret_fields(provider)
-            current = provider.get("config")
-            next_config = dict(current if isinstance(current, dict) else {})
-            for key, value in config.items():
-                if key in secret_fields and value == SECRET_PLACEHOLDER:
-                    continue
-                next_config[key] = _encrypt_secret_value(value) if key in secret_fields else value
+        if next_config is not None:
             provider["config"] = next_config
+            # A re-entered credential ends the decrypt-failure note: the
+            # installation stops asking for the key once its stored config
+            # decrypts again.
+            if provider.get("last_error") == DECRYPT_FAILED_MESSAGE:
+                _effective, undecryptable = _effective_installation_config(provider)
+                if not undecryptable:
+                    provider["last_error"] = None
 
         state.setdefault("installations", {})[provider_id] = provider
+        _persist_plugin_secret_paths(state, provider)
         return dict(provider)
 
     provider = mutate_state(update_installation)
@@ -1528,8 +1825,158 @@ def runtime_provider_configs() -> dict[str, dict[str, Any]]:
         # credentials. Use ``active_version`` as the gate instead.
         if not installation.get("active_version"):
             continue
-        configs[provider_id] = _effective_installation_config(installation)
+        # Fail closed: a stored credential that will not decrypt is left
+        # out of the worker's config (never sent as the credential), and
+        # the provider is left out of searches until it is fixed. A value
+        # in the plugin's own settings section satisfies the credential
+        # (the worker config is laid over it), so only a field neither
+        # source supplies keeps the provider out. Say why on the
+        # installation once, not on every pool build.
+        if _unsatisfied_secret_fields(provider_id, installation, state):
+            if installation.get("last_error") != DECRYPT_FAILED_MESSAGE:
+                _record_provider_last_error(provider_id, DECRYPT_FAILED_MESSAGE)
+            continue
+        if installation.get("last_error") == DECRYPT_FAILED_MESSAGE:
+            # The block lifted on its own: a settings-section value now
+            # covers the field, or the stored credential decrypts again.
+            # The note was only ever the echo of the block, so leaving it
+            # would keep asking for a re-entry that already happened.
+            _record_provider_last_error(provider_id, None)
+        configs[provider_id] = _effective_installation_config(installation, state)[0]
     return configs
+
+
+def _settings_section_supplies(provider_id: str, field: str) -> bool:
+    """Whether the plugin's own settings section holds a non-empty live
+    value for `field` - the same overlay get_providers_auth applies, so
+    the block agrees with what the worker would actually receive."""
+    try:
+        from app.config import settings
+        section = settings.get(str(provider_id), {}) if hasattr(settings, "get") else {}
+        if not hasattr(section, "get"):
+            return False
+        return section.get(field) not in (None, "", [], {})
+    except Exception:
+        return False
+
+
+def _unsatisfied_secret_fields(provider_id: str, installation: dict[str, Any],
+                               state: dict[str, Any] | None = None) -> set[str]:
+    """The installation's secret fields whose stored value will not
+    decrypt and whose settings section supplies no live value either:
+    exactly the ones that leave the provider without a credential."""
+    _effective, undecryptable = _effective_installation_config(installation, state)
+    return {
+        field
+        for field in undecryptable
+        if not _settings_section_supplies(provider_id, field)
+    }
+
+
+# The state-derived inputs of the decrypt block, cached per state.json
+# version: the admission gate runs before every provider call, and loading
+# and re-walking state.json each time was most of its cost. The cache key is
+# the state file's mtime and size plus the write version (mutate_state bumps
+# it, so a rewritten file never reads as unchanged), so anything that changes
+# state.json invalidates it; the live failure paths and settings-section
+# values are applied per call, outside the cache.
+_BLOCK_CACHE: dict[str, Any] = {"key": None, "state": None}
+
+
+def _block_cache_key() -> tuple:
+    """The identity of state.json as this process sees it right now."""
+    from .state import state_file, state_version
+    try:
+        path = state_file()
+        stat = path.stat()
+        disk_key = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        path = None
+        disk_key = None
+    return (str(path), disk_key, state_version())
+
+
+def _decrypt_block_state(cache_key: tuple) -> dict[str, Any]:
+    """The blocked-set inputs that come from state.json alone: per provider,
+    the active manifest's declared fields, the ones whose stored value will
+    not decrypt, and the ones with a working stored value.
+
+    The key is read by the caller, BEFORE the state is loaded, so a cache
+    hit pays neither the file read nor the parse. On a miss the state is
+    loaded and the block computed under that same key, and the answer is
+    stored only when the state did not change while it was computed: a
+    save landing in that window would otherwise pin the pre-save answer
+    under the post-save key, and a provider whose credential was just
+    re-entered would stay out of searches until some other write."""
+    if _BLOCK_CACHE["key"] == cache_key:
+        return _BLOCK_CACHE["state"]
+    state = load_state()
+    block: dict[str, Any] = {
+        "declared": {},      # provider_id -> fields the active manifest declares
+        "starved": {},       # provider_id -> declared fields with no working stored value
+        "working": {},       # provider_id -> secret fields with a working stored value
+    }
+    for provider_id, installation in (state.get("installations") or {}).items():
+        if not isinstance(installation, dict) or not installation.get("active_version"):
+            continue
+        # Keyed by the lowercased id: decrypt_failure_paths() carries the
+        # registry's lowercase form, whatever case state.json was written in.
+        key = str(provider_id).lower()
+        active_manifest = installation.get("manifest")
+        if not isinstance(active_manifest, dict):
+            active_manifest = {}
+        from secret_store.registry import _manifest_field_names, manifest_secret_fields
+        block["declared"][key] = _manifest_field_names(active_manifest)
+        effective, undecryptable = _effective_installation_config(installation, state)
+        block["starved"][key] = set(undecryptable)
+        working = set()
+        for field in manifest_secret_fields(active_manifest) | _retained_secret_fields(key, state):
+            value = effective.get(field)
+            if value not in (None, "") and field not in undecryptable:
+                working.add(field)
+        block["working"][key] = working
+    if _block_cache_key() == cache_key:
+        _BLOCK_CACHE["key"] = cache_key
+        _BLOCK_CACHE["state"] = block
+    return block
+
+
+def decrypt_blocked_provider_ids() -> set[str]:
+    """Provider ids with no usable credential, from either place one lives.
+
+    Two sources block a provider. A stored installation credential that
+    will not decrypt blocks it unless the plugin's settings section
+    supplies a live value for that field (the worker config is laid over
+    that section, so the plugin runs on the section's value). And a
+    settings-section credential that failed to decrypt at boot blocks it
+    unless the stored config supplies a working value: the withheld empty
+    string is what the overlay would apply. In both cases only fields the
+    active manifest declares count - a retained field the plugin no longer
+    reads withholds nothing it needs.
+
+    The ids are published so the search path keeps these providers out of
+    selection and admission too, not just out of the worker's
+    configuration. A blocked provider is not searched until its
+    credential is re-entered."""
+    from secret_store.migration import decrypt_failure_paths
+
+    block = _decrypt_block_state(_block_cache_key())
+    blocked: set[str] = set()
+    for provider_id, starved in block["starved"].items():
+        if any(not _settings_section_supplies(provider_id, field) for field in starved):
+            blocked.add(str(provider_id))
+    # A settings-section credential that failed to decrypt is withheld from
+    # the overlay, and the stored config is the only other source for the
+    # field.
+    for path in decrypt_failure_paths():
+        provider_id, _, field = path.partition(".")
+        declared = block["declared"].get(provider_id)
+        if not declared or field not in declared:
+            continue
+        if field in block["working"].get(provider_id, ()):
+            continue
+        blocked.add(str(provider_id))
+    return blocked
 
 
 def list_providers(redact: bool = True) -> list[dict[str, Any]]:
@@ -2157,6 +2604,10 @@ def _stage_validated(
                 source_id,
             )
             installations[validated.provider_id] = installation
+            # The plugin's secret paths join the persisted set now, so a
+            # credential configured through the settings card is encrypted
+            # at rest from the first save and stays covered after removal.
+            _persist_plugin_secret_paths(state, installation)
             return dict(installation)
 
         installation = mutate_state(record_staged_install)
@@ -2446,6 +2897,12 @@ def activate_staged_installations() -> list[str]:
 
         def persist_activated(state: dict[str, Any]) -> None:
             state["installations"] = updated_installations
+            # Activation swaps the installation's manifest for the staged one;
+            # the staged schema's secret paths (a new version can add them)
+            # join the persisted set with it.
+            for installation in updated_installations.values():
+                if isinstance(installation, dict):
+                    _persist_plugin_secret_paths(state, installation)
 
         mutate_state(persist_activated)
     return activated

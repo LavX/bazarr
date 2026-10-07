@@ -45,6 +45,24 @@ _PROVIDER_HUB_REGISTRATION_DONE = False
 _REPORTED_RESERVED_SECTION_PLUGINS = set()
 
 
+def _decrypt_blocked_provider_ids():
+    """Provider ids whose stored credentials will not decrypt.
+
+    Carried through configuration, selection and admission, so a provider
+    left without a usable credential is left out of searches completely
+    instead of only out of the runtime config: without the selection and
+    admission legs the pool rebuilt its config from the installation row
+    and queried it anyway. Unavailable answers empty, because the pool has
+    to be built either way and runtime_provider_configs already refuses
+    the blocked providers their config."""
+    try:
+        from provider_hub.service import decrypt_blocked_provider_ids
+        return decrypt_blocked_provider_ids()
+    except Exception:
+        logging.exception("Unable to load the Provider Hub decrypt-blocked providers")
+        return set()
+
+
 def _ensure_provider_hub_registered():
     global _PROVIDER_HUB_REGISTRATION_DONE
     if _PROVIDER_HUB_REGISTRATION_DONE:
@@ -186,13 +204,17 @@ _REMOTE_TIMEOUTS = {
 
 def provider_is_usable(name):
     """Adoption gate for the provider pools (see SZProviderPool.__getitem__):
-    True only when the provider is enabled in settings and not currently
-    throttled, so a download naming a provider from a stale cached search
-    cannot resurrect one the user disabled or the backoff excluded."""
+    True only when the provider is enabled in settings, not currently
+    throttled, and not blocked by a credential that will not decrypt, so a
+    download naming a provider from a stale cached search cannot resurrect
+    one the user disabled, the backoff excluded, or the secret store
+    withheld the credential of."""
     if name not in settings.general.enabled_providers:
         return False
     reason, until, _ = tp.get(name, (None, None, None))
     if reason and until and datetime.datetime.now() < until:
+        return False
+    if name in _decrypt_blocked_provider_ids():
         return False
     return True
 
@@ -293,7 +315,11 @@ def get_providers():
     _ensure_provider_hub_registered()
     providers_list = []
     existing_providers = provider_registry.names()
-    providers = [x for x in settings.general.enabled_providers if x in existing_providers]
+    blocked = _decrypt_blocked_provider_ids()
+    # Selection: a provider whose stored credential will not decrypt is
+    # left out here, so no search asks the pool for it at all.
+    providers = [x for x in settings.general.enabled_providers
+                 if x in existing_providers and x not in blocked]
     for provider in providers:
         reason, until, throttle_desc = tp.get(provider, (None, None, None))
         providers_list.append(provider)
@@ -550,9 +576,22 @@ def get_providers_auth():
         logging.exception("Unable to load Provider Hub provider config")
     try:
         from provider_hub.manifest import reserved_settings_sections
-        from provider_hub.state import active_installations
+        from provider_hub.state import running_installations
         reserved_sections = reserved_settings_sections()
-        for installation in active_installations():
+        blocked = _decrypt_blocked_provider_ids()
+        # The same active-version population the runtime configs admit, with
+        # the active manifest: the class stays keyed off active_version until
+        # a restart, so a pending update must not strip the section overlay,
+        # or a provider admitted on its settings-section credential runs
+        # without it. A staged schema's fields are not overlaid; the code
+        # that is running is the active version's.
+        for installation in running_installations():
+            if installation.provider_id in blocked:
+                # Configuration: a provider whose stored credential will not
+                # decrypt is not rebuilt here from its installation row, or
+                # the pool would query it anyway with the settings section's
+                # values for config. No config, no worker request.
+                continue
             manifest = installation.manifest
             schema = manifest.get("config_schema") if isinstance(manifest, dict) else {}
             properties = schema.get("properties") if isinstance(schema, dict) else {}
@@ -581,7 +620,7 @@ def get_providers_auth():
                 if "default" in field and key not in config:
                     config[key] = field["default"]
                 value = section.get(key) if hasattr(section, "get") else getattr(section, key, None)
-                if value not in (None, ""):
+                if value not in (None, "", [], {}):
                     config[key] = value
             provider_configs[installation.provider_id] = config
     except Exception:

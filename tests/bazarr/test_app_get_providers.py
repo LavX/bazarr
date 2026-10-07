@@ -317,7 +317,7 @@ class TestProviderHubSettingsOverlay:
 
         monkeypatch.setattr(
             hub_state,
-            "active_installations",
+            "running_installations",
             lambda: [self._installation(provider_id)],
         )
         monkeypatch.setattr(
@@ -364,6 +364,21 @@ class TestProviderHubSettingsOverlay:
             config.set("overlayhub", {})
 
         assert auth["overlayhub"]["apikey"] == "typed-into-the-settings-card"
+
+    def test_an_empty_section_collection_is_not_laid_into_the_worker_config(self, monkeypatch):
+        # An empty list or dict at a declared field is an absent value, not
+        # a supplied one: laying it over the stored config would hand the
+        # plugin the empty collection in place of its configured value.
+        config = get_providers.settings
+        for empty in ([], {}):
+            config.set("overlayhub", {"apikey": empty})
+            self._patch_hub(monkeypatch, "overlayhub", {"apikey": "stale-stored-key"})
+            try:
+                auth = get_providers.get_providers_auth()
+            finally:
+                config.set("overlayhub", {})
+
+            assert auth["overlayhub"]["apikey"] == "stale-stored-key"
 
 
 def test_concurrent_recorders_do_not_race_on_the_staging_file(monkeypatch, tmp_path):

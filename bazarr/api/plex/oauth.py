@@ -397,6 +397,16 @@ class PlexPinCheck(Resource):
                 settings.plex.auth_method = 'oauth'
                 settings.general.use_plex = True
 
+                # Signing in replaces the account's credentials, exactly as
+                # signing out clears them: end the decrypt failures of the
+                # paths this branch sets before the write, or the health
+                # issue would keep asking for an API key the user has
+                # replaced, and the preserve pass would keep the old token's
+                # recoverable ciphertext over the fresh one.
+                from secret_store.migration import clear_decrypt_failure_path
+                for path in ("plex.token", "plex.apikey", "plex.username", "plex.email"):
+                    clear_decrypt_failure_path(path)
+
                 try:
                     write_config()
                     # The account now holds the credential the refresh worker
@@ -791,6 +801,16 @@ class PlexLogout(Resource):
             settings.plex.server_local = False
             settings.plex.encryption_key = ""
             settings.general.use_plex = False
+
+            # Signing out is a purposeful clear of the account credentials.
+            # End any decrypt failure they carry before the write, or the
+            # preserve pass would keep the recoverable ciphertext on disk
+            # and the health issue would keep asking for an account the
+            # user just signed out of (and the old token would return with
+            # the right master key after a restart).
+            from secret_store.migration import clear_decrypt_failure_path
+            for path in ("plex.token", "plex.apikey", "plex.username", "plex.email"):
+                clear_decrypt_failure_path(path)
 
             write_config()
             # Switched off and stripped of its credential, not deleted: signing

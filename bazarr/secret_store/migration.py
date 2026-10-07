@@ -31,7 +31,11 @@ from . import crypto as _crypto  # module reference so test patches on
                                   # _crypto.get_master_key apply uniformly
                                   # across this module's call sites
 from .crypto import decrypt_secret, encrypt_secret, is_encrypted
-from .registry import USER_VISIBLE_SECRET_LISTS, USER_VISIBLE_SECRETS, WRITE_ONLY_SECRETS
+from .registry import (
+    USER_VISIBLE_SECRET_LISTS,
+    at_rest_secret_paths,
+    manifest_boolean_secret_paths,
+)
 
 
 # Plex legacy encryption fields. Pre-this-package, plex.apikey / plex.token
@@ -45,6 +49,115 @@ _PLEX_LEGACY_FIELDS = ("apikey", "token")
 
 logger = logging.getLogger(__name__)
 
+# Setting paths whose value failed to decrypt at boot. The live value is
+# withheld from every consumer (empty string, never the ciphertext), and
+# write_config keeps the on-disk ciphertext for these paths so a later save
+# does not overwrite recoverable ciphertext with the withheld empty value.
+# A save that carries the path (a new value or an explicit clear) removes it:
+# the failure is over, and neither the descriptor nor the preserve pass may
+# hold on to the old ciphertext past what the user just did.
+_FAILED_DECRYPT_PATHS: set[str] = set()
+
+# Failed elements of list-shaped secrets, per path: the ciphertext exactly as
+# it sits on disk. The preserve pass re-appends them to a later save's list,
+# so one element that fails to decrypt does not cost the elements that would
+# decrypt again under the right master key. A save that carries the path
+# replaces the whole list and drops the records with it.
+_FAILED_DECRYPT_ELEMENTS: dict[str, list[str]] = {}
+
+# Health notices for credentials this boot replaced because their stored
+# value would not decrypt. The replacement is already done, so the notice
+# tells the operator what to do next (update whatever held the old value)
+# rather than asking them to re-enter anything.
+_REPLACED_SECRET_ISSUES: list[dict[str, str]] = []
+
+# A secret shorter than this never has its last four characters exposed:
+# four characters of a short secret would be a large fraction of it.
+# The settings API and the Provider Hub installation API build their
+# write-only descriptors by this one rule.
+LAST_FOUR_MIN_LENGTH = 16
+
+
+def decrypt_failure_paths() -> frozenset[str]:
+    """The setting paths whose stored value would not decrypt this boot."""
+    return frozenset(_FAILED_DECRYPT_PATHS)
+
+
+def reset_decrypt_failures() -> None:
+    """Clear the per-path decrypt failure set. A fresh boot starts empty;
+    values that decrypt again no longer report a failure, and the
+    replacement notices of the previous boot do not carry over."""
+    _FAILED_DECRYPT_PATHS.clear()
+    _FAILED_DECRYPT_ELEMENTS.clear()
+    _REPLACED_SECRET_ISSUES.clear()
+
+
+def clear_decrypt_failure_path(path: str) -> None:
+    """End the decrypt failure for one path.
+
+    Called for every path a settings save carries, before the config is
+    written: a new value replaces the credential and an explicit clear
+    removes it, and neither may keep reporting decrypt_failed, hold the
+    old recoverable ciphertext over the fresh value, or resurrect the
+    credential after the next restart."""
+    _FAILED_DECRYPT_PATHS.discard(path)
+    _FAILED_DECRYPT_ELEMENTS.pop(path, None)
+
+
+def note_replaced_secret(path: str, issue: str) -> None:
+    """Record the health notice for a credential this boot replaced because
+    its stored value would not decrypt. The path leaves the failure set
+    (nothing needs re-entering), and the notice says what the operator still
+    has to do."""
+    _REPLACED_SECRET_ISSUES.append({"object": path, "issue": issue})
+
+
+def replaced_secret_issues() -> list[dict[str, str]]:
+    """Health issues for credentials this boot replaced, never their
+    values."""
+    return [dict(item) for item in _REPLACED_SECRET_ISSUES]
+
+
+def clear_replaced_secret_paths(live_snapshot: Dict[str, Any]) -> None:
+    """After a successful settings write: end the failure of every scalar
+    path whose live value is non-empty.
+
+    The boot pass withholds a failed value as an empty string, so a live
+    value that is not empty means some writer replaced the credential and
+    the fresh ciphertext of that value is now on disk: the failure is over.
+    Without this, only the settings API's save path ended a failure, and a
+    writer that set a credential directly (an OAuth sign-in, a generated
+    token) kept the health issue asking for a re-entry that had already
+    happened. List-shaped paths are left alone: their per-element records
+    survive until a save carries the path, and an element that reappears
+    non-empty in a list is not a replacement of the failed ones."""
+    for path in sorted(_FAILED_DECRYPT_PATHS):
+        if path in _FAILED_DECRYPT_ELEMENTS:
+            continue
+        try:
+            _section_key, _attr, live = _read_section_key(live_snapshot, path)
+        except (KeyError, ValueError):
+            continue
+        if isinstance(live, list):
+            continue
+        if live not in (None, ""):
+            clear_decrypt_failure_path(path)
+
+
+def decrypt_failure_issues() -> list[dict[str, str]]:
+    """Health issues for every credential that failed to decrypt.
+
+    Each issue names the setting path so the operator knows exactly which
+    credential to re-enter, and never the value."""
+    return [
+        {
+            "object": path,
+            "issue": "The stored credential could not be decrypted (the master key may have "
+                     "changed). Re-enter this credential in Settings and save.",
+        }
+        for path in sorted(_FAILED_DECRYPT_PATHS)
+    ]
+
 
 def _split_path(path: str) -> tuple[str, str]:
     """Split 'section.key' into ('section', 'key'). Always yields exactly
@@ -53,6 +166,17 @@ def _split_path(path: str) -> tuple[str, str]:
     if not key:
         raise ValueError(f"Registry path {path!r} must be 'section.key'")
     return section, key
+
+
+def _coerced_secret_text(value) -> str:
+    """The typed text a non-string scalar at a registered secret path
+    stands for. A boolean is the lowercase text the settings write path
+    round-trips ("true" and "false", never Python's capitalized repr, which
+    is not what anybody typed and would count as truthy for a False); a
+    number is its digits."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
 
 
 def _read_section_key(d: Dict[str, Any], path: str) -> tuple[str, str, Any]:
@@ -169,10 +293,21 @@ def migrate_legacy_plex_encryption(settings_obj) -> None:
 
 
 def has_plaintext_secrets_on_disk(settings_obj) -> bool:
-    """Return True iff at least one USER_VISIBLE_SECRETS path holds a
-    non-empty string without the enc:v1: marker - i.e. somebody (manual
-    edit, fresh upgrade, registry-expansion deploy) wrote a credential
-    in clear text and write_config has not yet rewritten the file.
+    """Return True iff at least one at-rest secret path holds a value
+    without the enc:v1: marker that is still a credential - a non-empty
+    string, or any non-string, non-None scalar (int, float, bool). The
+    scalar case is the mark of an older save that coerced a typed token
+    into a number or a boolean: the typed text is the credential, and
+    leaving the coerced value unencrypted would keep it in the clear on
+    disk, unable to mask in the API like every other credential. A
+    non-empty list or dictionary at a registered path is flagged too: no
+    at-rest pass can encrypt it, so the rewrite must refuse rather than
+    converge on leaving it in the clear. An empty value is not flagged:
+    empty stays empty, no migration.
+
+    Covers the static tiers plus the dynamically registered Provider Hub
+    plugin secrets, so a plaintext plugin secret forces the same one-time
+    rewrite as a built-in one.
 
     Lets the bootstrap force a one-time write_config call so the
     encryption guarantee is deterministic - the operator does not have
@@ -183,7 +318,7 @@ def has_plaintext_secrets_on_disk(settings_obj) -> bool:
     same source of truth that decrypt_settings_in_place / write_config
     operate on.
     """
-    for path in USER_VISIBLE_SECRETS | WRITE_ONLY_SECRETS:
+    for path in at_rest_secret_paths():
         try:
             section, key = _split_path(path)
             section_obj = getattr(settings_obj, section, None)
@@ -193,6 +328,25 @@ def has_plaintext_secrets_on_disk(settings_obj) -> bool:
                 else getattr(section_obj, key, None)
             if isinstance(current, str) and current and not is_encrypted(current):
                 return True
+            # isinstance(True, int) is True, so the bool check has to come
+            # first: a boolean at a registered path is flagged exactly like
+            # a number, because a save that coerced "true" left it there.
+            # One exception: a field the active manifest declares boolean
+            # holds a real toggle, and coercing its False to text would
+            # store the truthy string, so it is not plaintext to fix.
+            if isinstance(current, (bool, int, float)):
+                if isinstance(current, bool) and path in manifest_boolean_secret_paths():
+                    continue
+                return True
+            if isinstance(current, (list, dict)):
+                # A collection an earlier write left at a registered
+                # secret path can be neither encrypted at rest nor
+                # covered, and this pass is what forces the rewrite whose
+                # encryption refusal then stops the boot. An empty
+                # collection is not a credential, the same empty the
+                # string rule leaves alone.
+                if current:
+                    return True
         except Exception:
             continue
 
@@ -214,20 +368,31 @@ def has_plaintext_secrets_on_disk(settings_obj) -> bool:
 
 
 def decrypt_settings_in_place(settings_obj) -> None:
-    """Walk every USER_VISIBLE_SECRETS / USER_VISIBLE_SECRET_LISTS path in
-    the live settings object and decrypt any value carrying the marker
-    prefix. Plaintext values are left untouched (decrypt_secret is a
-    passthrough on plaintext - that's the auto-migration story).
+    """Walk every at-rest secret path in the live settings object and
+    decrypt any value carrying the marker prefix. Plaintext values are
+    left untouched (decrypt_secret is a passthrough on plaintext - that's
+    the auto-migration story).
 
-    Failures are logged but non-fatal: a corrupt single ciphertext should
-    not stop bazarr from starting. The operator can rotate that credential
-    via the Settings page; everything else continues to work.
+    Fails closed: a value that will not decrypt is withheld from every
+    consumer (the live value becomes an empty string, never the
+    ciphertext, so nothing can send the stored bytes anywhere as the
+    credential), its path is tracked so write_config preserves the
+    on-disk ciphertext, and a health issue names the setting path. The
+    operator re-enters the credential; everything else keeps working.
 
     Runs exactly once at bootstrap, after settings.validators.validate_all
     finishes. Re-running is harmless (decrypt_secret is idempotent on
-    already-plaintext values).
-    """
-    for path in USER_VISIBLE_SECRETS | WRITE_ONLY_SECRETS:
+    already-plaintext values), and re-runs after reload() re-withhold a
+    path whose ciphertext still will not decrypt.
+
+    A non-string scalar at a registered path is normalized to the typed
+    text it stands for in the same pass, before any worker configuration
+    is built from the live settings: the rewrite stores that text on disk,
+    and without the matching live value the settings overlay would keep
+    forwarding the coerced number to the worker while the disk copy is
+    ciphertext. A boolean at a field the active manifest declares boolean
+    is a stored toggle and is left alone, whether or not it is a secret."""
+    for path in at_rest_secret_paths():
         try:
             section, key = _split_path(path)
             section_obj = getattr(settings_obj, section, None)
@@ -236,15 +401,35 @@ def decrypt_settings_in_place(settings_obj) -> None:
             current = section_obj.get(key) if hasattr(section_obj, "get") \
                 else getattr(section_obj, key, None)
             if isinstance(current, str) and is_encrypted(current):
-                decrypted = decrypt_secret(current)
+                try:
+                    decrypted = decrypt_secret(current)
+                except Exception as e:
+                    # Don't print the credential value or section/key hint that
+                    # could be inferred to a specific provider in a public bug
+                    # report. The health issue names the path; the log stays
+                    # nameless.
+                    logger.error(
+                        f"Failed to decrypt secret at rest: {type(e).__name__}; "  # noqa: G004
+                        f"the value is withheld and must be re-entered."
+                    )
+                    _FAILED_DECRYPT_PATHS.add(path)
+                    section_obj[key] = ""
+                    continue
                 section_obj[key] = decrypted
+            elif isinstance(current, (bool, int, float)):
+                # A typed token an older save coerced into a number or a
+                # boolean: the live value becomes the text it was, so the
+                # worker configuration, the API and the on-disk rewrite all
+                # carry the same credential. A field the active manifest
+                # declares boolean is a toggle and keeps its value, whether
+                # or not it is a secret.
+                if isinstance(current, bool) and path in manifest_boolean_secret_paths():
+                    continue
+                section_obj[key] = _coerced_secret_text(current)
         except Exception as e:
-            # Don't print the credential value or section/key hint that could
-            # be inferred to a specific provider in a public bug report.
             logger.error(
                 f"Failed to decrypt secret at rest: {type(e).__name__}; "  # noqa: G004
-                f"continuing with the value unchanged so the rest of bazarr "
-                f"can boot. Rotate the credential to recover."
+                f"continuing so the rest of bazarr can boot."
             )
 
     for path in USER_VISIBLE_SECRET_LISTS:
@@ -257,10 +442,30 @@ def decrypt_settings_in_place(settings_obj) -> None:
                 else getattr(section_obj, key, None)
             if not isinstance(current, list):
                 continue
+            # Re-walked on every pass: what this pass fails to decrypt is the
+            # record, and what decrypts again leaves none behind.
+            _FAILED_DECRYPT_ELEMENTS.pop(path, None)
             new_items = []
             for item in current:
                 if isinstance(item, str) and is_encrypted(item):
-                    new_items.append(decrypt_secret(item))
+                    try:
+                        new_items.append(decrypt_secret(item))
+                    except Exception as e:
+                        # Same fail-closed rule as the scalar loop: an
+                        # element that will not decrypt is withheld rather
+                        # than handed to a consumer as if it were the key.
+                        # The ciphertext itself is recorded, because the
+                        # next save has to be able to keep it: one failed
+                        # element must not cost the elements that would
+                        # decrypt again under the right master key.
+                        logger.error(
+                            f"Failed to decrypt list-shaped secret at rest: "  # noqa: G004
+                            f"{type(e).__name__}; the element is withheld and must "
+                            f"be re-entered."
+                        )
+                        _FAILED_DECRYPT_PATHS.add(path)
+                        _FAILED_DECRYPT_ELEMENTS.setdefault(path, []).append(item)
+                        continue
                 else:
                     new_items.append(item)
             section_obj[key] = new_items
@@ -273,7 +478,8 @@ def decrypt_settings_in_place(settings_obj) -> None:
 
 def encrypt_settings_dict(plaintext_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Return a new dict identical to `plaintext_dict` except that every
-    USER_VISIBLE_SECRETS / USER_VISIBLE_SECRET_LISTS path is encrypted.
+    at-rest secret path (static tiers plus registered plugin secrets) and
+    every secret list is encrypted.
 
     Used by `write_config()` to produce the on-disk form. The dict is
     deep-copied so the in-memory settings (which is what the caller
@@ -304,31 +510,143 @@ def encrypt_settings_dict(plaintext_dict: Dict[str, Any]) -> Dict[str, Any]:
     if not out["general"].get("secrets_encryption_key"):
         out["general"]["secrets_encryption_key"] = master_key
 
-    for path in USER_VISIBLE_SECRETS | WRITE_ONLY_SECRETS:
+    for path in at_rest_secret_paths():
         try:
             section_key, attr, value = _read_section_key(out, path)
-            if isinstance(value, str) and value:
-                out[section_key][attr] = encrypt_secret(value, master_key=master_key)
-        except KeyError:
+        except (KeyError, ValueError):
+            # ValueError is a malformed registry path (no section.key shape
+            # to split): skipped rather than raised, because the value it
+            # names cannot be walked anyway and the failure must not cost
+            # the save. The tolerance ends at the lookup: an encryption
+            # failure raises instead, so the save refuses rather than
+            # return the credential in the payload as plaintext.
             continue
+        if isinstance(value, str) and value:
+            out[section_key][attr] = encrypt_secret(value, master_key=master_key)
+        elif isinstance(value, bool):
+            if path in manifest_boolean_secret_paths():
+                # A field the active manifest declares boolean holds a
+                # stored toggle, whether or not it is a secret:
+                # stringifying its False would hand the plugin the truthy
+                # text, so the value is left exactly as it is.
+                continue
+            # A credential an older save coerced into a boolean ("true"
+            # that became True): stored as the typed text from now on,
+            # in the lowercase form the settings write path round-trips,
+            # so it encrypts at rest and masks in the API like every
+            # other credential. The detection pass flags exactly these
+            # values, so the rewrite must cover them too or it would
+            # never converge.
+            out[section_key][attr] = encrypt_secret(
+                _coerced_secret_text(value), master_key=master_key)
+        elif value is not None and not isinstance(value, (str, list, dict)):
+            # A typed token an older save coerced into a number (a token
+            # like 001234567890123456): stored as the typed text from
+            # now on, so it encrypts at rest and masks in the API like
+            # every other credential.
+            out[section_key][attr] = encrypt_secret(str(value), master_key=master_key)
+        elif isinstance(value, (list, dict)):
+            # A collection an earlier write left at a registered secret
+            # path can be neither encrypted at rest nor covered, and the
+            # detection pass flags it as exactly that: carrying it into
+            # the payload would write the credential in the clear, so
+            # the save refuses instead. An empty collection is not a
+            # credential, the same empty the string rule leaves alone.
+            if value:
+                raise ValueError(
+                    f"The setting {path} holds a list or a dictionary "
+                    f"where a registered secret path lives, which the "
+                    f"secret store cannot encrypt; the save refuses "
+                    f"rather than return the credential in the payload "
+                    f"as plaintext"
+                )
 
     for path in USER_VISIBLE_SECRET_LISTS:
         try:
             section_key, attr, value = _read_section_key(out, path)
-            if isinstance(value, list):
-                out[section_key][attr] = [
-                    encrypt_secret(v, master_key=master_key) if isinstance(v, str) and v else v
-                    for v in value
-                ]
-        except KeyError:
+        except (KeyError, ValueError):
             continue
+        if isinstance(value, list):
+            out[section_key][attr] = [
+                encrypt_secret(v, master_key=master_key) if isinstance(v, str) and v else v
+                for v in value
+            ]
     return out
+
+
+def preserve_recoverable_ciphertexts(encrypted_payload: Dict[str, Any],
+                                     plaintext_snapshot: Dict[str, Any],
+                                     on_disk_dict: Dict[str, Any]) -> None:
+    """Keep the recoverable ciphertext of every path that failed to decrypt
+    at boot, unless a new value replaces it.
+
+    The boot pass withholds a failed value as an empty string, so without
+    this step the next save would overwrite recoverable ciphertext with
+    that empty value. A live value that is not empty means the operator
+    re-entered the credential, and the fresh encryption of that value is
+    kept instead. A list-shaped path keeps the ciphertext of each element
+    that failed to decrypt, re-appended to the fresh list: an unrelated
+    save must not cost the element that would decrypt again once the right
+    master key is back.
+
+    A path a save carried (new value or explicit clear) is removed from
+    the failure set before the write, so what the user just did is what
+    lands on disk.
+
+    `encrypted_payload` is the dict about to be persisted; `on_disk_dict`
+    is the file's current content, both keyed as `_write_config` builds
+    them.
+    """
+    for path in sorted(_FAILED_DECRYPT_PATHS):
+        try:
+            live_key, live_attr, live = _read_section_key(plaintext_snapshot, path)
+        except (KeyError, ValueError):
+            continue
+        if isinstance(live, list):
+            # The recorded failed elements join the fresh list. The on-disk
+            # comparison below is the source for paths recorded before this
+            # process started keeping per-element records.
+            recorded = list(_FAILED_DECRYPT_ELEMENTS.get(path) or [])
+            if not recorded:
+                continue
+        elif isinstance(live, str) and live:
+            # Re-entered credential: the fresh cipher wins.
+            continue
+        elif live not in (None, ""):
+            continue
+        try:
+            _section_key, _attr, stored = _read_section_key(on_disk_dict, path)
+        except (KeyError, ValueError):
+            continue
+        if isinstance(live, list):
+            # The payload's freshly encrypted list, plus the withheld
+            # ciphertext elements.
+            try:
+                payload_key, payload_attr, payload_value = _read_section_key(encrypted_payload, path)
+            except (KeyError, ValueError):
+                continue
+            if not isinstance(payload_value, list):
+                continue
+            encrypted_payload[payload_key][payload_attr] = payload_value + recorded
+            continue
+        if isinstance(stored, str) and not stored:
+            continue
+        if isinstance(stored, list) and not stored:
+            continue
+        if not isinstance(stored, (str, list)):
+            continue
+        # _read_section_key matched the payload's casing for us.
+        try:
+            payload_key, payload_attr, _ = _read_section_key(encrypted_payload, path)
+        except (KeyError, ValueError):
+            continue
+        encrypted_payload[payload_key][payload_attr] = stored
 
 
 def decrypt_settings_dict(encrypted_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Symmetric counterpart of encrypt_settings_dict. Returns a new dict
-    where every USER_VISIBLE_SECRETS / USER_VISIBLE_SECRET_LISTS path is
-    decrypted to plaintext.
+    where every at-rest secret path (static tiers plus registered plugin
+    secrets) and every secret list is decrypted to plaintext.
 
     Used by `write_config()` to compare the in-memory plaintext settings
     against the on-disk dict in plaintext form. Without this normalization
@@ -337,11 +655,12 @@ def decrypt_settings_dict(encrypted_dict: Dict[str, Any]) -> Dict[str, Any]:
     even when nothing changed.
 
     Decrypt failures (corrupt cipher, wrong master key) leave the value
-    untouched so the comparison fails safely - the rewrite proceeds and
-    overwrites the bad cipher with a fresh one.
+    untouched so the comparison fails safely - the rewrite proceeds, and
+    preserve_recoverable_ciphertexts decides whether the on-disk cipher
+    survives it.
     """
     out = deepcopy(encrypted_dict)
-    for path in USER_VISIBLE_SECRETS | WRITE_ONLY_SECRETS:
+    for path in at_rest_secret_paths():
         try:
             section_key, attr, value = _read_section_key(out, path)
             if isinstance(value, str) and is_encrypted(value):
@@ -349,7 +668,10 @@ def decrypt_settings_dict(encrypted_dict: Dict[str, Any]) -> Dict[str, Any]:
                     out[section_key][attr] = decrypt_secret(value)
                 except ValueError:
                     pass  # leave the bad cipher in place; compare will diff
-        except KeyError:
+        except (KeyError, ValueError):
+            # ValueError is a malformed registry path (no section.key shape
+            # to split): skipped, so an unsplittable path never costs the
+            # comparison the whole save depends on.
             continue
 
     for path in USER_VISIBLE_SECRET_LISTS:
@@ -366,6 +688,6 @@ def decrypt_settings_dict(encrypted_dict: Dict[str, Any]) -> Dict[str, Any]:
                     else:
                         new_items.append(v)
                 out[section_key][attr] = new_items
-        except KeyError:
+        except (KeyError, ValueError):
             continue
     return out
