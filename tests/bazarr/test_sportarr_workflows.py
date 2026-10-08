@@ -1166,19 +1166,58 @@ def test_scheduled_sports_sync_queues_one_named_job_and_forwards_the_queued_run(
     assert (row["module"], row["func"]) == ("sportarr.sync.leagues", "sync_sports_for_instance")
     assert row["kwargs"]["arr_instance_id"] == 1
     assert row["status"] == "pending"
-    assert row["job_name"] == "Syncing sports library with Sportarr (Main)"
+    assert row["job_name"] == "Syncing sports library with Sportarr (instance 1)"
+    assert row["is_progress"] is True
     assert workflows.is_sports_job(row)
 
     job = queue.jobs_pending_queue.popleft()
     queue.jobs_running_queue.append(job)
     assert queue._run_job(job)
     assert synced == [(1, {"job_id": job.job_id})]
-    assert job.job_name == "Synced sports library with Sportarr (Main)"
+    assert job.job_name == "Synced sports library with Sportarr (instance 1)"
     assert job.progress_message == "3 leagues synced"
 
     leagues.sync_sports_for_instance(2, job_id=77)
     assert synced[-1] == (2, {"job_id": 77})
     assert not queue.jobs_pending_queue
+
+
+def test_the_queued_sync_counts_its_leagues_and_threads_the_job_id_into_the_event_pass(
+    workflow_library, monkeypatch
+):
+    """The queued run reported no progress and its event pass ran without the
+    job id, so the System > Jobs card showed neither a ring nor a live line,
+    unlike the Sonarr and Radarr syncs. The queued run now counts its leagues
+    up front and hands the job id on. The live stream and the webhook call
+    update_sports_for_instance directly with no job, so they report nothing."""
+    from sportarr import rootfolder
+    from sportarr.sync import events as sync_events_module
+
+    leagues, workflows, queue, session = _scheduled_sync_queue(workflow_library, monkeypatch)
+    recorded = []
+    monkeypatch.setattr(rootfolder, "sync_rootfolders", lambda owner, **kwargs: None)
+    monkeypatch.setattr(leagues, "sync_leagues", lambda owner, **kwargs: [51, 53])
+    monkeypatch.setattr(sync_events_module, "sync_event_leagues",
+                        lambda ids, owner, **kwargs: recorded.append(kwargs))
+
+    leagues.sync_sports_for_instance(1)
+    rows = queue.list_jobs_from_queue()
+    assert len(rows) == 1
+    assert rows[0]["is_progress"] is True
+    job = queue.jobs_pending_queue.popleft()
+    queue.jobs_running_queue.append(job)
+    assert queue._run_job(job)
+    assert job.progress_max == 2
+    assert len(recorded) == 1
+    assert recorded[0]["job_id"] == job.job_id
+
+    # The direct path carries no job, so it reports no progress and no id.
+    progress = []
+    monkeypatch.setattr(queue, "update_job_progress",
+                        lambda job_id, **kwargs: progress.append(kwargs))
+    leagues.update_sports_for_instance(1)
+    assert recorded[-1].get("job_id") is None
+    assert not progress
 
 
 @pytest.mark.parametrize("synced_ids, summary", [([2, 4], "2 leagues synced"),

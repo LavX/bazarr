@@ -262,16 +262,11 @@ def update_sports_for_instance(arr_instance_id, job_id=None, *, cancel=None, exp
         kwargs = dict(cancel=cancel, expected_connection=expected, http_get=http_get)
         sync_rootfolders(arr_instance_id, **kwargs)
         ids = sync_leagues(arr_instance_id, **kwargs)
+        if job_id:
+            jobs_queue.update_job_progress(job_id=job_id, progress_max=len(ids))
         check_cancelled(cancel)
-        sync_event_leagues(ids, arr_instance_id, **kwargs, is_signalr=is_signalr, complete=True)
+        sync_event_leagues(ids, arr_instance_id, job_id=job_id, **kwargs, is_signalr=is_signalr, complete=True)
         return ids
-
-
-def _sync_job_label(arr_instance_id):
-    name = database.execute(select(TableArrInstances.name).where(
-        TableArrInstances.id == arr_instance_id,
-        TableArrInstances.kind == 'sportarr')).scalar_one_or_none()
-    return name or f'instance {arr_instance_id}'
 
 
 def _owner_is_enabled(arr_instance_id):
@@ -300,8 +295,8 @@ def sync_sports_for_instance(arr_instance_id, job_id=None, wait_for_completion=F
         # schedule, so a tick that fires in between must not queue another.
         if settings.general.use_sportarr and _owner_is_enabled(arr_instance_id):
             jobs_queue.add_job_from_function(
-                f'Syncing sports library with Sportarr ({_sync_job_label(arr_instance_id)})',
-                is_progress=False, wait_for_completion=wait_for_completion)
+                f'Syncing sports library with Sportarr (instance {arr_instance_id})',
+                is_progress=True, wait_for_completion=wait_for_completion)
         return
     from sportarr.workflows import SportsJobSignal
 
@@ -324,7 +319,7 @@ def sync_sports_for_instance(arr_instance_id, job_id=None, wait_for_completion=F
         raise
     jobs_queue.update_job_name(
         job_id=job_id,
-        new_job_name=f'Synced sports library with Sportarr ({_sync_job_label(arr_instance_id)})')
+        new_job_name=f'Synced sports library with Sportarr (instance {arr_instance_id})')
     noun = 'league' if len(ids) == 1 else 'leagues'
     # A Stop that landed after the sync's last checkpoint must not turn a
     # committed sync into "Cancelled by user".
