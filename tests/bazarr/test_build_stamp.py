@@ -9,9 +9,9 @@ constant identifies a running build.
 
 The rule this file guards: every image bake carries the line version, the
 source commit and the build date, stamped at build time and shown in System
-Status. The two workflows that bake the image already pass all three args,
-so the only bake that changes behaviour is an unstamped local one, which now
-fails loudly instead of shipping an image nobody can identify.
+Status. The workflows that bake the image pass all three args, so any bake
+that does not, local or in a lane, fails loudly instead of shipping an image
+nobody can identify.
 
 The repository does not track a ``BUILD`` file. A source checkout reads an
 empty stamp and shows no build identity, which is correct: a checkout is not
