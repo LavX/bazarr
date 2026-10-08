@@ -1070,6 +1070,72 @@ class WorkflowRunLaneTests(unittest.TestCase):
         self.assertIn("refs/heads/packaging/lock-v2.7.2", git(self.repository, "ls-remote", "--heads", "origin"))
         self.assertTrue(any("pr create --base development" in call for call in gh_log.read_text().splitlines()))
 
+    def test_a_replay_after_a_lower_lock_merges_resolves_and_pushes_from_the_new_base(self):
+        merged = lock_data("2.7.1", NEXT_DIGEST)
+        merged["platform_revisions"]["runtipi"] = 2
+        merged["platform_revisions"]["truenas"] = "1.0.1"
+        reviewed = (json.dumps(merged, sort_keys=True, indent=2) + "\n").encode()
+        self.development_origin("2.7.1.json", reviewed)
+        tools = self.root / "resolver-bin"
+        tools.mkdir()
+        python3 = tools / "python3"
+        python3.write_text(
+            '#!/bin/sh\n'
+            'tag=\n'
+            'releases=\n'
+            'previous=\n'
+            'for argument in "$@"; do\n'
+            '  case "$previous" in\n'
+            '    --tag) tag="$argument" ;;\n'
+            '    --releases-dir) releases="$argument" ;;\n'
+            '  esac\n'
+            '  previous="$argument"\n'
+            'done\n'
+            'case " $* " in\n'
+            '  *" --resolve-lock "*)\n'
+            '    base_name="$(command -p python3 packaging/release.py --lock-base --tag "$tag" --releases-dir "$releases")"\n'
+            '    base_name="${base_name%% *}"\n'
+            "    awk -v version=\"${tag#v}\" '\n"
+            "      /\"version\":/ { sub(/\"[0-9][0-9.]*\"/, \"\\\"\" version \"\\\"\") }\n"
+            "      /\"runtipi\":/ { match($0, /[0-9]+/); $0 = substr($0, 1, RSTART - 1) (substr($0, RSTART, RLENGTH) + 1) substr($0, RSTART + RLENGTH) }\n"
+            "      /\"truenas\":/ { match($0, /\"[0-9]+\\.[0-9]+\\.[0-9]+\"/); split(substr($0, RSTART + 1, RLENGTH - 2), parts, \".\"); $0 = substr($0, 1, RSTART - 1) \"\\\"\" parts[1] \".\" parts[2] \".\" (parts[3] + 1) \"\\\"\" substr($0, RSTART + RLENGTH) }\n"
+            "      { print }\n"
+            "    ' \"$releases/$base_name\" > \"packaging/releases/${tag#v}.json\"\n"
+            '    ;;\n'
+            '  *)\n'
+            '    exec command -p python3 "$@"\n'
+            '    ;;\n'
+            'esac\n')
+        python3.chmod(0o755)
+        runner = self.root / "runner"
+        runner.mkdir()
+        result = self.run_step(self.steps["Resolve release lock"]["run"],
+                               PATH=f"{tools}{os.pathsep}{os.environ['PATH']}",
+                               RUNNER_TEMP=str(runner), RELEASE_TAG="v2.7.2", GITHUB_OUTPUT=str(self.outputs))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # The propose job checks out development, whose tree does not carry the resolved lock yet.
+        resolved_path = self.repository / "packaging/releases/2.7.2.json"
+        resolved = resolved_path.read_bytes()
+        resolved_path.unlink()
+        recorded = dict(line.split("=", 1) for line in self.outputs.read_text().splitlines())
+        self.assertEqual(recorded, {
+            "resolved": "true",
+            "base": "2.7.1.json",
+            "base_sha256": hashlib.sha256(reviewed).hexdigest(),
+            "version": "2.7.2",
+            "sha256": hashlib.sha256(resolved).hexdigest(),
+        })
+        gh_log, environment = self.proposal_environment("2.7.2", resolved, resolved="true",
+                                                        lock_base=recorded["base"],
+                                                        lock_base_sha256=recorded["base_sha256"])
+        result = self.run_step(self.proposal, **environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("refs/heads/packaging/lock-v2.7.2", git(self.repository, "ls-remote", "--heads", "origin"))
+        self.assertTrue(any("pr create --base development" in call for call in gh_log.read_text().splitlines()))
+        pushed = json.loads(git(self.repository, "show", "origin/packaging/lock-v2.7.2:packaging/releases/2.7.2.json"))
+        self.assertEqual(pushed["platform_revisions"]["runtipi"], 3)
+        self.assertEqual(pushed["platform_revisions"]["truenas"], "1.0.2")
+
     def test_open_proposals_outside_the_lower_patches_still_push(self):
         stub = ('#!/bin/sh\n'
                 'printf "%s\\n" "$*" >> "$GH_LOG"\n'
