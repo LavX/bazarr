@@ -1836,6 +1836,7 @@ async def test_refusals_while_the_backend_is_down_are_named_here_and_reported_wh
     schedules the delivery by hand: the worker's own timer finds the backend
     answering again."""
     monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
     lines = []
     monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
     client = await _supervisor_client(tmp_path, monkeypatch)
@@ -1866,6 +1867,12 @@ async def test_refusals_while_the_backend_is_down_are_named_here_and_reported_wh
                     break
                 await asyncio.sleep(0.01)
             assert reports == [("the-supervisor-token", {"host": FOREIGN_HOST})]
+            # The worker clears the pending set once it has read the answer,
+            # not when the handler records it, so wait for its own clock.
+            for _ in range(200):
+                if not reporter.pending_reports():
+                    break
+                await asyncio.sleep(0.01)
             assert reporter.pending_reports() == []
             # The delivery worked, so this console needs no second line.
             assert len(lines) == 1
@@ -1882,6 +1889,7 @@ async def test_a_report_the_backend_did_not_take_is_held_and_retried(tmp_path, m
     and no call from anywhere, instead of waiting an hour for the next
     refusal. Until it lands, this console names the hostname."""
     monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
     lines = []
     monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
     attempts = {"count": 0}
@@ -1910,7 +1918,12 @@ async def test_a_report_the_backend_did_not_take_is_held_and_retried(tmp_path, m
                 await asyncio.sleep(0.01)
             reporter = supervisor._active_reporter
             assert reporter.pending_reports() == [FOREIGN_HOST]
-            # The failed delivery is named on this console, within its bounds.
+            # The failed delivery is named on this console, within its
+            # bounds, once the worker has read the answer that failed it.
+            for _ in range(200):
+                if lines:
+                    break
+                await asyncio.sleep(0.01)
             assert lines == [f"Refused a request for an unrecognized host: {FOREIGN_HOST}. Allow it "
                              f"under general.allowed_hosts in config.yaml, or set "
                              f"{supervisor.host_policy.ALLOWED_HOSTS_ENV}."]
@@ -1922,6 +1935,12 @@ async def test_a_report_the_backend_did_not_take_is_held_and_retried(tmp_path, m
                     break
                 await asyncio.sleep(0.01)
             assert attempts["count"] == 2
+            # The acknowledged retry is recorded once the worker has read
+            # the answer, so the pending set empties on the worker's clock.
+            for _ in range(200):
+                if not reporter.pending_reports():
+                    break
+                await asyncio.sleep(0.01)
             assert reporter.pending_reports() == []
             # And within the hour, a repeat refusal asks for nothing more.
             await client.get("/", headers={"Host": FOREIGN_HOST_HEADER})
@@ -2083,6 +2102,7 @@ async def test_only_an_acknowledged_report_counts_as_delivered(tmp_path, monkeyp
     redirect alike leave the hostname pending, and the delivery call does not
     follow the redirect, so the page it points at is never asked."""
     monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
     answers = {"status": 403, "headers": {}}
     visits = []
 
@@ -2205,6 +2225,7 @@ async def test_a_thousand_refusals_while_the_backend_is_down_stay_bounded(
     a time, and once the backend answers it is told about all of them within
     the pace, with no request and no manual call in between."""
     monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
     lines = []
     monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
     client = await _supervisor_client(tmp_path, monkeypatch)
