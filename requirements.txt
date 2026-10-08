@@ -51,7 +51,7 @@ Pillow>=12.3.0 --only-binary=Pillow
 plexapi>=4.18.3
 py7zr==1.1.3  # GHSA-q6rc-2cgv-63h7 arbitrary-file-write fix (latest)
 pycountry==26.2.16
-PyJWT>=2.15.0  # CVE-2026-32597 fix for unknown crit headers
+PyJWT>=2.15.1  # CVE-2026-32597 fix for unknown crit headers
 pysrt==1.1.2
 pysubs2==1.9.0
 python-dateutil==2.9.0.post0
