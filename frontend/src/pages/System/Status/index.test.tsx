@@ -7,7 +7,7 @@ import {
   sonarrDefault,
   sportarr,
 } from "@/pages/Settings/Connections/__tests__/fixtures";
-import { customRender, screen } from "@/tests";
+import { customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import SystemStatusView from ".";
 
@@ -16,6 +16,9 @@ type Connected = {
   radarr?: boolean;
   sports?: boolean;
   mediaServers?: System.MediaServerStatus[];
+  buildCommit?: string;
+  buildDate?: string;
+  packageVersion?: string;
 };
 
 function statusWith({
@@ -23,6 +26,9 @@ function statusWith({
   radarr = false,
   sports = false,
   mediaServers,
+  buildCommit = "",
+  buildDate = "",
+  packageVersion = "",
 }: Connected) {
   const instances = [
     ...(sonarr ? [sonarrDefault] : []),
@@ -36,6 +42,9 @@ function statusWith({
           sonarr_version: sonarr ? "4.0.0" : "",
           radarr_version: radarr ? "5.0.0" : "",
           sportarr_version: sports ? "4.1.6" : "",
+          build_commit: buildCommit,
+          build_date: buildDate,
+          package_version: packageVersion,
           ...(mediaServers ? { media_servers: mediaServers } : {}),
         },
       }),
@@ -84,6 +93,9 @@ function statusReplies(...replies: System.MediaServerStatus[][]) {
           sonarr_version: "",
           radarr_version: "",
           sportarr_version: "",
+          build_commit: "",
+          build_date: "",
+          package_version: "",
           media_servers: servers,
         },
       });
@@ -299,5 +311,45 @@ describe("System Status", () => {
     expect(screen.queryByText("Plex Version")).toBeNull();
     expect(screen.queryByText("Silo Version")).toBeNull();
     expect(screen.queryByText("Jellyfin Version")).toBeNull();
+  });
+
+  it("shows the build identity a stamped image reports", async () => {
+    // A build must identify itself: the commit and the bake date, so the
+    // owner can tell which tree the box is running. "latest" never could.
+    statusWith({
+      buildCommit: "5c8d31197",
+      buildDate: "2026-09-30",
+      packageVersion: "Bazarr+ v2.7.0 by LavX",
+    });
+    customRender(<SystemStatusView />);
+
+    expect(
+      await screen.findByText("5c8d31197 (2026-09-30)", undefined, {
+        timeout: 8000,
+      }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("Build")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Last Released Package"),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText("Bazarr+ v2.7.0 by LavX"),
+    ).toBeInTheDocument();
+  });
+
+  it("shows no build row for a source checkout", async () => {
+    // A checkout is not a build: no BUILD file is written, so the fields
+    // come back empty and the row stays out rather than render a blank. The
+    // absence can only be asserted once the endpoint has answered, because
+    // the row's condition is on the value, not on the answer's arrival.
+    statusWith({});
+    customRender(<SystemStatusView />);
+
+    expect(
+      await screen.findByText("Bazarr Version", undefined, { timeout: 8000 }),
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByText("Build")).toBeNull();
+    });
   });
 });

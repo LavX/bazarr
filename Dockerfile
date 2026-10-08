@@ -5,7 +5,10 @@
 # Based on Debian Slim for better compatibility (unrar, etc.)
 # =============================================================================
 
-ARG BAZARR_VERSION=latest
+# A build must identify itself: the line version, the source commit and the
+# build date are required at bake time, so there is no default to fall back
+# on and an unstamped bake fails instead of shipping an unnamed image.
+ARG BAZARR_VERSION
 ARG BUILD_DATE
 ARG VCS_REF
 ARG ALASS_CLI_VERSION=2.0.0
@@ -124,8 +127,14 @@ COPY migrations ./migrations
 COPY bazarr.py ./
 COPY bazarr ./bazarr
 
+RUN test -n "${BAZARR_VERSION}" && test -n "${VCS_REF}" && test -n "${BUILD_DATE}" \
+    || { echo 'BAZARR_VERSION, VCS_REF and BUILD_DATE are required build args' >&2; exit 1; }
+
 # Write version to VERSION file so bazarr/main.py can read it
 RUN echo "${BAZARR_VERSION}" > /app/bazarr/VERSION
+
+# Write build stamp so System Status can show the commit and the build date
+RUN printf 'commit=%s\ndate=%s\n' "${VCS_REF}" "${BUILD_DATE}" > /app/bazarr/BUILD
 
 # Copy package identification file (shows version in System Status)
 COPY package_info /app/bazarr/package_info
