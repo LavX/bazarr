@@ -254,10 +254,14 @@ def test_the_approval_form_accepts_only_names_the_allowlist_can_match():
     ("192.168.1.5", None, False),
     # An explicitly empty one trusts nobody.
     ("127.0.0.1", "", False),
-    # The configured address, its mapped form, the star.
+    # The configured address, and the star.
     ("172.18.0.5", "172.18.0.5", True),
     ("172.18.0.9", "172.18.0.5", False),
-    ("::ffff:172.18.0.5", "172.18.0.5", True),
+    # A mapped IPv6 form is a different peer at the backend, whose
+    # forwarded-header middleware compares the peer against the setting
+    # exactly as written, so it is one here too: one spelling of the setting
+    # works at both layers, or neither layer trusts it.
+    ("::ffff:172.18.0.5", "172.18.0.5", False),
     ("10.0.0.9", "*", True),
     ("proxy.local", "proxy.local", True),
     ("proxy.local", "proxy.other", False),
@@ -757,12 +761,22 @@ def test_a_wrong_code_counts_against_the_login_throttle(approval_app, console_lo
     for _ in range(5):
         wrong = client.post("/host-approval", headers={"Host": FOREIGN_HOST_HEADER},
                             data={"host": FOREIGN_HOST_HEADER, "code": "wrong" * 3})
+        body = wrong.get_data(as_text=True)
         assert wrong.status_code == 403
+        # The error paragraph names the problem; it is never rendered as a
+        # second, forwarded hostname.
+        assert "Wrong or missing approval code." in body
+        assert '<p class="error">' in body
+        assert "forwarded hostname" not in body
 
     throttled = client.post("/host-approval", headers={"Host": FOREIGN_HOST_HEADER},
                             data={"host": FOREIGN_HOST_HEADER, "code": code})
+    body = throttled.get_data(as_text=True)
 
     assert throttled.status_code == 429
+    assert "Too many attempts. Try again in 5 minutes." in body
+    assert '<p class="error">' in body
+    assert "forwarded hostname" not in body
     assert config.general.allowed_hosts == []
 
 
@@ -776,8 +790,36 @@ def test_a_star_cannot_be_allowed_through_the_form(approval_app, console_log):
     for host in ("*", "*.example.com", "bad name.example.com", "<script>alert(1)</script>"):
         response = client.post("/host-approval", headers={"Host": FOREIGN_HOST_HEADER},
                                data={"host": host, "code": code})
+        body = response.get_data(as_text=True)
         assert response.status_code == 403, host
-        assert config.general.allowed_hosts == []
+        assert "That hostname cannot be allowed." in body, host
+        assert "forwarded hostname" not in body, host
+        assert config.general.allowed_hosts == [], host
+
+
+def test_a_failed_save_names_the_problem_on_the_page(approval_app, console_log, monkeypatch):
+    """The recovery surface's fourth refusal: a save that fails tells the
+    operator so on the page, in the error paragraph, instead of rendering
+    the message as a second, forwarded hostname."""
+    from app import ui
+
+    flask_app, config, _ = approval_app
+    client = flask_app.test_client()
+    client.get("/probe", headers={"Host": FOREIGN_HOST_HEADER})
+    code = _announced_code(console_log)
+
+    def broken_save(items):
+        raise ValueError("the save is refused")
+
+    monkeypatch.setattr(ui, "save_settings", broken_save)
+    response = client.post("/host-approval", headers={"Host": FOREIGN_HOST_HEADER},
+                           data={"host": FOREIGN_HOST, "code": code})
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 503
+    assert "The hostname could not be saved. Try again." in body
+    assert '<p class="error">' in body
+    assert "forwarded hostname" not in body
 
 
 def test_the_approval_endpoint_answers_404_once_a_login_is_configured(monkeypatch):
@@ -1129,6 +1171,8 @@ def test_a_refusal_names_the_hostname_that_failed_and_recovers_from_it(
 
 
 def test_a_request_with_two_refused_hostnames_names_both(real_factory):
+    from app import host_allowlist
+
     client = real_factory.test_client()
 
     page = client.get("/", headers={"Host": "first.example.com:6767",
@@ -1147,6 +1191,64 @@ def test_a_request_with_two_refused_hostnames_names_both(real_factory):
                                     ).get_data(as_text=True))
     assert payload["host"] == "first.example.com"
     assert payload["also_refused"] == "second.example.com"
+
+    # The health record holds both: each hostname the request carried is one
+    # the operator may have to allow, each within its own bounds.
+    recorded = host_allowlist._refusals.recent(86400)
+    assert "first.example.com" in recorded
+    assert "second.example.com" in recorded
+
+
+def test_a_request_that_carries_one_name_twice_names_it_once(real_factory):
+    """Host and forwarded hostname that are the same name, modulo a port or
+    case, are one refusal: the page names it once, the JSON carries no
+    second hostname, and the record holds one entry."""
+    from app import host_allowlist
+
+    client = real_factory.test_client()
+
+    page = client.get("/", headers={"Host": "same.example.com:6767",
+                                    "X-Forwarded-Host": "SAME.example.com:443"})
+    body = page.get_data(as_text=True)
+    assert page.status_code == 421
+    assert "same.example.com" in body
+    assert "forwarded hostname" not in body
+
+    payload = json.loads(client.get("/api/system/status",
+                                    headers={"Host": "same.example.com:6767",
+                                             "X-Forwarded-Host": "SAME.example.com:443"}
+                                    ).get_data(as_text=True))
+    assert "also_refused" not in payload
+
+    assert host_allowlist._refusals.recent(86400) == ["same.example.com"]
+
+
+def test_a_request_with_no_host_header_is_refused(real_factory, shell_template):
+    """A request that carries no Host header is refused at this layer too,
+    whatever a trusted proxy's forwarded header would have put in its place:
+    the raw host is read by presence, so the header the forwarded-header
+    middleware may have replaced never stands in for the one the request
+    never carried."""
+    from werkzeug.test import EnvironBuilder
+
+    def answer(headers=None):
+        environ = EnvironBuilder(path="/", headers=headers or {}).get_environ()
+        environ["REMOTE_ADDR"] = "127.0.0.1"
+        environ.pop("HTTP_HOST", None)
+        captured = []
+        body = b"".join(real_factory(environ, lambda status, response_headers:
+                                     captured.append((status, dict(response_headers)))))
+        return captured[0][0], body.decode("utf-8", "replace")
+
+    status, body = answer()
+    assert status.startswith("421")
+    assert "carried no hostname" in body
+
+    # The trusted peer's forwarded hostname is judged with the request, but
+    # it cannot stand in for the Host header the request never carried.
+    status, body = answer({"X-Forwarded-Host": "bazarr.local"})
+    assert status.startswith("421")
+    assert "carried no hostname" in body
 
 
 def test_the_approval_submission_is_served_at_the_root_under_a_base_url(monkeypatch, console_log):
@@ -1342,18 +1444,30 @@ def test_the_boot_sequence_announces_the_code_to_the_console_only(tmp_path):
         [sys.executable, "-c",
          "from app.logger import configure_logging\n"
          "configure_logging()\n"
-         "import app.server\n",
+         "import app.server\n"
+         # The real server's own adjustment, from the options it is built
+         # with: the clearing waitress would do in front of the app's own
+         # forwarded-header parsing has to be off on the object it built.
+         "print('server clear_untrusted_proxy_headers:',\n"
+         "      app.server.webserver.server.adj.clear_untrusted_proxy_headers)\n",
          "--port", str(port)],
         cwd=str(repo), env=env, capture_output=True, timeout=300)
 
     console = (boot.stdout + boot.stderr).decode("utf-8", "replace")
     assert boot.returncode == 0, console[-4000:]
-    codes = re.findall(r"\b[0-9a-f]{16}\b", console)
-    assert codes, console[-4000:]
+    assert "server clear_untrusted_proxy_headers: False" in console
+
+    # The code is announced in a line of its own shape, and that shape is
+    # where the code is read from, not the first hex-looking token around.
+    code_lines = [line for line in console.splitlines()
+                  if "approval code for refused hostnames: " in line]
+    assert code_lines, console[-4000:]
+    code = re.search(r"approval code for refused hostnames: ([0-9a-f]{16})",
+                     code_lines[-1]).group(1)
 
     log_file = tmp_path / "log" / "bazarr.log"
-    if log_file.exists():
-        assert codes[0] not in log_file.read_text(encoding="utf-8", errors="replace")
+    assert log_file.exists()
+    assert code not in log_file.read_text(encoding="utf-8", errors="replace")
 
 
 # ---------------------------------------------------------------------------
@@ -1414,6 +1528,10 @@ def test_the_supervisor_decision_matrix():
     assert decision(request_host="localhost:6767", remote="127.0.0.1",
                     forwarded_host="bazarr.local", auth_type=None, trusted_proxy=None,
                     allowed_hosts=[]) == (True, [])
+    # A request that carried no hostname is refused, at this layer too.
+    assert decision(request_host="", remote="192.168.1.10",
+                    forwarded_host="", auth_type=None, trusted_proxy=None,
+                    allowed_hosts=[]) == (False, [""])
 
 
 class _Backend:
@@ -1591,16 +1709,39 @@ async def test_a_base_url_without_a_leading_slash_still_starts_the_front_listene
 
 
 @pytest.mark.asyncio
+async def test_the_front_listener_refuses_a_request_with_no_host_header(tmp_path, monkeypatch):
+    """The Host header itself is what the front listener judges: the web
+    library's fallback to the socket address would admit a request that
+    carried no hostname, and the rule refuses it at this layer too."""
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", client.server.port)
+        writer.write(b"GET / HTTP/1.0\r\n\r\n")
+        await writer.drain()
+        raw = await reader.read()
+        writer.close()
+    finally:
+        await client.close()
+
+    status_line = raw.split(b"\r\n", 1)[0]
+    body = raw.decode("utf-8", "replace")
+    assert b"421" in status_line
+    assert "carried no hostname" in body
+    assert "proxied" not in body
+
+
+@pytest.mark.asyncio
 async def test_the_supervisor_reports_its_refusals_to_the_backend(tmp_path, monkeypatch):
     """A refusal the front listener answers reaches the backend's record and
     its console code: at most one report per hostname per hour, carrying this
-    supervisor's token."""
+    supervisor's token, and only its own acknowledgement counts."""
     reports = []
 
     async def notice(request):
         reports.append((request.headers.get("X-Bazarr-Supervisor-Token"),
                          await request.post()))
-        return web.Response(status=204)
+        return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                 "the-supervisor-token"})
 
     backend_app = web.Application()
     backend_app.router.add_route("POST", "/_supervisor/host_refusal", notice)
@@ -1657,7 +1798,8 @@ async def test_every_refused_host_is_reported_even_past_the_line_ceiling(tmp_pat
 
     async def notice(request):
         reports.append((await request.post())["host"])
-        return web.Response(status=204)
+        return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                 "the-supervisor-token"})
 
     reports = []
     backend_app = web.Application()
@@ -1676,8 +1818,6 @@ async def test_every_refused_host_is_reported_even_past_the_line_ceiling(tmp_pat
                 if len(reports) >= 30:
                     break
                 await asyncio.sleep(0.01)
-            while supervisor._notice_tasks:
-                await asyncio.sleep(0.01)
             assert sorted(reports) == sorted(f"h{index}.example.com" for index in range(30))
             assert lines == []
         finally:
@@ -1691,7 +1831,10 @@ async def test_refusals_while_the_backend_is_down_are_named_here_and_reported_wh
         tmp_path, monkeypatch):
     """While the backend cannot be told, this console is the only place a
     refused hostname is named; the report waits for the backend to answer and
-    arrives then, so the health page and the console code catch up."""
+    arrives then, so the health page and the console code catch up. Nothing
+    schedules the delivery by hand: the worker's own timer finds the backend
+    answering again."""
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
     lines = []
     monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
     client = await _supervisor_client(tmp_path, monkeypatch)
@@ -1706,7 +1849,8 @@ async def test_refusals_while_the_backend_is_down_are_named_here_and_reported_wh
         async def notice(request):
             reports.append((request.headers.get("X-Bazarr-Supervisor-Token"),
                             await request.post()))
-            return web.Response(status=204)
+            return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                    "the-supervisor-token"})
 
         reports = []
         backend_app = web.Application()
@@ -1716,13 +1860,14 @@ async def test_refusals_while_the_backend_is_down_are_named_here_and_reported_wh
         try:
             monkeypatch.setattr(supervisor, "BACKEND_PORT", backend.server.port)
             monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
-            supervisor._schedule_pending_refusal_notices()
             for _ in range(100):
                 if reports:
                     break
                 await asyncio.sleep(0.01)
             assert reports == [("the-supervisor-token", {"host": FOREIGN_HOST})]
             assert reporter.pending_reports() == []
+            # The delivery worked, so this console needs no second line.
+            assert len(lines) == 1
         finally:
             await backend.close()
     finally:
@@ -1732,7 +1877,12 @@ async def test_refusals_while_the_backend_is_down_are_named_here_and_reported_wh
 @pytest.mark.asyncio
 async def test_a_report_the_backend_did_not_take_is_held_and_retried(tmp_path, monkeypatch):
     """A backend that answers 500 has not taken the report: it stays pending
-    and is tried again, instead of waiting an hour for the next refusal."""
+    and the worker tries it again on its own timer, with no further request
+    and no call from anywhere, instead of waiting an hour for the next
+    refusal. Until it lands, this console names the hostname."""
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
     attempts = {"count": 0}
 
     async def notice(request):
@@ -1740,7 +1890,8 @@ async def test_a_report_the_backend_did_not_take_is_held_and_retried(tmp_path, m
         attempts["count"] += 1
         if attempts["count"] == 1:
             return web.Response(status=500)
-        return web.Response(status=204)
+        return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                 "the-supervisor-token"})
 
     backend_app = web.Application()
     backend_app.router.add_route("POST", "/_supervisor/host_refusal", notice)
@@ -1758,12 +1909,18 @@ async def test_a_report_the_backend_did_not_take_is_held_and_retried(tmp_path, m
                 await asyncio.sleep(0.01)
             reporter = supervisor._active_reporter
             assert reporter.pending_reports() == [FOREIGN_HOST]
+            # The failed delivery is named on this console, within its bounds.
+            assert lines == [f"Refused a request for an unrecognized host: {FOREIGN_HOST}. Allow it "
+                             f"under general.allowed_hosts in config.yaml, or set "
+                             f"{supervisor.host_policy.ALLOWED_HOSTS_ENV}."]
 
-            supervisor._schedule_pending_refusal_notices()
-            for _ in range(100):
+            # The retry is the worker's own: nothing was asked of the
+            # backend in between, and no manual call schedules it.
+            for _ in range(200):
                 if attempts["count"] >= 2:
                     break
                 await asyncio.sleep(0.01)
+            assert attempts["count"] == 2
             assert reporter.pending_reports() == []
             # And within the hour, a repeat refusal asks for nothing more.
             await client.get("/", headers={"Host": FOREIGN_HOST_HEADER})
@@ -1773,3 +1930,224 @@ async def test_a_report_the_backend_did_not_take_is_held_and_retried(tmp_path, m
             await client.close()
     finally:
         await backend.close()
+
+
+def test_the_report_cooldown_survives_a_burst_of_other_names():
+    """However many hostnames are acknowledged around it, a hostname told
+    within the hour is not told again: the cooldown is kept by time alone,
+    never by a count, so no roll of other names makes it due again."""
+    clock = [0]
+    reporter = supervisor._RefusalReporter("/_supervisor/host_refusal", now=lambda: clock[0])
+
+    assert reporter.report_due("first.example.com") is True
+    reporter.report_sent("first.example.com")
+
+    for index in range(120):
+        assert reporter.report_due(f"h{index}.example.com") is True
+        reporter.report_sent(f"h{index}.example.com")
+
+    assert reporter.report_due("first.example.com") is False
+
+    clock[0] = 3601
+    assert reporter.report_due("first.example.com") is True
+
+
+def test_the_report_pace_is_bounded_globally_too():
+    """The once-an-hour pace of each hostname has a global ceiling as well:
+    at most the refused-hosts limit of report attempts an hour in total, the
+    same bound the backend's refused-host record holds, so a long roll of
+    distinct hostnames cannot become a long roll of requests. The rest stay
+    pending and go out as the hour rolls over."""
+    clock = [0]
+    reporter = supervisor._RefusalReporter("/_supervisor/host_refusal", now=lambda: clock[0])
+
+    for index in range(60):
+        assert reporter.report_due(f"h{index}.example.com") is True
+
+    taken = []
+    while True:
+        host = reporter.take_due_report()
+        if host is None:
+            break
+        taken.append(host)
+    assert len(taken) == supervisor.REPORTS_PER_HOUR
+    # The rest are held, not dropped, and go out once the hour rolls over.
+    clock[0] = 3601
+    assert reporter.take_due_report() is not None
+
+
+@pytest.mark.asyncio
+async def test_only_an_acknowledged_report_counts_as_delivered(tmp_path, monkeypatch):
+    """The report counts as delivered only on the answer this backend gives:
+    the success status carrying this supervisor's token. A refusal and a
+    redirect alike leave the hostname pending, and the delivery call does not
+    follow the redirect, so the page it points at is never asked."""
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    answers = {"status": 403, "headers": {}}
+    visits = []
+
+    async def notice(request):
+        await request.post()
+        visits.append("notice")
+        return web.Response(status=answers["status"], headers=answers["headers"])
+
+    async def elsewhere(request):
+        visits.append("elsewhere")
+        return web.Response(status=204)
+
+    backend_app = web.Application()
+    backend_app.router.add_route("POST", "/_supervisor/host_refusal", notice)
+    backend_app.router.add_route("GET", "/shell", elsewhere)
+    backend = TestClient(TestServer(backend_app))
+    await backend.start_server()
+    try:
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", backend.server.port)
+        monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+        client = await _supervisor_client(tmp_path, monkeypatch)
+        try:
+            await client.get("/", headers={"Host": FOREIGN_HOST_HEADER})
+            reporter = supervisor._active_reporter
+
+            # A 403 is not an acknowledgement: the hostname stays pending and
+            # is tried again.
+            for _ in range(200):
+                if visits.count("notice") >= 2:
+                    break
+                await asyncio.sleep(0.01)
+            assert reporter.pending_reports() == [FOREIGN_HOST]
+
+            # Nor is a redirect one, and it is not followed.
+            answers.update(status=302, headers={"Location": "/shell"})
+            for _ in range(200):
+                if visits.count("notice") >= 3:
+                    break
+                await asyncio.sleep(0.01)
+            assert "elsewhere" not in visits
+            assert reporter.pending_reports() == [FOREIGN_HOST]
+
+            # The one answer that counts: the success status carrying this
+            # supervisor's token.
+            answers.update(status=204,
+                           headers={supervisor.TOKEN_HEADER: "the-supervisor-token"})
+            for _ in range(200):
+                if not reporter.pending_reports():
+                    break
+                await asyncio.sleep(0.01)
+            assert reporter.pending_reports() == []
+        finally:
+            await client.close()
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_a_request_with_two_refused_hostnames_reports_both(tmp_path, monkeypatch):
+    """Both hostnames a forwarded request carried are told to the backend,
+    each within its own pace, so the health page and the console code can
+    name either one."""
+    reports = []
+
+    async def notice(request):
+        reports.append((await request.post())["host"])
+        return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                 "the-supervisor-token"})
+
+    backend_app = web.Application()
+    backend_app.router.add_route("POST", "/_supervisor/host_refusal", notice)
+    backend = TestClient(TestServer(backend_app))
+    await backend.start_server()
+    try:
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", backend.server.port)
+        monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+        client = await _supervisor_client(tmp_path, monkeypatch)
+        try:
+            # The test client's peer is loopback, which the absent setting's
+            # default names, so the forwarded host is believed.
+            await client.get("/", headers={"Host": "first.example.com:6767",
+                                           "X-Forwarded-Host": "second.example.com"})
+            for _ in range(200):
+                if len(reports) >= 2:
+                    break
+                await asyncio.sleep(0.01)
+            assert sorted(reports) == ["first.example.com", "second.example.com"]
+        finally:
+            await client.close()
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_the_front_listener_names_one_hostname_once_when_host_and_forwarded_match(
+        tmp_path, monkeypatch):
+    """Host and forwarded hostname that are the same name, modulo a port or
+    case, are one refusal at this layer too: the page names it once and one
+    report is queued."""
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    try:
+        response = await client.get("/", headers={"Host": "same.example.com:6767",
+                                                  "X-Forwarded-Host": "SAME.example.com:443"})
+        body = await response.text()
+    finally:
+        await client.close()
+
+    assert response.status == 421
+    assert "same.example.com" in body
+    assert "forwarded hostname" not in body
+    assert supervisor._active_reporter.pending_reports() == ["same.example.com"]
+
+
+@pytest.mark.asyncio
+async def test_a_thousand_refusals_while_the_backend_is_down_stay_bounded(
+        tmp_path, monkeypatch):
+    """The pending reports and the delivery are bounded: a long roll of
+    distinct hostnames against a backend that cannot be told leaves at most
+    the refused-hosts limit of them waiting, the worker sends one report at
+    a time, and once the backend answers it is told about all of them within
+    the pace, with no request and no manual call in between."""
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    try:
+        for index in range(1000):
+            response = await client.get("/", headers={"Host": f"h{index}.example.com"})
+            assert response.status == 421
+        reporter = supervisor._active_reporter
+        assert len(reporter.pending_reports()) == supervisor.host_policy.REFUSED_HOSTS_LIMIT
+
+        in_flight = {"now": 0, "peak": 0}
+        reports = []
+
+        async def notice(request):
+            in_flight["now"] += 1
+            in_flight["peak"] = max(in_flight["peak"], in_flight["now"])
+            try:
+                reports.append((await request.post())["host"])
+                return web.Response(status=204,
+                                    headers={supervisor.TOKEN_HEADER: "the-supervisor-token"})
+            finally:
+                in_flight["now"] -= 1
+
+        backend_app = web.Application()
+        backend_app.router.add_route("POST", "/_supervisor/host_refusal", notice)
+        backend = TestClient(TestServer(backend_app))
+        await backend.start_server()
+        try:
+            monkeypatch.setattr(supervisor, "BACKEND_PORT", backend.server.port)
+            monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+            for _ in range(4000):
+                if len(reports) >= supervisor.host_policy.REFUSED_HOSTS_LIMIT:
+                    break
+                await asyncio.sleep(0.01)
+            for _ in range(500):
+                if not reporter.pending_reports():
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            await backend.close()
+        assert len(reports) == supervisor.host_policy.REFUSED_HOSTS_LIMIT
+        assert in_flight["peak"] <= 1
+        assert reporter.pending_reports() == []
+        assert len(lines) <= 21
+    finally:
+        await client.close()

@@ -173,12 +173,17 @@ def refused_hostnames(raw, effective, configured_entries, environ=None):
     sent is judged first, so when only one of the two fails it is the failing
     one that is named, and when both fail they both are. A request that
     carried none at all is refused as well: a request the Host header cannot
-    name is not one the allowlist can answer for.
+    name is not one the allowlist can answer for. The same name twice,
+    modulo a port, a case or a bracket, is one refusal, so a request cannot
+    be named twice for one hostname.
     """
     refused = []
+    seen = set()
     for name in (raw, effective):
         if not name or not host_is_allowed(name, configured_entries, environ):
-            if name not in refused:
+            key = effective_host(name)
+            if key not in seen:
+                seen.add(key)
                 refused.append(name)
     return refused
 
@@ -204,28 +209,19 @@ def is_approvable_host(host):
     return bool(_APPROVABLE_HOSTNAME.match(host))
 
 
-def _comparable_address(value):
-    """The value as an address, with an IPv4-mapped IPv6 form as its IPv4."""
-    try:
-        parsed = ip_address(value)
-    except ValueError:
-        return None
-    if parsed.version == 6 and parsed.ipv4_mapped is not None:
-        return parsed.ipv4_mapped
-    return parsed
-
-
 def peer_is_trusted_proxy(remote, trusted_proxy=None):
     """Whether a peer address may name the hostname the client arrived for.
 
-    The same forms the backend accepts: one address compared exactly, a ``*``
-    that names every address, or the setting's default when it is absent; an
-    explicitly empty setting trusts nobody. Both sides are also parsed as
-    addresses, so a mapped IPv6 form of the configured IPv4 address matches,
-    which at this layer can only narrow the check: a forwarded host is
-    believed, and a believed one is judged alongside the hostname it replaced.
-    Anything else (a comma-separated list, a network range) matches no one
-    here, exactly as it does not at the backend.
+    One canonical comparison, the one the backend's forwarded-header
+    middleware applies: a lone ``*`` names every address, and any other
+    value is compared with the peer exactly as written (waitress compares
+    ``remote_peer == trusted_proxy``). A mapped IPv6 form of a configured
+    IPv4 address is therefore a different peer here exactly as it is there,
+    so one spelling of the setting works at both layers or neither trusts
+    it. The setting's default applies when it is absent; an explicitly empty
+    setting trusts nobody. Anything that is not one address (a
+    comma-separated list, a network range) matches no one here, exactly as
+    it does not at the backend.
     """
     if not remote:
         return False
@@ -234,12 +230,7 @@ def peer_is_trusted_proxy(remote, trusted_proxy=None):
         return False
     if spec == '*':
         return True
-    remote_text = str(remote).strip()
-    if spec.lower() == remote_text.lower():
-        return True
-    peer = _comparable_address(remote_text)
-    candidate = _comparable_address(spec)
-    return peer is not None and candidate is not None and peer == candidate
+    return str(remote) == spec
 
 
 class BoundedRefusalRecorder:

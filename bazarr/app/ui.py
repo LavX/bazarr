@@ -188,17 +188,17 @@ def approve_refused_host():
     address = request.remote_addr
 
     if _is_rate_limited(address):
-        return host_page(host, 'Too many attempts. Try again in 5 minutes.'), 429
+        return host_page(host, message='Too many attempts. Try again in 5 minutes.'), 429
 
     if not is_approvable_host(host):
         _record_failed_attempt(address)
-        return host_page(host, 'That hostname cannot be allowed.'), 403
+        return host_page(host, message='That hostname cannot be allowed.'), 403
 
     if not code or not verify_approval_code(code):
         _record_failed_attempt(address)
-        return host_page(host, 'Wrong or missing approval code. Use the most recent approval-code line '
-                                'printed to the console Bazarr+ runs in; it never appears in '
-                                'bazarr.log.'), 403
+        return host_page(host, message='Wrong or missing approval code. Use the most recent '
+                                       'approval-code line printed to the console Bazarr+ runs '
+                                       'in; it never appears in bazarr.log.'), 403
 
     existing = normalize_entries(getattr(settings.general, 'allowed_hosts', None))
     if host in existing or in_default_set(host):
@@ -215,7 +215,7 @@ def approve_refused_host():
                           'settings save failed', host)
     except Exception:
         logging.exception('BAZARR could not allow host %s through the request-host check', host)
-        return host_page(host, 'The hostname could not be saved. Try again.'), 503
+        return host_page(host, message='The hostname could not be saved. Try again.'), 503
 
     logging.info('BAZARR allowed host %s through the request-host check with the approval code.', host)
     return redirect(base_url or '/', code=302)

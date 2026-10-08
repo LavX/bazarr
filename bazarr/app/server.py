@@ -157,9 +157,6 @@ class Server:
 # The one-time code an operator enters on the refused-host page is announced
 # to the console at boot, so a hostname refused right after a restart has one
 # to use. It appears only on the console, never in bazarr.log.
-# The one-time code an operator enters on the refused-host page is announced
-# to the console at boot, so a hostname refused right after a restart has one
-# to use. It appears only on the console, never in bazarr.log.
 announce_code()
 
 

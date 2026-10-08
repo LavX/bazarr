@@ -76,14 +76,17 @@ def _is_api_path(path, config):
     return path == prefix or path.startswith(prefix + '/')
 
 
-def host_page(host, also=None, message=None, config=settings):
+def host_page(host, *, also=None, message=None, config=settings):
     """The static refusal page, which doubles as the approval form.
 
     It names the refused hostname and every way to allow it, and it is the
     entire response: nothing from the application or its settings is rendered
     into it. The form names the first refused hostname, so it is always a
     hostname that has to be allowed; a request that carried two refused
-    hostnames names the second one as well.
+    hostnames names the second one as well. ``also`` and ``message`` are
+    keyword-only so an error message can never land in the forwarded-hostname
+    slot: the recovery pages answer with their problem in the error
+    paragraph, not rendered as a second hostname.
     """
     shown = html.escape(host or '')
     named = shown if shown else 'a request that carried no hostname'
@@ -356,7 +359,12 @@ class HostAllowlistMiddleware:
                 and environ.get('PATH_INFO', '') in approval_paths(self.config)):
             return self.wsgi_app(environ, start_response)
         entries = _configured_hosts(self.config)
-        raw_host = environ.get(RAW_HOST_ENVIRON) or environ.get('HTTP_HOST', '')
+        # The raw host is read by presence, not truthiness: the header the
+        # forwarded-header middleware may have replaced must never stand in
+        # for a Host header the request did not carry at all.
+        raw_host = environ.get(RAW_HOST_ENVIRON)
+        if raw_host is None:
+            raw_host = environ.get('HTTP_HOST', '')
         host = environ.get('HTTP_HOST', '')
         refused = refused_hostnames(raw_host, host, entries)
         if not refused:
@@ -366,10 +374,13 @@ class HostAllowlistMiddleware:
     def _refuse(self, environ, start_response, refused):
         # The first refused hostname is the one the client sent, so it is
         # the one the page, the form and the record name; a request that
-        # carried two refused hostnames names the forwarded one as well.
+        # carried two refused hostnames names the forwarded one as well, and
+        # both are recorded, each within the bounds of its own entry.
         shown = effective_host(refused[0])
         also = effective_host(refused[1]) if len(refused) > 1 else None
         record_refusal(shown, config=self.config)
+        if also:
+            record_refusal(also, config=self.config)
         if _is_api_path(environ.get('PATH_INFO', ''), self.config):
             body = host_json(shown, also=also)
             content_type = 'application/json'

@@ -295,8 +295,10 @@ class BackendManager:
                             else:
                                 print("[supervisor] Backend is ready again after a restart")
                             # The backend can take the refused hostnames it
-                            # missed while it was unreachable.
-                            _schedule_pending_refusal_notices()
+                            # missed while it was unreachable: the delivery
+                            # worker is woken, and everything pending is due.
+                            if _active_reporter is not None:
+                                _active_reporter.ready_to_deliver()
                             return
             except Exception:
                 pass
@@ -703,15 +705,21 @@ def _host_refusal_response(request: web.Request, host: str, base: str,
                         content_type="text/html", headers={"Cache-Control": "no-store"})
 
 
-_notice_tasks = set()
-
-# How long a report that no backend answered waits before it may be tried
-# again, so a backend that is down is not asked about the same hostname on
-# every refusal.
+# How long a report that no backend acknowledged waits before it may be tried
+# again, so a backend that is down or failing is not asked about the same
+# hostname on every refusal.
 RETRY_PACE_SECONDS = 60
 
+# The separate global bound for the reports themselves: at most
+# REFUSED_HOSTS_LIMIT deliveries an hour in total, the same ceiling the
+# backend's refused-host record holds, so a long roll of distinct hostnames
+# never becomes a long roll of requests. Hostnames past the bound stay
+# pending and go out as the hour rolls over.
+REPORTS_PER_HOUR = host_policy.REFUSED_HOSTS_LIMIT
+
 # The reporter of the one host check this process fronts, so the readiness
-# poll can deliver the reports held while the backend could not be reached.
+# poll can wake the delivery worker for the reports held while the backend
+# could not be reached.
 _active_reporter: "_RefusalReporter | None" = None
 
 
@@ -723,20 +731,30 @@ class _RefusalReporter:
     ceiling one summary line counts the rest; but every refused hostname is
     reported to the backend at its own once-an-hour-per-host pace, because
     once the backend has the hostname its health page and its console code
-    can name it. A report no backend answered stays pending, and the
-    readiness poll delivers the pending ones as soon as the backend answers.
+    can name it. A report no backend acknowledged stays pending: at most
+    REFUSED_HOSTS_LIMIT of the oldest ones, the same number the backend's
+    record keeps, and the one delivery worker below sends them one at a
+    time, woken by refusals and by readiness, retrying on its own timer,
+    under the hour's global reporting bound above. The per-host cooldown is
+    kept by time alone, never by a count, so no amount of other hostnames
+    makes a told one tellable again within its hour.
 
     While the backend answers, its console owns the refusal lines: the
     report reaches it and its own record writes them. This console writes
-    them only while the backend cannot be told.
+    them while the backend cannot be told, and again whenever a delivery
+    fails, because from that moment this console is the only place the
+    hostname is named.
     """
 
     def __init__(self, notice_path: str, now=time.time):
         self.notice_path = notice_path
         self._now = now
         self._lines = host_policy.BoundedRefusalRecorder(now=now)
-        self._last_report = OrderedDict()  # host -> time of its last delivered report
-        self._pending = OrderedDict()  # host -> (time first refused, time of last attempt)
+        self._last_report = OrderedDict()  # host -> time of its last acknowledged report
+        self._pending = OrderedDict()  # host -> time of its last attempt (None until tried)
+        self._report_times = []  # times of this hour's report deliveries
+        self._wake = asyncio.Event()  # refusals and readiness wake the worker
+        self._drain_task: "asyncio.Task | None" = None
 
     def note_line(self, host):
         """Record a refusal; True when a console line may be written now."""
@@ -747,89 +765,187 @@ class _RefusalReporter:
         return self._lines.take_summary()
 
     def report_due(self, host):
-        """True when the backend should be told about this hostname now.
+        """Queue the hostname for the delivery worker, or leave it alone.
 
-        A hostname is told at most once an hour, and one that has been told
-        is done until the hour runs. One that has not been told yet is
-        tried no faster than once a minute.
+        True when the hostname is newly waiting to be told: one acknowledged
+        within the hour is done until the hour runs, and one already waiting
+        is the worker's to deliver. The pending set holds the
+        REFUSED_HOSTS_LIMIT oldest of them, the same number the backend's
+        record keeps, so a longer roll of hostnames cannot grow a longer
+        queue, and the ones it drops are the ones the backend's record has
+        dropped too.
         """
         now = self._now()
-        last = self._last_report.get(host)
-        if last is not None and now - last < host_policy.HOUR_SECONDS:
+        self._prune_reports(now)
+        if host in self._last_report or host in self._pending:
             return False
-        first, last_try = self._pending.get(host, (now, None))
-        if last_try is not None and now - last_try < RETRY_PACE_SECONDS:
-            return False
-        self._pending[host] = (first, now)
+        self._pending[host] = None
+        while len(self._pending) > host_policy.REFUSED_HOSTS_LIMIT:
+            self._pending.popitem(last=False)
+        self._wake.set()
         return True
 
+    def take_due_report(self):
+        """The next hostname the worker may tell the backend about, or None.
+
+        Oldest waiting first, once its retry pace has run; a hostname never
+        attempted is due at once. Taking one marks its attempt and counts it
+        against the hour's global reporting bound, so the worker's one
+        request at a time is bounded in total as well.
+        """
+        now = self._now()
+        self._prune_reports(now)
+        if len(self._report_times) >= REPORTS_PER_HOUR:
+            return None
+        for host, last_try in self._pending.items():
+            if last_try is None or now - last_try >= RETRY_PACE_SECONDS:
+                self._pending[host] = now
+                self._report_times.append(now)
+                return host
+        return None
+
+    def retry_delay(self):
+        """How long the worker may wait before another look, nothing due."""
+        now = self._now()
+        self._prune_reports(now)
+        waits = []
+        if len(self._report_times) >= REPORTS_PER_HOUR:
+            waits.append(host_policy.HOUR_SECONDS - (now - self._report_times[0]))
+        waits.extend(RETRY_PACE_SECONDS - (now - last_try)
+                     for last_try in self._pending.values() if last_try is not None)
+        if not waits:
+            return RETRY_PACE_SECONDS
+        return max(0.0, min(min(waits), RETRY_PACE_SECONDS))
+
     def report_sent(self, host):
-        """The backend acknowledged the report; it is not pending any more."""
+        """The backend acknowledged the report; it is not pending any more.
+
+        The cooldown is kept by time alone, never by a count: however many
+        hostnames are acknowledged around it, a told one stays told for its
+        full hour.
+        """
         self._last_report[host] = self._now()
-        if host in self._last_report:
-            self._last_report.move_to_end(host)
-        while len(self._last_report) > host_policy.REFUSED_HOSTS_LIMIT:
-            self._last_report.popitem(last=False)
         self._pending.pop(host, None)
 
     def report_failed(self, host):
-        """The report was not delivered; it stays pending, pace permitting."""
-        entry = self._pending.get(host)
-        if entry is not None:
-            self._pending[host] = (entry[0], self._now())
+        """The backend did not take the report: it stays pending, pace
+        permitting, and this console names the hostname, because from this
+        moment this console is the only place that does until it lands."""
+        if host in self._pending:
+            self._pending[host] = self._now()
+        if self.note_line(host):
+            _print_refusal_line(_refusal_line_text(host))
 
     def pending_reports(self):
         """The hostnames the backend has not been told about, oldest first."""
         return list(self._pending)
 
+    def ready_to_deliver(self):
+        """The backend answers again: everything it was not told is due now."""
+        for host in self._pending:
+            self._pending[host] = None
+        self._wake.set()
 
-async def _send_refusal_notice(host: str, reporter: _RefusalReporter) -> None:
+    def _prune_reports(self, now):
+        """Drop the hour-old report bookkeeping, by time and nothing else."""
+        self._report_times = [stamp for stamp in self._report_times
+                              if now - stamp < host_policy.HOUR_SECONDS]
+        self._last_report = OrderedDict(
+            (name, stamp) for name, stamp in self._last_report.items()
+            if now - stamp < host_policy.HOUR_SECONDS)
+
+    def wake_event(self):
+        """The event refusals and readiness set to wake the worker."""
+        return self._wake
+
+    def start_drain(self):
+        """Start the one delivery worker if it is not running."""
+        if self._drain_task is None or self._drain_task.done():
+            self._drain_task = asyncio.create_task(_drain_refusal_notices(self))
+
+    async def stop_drain(self):
+        """Stop the delivery worker and close its session."""
+        task = self._drain_task
+        self._drain_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
+def _refusal_line_text(host: str) -> str:
+    """The one shape of this console's per-host refusal line."""
+    return (f"Refused a request for an unrecognized host: {host}. Allow it under "
+            f"general.allowed_hosts in config.yaml, or set {host_policy.ALLOWED_HOSTS_ENV}.")
+
+
+async def _send_refusal_notice(session: ClientSession, port, token: str, host: str,
+                               reporter: _RefusalReporter) -> None:
     """Report a hostname this listener refused to the backend behind it.
 
     The backend never sees the request, so its health page and its console
     code know nothing about it until this arrives. The report carries the
-    token this supervisor started the backend with. The reporter marks the
-    hostname told once an answer arrives and holds it for the next attempt
-    otherwise, so a backend that is still starting, or one that has gone
-    away, gets the report as soon as it answers again.
+    token this supervisor started the backend with, and only the answer that
+    carries the token back counts: the one success status this endpoint gives,
+    acknowledged by this backend. Anything else, a refusal, an error or an
+    answer some other process on the port gave, leaves the hostname pending
+    for the next try. Redirects are not followed on this call, because an
+    ordinary page reached by following one is an answer this backend did not
+    give about this report.
     """
-    port, token = BACKEND_PORT, BACKEND_TOKEN
-    if not port or not token:
-        reporter.report_failed(host)
-        return
     try:
-        async with ClientSession(timeout=ClientTimeout(total=5)) as session:
-            async with session.post(f"http://{BACKEND_HOST}:{port}{reporter.notice_path}",
-                                    headers={TOKEN_HEADER: token},
-                                    data={"host": host}) as response:
-                await response.read()
-                if response.status < 500:
-                    reporter.report_sent(host)
-                    return
+        async with session.post(f"http://{BACKEND_HOST}:{port}{reporter.notice_path}",
+                                headers={TOKEN_HEADER: token},
+                                data={"host": host},
+                                allow_redirects=False) as response:
+            await response.read()
+            if response.status == 204 and response.headers.get(TOKEN_HEADER) == token:
+                reporter.report_sent(host)
+                return
     except Exception:
         pass
     reporter.report_failed(host)
 
 
-def _schedule_refusal_notice(host: str, reporter: _RefusalReporter) -> None:
-    """Send the report without holding the refusal's answer for it."""
-    task = asyncio.create_task(_send_refusal_notice(host, reporter))
-    _notice_tasks.add(task)
-    task.add_done_callback(_notice_tasks.discard)
+async def _drain_refusal_notices(reporter: _RefusalReporter) -> None:
+    """The one worker that delivers refused-hostname reports to the backend.
 
-
-def _schedule_pending_refusal_notices() -> None:
-    """Deliver the reports held while the backend could not be reached.
-
-    The backend answers again, so its health page and its console code can
-    take the hostnames refused meanwhile; until the reports arrive this
-    console was the only place they were named.
+    One client session and one report in flight at a time, so the reports
+    held through an outage arrive as a paced line of requests against a
+    backend that has just come up rather than a burst. It is woken by every
+    refusal and by readiness, and its own timer retries what no backend
+    acknowledged, so a failed report needs no further request and no manual
+    call to be tried again. While the backend cannot be reached it sends
+    nothing and waits.
     """
-    reporter = _active_reporter
-    if reporter is None:
-        return
-    for host in reporter.pending_reports():
-        _schedule_refusal_notice(host, reporter)
+    wake = reporter.wake_event()
+    session = None
+    try:
+        while True:
+            wake.clear()
+            port, token = BACKEND_PORT, BACKEND_TOKEN
+            host = None
+            if port and token:
+                host = reporter.take_due_report()
+            if host is None:
+                try:
+                    await asyncio.wait_for(wake.wait(), timeout=reporter.retry_delay())
+                except asyncio.TimeoutError:
+                    pass
+                continue
+            try:
+                if session is None:
+                    session = ClientSession(timeout=ClientTimeout(total=5))
+                await _send_refusal_notice(session, port, token, host, reporter)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                reporter.report_failed(host)
+    finally:
+        if session is not None:
+            await session.close()
 
 
 def _clock_minutes(stamp: float) -> str:
@@ -841,9 +957,10 @@ def _print_due_refusal_summary(reporter: _RefusalReporter) -> None:
     """This console's summary line, once the hour it counts has run.
 
     The refusal path calls it, and so does the readiness poll while the
-    backend cannot be told, which is the only time this console writes
+    backend cannot be told, which is the main time this console writes
     refusal lines: a stream of refusals that stops does not take the hour's
-    summary with it.
+    summary with it. The other time is a failed delivery, whose host line
+    the failure path writes itself.
     """
     summary = reporter.take_summary()
     if summary:
@@ -871,7 +988,9 @@ def create_host_check_middleware(config_dir: str, base_url: str = "/"):
     The approval path stays open for exactly the one POST that submits the
     form on the refusal page, at the base and at the root (a proxy that
     strips the prefix reaches the root one); any other request for it is
-    judged by its hostname like everything else.
+    judged by its hostname like everything else. The Host header itself is
+    what a request is judged by: the web library's own fallback to the
+    socket address would admit a request that carried no hostname.
     """
     global _active_reporter
     state = _HostCheckState(config_dir)
@@ -888,7 +1007,7 @@ def create_host_check_middleware(config_dir: str, base_url: str = "/"):
             return await handler(request)
         state.refresh()
         allowed, refused = host_check_decision(
-            request.host,
+            request.headers.get("Host", ""),
             request.remote,
             request.headers.get("X-Forwarded-Host", ""),
             state.auth_type(),
@@ -899,15 +1018,17 @@ def create_host_check_middleware(config_dir: str, base_url: str = "/"):
             return await handler(request)
         shown = refused[0]
         also = refused[1] if len(refused) > 1 else None
-        if BACKEND_PORT is None and reporter.note_line(shown):
-            # The backend cannot be told about this hostname, so this
-            # console is the only place its refusal is named.
-            _print_refusal_line(
-                f"Refused a request for an unrecognized host: {shown}. Allow it under "
-                f"general.allowed_hosts in config.yaml, or set {host_policy.ALLOWED_HOSTS_ENV}.")
+        reporter.start_drain()
+        if BACKEND_PORT is None:
+            # The backend cannot be told about these hostnames, so this
+            # console is the only place their refusals are named.
+            for name in (shown, also):
+                if name and reporter.note_line(name):
+                    _print_refusal_line(_refusal_line_text(name))
         _print_due_refusal_summary(reporter)
-        if reporter.report_due(shown):
-            _schedule_refusal_notice(shown, reporter)
+        for name in (shown, also):
+            if name:
+                reporter.report_due(name)
         return _host_refusal_response(request, shown, prefix, also=also)
 
     host_check_middleware.reporter = reporter
@@ -1427,6 +1548,13 @@ def create_app(config_dir: str, backend: BackendManager) -> web.Application:
 
     host_check = create_host_check_middleware(config_dir, config.get("baseUrl", "/"))
     app = web.Application(middlewares=[host_check])
+
+    # The delivery worker of the host check above outlives the routes: stop
+    # it and close its client session when the application goes away.
+    async def _stop_refusal_drain(_app):
+        await host_check.reporter.stop_drain()
+
+    app.on_cleanup.append(_stop_refusal_drain)
 
     # Supervisor-handled endpoints (not proxied)
     status_handler = create_supervisor_status_handler(backend)
