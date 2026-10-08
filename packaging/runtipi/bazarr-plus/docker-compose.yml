@@ -1,0 +1,27 @@
+services:
+  bazarr-plus:
+    image: ghcr.io/lavx/bazarr:2.7.0
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ}
+    volumes:
+      - ${APP_DATA_DIR}/config:/config
+      - ${ROOT_FOLDER_HOST}/media:/media
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    x-runtipi:
+      is_main: true
+      internal_port: 6767
+
+x-runtipi:
+  schema_version: 2

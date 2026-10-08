@@ -347,6 +347,12 @@ jobs:
       - name: Lint with ruff
         run: ruff check .
 
+      - name: Package release and fresh-volume bootstrap checks
+        run: |
+          python3 packaging/test_release.py
+          python3 packaging/stack/test_bootstrap.py
+          python3 packaging/test_marketplaces.py
+
       - name: pytest compat subpackage
         run: |
           pip install pytest pyjwt

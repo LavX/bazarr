@@ -1,0 +1,41 @@
+{
+  "$schema": "../app-info-schema.json",
+  "name": "Bazarr+",
+  "id": "bazarr-plus",
+  "available": true,
+  "exposable": true,
+  "dynamic_config": true,
+  "min_tipi_version": "4.7.0",
+  "port": 6767,
+  "tipi_version": 1,
+  "version": "2.7.0",
+  "categories": ["media", "utilities"],
+  "short_desc": "Find and manage subtitles for movies, TV, and sports.",
+  "description": "Bazarr+ manages subtitles for movie, television, and sports libraries. It can run standalone for manual subtitle workflows or connect to supported media managers. This Runtipi app installs Bazarr+ only and does not provision other services.",
+  "author": "LavX",
+  "source": "https://github.com/LavX/bazarr",
+  "website": "https://lavx.github.io/bazarr/",
+  "supported_architectures": ["amd64", "arm64"],
+  "form_fields": [
+    {
+      "type": "number",
+      "label": "PUID",
+      "hint": "Numeric user ID used by the image entrypoint to run Bazarr+ and own /config. Keep the Compose user unset.",
+      "min": 1,
+      "max": 2147483647,
+      "default": 1000,
+      "required": false,
+      "env_variable": "PUID"
+    },
+    {
+      "type": "number",
+      "label": "PGID",
+      "hint": "Numeric group ID used by the image entrypoint for /config and media file access.",
+      "min": 1,
+      "max": 2147483647,
+      "default": 1000,
+      "required": false,
+      "env_variable": "PGID"
+    }
+  ]
+}

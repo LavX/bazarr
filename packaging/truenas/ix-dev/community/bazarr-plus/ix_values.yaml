@@ -1,0 +1,12 @@
+images:
+  image:
+    repository: ghcr.io/lavx/bazarr
+    tag: 2.7.0
+  container_utils_image:
+    repository: ixsystems/container-utils
+    tag: 1.0.2
+
+consts:
+  bazarr_plus_container_name: bazarr_plus
+  perms_container_name: permissions
+  internal_web_port: 6767
