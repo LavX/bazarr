@@ -273,6 +273,26 @@ class BoundedRefusalRecorder:
             self._line_times.append(now)
             return True
 
+    def note_retry(self, host):
+        """Record a retry's line; True when a per-host line may be written now.
+
+        The pace and the cap are consulted as ``note`` consults them and an
+        allowed answer spends the same allowance, but a line they hold back
+        is not counted as suppressed: the delivery retries of a failed
+        report ask here, and an hour of them must not add up to a summary
+        that says a stream of refusals was held back when one hostname's
+        line was. The refusal record itself is left alone, because a
+        report's retry is not a new refusal.
+        """
+        now = self._now()
+        with self._lock:
+            self._prune(now)
+            if host in self._last_lines or len(self._line_times) >= REFUSAL_LOG_LINES_PER_HOUR:
+                return False
+            self._last_lines[host] = now
+            self._line_times.append(now)
+            return True
+
     def _prune(self, now):
         self._line_times = [stamp for stamp in self._line_times if now - stamp < HOUR_SECONDS]
         self._last_lines = OrderedDict(

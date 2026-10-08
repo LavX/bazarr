@@ -1045,8 +1045,9 @@ def test_the_boot_announcement_writes_to_the_console_only(fresh_state, console_l
 
 
 def test_a_thousand_refused_hosts_leave_the_log_bounded(real_factory, console_log, root_log):
-    """The PRD's own ceiling: at most 21 refusal-path lines in the log that
-    bazarr.log is fed from, and at most one code line on the console."""
+    """The ceiling the bounds set: at most 21 refusal-path lines in the log
+    that bazarr.log is fed from, the hour's 20 per-host lines plus the one
+    summary line, and at most one code line on the console."""
     client = real_factory.test_client()
 
     for index in range(1000):
@@ -1952,28 +1953,127 @@ def test_the_report_cooldown_survives_a_burst_of_other_names():
     assert reporter.report_due("first.example.com") is True
 
 
-def test_the_report_pace_is_bounded_globally_too():
-    """The once-an-hour pace of each hostname has a global ceiling as well:
-    at most the refused-hosts limit of report attempts an hour in total, the
-    same bound the backend's refused-host record holds, so a long roll of
-    distinct hostnames cannot become a long roll of requests. The rest stay
-    pending and go out as the hour rolls over."""
+def test_the_report_cooldown_does_not_outlive_the_backend():
+    """The backend's refusal record lives in its memory, so a backend that
+    was restarted knows none of the hostnames the old one acknowledged:
+    readiness clears the cooldown stamps with the rest, and the next refusal
+    of such a hostname is reported to the new backend, whose status page
+    would otherwise name none of them for up to an hour."""
     clock = [0]
     reporter = supervisor._RefusalReporter("/_supervisor/host_refusal", now=lambda: clock[0])
 
-    for index in range(60):
-        assert reporter.report_due(f"h{index}.example.com") is True
+    assert reporter.report_due("restarted.example.com") is True
+    assert reporter.take_due_report() == "restarted.example.com"
+    reporter.report_sent("restarted.example.com")
+    # The same backend has the hostname, so a repeat reports nothing.
+    assert reporter.report_due("restarted.example.com") is False
 
-    taken = []
+    # The backend restarts and answers again.
+    reporter.ready_to_deliver()
+    assert reporter.report_due("restarted.example.com") is True
+    assert reporter.take_due_report() == "restarted.example.com"
+
+
+def test_the_report_pace_is_bounded_globally_too():
+    """The once-an-hour pace of each hostname has a global ceiling as well:
+    at most the refused-hosts limit of acknowledged reports an hour in
+    total, the same bound the backend's refused-host record holds, so a
+    long roll of distinct hostnames cannot become a long roll of requests.
+    A report the backend does not acknowledge does not count against it, so
+    a failing backend cannot spend the hour instead of the recovery. The
+    rest stay pending and go out as the hour rolls over."""
+    clock = [0]
+    reporter = supervisor._RefusalReporter("/_supervisor/host_refusal", now=lambda: clock[0])
+
+    # Ten hostnames are told inside the hour, and fifty more queue behind
+    # them for the same hour.
+    for index in range(10):
+        assert reporter.report_due(f"told{index}.example.com") is True
+        assert reporter.take_due_report() == f"told{index}.example.com"
+        reporter.report_sent(f"told{index}.example.com")
+    for index in range(50):
+        assert reporter.report_due(f"held{index}.example.com") is True
+
+    delivered = []
     while True:
         host = reporter.take_due_report()
         if host is None:
             break
-        taken.append(host)
-    assert len(taken) == supervisor.REPORTS_PER_HOUR
+        reporter.report_sent(host)
+        delivered.append(host)
+    # The ten already told leave room for forty of the fifty waiting.
+    assert len(delivered) == supervisor.REPORTS_PER_HOUR - 10
     # The rest are held, not dropped, and go out once the hour rolls over.
     clock[0] = 3601
     assert reporter.take_due_report() is not None
+
+
+def test_a_crash_window_of_refused_connections_does_not_spend_the_delivery_bound(monkeypatch):
+    """A backend that refuses every connection answers on the spot, so an
+    hour's bound that counts attempts is spent by the crash window alone and
+    the backend that recovers is told none of the fifty for up to an hour.
+    The bound counts acknowledged reports only, and a failed delivery holds
+    the next attempt back for a pace instead, so after readiness all fifty
+    are delivered."""
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    clock = [0]
+    reporter = supervisor._RefusalReporter("/_supervisor/host_refusal", now=lambda: clock[0])
+
+    hosts = [f"h{index}.example.com" for index in range(supervisor.REPORTS_PER_HOUR)]
+    for host in hosts:
+        assert reporter.report_due(host) is True
+
+    # The crash window: every connection is refused, one report at a time.
+    attempted = []
+    while True:
+        host = reporter.take_due_report()
+        if host is None:
+            break
+        attempted.append(host)
+        reporter.report_failed(host)
+    # A failed delivery holds the next attempt back for a pace, so the
+    # window asks about one hostname and not fifty.
+    assert attempted == hosts[:1]
+
+    # The readiness poll finds the backend answering again.
+    reporter.ready_to_deliver()
+
+    delivered = []
+    while True:
+        host = reporter.take_due_report()
+        if host is None:
+            break
+        delivered.append(host)
+        reporter.report_sent(host)
+    assert sorted(delivered) == sorted(hosts)
+
+
+def test_failing_retries_do_not_count_as_suppressed_lines(monkeypatch):
+    """One refusal is one line of news, and an hour of failing retries of
+    its report is still one: the failure path asks the line pace without
+    counting a held-back line as suppressed, so the summary never prints
+    sixty suppressed lines for the one refusal."""
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    clock = [0]
+    reporter = supervisor._RefusalReporter("/_supervisor/host_refusal", now=lambda: clock[0])
+
+    assert reporter.note_line("held.example.com") is True
+    assert reporter.report_due("held.example.com") is True
+    assert reporter.take_due_report() == "held.example.com"
+    reporter.report_failed("held.example.com")
+    # The delivery is retried once a minute for the hour.
+    for _ in range(59):
+        clock[0] += 60
+        reporter.report_failed("held.example.com")
+    assert lines == []
+
+    # Nothing was suppressed, so no summary is ever due.
+    clock[0] = 3600
+    reporter.take_summary()
+    clock[0] = 7200
+    assert reporter.take_summary() is None
 
 
 @pytest.mark.asyncio
@@ -2113,7 +2213,12 @@ async def test_a_thousand_refusals_while_the_backend_is_down_stay_bounded(
             response = await client.get("/", headers={"Host": f"h{index}.example.com"})
             assert response.status == 421
         reporter = supervisor._active_reporter
-        assert len(reporter.pending_reports()) == supervisor.host_policy.REFUSED_HOSTS_LIMIT
+        pending = reporter.pending_reports()
+        assert len(pending) == supervisor.host_policy.REFUSED_HOSTS_LIMIT
+        # The eviction drops the oldest waiting entries and keeps the newest:
+        # of the thousand refused names the last fifty survive, and the first
+        # of them is the nine-hundred-fiftieth.
+        assert pending[0] == "h950.example.com"
 
         in_flight = {"now": 0, "peak": 0}
         reports = []
@@ -2151,3 +2256,99 @@ async def test_a_thousand_refusals_while_the_backend_is_down_stay_bounded(
         assert len(lines) <= 21
     finally:
         await client.close()
+
+
+class _CountingWake:
+    """The reporter's wake event, counting the delivery worker's turns: the
+    worker clears the event once per turn, so its clear count is the turn
+    count."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.turns = 0
+
+    def clear(self):
+        self.turns += 1
+        self._inner.clear()
+
+    def set(self):
+        self._inner.set()
+
+    async def wait(self):
+        await self._inner.wait()
+
+
+def _count_worker_turns(reporter):
+    """Swap the reporter's wake event for one that counts the worker's turns."""
+    counting = _CountingWake(reporter._wake)
+    reporter._wake = counting
+    return counting
+
+
+async def _run_the_worker_for_a_second(reporter):
+    """Run the delivery worker for a second and return how many turns it
+    took, counted on its wake event."""
+    counting = _count_worker_turns(reporter)
+    task = asyncio.create_task(supervisor._drain_refusal_notices(reporter))
+    try:
+        await asyncio.sleep(1)
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    return counting.turns
+
+
+@pytest.mark.asyncio
+async def test_the_delivery_worker_does_not_spin_while_the_backend_is_down(monkeypatch):
+    """One way the worker's wait computed to zero: the backend went down
+    after a failed delivery, and the pending report is past its retry pace,
+    so the paces alone read as no wait at all. While the port is unset the
+    worker waits on its wake event, which readiness sets, so it takes a
+    handful of turns over a second and not a spin at a full core for as long
+    as the backend stays down."""
+    monkeypatch.setattr(supervisor, "BACKEND_PORT", None)
+    monkeypatch.setattr(supervisor, "BACKEND_TOKEN", None)
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    clock = [0]
+    reporter = supervisor._RefusalReporter("/_supervisor/host_refusal", now=lambda: clock[0])
+    assert reporter.report_due("down.example.com") is True
+    assert reporter.take_due_report() == "down.example.com"
+    reporter.report_failed("down.example.com")
+    clock[0] = 120  # past the retry pace, with the port unset
+
+    turns = await _run_the_worker_for_a_second(reporter)
+    assert 1 <= turns <= 5
+
+
+@pytest.mark.asyncio
+async def test_the_delivery_worker_does_not_spin_while_the_hours_bound_is_spent(monkeypatch):
+    """The other way: the hour's reporting bound is spent and a pending
+    report is past its retry pace, so its overdue pace shortened the wait to
+    nothing while the bound held every delivery back for up to the rest of
+    the hour. The worker waits for the oldest acknowledged report to roll
+    out of the hour instead, whatever the paces say."""
+    # A port nothing answers, and nothing is ever sent to: the spent bound
+    # holds every delivery back.
+    monkeypatch.setattr(supervisor, "BACKEND_PORT", 1)
+    monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    clock = [0]
+    reporter = supervisor._RefusalReporter("/_supervisor/host_refusal", now=lambda: clock[0])
+    # The bound is spent by acknowledged deliveries, one report each.
+    for index in range(supervisor.REPORTS_PER_HOUR):
+        assert reporter.report_due(f"h{index}.example.com") is True
+        assert reporter.take_due_report() == f"h{index}.example.com"
+        reporter.report_sent(f"h{index}.example.com")
+    # One more hostname was attempted and not acknowledged, and its retry
+    # pace has since run out.
+    assert reporter.report_due("late.example.com") is True
+    reporter.report_failed("late.example.com")
+    clock[0] = 120
+
+    turns = await _run_the_worker_for_a_second(reporter)
+    assert 1 <= turns <= 5

@@ -707,14 +707,24 @@ def _host_refusal_response(request: web.Request, host: str, base: str,
 
 # How long a report that no backend acknowledged waits before it may be tried
 # again, so a backend that is down or failing is not asked about the same
-# hostname on every refusal.
+# hostname on every refusal. While the last delivery failed it holds back
+# every later attempt as well, one per pace, so a failing backend is not
+# asked in a stream.
 RETRY_PACE_SECONDS = 60
 
+# The delivery worker never waits less than this before another look, so a
+# delay that computes to zero, an overdue pace under an unset port or a
+# spent hour, can never turn its loop into a busy spin.
+MIN_RETRY_WAIT_SECONDS = 1
+
 # The separate global bound for the reports themselves: at most
-# REFUSED_HOSTS_LIMIT deliveries an hour in total, the same ceiling the
-# backend's refused-host record holds, so a long roll of distinct hostnames
-# never becomes a long roll of requests. Hostnames past the bound stay
-# pending and go out as the hour rolls over.
+# REFUSED_HOSTS_LIMIT acknowledged deliveries an hour in total, the same
+# ceiling the backend's refused-host record holds, so a long roll of
+# distinct hostnames never becomes a long roll of requests. A delivery the
+# backend did not acknowledge does not count against it, so a crash window
+# of refused connections cannot spend the hour instead of the recovery;
+# the retry pace above holds those attempts back instead. Hostnames past
+# the bound stay pending and go out as the hour rolls over.
 REPORTS_PER_HOUR = host_policy.REFUSED_HOSTS_LIMIT
 
 # The reporter of the one host check this process fronts, so the readiness
@@ -732,12 +742,13 @@ class _RefusalReporter:
     reported to the backend at its own once-an-hour-per-host pace, because
     once the backend has the hostname its health page and its console code
     can name it. A report no backend acknowledged stays pending: at most
-    REFUSED_HOSTS_LIMIT of the oldest ones, the same number the backend's
-    record keeps, and the one delivery worker below sends them one at a
-    time, woken by refusals and by readiness, retrying on its own timer,
-    under the hour's global reporting bound above. The per-host cooldown is
-    kept by time alone, never by a count, so no amount of other hostnames
-    makes a told one tellable again within its hour.
+    REFUSED_HOSTS_LIMIT of them, the newest of the roll as the backend's
+    record keeps the newest refused, and the one delivery worker below
+    sends them one at a time, woken by refusals and by readiness, retrying
+    on its own timer, under the hour's global reporting bound above. The
+    per-host cooldown is kept by time alone, never by a count, so no
+    amount of other hostnames makes a told one tellable again within its
+    hour.
 
     While the backend answers, its console owns the refusal lines: the
     report reaches it and its own record writes them. This console writes
@@ -752,7 +763,8 @@ class _RefusalReporter:
         self._lines = host_policy.BoundedRefusalRecorder(now=now)
         self._last_report = OrderedDict()  # host -> time of its last acknowledged report
         self._pending = OrderedDict()  # host -> time of its last attempt (None until tried)
-        self._report_times = []  # times of this hour's report deliveries
+        self._report_times = []  # times of this hour's acknowledged report deliveries
+        self._last_failure = None  # when the last delivery failed, until an ack or readiness
         self._wake = asyncio.Event()  # refusals and readiness wake the worker
         self._drain_task: "asyncio.Task | None" = None
 
@@ -770,10 +782,10 @@ class _RefusalReporter:
         True when the hostname is newly waiting to be told: one acknowledged
         within the hour is done until the hour runs, and one already waiting
         is the worker's to deliver. The pending set holds the
-        REFUSED_HOSTS_LIMIT oldest of them, the same number the backend's
+        REFUSED_HOSTS_LIMIT newest of them, the same number the backend's
         record keeps, so a longer roll of hostnames cannot grow a longer
-        queue, and the ones it drops are the ones the backend's record has
-        dropped too.
+        queue: the ones the eviction drops are the oldest waiting, the ones
+        the backend's record has dropped too.
         """
         now = self._now()
         self._prune_reports(now)
@@ -789,51 +801,76 @@ class _RefusalReporter:
         """The next hostname the worker may tell the backend about, or None.
 
         Oldest waiting first, once its retry pace has run; a hostname never
-        attempted is due at once. Taking one marks its attempt and counts it
-        against the hour's global reporting bound, so the worker's one
-        request at a time is bounded in total as well.
+        attempted is due at once. Taking one only marks the attempt: the
+        hour's global reporting bound is spent by acknowledged deliveries
+        alone, and a delivery that failed holds every later attempt back
+        for one pace, so a failing backend is asked once per pace and not
+        in a stream, and cannot spend the hour instead of the recovery.
         """
         now = self._now()
         self._prune_reports(now)
         if len(self._report_times) >= REPORTS_PER_HOUR:
             return None
+        if self._last_failure is not None and now - self._last_failure < RETRY_PACE_SECONDS:
+            return None
         for host, last_try in self._pending.items():
             if last_try is None or now - last_try >= RETRY_PACE_SECONDS:
                 self._pending[host] = now
-                self._report_times.append(now)
                 return host
         return None
 
     def retry_delay(self):
-        """How long the worker may wait before another look, nothing due."""
+        """How long the worker may wait before another look, nothing due.
+
+        Never less than MIN_RETRY_WAIT_SECONDS, so a wait that computes to
+        zero can never turn the worker into a busy spin. While the hour's
+        bound is spent, the next delivery can only happen once the oldest
+        acknowledged report rolls out of the hour, so the paces are not
+        consulted: a hostname past its pace cannot be taken while the bound
+        holds, and its overdue pace would otherwise read as no wait at all.
+        """
         now = self._now()
         self._prune_reports(now)
-        waits = []
         if len(self._report_times) >= REPORTS_PER_HOUR:
-            waits.append(host_policy.HOUR_SECONDS - (now - self._report_times[0]))
-        waits.extend(RETRY_PACE_SECONDS - (now - last_try)
-                     for last_try in self._pending.values() if last_try is not None)
-        if not waits:
-            return RETRY_PACE_SECONDS
-        return max(0.0, min(min(waits), RETRY_PACE_SECONDS))
+            return max(MIN_RETRY_WAIT_SECONDS,
+                       self._report_times[0] + host_policy.HOUR_SECONDS - now)
+        waits = [RETRY_PACE_SECONDS - (now - last_try)
+                 for last_try in self._pending.values() if last_try is not None]
+        wait = min(waits) if waits else RETRY_PACE_SECONDS
+        if self._last_failure is not None:
+            # A failed delivery holds every attempt back for a pace, so the
+            # worker does not hammer a failing backend.
+            wait = max(wait, RETRY_PACE_SECONDS - (now - self._last_failure))
+        return max(MIN_RETRY_WAIT_SECONDS, min(wait, RETRY_PACE_SECONDS))
 
     def report_sent(self, host):
         """The backend acknowledged the report; it is not pending any more.
 
         The cooldown is kept by time alone, never by a count: however many
         hostnames are acknowledged around it, a told one stays told for its
-        full hour.
+        full hour. The acknowledgement is also what spends the hour's global
+        reporting bound and lifts the failure backoff, so a backend that
+        refuses or drops reports cannot spend the hour instead of the
+        recovery.
         """
-        self._last_report[host] = self._now()
+        now = self._now()
+        self._last_report[host] = now
         self._pending.pop(host, None)
+        self._report_times.append(now)
+        self._last_failure = None
 
     def report_failed(self, host):
         """The backend did not take the report: it stays pending, pace
         permitting, and this console names the hostname, because from this
-        moment this console is the only place that does until it lands."""
+        moment this console is the only place that does until it lands. The
+        failure also holds every later attempt back for one pace, and the
+        line below asks its pace without counting a held-back line as
+        suppressed, so an hour of failing retries does not add up to a
+        summary that says a stream of refusals was held back."""
+        self._last_failure = self._now()
         if host in self._pending:
             self._pending[host] = self._now()
-        if self.note_line(host):
+        if self._lines.note_retry(host):
             _print_refusal_line(_refusal_line_text(host))
 
     def pending_reports(self):
@@ -841,9 +878,19 @@ class _RefusalReporter:
         return list(self._pending)
 
     def ready_to_deliver(self):
-        """The backend answers again: everything it was not told is due now."""
+        """The backend answers again: everything it was not told is due now.
+
+        The failure backoff is lifted with it, and so are the per-host
+        cooldown stamps, because a backend that was restarted knows none of
+        the hostnames the old one acknowledged: its refusal record died with
+        it, and the stamps would hold those hostnames back for up to an hour
+        while its status page names none of them. The hour's global bound
+        still caps what goes out.
+        """
         for host in self._pending:
             self._pending[host] = None
+        self._last_failure = None
+        self._last_report.clear()
         self._wake.set()
 
     def _prune_reports(self, now):
@@ -918,7 +965,10 @@ async def _drain_refusal_notices(reporter: _RefusalReporter) -> None:
     refusal and by readiness, and its own timer retries what no backend
     acknowledged, so a failed report needs no further request and no manual
     call to be tried again. While the backend cannot be reached it sends
-    nothing and waits.
+    nothing and waits on its wake event alone, with the retry pace for a
+    fallback: nothing but readiness can make a delivery possible before the
+    port is set again, and a pending report past its retry pace must not
+    turn this loop into a busy spin against a port no backend answers.
     """
     wake = reporter.wake_event()
     session = None
@@ -930,8 +980,12 @@ async def _drain_refusal_notices(reporter: _RefusalReporter) -> None:
             if port and token:
                 host = reporter.take_due_report()
             if host is None:
+                if port is None:
+                    delay = RETRY_PACE_SECONDS
+                else:
+                    delay = reporter.retry_delay()
                 try:
-                    await asyncio.wait_for(wake.wait(), timeout=reporter.retry_delay())
+                    await asyncio.wait_for(wake.wait(), timeout=delay)
                 except asyncio.TimeoutError:
                     pass
                 continue
