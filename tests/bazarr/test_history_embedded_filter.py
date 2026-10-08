@@ -44,7 +44,9 @@ def _series_fixture(schema_session):
         path="/tv/alpha/s01e01.mkv",
         season=1,
         episode=1,
-        subtitles="[]",
+        # The history rows carry this same subtitles_path, so the endpoint's
+        # upgradable check sees the track as still on disk.
+        subtitles="[['en', '/tv/alpha/s01e01.en.srt']]",
         missing_subtitles="[]",
         monitored="True",
     )
@@ -121,55 +123,21 @@ def _movie_fixture(schema_session):
     schema_session.flush()
 
 
-@pytest.mark.parametrize("filter_query", ["series_id=1", "seriesid=10"])
 @pytest.mark.parametrize("include_embedded", [False, True])
 def test_series_history_filter_scopes_rows_and_total(
-        schema_session, monkeypatch, filter_query, include_embedded):
-    from app.database import TableEpisodes, TableHistory, TableShows
-
-    _series_fixture(schema_session)
+        schema_session, monkeypatch, include_embedded):
+    _extended_series_fixture(schema_session)
     _patch_episode_endpoint(monkeypatch, schema_session)
-    schema_session.add(TableShows(
-        id=2, sonarrSeriesId=20, arr_instance_id=2, title="other show",
-        path="/tv/other", profileId=None, tags="[]", seriesType="standard",
-    ))
-    schema_session.flush()
-    schema_session.add_all([
-        TableEpisodes(
-            id=2, series_id=1, sonarrSeriesId=10, sonarrEpisodeId=101,
-            arr_instance_id=1, title="second episode", path="/tv/alpha/s01e02.mkv",
-            season=1, episode=2, subtitles="[]", monitored="True",
-        ),
-        TableEpisodes(
-            id=3, series_id=2, sonarrSeriesId=20, sonarrEpisodeId=200,
-            arr_instance_id=2, title="other pilot", path="/tv/other/s01e01.mkv",
-            season=1, episode=1, subtitles="[]", monitored="True",
-        ),
-    ])
-    schema_session.flush()
-    schema_session.add_all([
-        TableHistory(
-            id=4, series_id=1, episode_id=2, sonarrSeriesId=10, sonarrEpisodeId=101,
-            arr_instance_id=1, action=1, language="en", description="second download",
-            timestamp=datetime(2026, 8, 29, 12, 0, 4),
-        ),
-        TableHistory(
-            id=5, series_id=2, episode_id=3, sonarrSeriesId=20, sonarrEpisodeId=200,
-            arr_instance_id=2, action=1, language="en", description="other download",
-            timestamp=datetime(2026, 8, 29, 12, 0, 5),
-        ),
-    ])
-    schema_session.flush()
 
     embedded_query = f"include_embedded={str(include_embedded).lower()}"
-    result = _get_episode_history(f"?{filter_query}&{embedded_query}&length=-1")
+    result = _get_episode_history(f"?series_id=1&{embedded_query}&length=-1")
 
     assert {item["series_id"] for item in result["data"]} == {1}
     assert {item["id"] for item in result["data"]} == {1, 2}
     assert result["total"] == len(result["data"]) == (4 if include_embedded else 2)
     assert (7 in {item["action"] for item in result["data"]}) is include_embedded
 
-    page = _get_episode_history(f"?{filter_query}&{embedded_query}&length=1&start=1")
+    page = _get_episode_history(f"?series_id=1&{embedded_query}&length=1&start=1")
     assert len(page["data"]) == 1
     assert page["data"][0]["history_id"] == result["data"][1]["history_id"]
     assert page["total"] == result["total"]
@@ -256,6 +224,100 @@ def test_episode_scoped_history_applies_the_same_default(schema_session, monkeyp
 
     assert [item["action"] for item in result["data"]] == [1]
     assert result["total"] == 1
+
+
+def _extended_series_fixture(schema_session):
+    from app.database import TableEpisodes, TableHistory, TableShows
+
+    _series_fixture(schema_session)
+    schema_session.add(TableShows(
+        id=2, sonarrSeriesId=20, arr_instance_id=2, title="other show",
+        path="/tv/other", profileId=None, tags="[]", seriesType="standard",
+    ))
+    schema_session.flush()
+    schema_session.add_all([
+        TableEpisodes(
+            id=2, series_id=1, sonarrSeriesId=10, sonarrEpisodeId=101,
+            arr_instance_id=1, title="second episode", path="/tv/alpha/s01e02.mkv",
+            season=1, episode=2, subtitles="[]", monitored="True",
+        ),
+        TableEpisodes(
+            id=3, series_id=2, sonarrSeriesId=20, sonarrEpisodeId=200,
+            arr_instance_id=2, title="other pilot", path="/tv/other/s01e01.mkv",
+            season=1, episode=1, subtitles="[]", monitored="True",
+        ),
+    ])
+    schema_session.flush()
+    schema_session.add_all([
+        TableHistory(
+            id=4, series_id=1, episode_id=2, sonarrSeriesId=10, sonarrEpisodeId=101,
+            arr_instance_id=1, action=1, language="en", description="second download",
+            timestamp=datetime(2026, 8, 29, 12, 0, 4),
+        ),
+        TableHistory(
+            id=5, series_id=2, episode_id=3, sonarrSeriesId=20, sonarrEpisodeId=200,
+            arr_instance_id=2, action=1, language="en", description="other download",
+            timestamp=datetime(2026, 8, 29, 12, 0, 5),
+        ),
+    ])
+    schema_session.flush()
+
+
+def test_episode_history_legacy_seriesid_spelling_is_not_a_filter(
+        schema_session, monkeypatch):
+    """The legacy seriesid spelling filtered on the per-instance
+    sonarrSeriesId, which two Sonarr instances can share, and no caller sends
+    it. It is not an accepted filter, so a request that still carries it
+    behaves as unfiltered."""
+    _extended_series_fixture(schema_session)
+    _patch_episode_endpoint(monkeypatch, schema_session)
+
+    legacy = _get_episode_history("?seriesid=10&include_embedded=false&length=-1")
+    unfiltered = _get_episode_history("?include_embedded=false&length=-1")
+
+    assert {item["id"] for item in legacy["data"]} == {1, 2, 3}
+    assert {item["series_id"] for item in legacy["data"]} == {1, 2}
+    assert legacy["total"] == unfiltered["total"]
+
+
+def test_episode_history_can_skip_the_upgradable_computation(
+        schema_session, monkeypatch):
+    """The upgradable computation aggregates the whole history table, and the
+    series detail page reads only score, provider and matches. A request that
+    opts out does not pay for the scan and gets upgradable False on every row."""
+    from api.episodes import history
+
+    _series_fixture(schema_session)
+    _patch_episode_endpoint(monkeypatch, schema_session)
+
+    calls = []
+    still_desired_calls = []
+
+    def spy(history_id_list):
+        calls.append(list(history_id_list))
+        return {1: 999}
+
+    def still_desired(language, profile_id):
+        still_desired_calls.append((language, profile_id))
+        return True
+
+    monkeypatch.setattr(history, "get_upgradable_episode_subtitles", spy)
+    monkeypatch.setattr(history, "_language_still_desired", still_desired)
+
+    default = _get_episode_history("?series_id=1&include_embedded=false&length=-1")
+    assert calls == [[1]]
+    assert still_desired_calls == [("en", None)]
+    assert [item["upgradable"] for item in default["data"]] == [True]
+
+    skipped = _get_episode_history(
+        "?series_id=1&include_embedded=false&length=-1&include_upgradable=false")
+    assert calls == [[1]]
+    assert still_desired_calls == [("en", None)]
+    assert skipped["total"] == default["total"]
+    assert [item["upgradable"] for item in skipped["data"]] == [False]
+    for item in default["data"] + skipped["data"]:
+        del item["upgradable"]
+    assert skipped["data"] == default["data"]
 
 
 def test_movie_history_excludes_embedded_by_default(schema_session, monkeypatch):

@@ -71,6 +71,7 @@ describe("series subtitle score history", () => {
     expect(requests[0].searchParams.get("series_id")).toBe("501");
     expect(requests[0].searchParams.get("include_embedded")).toBe("true");
     expect(requests[0].searchParams.get("length")).toBe("-1");
+    expect(requests[0].searchParams.get("include_upgradable")).toBe("false");
   });
 
   it("reuses fresh history for five minutes and then refreshes on remount", async () => {

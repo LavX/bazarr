@@ -259,7 +259,7 @@ export const Subtitle: FunctionComponent<Props> = ({
       {/* Render inline (span) so an appended score stays on the same line
           instead of wrapping below the block <p> and being clipped. */}
       <Language.Text value={subtitle} long={false} span></Language.Text>
-      {scored ? ` ${Math.round(scorePct!)}%` : null}
+      {scored ? ` ${scorePct!}%` : null}
     </Badge>
   );
 
