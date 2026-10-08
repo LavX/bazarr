@@ -324,7 +324,8 @@ def sync_subtitles(video_path,
                    context=None,
                    validate=None,
                    cancel=None,
-                   publication_guard=None):
+                   publication_guard=None,
+                   return_job_id=False):
     try:
         if context is not None:
             if validate is None or publication_guard is None:
@@ -355,6 +356,13 @@ def sync_subtitles(video_path,
             return False
 
         if not job_id and track_job_progress:
+            # HTTP callers need the id to refresh only after the queued sync
+            # finishes. Internal callers retain the boolean outcome contract.
+            if return_job_id:
+                return jobs_queue.add_job_from_function(
+                    f"Syncing {srt_path}", is_progress=True,
+                    progress_max=_sync_progress_total(enabled_engines), return_existing=True,
+                )
             if not jobs_queue.add_job_from_function(
                 f"Syncing {srt_path}",
                 is_progress=True,

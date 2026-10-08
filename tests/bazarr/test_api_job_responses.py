@@ -31,7 +31,7 @@ def _schema_ref(response):
 def test_series_and_movie_actions_document_the_scan_job(spec):
     for path in ("/series", "/movies"):
         responses = spec["paths"][path]["patch"]["responses"]
-        # scan-disk queues a job, every other action still answers 204.
+        # Queued actions expose their job; synchronous actions still answer 204.
         assert {"202", "204"} <= set(responses), path
         model = spec["definitions"][_schema_ref(responses["202"])]
         # An identical job already queued answers with a null id.
@@ -97,3 +97,29 @@ def test_the_jobs_list_documents_who_started_the_job(spec):
     job = spec["definitions"][envelope["properties"]["data"]["items"]["$ref"].rsplit("/", 1)[-1]]
     assert job["properties"]["origin"]["type"] == "string"
     assert job["properties"]["origin"]["x-nullable"] is True
+
+
+def test_episode_download_documents_the_job_to_follow(spec):
+    responses = spec["paths"]["/episodes/subtitles"]["patch"]["responses"]
+    assert "202" in responses
+    assert "204" not in responses
+    model = spec["definitions"][_schema_ref(responses["202"])]
+    assert model["properties"]["job_id"]["type"] == "integer"
+
+
+@pytest.mark.parametrize("path,method", [("/providers/episodes", "post"), ("/subtitles", "patch")])
+def test_manual_actions_document_the_job_to_follow(spec, path, method):
+    responses = spec["paths"][path][method]["responses"]
+    assert "202" in responses
+    model = spec["definitions"][_schema_ref(responses["202"])]
+    assert model["properties"]["job_id"]["type"] == "integer"
+    if path == "/subtitles":
+        assert "204" in responses  # Movie and sports sync/translation keep their existing response.
+
+
+def test_exclude_documents_the_replacement_search_to_follow(spec):
+    responses = spec["paths"]["/episodes/blacklist"]["post"]["responses"]
+    assert "200" in responses
+    model = spec["definitions"][_schema_ref(responses["200"])]
+    assert model["properties"]["job_id"]["type"] == "integer"
+    assert model["properties"]["job_id"]["x-nullable"] is True

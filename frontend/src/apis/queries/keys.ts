@@ -32,3 +32,8 @@ export enum QueryKeys {
   Seerr = "seerr",
   Translator = "translator",
 }
+
+// Separate from the Series prefix: library-wide series events must not reload
+// the full history used by subtitle score badges.
+export const episodesHistoryKey = (seriesId?: number) =>
+  [QueryKeys.Episodes, QueryKeys.History, QueryKeys.Series, seriesId] as const;

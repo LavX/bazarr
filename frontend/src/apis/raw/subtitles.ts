@@ -195,7 +195,12 @@ class SubtitlesApi extends BaseApi {
   }
 
   async modify(action: string, form: FormType.ModifySubtitle) {
-    await this.patch("", form, { action });
+    const response = await this.patch<{ job_id: number | null } | undefined>(
+      "",
+      form,
+      { action },
+    );
+    return response.data;
   }
 
   async batch(

@@ -5,9 +5,11 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import { invalidateEpisodeHistory } from "@/apis/queries/episodeHistory";
 import { usePaginationQuery } from "@/apis/queries/hooks";
-import { QueryKeys } from "@/apis/queries/keys";
+import { episodesHistoryKey, QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
+import { whenJobFinishes } from "./jobWatch";
 
 const cacheEpisodes = (client: QueryClient, episodes: Item.Episode[]) => {
   episodes.forEach((item) => {
@@ -69,7 +71,7 @@ export function useEpisodeAddBlacklist() {
       return api.episodes.addBlacklist(seriesId, episodeId, form);
     },
 
-    onSuccess: () => {
+    onSuccess: (data, param) => {
       void client.invalidateQueries({
         queryKey: [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.Blacklist],
       });
@@ -82,6 +84,21 @@ export function useEpisodeAddBlacklist() {
       void client.invalidateQueries({
         queryKey: [QueryKeys.Series],
       });
+      const refreshHistory = () =>
+        invalidateEpisodeHistory(client, {
+          seriesId: param.seriesId,
+          episodeId: param.episodeId,
+          arrInstanceId: param.form.arr_instance_id,
+        });
+      // Clear the deleted subtitle's score immediately, then refresh again
+      // when its replacement search finishes, including when the socket is down.
+      if (typeof data?.job_id === "number") {
+        whenJobFinishes(client, data.job_id, () => {
+          void client.invalidateQueries({ queryKey: [QueryKeys.Series] });
+          void refreshHistory();
+        });
+      }
+      return refreshHistory();
     },
   });
 }
@@ -127,5 +144,19 @@ export function useEpisodeHistory(episodeId?: number) {
 
       return [];
     },
+  });
+}
+
+// One request per series detail page: the whole show's episode history, which
+// the episodes table maps to per-subtitle scores. Distinct from
+// useEpisodeHistory (a single episode) above.
+export function useEpisodesHistory(seriesId?: number) {
+  return useQuery({
+    queryKey: episodesHistoryKey(seriesId),
+    queryFn: ({ signal }) => api.episodes.historyBySeriesId(seriesId!, signal),
+    enabled: seriesId !== undefined && seriesId > 0,
+    staleTime: 5 * 60 * 1000,
+    // Do not show the previous series' scores while navigating between shows.
+    placeholderData: undefined,
   });
 }

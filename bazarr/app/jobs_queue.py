@@ -34,8 +34,18 @@ bazarr_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class JobCancelled(Exception):
-    """Raised when a running job is cancelled by the user."""
-    pass
+    """Raised when a running job is cancelled by the user.
+
+    ``job_id`` names the stopped job. A stop can surface inside another job's
+    work, because the provider pool a search reports its progress through is
+    shared between the jobs of a profile, so work being interrupted checks
+    whose stop arrived before it ends its own job. The message is optional: a
+    caller that only signals the stop raises the class bare.
+    """
+
+    def __init__(self, message="", job_id=None):
+        super().__init__(message)
+        self.job_id = job_id
 
 
 class JobFailed(Exception):
@@ -212,6 +222,12 @@ class JobsQueue:
         self._job_id_lock = Lock()  # Separate lock for ID generation
         self._import_lock = Lock()  # Lock for module imports
 
+        # Inline runs a batch job claimed in place of queueing one, each keyed
+        # like the job the queue would refuse to duplicate and owned by the
+        # claiming job's id. They are read in the same look, under this same
+        # lock, as the pending and running queues.
+        self._inline_claims = []
+
         # Throttle progress events: buffer latest payload per job, flush every 250 ms
         self._progress_buffer = {}
         self._progress_buffer_lock = Lock()
@@ -247,9 +263,10 @@ class JobsQueue:
         :type retryable: bool
         :param retry_of: The id of the failed job this one retries.
         :type retry_of: int
-        :param return_existing: When an identical job is already pending or running, return that job's ID
-            instead of False. It is read in the same look as the match, under the queue lock, so the caller
-            gets a job to follow even when that job finishes a moment later.
+        :param return_existing: When an identical job is already pending or running, or runs inline in a
+            claimed batch job, return that job's ID instead of False. It is read in the same look as the
+            match, under the queue lock, so the caller gets a job to follow even when that job finishes a
+            moment later.
         :type return_existing: bool
         :return: The unique job ID assigned to the newly queued job, or False when an identical job is already
             pending or running.
@@ -265,6 +282,14 @@ class JobsQueue:
             if existing is not None:
                 logging.debug(f"Task {job_name} already exists in pending and running queue")  # noqa: G004
                 return existing.job_id if return_existing else False
+
+            claim = self._find_inline_claim(module, func, args, kwargs)
+            if claim is not None:
+                # The work runs inline in the batch job that claimed it, so a
+                # request that would queue the same work follows that job
+                # instead of starting a second one.
+                logging.debug(f"Task {job_name} runs inline in job {claim['job_id']}")  # noqa: G004
+                return claim['job_id'] if return_existing else False
 
             with self._job_id_lock:
                 new_job_id = self.current_job_id = self.current_job_id + 1
@@ -519,7 +544,7 @@ class JobsQueue:
                 # Only final accounting of an already committed operation may
                 # report after cancellation. Work checks retain the default.
                 if job.cancelled and not allow_cancelled:
-                    raise JobCancelled(f"Job {job.job_name} ({job.job_id}) was cancelled")
+                    raise JobCancelled(f"Job {job.job_name} ({job.job_id}) was cancelled", job_id=job_id)
                 payload = self._build_progress_payload(job, progress_value, progress_max, progress_message)
                 with self._progress_buffer_lock:
                     self._progress_buffer[job_id] = payload
@@ -587,7 +612,7 @@ class JobsQueue:
         return False
 
     def add_job_from_function(self, job_name: str, is_progress: bool, progress_max: int = 0,
-                              wait_for_completion: bool = False) -> int | bool:
+                              wait_for_completion: bool = False, return_existing: bool = False) -> int | bool:
         """
         Adds a job to the pending queue using the details of the calling function. The job is then executed.
 
@@ -599,6 +624,8 @@ class JobsQueue:
         :type progress_max: int
         :param wait_for_completion: Flag indicating whether to wait for the job to complete before returning.
         :type wait_for_completion: bool
+        :param return_existing: Return the matching active job's id when this call is already queued.
+        :type return_existing: bool
         :return: ID of the added job.
         :rtype: int | bool
         """
@@ -632,7 +659,8 @@ class JobsQueue:
 
         # Feed the job to the pending queue
         job_id = self.feed_jobs_pending_queue(job_name=job_name, module=parent_function_path, func=parent_function_name,
-                                              kwargs=arguments, is_progress=is_progress, progress_max=progress_max)
+                                              kwargs=arguments, is_progress=is_progress, progress_max=progress_max,
+                                              return_existing=return_existing)
 
         if not job_id:
             return False
@@ -1001,6 +1029,85 @@ class JobsQueue:
                         cleaned_job_kwargs == cleaned_kwargs):
                     return job
             return None
+
+    def claim_inline_job(self, module, func, args=None, kwargs=None, job_id=None):
+        """Claim an inline run of work the queue would refuse to duplicate.
+
+        A batch job that runs the work itself, inline, publishes the run here
+        before it starts. The claim is read in the same look, under the same
+        lock, that ``feed_jobs_pending_queue`` makes before queueing, so both
+        directions of the race are covered: this batch leaves alone work a job
+        another request already queued or claimed, and a request that arrives
+        while the batch runs the work follows this job instead of queueing a
+        second one.
+
+        :param module: Module the inline work runs from.
+        :type module: str
+        :param func: Function the inline work runs.
+        :type func: str
+        :param args: Positional arguments of the work, as the queue would bind them.
+        :type args: list
+        :param kwargs: Keyword arguments of the work, as the queue would bind them.
+        :type kwargs: dict
+        :param job_id: The claiming batch job's id.
+        :type job_id: int
+        :return: The id of the job that owns the work: ``job_id`` when this
+            caller claimed it, or the id of the job that already does.
+        :rtype: int
+        """
+        args = list(args or [])
+        cleaned_kwargs = dict(kwargs or {})
+        cleaned_kwargs.pop('job_id', None)
+        with self._queue_lock:
+            existing = self._find_existing_job(module, func, args, cleaned_kwargs)
+            if existing is not None:
+                return existing.job_id
+            claim = self._find_inline_claim(module, func, args, cleaned_kwargs)
+            if claim is not None:
+                return claim['job_id']
+            self._inline_claims.append({'module': module, 'func': func, 'args': args,
+                                        'kwargs': cleaned_kwargs, 'job_id': job_id})
+            return job_id
+
+    def release_inline_job(self, module, func, args=None, kwargs=None):
+        """Drop the claim ``claim_inline_job`` recorded for this inline run.
+
+        The batch that claimed the run calls this when the run ends, whether it
+        completed, failed or was stopped, so a later request may start the work
+        again.
+
+        :param module: Module the inline work runs from.
+        :type module: str
+        :param func: Function the inline work runs.
+        :type func: str
+        :param args: Positional arguments of the work, as the queue would bind them.
+        :type args: list
+        :param kwargs: Keyword arguments of the work, as the queue would bind them.
+        :type kwargs: dict
+        """
+        args = list(args or [])
+        cleaned_kwargs = dict(kwargs or {})
+        cleaned_kwargs.pop('job_id', None)
+        with self._queue_lock:
+            for claim in self._inline_claims:
+                if (claim['module'] == module and claim['func'] == func and
+                        claim['args'] == args and claim['kwargs'] == cleaned_kwargs):
+                    self._inline_claims.remove(claim)
+                    return
+
+    def _find_inline_claim(self, module, func, args, kwargs):
+        """The inline claim for the same work, or None.
+
+        A ``job_id`` in either set of keyword arguments is not part of the
+        comparison, exactly as in ``_find_existing_job``.
+        """
+        cleaned_kwargs = dict(kwargs or {})
+        cleaned_kwargs.pop('job_id', None)
+        for claim in self._inline_claims:
+            if (claim['module'] == module and claim['func'] == func and
+                    claim['args'] == list(args or []) and claim['kwargs'] == cleaned_kwargs):
+                return claim
+        return None
 
 
 jobs_queue = JobsQueue()

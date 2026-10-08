@@ -1196,6 +1196,7 @@ def _process_media_action(items, action, job_id):
 
     jobs_queue.update_job_progress(job_id=job_id, progress_max=len(items))
 
+    searched_series = set()
     for i, item in enumerate(items, start=1):
         item_type = item.get('type')
         jobs_queue.update_job_progress(
@@ -1248,7 +1249,34 @@ def _process_media_action(items, action, job_id):
                     if not series_id:
                         skipped += 1
                         continue
-                    series_download_subtitles(series_id, arr_instance_id=item.get('arr_instance_id'))
+                    # Episode selections can share a series, and another
+                    # request may already have this show queued or running.
+                    # Inline searches need the deduplication previously
+                    # supplied by the queue, or two searches race file by file
+                    # and spend provider quota twice. The claim also publishes
+                    # this batch's own inline run, so a Search on the show's
+                    # page follows this job instead of starting a second one.
+                    # The kwargs mirror the ones the series route's self-queue
+                    # binds.
+                    series_key = (item.get('arr_instance_id'), series_id)
+                    if series_key in searched_series:
+                        skipped += 1
+                        continue
+                    claim = {'no': series_id, 'job_sub_function': False,
+                             'arr_instance_id': item.get('arr_instance_id')}
+                    owner = jobs_queue.claim_inline_job('subtitles.mass_download.series',
+                                                        'series_download_subtitles',
+                                                        kwargs=claim, job_id=job_id)
+                    if owner != job_id:
+                        skipped += 1
+                        continue
+                    searched_series.add(series_key)
+                    try:
+                        series_download_subtitles(series_id, job_id=job_id, job_sub_function=True,
+                                                   arr_instance_id=item.get('arr_instance_id'))
+                    finally:
+                        jobs_queue.release_inline_job('subtitles.mass_download.series',
+                                                      'series_download_subtitles', kwargs=claim)
                 elif item_type == 'movie':
                     radarr_id = item.get('radarrId')
                     if not radarr_id:

@@ -110,7 +110,7 @@ def test_the_owner_reaches_the_queued_episode_extraction(schema_session, endpoin
                                      season=1, episode=1))
     schema_session.commit()
 
-    assert call() == ("", 204)
+    assert call() == ({"job_id": None}, 202)
 
     assert recorded['extracted'] is None, 'the request must not run ffmpeg itself'
     assert recorded['translated']['embedded_source'] == {'language': 'en', 'hi': False, 'forced': False}

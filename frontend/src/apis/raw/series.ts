@@ -27,7 +27,11 @@ class SeriesApi extends BaseApi {
   }
 
   async action(form: FormType.SeriesAction) {
-    await this.patch("", form);
+    const response = await this.patch<{ job_id: number | null } | undefined>(
+      "",
+      form,
+    );
+    return response.data;
   }
 
   async downloadSubtitlesArchive(
