@@ -366,6 +366,21 @@ class LockResolutionTests(unittest.TestCase):
         self.assertEqual(out.getvalue(), f"{existing}\n")
         self.assertEqual(existing.read_bytes(), before)
 
+    def test_an_existing_lock_in_the_passed_directory_passes_through_without_resolution(self):
+        # A tag whose lock is already reviewed on development passes through; the local checkout never sees a write.
+        development = self.root / "development-releases"
+        development.mkdir()
+        existing = development / "2.7.1.json"
+        existing.write_text(json.dumps(lock_data("2.7.1", NEXT_DIGEST)))
+        before = existing.read_bytes()
+        with patch.object(release, "PACKAGING", self.root), \
+             patch.object(release, "request_json", side_effect=AssertionError("the registry must not be read")), \
+             patch.object(release.subprocess, "run", side_effect=AssertionError("gh must not run")):
+            resolved = release.resolve_lock("v2.7.1", development)
+        self.assertEqual(resolved, existing)
+        self.assertEqual(existing.read_bytes(), before)
+        self.assertEqual(sorted(path.name for path in self.releases.iterdir()), ["2.7.0.json"])
+
     def test_a_first_release_of_a_line_needs_a_hand_reviewed_lock(self):
         cases = {
             "no base in the line": ([], "v2.7.1", "2.7"),
@@ -392,6 +407,26 @@ class LockResolutionTests(unittest.TestCase):
         resolved = json.loads((self.releases / "2.7.2.json").read_text())
         self.assertEqual(resolved["version"], "2.7.2")
         self.assertEqual(resolved["companions"], closer["companions"])
+
+    def test_resolution_reads_the_base_from_the_passed_directory(self):
+        # Lock pull requests merge into development, so v2.7.1's reviewed lock can be absent from the master checkout.
+        development = self.root / "development-releases"
+        development.mkdir()
+        reviewed = lock_data("2.7.1", NEXT_DIGEST)
+        reviewed["companions"]["translator"]["digest"] = "sha256:" + "d" * 64
+        reviewed["platform_revisions"]["runtipi"] = 3
+        reviewed["platform_revisions"]["truenas"] = "1.0.4"
+        (development / "2.7.1.json").write_text(json.dumps(reviewed))
+        self.stub_resolution(self.registry_responses())
+        resolved = release.resolve_lock("v2.7.2", development)
+        self.assertEqual(resolved, self.releases / "2.7.2.json")
+        lock = json.loads((self.releases / "2.7.2.json").read_text())
+        self.assertEqual(lock["version"], "2.7.2")
+        self.assertEqual(lock["companions"], reviewed["companions"])
+        self.assertEqual(lock["platform_revisions"]["runtipi"], 4)
+        self.assertEqual(lock["platform_revisions"]["truenas"], "1.0.5")
+        self.assertEqual(sorted(path.name for path in self.releases.iterdir()), ["2.7.0.json", "2.7.2.json"])
+        self.assertEqual(sorted(path.name for path in development.iterdir()), ["2.7.1.json"])
 
     def test_only_runtipi_and_truenas_bump_their_revisions(self):
         cases = {
@@ -443,6 +478,31 @@ class LockResolutionTests(unittest.TestCase):
                     release.resolve_lock("v2.7.1")
                 self.assertEqual([path.name for path in self.releases.iterdir()], ["2.7.0.json"])
 
+    def test_a_lock_appearing_during_resolution_is_never_overwritten(self):
+        # A lock written between the existence check and the write must be refused, never clobbered.
+        canonical = release.canonical_json
+        sentinel = b"hand written lock"
+
+        def appearing_file(lock):
+            (self.releases / "2.7.1.json").write_bytes(sentinel)
+            return canonical(lock)
+
+        def appearing_symlink(lock):
+            (self.root / "hand-written").write_bytes(sentinel)
+            (self.releases / "2.7.1.json").symlink_to(self.root / "hand-written")
+            return canonical(lock)
+
+        cases = {"appearing file": appearing_file, "appearing symlink": appearing_symlink}
+        for case, appearing in cases.items():
+            with self.subTest(case):
+                for leftover in (self.releases / "2.7.1.json", self.root / "hand-written"):
+                    leftover.unlink(missing_ok=True)
+                self.stub_resolution(self.registry_responses())
+                with patch.object(release, "canonical_json", side_effect=appearing):
+                    with self.assertRaisesRegex(release.ReleaseError, "Release lock appeared during resolution"):
+                        release.resolve_lock("v2.7.1")
+                self.assertEqual((self.releases / "2.7.1.json").read_bytes(), sentinel)
+
     def test_resolution_reproduces_the_expected_lock(self):
         with patch.object(release, "PACKAGING", self.root), \
              patch.object(release, "request_json", side_effect=self.registry_responses()), \
@@ -467,11 +527,14 @@ class ResolveCommandTests(unittest.TestCase):
         cases = {
             "missing tag": ([], "--resolve-lock requires --tag"),
             "with a lock": (["--tag", "v2.7.1", "--lock", "releases/2.7.1.json"],
-                            "--resolve-lock cannot be combined with --lock or --verify-live"),
+                            "--resolve-lock cannot be combined with --lock, --output or --verify-live"),
+            # v2.7.0 has a checked-in lock, so a command that ignores --output would pass through and succeed.
+            "with an output": (["--tag", "v2.7.0", "--output", "unused"],
+                               "--resolve-lock cannot be combined with --lock, --output or --verify-live"),
             "with every lock": (["--tag", "v2.7.1", "--all-locks", "releases"],
                                 "--all-locks cannot be combined with --tag, --lock, --resolve-lock or --verify-live"),
             "with live verification": (["--tag", "v2.7.1", "--verify-live"],
-                                       "--resolve-lock cannot be combined with --lock or --verify-live"),
+                                       "--resolve-lock cannot be combined with --lock, --output or --verify-live"),
         }
         for case, (arguments, message) in cases.items():
             with self.subTest(case):
@@ -584,6 +647,9 @@ class WorkflowRunStructureTests(unittest.TestCase):
         resolution = self.prepare_steps["Resolve release lock"]
         self.assertEqual(resolution["if"], "github.event_name == 'workflow_run'")
         self.assertIn("release.py --resolve-lock", resolution["run"])
+        self.assertIn("git fetch origin development", resolution["run"])
+        self.assertIn("git archive origin/development packaging/releases", resolution["run"])
+        self.assertIn("--releases-dir", resolution["run"])
         self.assertLess(self.order.index("Validate final stable tag"), self.order.index("Resolve release lock"))
         self.assertLess(self.order.index("Resolve release lock"),
                         self.order.index("Verify published release and prepare packages"))
@@ -591,6 +657,7 @@ class WorkflowRunStructureTests(unittest.TestCase):
     def test_a_newly_resolved_lock_reaches_the_proposal_job(self):
         upload = self.prepare_steps["Upload resolved lock"]
         self.assertEqual(upload["if"], "github.event_name == 'workflow_run' && steps.lock.outputs.resolved == 'true'")
+        self.assertEqual(upload["with"]["name"], self.jobs["prepare"]["outputs"]["lock_artifact"])
         proposal = self.jobs["propose-lock"]
         self.assertEqual(proposal["needs"], ["prepare"])
         self.assertIn("github.event_name == 'workflow_run'", proposal["if"])
@@ -599,7 +666,12 @@ class WorkflowRunStructureTests(unittest.TestCase):
         checkouts = [step for step in proposal["steps"] if step.get("uses", "").startswith("actions/checkout@")]
         self.assertEqual([step["with"]["ref"] for step in checkouts], ["development"])
         downloads = [step for step in proposal["steps"] if step.get("uses", "").startswith("actions/download-artifact@")]
-        self.assertEqual([step["with"]["name"] for step in downloads], [upload["with"]["name"]])
+        self.assertEqual([step["with"]["name"] for step in downloads],
+                         ["${{ needs.prepare.outputs.lock_artifact }}"])
+        proposing = [step for step in proposal["steps"] if "run" in step][0]
+        self.assertEqual(proposing["env"]["PRODUCING_RUN"],
+                         "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
+        self.assertEqual(proposing["env"]["IMAGE_BUILD_RUN"], "${{ github.event.workflow_run.html_url }}")
         runs = [step["run"] for step in proposal["steps"] if "run" in step]
         self.assertTrue(any("--base development" in run for run in runs))
         self.assertTrue(all("master" not in run and "pr merge" not in run for run in runs))
@@ -662,7 +734,8 @@ class WorkflowRunLaneTests(unittest.TestCase):
                                PATH=f"{tools}{os.pathsep}{os.environ['PATH']}", GH_LOG=str(gh_log),
                                GH_TOKEN="fake-token", GH_REPO="LavX/bazarr", VERSION="2.7.1",
                                EXPECTED_SHA256=hashlib.sha256(lock.read_bytes()).hexdigest(),
-                               PRODUCING_RUN="https://github.com/LavX/bazarr/actions/runs/1")
+                               PRODUCING_RUN="https://github.com/LavX/bazarr/actions/runs/2",
+                               IMAGE_BUILD_RUN="https://github.com/LavX/bazarr/actions/runs/1")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(git(self.repository, "diff", "--name-only", "HEAD~1", "HEAD").split(),
                          ["packaging/releases/2.7.1.json"])
@@ -673,6 +746,7 @@ class WorkflowRunLaneTests(unittest.TestCase):
         body = (self.repository / "proposal-body.md").read_text()
         self.assertIn(NEXT_DIGEST, body)
         self.assertIn("ghcr.io/lavx/ai-subtitle-translator:v2.1.1@", body)
+        self.assertIn("produced by https://github.com/LavX/bazarr/actions/runs/2", body)
         self.assertIn("https://github.com/LavX/bazarr/actions/runs/1", body)
         self.assertIn("runtipi: 1", body)
         self.assertIn("truenas: 1.0.0", body)

@@ -45,6 +45,7 @@ jobs:
       lock_resolved: ${{ steps.lock.outputs.resolved }}
       lock_version: ${{ steps.lock.outputs.version }}
       lock_sha256: ${{ steps.lock.outputs.sha256 }}
+      lock_artifact: resolved-lock-${{ github.run_id }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -89,8 +90,21 @@ jobs:
             echo "${lock} already exists; using the reviewed lock"
             echo "resolved=false" >> "$GITHUB_OUTPUT"
           else
-            python3 packaging/release.py --resolve-lock --tag "$RELEASE_TAG"
-            echo "resolved=true" >> "$GITHUB_OUTPUT"
+            # Lock pull requests merge into development, so resolution bases on its reviewed locks.
+            development="${RUNNER_TEMP}/dev-releases"
+            mkdir "$development"
+            git fetch origin development
+            git archive origin/development packaging/releases | tar -x -C "$development"
+            dev_lock="${development}/packaging/releases/${RELEASE_TAG#v}.json"
+            if [[ -f "$dev_lock" ]]; then
+              cp "$dev_lock" "$lock"
+              echo "${dev_lock} is already reviewed on development; reusing its lock"
+              echo "resolved=false" >> "$GITHUB_OUTPUT"
+            else
+              python3 packaging/release.py --resolve-lock --tag "$RELEASE_TAG" \
+                --releases-dir "${development}/packaging/releases"
+              echo "resolved=true" >> "$GITHUB_OUTPUT"
+            fi
           fi
           echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
           echo "sha256=$(sha256sum "$lock" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
@@ -224,7 +238,7 @@ jobs:
         if: github.event_name == 'workflow_run' && steps.lock.outputs.resolved == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: resolved-lock-${{ github.run_id }}-${{ github.run_attempt }}
+          name: resolved-lock-${{ github.run_id }}
           path: packaging/releases/${{ steps.lock.outputs.version }}.json
           if-no-files-found: error
           retention-days: 30
@@ -272,7 +286,7 @@ jobs:
       - name: Download resolved lock
         uses: actions/download-artifact@v8
         with:
-          name: resolved-lock-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ needs.prepare.outputs.lock_artifact }}
           path: resolved-lock
 
       - name: Propose the resolved lock
@@ -281,7 +295,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.prepare.outputs.lock_version }}
           EXPECTED_SHA256: ${{ needs.prepare.outputs.lock_sha256 }}
-          PRODUCING_RUN: ${{ github.event.workflow_run.html_url }}
+          PRODUCING_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          IMAGE_BUILD_RUN: ${{ github.event.workflow_run.html_url }}
         run: |
           set -euo pipefail
           lock="resolved-lock/${VERSION}.json"
@@ -292,8 +307,13 @@ jobs:
           fi
           target="packaging/releases/${VERSION}.json"
           if [[ -f "$target" ]]; then
-            echo "${target} is already reviewed on development; nothing to propose"
-            exit 0
+            if cmp -s "$target" "$lock"; then
+              echo "${target} is already reviewed on development with the same bytes; nothing to propose"
+              exit 0
+            fi
+            echo "${target} is already reviewed on development with different bytes than the resolved lock." >&2
+            echo "Decide by hand which lock fits the tag, put those bytes on development, and replay this lane." >&2
+            exit 1
           fi
           branch="packaging/lock-v${VERSION}"
           git config user.name "github-actions[bot]"
@@ -304,11 +324,6 @@ jobs:
           git commit -m "Add the ${VERSION} release lock resolved after the image build"
           # The branch is automation-owned; rewinding it keeps a replayed run consistent.
           git push --force origin "$branch"
-          open="$(gh pr list --head "$branch" --state open --json url --jq '.[0].url // ""')"
-          if [[ -n "$open" ]]; then
-            echo "A proposal is already open: ${open}"
-            exit 0
-          fi
           python3 - "$lock" > proposal-body.md <<'PY'
           import json, os, sys
 
@@ -316,11 +331,12 @@ jobs:
           version = lock["version"]
           digest = lock["app"]["digest"]
           run = os.environ["PRODUCING_RUN"]
+          image_build = os.environ["IMAGE_BUILD_RUN"]
           companions = "\n".join(f"- {name}: {entry['image']}:{entry['tag']}@{entry['digest']}"
                                  for name, entry in sorted(lock["companions"].items()))
           revisions = "\n".join(f"- {name}: {revision}"
                                 for name, revision in sorted(lock["platform_revisions"].items()))
-          print(f"""This pull request adds the release lock resolved automatically for version {version}. It was produced by {run} after the tagged image build completed, and the packages in that run were prepared from these exact bytes.
+          print(f"""This pull request adds the release lock resolved automatically for version {version}. It was produced by {run} after the tagged image build completed, and the packages in that run were prepared from these exact bytes. The image build that published the app image is {image_build}.
 
           - Version: {version}
           - App image digest: {digest}
@@ -333,5 +349,11 @@ jobs:
 
           Nothing merges automatically. Companion upgrades, new runtime profiles and new major.minor lines still need a hand-authored lock.""")
           PY
+          open="$(gh pr list --head "$branch" --state open --json number --jq '.[0].number // ""')"
+          if [[ -n "$open" ]]; then
+            echo "A proposal is already open: ${open}; updating its body"
+            gh pr edit "$open" --body-file proposal-body.md
+            exit 0
+          fi
           gh pr create --base development --head "$branch" \
             --title "Add the ${VERSION} release lock" --body-file proposal-body.md

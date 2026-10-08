@@ -21,7 +21,7 @@ import urllib.request
 
 
 PACKAGING = Path(__file__).resolve().parent
-# The render anchor stays at the last fully released version; the automation lands real locks per release.
+# The render anchor is the version the templates are written against; the automation lands real locks per release.
 SOURCE_VERSION = "2.7.0"
 SOURCE_APP_DIGEST = "sha256:90a5c184b0af41602ff78ea7286e0c5f2c4c284c9b18f71427d9ddbeb0b6531c"
 IMAGE_REPOSITORIES = {
@@ -332,10 +332,9 @@ def resolve_app_digest(tag):
     return digest
 
 
-def previous_lock_path(tag):
+def previous_lock_path(tag, releases):
     """Return the lock of the immediately previous final release in the same major.minor line."""
     version = tuple(int(part) for part in tag[1:].split("."))
-    releases = PACKAGING / "releases"
     if releases.is_symlink() or not releases.is_dir():
         raise ReleaseError("Release lock directory must be a regular directory")
     bases = []
@@ -364,15 +363,22 @@ def bumped_revisions(base):
     return revisions
 
 
-def resolve_lock(tag):
-    """Resolve the release lock for a tag after its image build published the app image."""
+def resolve_lock(tag, releases_dir=None):
+    """Resolve the release lock for a tag after its image build published the app image.
+
+    Reads come from releases_dir when it is provided, so the workflow resolves against
+    development's reviewed locks, and otherwise from the local packaging/releases checkout.
+    A newly resolved lock is always written into the local checkout, whose bytes the lane
+    then prepares and proposes.
+    """
     if not VERSION.fullmatch(tag):
         raise ReleaseError(f"Expected a final stable tag such as v2.7.0, got {tag}")
     version = tag[1:]
-    lock_path = PACKAGING / "releases" / f"{version}.json"
+    releases = releases_dir if releases_dir is not None else PACKAGING / "releases"
+    lock_path = releases / f"{version}.json"
     if lock_path.is_symlink() or lock_path.exists():
         return lock_path
-    base_path = previous_lock_path(tag)
+    base_path = previous_lock_path(tag, releases)
     base = read_lock(base_path, "v" + base_path.name.removesuffix(".json"))
     lock = {
         "schema": 1,
@@ -383,10 +389,14 @@ def resolve_lock(tag):
         "platform_revisions": bumped_revisions(base),
     }
     validate_lock(lock, tag)
-    if lock_path.is_symlink() or lock_path.exists():
-        raise ReleaseError(f"Release lock appeared during resolution: {lock_path}")
-    lock_path.write_bytes(canonical_json(lock))
-    return lock_path
+    written = PACKAGING / "releases" / f"{version}.json"
+    data = canonical_json(lock)
+    try:
+        with written.open("xb") as handle:
+            handle.write(data)
+    except FileExistsError as exc:
+        raise ReleaseError(f"Release lock appeared during resolution: {written}") from exc
+    return written
 
 
 def checked_output(output):
@@ -466,6 +476,8 @@ def main(argv=None):
     parser.add_argument("--lock", type=Path)
     parser.add_argument("--resolve-lock", action="store_true",
                         help="resolve the release lock for --tag after its image build, then exit")
+    parser.add_argument("--releases-dir", type=Path, metavar="DIRECTORY",
+                        help="directory of reviewed release locks --resolve-lock reads instead of the local checkout")
     parser.add_argument("--all-locks", type=Path, metavar="DIRECTORY",
                         help="prepare an offline candidate for every release lock in DIRECTORY")
     parser.add_argument("--output", type=Path)
@@ -473,8 +485,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.all_locks and (args.tag or args.lock or args.verify_live or args.resolve_lock):
         parser.error("--all-locks cannot be combined with --tag, --lock, --resolve-lock or --verify-live")
-    if args.resolve_lock and (args.lock or args.verify_live):
-        parser.error("--resolve-lock cannot be combined with --lock or --verify-live")
+    if args.resolve_lock and (args.lock or args.output or args.verify_live):
+        parser.error("--resolve-lock cannot be combined with --lock, --output or --verify-live")
     if args.resolve_lock and not args.tag:
         parser.error("--resolve-lock requires --tag")
     if not args.resolve_lock and not args.output:
@@ -483,7 +495,7 @@ def main(argv=None):
         parser.error("--tag and --lock are required unless --all-locks is used")
     try:
         if args.resolve_lock:
-            outputs = [resolve_lock(args.tag)]
+            outputs = [resolve_lock(args.tag, args.releases_dir)]
         elif args.all_locks:
             outputs = prepare_all(args.all_locks, args.output)
         else:

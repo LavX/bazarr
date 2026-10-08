@@ -12,7 +12,7 @@ Submission candidates for Bazarr+, separate from upstream Bazarr. These files do
 
 Each package uses the current released stable `ghcr.io/lavx/bazarr` image, pinned per the release lock, with persistent config storage and a distinct Bazarr+ app identity. The published image supports amd64 and arm64. Platform support is narrower where a catalog requires it.
 
-Registry verification on September 28, 2026 resolved that tag to index digest `sha256:90a5c184b0af41602ff78ea7286e0c5f2c4c284c9b18f71427d9ddbeb0b6531c`. Recheck the tag before publishing the packages.
+Registry verification on September 28, 2026 resolved the `v2.7.0` tag to index digest `sha256:90a5c184b0af41602ff78ea7286e0c5f2c4c284c9b18f71427d9ddbeb0b6531c`. Recheck the tag before publishing the packages.
 
 Choose the combined stack for one install with the translator and FlareSolverr already connected, or a standalone package if you only want Bazarr+. Movies, TV, and sports folders are optional. Add only the media storage you need, with write permissions for subtitle downloads.
 
