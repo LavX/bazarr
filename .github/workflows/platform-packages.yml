@@ -93,7 +93,8 @@ jobs:
             # Lock pull requests merge into development, so resolution bases on its reviewed locks.
             development="${RUNNER_TEMP}/dev-releases"
             mkdir "$development"
-            git fetch origin development
+            # Only the reviewed tip is needed, so a depth-1 fetch keeps the shallow checkout light.
+            git fetch --depth=1 origin development
             git archive origin/development packaging/releases | tar -x -C "$development"
             dev_lock="${development}/packaging/releases/${RELEASE_TAG#v}.json"
             if [[ -f "$dev_lock" ]]; then
@@ -314,6 +315,25 @@ jobs:
             fi
             echo "${target} is already reviewed on development with different bytes than the resolved lock." >&2
             echo "Decide by hand which lock fits the tag, put those bytes on development, and replay this lane." >&2
+            exit 1
+          fi
+          # A lower patch proposal still open means development lacks its reviewed lock, so
+          # this run resolved from an older base and would repeat its platform revisions
+          # while both pull requests merge cleanly. The current tag's own proposal is never
+          # caught here: a first run creates it and a replay refreshes it below.
+          line="${VERSION%.*}"
+          patch="${VERSION##*.}"
+          pending="$(gh pr list --state open --base development --json headRefName --jq '.[].headRefName')"
+          blocking=()
+          while IFS= read -r head; do
+            [[ "$head" =~ ^packaging/lock-v${line}\.(0|[1-9][0-9]*)$ ]] || continue
+            if (( BASH_REMATCH[1] < patch )); then
+              blocking+=("v${line}.${BASH_REMATCH[1]}")
+            fi
+          done <<< "$pending"
+          if ((${#blocking[@]})); then
+            echo "The lock proposal for ${blocking[*]} is still open, so development does not carry its reviewed lock yet." >&2
+            echo "Merge the ${blocking[*]} release lock first, then Re-run all jobs." >&2
             exit 1
           fi
           branch="packaging/lock-v${VERSION}"

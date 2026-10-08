@@ -369,7 +369,7 @@ def resolve_lock(tag, releases_dir=None):
     Reads come from releases_dir when it is provided, so the workflow resolves against
     development's reviewed locks, and otherwise from the local packaging/releases checkout.
     A newly resolved lock is always written into the local checkout, whose bytes the lane
-    then prepares and proposes.
+    then prepares and proposes; a lock already present there refuses before any registry work.
     """
     if not VERSION.fullmatch(tag):
         raise ReleaseError(f"Expected a final stable tag such as v2.7.0, got {tag}")
@@ -378,6 +378,9 @@ def resolve_lock(tag, releases_dir=None):
     lock_path = releases / f"{version}.json"
     if lock_path.is_symlink() or lock_path.exists():
         return lock_path
+    written = PACKAGING / "releases" / f"{version}.json"
+    if written.is_symlink() or written.exists():
+        raise ReleaseError(f"Release lock already exists in the local checkout: {written}")
     base_path = previous_lock_path(tag, releases)
     base = read_lock(base_path, "v" + base_path.name.removesuffix(".json"))
     lock = {
@@ -389,7 +392,6 @@ def resolve_lock(tag, releases_dir=None):
         "platform_revisions": bumped_revisions(base),
     }
     validate_lock(lock, tag)
-    written = PACKAGING / "releases" / f"{version}.json"
     data = canonical_json(lock)
     try:
         with written.open("xb") as handle:

@@ -381,6 +381,28 @@ class LockResolutionTests(unittest.TestCase):
         self.assertEqual(existing.read_bytes(), before)
         self.assertEqual(sorted(path.name for path in self.releases.iterdir()), ["2.7.0.json"])
 
+    def test_a_local_lock_refuses_resolution_before_any_registry_work(self):
+        # The workflow checks the local file first, but a CLI run with --releases-dir must
+        # also refuse up front instead of resolving and only then reporting a collision.
+        development = self.root / "development-releases"
+        development.mkdir()
+        shutil.copyfile(PACKAGE_ROOT / "releases" / "2.7.0.json", development / "2.7.0.json")
+        existing = self.releases / "2.7.1.json"
+        existing.write_text(json.dumps(lock_data("2.7.1", NEXT_DIGEST)))
+        before = existing.read_bytes()
+        with patch.object(release, "PACKAGING", self.root), \
+             patch.object(release, "request_json", side_effect=AssertionError("an existing local lock reads no registry")), \
+             patch.object(release.subprocess, "run", side_effect=AssertionError("an existing local lock runs no attestation")), \
+             contextlib.redirect_stderr(io.StringIO()) as errors:
+            with self.assertRaises(SystemExit) as refused:
+                release.main(["--resolve-lock", "--tag", "v2.7.1", "--releases-dir", str(development)])
+        self.assertEqual(refused.exception.code, 1)
+        self.assertIn("release preparation refused", errors.getvalue())
+        self.assertIn(f"Release lock already exists in the local checkout: {existing}", errors.getvalue())
+        self.assertEqual(existing.read_bytes(), before)
+        self.assertEqual(sorted(path.name for path in development.iterdir()), ["2.7.0.json"])
+        self.assertEqual(sorted(path.name for path in self.releases.iterdir()), ["2.7.0.json", "2.7.1.json"])
+
     def test_a_first_release_of_a_line_needs_a_hand_reviewed_lock(self):
         cases = {
             "no base in the line": ([], "v2.7.1", "2.7"),
@@ -647,7 +669,7 @@ class WorkflowRunStructureTests(unittest.TestCase):
         resolution = self.prepare_steps["Resolve release lock"]
         self.assertEqual(resolution["if"], "github.event_name == 'workflow_run'")
         self.assertIn("release.py --resolve-lock", resolution["run"])
-        self.assertIn("git fetch origin development", resolution["run"])
+        self.assertIn("git fetch --depth=1 origin development", resolution["run"])
         self.assertIn("git archive origin/development packaging/releases", resolution["run"])
         self.assertIn("--releases-dir", resolution["run"])
         self.assertLess(self.order.index("Validate final stable tag"), self.order.index("Resolve release lock"))
@@ -681,6 +703,8 @@ class WorkflowRunStructureTests(unittest.TestCase):
 class WorkflowRunLaneTests(unittest.TestCase):
     """Run the workflow_run lane steps against a disposable repository."""
 
+    RECORDING_GH = '#!/bin/sh\nprintf "%s\\n" "$*" >> "$GH_LOG"\nexit 0\n'
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -695,6 +719,44 @@ class WorkflowRunLaneTests(unittest.TestCase):
         env = {**os.environ, **environment}
         return subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
                                cwd=self.repository, env=env, capture_output=True, text=True, check=False)
+
+    def development_origin(self, name, data):
+        """Point the fixture at a bare file:// origin whose development branch adds a reviewed lock."""
+        remote = self.root / "remote.git"
+        git(self.repository, "init", "-q", "--bare", str(remote))
+        git(self.repository, "remote", "add", "origin", f"file://{remote}")
+        upstream = self.root / "upstream"
+        git(self.root, "clone", "-q", str(self.repository), str(upstream))
+        git(upstream, "checkout", "-q", "-b", "development")
+        (upstream / "packaging/releases" / name).write_bytes(data)
+        git(upstream, "add", "-A")
+        git(upstream, "commit", "-q", "-m", "reviewed lock")
+        git(upstream, "push", "-q", str(remote), "development")
+
+    def proposal_environment(self, version, lock_bytes, gh_script):
+        """Set up a bare origin, the downloaded lock and a gh stub for the proposal step."""
+        remote = self.root / "remote.git"
+        git(self.repository, "init", "-q", "--bare", str(remote))
+        git(self.repository, "remote", "add", "origin", str(remote))
+        downloaded = self.repository / "resolved-lock" / f"{version}.json"
+        downloaded.parent.mkdir()
+        downloaded.write_bytes(lock_bytes)
+        tools = self.root / "bin"
+        tools.mkdir()
+        gh_log = self.root / "gh.log"
+        gh = tools / "gh"
+        gh.write_text(gh_script)
+        gh.chmod(0o755)
+        return gh_log, {
+            "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}",
+            "GH_LOG": str(gh_log),
+            "GH_TOKEN": "fake-token",
+            "GH_REPO": "LavX/bazarr",
+            "VERSION": version,
+            "EXPECTED_SHA256": hashlib.sha256(lock_bytes).hexdigest(),
+            "PRODUCING_RUN": "https://github.com/LavX/bazarr/actions/runs/2",
+            "IMAGE_BUILD_RUN": "https://github.com/LavX/bazarr/actions/runs/1",
+        }
 
     def test_only_final_tags_pass_the_lane_validation(self):
         cases = {"final tag": ("v2.7.1", 0), "release candidate": ("v2.7.1-rc1", 1), "branch build": ("master", 1)}
@@ -717,6 +779,52 @@ class WorkflowRunLaneTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.outputs.read_text(),
                          f"resolved=false\nversion=2.7.1\nsha256={hashlib.sha256(lock.read_bytes()).hexdigest()}\n")
+
+    def test_a_reviewed_development_lock_is_copied_without_resolving(self):
+        reviewed = (json.dumps(lock_data("2.7.1", NEXT_DIGEST), indent=2) + "\n").encode()
+        self.development_origin("2.7.1.json", reviewed)
+        tools = self.root / "bin"
+        tools.mkdir()
+        python3_log = self.root / "python3.log"
+        python3 = tools / "python3"
+        python3.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$PYTHON3_LOG"\nexit 1\n')
+        python3.chmod(0o755)
+        runner = self.root / "runner"
+        runner.mkdir()
+        result = self.run_step(self.steps["Resolve release lock"]["run"],
+                               PATH=f"{tools}{os.pathsep}{os.environ['PATH']}",
+                               PYTHON3_LOG=str(python3_log), RUNNER_TEMP=str(runner),
+                               RELEASE_TAG="v2.7.1", GITHUB_OUTPUT=str(self.outputs))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(python3_log.exists())
+        self.assertEqual((self.repository / "packaging/releases/2.7.1.json").read_bytes(), reviewed)
+        self.assertEqual(self.outputs.read_text(),
+                         f"resolved=false\nversion=2.7.1\nsha256={hashlib.sha256(reviewed).hexdigest()}\n")
+
+    def test_resolution_reads_the_exported_development_locks(self):
+        reviewed = (json.dumps(lock_data("2.7.1", NEXT_DIGEST), indent=2) + "\n").encode()
+        self.development_origin("2.7.1.json", reviewed)
+        tools = self.root / "bin"
+        tools.mkdir()
+        python3_log = self.root / "python3.log"
+        python3 = tools / "python3"
+        python3.write_text('#!/bin/sh\n'
+                           'printf "%s\\n" "$*" >> "$PYTHON3_LOG"\n'
+                           'printf "stub resolved lock\\n" > "packaging/releases/2.7.2.json"\n')
+        python3.chmod(0o755)
+        runner = self.root / "runner"
+        runner.mkdir()
+        result = self.run_step(self.steps["Resolve release lock"]["run"],
+                               PATH=f"{tools}{os.pathsep}{os.environ['PATH']}",
+                               PYTHON3_LOG=str(python3_log), RUNNER_TEMP=str(runner),
+                               RELEASE_TAG="v2.7.2", GITHUB_OUTPUT=str(self.outputs))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        exported = f"{runner}/dev-releases/packaging/releases"
+        self.assertEqual(python3_log.read_text(),
+                         f"packaging/release.py --resolve-lock --tag v2.7.2 --releases-dir {exported}\n")
+        stub = b"stub resolved lock\n"
+        self.assertEqual(self.outputs.read_text(),
+                         f"resolved=true\nversion=2.7.2\nsha256={hashlib.sha256(stub).hexdigest()}\n")
 
     def test_the_proposal_commits_only_the_resolved_lock(self):
         remote = self.root / "remote.git"
@@ -751,6 +859,80 @@ class WorkflowRunLaneTests(unittest.TestCase):
         self.assertIn("https://github.com/LavX/bazarr/actions/runs/1", body)
         self.assertIn("runtipi: 1", body)
         self.assertIn("truenas: 1.0.0", body)
+
+    def test_an_open_lower_patch_proposal_refuses_before_the_push(self):
+        stub = ('#!/bin/sh\n'
+                'printf "%s\\n" "$*" >> "$GH_LOG"\n'
+                'case " $* " in\n'
+                '  *" headRefName "*) printf "%s\\n" "packaging/lock-v2.7.1" ;;\n'
+                'esac\n'
+                'exit 0\n')
+        downloaded = json.dumps(lock_data("2.7.2", NEXT_DIGEST)).encode()
+        gh_log, environment = self.proposal_environment("2.7.2", downloaded, stub)
+        head = git(self.repository, "rev-parse", "HEAD")
+        result = self.run_step(self.proposal, **environment)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Merge the v2.7.1 release lock first, then Re-run all jobs",
+                      result.stdout + result.stderr)
+        self.assertEqual(git(self.repository, "rev-parse", "HEAD"), head)
+        self.assertEqual(git(self.repository, "branch", "--list", "packaging/lock-v*"), "")
+        self.assertEqual(git(self.repository, "ls-remote", "--heads", "origin"), "")
+        self.assertFalse((self.repository / "packaging/releases/2.7.2.json").exists())
+        self.assertEqual(gh_log.read_text().splitlines(),
+                         ["pr list --state open --base development --json headRefName --jq .[].headRefName"])
+
+    def test_open_proposals_outside_the_lower_patches_still_push(self):
+        stub = ('#!/bin/sh\n'
+                'printf "%s\\n" "$*" >> "$GH_LOG"\n'
+                'case " $* " in\n'
+                '  *" headRefName "*) printf "%s\\n" "packaging/lock-v2.8.0" "packaging/lock-v2.7.2" ;;\n'
+                'esac\n'
+                'exit 0\n')
+        downloaded = json.dumps(lock_data("2.7.1", NEXT_DIGEST)).encode()
+        gh_log, environment = self.proposal_environment("2.7.1", downloaded, stub)
+        result = self.run_step(self.proposal, **environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("refs/heads/packaging/lock-v2.7.1", git(self.repository, "ls-remote", "--heads", "origin"))
+        self.assertTrue(any("pr create --base development" in call for call in gh_log.read_text().splitlines()))
+
+    def test_matching_development_lock_bytes_leave_nothing_to_propose(self):
+        reviewed = (json.dumps(lock_data("2.7.1", NEXT_DIGEST), indent=2) + "\n").encode()
+        (self.repository / "packaging/releases/2.7.1.json").write_bytes(reviewed)
+        gh_log, environment = self.proposal_environment("2.7.1", reviewed, self.RECORDING_GH)
+        result = self.run_step(self.proposal, **environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("nothing to propose", result.stdout)
+        self.assertFalse(gh_log.exists())
+        self.assertEqual(git(self.repository, "ls-remote", "--heads", "origin"), "")
+
+    def test_conflicting_development_lock_bytes_refuse_and_push_nothing(self):
+        reviewed = (json.dumps(lock_data("2.7.1", BASE_DIGEST), indent=2) + "\n").encode()
+        (self.repository / "packaging/releases/2.7.1.json").write_bytes(reviewed)
+        downloaded = (json.dumps(lock_data("2.7.1", NEXT_DIGEST), indent=2) + "\n").encode()
+        gh_log, environment = self.proposal_environment("2.7.1", downloaded, self.RECORDING_GH)
+        result = self.run_step(self.proposal, **environment)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Decide by hand which lock fits the tag", result.stderr)
+        self.assertFalse(gh_log.exists())
+        self.assertEqual(git(self.repository, "ls-remote", "--heads", "origin"), "")
+
+    def test_a_replayed_proposal_refreshes_its_open_pull_request(self):
+        stub = ('#!/bin/sh\n'
+                'printf "%s\\n" "$*" >> "$GH_LOG"\n'
+                'case " $* " in\n'
+                '  *" headRefName "*) printf "%s\\n" "packaging/lock-v2.7.1" ;;\n'
+                '  *" --head "*) printf "%s\\n" 17 ;;\n'
+                'esac\n'
+                'exit 0\n')
+        downloaded = json.dumps(lock_data("2.7.1", NEXT_DIGEST)).encode()
+        gh_log, environment = self.proposal_environment("2.7.1", downloaded, stub)
+        result = self.run_step(self.proposal, **environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = gh_log.read_text().splitlines()
+        self.assertIn("pr edit 17 --body-file proposal-body.md", calls)
+        self.assertFalse(any("pr create" in call for call in calls))
+        self.assertIn("refs/heads/packaging/lock-v2.7.1", git(self.repository, "ls-remote", "--heads", "origin"))
+        self.assertIn(NEXT_DIGEST, (self.repository / "proposal-body.md").read_text())
 
 
 if __name__ == "__main__":
