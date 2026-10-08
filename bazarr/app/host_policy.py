@@ -16,7 +16,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from ipaddress import ip_address, ip_network
+from ipaddress import ip_address
 
 # The environment variable that carries extra allowed hosts, comma-separated,
 # for an operator who cannot reach the UI or edit config.yaml.
@@ -166,6 +166,23 @@ def host_is_allowed(host, configured_entries, environ=None):
     return any(host_matches(host, entry) for entry in entries)
 
 
+def refused_hostnames(raw, effective, configured_entries, environ=None):
+    """The hostnames of a request the allowlist does not admit, in order.
+
+    A request from a trusted proxy carries two of them. The one the client
+    sent is judged first, so when only one of the two fails it is the failing
+    one that is named, and when both fail they both are. A request that
+    carried none at all is refused as well: a request the Host header cannot
+    name is not one the allowlist can answer for.
+    """
+    refused = []
+    for name in (raw, effective):
+        if not name or not host_is_allowed(name, configured_entries, environ):
+            if name not in refused:
+                refused.append(name)
+    return refused
+
+
 # One label of a hostname: letters, digits and inner hyphens, at most 63
 # characters, neither starting nor ending in a hyphen.
 _HOSTNAME_LABEL = r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?'
@@ -201,36 +218,28 @@ def _comparable_address(value):
 def peer_is_trusted_proxy(remote, trusted_proxy=None):
     """Whether a peer address may name the hostname the client arrived for.
 
-    The rule mirrors the backend: the one address in
-    ``general.trusted_proxy`` (its default applies when the setting is
-    absent, an explicitly empty one trusts nobody), a ``*`` that names every
-    address, or a comma-separated list of those. A peer is compared as an
-    address when both sides parse as one, so a mapped IPv6 form of a
-    configured IPv4 address matches, and an address may also be named as a
-    network.
+    The same forms the backend accepts: one address compared exactly, a ``*``
+    that names every address, or the setting's default when it is absent; an
+    explicitly empty setting trusts nobody. Both sides are also parsed as
+    addresses, so a mapped IPv6 form of the configured IPv4 address matches,
+    which at this layer can only narrow the check: a forwarded host is
+    believed, and a believed one is judged alongside the hostname it replaced.
+    Anything else (a comma-separated list, a network range) matches no one
+    here, exactly as it does not at the backend.
     """
     if not remote:
         return False
     spec = '127.0.0.1' if trusted_proxy is None else str(trusted_proxy).strip()
+    if not spec or spec.count(','):
+        return False
+    if spec == '*':
+        return True
     remote_text = str(remote).strip()
+    if spec.lower() == remote_text.lower():
+        return True
     peer = _comparable_address(remote_text)
-    for item in spec.split(','):
-        item = item.strip()
-        if not item:
-            continue
-        if item == '*' or item.lower() == remote_text.lower():
-            return True
-        if peer is None:
-            continue
-        candidate = _comparable_address(item)
-        if candidate is not None and peer == candidate:
-            return True
-        try:
-            if peer in ip_network(item, strict=False):
-                return True
-        except ValueError:
-            continue
-    return False
+    candidate = _comparable_address(spec)
+    return peer is not None and candidate is not None and peer == candidate
 
 
 class BoundedRefusalRecorder:
@@ -244,7 +253,7 @@ class BoundedRefusalRecorder:
     cap one summary line counts the suppressed ones once the hour it opened in
     has run. The caller owns the wording and the channel: ``note`` returns
     whether a per-host line may be written now, and ``take_summary`` returns
-    the suppressed count when a summary line is due (and resets it).
+    the suppressed window when a summary line is due (and clears it).
     """
 
     def __init__(self, now=time.time):
@@ -279,24 +288,27 @@ class BoundedRefusalRecorder:
             (name, stamp) for name, stamp in self._last_lines.items() if now - stamp < HOUR_SECONDS)
 
     def take_summary(self):
-        """The suppressed count when a summary line is due, else 0.
+        """The suppressed window when a summary line is due, else ``None``.
 
-        The count is held for the hour it opened in, so the line reports every
-        refusal suppressed in that window rather than only the first one.
+        A count that starts being suppressed is held for a full hour before
+        it is reported, so the line counts every refusal suppressed in that
+        window. The answer is that count with the window's two ends, and
+        taking it clears the window.
         """
         now = self._now()
         with self._lock:
             if not self._suppressed:
-                return 0
+                return None
             if self._window_opens is None:
                 self._window_opens = now
-                return 0
+                return None
             if now - self._window_opens < HOUR_SECONDS:
-                return 0
+                return None
             suppressed = self._suppressed
+            opened = self._window_opens
             self._suppressed = 0
             self._window_opens = None
-            return suppressed
+            return suppressed, opened, now
 
     def recent(self, within_seconds):
         """The refused hosts of the window, newest first."""

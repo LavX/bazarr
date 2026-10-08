@@ -129,58 +129,59 @@ def test_trusted_proxy_value(configured, expected):
     assert trusted_proxy_value(config) == expected
 
 
-def test_waitress_actually_honours_the_value_we_hand_it():
-    """
-    Waitress compares the peer against trusted_proxy exactly, so anything that
-    is not a single address trusts nobody. Driving its own middleware is the
-    only way to catch that: a test of the formatter alone passed happily while
-    the value it produced matched no one.
-    """
-    from waitress.proxy_headers import proxy_headers_middleware
+def test_the_forwarded_scheme_is_believed_only_from_the_configured_peer(monkeypatch):
+    """The trust rule lives in the middleware create_app wraps around the
+    application, so it has to be pinned there: only general.trusted_proxy's
+    peer has its X-Forwarded-Proto believed, and any other peer's forwarded
+    headers are stripped before a route ever sees them."""
+    from app import app as app_module
+    from app.app import create_app
 
-    def app(environ, _start_response):
-        app.seen = environ
-        return []
+    socketio = app_module.socketio
+    for name in ("server", "sockio_mw", "async_mode"):
+        monkeypatch.setattr(socketio, name, getattr(socketio, name, None), raising=False)
+    monkeypatch.setattr(socketio, "server_options", dict(socketio.server_options))
 
-    def run(trusted, peer):
-        wrapped = proxy_headers_middleware(
-            app,
-            trusted_proxy=trusted,
-            trusted_proxy_headers={"x-forwarded-proto"},
-            clear_untrusted=True,
-        )
-        wrapped(
-            {
-                "REMOTE_ADDR": peer,
-                "HTTP_X_FORWARDED_PROTO": "https",
-                "wsgi.url_scheme": "http",
-                "SERVER_NAME": "bazarr",
-                "SERVER_PORT": "6767",
-            },
-            lambda *_a, **_k: None,
-        )
-        return app.seen
+    flask_app = create_app()
 
-    assert run("127.0.0.1", "127.0.0.1")["wsgi.url_scheme"] == "https"
-    assert run("127.0.0.1", "10.0.0.9")["wsgi.url_scheme"] == "http"
+    # An api-package import earlier in the same process leaves a transaction
+    # open on this thread's session, and the request's own begin() would
+    # refuse it otherwise.
+    from app.database import database
+
+    database.close()
+
+    @flask_app.route("/scheme-probe")
+    def scheme_probe():
+        from flask import request
+
+        return request.scheme
+
+    client = flask_app.test_client()
+    client.environ_base["REMOTE_ADDR"] = "127.0.0.1"
+    assert client.get("/scheme-probe",
+                     headers={"X-Forwarded-Proto": "https"}).get_data(as_text=True) == "https"
+    client.environ_base["REMOTE_ADDR"] = "10.0.0.9"
+    assert client.get("/scheme-probe",
+                     headers={"X-Forwarded-Proto": "https"}).get_data(as_text=True) == "http"
 
 
-def test_an_empty_setting_still_produces_a_server_waitress_will_build():
-    """
-    waitress refuses trusted_proxy_headers without a trusted_proxy, and that
-    ValueError escapes the OSError handler in Server.configure_server, so it
-    would be a boot loop an operator could only fix by editing config.yaml.
-    """
+def test_the_server_options_leave_the_forwarded_headers_to_the_app():
+    """The server passes no proxy options of its own: with waitress's default
+    clear_untrusted_proxy_headers it would strip a trusted proxy's headers in
+    front of the app, and the app's own parsing would never see them. The
+    options helper pins that, and it must still build a server an empty
+    trusted_proxy setting can start."""
     from waitress.adjustments import Adjustments
 
-    from app.app import trusted_proxy_value
+    from app.app import trusted_proxy_value, waitress_server_options
 
     proxy = trusted_proxy_value(SimpleNamespace(general=SimpleNamespace(trusted_proxy="")))
     assert proxy is None
 
-    options = {}
-    if proxy:
-        options = {"trusted_proxy": proxy, "trusted_proxy_headers": {"x-forwarded-proto"}}
+    options = waitress_server_options()
+    assert options["clear_untrusted_proxy_headers"] is False
+    assert "trusted_proxy" not in options
 
     # Must not raise.
     Adjustments(host="127.0.0.1", port=6767, **options)

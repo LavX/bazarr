@@ -21,6 +21,7 @@ from .database import database
 from .get_args import args
 from .config import settings, base_url
 from .host_allowlist import HostAllowlistMiddleware, RAW_HOST_ENVIRON, front_refusal_notice
+from .host_policy import APPROVAL_SEGMENT
 
 socketio = SocketIO()
 
@@ -83,9 +84,9 @@ class SchemeAwareSessionInterface(SecureCookieSessionInterface):
     work. 'always' and 'never' are the explicit overrides, and 'always' is what
     an HTTPS proxy this instance cannot detect needs.
 
-    The scheme seen here is the one ReverseProxied derived from
-    X-Forwarded-Proto, which waitress only passes on for an address listed in
-    general.trusted_proxies.
+    The scheme seen here is the one the forwarded-header middleware in
+    create_app derived from X-Forwarded-Proto, which it passes on only for
+    the one address general.trusted_proxy names.
     """
 
     def get_cookie_secure(self, app):
@@ -114,20 +115,47 @@ def configure_session_cookie(app, config=settings):
 
 
 def trusted_proxy_value(config=settings):
-    """Render general.trusted_proxy for waitress, or None to trust nobody.
+    """Render general.trusted_proxy for the forwarded-header middleware.
 
     One address, not a list: waitress compares the peer against this value
     exactly (`remote_peer == trusted_proxy` in its proxy_headers middleware),
     so a comma-separated list would match no one and silently strip every
     forwarded header, including the supervisor hop that worked before.
 
-    None rather than an empty string, because waitress reads an empty string as
-    an address that matches nothing. Callers must also drop
-    trusted_proxy_headers when this returns None: waitress refuses the
-    combination outright, and an unhandled refusal at startup is a boot loop.
+    None rather than an empty string, because waitress reads an empty string
+    as an address that matches nothing.
     """
     value = str(config.general.trusted_proxy or '').strip()
     return value or None
+
+
+# Waitress spools a request body to disk before any route sees it, and its own
+# default ceiling is 1 GiB. The largest upload a route accepts is a 150 MiB
+# subtitle file, and each upload route refuses its own excess, so this is the
+# backstop for every other path, including a request that never authenticates.
+# In the image, docker/supervisor.py refuses a body at this ceiling in front of
+# it, because waitress's own refusal would not reach the page.
+MAX_REQUEST_BODY_SIZE = 256 * 1024 * 1024  # 256 MiB
+
+
+def waitress_server_options():
+    """The waitress options beyond host and port, in one place.
+
+    ``trusted_proxy`` is deliberately absent: the forwarded headers are
+    parsed inside create_app, against the trust rule of the application
+    itself. ``clear_untrusted_proxy_headers`` is off for the same reason:
+    with no proxy options, that flag is on by default and makes waitress
+    wrap the app in its own proxy middleware with no trusted proxy, which
+    strips every forwarded header before the app's own parsing runs; a
+    request the operator's proxy forwarded in good faith would then be
+    judged by its proxied hostname alone, and the forwarded scheme, address
+    and host would never arrive. The app clears the headers of peers it
+    does not trust itself, so nothing is left unfiltered.
+    """
+    return {
+        'max_request_body_size': MAX_REQUEST_BODY_SIZE,
+        'clear_untrusted_proxy_headers': False,
+    }
 
 
 def cors_is_enabled(config=settings):
@@ -259,6 +287,14 @@ def create_app():
     # started this process with.
     app.add_url_rule(f'{base_url}/_supervisor/host_refusal', 'front_refusal_notice',
                      front_refusal_notice, methods=['POST'])
+    if base_url.rstrip('/'):
+        # A proxy that strips the install's base_url prefix leaves the
+        # approval form at the root, so the same submission is served there
+        # too; the blueprint below registers the prefixed path.
+        from .ui import approve_refused_host
+
+        app.add_url_rule(f'/{APPROVAL_SEGMENT}', 'approve_refused_host_at_root',
+                         approve_refused_host, methods=['POST'])
 
     @app.errorhandler(404)
     def page_not_found(_):
