@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1103,7 +1104,7 @@ class WorkflowRunLaneTests(unittest.TestCase):
             "    ' \"$releases/$base_name\" > \"packaging/releases/${tag#v}.json\"\n"
             '    ;;\n'
             '  *)\n'
-            '    exec command -p python3 "$@"\n'
+            f'    exec {shlex.quote(sys.executable)} "$@"\n'
             '    ;;\n'
             'esac\n')
         python3.chmod(0o755)
