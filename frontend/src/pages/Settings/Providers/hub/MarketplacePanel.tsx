@@ -25,6 +25,7 @@ import type {
   ProviderHubCatalogEntry,
   ProviderHubInstallation,
 } from "@/apis/raw/providerHub";
+import { useGatedAction } from "@/components/modals/PasswordConfirmModal";
 import { notification } from "@/modules/notification";
 import { CatalogCard } from "@/pages/Settings/Providers/hub/components/CatalogCard";
 import { EmptyState } from "@/pages/Settings/Providers/hub/components/EmptyState";
@@ -83,6 +84,7 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
   const installLocal = useProviderHubInstallLocal();
   const testProvider = useProviderHubTest();
   const uninstall = useProviderHubUninstall();
+  const runGated = useGatedAction();
 
   const sources = catalog?.sources ?? [];
 
@@ -213,13 +215,18 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
   const handleInstall = useCallback(
     (entry: ProviderHubCatalogEntry) => {
       if (!entry.source || !parseManifest(entry)) return;
-      install.mutate({
-        source: entry.source,
-        provider_id: entry.provider_id,
-        version: entry.version,
-      });
+      const source = entry.source;
+      void runGated(
+        () =>
+          install.mutate({
+            source,
+            provider_id: entry.provider_id,
+            version: entry.version,
+          }),
+        "install this provider",
+      );
     },
-    [install],
+    [install, runGated],
   );
 
   const marketplaceCards = useMemo(
@@ -299,7 +306,10 @@ export const MarketplacePanel: FunctionComponent<MarketplacePanelProps> = ({
                 );
                 return;
               }
-              installLocal.mutate(file);
+              void runGated(
+                () => installLocal.mutate(file),
+                "install the uploaded package",
+              );
             }}
           >
             {(props) => (

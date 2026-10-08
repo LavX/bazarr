@@ -5,6 +5,7 @@ import tempfile
 from flask import request
 from flask_restx import Namespace, Resource, reqparse
 
+from api.password_confirm import require_password_confirmation
 from api.utils import (UploadTooLarge, authenticate, copy_bounded_upload, upload_declared_too_large,
                        upload_too_large_message)
 from provider_hub import jobs as hub_jobs
@@ -36,9 +37,11 @@ class ProviderHubCatalogRefresh(Resource):
 @api_ns_provider_hub.route('provider-hub/catalog/sources')
 class ProviderHubCatalogSources(Resource):
     @authenticate
+    @require_password_confirmation
     @api_ns_provider_hub.response(200, 'Success')
     @api_ns_provider_hub.response(400, 'Invalid catalog source')
     @api_ns_provider_hub.response(401, 'Not Authenticated')
+    @api_ns_provider_hub.response(403, 'Password confirmation required')
     def post(self):
         payload = request.json or {}
         try:
@@ -62,9 +65,11 @@ class ProviderHubCatalogSource(Resource):
         return '', 204
 
     @authenticate
+    @require_password_confirmation
     @api_ns_provider_hub.response(200, 'Success')
     @api_ns_provider_hub.response(400, 'Invalid catalog source')
     @api_ns_provider_hub.response(401, 'Not Authenticated')
+    @api_ns_provider_hub.response(403, 'Password confirmation required')
     @api_ns_provider_hub.response(404, 'Catalog source not found')
     def patch(self, name):
         payload = request.json or {}
@@ -141,9 +146,11 @@ class ProviderHubProviderTest(Resource):
 @api_ns_provider_hub.route('provider-hub/installations')
 class ProviderHubInstallations(Resource):
     @authenticate
+    @require_password_confirmation
     @api_ns_provider_hub.response(202, 'Install queued as a job')
     @api_ns_provider_hub.response(400, 'No installable catalog entry')
     @api_ns_provider_hub.response(401, 'Not Authenticated')
+    @api_ns_provider_hub.response(403, 'Password confirmation required')
     def post(self):
         # An install names a catalog entry by source, provider_id and version. A
         # raw manifest is taken only when it equals an entry the catalog holds.
@@ -170,9 +177,11 @@ def _package_too_large():
 @api_ns_provider_hub.route('provider-hub/installations/local')
 class ProviderHubLocalInstallations(Resource):
     @authenticate
+    @require_password_confirmation
     @api_ns_provider_hub.response(202, 'Install queued as a job')
     @api_ns_provider_hub.response(400, 'Invalid package')
     @api_ns_provider_hub.response(401, 'Not Authenticated')
+    @api_ns_provider_hub.response(403, 'Password confirmation required')
     @api_ns_provider_hub.response(413, 'Package is too large')
     def post(self):
         # Refuse an oversized package from the declared length, before the form
@@ -231,9 +240,11 @@ class ProviderHubUpdatesApply(Resource):
     post_request_parser.add_argument('provider_id', type=str, required=True)
 
     @authenticate
+    @require_password_confirmation
     @api_ns_provider_hub.doc(parser=post_request_parser)
     @api_ns_provider_hub.response(202, 'Update queued as a job')
     @api_ns_provider_hub.response(401, 'Not Authenticated')
+    @api_ns_provider_hub.response(403, 'Password confirmation required')
     @api_ns_provider_hub.response(404, 'Provider not found')
     def post(self):
         args = self.post_request_parser.parse_args()

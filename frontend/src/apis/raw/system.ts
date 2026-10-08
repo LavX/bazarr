@@ -34,6 +34,18 @@ class SystemApi extends BaseApi {
     await this.post("/account", undefined, { action: "logout" });
   }
 
+  // Verifies the password the way login does, for a short-lived confirmation
+  // that gated actions (plugin installs, the post-processing command, the
+  // login settings, a backup restore) require on top of being signed in.
+  // A wrong password and the throttle are answered inside the prompt itself,
+  // so the shared client is asked to stay quiet for them: one failure, one
+  // message, not a toast on top of the modal's inline one.
+  async confirmPassword(username: string, password: string) {
+    await this.post("/account/confirm", { username, password }, undefined, {
+      silentError: true,
+    });
+  }
+
   async shutdown() {
     return this.performAction("shutdown");
   }

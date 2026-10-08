@@ -19,9 +19,27 @@ from subtitles.language_profiles import validate_combine_rule, CombineRuleError
 from subtitles.tools.translate.failure_record import clear_failed_translations
 from arr_instances.resolution import forget_deleted_language_profiles
 
+from ..password_confirm import password_confirm_refusal, password_confirmation_live
 from ..utils import authenticate
 
 api_ns_system_settings = Namespace('systemSettings', description='System settings API endpoint')
+
+# The keys a save may not carry on the API key alone: the post-processing keys
+# run a shell command after the next subtitle download, and the login keys
+# decide who may sign in, which decides whether this gate applies at all. A
+# leaked key that could switch login off would switch the gate off with it.
+GATED_SETTINGS_KEYS = frozenset({
+    'settings-general-postprocessing_cmd',
+    'settings-general-use_postprocessing',
+    'settings-auth-type',
+    'settings-auth-username',
+    'settings-auth-password',
+})
+
+
+def _save_needs_password_confirmation(form_keys):
+    """True when the save changes a key that runs code or rewrites who may sign in."""
+    return any(str(key).lower() in GATED_SETTINGS_KEYS for key in form_keys)
 
 
 def _write_settings_rows(enabled_languages, profiles, notifications):
@@ -194,6 +212,10 @@ class SystemSettings(Resource):
 
     @authenticate
     def post(self):
+        # Before any validation and before any save: a refused request must
+        # leave the settings, and above all the login settings, untouched.
+        if _save_needs_password_confirmation(request.form.keys()) and not password_confirmation_live():
+            return password_confirm_refusal()
         try:
             validate_metadata_settings(list(zip(request.form.keys(), request.form.listvalues())))
         except ValidationError as error:

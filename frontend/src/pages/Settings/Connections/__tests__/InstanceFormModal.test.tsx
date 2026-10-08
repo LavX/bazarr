@@ -17,14 +17,17 @@
  */
 
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { http, HttpResponse } from "msw";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ArrInstance,
   ArrInstanceCreate,
   ArrInstanceUpdate,
 } from "@/apis/raw/arrInstances";
+import { forgetPasswordConfirmation } from "@/modules/passwordConfirm";
 import InstanceFormModal from "@/pages/Settings/Connections/InstanceFormModal";
-import { customRender, fireEvent, screen, waitFor } from "@/tests";
+import { customRender, fireEvent, screen, waitFor, within } from "@/tests";
+import server from "@/tests/mocks/node";
 
 // ---------------------------------------------------------------------------
 // Mock the mutation hooks. We replace the whole @/apis/hooks module so that
@@ -753,5 +756,114 @@ describe("InstanceFormModal, default language profile", () => {
     expect(
       screen.queryByRole("button", { name: /apply to unset/i }),
     ).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The post-processing override save asks for the password confirmation
+// ---------------------------------------------------------------------------
+
+describe("InstanceFormModal, post-processing confirmation", () => {
+  const FORM_AUTH_SETTINGS = http.get("/api/system/settings", () =>
+    HttpResponse.json({
+      general: { theme: "auto" },
+      auth: { type: "form", username: "admin", password: "***" },
+    }),
+  );
+
+  function mockConfirmEndpoint() {
+    return http.post("/api/system/account/confirm", () => {
+      return new HttpResponse(null, { status: 204 });
+    });
+  }
+
+  beforeEach(() => {
+    forgetPasswordConfirmation();
+    server.use(FORM_AUTH_SETTINGS, mockConfirmEndpoint());
+  });
+
+  function makeInstanceWithOverrides(
+    subtitle_settings: LooseObject,
+  ): ArrInstance {
+    return { ...makeInstance(), subtitle_settings };
+  }
+
+  async function enablePostprocessingOverride(
+    user: ReturnType<typeof userEvent.setup>,
+  ) {
+    await user.click(
+      screen.getByRole("switch", { name: /use custom post-processing/i }),
+    );
+    await user.click(screen.getByRole("radio", { name: "Enabled" }));
+  }
+
+  it("asks for the password when the save turns the override on", async () => {
+    const user = userEvent.setup();
+    mockUpdateMutate.mockClear();
+    renderEdit(makeInstanceWithOverrides({}));
+
+    await enablePostprocessingOverride(user);
+    await user.click(screen.getByRole("button", { name: /save changes/i }));
+
+    expect(mockUpdateMutate).not.toHaveBeenCalled();
+    expect(
+      await screen.findByText("Confirm your password"),
+    ).toBeInTheDocument();
+  });
+
+  it("saves after the password is confirmed", async () => {
+    const user = userEvent.setup();
+    mockUpdateMutate.mockClear();
+    renderEdit(makeInstanceWithOverrides({}));
+
+    await enablePostprocessingOverride(user);
+    await user.click(screen.getByRole("button", { name: /save changes/i }));
+    await user.type(await screen.findByLabelText("Password"), "hunter2");
+    await user.click(screen.getByRole("button", { name: /^confirm$/i }));
+
+    await waitFor(() => {
+      expect(mockUpdateMutate).toHaveBeenCalled();
+    });
+    const { body } = mockUpdateMutate.mock.calls[0][0];
+    expect(body.subtitle_settings.general.use_postprocessing).toBe(true);
+  });
+
+  it("does not save when the confirmation is cancelled", async () => {
+    const user = userEvent.setup();
+    mockUpdateMutate.mockClear();
+    renderEdit(makeInstanceWithOverrides({}));
+
+    await enablePostprocessingOverride(user);
+    await user.click(screen.getByRole("button", { name: /save changes/i }));
+    const prompt = await screen.findByRole("dialog", {
+      name: "Confirm your password",
+    });
+    await user.click(within(prompt).getByRole("button", { name: /cancel/i }));
+
+    await waitFor(() => {
+      expect(
+        screen.queryByText("Confirm your password"),
+      ).not.toBeInTheDocument();
+    });
+    expect(mockUpdateMutate).not.toHaveBeenCalled();
+  });
+
+  it("does not ask for the password when the override is unchanged", async () => {
+    const user = userEvent.setup();
+    mockUpdateMutate.mockClear();
+    // The stored override says post-processing is on with this command, and
+    // the modal resends it untouched: no prompt, the save just goes through.
+    renderEdit(
+      makeInstanceWithOverrides({
+        general: { use_postprocessing: true, postprocessing_cmd: "/bin/true" },
+      }),
+    );
+
+    await user.click(screen.getByRole("button", { name: /save changes/i }));
+
+    await waitFor(() => {
+      expect(mockUpdateMutate).toHaveBeenCalled();
+    });
+    expect(screen.queryByText("Confirm your password")).not.toBeInTheDocument();
   });
 });
