@@ -332,8 +332,11 @@ def resolve_app_digest(tag):
     return digest
 
 
-def previous_lock_path(tag, releases):
-    """Return the lock of the immediately previous final release in the same major.minor line."""
+def lock_base_path(tag, releases):
+    """Return the closest previous release lock below a tag in the same major.minor line.
+
+    Returns None when the line holds no lock below the tag; callers decide what that means.
+    """
     version = tuple(int(part) for part in tag[1:].split("."))
     if releases.is_symlink() or not releases.is_dir():
         raise ReleaseError("Release lock directory must be a regular directory")
@@ -345,11 +348,61 @@ def previous_lock_path(tag, releases):
         candidate = tuple(int(match.group(index)) for index in (1, 2, 3))
         if candidate[:2] == version[:2] and candidate < version:
             bases.append((candidate, path))
-    if not bases:
+    return max(bases)[1] if bases else None
+
+
+def previous_lock_path(tag, releases):
+    """Return the lock of the immediately previous final release in the same major.minor line."""
+    base = lock_base_path(tag, releases)
+    if base is None:
+        version = tuple(int(part) for part in tag[1:].split("."))
         line = f"{version[0]}.{version[1]}"
         raise ReleaseError(f"No previous release lock exists in the {line} line; "
                            "a first release of a new major.minor line needs a hand-reviewed lock")
-    return max(bases)[1]
+    return base
+
+
+def report_lock_base(tag, releases_dir):
+    """Print the lock a resolution bases its bytes on: its file name, digest, or none.
+
+    Reads only the given directory, so the resolve step can record the base it used
+    without touching the network or attesting anything.
+    """
+    if not VERSION.fullmatch(tag):
+        raise ReleaseError(f"Expected a final stable tag such as v2.7.0, got {tag}")
+    base = lock_base_path(tag, releases_dir)
+    if base is None:
+        print("none")
+    else:
+        print(f"{base.name} {sha256(base.read_bytes())}")
+
+
+def check_lock_base(tag, releases_dir, expected_name, expected_sha256):
+    """Refuse unless the closest previous lock below a tag still matches the recorded base.
+
+    The resolve step records the base its bytes were computed against, and a lock pull
+    request merging before the proposal changes that base.
+    """
+    if not VERSION.fullmatch(tag):
+        raise ReleaseError(f"Expected a final stable tag such as v2.7.0, got {tag}")
+    base = lock_base_path(tag, releases_dir)
+    expected_absent = expected_name in (None, "", "none")
+    if base is None:
+        if not expected_absent:
+            raise ReleaseError(f"The resolution based its lock on {expected_name}, "
+                               "but development no longer carries a previous lock in the line")
+    else:
+        name = base.name
+        digest = sha256(base.read_bytes())
+        if expected_absent:
+            raise ReleaseError(f"The resolution recorded no lock base, but development now carries {name}")
+        if name != expected_name:
+            raise ReleaseError(f"The lock base moved to {name} on development, not the recorded {expected_name}; "
+                               "merge the lower release lock, then Re-run all jobs so the lock "
+                               "resolves from the current base")
+        if digest != expected_sha256:
+            raise ReleaseError(f"The lock base {name} changed bytes on development "
+                               "since the resolution recorded its digest")
 
 
 def bumped_revisions(base):
@@ -478,6 +531,14 @@ def main(argv=None):
     parser.add_argument("--lock", type=Path)
     parser.add_argument("--resolve-lock", action="store_true",
                         help="resolve the release lock for --tag after its image build, then exit")
+    parser.add_argument("--lock-base", action="store_true",
+                        help="print the closest previous lock below --tag and its digest, then exit")
+    parser.add_argument("--check-lock-base", action="store_true",
+                        help="verify the closest previous lock below --tag matches the recorded base, then exit")
+    parser.add_argument("--expected-base", metavar="NAME",
+                        help="file name of the lock base recorded by --lock-base, or none")
+    parser.add_argument("--expected-base-sha256", metavar="SHA256",
+                        help="digest of the lock base recorded by --lock-base")
     parser.add_argument("--releases-dir", type=Path, metavar="DIRECTORY",
                         help="directory of reviewed release locks --resolve-lock reads instead of the local checkout")
     parser.add_argument("--all-locks", type=Path, metavar="DIRECTORY",
@@ -491,13 +552,32 @@ def main(argv=None):
         parser.error("--resolve-lock cannot be combined with --lock, --output or --verify-live")
     if args.resolve_lock and not args.tag:
         parser.error("--resolve-lock requires --tag")
-    if not args.resolve_lock and not args.output:
+    if args.lock_base and args.check_lock_base:
+        parser.error("--lock-base and --check-lock-base cannot be combined")
+    if (args.lock_base or args.check_lock_base) and (args.resolve_lock or args.all_locks):
+        parser.error("--lock-base and --check-lock-base cannot be combined with --resolve-lock or --all-locks")
+    if (args.lock_base or args.check_lock_base) and (args.lock or args.output or args.verify_live):
+        parser.error("--lock-base and --check-lock-base cannot be combined with --lock, --output or --verify-live")
+    if (args.lock_base or args.check_lock_base) and not args.tag:
+        parser.error("--lock-base and --check-lock-base require --tag")
+    if (args.lock_base or args.check_lock_base) and not args.releases_dir:
+        parser.error("--lock-base and --check-lock-base require --releases-dir")
+    if args.check_lock_base and (args.expected_base is None or args.expected_base_sha256 is None):
+        parser.error("--check-lock-base requires --expected-base and --expected-base-sha256")
+    if not args.resolve_lock and not args.lock_base and not args.check_lock_base and not args.output:
         parser.error("the following arguments are required: --output")
-    if not args.resolve_lock and not args.all_locks and not (args.tag and args.lock):
+    if (not args.resolve_lock and not args.all_locks and not args.lock_base
+            and not args.check_lock_base and not (args.tag and args.lock)):
         parser.error("--tag and --lock are required unless --all-locks is used")
     try:
         if args.resolve_lock:
             outputs = [resolve_lock(args.tag, args.releases_dir)]
+        elif args.lock_base:
+            report_lock_base(args.tag, args.releases_dir)
+            return 0
+        elif args.check_lock_base:
+            check_lock_base(args.tag, args.releases_dir, args.expected_base, args.expected_base_sha256)
+            return 0
         elif args.all_locks:
             outputs = prepare_all(args.all_locks, args.output)
         else:

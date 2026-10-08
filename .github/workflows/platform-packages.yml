@@ -45,6 +45,8 @@ jobs:
       lock_resolved: ${{ steps.lock.outputs.resolved }}
       lock_version: ${{ steps.lock.outputs.version }}
       lock_sha256: ${{ steps.lock.outputs.sha256 }}
+      lock_base: ${{ steps.lock.outputs.base }}
+      lock_base_sha256: ${{ steps.lock.outputs.base_sha256 }}
       lock_artifact: resolved-lock-${{ github.run_id }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -105,6 +107,10 @@ jobs:
               python3 packaging/release.py --resolve-lock --tag "$RELEASE_TAG" \
                 --releases-dir "${development}/packaging/releases"
               echo "resolved=true" >> "$GITHUB_OUTPUT"
+              read -r base_lock base_sha256 < <(python3 packaging/release.py --lock-base --tag "$RELEASE_TAG" \
+                --releases-dir "${development}/packaging/releases")
+              echo "base=${base_lock}" >> "$GITHUB_OUTPUT"
+              echo "base_sha256=${base_sha256}" >> "$GITHUB_OUTPUT"
             fi
           fi
           echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
@@ -297,6 +303,9 @@ jobs:
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.prepare.outputs.lock_version }}
           EXPECTED_SHA256: ${{ needs.prepare.outputs.lock_sha256 }}
+          RESOLVED: ${{ needs.prepare.outputs.lock_resolved }}
+          LOCK_BASE: ${{ needs.prepare.outputs.lock_base }}
+          LOCK_BASE_SHA256: ${{ needs.prepare.outputs.lock_base_sha256 }}
           PRODUCING_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           IMAGE_BUILD_RUN: ${{ github.event.workflow_run.html_url }}
         run: |
@@ -322,11 +331,18 @@ jobs:
           # while both pull requests merge cleanly. The current tag's own proposal is never
           # caught here: a first run creates it and a replay refreshes it below.
           line="${VERSION%.*}"
+          line_regex="${line//./\\.}"
           patch="${VERSION##*.}"
-          pending="$(gh pr list --state open --base development --json headRefName --jq '.[].headRefName')"
+          pending="$(gh pr list --state open --base development --limit 200 \
+            --json headRefName --jq '.[].headRefName')"
+          if [[ "$(grep -c . <<<"$pending" || true)" -ge 200 ]]; then
+            echo 'There are 200 or more open development pull requests, too many to check the lock line safely' >&2
+            echo 'Investigate the open packaging lock proposals by hand, then replay this lane.' >&2
+            exit 1
+          fi
           blocking=()
           while IFS= read -r head; do
-            [[ "$head" =~ ^packaging/lock-v${line}\.(0|[1-9][0-9]*)$ ]] || continue
+            [[ "$head" =~ ^packaging/lock-v${line_regex}\.(0|[1-9][0-9]*)$ ]] || continue
             if (( BASH_REMATCH[1] < patch )); then
               blocking+=("v${line}.${BASH_REMATCH[1]}")
             fi
@@ -335,6 +351,19 @@ jobs:
             echo "The lock proposal for ${blocking[*]} is still open, so development does not carry its reviewed lock yet." >&2
             echo "Merge the ${blocking[*]} release lock first, then Re-run all jobs." >&2
             exit 1
+          fi
+          if [[ "$RESOLVED" == "true" ]]; then
+            # The resolved bytes were computed against development as it stood when the images
+            # started building. A lock pull request merging in that window changes the base, so
+            # the proposal would repeat or skip revisions against a base nobody checked. Refetch
+            # development and compare its closest previous lock against the recorded base.
+            development="${RUNNER_TEMP}/dev-releases"
+            mkdir -p "$development"
+            git fetch --depth=1 origin development
+            git archive origin/development packaging/releases | tar -x -C "$development"
+            python3 packaging/release.py --check-lock-base --tag "v${VERSION}" \
+              --releases-dir "${development}/packaging/releases" \
+              --expected-base "$LOCK_BASE" --expected-base-sha256 "$LOCK_BASE_SHA256"
           fi
           branch="packaging/lock-v${VERSION}"
           git config user.name "github-actions[bot]"
