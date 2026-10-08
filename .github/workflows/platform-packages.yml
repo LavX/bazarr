@@ -242,6 +242,7 @@ jobs:
           path: packaging/releases/${{ steps.lock.outputs.version }}.json
           if-no-files-found: error
           retention-days: 30
+          overwrite: true
 
       - name: Upload reviewable packages
         uses: actions/upload-artifact@v7

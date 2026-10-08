@@ -658,6 +658,7 @@ class WorkflowRunStructureTests(unittest.TestCase):
         upload = self.prepare_steps["Upload resolved lock"]
         self.assertEqual(upload["if"], "github.event_name == 'workflow_run' && steps.lock.outputs.resolved == 'true'")
         self.assertEqual(upload["with"]["name"], self.jobs["prepare"]["outputs"]["lock_artifact"])
+        self.assertEqual(upload["with"]["overwrite"], True)
         proposal = self.jobs["propose-lock"]
         self.assertEqual(proposal["needs"], ["prepare"])
         self.assertIn("github.event_name == 'workflow_run'", proposal["if"])
