@@ -17,6 +17,7 @@ from subliminal_patch.core_persistent import download_best_subtitles
 
 from app.config import settings
 from app.database import TableEpisodes, TableMovies, database, select, get_profiles_list
+from app.jobs_queue import JobCancelled
 from utilities.path_mappings import path_mappings
 from utilities.helper import get_target_folder, force_unicode
 from languages.get_languages import alpha3_from_alpha2
@@ -121,6 +122,16 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                                        fallback_allowed=fallback_allowed,
                                                                        candidate_sink=candidate_sink)
                     except Exception as e:
+                        if isinstance(e, JobCancelled) and e.job_id == job_id:
+                            # The provider callback raised through the pool
+                            # because Stop was pressed on this job. That is
+                            # not a download failure, and swallowing it here
+                            # would run every remaining language and episode
+                            # of a stopped search. The pool is shared between
+                            # the jobs of a profile, so a different job's stop
+                            # arrives here as well; it keeps the handling
+                            # below, one failed episode.
+                            raise
                         logging.exception(f'BAZARR Error downloading Subtitles for this file {path}: {repr(e)}')  # noqa: G004
                         return None
 

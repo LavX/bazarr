@@ -159,8 +159,15 @@ describe("sports library", () => {
     }
 
     await user.click(screen.getByRole("button", { name: "More" }));
+    // The menu mounts through the shared Mantine portal, which can exceed the
+    // global 5s async timeout under full-suite CPU contention on CI; give it
+    // the same slow-chain budget the queries above already use.
     await user.click(
-      await screen.findByRole("menuitem", { name: "Scan Disk" }),
+      await screen.findByRole(
+        "menuitem",
+        { name: "Scan Disk" },
+        { timeout: 8000 },
+      ),
     );
     await user.click(
       await screen.findByRole("button", { name: /Apply to 1 Item/ }),

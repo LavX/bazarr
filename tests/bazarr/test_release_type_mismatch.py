@@ -716,6 +716,39 @@ def test_the_searched_video_names_the_instance_the_search_is_for(search, refined
     assert video.arr_instance_id == 2
 
 
+def test_a_stop_pressed_mid_search_ends_the_search(search):
+    """Stop raises through the provider callback, inside the search itself.
+    The broad failure handler must not swallow it: a stopped batch search
+    would otherwise run every remaining language and episode of the current
+    show, logging a traceback for each."""
+    from app.jobs_queue import JobCancelled
+
+    def cancelled_by_stop(**kwargs):
+        raise JobCancelled("Job Search (1) was cancelled", job_id=1)
+
+    search.monkeypatch.setattr(search.module, "download_best_subtitles", cancelled_by_stop)
+
+    with pytest.raises(JobCancelled):
+        search.run(job_id=1)
+
+
+def test_another_jobs_stop_ends_this_search_as_one_failed_episode(search):
+    """The pool a search reports its progress through is shared between the
+    jobs of a profile, so the callback of a stopped job raises inside this
+    search as well. That stop belongs to the other job: it is one failed
+    episode here, not a stop of this job, whose own stop still ends it."""
+    from app.jobs_queue import JobCancelled
+
+    def cancelled_by_stop(**kwargs):
+        raise JobCancelled("Job Other Search (2) was cancelled", job_id=2)
+
+    search.monkeypatch.setattr(search.module, "download_best_subtitles", cancelled_by_stop)
+
+    # The search ends with no subtitle, like any failed episode, not with the
+    # stop of this job.
+    assert search.run(job_id=1) == []
+
+
 def test_the_search_hands_its_rejected_candidates_to_the_detector(search):
     reports = []
     search.monkeypatch.setattr(search.module, "report_release_type_mismatch",

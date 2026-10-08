@@ -20,6 +20,7 @@ from subtitles.tools.combine.main import try_combine_for_video
 from app.jobs_queue import jobs_queue  # noqa: F401
 from app.event_handler import event_stream  # noqa: F401
 from app.config import settings  # noqa: F401
+from api.swaggerui import job_queued_model
 
 from ..utils import (MAX_SUBTITLE_UPLOAD_SIZE, UploadTooLarge, authenticate, read_bounded_upload,
                      upload_declared_too_large, upload_too_large_message)
@@ -38,9 +39,11 @@ class EpisodesSubtitles(Resource):
     patch_request_parser.add_argument('arr_instance_id', type=int, required=False,
                                       help='Owning Sonarr/Radarr instance id (#156)')
 
+    patch_response_model = api_ns_episodes_subtitles.model('JobQueued', job_queued_model)
+
     @authenticate
     @api_ns_episodes_subtitles.doc(parser=patch_request_parser)
-    @api_ns_episodes_subtitles.response(204, 'Success')
+    @api_ns_episodes_subtitles.response(202, 'Subtitle search queued', patch_response_model)
     @api_ns_episodes_subtitles.response(401, 'Not Authenticated')
     @api_ns_episodes_subtitles.response(404, 'Episode not found')
     @api_ns_episodes_subtitles.response(409, 'Unable to save subtitles file. Permission or path mapping issue?')
@@ -49,13 +52,13 @@ class EpisodesSubtitles(Resource):
         """Download an episode subtitles"""
         args = self.patch_request_parser.parse_args()
 
-        episode_download_specific_subtitles(sonarr_series_id=args.get('seriesid'),
-                                            sonarr_episode_id=args.get('episodeid'),
-                                            language=args.get('language'), hi=args.get('hi').capitalize(),
-                                            forced=args.get('forced').capitalize(), job_id=None,
-                                            arr_instance_id=args.get('arr_instance_id'))
+        job_id = episode_download_specific_subtitles(sonarr_series_id=args.get('seriesid'),
+                                                     sonarr_episode_id=args.get('episodeid'),
+                                                     language=args.get('language'), hi=args.get('hi').capitalize(),
+                                                     forced=args.get('forced').capitalize(), job_id=None,
+                                                     arr_instance_id=args.get('arr_instance_id'))
 
-        return '', 204
+        return {'job_id': job_id or None}, 202
 
     post_request_parser = reqparse.RequestParser()
     post_request_parser.add_argument('seriesid', type=int, required=True, help='Series ID')

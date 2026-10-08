@@ -271,7 +271,7 @@ def test_series_search_missing_action_passes_arr_instance_id(monkeypatch):
     ):
         response = series.Series.patch.__wrapped__(series.Series())
 
-    assert response == ("", 204)
+    assert response == ({"job_id": None}, 202)
     assert captured == {"no": 1, "arr_instance_id": 3}
 
 
@@ -410,7 +410,7 @@ def test_episode_manual_download_routes_by_upstream_id_not_local_id(schema_sessi
             providers_episodes.ProviderEpisodes()
         )
 
-    assert response == ("", 204), f"Expected 204, got {response}"
+    assert response == ({"job_id": None}, 202)
     assert captured.get("sonarr_episode_id") == 88, f"Wrong episode_id routed: {captured}"
     assert captured.get("sonarr_series_id") == 5, f"Wrong series_id routed: {captured}"
     assert captured.get("arr_instance_id") == 2, f"Wrong instance routed: {captured}"

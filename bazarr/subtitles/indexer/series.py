@@ -513,7 +513,8 @@ def series_scan_disk(series_id, arr_instance_id=None, job_id=None):
     reported nothing while it did.
     """
     if not job_id:
-        return jobs_queue.add_job_from_function("Scanning disk for series subtitles", is_progress=False)
+        return jobs_queue.add_job_from_function("Scanning disk for series subtitles", is_progress=False,
+                                               return_existing=True)
 
     from app.job_errors import reason_of
     from app.jobs_queue import JobFailed

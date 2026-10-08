@@ -841,6 +841,7 @@ jobs:
             tests/bazarr/test_threading_scope.py \
             tests/bazarr/test_path_mappings_instance.py \
             tests/bazarr/test_job_module_identity.py \
+            tests/bazarr/test_episode_subtitle_job_completion.py \
             tests/bazarr/test_parser_owner_threading.py \
             tests/bazarr/test_postgres_driver_pin.py ; do
             echo "::group::$f"

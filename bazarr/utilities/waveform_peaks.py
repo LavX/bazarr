@@ -222,7 +222,8 @@ def _extract_peaks(video_path, audio_track, duration, job_id):
     # A Stop that killed ffmpeg ends the read like the end of the file does, so
     # what was read so far is not a waveform.
     if job_id is not None and _job_cancelled(job_id):
-        raise JobCancelled(f'Generating the waveform for {os.path.basename(video_path)} was cancelled.')
+        raise JobCancelled(f'Generating the waveform for {os.path.basename(video_path)} was cancelled.',
+                           job_id=job_id)
     # An ffmpeg that read part of a damaged track and then failed leaves peaks
     # that stop short of the duration, so it fails the job like one that read
     # nothing, and nothing is cached.

@@ -41,6 +41,7 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { Table as TableInstance } from "@tanstack/react-table";
 import {
   useEpisodesBySeriesId,
+  useEpisodesHistory,
   useIsAnyActionRunning,
   useSeriesAction,
   useSeriesById,
@@ -72,6 +73,7 @@ const SeriesEpisodesView: FunctionComponent = () => {
 
   const seriesQuery = useSeriesById(id);
   const episodesQuery = useEpisodesBySeriesId(id);
+  const { data: episodesHistory } = useEpisodesHistory(id);
   const { multiInstance, nameById: instanceNameById } =
     useArrInstanceLabels("sonarr");
 
@@ -419,6 +421,7 @@ const SeriesEpisodesView: FunctionComponent = () => {
             <Table
               ref={tableRef}
               episodes={episodes ?? null}
+              history={episodesHistory}
               profile={profile}
               disabled={hasTask || !series || series.profileId === null}
               onAllRowsExpandedChanged={setIsAllRowExpanded}

@@ -8,7 +8,7 @@ from subtitles.tools.delete_ownership import SubtitleDeletionError, resolve_subt
 from sonarr.blacklist import blacklist_log, blacklist_delete_all, blacklist_delete
 from subtitles.mass_download import episode_download_subtitles
 from app.event_handler import event_stream
-from api.swaggerui import subtitles_language_model
+from api.swaggerui import subtitles_language_model, job_queued_model
 from utilities.pretty_date import pretty_date
 
 from ..utils import authenticate, postprocess
@@ -90,9 +90,11 @@ class EpisodesBlacklist(Resource):
     post_request_parser.add_argument('arr_instance_id', type=int, required=False,
                                      help='Owning Sonarr instance id (#156)')
 
+    post_response_model = api_ns_episodes_blacklist.model('JobQueued', job_queued_model)
+
     @authenticate
     @api_ns_episodes_blacklist.doc(parser=post_request_parser)
-    @api_ns_episodes_blacklist.response(200, 'Success')
+    @api_ns_episodes_blacklist.response(200, 'Subtitle excluded; replacement search queued', post_response_model)
     @api_ns_episodes_blacklist.response(401, 'Not Authenticated')
     @api_ns_episodes_blacklist.response(403, "Subtitle is not one of this episode's current subtitles")
     @api_ns_episodes_blacklist.response(404, 'Episode not found')
@@ -136,9 +138,9 @@ class EpisodesBlacklist(Resource):
             return str(exc), exc.status
 
         if removed:
-            episode_download_subtitles(no=sonarr_episode_id, arr_instance_id=arr_instance_id)
+            job_id = episode_download_subtitles(no=sonarr_episode_id, arr_instance_id=arr_instance_id)
             event_stream(type='episode-history')
-            return '', 200
+            return {'job_id': job_id or None}, 200
         else:
             return 'Subtitles file not found or permission issue.', 500
 

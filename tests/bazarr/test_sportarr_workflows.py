@@ -28,6 +28,7 @@ def private_queue(monkeypatch):
     queue._import_lock = RLock()
     queue._progress_buffer_lock = RLock()
     queue._progress_buffer = {}
+    queue._inline_claims = []
     return queue
 
 
@@ -266,6 +267,7 @@ def test_actual_queue_capture_and_execution_has_no_hidden_locals(
     queue._import_lock = RLock()
     queue._progress_buffer_lock = RLock()
     queue._progress_buffer = {}
+    queue._inline_claims = []
     monkeypatch.setattr(workflows, "jobs_queue", queue)
     job_id = workflows.automatic_search_sports(61, 1)
     assert job_id
