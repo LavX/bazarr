@@ -1,5 +1,8 @@
 """Behavioral checks for the release package command."""
 
+import contextlib
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -153,6 +156,22 @@ class ReleaseCommandTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / "output").exists())
 
+    def test_prepare_still_requires_its_lock_and_output_arguments(self):
+        cases = {
+            "no lock and no output": (["--tag", "v2.7.0"],
+                                      "error: the following arguments are required: --output"),
+            "no output": (["--tag", "v2.7.0", "--lock", "packaging/releases/2.7.0.json"],
+                           "error: the following arguments are required: --output"),
+            "no lock with output": (["--tag", "v2.7.0", "--output", "/tmp/unused"],
+                                    "error: --tag and --lock are required unless --all-locks is used"),
+        }
+        for case, (arguments, message) in cases.items():
+            with self.subTest(case):
+                result = subprocess.run([sys.executable, str(COMMAND), *arguments],
+                                        capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(message, result.stderr)
+
     def test_refuses_symlink_lock_and_output(self):
         self.lock.write_text(json.dumps(self.data))
         target = self.root / "real-lock.json"
@@ -275,6 +294,193 @@ class LockSelectionTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
 
 
+class LockResolutionTests(unittest.TestCase):
+    """Check the automatic release lock resolution for a tag whose image build completed."""
+
+    EXPECTED_271 = {
+        "schema": 1,
+        "version": "2.7.1",
+        "app": {"digest": NEXT_DIGEST, "image": "ghcr.io/lavx/bazarr"},
+        "companions": {
+            "flaresolverr": {"digest": "sha256:c80ae007ce2ccdcd217a12426e4f039ef763ff90738c808d38810c3e59323767",
+                             "image": "ghcr.io/flaresolverr/flaresolverr", "tag": "v3.5.2"},
+            "translator": {"digest": "sha256:e22abba9625b96df6727354f10933da312a084ffeae68f0eb1f9a82492f5e48d",
+                           "image": "ghcr.io/lavx/ai-subtitle-translator", "tag": "v2.1.1"},
+        },
+        "platform_revisions": {"casaos": "1.0.0", "runtipi": 2, "stack": "1.0.0",
+                               "truenas": "1.0.1", "unraid": "1.0.0"},
+        "runtime_profile": "atlas-sidecar",
+    }
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.releases = self.root / "releases"
+        self.releases.mkdir()
+        # The checked-in 2.7.0 lock is the resolution base for the 2.7 line.
+        shutil.copyfile(PACKAGE_ROOT / "releases" / "2.7.0.json", self.releases / "2.7.0.json")
+
+    def registry_responses(self, digest=NEXT_DIGEST, architectures=("amd64", "arm64")):
+        """Two GHCR round trips: the resolver fetches the index digest, then re-verifies it."""
+        token = ({"token": "local-test-token"}, {})
+        index = ({"mediaType": "application/vnd.oci.image.index.v1+json",
+                  "manifests": [{"digest": "sha256:" + "a" * 64,
+                                 "platform": {"os": "linux", "architecture": architecture}}
+                                for architecture in architectures]},
+                 {"Docker-Content-Digest": digest})
+        return [token, index, token, index]
+
+    def stub_resolution(self, responses, attestation=subprocess.CompletedProcess([], 0)):
+        """Isolate the release directory, the registry and gh from the test run."""
+        gh = (patch.object(release.subprocess, "run", side_effect=attestation)
+              if isinstance(attestation, BaseException)
+              else patch.object(release.subprocess, "run", return_value=attestation))
+        for managed in (patch.object(release, "PACKAGING", self.root),
+                        patch.object(release, "request_json", side_effect=responses),
+                        gh):
+            managed.start()
+            self.addCleanup(managed.stop)
+
+    def test_an_existing_lock_passes_through_unchanged(self):
+        existing = self.releases / "2.7.1.json"
+        existing.write_text(json.dumps(lock_data("2.7.1", NEXT_DIGEST)))
+        before = existing.read_bytes()
+        with patch.object(release, "PACKAGING", self.root), \
+             patch.object(release, "request_json", side_effect=AssertionError("the registry must not be read")), \
+             patch.object(release.subprocess, "run", side_effect=AssertionError("gh must not run")):
+            resolved = release.resolve_lock("v2.7.1")
+        self.assertEqual(resolved, existing)
+        self.assertEqual(existing.read_bytes(), before)
+        self.assertEqual(sorted(path.name for path in self.releases.iterdir()), ["2.7.0.json", "2.7.1.json"])
+
+    def test_an_existing_lock_passes_through_the_cli_unchanged(self):
+        existing = self.releases / "2.7.1.json"
+        existing.write_text(json.dumps(lock_data("2.7.1", NEXT_DIGEST)))
+        before = existing.read_bytes()
+        with patch.object(release, "PACKAGING", self.root), \
+             patch.object(release, "request_json", side_effect=AssertionError("the registry must not be read")), \
+             patch.object(release.subprocess, "run", side_effect=AssertionError("gh must not run")), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(release.main(["--resolve-lock", "--tag", "v2.7.1"]), 0)
+        self.assertEqual(out.getvalue(), f"{existing}\n")
+        self.assertEqual(existing.read_bytes(), before)
+
+    def test_a_first_release_of_a_line_needs_a_hand_reviewed_lock(self):
+        cases = {
+            "no base in the line": ([], "v2.7.1", "2.7"),
+            "new major.minor line": (["2.7.0.json"], "v2.8.0", "2.8"),
+        }
+        for case, (kept, tag, line) in cases.items():
+            with self.subTest(case):
+                for path in list(self.releases.iterdir()):
+                    path.unlink()
+                for name in kept:
+                    shutil.copyfile(PACKAGE_ROOT / "releases" / "2.7.0.json", self.releases / name)
+                with patch.object(release, "PACKAGING", self.root), \
+                     patch.object(release, "request_json", side_effect=AssertionError("a refusal needs no registry read")):
+                    with self.assertRaisesRegex(release.ReleaseError, f"in the {line} line.*hand-reviewed lock"):
+                        release.resolve_lock(tag)
+                self.assertEqual(sorted(path.name for path in self.releases.iterdir()), kept)
+
+    def test_resolution_uses_the_closest_previous_lock_in_the_line(self):
+        closer = lock_data("2.7.1", NEXT_DIGEST)
+        closer["companions"]["translator"]["digest"] = "sha256:" + "d" * 64
+        (self.releases / "2.7.1.json").write_text(json.dumps(closer))
+        self.stub_resolution(self.registry_responses())
+        release.resolve_lock("v2.7.2")
+        resolved = json.loads((self.releases / "2.7.2.json").read_text())
+        self.assertEqual(resolved["version"], "2.7.2")
+        self.assertEqual(resolved["companions"], closer["companions"])
+
+    def test_only_runtipi_and_truenas_bump_their_revisions(self):
+        cases = {
+            "first update": ({"stack": "1.0.0", "casaos": "1.0.0", "runtipi": 1, "truenas": "1.0.0", "unraid": "1.0.0"},
+                             {"stack": "1.0.0", "casaos": "1.0.0", "runtipi": 2, "truenas": "1.0.1", "unraid": "1.0.0"}),
+            "later updates": ({"stack": "2.3.4", "casaos": "1.2.0", "runtipi": 7, "truenas": "4.5.9", "unraid": "1.0.0"},
+                             {"stack": "2.3.4", "casaos": "1.2.0", "runtipi": 8, "truenas": "4.5.10", "unraid": "1.0.0"}),
+        }
+        for case, (revisions, expected) in cases.items():
+            with self.subTest(case):
+                for path in list(self.releases.iterdir()):
+                    path.unlink()
+                base = lock_data("2.7.0")
+                base["platform_revisions"] = dict(revisions)
+                (self.releases / "2.7.0.json").write_text(json.dumps(base))
+                self.stub_resolution(self.registry_responses())
+                release.resolve_lock("v2.7.1")
+                written = (self.releases / "2.7.1.json").read_bytes()
+                resolved = json.loads(written)
+                self.assertEqual(resolved["platform_revisions"], expected)
+                self.assertEqual(written, release.canonical_json(resolved))
+
+    def test_registry_and_attestation_failures_refuse_without_writing(self):
+        mismatch = list(self.registry_responses())
+        mismatch[3] = (mismatch[3][0], {"Docker-Content-Digest": "sha256:" + "b" * 64})
+        cases = {
+            "digest mismatch": (mismatch, "GHCR image not ready", subprocess.CompletedProcess([], 0)),
+            "missing amd64": (self.registry_responses(architectures=("arm64",)), "GHCR image not ready",
+                              subprocess.CompletedProcess([], 0)),
+            "missing arm64": (self.registry_responses(architectures=("amd64",)), "GHCR image not ready",
+                              subprocess.CompletedProcess([], 0)),
+            "attestation failure": (self.registry_responses(), "attestation",
+                                    subprocess.CalledProcessError(1, "gh attestation verify")),
+        }
+        for case, (responses, message, attestation) in cases.items():
+            with self.subTest(case):
+                gh = (patch.object(release.subprocess, "run", side_effect=attestation)
+                      if isinstance(attestation, BaseException)
+                      else patch.object(release.subprocess, "run", return_value=attestation))
+                for managed in (patch.object(release, "PACKAGING", self.root),
+                                patch.object(release, "READINESS_SECONDS", 0),
+                                patch.object(release.time, "monotonic", return_value=0),
+                                patch.object(release.time, "sleep"),
+                                patch.object(release, "request_json", side_effect=responses),
+                                gh):
+                    managed.start()
+                    self.addCleanup(managed.stop)
+                with self.assertRaisesRegex(release.ReleaseError, message):
+                    release.resolve_lock("v2.7.1")
+                self.assertEqual([path.name for path in self.releases.iterdir()], ["2.7.0.json"])
+
+    def test_resolution_reproduces_the_expected_lock(self):
+        with patch.object(release, "PACKAGING", self.root), \
+             patch.object(release, "request_json", side_effect=self.registry_responses()), \
+             patch.object(release.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as attested:
+            resolved = release.resolve_lock("v2.7.1")
+        self.assertEqual(resolved, self.releases / "2.7.1.json")
+        attested.assert_called_once()
+        command = attested.call_args[0][0]
+        self.assertEqual(command[:3], ["gh", "attestation", "verify"])
+        self.assertIn(f"oci://ghcr.io/lavx/bazarr@{NEXT_DIGEST}", command)
+        self.assertIn("refs/tags/v2.7.1", command)
+        self.assertIn("LavX/bazarr/.github/workflows/build-docker.yml", command)
+        written = (self.releases / "2.7.1.json").read_bytes()
+        self.assertEqual(json.loads(written), self.EXPECTED_271)
+        self.assertEqual(written, release.canonical_json(self.EXPECTED_271))
+
+
+class ResolveCommandTests(unittest.TestCase):
+    """Check the resolve-lock flag wiring without touching the network."""
+
+    def test_unsupported_flag_combinations_refuse_before_any_work(self):
+        cases = {
+            "missing tag": ([], "--resolve-lock requires --tag"),
+            "with a lock": (["--tag", "v2.7.1", "--lock", "releases/2.7.1.json"],
+                            "--resolve-lock cannot be combined with --lock or --verify-live"),
+            "with every lock": (["--tag", "v2.7.1", "--all-locks", "releases"],
+                                "--all-locks cannot be combined with --tag, --lock, --resolve-lock or --verify-live"),
+            "with live verification": (["--tag", "v2.7.1", "--verify-live"],
+                                       "--resolve-lock cannot be combined with --lock or --verify-live"),
+        }
+        for case, (arguments, message) in cases.items():
+            with self.subTest(case):
+                result = subprocess.run([sys.executable, str(COMMAND), "--resolve-lock", *arguments],
+                                        capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(message, result.stderr)
+
+
 class PullRequestWorkflowTests(unittest.TestCase):
     """Run the workflow's pull request steps against a disposable repository and a recording Docker."""
 
@@ -336,6 +542,140 @@ class PullRequestWorkflowTests(unittest.TestCase):
         result = self.run_step(self.STEPS[0])
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("release preparation refused", result.stderr)
+
+
+class WorkflowRunStructureTests(unittest.TestCase):
+    """Check the workflow_run machinery that GitHub Actions cannot validate locally."""
+
+    def setUp(self):
+        self.workflow = yaml.safe_load(WORKFLOW.read_text())
+        self.triggers = self.workflow[True]
+        self.jobs = self.workflow["jobs"]
+        self.prepare_steps = {step["name"]: step for step in self.jobs["prepare"]["steps"] if "name" in step}
+        self.order = [step.get("name") for step in self.jobs["prepare"]["steps"]]
+
+    def test_a_completed_image_build_triggers_the_lane(self):
+        self.assertEqual(self.triggers["workflow_run"], {"workflows": ["Build Docker Image"], "types": ["completed"]})
+        self.assertEqual(self.triggers["pull_request"]["paths"],
+                         ["packaging/**", "LICENSE", "NOTICES.md", ".github/workflows/platform-packages.yml"])
+        self.assertEqual(self.triggers["workflow_dispatch"]["inputs"]["tag"]["required"], True)
+        self.assertNotIn("release", self.triggers)
+        self.assertIn("only uses the copy of this workflow on the default branch", WORKFLOW.read_text())
+
+    def test_the_lane_runs_per_tag_with_least_privilege(self):
+        self.assertIn("github.event.workflow_run.head_branch", self.workflow["concurrency"]["group"])
+        self.assertEqual(self.workflow["permissions"], {"contents": "read", "packages": "read"})
+
+    def test_the_lane_requires_a_successful_build_without_job_level_regex(self):
+        condition = self.jobs["prepare"]["if"]
+        self.assertIn("github.event.workflow_run.conclusion == 'success'", condition)
+        self.assertNotIn("=~", condition)
+
+    def test_the_final_tag_shape_is_validated_in_a_step(self):
+        validation = self.prepare_steps["Validate final stable tag"]
+        self.assertEqual(validation["if"], "github.event_name == 'workflow_run'")
+        self.assertIn("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$", validation["run"])
+        preparation = self.prepare_steps["Verify published release and prepare packages"]
+        self.assertEqual(preparation["env"]["RELEASE_TAG"],
+                         "${{ github.event.workflow_run.head_branch || inputs.tag }}")
+        self.assertEqual(preparation["if"], "github.event_name != 'pull_request'")
+
+    def test_the_lock_is_resolved_before_the_lane_prepares(self):
+        resolution = self.prepare_steps["Resolve release lock"]
+        self.assertEqual(resolution["if"], "github.event_name == 'workflow_run'")
+        self.assertIn("release.py --resolve-lock", resolution["run"])
+        self.assertLess(self.order.index("Validate final stable tag"), self.order.index("Resolve release lock"))
+        self.assertLess(self.order.index("Resolve release lock"),
+                        self.order.index("Verify published release and prepare packages"))
+
+    def test_a_newly_resolved_lock_reaches_the_proposal_job(self):
+        upload = self.prepare_steps["Upload resolved lock"]
+        self.assertEqual(upload["if"], "github.event_name == 'workflow_run' && steps.lock.outputs.resolved == 'true'")
+        proposal = self.jobs["propose-lock"]
+        self.assertEqual(proposal["needs"], ["prepare"])
+        self.assertIn("github.event_name == 'workflow_run'", proposal["if"])
+        self.assertIn("needs.prepare.outputs.lock_resolved == 'true'", proposal["if"])
+        self.assertEqual(proposal["permissions"], {"contents": "write", "pull-requests": "write"})
+        checkouts = [step for step in proposal["steps"] if step.get("uses", "").startswith("actions/checkout@")]
+        self.assertEqual([step["with"]["ref"] for step in checkouts], ["development"])
+        downloads = [step for step in proposal["steps"] if step.get("uses", "").startswith("actions/download-artifact@")]
+        self.assertEqual([step["with"]["name"] for step in downloads], [upload["with"]["name"]])
+        runs = [step["run"] for step in proposal["steps"] if "run" in step]
+        self.assertTrue(any("--base development" in run for run in runs))
+        self.assertTrue(all("master" not in run and "pr merge" not in run for run in runs))
+
+
+class WorkflowRunLaneTests(unittest.TestCase):
+    """Run the workflow_run lane steps against a disposable repository."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.repository = package_repository(self.root / "repository")
+        self.outputs = self.root / "github-output"
+        workflow = yaml.safe_load(WORKFLOW.read_text())["jobs"]
+        self.steps = {step["name"]: step for step in workflow["prepare"]["steps"] if "name" in step}
+        self.proposal = [step["run"] for step in workflow["propose-lock"]["steps"] if "run" in step][0]
+
+    def run_step(self, script, **environment):
+        env = {**os.environ, **environment}
+        return subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
+                               cwd=self.repository, env=env, capture_output=True, text=True, check=False)
+
+    def test_only_final_tags_pass_the_lane_validation(self):
+        cases = {"final tag": ("v2.7.1", 0), "release candidate": ("v2.7.1-rc1", 1), "branch build": ("master", 1)}
+        for case, (tag, code) in cases.items():
+            with self.subTest(case):
+                result = self.run_step(self.steps["Validate final stable tag"]["run"], RELEASE_TAG=tag)
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+
+    def test_an_existing_lock_bypasses_the_resolver(self):
+        lock = self.repository / "packaging/releases/2.7.1.json"
+        lock.write_text(json.dumps(lock_data("2.7.1", NEXT_DIGEST)))
+        tools = self.root / "bin"
+        tools.mkdir()
+        python3 = tools / "python3"
+        python3.write_text('#!/bin/sh\necho "the resolver must not run for an existing lock" >&2\nexit 1\n')
+        python3.chmod(0o755)
+        result = self.run_step(self.steps["Resolve release lock"]["run"],
+                               PATH=f"{tools}{os.pathsep}{os.environ['PATH']}",
+                               RELEASE_TAG="v2.7.1", GITHUB_OUTPUT=str(self.outputs))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.outputs.read_text(),
+                         f"resolved=false\nversion=2.7.1\nsha256={hashlib.sha256(lock.read_bytes()).hexdigest()}\n")
+
+    def test_the_proposal_commits_only_the_resolved_lock(self):
+        remote = self.root / "remote.git"
+        git(self.repository, "init", "-q", "--bare", str(remote))
+        git(self.repository, "remote", "add", "origin", str(remote))
+        lock = self.repository / "resolved-lock/2.7.1.json"
+        lock.parent.mkdir()
+        lock.write_text(json.dumps(lock_data("2.7.1", NEXT_DIGEST)))
+        tools = self.root / "bin"
+        tools.mkdir()
+        gh_log = self.root / "gh.log"
+        gh = tools / "gh"
+        gh.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$GH_LOG"\nexit 0\n')
+        gh.chmod(0o755)
+        result = self.run_step(self.proposal,
+                               PATH=f"{tools}{os.pathsep}{os.environ['PATH']}", GH_LOG=str(gh_log),
+                               GH_TOKEN="fake-token", GH_REPO="LavX/bazarr", VERSION="2.7.1",
+                               EXPECTED_SHA256=hashlib.sha256(lock.read_bytes()).hexdigest(),
+                               PRODUCING_RUN="https://github.com/LavX/bazarr/actions/runs/1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(git(self.repository, "diff", "--name-only", "HEAD~1", "HEAD").split(),
+                         ["packaging/releases/2.7.1.json"])
+        self.assertEqual(git(self.repository, "branch", "--show-current").strip(), "packaging/lock-v2.7.1")
+        self.assertIn("refs/heads/packaging/lock-v2.7.1", git(self.repository, "ls-remote", "--heads", "origin"))
+        calls = gh_log.read_text().splitlines()
+        self.assertTrue(any("pr create --base development" in call for call in calls))
+        body = (self.repository / "proposal-body.md").read_text()
+        self.assertIn(NEXT_DIGEST, body)
+        self.assertIn("ghcr.io/lavx/ai-subtitle-translator:v2.1.1@", body)
+        self.assertIn("https://github.com/LavX/bazarr/actions/runs/1", body)
+        self.assertIn("runtipi: 1", body)
+        self.assertIn("truenas: 1.0.0", body)
 
 
 if __name__ == "__main__":

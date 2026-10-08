@@ -10,7 +10,7 @@ Submission candidates for Bazarr+, separate from upstream Bazarr. These files do
 | CasaOS / ZimaOS | [CasaOS](casaos/README.md) |
 | TrueNAS Apps | [TrueNAS](truenas/README.md) |
 
-Each package uses the stable `ghcr.io/lavx/bazarr:2.7.0` image, persistent config storage, and a distinct Bazarr+ app identity. The published image supports amd64 and arm64. Platform support is narrower where a catalog requires it.
+Each package uses the current released stable `ghcr.io/lavx/bazarr` image, pinned per the release lock, with persistent config storage and a distinct Bazarr+ app identity. The published image supports amd64 and arm64. Platform support is narrower where a catalog requires it.
 
 Registry verification on September 28, 2026 resolved that tag to index digest `sha256:90a5c184b0af41602ff78ea7286e0c5f2c4c284c9b18f71427d9ddbeb0b6531c`. Recheck the tag before publishing the packages.
 

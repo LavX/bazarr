@@ -21,6 +21,7 @@ import urllib.request
 
 
 PACKAGING = Path(__file__).resolve().parent
+# The render anchor stays at the last fully released version; the automation lands real locks per release.
 SOURCE_VERSION = "2.7.0"
 SOURCE_APP_DIGEST = "sha256:90a5c184b0af41602ff78ea7286e0c5f2c4c284c9b18f71427d9ddbeb0b6531c"
 IMAGE_REPOSITORIES = {
@@ -249,7 +250,8 @@ def request_json(url, headers=None):
         raise ReleaseError("Invalid registry JSON response") from exc
 
 
-def verify_index(image, tag, digest):
+def fetch_index(image, tag):
+    """Fetch the image index for tag, returning the reported digest and the parsed index."""
     repository = image.removeprefix("ghcr.io/")
     token_url = "https://ghcr.io/token?" + urllib.parse.urlencode({"scope": f"repository:{repository}:pull", "service": "ghcr.io"})
     token_data, _ = request_json(token_url)
@@ -258,7 +260,12 @@ def verify_index(image, tag, digest):
         raise ReleaseError(f"GHCR did not supply a pull token for {image}")
     manifest_url = f"https://ghcr.io/v2/{repository}/manifests/{urllib.parse.quote(tag, safe='')}"
     index, headers = request_json(manifest_url, {"Authorization": "Bearer " + token, "Accept": MANIFEST_ACCEPT})
-    actual_digest = headers.get("Docker-Content-Digest", "")
+    return headers.get("Docker-Content-Digest", ""), index
+
+
+def verify_index(image, tag, digest):
+    """Check that the GHCR index for tag carries exactly this digest with linux amd64 and arm64."""
+    actual_digest, index = fetch_index(image, tag)
     if actual_digest != digest:
         raise RegistryNotReady(f"GHCR digest mismatch for {image}:{tag}")
     if not isinstance(index, dict) or index.get("mediaType") not in INDEX_TYPES or not isinstance(index.get("manifests"), list):
@@ -291,6 +298,95 @@ def verify_live(lock, tag):
                 if remaining <= 0:
                     raise ReleaseError(f"GHCR image not ready for {image}:{image_tag}: {exc}") from exc
                 time.sleep(min(RETRY_SECONDS, remaining))
+
+
+def verify_attestation(digest, tag):
+    """Refuse a digest the tagged build workflow did not attest, so a mutable-tag race cannot pin the wrong image."""
+    subject = f"oci://{IMAGE_REPOSITORIES['app']}@{digest}"
+    command = ["gh", "attestation", "verify", subject, "--repo", "LavX/bazarr",
+               "--signer-workflow", "LavX/bazarr/.github/workflows/build-docker.yml",
+               "--source-ref", f"refs/tags/{tag}"]
+    try:
+        subprocess.run(command, capture_output=True, text=True, timeout=120, check=True)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise ReleaseError(f"Cannot verify the image attestation for {subject}: {exc}") from exc
+
+
+def resolve_app_digest(tag):
+    """Resolve the published app image digest for tag with the bounded retry verify_live uses."""
+    image, version = IMAGE_REPOSITORIES["app"], tag[1:]
+    deadline = time.monotonic() + READINESS_SECONDS
+    while True:
+        try:
+            digest, _ = fetch_index(image, version)
+            if not DIGEST.fullmatch(digest):
+                raise RegistryNotReady(f"GHCR did not return an index digest for {image}:{version}")
+            verify_index(image, version, digest)
+            break
+        except (RegistryNotReady, urllib.error.URLError, TimeoutError, OSError) as exc:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ReleaseError(f"GHCR image not ready for {image}:{version}: {exc}") from exc
+            time.sleep(min(RETRY_SECONDS, remaining))
+    verify_attestation(digest, tag)
+    return digest
+
+
+def previous_lock_path(tag):
+    """Return the lock of the immediately previous final release in the same major.minor line."""
+    version = tuple(int(part) for part in tag[1:].split("."))
+    releases = PACKAGING / "releases"
+    if releases.is_symlink() or not releases.is_dir():
+        raise ReleaseError("Release lock directory must be a regular directory")
+    bases = []
+    for path in releases.iterdir():
+        match = LOCK_NAME.fullmatch(path.name)
+        if not match:
+            continue
+        candidate = tuple(int(match.group(index)) for index in (1, 2, 3))
+        if candidate[:2] == version[:2] and candidate < version:
+            bases.append((candidate, path))
+    if not bases:
+        line = f"{version[0]}.{version[1]}"
+        raise ReleaseError(f"No previous release lock exists in the {line} line; "
+                           "a first release of a new major.minor line needs a hand-reviewed lock")
+    return max(bases)[1]
+
+
+def bumped_revisions(base):
+    """Bump the platform revisions a new application version requires."""
+    # Revision policy follows the platform tables in RELEASING.md: Runtipi increments
+    # tipi_version on updates, TrueNAS bumps its revision, and the rest carry over.
+    revisions = dict(base["platform_revisions"])
+    revisions["runtipi"] = revisions["runtipi"] + 1
+    major, minor, patch = revisions["truenas"].split(".")
+    revisions["truenas"] = f"{major}.{minor}.{int(patch) + 1}"
+    return revisions
+
+
+def resolve_lock(tag):
+    """Resolve the release lock for a tag after its image build published the app image."""
+    if not VERSION.fullmatch(tag):
+        raise ReleaseError(f"Expected a final stable tag such as v2.7.0, got {tag}")
+    version = tag[1:]
+    lock_path = PACKAGING / "releases" / f"{version}.json"
+    if lock_path.is_symlink() or lock_path.exists():
+        return lock_path
+    base_path = previous_lock_path(tag)
+    base = read_lock(base_path, "v" + base_path.name.removesuffix(".json"))
+    lock = {
+        "schema": 1,
+        "version": version,
+        "app": {"image": IMAGE_REPOSITORIES["app"], "digest": resolve_app_digest(tag)},
+        "companions": base["companions"],
+        "runtime_profile": base["runtime_profile"],
+        "platform_revisions": bumped_revisions(base),
+    }
+    validate_lock(lock, tag)
+    if lock_path.is_symlink() or lock_path.exists():
+        raise ReleaseError(f"Release lock appeared during resolution: {lock_path}")
+    lock_path.write_bytes(canonical_json(lock))
+    return lock_path
 
 
 def checked_output(output):
@@ -368,17 +464,27 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tag")
     parser.add_argument("--lock", type=Path)
+    parser.add_argument("--resolve-lock", action="store_true",
+                        help="resolve the release lock for --tag after its image build, then exit")
     parser.add_argument("--all-locks", type=Path, metavar="DIRECTORY",
                         help="prepare an offline candidate for every release lock in DIRECTORY")
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path)
     parser.add_argument("--verify-live", action="store_true")
     args = parser.parse_args(argv)
-    if args.all_locks and (args.tag or args.lock or args.verify_live):
-        parser.error("--all-locks cannot be combined with --tag, --lock or --verify-live")
-    if not args.all_locks and not (args.tag and args.lock):
+    if args.all_locks and (args.tag or args.lock or args.verify_live or args.resolve_lock):
+        parser.error("--all-locks cannot be combined with --tag, --lock, --resolve-lock or --verify-live")
+    if args.resolve_lock and (args.lock or args.verify_live):
+        parser.error("--resolve-lock cannot be combined with --lock or --verify-live")
+    if args.resolve_lock and not args.tag:
+        parser.error("--resolve-lock requires --tag")
+    if not args.resolve_lock and not args.output:
+        parser.error("the following arguments are required: --output")
+    if not args.resolve_lock and not args.all_locks and not (args.tag and args.lock):
         parser.error("--tag and --lock are required unless --all-locks is used")
     try:
-        if args.all_locks:
+        if args.resolve_lock:
+            outputs = [resolve_lock(args.tag)]
+        elif args.all_locks:
             outputs = prepare_all(args.all_locks, args.output)
         else:
             outputs = [prepare(args.tag, args.lock, args.output, args.verify_live)]

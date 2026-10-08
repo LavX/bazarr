@@ -1,8 +1,12 @@
 name: Platform packages
 
+# The workflow_run trigger only uses the copy of this workflow on the default branch,
+# so the automation first fires for a release after a release PR carries this machinery
+# into master.
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: [Build Docker Image]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -21,20 +25,34 @@ permissions:
   packages: read
 
 concurrency:
-  group: platform-packages-${{ github.event.release.tag_name || inputs.tag || github.ref }}
+  group: platform-packages-${{ github.event.workflow_run.head_branch || inputs.tag || github.ref }}
   cancel-in-progress: false
 
 jobs:
   prepare:
-    if: github.event_name != 'release' || (!github.event.release.draft && !github.event.release.prerelease)
+    # Job-level if expressions cannot match regex, so completed builds of the image
+    # workflow that did not start from a v ref are skipped here, and the final-tag
+    # shape is enforced in the step below.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    permissions:
+      contents: read
+      packages: read
+      attestations: read
+    outputs:
+      lock_resolved: ${{ steps.lock.outputs.resolved }}
+      lock_version: ${{ steps.lock.outputs.version }}
+      lock_sha256: ${{ steps.lock.outputs.sha256 }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Checkout package sources
         uses: actions/checkout@v7
         with:
-          # Historical releases can predate this tooling. Record source provenance.
-          ref: ${{ github.event_name == 'release' && github.event.repository.default_branch || github.ref }}
+          # workflow_run runs use the default branch copy; dispatch replays use the selected ref.
+          ref: ${{ github.ref }}
           persist-credentials: false
 
       - name: Install package test dependency
@@ -45,6 +63,37 @@ jobs:
           python3 packaging/test_release.py
           python3 packaging/stack/test_bootstrap.py
           python3 packaging/test_marketplaces.py
+
+      - name: Validate final stable tag
+        if: github.event_name == 'workflow_run'
+        env:
+          RELEASE_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo 'Expected a final stable tag such as v2.7.0' >&2
+            exit 1
+          fi
+
+      - name: Resolve release lock
+        if: github.event_name == 'workflow_run'
+        id: lock
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          lock="packaging/releases/${RELEASE_TAG#v}.json"
+          if [[ -f "$lock" ]]; then
+            echo "${lock} already exists; using the reviewed lock"
+            echo "resolved=false" >> "$GITHUB_OUTPUT"
+          else
+            python3 packaging/release.py --resolve-lock --tag "$RELEASE_TAG"
+            echo "resolved=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "$lock" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Prepare offline PR candidate
         if: github.event_name == 'pull_request'
@@ -57,7 +106,7 @@ jobs:
         if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          RELEASE_TAG: ${{ github.event.workflow_run.head_branch || inputs.tag }}
         run: |
           set -euo pipefail
           if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
@@ -171,6 +220,15 @@ jobs:
             docker compose -f "$store/stacks/bazarr-plus/compose.yaml" config --quiet
           done
 
+      - name: Upload resolved lock
+        if: github.event_name == 'workflow_run' && steps.lock.outputs.resolved == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: resolved-lock-${{ github.run_id }}-${{ github.run_attempt }}
+          path: packaging/releases/${{ steps.lock.outputs.version }}.json
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Upload reviewable packages
         uses: actions/upload-artifact@v7
         with:
@@ -193,3 +251,87 @@ jobs:
         run: |
           echo 'Packages are workflow artifacts, not release assets or catalog listings.' >> "$GITHUB_STEP_SUMMARY"
           echo 'Follow packaging/RELEASING.md after review.' >> "$GITHUB_STEP_SUMMARY"
+
+  propose-lock:
+    needs: [prepare]
+    if: >-
+      github.event_name == 'workflow_run' &&
+      needs.prepare.outputs.lock_resolved == 'true'
+    permissions:
+      contents: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out development
+        uses: actions/checkout@v7
+        with:
+          ref: development
+          # Credentials stay enabled so this job can push the lock branch.
+
+      - name: Download resolved lock
+        uses: actions/download-artifact@v8
+        with:
+          name: resolved-lock-${{ github.run_id }}-${{ github.run_attempt }}
+          path: resolved-lock
+
+      - name: Propose the resolved lock
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.prepare.outputs.lock_version }}
+          EXPECTED_SHA256: ${{ needs.prepare.outputs.lock_sha256 }}
+          PRODUCING_RUN: ${{ github.event.workflow_run.html_url }}
+        run: |
+          set -euo pipefail
+          lock="resolved-lock/${VERSION}.json"
+          actual="$(sha256sum "$lock" | cut -d' ' -f1)"
+          if [[ "$actual" != "$EXPECTED_SHA256" ]]; then
+            echo 'The downloaded lock differs from the lock the packages were prepared from' >&2
+            exit 1
+          fi
+          target="packaging/releases/${VERSION}.json"
+          if [[ -f "$target" ]]; then
+            echo "${target} is already reviewed on development; nothing to propose"
+            exit 0
+          fi
+          branch="packaging/lock-v${VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          cp "$lock" "$target"
+          git add "$target"
+          git commit -m "Add the ${VERSION} release lock resolved after the image build"
+          # The branch is automation-owned; rewinding it keeps a replayed run consistent.
+          git push --force origin "$branch"
+          open="$(gh pr list --head "$branch" --state open --json url --jq '.[0].url // ""')"
+          if [[ -n "$open" ]]; then
+            echo "A proposal is already open: ${open}"
+            exit 0
+          fi
+          python3 - "$lock" > proposal-body.md <<'PY'
+          import json, os, sys
+
+          lock = json.load(open(sys.argv[1]))
+          version = lock["version"]
+          digest = lock["app"]["digest"]
+          run = os.environ["PRODUCING_RUN"]
+          companions = "\n".join(f"- {name}: {entry['image']}:{entry['tag']}@{entry['digest']}"
+                                 for name, entry in sorted(lock["companions"].items()))
+          revisions = "\n".join(f"- {name}: {revision}"
+                                for name, revision in sorted(lock["platform_revisions"].items()))
+          print(f"""This pull request adds the release lock resolved automatically for version {version}. It was produced by {run} after the tagged image build completed, and the packages in that run were prepared from these exact bytes.
+
+          - Version: {version}
+          - App image digest: {digest}
+
+          Companion pins:
+          {companions}
+
+          Platform revisions:
+          {revisions}
+
+          Nothing merges automatically. Companion upgrades, new runtime profiles and new major.minor lines still need a hand-authored lock.""")
+          PY
+          gh pr create --base development --head "$branch" \
+            --title "Add the ${VERSION} release lock" --body-file proposal-body.md
