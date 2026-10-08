@@ -24,6 +24,10 @@ DOCKERFILE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     'Dockerfile')
 
+WORKFLOWS = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    '.github', 'workflows')
+
 
 def test_the_build_stamp_sits_beside_the_package_info():
     from utilities.build import build_stamp_path
@@ -156,3 +160,41 @@ def test_the_bake_writes_the_stamp_after_the_version():
     assert version_write != -1
     assert version_write < stamp_write, (
         'the BUILD stamp is not written after the VERSION it belongs to')
+
+
+def _block_from(text, start_marker):
+    """The lines of one workflow block: from a start marker to the next
+    named step, so the assertions below cannot match unrelated content."""
+    start = text.find(start_marker)
+    if start == -1:
+        return ''
+    end = text.find('- name:', start + len(start_marker))
+    return text[start:end if end != -1 else len(text)]
+
+
+def test_every_bake_of_the_root_dockerfile_passes_the_identity_args():
+    """Three workflows bake the root Dockerfile: the release build, the
+    manual build and the e2e lane. The Dockerfile guard fails any bake that
+    passes nothing, so each baker must pass all three identity args. And a
+    repository's last-updated timestamp is not the date of the bake, so no
+    build-args block may stamp itself with github.event.repository.updated_at."""
+    for name in ('build-docker.yml', 'build-docker-manual.yml'):
+        block = _block_from(open(os.path.join(WORKFLOWS, name)).read(),
+                            'build-args:')
+        assert block, f'{name} has no build-args block to guard'
+        for arg in ('BAZARR_VERSION=', 'BUILD_DATE=', 'VCS_REF='):
+            assert arg in block, (
+                f'{name} does not pass {arg}, so its bake would fail '
+                'the Dockerfile guard')
+        assert 'github.event.repository.updated_at' not in block, (
+            f'{name} stamps the build date with the repository\'s '
+            'last-updated timestamp, which is not the date of the bake')
+
+    e2e_step = _block_from(open(os.path.join(WORKFLOWS, 'e2e.yml')).read(),
+                           '- name: Build image')
+    assert e2e_step, 'e2e.yml has no Build image step to guard'
+    for arg in ('--build-arg BAZARR_VERSION=', '--build-arg VCS_REF=',
+                '--build-arg BUILD_DATE='):
+        assert arg in e2e_step, (
+            f'the e2e bake does not pass {arg}, so the image build fails '
+            'the Dockerfile guard and the whole lane dies there')
