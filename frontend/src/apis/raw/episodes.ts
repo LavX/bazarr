@@ -61,8 +61,14 @@ class EpisodeApi extends BaseApi {
       "/history",
       // The series detail table reads score + provider for every episode's
       // subtitles in one request, including the Embedded Source rows the
-      // paginated history hides by default.
-      { series_id: seriesId, include_embedded: true, length: -1 },
+      // paginated history hides by default. It never reads upgradable, so
+      // the full-library upgrade scan is skipped for this call.
+      {
+        series_id: seriesId,
+        include_embedded: true,
+        length: -1,
+        include_upgradable: false,
+      },
       signal,
     );
     return response.data;

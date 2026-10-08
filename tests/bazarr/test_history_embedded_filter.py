@@ -121,7 +121,7 @@ def _movie_fixture(schema_session):
     schema_session.flush()
 
 
-@pytest.mark.parametrize("filter_query", ["series_id=1", "seriesid=10"])
+@pytest.mark.parametrize("filter_query", ["series_id=1"])
 @pytest.mark.parametrize("include_embedded", [False, True])
 def test_series_history_filter_scopes_rows_and_total(
         schema_session, monkeypatch, filter_query, include_embedded):
@@ -256,6 +256,89 @@ def test_episode_scoped_history_applies_the_same_default(schema_session, monkeyp
 
     assert [item["action"] for item in result["data"]] == [1]
     assert result["total"] == 1
+
+
+def _extended_series_fixture(schema_session):
+    from app.database import TableEpisodes, TableHistory, TableShows
+
+    _series_fixture(schema_session)
+    schema_session.add(TableShows(
+        id=2, sonarrSeriesId=20, arr_instance_id=2, title="other show",
+        path="/tv/other", profileId=None, tags="[]", seriesType="standard",
+    ))
+    schema_session.flush()
+    schema_session.add_all([
+        TableEpisodes(
+            id=2, series_id=1, sonarrSeriesId=10, sonarrEpisodeId=101,
+            arr_instance_id=1, title="second episode", path="/tv/alpha/s01e02.mkv",
+            season=1, episode=2, subtitles="[]", monitored="True",
+        ),
+        TableEpisodes(
+            id=3, series_id=2, sonarrSeriesId=20, sonarrEpisodeId=200,
+            arr_instance_id=2, title="other pilot", path="/tv/other/s01e01.mkv",
+            season=1, episode=1, subtitles="[]", monitored="True",
+        ),
+    ])
+    schema_session.flush()
+    schema_session.add_all([
+        TableHistory(
+            id=4, series_id=1, episode_id=2, sonarrSeriesId=10, sonarrEpisodeId=101,
+            arr_instance_id=1, action=1, language="en", description="second download",
+            timestamp=datetime(2026, 8, 29, 12, 0, 4),
+        ),
+        TableHistory(
+            id=5, series_id=2, episode_id=3, sonarrSeriesId=20, sonarrEpisodeId=200,
+            arr_instance_id=2, action=1, language="en", description="other download",
+            timestamp=datetime(2026, 8, 29, 12, 0, 5),
+        ),
+    ])
+    schema_session.flush()
+
+
+def test_episode_history_legacy_seriesid_spelling_is_not_a_filter(
+        schema_session, monkeypatch):
+    """The legacy seriesid spelling filtered on the per-instance
+    sonarrSeriesId, which two Sonarr instances can share, and no caller sends
+    it. It is not an accepted filter, so a request that still carries it
+    behaves as unfiltered."""
+    _extended_series_fixture(schema_session)
+    _patch_episode_endpoint(monkeypatch, schema_session)
+
+    legacy = _get_episode_history("?seriesid=10&include_embedded=false&length=-1")
+    unfiltered = _get_episode_history("?include_embedded=false&length=-1")
+
+    assert {item["id"] for item in legacy["data"]} == {1, 2, 3}
+    assert {item["series_id"] for item in legacy["data"]} == {1, 2}
+    assert legacy["total"] == unfiltered["total"]
+
+
+def test_episode_history_can_skip_the_upgradable_computation(
+        schema_session, monkeypatch):
+    """The upgradable computation aggregates the whole history table, and the
+    series detail page reads only score, provider and matches. A request that
+    opts out does not pay for the scan and gets upgradable False on every row."""
+    from api.episodes import history
+
+    _series_fixture(schema_session)
+    _patch_episode_endpoint(monkeypatch, schema_session)
+
+    calls = []
+
+    def spy(history_id_list):
+        calls.append(list(history_id_list))
+        return {}
+
+    monkeypatch.setattr(history, "get_upgradable_episode_subtitles", spy)
+
+    default = _get_episode_history("?series_id=1&include_embedded=false&length=-1")
+    assert calls == [[1]]
+
+    skipped = _get_episode_history(
+        "?series_id=1&include_embedded=false&length=-1&include_upgradable=false")
+    assert calls == [[1]]
+    assert skipped["total"] == default["total"]
+    assert skipped["data"] == default["data"]
+    assert all(item["upgradable"] is False for item in skipped["data"])
 
 
 def test_movie_history_excludes_embedded_by_default(schema_session, monkeypatch):

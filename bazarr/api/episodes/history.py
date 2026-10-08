@@ -23,9 +23,10 @@ class EpisodesHistory(Resource):
     get_request_parser.add_argument('id', type=int, required=False, help='Local episode ID')
     get_request_parser.add_argument('episodeid', type=int, required=False, help='Episode ID')
     get_request_parser.add_argument('series_id', type=int, required=False, help='Local series ID')
-    get_request_parser.add_argument('seriesid', type=int, required=False, help='Series ID')
     get_request_parser.add_argument('include_embedded', type=inputs.boolean, required=False, default=False,
                                     help='Include Embedded Source records (default excludes them)')
+    get_request_parser.add_argument('include_upgradable', type=inputs.boolean, required=False, default=True,
+                                    help='Include the upgradable computation (default includes it)')
 
     get_language_model = api_ns_episodes_history.model('subtitles_language_model', subtitles_language_model)
 
@@ -75,8 +76,8 @@ class EpisodesHistory(Resource):
         local_episode_id = args.get('id')
         episodeid = args.get('episodeid')
         local_series_id = args.get('series_id')
-        seriesid = args.get('seriesid')
         include_embedded = args.get('include_embedded')
+        include_upgradable = args.get('include_upgradable')
 
         blacklisted_subtitles = select(TableBlacklist.provider,
                                        TableBlacklist.subs_id,
@@ -100,8 +101,6 @@ class EpisodesHistory(Resource):
         # which only joins TableEpisodes, stays valid.
         elif local_series_id:
             query_conditions.append((TableEpisodes.series_id == local_series_id))
-        elif seriesid:
-            query_conditions.append((TableEpisodes.sonarrSeriesId == seriesid))
 
         stmt = select(TableHistory.id.label('history_id'),
                       TableEpisodes.id,
@@ -178,24 +177,32 @@ class EpisodesHistory(Resource):
             'blacklisted': bool(x.blacklisted),
         } for x in database.execute(stmt).all()]
 
-        upgradable_episodes_not_perfect = get_upgradable_episode_subtitles(history_id_list=[x['history_id'] for x in
-                                                                                            episode_history])
+        # The upgradable computation aggregates the whole history table and
+        # materializes every library-wide candidate. The series detail table
+        # reads only score, provider and matches, so callers that never read
+        # upgradable can skip it with include_upgradable=false.
+        if include_upgradable:
+            upgradable_episodes_not_perfect = get_upgradable_episode_subtitles(history_id_list=[x['history_id'] for x in
+                                                                                                episode_history])
 
         for item in episode_history:
             # is this language still desired or should we simply skip this subtitles from upgrade logic?
-            still_desired = _language_still_desired(item['language'], item['profileId'])
+            still_desired = _language_still_desired(item['language'], item['profileId']) if include_upgradable else None
 
             item.update(postprocess(item))
 
-            # Mark upgradable and get original_id
-            item.update({'original_id': upgradable_episodes_not_perfect.get(item['history_id'])})
-            item.update({'upgradable': item['history_id'] in upgradable_episodes_not_perfect.keys()})
+            if include_upgradable:
+                # Mark upgradable and get original_id
+                item.update({'original_id': upgradable_episodes_not_perfect.get(item['history_id'])})
+                item.update({'upgradable': item['history_id'] in upgradable_episodes_not_perfect.keys()})
 
-            # Mark not upgradable if video/subtitles file doesn't exist anymore or if language isn't desired anymore
-            if item['upgradable']:
-                if (item['subtitles_path'] not in item['external_subtitles'] or item['video_path'] != item['path'] or
-                        not still_desired):
-                    item.update({"upgradable": False})
+                # Mark not upgradable if video/subtitles file doesn't exist anymore or if language isn't desired anymore
+                if item['upgradable']:
+                    if (item['subtitles_path'] not in item['external_subtitles'] or item['video_path'] != item['path'] or
+                            not still_desired):
+                        item.update({"upgradable": False})
+            else:
+                item.update({'upgradable': False})
 
             del item['path']
             del item['video_path']

@@ -148,9 +148,27 @@ describe("Subtitle badge score", () => {
       matches: ["hash"],
       notMatches: ["resolution"],
     });
-    // Rounded percentage is appended to the language code: "en 98%".
+    // Parsed percentage is appended to the language code: "en 98%".
     expect(await findScoredBadge(/^en 98%$/i)).toBeInTheDocument();
   });
+
+  it.each([
+    ["89.6%", "yellow", /^en 89\.6%$/i],
+    ["69.6%", "red", /^en 69\.6%$/i],
+  ])(
+    "shows the %s score unrounded and keeps it in its %s band",
+    async (score, colour, text) => {
+      renderBadge(sub("/tv/Show/Season 1/Show S01E08.en.srt"), { score });
+      expect(await findScoredBadge(text)).toBeInTheDocument();
+      const badge = await screen.findByText(
+        (_content, element) =>
+          element?.classList.contains("mantine-Badge-root") ?? false,
+      );
+      expect(badge).toHaveStyle({
+        color: `var(--mantine-color-${colour}-light-color)`,
+      });
+    },
+  );
 
   it("leaves the badge unchanged when there is no score", async () => {
     renderBadge(sub("/tv/Show/Season 1/Show S01E08.en.srt"));
