@@ -55,6 +55,14 @@ REFUSAL_LOG_LINES_PER_HOUR = 20
 # windows minted in the two layers at the same moment are still distinct.
 WINDOW_ID_BYTES = 8
 
+# How long the console may keep re-carrying a sent copy no answer resolved,
+# and the same span the backend must remember the window's ID: a copy the
+# console can still re-carry always meets a backend that still remembers
+# it, and a copy no backend remembers can no longer recur. One constant
+# carries both sides, so the backend's retention and the console's hold
+# cannot drift apart.
+CARRY_RETENTION_SECONDS = 2 * HOUR_SECONDS
+
 
 def _mint_window_id():
     """A fresh window ID: 64 random bits, unique across both layers."""
@@ -452,12 +460,21 @@ class BoundedRefusalRecorder:
         self._first_failures = OrderedDict(
             (name, stamp) for name, stamp in self._first_failures.items()
             if now - stamp < HOUR_SECONDS)
+        # The window IDs are the carry protocol, not the hourly line budget,
+        # so the two lists holding them outlast the hour: they are kept for
+        # the whole span the console may keep re-carrying a sent copy no
+        # answer resolved, on the one constant both sides share so the
+        # retention and the console's hold cannot drift apart. The backend
+        # stamps an ID when it first folds the window in, at or after the
+        # carry began, so its retention of that first stamp always covers
+        # the console's hold of the same copy, and once no backend remembers
+        # the ID, the console can no longer re-carry the copy either.
         self._counted_windows = OrderedDict(
             (window_id, stamp) for window_id, stamp in self._counted_windows.items()
-            if now - stamp < HOUR_SECONDS)
+            if now - stamp < CARRY_RETENTION_SECONDS)
         self._completed_windows = OrderedDict(
             (window_id, stamp) for window_id, stamp in self._completed_windows.items()
-            if now - stamp < HOUR_SECONDS)
+            if now - stamp < CARRY_RETENTION_SECONDS)
 
     def take_summary(self):
         """The suppressed window when a summary line is due, else ``None``.
@@ -468,10 +485,11 @@ class BoundedRefusalRecorder:
         stable ID, and taking it clears the window. Taking it does not
         forget the ID: the window has been counted here, so a copy of it
         that arrives again, from the other layer, folds nowhere. The ID
-        joins the completed list as well, on the hour horizon every other
-        roll here uses, because the layer that took the window out to carry
-        it needs to be told its summary has been paid, so it drops the copy
-        it holds instead of carrying a window that is owed nothing anymore.
+        joins the completed list as well, held for the whole span the other
+        layer may keep re-carrying the copy it took out, because the layer
+        that took the window out to carry it needs to be told its summary
+        has been paid, so it drops the copy it holds instead of carrying a
+        window that is owed nothing anymore.
         """
         now = self._now()
         with self._lock:
@@ -518,9 +536,11 @@ class BoundedRefusalRecorder:
         An acknowledgement carries them so the other layer can drop every
         copy it holds of a window whose summary has been paid: without them
         it could not tell a window it must keep carrying from one that is
-        owed nothing anymore. The IDs are held on the hour horizon the line
-        times use, so the list stays bounded and the windows it names cannot
-        come back as live accounting once their hour has run.
+        owed nothing anymore. The IDs are held for the whole span the other
+        layer may keep re-carrying a copy no answer resolved, on the one
+        constant both sides share, so the list stays bounded and an answer
+        can still name a window paid however long its copy stayed
+        unresolved.
         """
         now = self._now()
         with self._lock:
@@ -570,8 +590,11 @@ class BoundedRefusalRecorder:
         nowhere, so a report whose acknowledgement was lost and whose
         retry carries the window again does not count it twice, and the
         window the other layer hands back while this one still holds it
-        costs nothing either. The IDs are held on the hour horizon the
-        line times use, so the set of them stays bounded.
+        costs nothing either. The IDs are held for the whole span the
+        other layer may keep re-carrying the window, on the one constant
+        both sides share, so the set of them stays bounded and a copy the
+        other layer can still re-carry always meets a layer that still
+        remembers counting it.
         """
         if not count or opened is None:
             return

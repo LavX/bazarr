@@ -1038,17 +1038,39 @@ class _RefusalReporter:
         its ID completed and folded by a backend that still counts it,
         and a backend that never answers loses the one summary rather
         than the pair logging a second line for a window the backend may
-        already have summarized. Any acknowledgement since the carry began
-        bars the emission as well and drops the copy once its hour has
-        run, because the backend has taken the window in and holds it or
-        has paid it, and the mirrored copy or the completed IDs carry its
-        accounting, so the pair stays on the one summary whichever layer
-        pays it.
+        already have summarized. The wait is bounded all the same: once the
+        carry has run past the span the backend remembers the window's ID,
+        held for exactly that purpose on the one constant both sides share
+        so the retention and this hold cannot drift apart, the copy is
+        dropped outright, emitted nowhere and carried by no later report,
+        because a backend that no longer remembers the ID would fold it in
+        again and log a second line, so the pair keeps the one summary the
+        backend logged, or loses the one the backend never took, rather
+        than risk logging the window twice. Any acknowledgement since the
+        carry began bars the emission as well and drops the copy once its
+        hour has run, because the backend has taken the window in and
+        holds it or has paid it, and the mirrored copy or the completed
+        IDs carry its accounting, so the pair stays on the one summary
+        whichever layer pays it.
         """
         now = self._now()
         carried = self._carried
         if carried is not None and now - self._carried_at >= host_policy.HOUR_SECONDS:
             if self._carried_sent and (self._last_ack is None or self._last_ack < self._carried_at):
+                if now - self._carried_at >= host_policy.CARRY_RETENTION_SECONDS:
+                    # Sent, never answered, and carried past the whole span
+                    # the backend remembers the window's ID: a later report
+                    # would re-carry the copy to a backend that folds it in
+                    # as a window it has never seen and logs a second line,
+                    # so the copy is dropped outright, emitted nowhere and
+                    # carried by no later report, on the one retention span
+                    # both sides share so this hold cannot outlast what any
+                    # backend remembers of the window. The pair keeps the
+                    # one summary the backend logged, or loses the one the
+                    # backend never took, rather than risk a second line for
+                    # a window whose ID no backend remembers.
+                    self._carried = None
+                    return self._lines.take_summary()
                 # Sent but never answered: the backend may have logged the
                 # summary before its answer was lost, so the window stays in
                 # the slot for the acknowledgement protocol and is never
@@ -1411,7 +1433,18 @@ async def _drain_refusal_notices(reporter: _RefusalReporter) -> None:
                 continue
             try:
                 if session is None:
-                    session = ClientSession(timeout=ClientTimeout(total=5))
+                    # The connect timeout is the shorter of the two, so a
+                    # stall while the connection is still being opened,
+                    # waiting for a pool slot or connecting the socket, ends
+                    # as the connector's own timeout in the never-connected
+                    # handler of the send below: a timeout that fires while
+                    # the connection is still being opened leaves the window
+                    # unsent, because no request byte of the report ever
+                    # left for any backend. A total timeout firing there
+                    # instead would read as a failure of an exchange that
+                    # had its connection open and mark the window sent,
+                    # withholding a summary no backend ever received.
+                    session = ClientSession(timeout=ClientTimeout(total=5, connect=3))
                 await _send_refusal_notice(session, port, token, host, reporter)
             except asyncio.CancelledError:
                 raise

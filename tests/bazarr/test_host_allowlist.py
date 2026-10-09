@@ -30,7 +30,7 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
-from aiohttp import web
+from aiohttp import ClientTimeout, TCPConnector, web
 from aiohttp.test_utils import TestClient, TestServer
 from flask import Flask
 
@@ -3282,6 +3282,517 @@ async def test_a_prolonged_outage_after_a_dropped_exchange_keeps_the_one_summary
 
         # A later report carries no copy of the window: the console discarded
         # its copy when the acknowledgement named it completed.
+        delivered.clear()
+        clock[0] += 1
+        response = await client.get("/", headers={"Host": "witness.example.com"})
+        assert response.status == 421
+        for _ in range(6000):
+            if delivered:
+                break
+            clock[0] += 0.06
+            await asyncio.sleep(0.01)
+        assert "suppressed" not in delivered[0]
+        assert "suppressed_id" not in delivered[0]
+
+        console_summaries = [line for line in lines if line.startswith("Suppressed")]
+        backend_summaries = [message for message in root_log.messages
+                             if "host-refusal log lines" in message]
+        assert console_summaries == []
+        assert len(backend_summaries) == 1
+        assert "suppressed 5 host-refusal log lines" in backend_summaries[0]
+    finally:
+        await client.close()
+        if recovered_backend is not None:
+            await recovered_backend.close()
+
+
+@pytest.mark.asyncio
+async def test_a_connect_phase_stall_leaves_the_carried_window_unsent(tmp_path, monkeypatch,
+                                                                      root_log, caplog):
+    """An already-due window travels with a report whose connection stalls
+    before it ever opens: the session's one pool slot is held by another
+    long-lived request, so the report waits for the slot inside its
+    connect phase and no request byte of it ever leaves for any backend.
+    The stall resolves as the connect timeout, the connector's own
+    failure to open a connection, so the window stays unsent and the
+    sustained-outage emission stays available: once the backend has been
+    unreachable past the window's hour with no acknowledgement of any
+    kind, a refusal arriving in that outage emits the window here, once,
+    because nothing could have summarized it anywhere."""
+    from app import host_allowlist
+
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
+    monkeypatch.setenv("BAZARR_SUPERVISOR_TOKEN", "the-supervisor-token")
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    caplog.set_level(logging.INFO)
+
+    clock = [0]
+    recorder = host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0])
+    monkeypatch.setattr(host_allowlist, "_refusals", recorder)
+    config = _config()
+    delivered = []
+    backend_app = Flask(__name__)
+
+    def deliver(form):
+        """The backend's own notice route, over the form the report carried."""
+        with backend_app.test_request_context(
+                "/_supervisor/host_refusal", method="POST",
+                headers={supervisor.TOKEN_HEADER: "the-supervisor-token"}, data=form):
+            return host_allowlist.front_refusal_notice(config=config)
+
+    async def notice(request):
+        form = dict(await request.post())
+        delivered.append(form)
+        _body, _status, headers = deliver(form)
+        return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                 "the-supervisor-token", **headers})
+
+    # A request this route holds open occupies the session's one pool slot:
+    # the pool wait runs inside a report's connect phase, so a report sent
+    # on the same session waits there for the slot, where the connect
+    # timeout is what ends the wait, and no request byte of it leaves.
+    slot_entered = asyncio.Event()
+    slot_release = asyncio.Event()
+
+    async def hold(request):
+        slot_entered.set()
+        await slot_release.wait()
+        return web.Response(text="held")
+
+    backend = web.Application()
+    backend.router.add_route("POST", "/_supervisor/host_refusal", notice)
+    backend.router.add_route("GET", "/hold", hold)
+    stall_backend = TestClient(TestServer(backend))
+    await stall_backend.start_server()
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    hold_task = None
+    try:
+        reporter = supervisor._active_reporter
+        monkeypatch.setattr(reporter, "_now", lambda: clock[0])
+        monkeypatch.setattr(reporter._lines, "_now", lambda: clock[0])
+
+        # The delivery worker's session is built over a connector of one
+        # slot, with the timeout the worker itself asks for, so a long-lived
+        # request on it can hold a report's connect phase closed.
+        real_client_session = supervisor.ClientSession
+        made = []
+
+        def one_slot_session(*args, **kwargs):
+            kwargs["connector"] = TCPConnector(limit=1)
+            session = real_client_session(*args, **kwargs)
+            made.append(session)
+            return session
+
+        monkeypatch.setattr(supervisor, "ClientSession", one_slot_session)
+
+        # The unresolved copy's return from a delivery is how this test
+        # sees the stalled exchange end.
+        restored = []
+        real_restore = reporter.restore_carried_summary
+
+        def recording_restore(carried, reached=False):
+            restored.append(reached)
+            real_restore(carried, reached)
+
+        monkeypatch.setattr(reporter, "restore_carried_summary", recording_restore)
+
+        # A port nothing listens on, so the first report of the outage is
+        # refused at the connect.
+        with socket.socket() as reserve:
+            reserve.bind(("127.0.0.1", 0))
+            refused_port = reserve.getsockname()[1]
+
+        # The outage spends the hour's cap of lines and holds the rest back,
+        # which opens the console's suppressed window.
+        for index in range(25):
+            clock[0] = index
+            response = await client.get("/", headers={"Host": f"down{index}.example.com"})
+            assert response.status == 421
+        named = [line for line in lines if line.startswith("Refused")]
+        assert len(named) == supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR
+
+        # The first report reaches for a port nothing answers and is
+        # refused at the connect, so no request byte of it ever leaves: the
+        # window stays unsent in the slot, and the attempt builds the
+        # session the stall needs.
+        clock[0] = 3700
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", refused_port)
+        monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+        for _ in range(2000):
+            if len([line for line in lines if line.startswith("Refused")]) > len(named):
+                break
+            await asyncio.sleep(0.01)
+        assert len([line for line in lines if line.startswith("Refused")]) > len(named)
+        restored.clear()
+
+        # The held request takes the one pool slot, and the report the
+        # console then retries carries the window again on the same session,
+        # against a backend that would answer it: the connect phase waits
+        # for the slot, and the timeout that ends the wait is the connect
+        # one, before any connection for the report ever opened.
+        async def hold_the_slot():
+            async with made[0].get(f"http://127.0.0.1:{stall_backend.server.port}/hold",
+                                  timeout=ClientTimeout(total=None)) as response:
+                await response.read()
+
+        hold_task = asyncio.create_task(hold_the_slot())
+        await slot_entered.wait()
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", stall_backend.server.port)
+        clock[0] += 0.06
+        for _ in range(1500):
+            if restored:
+                break
+            await asyncio.sleep(0.01)
+        assert restored
+        slot_release.set()
+        await hold_task
+        hold_task = None
+
+        # The backend becomes unreachable, and the outage outlasts the
+        # window's hour with no acknowledgement of any kind in between.
+        await stall_backend.close()
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", None)
+        clock[0] = 3700 + int(supervisor.host_policy.HOUR_SECONDS)
+
+        # A refusal arrives in the prolonged outage: the stalled exchange
+        # never opened a connection, so no request byte of the window ever
+        # left for any backend, and the console emits it here, once, the
+        # sustained-outage case.
+        response = await client.get("/", headers={"Host": "late.example.com"})
+        assert response.status == 421
+        console_summaries = [line for line in lines if line.startswith("Suppressed")]
+        assert len(console_summaries) == 1
+        assert console_summaries[0].startswith("Suppressed 5 host-refusal lines between")
+
+        # The emission is the window's one summary: a later refusal in the
+        # same outage writes no second line here.
+        response = await client.get("/", headers={"Host": "again.example.com"})
+        assert response.status == 421
+        console_summaries = [line for line in lines if line.startswith("Suppressed")]
+        assert len(console_summaries) == 1
+
+        # No report ever reached the backend, so it holds and logs nothing
+        # of the window.
+        assert delivered == []
+        backend_summaries = [message for message in root_log.messages
+                             if "host-refusal log lines" in message]
+        assert backend_summaries == []
+    finally:
+        if hold_task is not None:
+            hold_task.cancel()
+            try:
+                await hold_task
+            except asyncio.CancelledError:
+                pass
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_retry_reaching_the_backend_more_than_an_hour_later_folds_the_window_nowhere(
+        tmp_path, monkeypatch, root_log, caplog):
+    """An already-due window travels with a report the backend processes
+    and summarizes before the connection drops without any response byte,
+    and the backend then stays unreachable more than an hour past the
+    moment it processed that report, while the console's copy is still
+    within the span it may keep re-carrying a sent window no answer
+    resolved. The retry that reaches the recovered backend meets one that
+    still remembers the window's ID, so the re-carried copy folds nowhere
+    and the backend logs no second summary: the pair keeps the one summary
+    the window owes, the backend's, and the console discards its copy when
+    the acknowledgement names the window completed."""
+    from app import host_allowlist
+
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
+    monkeypatch.setenv("BAZARR_SUPERVISOR_TOKEN", "the-supervisor-token")
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    caplog.set_level(logging.INFO)
+
+    clock = [0]
+    recorder = host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0])
+    monkeypatch.setattr(host_allowlist, "_refusals", recorder)
+    config = _config()
+    answer = {"dropped": True}
+    delivered = []
+    backend_app = Flask(__name__)
+
+    def deliver(form):
+        """The backend's own notice route, over the form the report carried."""
+        with backend_app.test_request_context(
+                "/_supervisor/host_refusal", method="POST",
+                headers={supervisor.TOKEN_HEADER: "the-supervisor-token"}, data=form):
+            return host_allowlist.front_refusal_notice(config=config)
+
+    async def notice(request):
+        form = dict(await request.post())
+        if answer["dropped"]:
+            # The backend takes a moment of the shared clock to process the
+            # report, after this console's carry began, and logs the
+            # summary the carried window owed.
+            clock[0] += 1
+        notice_route = deliver(form)
+        if notice_route[1] != 204:
+            return web.Response(status=503)
+        if answer["dropped"]:
+            # The backend has taken the report in and logged the summary the
+            # carried window owed, and then the connection drops before any
+            # response byte leaves: the acknowledgement this route built
+            # never reaches the wire, so no answer arrives at all.
+            answer["dropped"] = False
+            request.transport.close()
+            return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                     "the-supervisor-token",
+                                                     **notice_route[2]})
+        delivered.append(form)
+        _body, _status, headers = notice_route
+        return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                "the-supervisor-token", **headers})
+
+    backend = web.Application()
+    backend.router.add_route("POST", "/_supervisor/host_refusal", notice)
+    dropping_backend = TestClient(TestServer(backend))
+    await dropping_backend.start_server()
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    recovered_backend = None
+    try:
+        reporter = supervisor._active_reporter
+        monkeypatch.setattr(reporter, "_now", lambda: clock[0])
+        monkeypatch.setattr(reporter._lines, "_now", lambda: clock[0])
+
+        # The outage spends the hour's cap of lines and holds the rest back,
+        # which opens the console's suppressed window.
+        for index in range(25):
+            clock[0] = index
+            response = await client.get("/", headers={"Host": f"down{index}.example.com"})
+            assert response.status == 421
+        named = [line for line in lines if line.startswith("Refused")]
+        assert len(named) == supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR
+
+        # The window is already due when the first report carries it, and the
+        # backend that takes the report in logs its summary before dropping
+        # the connection without any response byte. The failure path names
+        # the report's hostname once the console has seen the drop, so the
+        # wait ends only after the exchange has failed here.
+        clock[0] = 3700
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", dropping_backend.server.port)
+        monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+        failed = [line for line in lines if line.startswith("Refused")]
+        for _ in range(2000):
+            if len([line for line in lines if line.startswith("Refused")]) > len(failed):
+                break
+            await asyncio.sleep(0.01)
+        assert not answer["dropped"]
+        assert len([line for line in lines if line.startswith("Refused")]) > len(failed)
+
+        # The backend becomes unreachable, and the outage outlasts the
+        # window's hour, running more than an hour past the moment the
+        # backend processed the report, with no acknowledgement of any kind
+        # in between, while the carry is still within the span the console
+        # may keep re-carrying its unresolved sent copy.
+        await dropping_backend.close()
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", None)
+        clock[0] = 3700 + int(supervisor.host_policy.HOUR_SECONDS) + 60
+
+        # A refusal arrives in the prolonged outage: the console emits no
+        # second summary for a window the report's exchange carried on an
+        # open connection, so the copy waits in flight for the backend to
+        # answer again.
+        response = await client.get("/", headers={"Host": "late.example.com"})
+        assert response.status == 421
+        console_summaries = [line for line in lines if line.startswith("Suppressed")]
+        assert console_summaries == []
+
+        # The backend recovers, and the retry reaches it more than an hour
+        # after it processed the report: the backend still remembers the
+        # window's ID, so the re-carried copy folds nowhere and no second
+        # summary is logged, and the acknowledgement names the window among
+        # the IDs the backend has completed, so the console discards its
+        # copy.
+        recovered_backend = TestClient(TestServer(backend))
+        await recovered_backend.start_server()
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", recovered_backend.server.port)
+        for _ in range(2000):
+            if delivered:
+                break
+            await asyncio.sleep(0.01)
+        assert delivered
+        for _ in range(6000):
+            if not reporter.pending_reports():
+                break
+            clock[0] += 0.06
+            await asyncio.sleep(0.01)
+        assert reporter.pending_reports() == []
+
+        # A later report carries no copy of the window: the console discarded
+        # its copy when the acknowledgement named it completed.
+        delivered.clear()
+        clock[0] += 1
+        response = await client.get("/", headers={"Host": "witness.example.com"})
+        assert response.status == 421
+        for _ in range(6000):
+            if delivered:
+                break
+            clock[0] += 0.06
+            await asyncio.sleep(0.01)
+        assert "suppressed" not in delivered[0]
+        assert "suppressed_id" not in delivered[0]
+
+        console_summaries = [line for line in lines if line.startswith("Suppressed")]
+        backend_summaries = [message for message in root_log.messages
+                             if "host-refusal log lines" in message]
+        assert console_summaries == []
+        assert len(backend_summaries) == 1
+        assert "suppressed 5 host-refusal log lines" in backend_summaries[0]
+    finally:
+        await client.close()
+        if recovered_backend is not None:
+            await recovered_backend.close()
+
+
+@pytest.mark.asyncio
+async def test_a_carry_past_the_retention_horizon_drops_the_unresolved_sent_copy(
+        tmp_path, monkeypatch, root_log, caplog):
+    """An already-due window travels with a report the backend processes
+    and summarizes before the connection drops without any response byte,
+    and the backend then stays unreachable past the whole span the console
+    may keep re-carrying its unresolved sent copy. The console drops the
+    copy outright rather than re-carry a window whose ID no backend
+    remembers anymore: nothing about the window reaches the recovered
+    backend, no report carries a copy of it, and no second summary is
+    logged anywhere, so the pair is left with the one summary the backend
+    already logged, losing the copy's claim rather than logging the window
+    twice."""
+    from app import host_allowlist
+
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
+    monkeypatch.setenv("BAZARR_SUPERVISOR_TOKEN", "the-supervisor-token")
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    caplog.set_level(logging.INFO)
+
+    clock = [0]
+    recorder = host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0])
+    monkeypatch.setattr(host_allowlist, "_refusals", recorder)
+    config = _config()
+    answer = {"dropped": True}
+    delivered = []
+    backend_app = Flask(__name__)
+
+    def deliver(form):
+        """The backend's own notice route, over the form the report carried."""
+        with backend_app.test_request_context(
+                "/_supervisor/host_refusal", method="POST",
+                headers={supervisor.TOKEN_HEADER: "the-supervisor-token"}, data=form):
+            return host_allowlist.front_refusal_notice(config=config)
+
+    async def notice(request):
+        form = dict(await request.post())
+        if answer["dropped"]:
+            # The backend takes a moment of the shared clock to process the
+            # report, after this console's carry began, and logs the
+            # summary the carried window owed.
+            clock[0] += 1
+        notice_route = deliver(form)
+        if notice_route[1] != 204:
+            return web.Response(status=503)
+        if answer["dropped"]:
+            # The backend has taken the report in and logged the summary the
+            # carried window owed, and then the connection drops before any
+            # response byte leaves: the acknowledgement this route built
+            # never reaches the wire, so no answer arrives at all.
+            answer["dropped"] = False
+            request.transport.close()
+            return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                     "the-supervisor-token",
+                                                     **notice_route[2]})
+        delivered.append(form)
+        _body, _status, headers = notice_route
+        return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                "the-supervisor-token", **headers})
+
+    backend = web.Application()
+    backend.router.add_route("POST", "/_supervisor/host_refusal", notice)
+    dropping_backend = TestClient(TestServer(backend))
+    await dropping_backend.start_server()
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    recovered_backend = None
+    try:
+        reporter = supervisor._active_reporter
+        monkeypatch.setattr(reporter, "_now", lambda: clock[0])
+        monkeypatch.setattr(reporter._lines, "_now", lambda: clock[0])
+
+        # The outage spends the hour's cap of lines and holds the rest back,
+        # which opens the console's suppressed window.
+        for index in range(25):
+            clock[0] = index
+            response = await client.get("/", headers={"Host": f"down{index}.example.com"})
+            assert response.status == 421
+        named = [line for line in lines if line.startswith("Refused")]
+        assert len(named) == supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR
+
+        # The window is already due when the first report carries it, and the
+        # backend that takes the report in logs its summary before dropping
+        # the connection without any response byte. The failure path names
+        # the report's hostname once the console has seen the drop, so the
+        # wait ends only after the exchange has failed here.
+        clock[0] = 3700
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", dropping_backend.server.port)
+        monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+        failed = [line for line in lines if line.startswith("Refused")]
+        for _ in range(2000):
+            if len([line for line in lines if line.startswith("Refused")]) > len(failed):
+                break
+            await asyncio.sleep(0.01)
+        assert not answer["dropped"]
+        assert len([line for line in lines if line.startswith("Refused")]) > len(failed)
+
+        # The backend becomes unreachable, and the outage outlasts the
+        # whole span the console may keep re-carrying its unresolved sent
+        # copy, twice the window's hour, with no acknowledgement of any
+        # kind in between.
+        await dropping_backend.close()
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", None)
+        clock[0] = 3700 + 2 * int(supervisor.host_policy.HOUR_SECONDS) + 60
+
+        # A refusal arrives past that span: the console drops its unresolved
+        # sent copy outright, emitting nothing here, because re-carrying it
+        # again would meet a backend that no longer remembers the window's
+        # ID and would log a second summary, so the pair loses the one
+        # summary the backend may never have taken rather than risk the
+        # second line.
+        response = await client.get("/", headers={"Host": "late.example.com"})
+        assert response.status == 421
+        console_summaries = [line for line in lines if line.startswith("Suppressed")]
+        assert console_summaries == []
+
+        # The backend recovers, and the reports that reach it carry no copy
+        # of the window: the console dropped the one it held, and its own
+        # recorder's window was carried out long ago, so no form names the
+        # window and the backend folds nothing in and logs nothing.
+        recovered_backend = TestClient(TestServer(backend))
+        await recovered_backend.start_server()
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", recovered_backend.server.port)
+        for _ in range(2000):
+            if delivered:
+                break
+            await asyncio.sleep(0.01)
+        assert delivered
+        for _ in range(6000):
+            if not reporter.pending_reports():
+                break
+            clock[0] += 0.06
+            await asyncio.sleep(0.01)
+        assert reporter.pending_reports() == []
+        for form in delivered:
+            assert "suppressed" not in form
+            assert "suppressed_id" not in form
+
+        # A later witness report carries no copy of the window either: the
+        # slot is empty, so the console has nothing left to re-carry.
         delivered.clear()
         clock[0] += 1
         response = await client.get("/", headers={"Host": "witness.example.com"})
