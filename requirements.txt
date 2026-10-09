@@ -3,7 +3,7 @@ setuptools>=84.0.0
 # Bazarr runtime dependencies
 aiohttp>=3.14.3
 alembic==1.20.0
-apprise==2.0.0
+apprise==2.0.1
 apscheduler==3.11.3
 babelfish==0.6.1
 beautifulsoup4==4.15.0
@@ -45,13 +45,13 @@ itsdangerous==2.2.0
 json_tricks==3.17.3
 knowit==0.7.0
 lxml>=6.1.3  # XXE fix in iterparse / ETCompatXMLParser
-msgpack==1.2.2  # GHSA-6v7p-g79w-8964 fix. signalrcore 1.0.2 over-pins msgpack==1.1.2 in its metadata, so it is installed with --no-deps (see Dockerfile, .github/workflows/ci.yml, bazarr/app/requirements.py). Bazarr forces the JSON SignalR protocol, so msgpack's MessagePack path is never used, and 1.2.1 is runtime-compatible with signalrcore 1.0.2 (verified).
+msgpack==1.2.3  # GHSA-6v7p-g79w-8964 fix. signalrcore 1.0.2 over-pins msgpack==1.1.2 in its metadata, so it is installed with --no-deps (see Dockerfile, .github/workflows/ci.yml, bazarr/app/requirements.py). Bazarr forces the JSON SignalR protocol, so msgpack's MessagePack path is never used, and 1.2.1 is runtime-compatible with signalrcore 1.0.2 (verified).
 numpy>=2.5.3,<2.6.0  # cap excludes entire 2.4.x line: it raised the x86-64 baseline to v2, crashing pre-2009 CPUs (SIGILL on import). 2.4.0 itself is also yanked for an unrelated BC bug.
 Pillow>=12.3.0 --only-binary=Pillow
 plexapi>=4.18.3
 py7zr==1.1.3  # GHSA-q6rc-2cgv-63h7 arbitrary-file-write fix (latest)
 pycountry==26.2.16
-PyJWT>=2.15.0  # CVE-2026-32597 fix for unknown crit headers
+PyJWT>=2.15.1  # CVE-2026-32597 fix for unknown crit headers
 pysrt==1.1.2
 pysubs2==1.9.0
 python-dateutil==2.9.0.post0
@@ -76,8 +76,8 @@ tzlocal==5.4.4
 unidecode==1.4.0
 urllib3==2.8.0
 waitress==3.0.2
-webrtcvad-wheels>=2.0.14  # binary wheels for cp36..cp313; upstream webrtcvad is source-only and unmaintained since 2017
-werkzeug==3.1.8
+webrtcvad-wheels>=2.0.14.post1  # binary wheels for cp36..cp313; upstream webrtcvad is source-only and unmaintained since 2017
+werkzeug==3.1.9
 whichcraft==0.6.1
 
 # Provider captcha support

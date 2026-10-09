@@ -97,7 +97,7 @@ RUNTIME_REQUIREMENTS = {
     "setuptools": ("setuptools", ">=84.0.0"),
     "aiohttp": ("aiohttp", ">=3.14.3"),
     "alembic": ("alembic", "==1.20.0"),
-    "apprise": ("apprise", "==2.0.0"),
+    "apprise": ("apprise", "==2.0.1"),
     "apscheduler": ("apscheduler", "==3.11.3"),
     "babelfish": ("babelfish", "==0.6.1"),
     "bs4": ("beautifulsoup4", "==4.15.0"),
@@ -133,11 +133,11 @@ RUNTIME_REQUIREMENTS = {
     "guess_language": ("guess_language-spirit", "==0.5.4"),
     "guessit": ("guessit", "==4.4.0"),
     "itsdangerous": ("itsdangerous", "==2.2.0"),
-    "jwt": ("PyJWT", ">=2.15.0"),
+    "jwt": ("PyJWT", ">=2.15.1"),
     "json_tricks": ("json_tricks", "==3.17.3"),
     "knowit": ("knowit", "==0.7.0"),
     "lxml": ("lxml", ">=6.1.3"),
-    "msgpack": ("msgpack", "==1.2.2"),  # signalrcore over-pins ==1.1.2; we install signalrcore --no-deps
+    "msgpack": ("msgpack", "==1.2.3"),  # signalrcore over-pins ==1.1.2; we install signalrcore --no-deps
     "numpy": ("numpy", ">=2.5.3,<2.6.0"),
     "PIL": ("Pillow", ">=12.3.0"),
     "plexapi": ("plexapi", ">=4.18.3"),
@@ -162,8 +162,8 @@ RUNTIME_REQUIREMENTS = {
     "unidecode": ("unidecode", "==1.4.0"),
     "urllib3": ("urllib3", "==2.8.0"),
     "waitress": ("waitress", "==3.0.2"),
-    "webrtcvad": ("webrtcvad-wheels", ">=2.0.14"),
-    "werkzeug": ("werkzeug", "==3.1.8"),
+    "webrtcvad": ("webrtcvad-wheels", ">=2.0.14.post1"),
+    "werkzeug": ("werkzeug", "==3.1.9"),
     "whichcraft": ("whichcraft", "==0.6.1"),
     "yaml": ("PyYAML", ">=6.0.3"),
 }
