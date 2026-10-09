@@ -297,9 +297,10 @@ class BoundedRefusalRecorder:
     lose accounting to a delivery that did not land.
 
     Two more pieces travel the same road. The summaries this layer logs name
-    their windows on the completed list, and the acknowledgements carry that
-    list, so the layer that holds a copy of a window whose summary has been
-    paid discards it. And every report carries the newest bounded refused
+    their windows on the completed list, every ID the paid window counts and
+    not its own minted one alone, and the acknowledgements carry that list,
+    so the layer that holds a copy of a window whose summary has been paid
+    discards it. And every report carries the newest bounded refused
     set with the refusals' own stamps, which ``merge_recent`` folds into the
     record by taking the newer stamp per host: the record holds the most
     recently refused names whichever layer saw them, whichever of them the
@@ -315,6 +316,7 @@ class BoundedRefusalRecorder:
         self._suppressed = 0
         self._window_opens = None  # when the current suppressed count started
         self._window_id = None  # the current window's ID, minted at its first line
+        self._window_ids = []  # every ID the current window counts, its own and each folded-in one
         self._counted_windows = OrderedDict()  # window ID -> when it was counted here
         self._completed_windows = OrderedDict()  # window ID -> when it was paid here
         self._first_failures = OrderedDict()  # host -> when its first failed notice counted
@@ -326,10 +328,13 @@ class BoundedRefusalRecorder:
         and never regenerated: every later handoff of the window, in a
         report, an acknowledgement or the console's fold back, carries the
         same one, so whichever layer receives the window can tell whether
-        it has already counted it.
+        it has already counted it. The minted ID also opens the window's
+        list of the IDs it counts, the ones the summary that pays the
+        window completes on the list the acknowledgement carries.
         """
         if not self._suppressed:
             self._window_id = _mint_window_id()
+            self._window_ids = [self._window_id]
             self._counted_windows[self._window_id] = now
         self._suppressed += 1
 
@@ -484,12 +489,14 @@ class BoundedRefusalRecorder:
         window. The answer is that count with the window's two ends and its
         stable ID, and taking it clears the window. Taking it does not
         forget the ID: the window has been counted here, so a copy of it
-        that arrives again, from the other layer, folds nowhere. The ID
-        joins the completed list as well, held for the whole span the other
-        layer may keep re-carrying the copy it took out, because the layer
-        that took the window out to carry it needs to be told its summary
-        has been paid, so it drops the copy it holds instead of carrying a
-        window that is owed nothing anymore.
+        that arrives again, from the other layer, folds nowhere. Every ID
+        the window counts joins the completed list as well, its own minted
+        one and each one folded in from another layer's window, held for
+        the whole span the other layer may keep re-carrying the copies it
+        took out, because whichever layer holds a copy of any of those
+        windows needs to be told its summary has been paid, so it drops
+        the copy it holds instead of carrying a window that is owed
+        nothing anymore.
         """
         now = self._now()
         with self._lock:
@@ -503,11 +510,13 @@ class BoundedRefusalRecorder:
             suppressed = self._suppressed
             opened = self._window_opens
             window_id = self._window_id
+            window_ids = self._window_ids
             self._suppressed = 0
             self._window_opens = None
             self._window_id = None
-            if window_id is not None:
-                self._completed_windows[window_id] = now
+            self._window_ids = []
+            for paid_id in window_ids:
+                self._completed_windows[paid_id] = now
             return suppressed, opened, now, window_id
 
     def hour_suppressed_window(self):
@@ -560,7 +569,10 @@ class BoundedRefusalRecorder:
         nothing. The window's ID is taken out with it as well: for as long
         as the window is in flight this layer has not counted it, so the
         fold back below lands and is not refused as a window this layer has
-        already counted.
+        already counted. The IDs folded into the window from elsewhere stay
+        counted here: only the window's own travelling ID leaves with the
+        take, and a re-carry of a folded-in ID still folds nowhere while
+        this layer remembers it.
         """
         now = self._now()
         with self._lock:
@@ -572,6 +584,7 @@ class BoundedRefusalRecorder:
             self._suppressed = 0
             self._window_opens = None
             self._window_id = None
+            self._window_ids = []
             if window_id is not None:
                 self._counted_windows.pop(window_id, None)
             return count, opened, window_id
@@ -595,6 +608,15 @@ class BoundedRefusalRecorder:
         both sides share, so the set of them stays bounded and a copy the
         other layer can still re-carry always meets a layer that still
         remembers counting it.
+
+        The folded-in ID joins the window's list of the IDs it counts as
+        well, so the summary that pays the combined window completes it
+        too and the acknowledgement names it: the layer holding a copy of
+        the folded window drops it on the answer, instead of carrying it
+        to a backend that no longer remembers counting it. The wire keeps
+        the one shape it always had, with the window's own travelling ID
+        alone on the report and the hour copy; only the completed list
+        grows to cover the aggregate.
         """
         if not count or opened is None:
             return
@@ -604,6 +626,8 @@ class BoundedRefusalRecorder:
             if window_id is not None:
                 self._counted_windows[window_id] = self._now()
             self._suppressed += count
+            if window_id is not None and window_id not in self._window_ids:
+                self._window_ids.append(window_id)
             if self._window_opens is None or opened < self._window_opens:
                 self._window_opens = opened
                 self._window_id = window_id

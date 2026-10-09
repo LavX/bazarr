@@ -986,10 +986,48 @@ class _RefusalReporter:
         unsent, and the delivery attempt marks it once its request reaches
         the backend at the transport level, which ``take_summary`` below
         reads when it decides what this console may still emit.
+
+        A copy waiting in the slot ages with it: a sent copy no answer
+        resolved is dropped once the carry has run past the span the
+        backend remembers the window's ID, before any report carries it,
+        on the same bounded lose-not-double trade the local emission
+        below makes, because a backend that no longer remembers the ID
+        would fold the copy in as a window it has never seen and log a
+        second line for lines a first summary may already have paid. An
+        unsent copy is never dropped by age: no request byte of it ever
+        left for any backend, nothing could have counted it, and the
+        sustained-outage emission below may still read it. The age runs
+        from the take alone and never from a restore, because a restore
+        keeps the same carry going rather than starting one, so the span
+        this hold covers cannot outlast the backend's memory of the ID:
+        a copy this console can still re-carry always meets a backend
+        that still remembers it. After a stale slot is dropped the take
+        proceeds to the recorder's fresh window exactly as normal, and
+        the recorder may owe nothing.
         """
+        now = self._now()
         if self._carried is not None:
-            carried, self._carried = self._carried, None
-            return carried
+            if (self._carried_sent
+                    and now - self._carried_at >= host_policy.CARRY_RETENTION_SECONDS):
+                # Sent, never resolved, and held past the whole span the
+                # backend remembers the window's ID: a report carrying the
+                # copy again would hand it to a backend that has pruned the
+                # ID and would fold it in as a window it has never seen,
+                # logging a second line for lines a first summary may
+                # already have paid, so the slot drops the copy before any
+                # report can carry it, on the one retention span both
+                # sides share. The age runs from the take and not from a
+                # restore, because a restore keeps the same carry going,
+                # so this hold ends within the same span the backend's
+                # memory of the ID does and a copy this console can still
+                # re-carry always meets a backend that still remembers it.
+                # The pair keeps the one summary the backend logged, or
+                # loses the one the backend never took, rather than risk
+                # the second line.
+                self._carried = None
+            else:
+                carried, self._carried = self._carried, None
+                return carried
         carried = self._lines.take_carried_summary()
         if carried is not None:
             self._carried_at = self._now()
