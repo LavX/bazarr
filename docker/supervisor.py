@@ -84,13 +84,16 @@ PORT_FILE = Path("/tmp/bazarr-supervisor.port")
 TOKEN_HEADER = "X-Bazarr-Supervisor-Token"
 
 # The backend's acknowledgement of a refused-host report carries its own
-# accounting on these headers: the times of the lines its hour has spent, and
-# the suppressed window it holds with its stable ID. The backend defines the
+# accounting on these headers: the times of the lines its hour has spent,
+# the suppressed window it holds with its stable ID, and the IDs of the
+# windows it has logged and cleared, so this console can drop every copy it
+# holds of a window whose summary has been paid. The backend defines the
 # same names on its side, because the two processes share no imports.
 ACCOUNTING_HOUR_LINES_HEADER = "X-Bazarr-Hour-Lines"
 ACCOUNTING_SUPPRESSED_HEADER = "X-Bazarr-Suppressed"
 ACCOUNTING_SUPPRESSED_SINCE_HEADER = "X-Bazarr-Suppressed-Since"
 ACCOUNTING_SUPPRESSED_ID_HEADER = "X-Bazarr-Suppressed-Id"
+ACCOUNTING_COMPLETED_WINDOWS_HEADER = "X-Bazarr-Completed-Windows"
 
 # Paths that get proxied to the backend
 PROXY_PREFIXES = ("/api/", "/images/", "/test/", "/system/backup/download/", "/bazarr.log")
@@ -696,9 +699,13 @@ replaced after each use and by every restart: use the most recent line.</p>
 
 def _host_refusal_response(request: web.Request, host: str, base: str,
                            also: str | None = None) -> web.Response:
-    api_prefix = f"{base}/api"
     path = request.path
-    if path == api_prefix or path.startswith(api_prefix + "/"):
+    # The API answers JSON under the base and at the root, which a
+    # prefix-stripping proxy leaves it at: the same root path the approval
+    # form is served at, so a refused root API request gets the API's own
+    # refusal and not the page, exactly as under the prefix.
+    api_prefixes = [f"{base}/api", "/api"]
+    if any(path == prefix or path.startswith(prefix + "/") for prefix in api_prefixes):
         body = {
             "code": host_policy.REFUSED_REASON,
             "host": host,
@@ -787,6 +794,26 @@ class _RefusalReporter:
     instead, under its ID, so the backend that still holds it folds it
     nowhere and a backend that lost it to a restart folds it in and owes
     its summary again.
+
+    A window a report has carried is never folded back into this console's
+    recorder either, which is what keeps a lost answer to a report the
+    backend processed from leaving the pair with two summaries of one
+    window: a delivery no backend acknowledged, and an acknowledgement that
+    left its window unresolved, hold it in an in-flight slot that the next
+    report carries again, and this console emits it only in the
+    sustained-outage case, when no acknowledgement of any kind has arrived
+    since the carry began and the window's hour has fully run past with it.
+    The acknowledgement also names the windows the backend has logged and
+    cleared, and this console discards the carried and mirrored copies it
+    holds of them, so a window whose summary has been paid is carried
+    nowhere anymore.
+
+    Every report also carries the newest bounded refused names with this
+    console's own recency stamps, and the backend's record takes the newer
+    stamp per host: a hostname this console already told within the hour is
+    skipped by its reports, and the reporting bound holds the newest names
+    of a burst back, so without the set the record would hold older names
+    while the newest refusals waited out the hour.
     """
 
     def __init__(self, notice_path: str, now=time.time):
@@ -796,9 +823,13 @@ class _RefusalReporter:
         self._last_report = OrderedDict()  # host -> time of its last acknowledged report
         self._pending = OrderedDict()  # host -> time of its last attempt (None until tried)
         self._accounted = OrderedDict()  # host -> time this console last spent its line
+        self._recent = OrderedDict()  # host -> time this console last refused it
         self._report_times = []  # times of this hour's acknowledged report deliveries
         self._last_failure = None  # when the last delivery failed, until an ack or readiness
         self._mirrored = None  # the window the last acknowledgement carried back
+        self._carried = None  # the window a report has carried, held in flight here
+        self._carried_at = None  # when the carry began
+        self._last_ack = None  # when the last acknowledgement of any kind arrived
         self._wake = asyncio.Event()  # refusals and readiness wake the worker
         self._drain_task: "asyncio.Task | None" = None
 
@@ -844,7 +875,34 @@ class _RefusalReporter:
         """
         return self._lines.hour_line_times()
 
-    def merge_acknowledged(self, hour_lines, held):
+    def recent_refusals(self):
+        """The newest bounded refused names with their stamps, oldest first.
+
+        Every report carries them, so the backend's record takes the newer
+        stamp per host without a report of each name's own: the newest
+        refusals reach it whichever layer saw them.
+        """
+        return list(self._recent.items())
+
+    def _note_recent(self, host, now):
+        """Refresh the newest-refused set, which every refusal refreshes.
+
+        A hostname this console already told within the hour is skipped by
+        its reports, and the reporting bound holds the newest names of a
+        burst back, so the set stands in for the record the backend keeps:
+        it is bounded and rolled past its day the same way, and the next
+        report carries it with this console's own recency stamps.
+        """
+        self._recent = OrderedDict(
+            (name, stamp) for name, stamp in self._recent.items()
+            if now - stamp < host_policy.DAY_SECONDS)
+        if host in self._recent:
+            self._recent.move_to_end(host)
+        self._recent[host] = now
+        while len(self._recent) > host_policy.REFUSED_HOSTS_LIMIT:
+            self._recent.popitem(last=False)
+
+    def merge_acknowledged(self, carried, hour_lines, held, completed):
         """Fold the accounting the backend's acknowledgement carried back.
 
         The line times join this console's hour budget exactly as its own
@@ -854,10 +912,31 @@ class _RefusalReporter:
         a window when its hour runs is the one that reports it, so a
         window held in two recorders would be reported twice, and this
         copy is never reported here at all. The acknowledgement replaces
-        whatever the last one carried, so a repeated one cannot double it.
+        whatever the last one carried, so a repeated one cannot double it,
+        and a held window the same answer reports completed is dropped
+        instead, because the two cannot both be true of one window and
+        the completed list is the one that says the summary has been paid.
+
+        The acknowledgement also resolves the window this report carried:
+        its ID named among the windows the backend has logged and cleared
+        means the one summary the window owes has been paid, and this
+        console discards its copy; one the backend still holds comes back
+        to the in-flight slot, re-carried on every later report until an
+        answer names it completed, so the pair stays owed the one summary
+        whichever layer holds the window. The answer is an acknowledgement
+        of some kind as well, so from here on the sustained-outage emission
+        of a carried window is barred.
         """
         self._lines.merge_hour_lines(hour_lines)
+        if held is not None and held[2] is not None and held[2] in completed:
+            held = None
         self._mirrored = held
+        self._last_ack = self._now()
+        if carried is None:
+            return
+        if carried[2] is not None and carried[2] in completed:
+            return
+        self._carried = carried
 
     def mirrored_summary(self):
         """The window the last acknowledgement carried back, for the report
@@ -881,23 +960,61 @@ class _RefusalReporter:
         return held
 
     def take_carried_summary(self):
-        """Take this console's suppressed window, for the report to carry.
+        """Take the window the next report carries, the in-flight slot first.
 
-        The first report a backend acknowledges carries the window along, so
-        the backend folds it into its own and the two layers together owe
-        the one summary the window counts. A window taken for a delivery
-        the backend did not acknowledge is folded back in, so a recovery
-        that fails loses nothing.
+        The first report a backend acknowledges carries this console's
+        suppressed window along, so the backend folds it into its own and
+        the two layers together owe the one summary the window counts. A
+        window a report has carried before waits in the slot when the
+        delivery came back unresolved, and is carried before anything the
+        recorder still holds, because a window any report has carried is
+        owed its summary by the backend and is never folded back into this
+        console's own recorder: a lost answer to a report the backend
+        processed must not leave the pair with two summaries of one window.
         """
-        return self._lines.take_carried_summary()
-
-    def merge_carried_summary(self, carried):
-        """Fold a carried window back in, after a delivery no backend took."""
+        if self._carried is not None:
+            carried, self._carried = self._carried, None
+            return carried
+        carried = self._lines.take_carried_summary()
         if carried is not None:
-            self._lines.merge_summary(*carried)
+            self._carried_at = self._now()
+        return carried
+
+    def restore_carried_summary(self, carried):
+        """Hold a carried window back in the slot, after a delivery no
+        backend acknowledged.
+
+        The copy waits in flight, never in this console's recorder, and the
+        next report carries it again. This console emits it only in the
+        sustained-outage case, which ``take_summary`` below decides, so a
+        refusal between a lost answer and the retry that lands emits
+        nothing here.
+        """
+        if carried is not None:
+            self._carried = carried
 
     def take_summary(self):
-        """The suppressed window of this console's refusal lines, if due."""
+        """The suppressed window this console may report, if due.
+
+        Its own recorder answers as before: a window no report has carried
+        is this console's to report once its hour has run, exactly as the
+        outage always worked. A window a report has carried waits in the
+        slot instead, and this console emits it only in the
+        sustained-outage case: no acknowledgement of any kind has arrived
+        since the carry began, so a full hour of reports reached no answer,
+        and the window's hour has fully run past with it, because it opened
+        before the carry began. Any acknowledgement since the carry began
+        bars the emission, because the backend has taken the window in and
+        holds it or has paid it, and the mirrored copy or the completed IDs
+        carry its accounting, so the copy is dropped once its hour has run
+        instead.
+        """
+        now = self._now()
+        carried = self._carried
+        if carried is not None and now - self._carried_at >= host_policy.HOUR_SECONDS:
+            self._carried = None
+            if self._last_ack is None or self._last_ack < self._carried_at:
+                return carried[0], carried[1], now, carried[2]
         return self._lines.take_summary()
 
     def report_due(self, host):
@@ -913,9 +1030,15 @@ class _RefusalReporter:
         backend's record keeps, so a longer roll of hostnames cannot grow a
         longer queue: the ones the eviction drops are the oldest waiting,
         the ones the backend's record has dropped too.
+
+        Every refusal refreshes the newest-refused set first, whatever the
+        queue decides, because the skipped and the waiting names are still
+        the newest news about the refusals this console saw, and the
+        reports carry the set to the backend's record.
         """
         now = self._now()
         self._prune_reports(now)
+        self._note_recent(host, now)
         if host in self._last_report:
             return False
         if host in self._pending:
@@ -1090,7 +1213,15 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
     backend's own hour back: this console folds the spent line times in and
     keeps the window beside its own, so the two layers stay on the one
     allowance whichever of them spent it, and a window owed a summary is
-    held by the one layer that will report it.
+    held by the one layer that will report it. Every report carries the
+    newest bounded refused names with this console's recency stamps as
+    well, so the backend's record reflects the newest refusals without a
+    report of each name's own, and the acknowledgement names the windows
+    the backend has logged and cleared, so this console discards the
+    copies it holds of a window whose summary has been paid. A carried
+    window the answer did not resolve waits in flight for the next report
+    and never folds back into this console's recorder, so one window is
+    owed one summary by the pair, whichever layer holds it.
     """
     data = {"host": host}
     logged = reporter.line_time(host)
@@ -1111,6 +1242,10 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
         data["mirrored_since"] = str(mirrored[1])
         if mirrored[2] is not None:
             data["mirrored_id"] = mirrored[2]
+    recent = reporter.recent_refusals()
+    if recent:
+        data["recent"] = ",".join(name for name, _stamp in recent)
+        data["recent_at"] = ",".join(str(stamp) for _name, stamp in recent)
     delivered = False
     try:
         async with session.post(f"http://{BACKEND_HOST}:{port}{reporter.notice_path}",
@@ -1121,26 +1256,29 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
             if response.status == 204 and response.headers.get(TOKEN_HEADER) == token:
                 delivered = True
                 reporter.report_sent(host)
-                reporter.merge_acknowledged(*_acknowledged_accounting(response))
+                reporter.merge_acknowledged(carried, *_acknowledged_accounting(response))
                 return
     except Exception:
         pass
     finally:
         # A delivery the backend did not acknowledge, whatever ended it,
-        # leaves the carried window here: the next report carries it again.
+        # leaves the carried window in flight here: the next report
+        # carries it again, and the console never folds it back into its
+        # own recorder, where a later refusal could emit a second summary.
         if not delivered and carried is not None:
-            reporter.merge_carried_summary(carried)
+            reporter.restore_carried_summary(carried)
     reporter.report_failed(host)
 
 
 def _acknowledged_accounting(response):
     """The accounting a backend's acknowledgement carries back, if any.
 
-    The headers hold the times of the lines the backend's hour has spent
-    and the suppressed window it holds, and an answer that carries none of
-    them folds nothing. Every value is parsed the defensive way the
-    backend's own notice route parses what arrives, because the two
-    processes only ever share words on the wire.
+    The headers hold the times of the lines the backend's hour has spent,
+    the suppressed window it holds, and the IDs of the windows it has
+    logged and cleared, and an answer that carries none of them folds
+    nothing. Every value is parsed the defensive way the backend's own
+    notice route parses what arrives, because the two processes only ever
+    share words on the wire.
     """
     times = []
     for stamp in response.headers.get(ACCOUNTING_HOUR_LINES_HEADER, "").split(","):
@@ -1160,7 +1298,10 @@ def _acknowledged_accounting(response):
         opened = None
     window_id = response.headers.get(ACCOUNTING_SUPPRESSED_ID_HEADER) or None
     held = (suppressed, opened, window_id) if suppressed and opened is not None else None
-    return times, held
+    completed = [window_id for window_id in
+                 response.headers.get(ACCOUNTING_COMPLETED_WINDOWS_HEADER, "").split(",")
+                 if window_id]
+    return times, held, completed
 
 
 async def _drain_refusal_notices(reporter: _RefusalReporter) -> None:

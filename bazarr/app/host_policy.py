@@ -287,6 +287,15 @@ class BoundedRefusalRecorder:
     hands out a copy and not a take, and the console keeps its own through
     the take and fold back of a failed report, so neither direction can
     lose accounting to a delivery that did not land.
+
+    Two more pieces travel the same road. The summaries this layer logs name
+    their windows on the completed list, and the acknowledgements carry that
+    list, so the layer that holds a copy of a window whose summary has been
+    paid discards it. And every report carries the newest bounded refused
+    set with the refusals' own stamps, which ``merge_recent`` folds into the
+    record by taking the newer stamp per host: the record holds the most
+    recently refused names whichever layer saw them, whichever of them the
+    reports reached first.
     """
 
     def __init__(self, now=time.time):
@@ -299,6 +308,7 @@ class BoundedRefusalRecorder:
         self._window_opens = None  # when the current suppressed count started
         self._window_id = None  # the current window's ID, minted at its first line
         self._counted_windows = OrderedDict()  # window ID -> when it was counted here
+        self._completed_windows = OrderedDict()  # window ID -> when it was paid here
         self._first_failures = OrderedDict()  # host -> when its first failed notice counted
 
     def _count_suppressed(self, now):
@@ -374,6 +384,33 @@ class BoundedRefusalRecorder:
                 if now - stamp < HOUR_SECONDS and stamp not in self._line_times:
                     self._line_times.append(stamp)
 
+    def merge_recent(self, pairs):
+        """Fold the newest refused names another layer carried into the record.
+
+        Every report carries the newest bounded refused set with the
+        refusals' own stamps, and the record takes the newer stamp per host,
+        so it holds the most recently refused names whichever layer saw them:
+        a hostname whose report is skipped or held back would otherwise age
+        out of the record while refusals of it stay the newest news about it.
+        A newer stamp moves the host to the end, the newest place, and the
+        bound drops the oldest exactly as ``note`` drops it. The log pace is
+        not consulted and not spent: these are names a refusal already named,
+        not lines to write.
+        """
+        now = self._now()
+        with self._lock:
+            for host, stamp in pairs:
+                if not host or now - stamp >= DAY_SECONDS:
+                    continue
+                known = self._hosts.get(host)
+                if known is not None and known >= stamp:
+                    continue
+                if known is not None:
+                    self._hosts.move_to_end(host)
+                self._hosts[host] = stamp
+                while len(self._hosts) > REFUSED_HOSTS_LIMIT:
+                    self._hosts.popitem(last=False)
+
     def note_retry(self, host):
         """Record a retry's line; True when a per-host line may be written now.
 
@@ -418,6 +455,9 @@ class BoundedRefusalRecorder:
         self._counted_windows = OrderedDict(
             (window_id, stamp) for window_id, stamp in self._counted_windows.items()
             if now - stamp < HOUR_SECONDS)
+        self._completed_windows = OrderedDict(
+            (window_id, stamp) for window_id, stamp in self._completed_windows.items()
+            if now - stamp < HOUR_SECONDS)
 
     def take_summary(self):
         """The suppressed window when a summary line is due, else ``None``.
@@ -427,7 +467,11 @@ class BoundedRefusalRecorder:
         window. The answer is that count with the window's two ends and its
         stable ID, and taking it clears the window. Taking it does not
         forget the ID: the window has been counted here, so a copy of it
-        that arrives again, from the other layer, folds nowhere.
+        that arrives again, from the other layer, folds nowhere. The ID
+        joins the completed list as well, on the hour horizon every other
+        roll here uses, because the layer that took the window out to carry
+        it needs to be told its summary has been paid, so it drops the copy
+        it holds instead of carrying a window that is owed nothing anymore.
         """
         now = self._now()
         with self._lock:
@@ -444,6 +488,8 @@ class BoundedRefusalRecorder:
             self._suppressed = 0
             self._window_opens = None
             self._window_id = None
+            if window_id is not None:
+                self._completed_windows[window_id] = now
             return suppressed, opened, now, window_id
 
     def hour_suppressed_window(self):
@@ -465,6 +511,21 @@ class BoundedRefusalRecorder:
             if self._window_opens is None:
                 self._window_opens = now
             return self._suppressed, self._window_opens, self._window_id
+
+    def completed_windows(self):
+        """The IDs of the windows this layer has logged and cleared.
+
+        An acknowledgement carries them so the other layer can drop every
+        copy it holds of a window whose summary has been paid: without them
+        it could not tell a window it must keep carrying from one that is
+        owed nothing anymore. The IDs are held on the hour horizon the line
+        times use, so the list stays bounded and the windows it names cannot
+        come back as live accounting once their hour has run.
+        """
+        now = self._now()
+        with self._lock:
+            self._prune(now)
+            return list(self._completed_windows)
 
     def take_carried_summary(self):
         """Take the suppressed window out, for the report that carries it.

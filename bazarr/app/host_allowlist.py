@@ -37,13 +37,15 @@ CODE_LOGGER_NAME = 'bazarr.host_approval'
 
 # The acknowledgement of a front listener's report carries this backend's own
 # accounting on these headers: the times of the refusal lines its hour has
-# spent, and the suppressed window it holds with its stable ID. The
-# supervisor defines the same names on its side, because the two processes
-# share no imports.
+# spent, the suppressed window it holds with its stable ID, and the IDs of
+# the windows it has logged and cleared, so the console can drop every copy
+# it holds of a window whose summary has been paid. The supervisor defines
+# the same names on its side, because the two processes share no imports.
 HOUR_LINES_HEADER = 'X-Bazarr-Hour-Lines'
 SUPPRESSED_HEADER = 'X-Bazarr-Suppressed'
 SUPPRESSED_SINCE_HEADER = 'X-Bazarr-Suppressed-Since'
 SUPPRESSED_ID_HEADER = 'X-Bazarr-Suppressed-Id'
+COMPLETED_WINDOWS_HEADER = 'X-Bazarr-Completed-Windows'
 
 # Where the shim in app.py keeps the Host header the request arrived with,
 # before the forwarded-header middleware replaces environ['HTTP_HOST'].
@@ -82,8 +84,15 @@ def _configured_hosts(config):
 
 
 def _is_api_path(path, config):
-    prefix = (getattr(getattr(config, 'general', None), 'base_url', '') or '').rstrip('/') + '/api'
-    return path == prefix or path.startswith(prefix + '/')
+    # The API answers JSON under the install's base_url and at the root,
+    # which a prefix-stripping proxy leaves it at: the same root path the
+    # approval form is served at, so a refused root API request gets the
+    # API's own refusal and not the page, exactly as under the prefix.
+    base = (getattr(getattr(config, 'general', None), 'base_url', '') or '').rstrip('/')
+    for prefix in (f'{base}/api', '/api'):
+        if path == prefix or path.startswith(prefix + '/'):
+            return True
+    return False
 
 
 def host_page(host, *, also=None, message=None, config=settings):
@@ -273,7 +282,7 @@ def verify_approval_code(supplied):
 
 def record_refusal(host, config=settings, line_at=None, hour_lines=None, suppressed=0,
                    suppressed_since=None, suppressed_id=None, mirrored=0, mirrored_since=None,
-                   mirrored_id=None):
+                   mirrored_id=None, recent=None):
     """Record a refused hostname and keep a code on the console.
 
     The backend's own refusals call this, and so does the report the front
@@ -297,6 +306,13 @@ def record_refusal(host, config=settings, line_at=None, hour_lines=None, suppres
     mirrored window is this backend's own, carried back to it so that a
     restart that lost it can be told it again, not a second window owed a
     second summary.
+
+    The report also carries the newest bounded set of refused names with the
+    times that console saw the refusals, and the record takes the newer stamp
+    per host: a hostname whose report the console skips, because it was told
+    within the hour, or holds back past the reporting bound would otherwise
+    age out of the record while refusals of it stay the newest news about it,
+    so the record keeps reflecting the most recently refused names.
     """
     shown = effective_host(host)
     if not shown or not check_active(config):
@@ -305,6 +321,14 @@ def record_refusal(host, config=settings, line_at=None, hour_lines=None, suppres
         _refusals.merge_hour_lines(hour_lines)
     _refusals.merge_summary(suppressed, suppressed_since, suppressed_id)
     _refusals.merge_summary(mirrored, mirrored_since, mirrored_id)
+    if recent:
+        named = []
+        for name, stamp in recent:
+            shown_name = effective_host(name)
+            if shown_name:
+                named.append((shown_name, stamp))
+        if named:
+            _refusals.merge_recent(named)
     if _refusals.note(shown, line_at):
         logging.warning('BAZARR refused a request for an unrecognized host: %s. Allow it under '
                         'Settings > General > Allowed Hosts, or set %s.', shown, ALLOWED_HOSTS_ENV)
@@ -321,13 +345,17 @@ def front_refusal_notice(config=settings):
     sender bounds it to at most one report per hostname per hour, so the work
     here is only the bookkeeping and the announcement. It also carries the
     time that console spent the hostname's refusal line, the times of the
-    refusal lines it spent within the hour, and the suppressed window it
-    holds under that window's stable ID, so the hour's line budget and its
-    one summary are the two processes' shared allowance.
+    refusal lines it spent within the hour, the suppressed window it holds
+    under that window's stable ID, and the newest bounded set of refused
+    names with the times it saw those refusals, so the hour's line budget,
+    its one summary and the record of the newest names are the two
+    processes' shared allowance.
 
     The answer carries this backend's own accounting back on the response
-    headers: the times of the lines its hour has spent and the suppressed
-    window it holds, again with the ID. The window goes as a copy and not a
+    headers: the times of the lines its hour has spent, the suppressed
+    window it holds, again with the ID, and the IDs of the windows it has
+    logged and cleared, so the console discards every copy it holds of a
+    window whose summary has been paid. The window goes as a copy and not a
     take, so an answer that is lost or mis-delivered leaves this backend
     holding what it held, and the console keeps the copy beside its own
     window rather than inside it, so the one summary a window owes is
@@ -373,10 +401,19 @@ def front_refusal_notice(config=settings):
     except ValueError:
         mirrored_opens = None
     mirrored_id = request.form.get('mirrored_id', '') or None
+    recent_names = [name for name in request.form.get('recent', '').split(',') if name]
+    recent_times = []
+    for stamp in request.form.get('recent_at', '').split(','):
+        try:
+            recent_times.append(float(stamp))
+        except ValueError:
+            recent_times.append(None)
+    recent = [(name, stamp) for name, stamp in zip(recent_names, recent_times)
+              if stamp is not None]
     record_refusal(request.form.get('host', ''), config=config, line_at=line_at,
                    hour_lines=spent, suppressed=held_back, suppressed_since=window_opens,
                    suppressed_id=window_id, mirrored=mirrored_back, mirrored_since=mirrored_opens,
-                   mirrored_id=mirrored_id)
+                   mirrored_id=mirrored_id, recent=recent)
     headers = {}
     times = _refusals.hour_line_times()
     if times:
@@ -387,6 +424,9 @@ def front_refusal_notice(config=settings):
         headers[SUPPRESSED_SINCE_HEADER] = str(held[1])
         if held[2] is not None:
             headers[SUPPRESSED_ID_HEADER] = held[2]
+    completed = _refusals.completed_windows()
+    if completed:
+        headers[COMPLETED_WINDOWS_HEADER] = ','.join(completed)
     return '', 204, headers
 
 
