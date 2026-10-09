@@ -85,7 +85,10 @@ def movies_download_subtitles(no, job_id=None, job_sub_function=False, arr_insta
 
     languages = []
 
-    jobs_queue.update_job_progress(job_id=job_id, progress_max=count_movie, progress_message=movie.title)
+    if job_sub_function:
+        jobs_queue.update_job_progress(job_id=job_id, progress_message=movie.title)
+    else:
+        jobs_queue.update_job_progress(job_id=job_id, progress_max=count_movie, progress_message=movie.title)
 
     providers_list = get_providers()
 
@@ -121,9 +124,13 @@ def movies_download_subtitles(no, job_id=None, job_sub_function=False, arr_insta
         logging.info("BAZARR All providers are throttled")
         outcome_msg = "All providers throttled"
 
-    jobs_queue.update_job_progress(job_id=job_id, progress_value="max",
-                                   progress_message=outcome_msg)
-    jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Downloaded missing subtitles for {movie.title} ({movie.year})")
+    if job_sub_function:
+        jobs_queue.update_job_progress(job_id=job_id, progress_message=outcome_msg)
+    else:
+        jobs_queue.update_job_progress(job_id=job_id, progress_value="max",
+                                       progress_message=outcome_msg)
+        jobs_queue.update_job_name(job_id=job_id,
+                                   new_job_name=f"Downloaded missing subtitles for {movie.title} ({movie.year})")
 
 
 def movie_download_specific_subtitles(radarr_id, language, hi, forced, job_id=None, arr_instance_id=None):

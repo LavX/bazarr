@@ -179,7 +179,8 @@ def refresh_league_profiles(league_ids, arr_instance_id, job_id=None, refresh_id
 
 
 def _event_query(arr_instance_id=None, enabled_only=True):
-    query = select(TableSportsEvents, TableSportsLeagues.profileId, TableArrInstances.path_mappings).join(
+    query = select(TableSportsEvents, TableSportsLeagues.profileId, TableArrInstances.path_mappings,
+                   TableSportsLeagues.tags.label('league_tags')).join(
         TableSportsLeagues, (TableSportsEvents.league_id == TableSportsLeagues.id) &
         (TableSportsEvents.arr_instance_id == TableSportsLeagues.arr_instance_id)).join(
         TableArrInstances, TableSportsEvents.arr_instance_id == TableArrInstances.id).where(
@@ -200,7 +201,7 @@ def parse_stored_list(raw):
 
 
 def _serialize_event(row):
-    event, profile, mappings = row
+    event, profile, mappings, league_tags = row
     result = event.to_dict()
     result.pop('ffprobe_cache')
     for name in ('created_at_timestamp', 'updated_at_timestamp'):
@@ -210,6 +211,7 @@ def _serialize_event(row):
         result[name] = parse_stored_list(result[name])
     result['monitored'] = result['monitored'] == 'True'
     result['partNumber'] = result['partNumber'] or None
+    result['tags'] = parse_stored_list(league_tags)
     return result | {'profileId': profile, 'hasFile': True,
                      'mapped_path': apply_sports_mapping(event.path, read_sports_mappings(mappings))}
 

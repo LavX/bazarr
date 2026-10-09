@@ -467,6 +467,69 @@ it("maps audio track names to code2 through the language catalogue", () => {
   expect(row.audio_language).toEqual(["hu", "en", "Klingon"]);
 });
 
+it("preserves Sportarr league tags on wanted event rows", () => {
+  const row = toSportsWantedRow(
+    {
+      ...event,
+      tags: ["Playoffs"],
+    } as SportsEvent,
+  );
+  expect(row.tags).toEqual(["Playoffs"]);
+});
+
+it("filters wanted sports events by their owning league tags", async () => {
+  owners();
+  const actor = userEvent.setup();
+  server.use(
+    http.get("/api/sports/wanted", () =>
+      HttpResponse.json({
+        data: [
+          { ...event, title: "Final", tags: ["Playoffs"] },
+          {
+            ...event,
+            id: 12,
+            title: "Friendly",
+            tags: ["Exhibition"],
+          },
+        ],
+        total: 2,
+      }),
+    ),
+  );
+  customRender(<WantedSportsView />);
+  await screen.findByRole("row", { name: /Friendly/ }, { timeout: 8000 });
+  await actor.click(
+    await screen.findByRole("button", { name: "Toggle filters" }),
+  );
+  const listbox = await openSelect(actor, "Filter by tags...");
+  await actor.click(
+    within(listbox).getByRole("option", { name: "Playoffs", hidden: true }),
+  );
+
+  expect(screen.getByRole("row", { name: /Final/ })).toBeInTheDocument();
+  expect(screen.queryByRole("row", { name: /Friendly/ })).toBeNull();
+  expect(screen.getByText("Tags: Playoffs")).toBeInTheDocument();
+});
+
+it("keeps the Wanted sports tag filter visible when there are no tags", async () => {
+  owners();
+  const actor = userEvent.setup();
+  server.use(
+    http.get("/api/sports/wanted", () =>
+      HttpResponse.json({ data: [event], total: 1 }),
+    ),
+  );
+  customRender(<WantedSportsView />);
+  await screen.findByRole("row", { name: /Final/ }, { timeout: 8000 });
+  await actor.click(
+    await screen.findByRole("button", { name: "Toggle filters" }),
+  );
+
+  expect(
+    screen.getByPlaceholderText("No tags available"),
+  ).toBeInTheDocument();
+});
+
 it("re-fetches wanted rows when the audio catalogue lands after them", async () => {
   // Cold cache: the wanted rows resolve before /system/languages/audio, so
   // toSportsWantedRow runs with an empty name map. The pagination key carries

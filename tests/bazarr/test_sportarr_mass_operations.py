@@ -404,6 +404,29 @@ def test_search_missing_runs_per_event_and_per_league():
         assert _search_sports({'type': 'sportsLeague', 'sportsLeagueId': 51,
                                'arr_instance_id': 42}, job_id=7) is True
         assert download.call_args.args == (51, 42)
+        assert download.call_args.kwargs == {'job_id': 7}
+
+
+def test_cancelled_sports_batch_stops_before_the_next_selected_event(sports_library, monkeypatch):
+    from app.jobs_queue import JobCancelled
+    from subtitles import mass_operations
+
+    searched = []
+
+    def search(item, job_id):
+        searched.append((item['sportsEventId'], job_id))
+        raise JobCancelled('batch stopped', job_id=job_id)
+
+    monkeypatch.setattr(mass_operations, '_search_sports', search)
+    items = [
+        {'type': 'sports', 'sportsEventId': 61, 'arr_instance_id': 42},
+        {'type': 'sports', 'sportsEventId': 62, 'arr_instance_id': 42},
+    ]
+
+    with pytest.raises(JobCancelled):
+        mass_operations._process_media_action(items, action='search-missing', job_id=7)
+
+    assert searched == [(61, 7)]
 
 
 def test_cancelled_event_search_stops_before_resolving_or_publishing(monkeypatch):

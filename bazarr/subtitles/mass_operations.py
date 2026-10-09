@@ -1282,7 +1282,11 @@ def _process_media_action(items, action, job_id):
                     if not radarr_id:
                         skipped += 1
                         continue
-                    movies_download_subtitles(radarr_id, arr_instance_id=item.get('arr_instance_id'))
+                    # Keep the selected movies inside this cancellable batch
+                    # job instead of enqueuing one independent job per movie.
+                    movies_download_subtitles(
+                        radarr_id, job_id=job_id, job_sub_function=True,
+                        arr_instance_id=item.get('arr_instance_id'))
                 elif item_type in ('sports', 'sportsLeague'):
                     searched = _search_sports(item, job_id)
                     if not searched:

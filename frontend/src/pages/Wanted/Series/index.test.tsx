@@ -153,4 +153,65 @@ describe("Wanted Series", () => {
 
     await screen.findByText(/No missing Series subtitles/i);
   });
+
+  it("filters wanted series by any selected Sonarr tag", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get("/api/episodes/wanted", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: 101,
+              series_id: 201,
+              sonarrSeriesId: 1,
+              sonarrEpisodeId: 101,
+              seriesTitle: "Breaking Bad",
+              episode_number: "S01E01",
+              episodeTitle: "Pilot",
+              tags: ["Drama"],
+              missing_subtitles: [],
+            },
+            {
+              id: 102,
+              series_id: 202,
+              sonarrSeriesId: 2,
+              sonarrEpisodeId: 102,
+              seriesTitle: "The Expanse",
+              episode_number: "S01E01",
+              episodeTitle: "Dulcinea",
+              tags: ["Science Fiction"],
+              missing_subtitles: [],
+            },
+          ],
+          total: 2,
+        }),
+      ),
+    );
+
+    customRender(<WantedSeriesView />);
+    await screen.findByRole("link", { name: "The Expanse" });
+    await user.click(screen.getByRole("button", { name: "Toggle filters" }));
+    await user.click(screen.getByPlaceholderText("Filter by tags..."));
+    await user.click(await screen.findByRole("option", { name: "Drama" }));
+
+    expect(
+      screen.getByRole("link", { name: "Breaking Bad" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "The Expanse" })).toBeNull();
+    expect(screen.getByText("Tags: Drama")).toBeInTheDocument();
+  });
+
+  it("keeps the Wanted tags filter visible when no tags are available", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get("/api/episodes/wanted", () =>
+        HttpResponse.json({ data: [], total: 0 }),
+      ),
+    );
+    customRender(<WantedSeriesView />);
+    await screen.findByText(/No missing Series subtitles/i);
+    await user.click(screen.getByRole("button", { name: "Toggle filters" }));
+
+    expect(screen.getByPlaceholderText("No tags available")).toBeInTheDocument();
+  });
 });

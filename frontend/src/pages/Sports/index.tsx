@@ -183,6 +183,7 @@ const Sports: FunctionComponent = () => {
   const [audioLanguages, setAudioLanguages] = useState<string[]>([]);
   const [excludeLanguages, setExcludeLanguages] = useState<string[]>([]);
   const [instanceFilter, setInstanceFilter] = useState<string[]>([]);
+  const [tagFilter, setTagFilter] = useState<string[]>([]);
   const [selections, setSelections] = useState<SportsLeagueRow[]>([]);
 
   const {
@@ -199,7 +200,8 @@ const Sports: FunctionComponent = () => {
     search.length > 0 ||
     audioLanguages.length > 0 ||
     excludeLanguages.length > 0 ||
-    instanceFilter.length > 0;
+    instanceFilter.length > 0 ||
+    tagFilter.length > 0;
   const query = useSportsLeaguesPagination(hasActiveFilter, nameToCode);
   // The same low-score marker Series and Movies show. Sports had no way to
   // consume /api/subtitles/upgradable because the endpoint sent no sports key,
@@ -588,6 +590,8 @@ const Sports: FunctionComponent = () => {
         instanceOptions={multiInstance ? instanceOptions : undefined}
         instanceValues={instanceFilter}
         onInstanceValuesChange={setInstanceFilter}
+        tagValues={tagFilter}
+        onTagValuesChange={setTagFilter}
         enableRowSelection
         onSelectionChanged={setSelections}
         selectionToolbar={selectionToolbar}
