@@ -1223,11 +1223,12 @@ describe("ProviderInstallStage", () => {
   it("leaves the enabled list alone when it cannot be read", async () => {
     const user = userEvent.setup();
     setCatalog([subtitlecatEntry]);
-    // The settings read never answers, not even when the gate asks again.
-    refetchSettings.mockResolvedValue({ data: undefined });
+    // The settings answer, but the enabled list is not in the answer. The gate
+    // has what it needs to run the batch, while the union still cannot write
+    // a list it never saw. A read that never answers never gets this far any
+    // more: the gate blocks the batch and asks for a retry instead.
     mockedSystemSettings.mockReturnValue({
-      data: undefined,
-      refetch: refetchSettings,
+      data: { general: {} },
     } as unknown as ReturnType<typeof useSystemSettings>);
 
     customRender(

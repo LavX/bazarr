@@ -172,4 +172,39 @@ describe("useGatedAction", () => {
 
     await waitFor(() => expect(onRun).toHaveBeenCalled());
   });
+
+  it("blocks the action with a retryable error when the refetch cannot answer", async () => {
+    const user = userEvent.setup();
+    const onRun = vi.fn();
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({}, { status: 500 }),
+      ),
+    );
+
+    customRender(<Probe onRun={onRun} />);
+
+    await user.click(screen.getByRole("button", { name: /go/i }));
+
+    expect(onRun).not.toHaveBeenCalled();
+    expect(
+      await screen.findByText(
+        "Bazarr+ could not read its settings, so it cannot tell whether a password is needed. Try again.",
+      ),
+    ).toBeInTheDocument();
+
+    // The error is retryable: closing it and invoking the gated action again
+    // repeats the read, and once the settings answer, the action runs.
+    await user.click(screen.getByRole("button", { name: /cancel/i }));
+    server.use(
+      http.get("/api/system/settings", () =>
+        HttpResponse.json({ general: { theme: "auto" } }),
+      ),
+    );
+    await user.click(screen.getByRole("button", { name: /go/i }));
+
+    // No password was ever typed, so the run can only have come from a
+    // read that finally answered: the retry needs no prompt.
+    await waitFor(() => expect(onRun).toHaveBeenCalledTimes(1));
+  });
 });

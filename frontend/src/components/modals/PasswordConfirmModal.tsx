@@ -19,15 +19,17 @@ export interface PasswordConfirmViewProps {
   action: string;
   /** Invoked once the server accepted the confirmation. */
   onConfirmed: () => void;
+  /** Shown in the error slot on open, when the settings read never answered. */
+  initialError?: string;
 }
 
 export const PasswordConfirmView: FunctionComponent<
   PasswordConfirmViewProps
-> = ({ action, onConfirmed }) => {
+> = ({ action, onConfirmed, initialError }) => {
   const { closeSelf } = useModals();
   const { data: settings } = useSystemSettings();
   const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | undefined>();
+  const [error, setError] = useState<string | undefined>(initialError);
   const [submitting, setSubmitting] = useState(false);
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
@@ -123,10 +125,29 @@ export function useGatedAction() {
         // settings-loading guard, so the catalog can be ready while the
         // settings are still loading, and a batch that ran here would submit
         // without the prompt and land on a 403. Waiting for the read settles
-        // that order, and refetch also retries one that failed; if it still
-        // has not answered, the server stays the gate and refuses the action
-        // itself.
+        // that order, and refetch also retries one that failed.
         const settled = await query.refetch();
+        if (settled.data === undefined) {
+          // A second unanswered read means the gate cannot decide, and the
+          // action stays blocked: running it anyway would let the wizard
+          // submit the install and meet its 403 with no prompt on the way.
+          // The modal carries the failure in its error slot instead, and
+          // invoking the gated action again repeats the read, so the error
+          // stays retryable until the auth mode is known.
+          await new Promise<void>((resolve) => {
+            modalManager.openContextModal(
+              PasswordConfirmModal,
+              {
+                action,
+                initialError:
+                  "Bazarr+ could not read its settings, so it cannot tell whether a password is needed. Try again.",
+                onConfirmed: () => resolve(),
+              },
+              { onClose: () => resolve() },
+            );
+          });
+          return false;
+        }
         authType = settled.data?.auth?.type;
       }
       if (authType !== "form" && authType !== "basic") {
