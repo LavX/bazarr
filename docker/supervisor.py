@@ -36,7 +36,8 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 
-from aiohttp import ClientSession, ClientTimeout, TraceConfig, WSMsgType, web
+from aiohttp import (ClientConnectorError, ClientSession, ClientTimeout,
+                     ConnectionTimeoutError, TraceConfig, WSMsgType, web)
 
 APP_DIR = Path(__file__).resolve().parent.parent
 import yaml  # noqa: E402
@@ -1263,11 +1264,13 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
     window the answer did not resolve waits in flight for the next report
     and never folds back into this console's recorder, so one window is
     owed one summary by the pair, whichever layer holds it. The restore
-    carries the delivery's transport outcome with the copy as well: a
-    window whose request reached the backend is held as sent and never
-    emitted here, and one no delivery ever connected for keeps the
-    sustained-outage emission, because only then could nothing have
-    summarized it.
+    carries the delivery's transport outcome with the copy as well, and the
+    marking watches the exchange rather than the answer's arrival: a window
+    whose report went out on a connection this delivery opened is held as
+    sent and never emitted here, because the backend may have logged its
+    summary before whatever failure ended the exchange, and one no delivery
+    ever connected for keeps the sustained-outage emission, because only
+    then could nothing have summarized it.
     """
     data = {"host": host}
     logged = reporter.line_time(host)
@@ -1311,8 +1314,21 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
                 reporter.report_sent(host)
                 reporter.merge_acknowledged(carried, *_acknowledged_accounting(response))
                 return
-    except Exception:
+    except (ClientConnectorError, ConnectionTimeoutError):
+        # No connection ever opened for this request, refused, unreachable,
+        # unresolvable or timed out at the connect, so no request byte of
+        # this report ever left for any backend: nothing could have
+        # summarized the carried window, and it keeps the sustained-outage
+        # emission.
         pass
+    except Exception:
+        # Any other failure of the exchange, the server closing the
+        # connection, a reset, a payload or timeout failure, leaves a
+        # connection that was open for this request, so the report counts
+        # as possibly delivered: the backend may have taken it in and
+        # logged the summary before the failure, and this console never
+        # emits a window its report may have reached the backend with.
+        reached = True
     finally:
         # A delivery the backend did not acknowledge, whatever ended it,
         # leaves the carried window in flight here: the next report carries
