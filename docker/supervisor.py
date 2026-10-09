@@ -757,10 +757,14 @@ class _RefusalReporter:
     hostname is named. A hostname this console spent a line on, or held
     back under its ceiling, carries the time of that with its report, so
     the backend writes no second line for it in the same hour, and every
-    report carries how many lines this console spent within the hour, so
-    a hostname refused for the first time once the backend answers draws
-    on the one merged budget: the hour's line budget is the one the two
-    processes share, even though they share no memory.
+    report carries the times of the lines this console spent within the
+    hour, so a hostname refused for the first time once the backend answers
+    draws on the one merged budget, which rolls over exactly when those
+    lines do. The first report a backend acknowledges also carries this
+    console's suppressed window, so the summary the window owes is paid
+    once by whichever layer holds it: the hour's line budget and its one
+    summary are the two processes' shared allowance, even though they
+    share no memory.
     """
 
     def __init__(self, notice_path: str, now=time.time):
@@ -806,16 +810,32 @@ class _RefusalReporter:
             return stamp
         return None
 
-    def hour_line_count(self):
-        """How many refusal lines this console has spent within the hour.
+    def hour_line_times(self):
+        """The times of the refusal lines this console has spent within the hour.
 
-        The report the backend eventually takes carries the count, so a
-        hostname refused for the first time once the backend answers draws
-        on the one merged hour budget rather than a fresh cap: the two
-        processes share the hour's line budget even though they share no
-        memory.
+        The report the backend eventually takes carries them, so a hostname
+        refused for the first time once the backend answers draws on the one
+        merged hour budget rather than a fresh cap, and the budget rolls
+        over exactly when these lines do: the two processes share the
+        hour's line budget even though they share no memory.
         """
-        return self._lines.hour_line_count()
+        return self._lines.hour_line_times()
+
+    def take_carried_summary(self):
+        """Take this console's suppressed window, for the report to carry.
+
+        The first report a backend acknowledges carries the window along, so
+        the backend folds it into its own and the two layers together owe
+        the one summary the window counts. A window taken for a delivery
+        the backend did not acknowledge is folded back in, so a recovery
+        that fails loses nothing.
+        """
+        return self._lines.take_carried_summary()
+
+    def merge_carried_summary(self, carried):
+        """Fold a carried window back in, after a delivery no backend took."""
+        if carried is not None:
+            self._lines.merge_summary(*carried)
 
     def take_summary(self):
         """The suppressed window of this console's refusal lines, if due."""
@@ -996,19 +1016,28 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
 
     The report also carries the time this console spent the hostname's line,
     while the backend could not be told and this console was the only place
-    a refusal was named, and how many refusal lines it spent within the
-    hour: the backend then writes no second line for the same hostname in
-    the same hour, and a hostname refused for the first time once it
-    answers draws on the one merged hour budget, so the two processes
-    share the hour's line budget even though they share no memory.
+    a refusal was named, and the times of the refusal lines it spent within
+    the hour: the backend then writes no second line for the same hostname
+    in the same hour, and a hostname refused for the first time once it
+    answers draws on the one merged hour budget, which rolls over exactly
+    at those lines' times. The first report a backend acknowledges carries
+    the suppressed window this console holds as well, so the summary the
+    window owes is paid once by whichever layer holds it: the two processes
+    share the hour's line budget and its one summary even though they share
+    no memory.
     """
     data = {"host": host}
     logged = reporter.line_time(host)
     if logged is not None:
         data["logged"] = str(logged)
-    hour_lines = reporter.hour_line_count()
+    hour_lines = reporter.hour_line_times()
     if hour_lines:
-        data["hour_lines"] = str(hour_lines)
+        data["hour_lines"] = ",".join(str(stamp) for stamp in hour_lines)
+    carried = reporter.take_carried_summary()
+    if carried is not None:
+        data["suppressed"] = str(carried[0])
+        data["suppressed_since"] = str(carried[1])
+    delivered = False
     try:
         async with session.post(f"http://{BACKEND_HOST}:{port}{reporter.notice_path}",
                                 headers={TOKEN_HEADER: token},
@@ -1016,10 +1045,16 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
                                 allow_redirects=False) as response:
             await response.read()
             if response.status == 204 and response.headers.get(TOKEN_HEADER) == token:
+                delivered = True
                 reporter.report_sent(host)
                 return
     except Exception:
         pass
+    finally:
+        # A delivery the backend did not acknowledge, whatever ended it,
+        # leaves the carried window here: the next report carries it again.
+        if not delivered and carried is not None:
+            reporter.merge_carried_summary(carried)
     reporter.report_failed(host)
 
 

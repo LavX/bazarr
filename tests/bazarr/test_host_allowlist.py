@@ -2398,11 +2398,11 @@ async def test_the_console_and_the_backend_share_the_refusal_log_budget(
 async def test_fresh_refusals_after_recovery_draw_on_the_merged_hour_budget(
         tmp_path, monkeypatch, fresh_state, root_log):
     """The outage spends this console's hour line cap, and the recovery is
-    told so: each report carries how many refusal lines the console spent
-    within the hour, the backend folds that many into its own hour, and a
-    hostname refused for the first time after the recovery draws on the one
-    merged budget rather than a fresh cap, so the lines of the two processes
-    together stay within the hour's cap."""
+    told so: each report carries the times of the refusal lines the console
+    spent within the hour, the backend folds the ones its hour still holds
+    into its own, and a hostname refused for the first time after the
+    recovery draws on the one merged budget rather than a fresh cap, so the
+    lines of the two processes together stay within the hour's cap."""
     monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
     monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
     lines = []
@@ -2422,7 +2422,7 @@ async def test_fresh_refusals_after_recovery_draw_on_the_merged_hour_budget(
             hour_lines = form.get("hour_lines")
             carried = {"line_at": float(logged)} if logged else {}
             if hour_lines:
-                carried["hour_lines"] = int(hour_lines)
+                carried["hour_lines"] = [float(stamp) for stamp in hour_lines.split(",")]
             fresh_state.record_refusal(form["host"], config=config, **carried)
             return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
                                                      "the-supervisor-token"})
@@ -2461,6 +2461,178 @@ async def test_fresh_refusals_after_recovery_draw_on_the_merged_hour_budget(
             supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR + 1)
     finally:
         await client.close()
+
+
+def test_a_repeated_recovery_rolls_the_merged_budget_at_the_lines_true_times(
+        real_factory, root_log, monkeypatch):
+    """The report carries the times of the lines the console spent, not a
+    count of them, so the backend's hour budget is the one the console's
+    lines actually cover: a later outage replaces the console's lines as its
+    hour rolls the old ones out, and the recovery within that rollover
+    carries the fresh times, so the fresh hostnames of both recoveries name
+    no line of their own while the console's lines hold, and the budget
+    reopens only once those lines really run out."""
+    from app import host_allowlist, host_policy
+    from app.config import settings
+
+    monkeypatch.setenv("BAZARR_SUPERVISOR_TOKEN", "supervisor-token")
+    clock = [0]
+    monkeypatch.setattr(host_allowlist, "_refusals",
+                        host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0]))
+    client = real_factory.test_client()
+    headers = {"Host": "127.0.0.1:6767", "X-Bazarr-Supervisor-Token": "supervisor-token"}
+
+    def report(host, logged=None, spent_lines=()):
+        data = {"host": host}
+        if logged is not None:
+            data["logged"] = repr(logged)
+        if spent_lines:
+            data["hour_lines"] = ",".join(repr(stamp) for stamp in spent_lines)
+        return client.post("/_supervisor/host_refusal", headers=headers, data=data)
+
+    cap = host_policy.REFUSAL_LOG_LINES_PER_HOUR
+
+    # The first outage spent the hour's cap of lines within its hour, and
+    # the first recovery lands inside that hour.
+    first_lines = [60.0 + 30.0 * index for index in range(cap)]
+    clock[0] = 1000
+    assert report("down0.example.com", logged=first_lines[0],
+                  spent_lines=first_lines).status_code == 204
+    assert report("post0.example.com").status_code == 204
+
+    # A later outage, past the first hour: the console's lines have rolled
+    # out of its hour, and it spent the cap again at fresh times, so the
+    # second recovery carries those and not the first hour's count.
+    second_lines = [4030.0 + 30.0 * index for index in range(cap)]
+    clock[0] = 4600
+    assert report("down20.example.com", logged=second_lines[0],
+                  spent_lines=second_lines).status_code == 204
+    assert report("post1.example.com").status_code == 204
+
+    # Both recoveries' fresh hostnames name no line: the budget the console
+    # spent each hour covers them, wherever they were refused.
+    refused = [message for message in root_log.messages if "refused a request" in message]
+    assert refused == []
+    issues = host_allowlist.health_issues(settings)
+    assert any("post0.example.com" in issue["issue"] for issue in issues)
+    assert any("post1.example.com" in issue["issue"] for issue in issues)
+
+    # Once the second hour's lines have really run out, the budget reopens
+    # and a fresh hostname names its line after all.
+    clock[0] = 8201
+    assert report("post2.example.com").status_code == 204
+    refused = [message for message in root_log.messages if "refused a request" in message]
+    assert len(refused) == 1
+    assert "post2.example.com" in refused[0]
+
+
+@pytest.mark.asyncio
+async def test_the_console_and_the_backend_share_the_one_summary_window(
+        tmp_path, monkeypatch, real_factory, root_log, caplog):
+    """An outage opens this console's suppressed window, and the first report
+    the recovered backend acknowledges carries it over: the lines the
+    backend holds back after the recovery join the same window, and the one
+    summary the window owes is logged by the backend alone, so a rolling hour
+    never carries a summary from each of the two layers for the one stream
+    of refusals."""
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
+    console_lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", console_lines.append)
+    caplog.set_level(logging.INFO)
+    from waitress.server import create_server
+
+    from app import host_allowlist
+    from app.app import waitress_server_options
+
+    monkeypatch.setenv("BAZARR_SUPERVISOR_TOKEN", "the-supervisor-token")
+    clock = [0]
+    monkeypatch.setattr(host_allowlist, "_refusals",
+                        host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0]))
+
+    # The backend answers the reports over a real socket, the way the
+    # supervisor sends them, with the real notice route.
+    with socket.socket() as reserve:
+        reserve.bind(("127.0.0.1", 0))
+        port = reserve.getsockname()[1]
+    server = create_server(real_factory, host="127.0.0.1", port=port,
+                           threads=4, **waitress_server_options())
+
+    def serve():
+        try:
+            server.run()
+        except OSError:
+            pass
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    try:
+        reporter = supervisor._active_reporter
+        monkeypatch.setattr(reporter, "_now", lambda: clock[0])
+        monkeypatch.setattr(reporter._lines, "_now", lambda: clock[0])
+
+        # Wait for the delivery worker to hand every report over, letting a
+        # little time pass on the shared clock as the round trips run.
+        async def settle():
+            for _ in range(6000):
+                if not reporter.pending_reports():
+                    return
+                clock[0] += 0.06
+                await asyncio.sleep(0.01)
+            raise AssertionError("the reports never drained")
+
+        # The outage: this console names the hour's cap of lines and holds
+        # the rest back, which opens its suppressed window.
+        for index in range(30):
+            clock[0] = index
+            response = await client.get("/", headers={"Host": f"down{index}.example.com"})
+            assert response.status == 421
+        named = [line for line in console_lines if line.startswith("Refused")]
+        assert len(named) == supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR
+
+        # The recovery: the reports arrive at the real notice route, and the
+        # first one the backend acknowledges carries the console's window.
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", port)
+        monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+        await settle()
+        clock[0] = 3000
+
+        # Fresh hostnames, refused while the backend answers: the merged
+        # budget is spent, so the backend holds their lines back into the
+        # window it now holds.
+        for index in range(5):
+            response = await client.get("/", headers={"Host": f"fresh{index}.example.com"})
+            assert response.status == 421
+        await settle()
+
+        # The window's hour runs: the console no longer holds one, so it
+        # prints no summary, and the backend logs the one the combined
+        # window owes.
+        clock[0] = 3700
+        response = await client.get("/", headers={"Host": "ripe.example.com"})
+        assert response.status == 421
+        await settle()
+
+        # Past the whole recovery, the next hour's refusals are named or
+        # held back within the budget the recovery left, and no second
+        # summary of the first stream arrives.
+        clock[0] = 7000
+        response = await client.get("/", headers={"Host": "late.example.com"})
+        assert response.status == 421
+        await settle()
+
+        console_summaries = [line for line in console_lines if line.startswith("Suppressed")]
+        backend_summaries = [message for message in root_log.messages
+                             if "host-refusal log lines" in message]
+        assert len(console_summaries) + len(backend_summaries) <= 1
+        assert console_summaries == []
+        assert len(backend_summaries) == 1
+        assert "suppressed 15 host-refusal log lines" in backend_summaries[0]
+    finally:
+        await client.close()
+        server.close()
+        thread.join(timeout=10)
 
 
 class _CountingWake:

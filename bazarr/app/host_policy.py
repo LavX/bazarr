@@ -247,15 +247,21 @@ class BoundedRefusalRecorder:
     the suppressed window when a summary line is due (and clears it).
 
     The two processes that apply this policy share no memory, so the hour's
-    line budget is shared through the front listener's report: ``note`` takes
-    ``line_at``, the time a console elsewhere already spent this hostname's
-    line within the hour, and records the refusal without writing or
-    suppressing a line for it, so the hostname is not named twice in the
-    same window. A hostname refused for the first time after the recovery
-    has no such time to carry, so the report also carries how many lines
-    that console spent within the hour, and ``merge_hour_lines`` folds that
-    many into this hour's cap: the refusals that follow the recovery draw
-    on the one merged budget rather than a fresh cap.
+    line budget and its one summary are shared through the front listener's
+    report: ``note`` takes ``line_at``, the time a console elsewhere already
+    spent this hostname's line within the hour, and records the refusal
+    without writing or suppressing a line for it, so the hostname is not
+    named twice in the same window. A hostname refused for the first time
+    after the recovery has no such time to carry, so the report also carries
+    the times of the lines that console spent within the hour, and
+    ``merge_hour_lines`` folds the ones this hour still holds into its cap:
+    the refusals that follow the recovery draw on the one merged budget
+    rather than a fresh cap, and it rolls over exactly when the console's
+    lines do. The suppressed window travels the same way: the first report a
+    backend acknowledges takes the console's window out with
+    ``take_carried_summary``, and ``merge_summary`` folds it into this
+    layer's, so the two layers together owe the one summary the combined
+    window counts.
     """
 
     def __init__(self, now=time.time):
@@ -266,8 +272,6 @@ class BoundedRefusalRecorder:
         self._line_times = []  # times of per-host refusal lines this hour
         self._suppressed = 0
         self._window_opens = None  # when the current suppressed count started
-        self._merged_lines = 0  # the hour count already folded in from a console
-        self._merged_at = None  # when that count was last folded in
 
     def note(self, host, line_at=None):
         """Record a refusal; True when a per-host line may be written now.
@@ -302,36 +306,31 @@ class BoundedRefusalRecorder:
             self._line_times.append(now)
             return True
 
-    def hour_line_count(self):
-        """How many refusal lines this hour has already spent here."""
+    def hour_line_times(self):
+        """The times of the refusal lines this hour has already spent here."""
         now = self._now()
         with self._lock:
             self._prune(now)
-            return len(self._line_times)
+            return list(self._line_times)
 
-    def merge_hour_lines(self, count):
-        """Fold a console elsewhere's spent lines into this hour's cap.
+    def merge_hour_lines(self, times):
+        """Fold a console elsewhere's spent line times into this hour's cap.
 
-        The reports a front listener sends once it can be told carry how
-        many refusal lines its console spent within the hour, and a report
-        goes out per hostname, so the same count arrives many times: the
-        count of a window is folded in once, and a report that repeats it
-        spends nothing again. Only the lines the hour still holds are
-        folded in, so the answer stays bounded by the same cap the count
-        came from.
+        The reports a front listener sends once it can be told carry the
+        times of the refusal lines its console spent within the hour, and a
+        report goes out per hostname, so the same times arrive many times:
+        a time already folded in is not folded in again, so a report that
+        repeats them spends nothing again. Only the lines the hour still
+        holds are folded in, so the answer stays bounded by the same cap the
+        times came from, and the merged budget rolls over exactly when the
+        console's lines do.
         """
         now = self._now()
-        if count <= 0:
-            return
         with self._lock:
             self._prune(now)
-            if self._merged_at is None or now - self._merged_at >= HOUR_SECONDS:
-                self._merged_lines = 0
-            spent = min(count, REFUSAL_LOG_LINES_PER_HOUR)
-            if spent > self._merged_lines:
-                self._line_times.extend([now] * (spent - self._merged_lines))
-                self._merged_lines = spent
-            self._merged_at = now
+            for stamp in times:
+                if now - stamp < HOUR_SECONDS and stamp not in self._line_times:
+                    self._line_times.append(stamp)
 
     def note_retry(self, host):
         """Record a retry's line; True when a per-host line may be written now.
@@ -380,6 +379,43 @@ class BoundedRefusalRecorder:
             self._suppressed = 0
             self._window_opens = None
             return suppressed, opened, now
+
+    def take_carried_summary(self):
+        """Take the suppressed window out, for the report that carries it.
+
+        The console that holds lines back while its backend cannot be told
+        keeps their count in a window of its own, and one summary line is
+        all a window owes wherever it is paid from: the first report a
+        backend acknowledges carries the window along, so the backend folds
+        it into its own and the two layers together owe the one summary, not
+        one each. A window taken for a delivery the backend did not
+        acknowledge is folded back in, so a recovery that fails loses
+        nothing.
+        """
+        now = self._now()
+        with self._lock:
+            if not self._suppressed:
+                return None
+            count = self._suppressed
+            opened = self._window_opens if self._window_opens is not None else now
+            self._suppressed = 0
+            self._window_opens = None
+            return count, opened
+
+    def merge_summary(self, count, opened):
+        """Fold a suppressed window another layer carried into this one.
+
+        The window that opened first keeps its place, so the lines one layer
+        held back before the recovery and the lines the other held back
+        after it are counted by the one summary the combined window owes,
+        once its hour has run.
+        """
+        if not count or opened is None:
+            return
+        with self._lock:
+            self._suppressed += count
+            if self._window_opens is None or opened < self._window_opens:
+                self._window_opens = opened
 
     def recent(self, within_seconds):
         """The refused hosts of the window, newest first."""
