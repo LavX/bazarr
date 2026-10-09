@@ -2996,6 +2996,157 @@ async def test_a_lost_acknowledgement_leaves_the_one_summary_with_the_backend(tm
 
 
 @pytest.mark.asyncio
+async def test_a_prolonged_outage_after_a_lost_answer_keeps_the_one_summary_with_the_backend(
+        tmp_path, monkeypatch, root_log, caplog):
+    """An already-due window travels with a report the backend processes and
+    summarizes before its answer is lost, and the backend then stays
+    unreachable past the window's hour. The console never emits the copy it
+    kept, because the report reached the backend at the transport level and
+    the backend may have logged the summary before its answer was lost, so
+    a refusal arriving in the prolonged outage writes no summary here. The
+    pair leaves the window to the acknowledgement protocol instead: the
+    retry that reaches the recovered backend carries the copy, the backend
+    folds a window it still counts nowhere, and the acknowledgement names
+    the window among the IDs it has completed, so the console discards its
+    copy: the pair has logged the one summary the window owes, from the
+    backend alone."""
+    from app import host_allowlist
+
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
+    monkeypatch.setenv("BAZARR_SUPERVISOR_TOKEN", "the-supervisor-token")
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    caplog.set_level(logging.INFO)
+
+    clock = [0]
+    recorder = host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0])
+    monkeypatch.setattr(host_allowlist, "_refusals", recorder)
+    config = _config()
+    answer = {"lost": True}
+    delivered = []
+    backend_app = Flask(__name__)
+
+    def deliver(form):
+        """The backend's own notice route, over the form the report carried."""
+        with backend_app.test_request_context(
+                "/_supervisor/host_refusal", method="POST",
+                headers={supervisor.TOKEN_HEADER: "the-supervisor-token"}, data=form):
+            return host_allowlist.front_refusal_notice(config=config)
+
+    async def notice(request):
+        form = dict(await request.post())
+        if answer["lost"]:
+            # The backend takes a moment of the shared clock to process the
+            # report, after this console's carry began, and logs the
+            # summary the carried window owed.
+            clock[0] += 1
+        notice_route = deliver(form)
+        if notice_route[1] != 204:
+            return web.Response(status=503)
+        if answer["lost"]:
+            # The backend has taken the report in and logged the summary the
+            # carried window owed; its answer is lost all the same.
+            answer["lost"] = False
+            return web.Response(status=503)
+        delivered.append(form)
+        _body, _status, headers = notice_route
+        return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                 "the-supervisor-token", **headers})
+
+    backend = web.Application()
+    backend.router.add_route("POST", "/_supervisor/host_refusal", notice)
+    losing_backend = TestClient(TestServer(backend))
+    await losing_backend.start_server()
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    recovered_backend = None
+    try:
+        reporter = supervisor._active_reporter
+        monkeypatch.setattr(reporter, "_now", lambda: clock[0])
+        monkeypatch.setattr(reporter._lines, "_now", lambda: clock[0])
+
+        # The outage spends the hour's cap of lines and holds the rest back,
+        # which opens the console's suppressed window.
+        for index in range(25):
+            clock[0] = index
+            response = await client.get("/", headers={"Host": f"down{index}.example.com"})
+            assert response.status == 421
+        named = [line for line in lines if line.startswith("Refused")]
+        assert len(named) == supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR
+
+        # The window is already due when the first report carries it, and the
+        # backend that takes the report in logs its summary before an answer
+        # that never arrives.
+        clock[0] = 3700
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", losing_backend.server.port)
+        monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+        for _ in range(2000):
+            if not answer["lost"]:
+                break
+            await asyncio.sleep(0.01)
+        assert not answer["lost"]
+
+        # The backend becomes unreachable, and the outage outlasts the
+        # window's hour with no acknowledgement of any kind in between.
+        await losing_backend.close()
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", None)
+        clock[0] = 3700 + int(supervisor.host_policy.HOUR_SECONDS)
+
+        # A refusal arrives in the prolonged outage: the console emits no
+        # second summary for a window the report already reached the backend
+        # with, whatever became of its answer, so the copy waits in flight
+        # for the backend to answer again.
+        response = await client.get("/", headers={"Host": "late.example.com"})
+        assert response.status == 421
+        console_summaries = [line for line in lines if line.startswith("Suppressed")]
+        assert console_summaries == []
+
+        # The backend recovers, and the retry reaches it: the report carries
+        # the window again, the backend folds a window it still counts
+        # nowhere, and the acknowledgement names its ID among the windows
+        # the backend has completed, so the console discards its copy.
+        recovered_backend = TestClient(TestServer(backend))
+        await recovered_backend.start_server()
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", recovered_backend.server.port)
+        for _ in range(2000):
+            if delivered:
+                break
+            await asyncio.sleep(0.01)
+        assert delivered
+        for _ in range(6000):
+            if not reporter.pending_reports():
+                break
+            clock[0] += 0.06
+            await asyncio.sleep(0.01)
+        assert reporter.pending_reports() == []
+
+        # A later report carries no copy of the window: the console discarded
+        # its copy when the acknowledgement named it completed.
+        delivered.clear()
+        clock[0] += 1
+        response = await client.get("/", headers={"Host": "witness.example.com"})
+        assert response.status == 421
+        for _ in range(6000):
+            if delivered:
+                break
+            clock[0] += 0.06
+            await asyncio.sleep(0.01)
+        assert "suppressed" not in delivered[0]
+        assert "suppressed_id" not in delivered[0]
+
+        console_summaries = [line for line in lines if line.startswith("Suppressed")]
+        backend_summaries = [message for message in root_log.messages
+                             if "host-refusal log lines" in message]
+        assert console_summaries == []
+        assert len(backend_summaries) == 1
+        assert "suppressed 5 host-refusal log lines" in backend_summaries[0]
+    finally:
+        await client.close()
+        if recovered_backend is not None:
+            await recovered_backend.close()
+
+
+@pytest.mark.asyncio
 async def test_a_backend_first_outage_keeps_the_pair_within_the_one_line_budget(
         tmp_path, monkeypatch, real_factory, root_log, caplog):
     """The backend can be the layer that spends the hour: it answers the

@@ -802,11 +802,16 @@ class _RefusalReporter:
     left its window unresolved, hold it in an in-flight slot that the next
     report carries again, and this console emits it only in the
     sustained-outage case, when no acknowledgement of any kind has arrived
-    since the carry began and the window's hour has fully run past with it.
-    The acknowledgement also names the windows the backend has logged and
-    cleared, and this console discards the carried and mirrored copies it
-    holds of them, so a window whose summary has been paid is carried
-    nowhere anymore.
+    since the carry began, the window's hour has fully run past with it and
+    no delivery for it ever reached the backend at the transport level,
+    because only then could nothing have summarized it. A window a
+    delivery sent but no answer resolved is never emitted here however
+    long the outage runs: the backend may have logged its summary before
+    the answer was lost, so the pair leaves the window to the
+    acknowledgement protocol instead. The acknowledgement also names the
+    windows the backend has logged and cleared, and this console discards
+    the carried and mirrored copies it holds of them, so a window whose
+    summary has been paid is carried nowhere anymore.
 
     Every report also carries the newest bounded refused names with this
     console's own recency stamps, and the backend's record takes the newer
@@ -829,6 +834,7 @@ class _RefusalReporter:
         self._mirrored = None  # the window the last acknowledgement carried back
         self._carried = None  # the window a report has carried, held in flight here
         self._carried_at = None  # when the carry began
+        self._carried_sent = False  # whether a delivery for it ever reached the backend
         self._last_ack = None  # when the last acknowledgement of any kind arrived
         self._wake = asyncio.Event()  # refusals and readiness wake the worker
         self._drain_task: "asyncio.Task | None" = None
@@ -923,8 +929,11 @@ class _RefusalReporter:
         console discards its copy; one the backend still holds comes back
         to the in-flight slot, re-carried on every later report until an
         answer names it completed, so the pair stays owed the one summary
-        whichever layer holds the window. The answer is an acknowledgement
-        of some kind as well, so from here on the sustained-outage emission
+        whichever layer holds the window. The window comes back marked as
+        sent, because the report that carried it was answered, so it
+        reached the backend at the transport level whatever the answer
+        said about the window, and the answer is an acknowledgement of
+        some kind as well, so from here on the sustained-outage emission
         of a carried window is barred.
         """
         self._lines.merge_hour_lines(hour_lines)
@@ -937,6 +946,7 @@ class _RefusalReporter:
         if carried[2] is not None and carried[2] in completed:
             return
         self._carried = carried
+        self._carried_sent = True
 
     def mirrored_summary(self):
         """The window the last acknowledgement carried back, for the report
@@ -971,6 +981,10 @@ class _RefusalReporter:
         owed its summary by the backend and is never folded back into this
         console's own recorder: a lost answer to a report the backend
         processed must not leave the pair with two summaries of one window.
+        A window taken fresh from this console's recorder begins its carry
+        unsent, and the delivery attempt marks it once its request reaches
+        the backend at the transport level, which ``take_summary`` below
+        reads when it decides what this console may still emit.
         """
         if self._carried is not None:
             carried, self._carried = self._carried, None
@@ -978,19 +992,27 @@ class _RefusalReporter:
         carried = self._lines.take_carried_summary()
         if carried is not None:
             self._carried_at = self._now()
+            self._carried_sent = False
         return carried
 
-    def restore_carried_summary(self, carried):
+    def restore_carried_summary(self, carried, reached=False):
         """Hold a carried window back in the slot, after a delivery no
         backend acknowledged.
 
-        The copy waits in flight, never in this console's recorder, and the
-        next report carries it again. This console emits it only in the
-        sustained-outage case, which ``take_summary`` below decides, so a
-        refusal between a lost answer and the retry that lands emits
-        nothing here.
+        ``reached`` says whether the attempt sent the request on an
+        established connection, whatever answer came back or none at all.
+        A window whose delivery reached the backend is marked sent,
+        because the backend may have logged its summary before the answer
+        was lost, so this console never emits it locally however long the
+        outage runs. A window no delivery ever connected for keeps the
+        sustained-outage emission ``take_summary`` below decides, because
+        no request byte of it ever left for any backend and nothing could
+        have summarized it. The copy waits in flight either way, never in
+        this console's recorder, and the next report carries it again.
         """
         if carried is not None:
+            if reached:
+                self._carried_sent = True
             self._carried = carried
 
     def take_summary(self):
@@ -1002,16 +1024,35 @@ class _RefusalReporter:
         slot instead, and this console emits it only in the
         sustained-outage case: no acknowledgement of any kind has arrived
         since the carry began, so a full hour of reports reached no answer,
-        and the window's hour has fully run past with it, because it opened
-        before the carry began. Any acknowledgement since the carry began
-        bars the emission, because the backend has taken the window in and
-        holds it or has paid it, and the mirrored copy or the completed IDs
-        carry its accounting, so the copy is dropped once its hour has run
-        instead.
+        the window's hour has fully run past with it, because it opened
+        before the carry began, and no delivery for it ever reached the
+        backend at the transport level, so no request byte of it arrived
+        anywhere and nothing could have summarized it.
+
+        A window a delivery sent but no answer resolved is never emitted
+        here however long the outage runs: the backend may have logged its
+        summary before the answer was lost, so the pair leaves the window
+        to the acknowledgement protocol, and the copy waits in the slot to
+        be carried by every later report, discarded when an answer names
+        its ID completed and folded by a backend that still counts it,
+        and a backend that never answers loses the one summary rather
+        than the pair logging a second line for a window the backend may
+        already have summarized. Any acknowledgement since the carry began
+        bars the emission as well and drops the copy once its hour has
+        run, because the backend has taken the window in and holds it or
+        has paid it, and the mirrored copy or the completed IDs carry its
+        accounting, so the pair stays on the one summary whichever layer
+        pays it.
         """
         now = self._now()
         carried = self._carried
         if carried is not None and now - self._carried_at >= host_policy.HOUR_SECONDS:
+            if self._carried_sent and (self._last_ack is None or self._last_ack < self._carried_at):
+                # Sent but never answered: the backend may have logged the
+                # summary before its answer was lost, so the window stays in
+                # the slot for the acknowledgement protocol and is never
+                # emitted here, however long the outage runs.
+                return self._lines.take_summary()
             self._carried = None
             if self._last_ack is None or self._last_ack < self._carried_at:
                 return carried[0], carried[1], now, carried[2]
@@ -1221,7 +1262,12 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
     copies it holds of a window whose summary has been paid. A carried
     window the answer did not resolve waits in flight for the next report
     and never folds back into this console's recorder, so one window is
-    owed one summary by the pair, whichever layer holds it.
+    owed one summary by the pair, whichever layer holds it. The restore
+    carries the delivery's transport outcome with the copy as well: a
+    window whose request reached the backend is held as sent and never
+    emitted here, and one no delivery ever connected for keeps the
+    sustained-outage emission, because only then could nothing have
+    summarized it.
     """
     data = {"host": host}
     logged = reporter.line_time(host)
@@ -1247,11 +1293,18 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
         data["recent"] = ",".join(name for name, _stamp in recent)
         data["recent_at"] = ",".join(str(stamp) for _name, stamp in recent)
     delivered = False
+    reached = False
     try:
         async with session.post(f"http://{BACKEND_HOST}:{port}{reporter.notice_path}",
                                 headers={TOKEN_HEADER: token},
                                 data=data,
                                 allow_redirects=False) as response:
+            # Entering the context sent the request on an established
+            # connection, whatever answer comes back or none at all, so the
+            # window this report carried is marked sent on its way back to
+            # the slot: the backend may have logged its summary before the
+            # answer was lost, and this console never emits a sent window.
+            reached = True
             await response.read()
             if response.status == 204 and response.headers.get(TOKEN_HEADER) == token:
                 delivered = True
@@ -1262,11 +1315,14 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
         pass
     finally:
         # A delivery the backend did not acknowledge, whatever ended it,
-        # leaves the carried window in flight here: the next report
-        # carries it again, and the console never folds it back into its
-        # own recorder, where a later refusal could emit a second summary.
+        # leaves the carried window in flight here: the next report carries
+        # it again, and the console never folds it back into its own
+        # recorder, where a later refusal could emit a second summary. The
+        # transport outcome travels with the copy, so a window the request
+        # reached the backend with is never emitted here, and one no
+        # delivery ever connected for keeps the sustained-outage emission.
         if not delivered and carried is not None:
-            reporter.restore_carried_summary(carried)
+            reporter.restore_carried_summary(carried, reached)
     reporter.report_failed(host)
 
 
