@@ -2394,6 +2394,75 @@ async def test_the_console_and_the_backend_share_the_refusal_log_budget(
         await client.close()
 
 
+@pytest.mark.asyncio
+async def test_fresh_refusals_after_recovery_draw_on_the_merged_hour_budget(
+        tmp_path, monkeypatch, fresh_state, root_log):
+    """The outage spends this console's hour line cap, and the recovery is
+    told so: each report carries how many refusal lines the console spent
+    within the hour, the backend folds that many into its own hour, and a
+    hostname refused for the first time after the recovery draws on the one
+    merged budget rather than a fresh cap, so the lines of the two processes
+    together stay within the hour's cap."""
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    config = _config()
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    try:
+        # The outage: this console is the only place a refusal is named.
+        for index in range(25):
+            response = await client.get("/", headers={"Host": f"down{index}.example.com"})
+            assert response.status == 421
+        assert len(lines) == supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR
+
+        async def notice(request):
+            form = await request.post()
+            logged = form.get("logged")
+            hour_lines = form.get("hour_lines")
+            carried = {"line_at": float(logged)} if logged else {}
+            if hour_lines:
+                carried["hour_lines"] = int(hour_lines)
+            fresh_state.record_refusal(form["host"], config=config, **carried)
+            return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                     "the-supervisor-token"})
+
+        backend_app = web.Application()
+        backend_app.router.add_route("POST", "/_supervisor/host_refusal", notice)
+        backend = TestClient(TestServer(backend_app))
+        await backend.start_server()
+        try:
+            monkeypatch.setattr(supervisor, "BACKEND_PORT", backend.server.port)
+            monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+            reporter = supervisor._active_reporter
+            for _ in range(4000):
+                if not reporter.pending_reports():
+                    break
+                await asyncio.sleep(0.01)
+            assert reporter.pending_reports() == []
+
+            # Fresh hostnames, refused for the first time while the backend
+            # answers and within the same hour, name no console line of their
+            # own: the backend owns their lines, out of the merged hour.
+            for index in range(10):
+                response = await client.get("/", headers={"Host": f"post{index}.example.com"})
+                assert response.status == 421
+            for _ in range(4000):
+                if not reporter.pending_reports():
+                    break
+                await asyncio.sleep(0.01)
+            assert reporter.pending_reports() == []
+        finally:
+            await backend.close()
+
+        backend_lines = [message for message in root_log.messages
+                         if "refused a request" in message]
+        assert len(lines) + len(backend_lines) <= (
+            supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR + 1)
+    finally:
+        await client.close()
+
+
 class _CountingWake:
     """The reporter's wake event, counting the delivery worker's turns: the
     worker clears the event once per turn, so its clear count is the turn

@@ -756,9 +756,11 @@ class _RefusalReporter:
     fails, because from that moment this console is the only place the
     hostname is named. A hostname this console spent a line on, or held
     back under its ceiling, carries the time of that with its report, so
-    the backend writes no second line for it in the same hour: the hour's
-    line budget is the one the two processes share, even though they share
-    no memory.
+    the backend writes no second line for it in the same hour, and every
+    report carries how many lines this console spent within the hour, so
+    a hostname refused for the first time once the backend answers draws
+    on the one merged budget: the hour's line budget is the one the two
+    processes share, even though they share no memory.
     """
 
     def __init__(self, notice_path: str, now=time.time):
@@ -803,6 +805,17 @@ class _RefusalReporter:
         if stamp is not None and now - stamp < host_policy.HOUR_SECONDS:
             return stamp
         return None
+
+    def hour_line_count(self):
+        """How many refusal lines this console has spent within the hour.
+
+        The report the backend eventually takes carries the count, so a
+        hostname refused for the first time once the backend answers draws
+        on the one merged hour budget rather than a fresh cap: the two
+        processes share the hour's line budget even though they share no
+        memory.
+        """
+        return self._lines.hour_line_count()
 
     def take_summary(self):
         """The suppressed window of this console's refusal lines, if due."""
@@ -983,14 +996,19 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
 
     The report also carries the time this console spent the hostname's line,
     while the backend could not be told and this console was the only place
-    a refusal was named: the backend then writes no second line for the same
-    hostname in the same hour, so the two processes share the hour's line
-    budget even though they share no memory.
+    a refusal was named, and how many refusal lines it spent within the
+    hour: the backend then writes no second line for the same hostname in
+    the same hour, and a hostname refused for the first time once it
+    answers draws on the one merged hour budget, so the two processes
+    share the hour's line budget even though they share no memory.
     """
     data = {"host": host}
     logged = reporter.line_time(host)
     if logged is not None:
         data["logged"] = str(logged)
+    hour_lines = reporter.hour_line_count()
+    if hour_lines:
+        data["hour_lines"] = str(hour_lines)
     try:
         async with session.post(f"http://{BACKEND_HOST}:{port}{reporter.notice_path}",
                                 headers={TOKEN_HEADER: token},

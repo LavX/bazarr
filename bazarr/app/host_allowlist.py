@@ -261,7 +261,7 @@ def verify_approval_code(supplied):
     return _approval_code.verify(supplied)
 
 
-def record_refusal(host, config=settings, line_at=None):
+def record_refusal(host, config=settings, line_at=None, hour_lines=0):
     """Record a refused hostname and keep a code on the console.
 
     The backend's own refusals call this, and so does the report the front
@@ -270,11 +270,16 @@ def record_refusal(host, config=settings, line_at=None):
     the health page and the console code would never be repeated while they
     continue. The report also carries the time that console spent the
     hostname's refusal line while this backend could not be told, so no
-    second line is written for it in the same hour.
+    second line is written for it in the same hour, and how many refusal
+    lines that console spent within the hour, so a hostname refused for the
+    first time after the recovery draws on the one merged hour budget
+    rather than a fresh cap.
     """
     shown = effective_host(host)
     if not shown or not check_active(config):
         return
+    if hour_lines:
+        _refusals.merge_hour_lines(hour_lines)
     if _refusals.note(shown, line_at):
         logging.warning('BAZARR refused a request for an unrecognized host: %s. Allow it under '
                         'Settings > General > Allowed Hosts, or set %s.', shown, ALLOWED_HOSTS_ENV)
@@ -290,8 +295,9 @@ def front_refusal_notice(config=settings):
     It carries the token the supervisor started this process with, and the
     sender bounds it to at most one report per hostname per hour, so the work
     here is only the bookkeeping and the announcement. It also carries the
-    time that console spent the hostname's refusal line, so the hour's line
-    budget is the one the two processes share.
+    time that console spent the hostname's refusal line, and how many
+    refusal lines it spent within the hour, so the hour's line budget is
+    the one the two processes share.
     """
     from flask import request
 
@@ -305,7 +311,13 @@ def front_refusal_notice(config=settings):
         line_at = float(logged) if logged else None
     except ValueError:
         line_at = None
-    record_refusal(request.form.get('host', ''), config=config, line_at=line_at)
+    hour_lines = request.form.get('hour_lines', '')
+    try:
+        spent = int(hour_lines) if hour_lines else 0
+    except ValueError:
+        spent = 0
+    record_refusal(request.form.get('host', ''), config=config, line_at=line_at,
+                   hour_lines=spent)
     return '', 204
 
 

@@ -251,7 +251,11 @@ class BoundedRefusalRecorder:
     ``line_at``, the time a console elsewhere already spent this hostname's
     line within the hour, and records the refusal without writing or
     suppressing a line for it, so the hostname is not named twice in the
-    same window.
+    same window. A hostname refused for the first time after the recovery
+    has no such time to carry, so the report also carries how many lines
+    that console spent within the hour, and ``merge_hour_lines`` folds that
+    many into this hour's cap: the refusals that follow the recovery draw
+    on the one merged budget rather than a fresh cap.
     """
 
     def __init__(self, now=time.time):
@@ -262,6 +266,8 @@ class BoundedRefusalRecorder:
         self._line_times = []  # times of per-host refusal lines this hour
         self._suppressed = 0
         self._window_opens = None  # when the current suppressed count started
+        self._merged_lines = 0  # the hour count already folded in from a console
+        self._merged_at = None  # when that count was last folded in
 
     def note(self, host, line_at=None):
         """Record a refusal; True when a per-host line may be written now.
@@ -295,6 +301,37 @@ class BoundedRefusalRecorder:
             self._last_lines[host] = now
             self._line_times.append(now)
             return True
+
+    def hour_line_count(self):
+        """How many refusal lines this hour has already spent here."""
+        now = self._now()
+        with self._lock:
+            self._prune(now)
+            return len(self._line_times)
+
+    def merge_hour_lines(self, count):
+        """Fold a console elsewhere's spent lines into this hour's cap.
+
+        The reports a front listener sends once it can be told carry how
+        many refusal lines its console spent within the hour, and a report
+        goes out per hostname, so the same count arrives many times: the
+        count of a window is folded in once, and a report that repeats it
+        spends nothing again. Only the lines the hour still holds are
+        folded in, so the answer stays bounded by the same cap the count
+        came from.
+        """
+        now = self._now()
+        if count <= 0:
+            return
+        with self._lock:
+            self._prune(now)
+            if self._merged_at is None or now - self._merged_at >= HOUR_SECONDS:
+                self._merged_lines = 0
+            spent = min(count, REFUSAL_LOG_LINES_PER_HOUR)
+            if spent > self._merged_lines:
+                self._line_times.extend([now] * (spent - self._merged_lines))
+                self._merged_lines = spent
+            self._merged_at = now
 
     def note_retry(self, host):
         """Record a retry's line; True when a per-host line may be written now.
