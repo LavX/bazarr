@@ -55,7 +55,10 @@ def profile_library(manual_library, monkeypatch):
     monkeypatch.setattr(settings.translator, "openrouter_url", "http://fixture")
     monkeypatch.setattr(settings.translator, "lingarr_url", "http://fixture/base")
     monkeypatch.setattr(settings.translator, "lingarr_token", "")
-    monkeypatch.setattr(settings.translator, "openrouter_api_key", "")
+    # A configured key, not a blank one: the translation availability gate
+    # refuses an openrouter engine without one, and this fixture's transport
+    # is fully mocked, so the value is only ever read, never used.
+    monkeypatch.setattr(settings.translator, "openrouter_api_key", "fixture")
     monkeypatch.setattr(settings.translator, "openrouter_encryption_key", "")
     for queue in (
         "jobs_pending_queue",
@@ -1052,3 +1055,19 @@ def test_gemini_does_not_publish_malformed_or_duplicate_positions(
         run_job(lib, enqueue(lib)[0])
     assert not (lib.folder / "1/event.hu.srt").exists()
     assert not lib.session.execute(sa.select(TableHistorySports)).all()
+
+
+@pytest.mark.parametrize("shape", ["three", "four"])
+def test_missing_languages_reads_every_stored_entry_shape(
+    indexed_library, monkeypatch, shape
+):
+    from sportarr import profile_hooks
+    from sportarr.identity import resolve_event_in_session
+    from test_sportarr_indexer import stored_entry_event
+
+    session, _ = indexed_library
+    stored_entry_event(session, monkeypatch, shape)
+    monkeypatch.setattr(profile_hooks, "database", session)
+    context = resolve_event_in_session(session, 61, 1)
+
+    assert profile_hooks.missing_languages(context) == ["de"]

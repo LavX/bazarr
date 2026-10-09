@@ -109,6 +109,30 @@ def test_the_same_translation_follows_the_job_already_queued(queue):
     assert len(queue.list_jobs_from_queue()) == 2
 
 
+def test_the_same_translation_follows_the_first_job_even_when_it_ends_at_once(queue, monkeypatch):
+    """The duplicate is matched and its id read in one step, under the queue
+    lock. The id used to be looked up afterwards, and when the first job had
+    finished in between the editor was told the translation could not be
+    queued."""
+    first = editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+    running = queue.jobs_pending_queue.popleft()
+    queue.jobs_running_queue.append(running)
+    feed = queue.feed_jobs_pending_queue
+
+    def first_job_ends_right_after_the_answer(*args, **kwargs):
+        answer = feed(*args, **kwargs)
+        with queue._queue_lock:
+            queue.jobs_running_queue.remove(running)
+        running.status = 'completed'
+        queue.jobs_completed_queue.append(running)
+        return answer
+
+    monkeypatch.setattr(queue, 'feed_jobs_pending_queue', first_job_ends_right_after_the_answer)
+
+    assert editor.enqueue_editor_translation(LINES, 'English', 'Hungarian') == first
+    assert list(queue.jobs_pending_queue) == []
+
+
 def test_a_finished_job_hands_the_lines_back_at_their_editor_positions(queue, sidecar):
     shifted = [{'position': 4, 'line': 'Hello'}, {'position': 7, 'line': 'World'}]
     job_id = editor.enqueue_editor_translation(shifted, 'English', 'Hungarian', title='Example')
@@ -216,6 +240,33 @@ def test_a_result_outlives_its_job_leaving_the_bounded_queue(queue, sidecar):
 
     assert state['status'] == 'completed'
     assert state['lines'] == [{'position': 0, 'line': 'Szia'}, {'position': 1, 'line': 'Világ'}]
+
+
+def test_a_failure_outlives_its_job_leaving_the_bounded_queue(queue, sidecar):
+    job_id = editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+    sidecar.polls = [{'status': 'failed', 'error': 'OpenRouter rejected the key'}]
+    job = _run(queue, job_id)
+    queue.jobs_failed_queue.clear()
+
+    state = editor.editor_translation_state(job_id)
+
+    assert state == {'jobId': job_id, 'status': 'failed', 'error': job.error['message']}
+    assert 'OpenRouter rejected the key' in state['error']
+
+
+def test_an_unexpected_failure_keeps_the_same_message_the_job_shows(queue, sidecar, monkeypatch):
+    def broken(*args, **kwargs):
+        raise ValueError('/secret/path in a provider payload')
+
+    monkeypatch.setattr(openrouter_translator.OpenRouterTranslatorService, 'submit_content', broken)
+    job_id = editor.enqueue_editor_translation(LINES, 'English', 'Hungarian')
+    job = _run(queue, job_id)
+    queue.jobs_failed_queue.clear()
+
+    state = editor.editor_translation_state(job_id)
+
+    assert state['status'] == 'failed'
+    assert state['error'] == job.error['message'] == jobs_queue_module.UNEXPECTED_JOB_ERROR['message']
 
 
 def test_a_library_translation_failure_reason_lands_on_its_job(monkeypatch):

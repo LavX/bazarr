@@ -15,9 +15,15 @@ tests job writes its blob report, and the Frontend coverage step then merges
 the reports and checks the coverage floor, both as written in ci.yml. The shards
 write into the folder their job uploads and the coverage job downloads into,
 so a report that lands anywhere else fails here as it fails in CI.
+
+The Release hero job runs its steps as written, one after another, when the
+working tree changes what it builds from compared with --docs-base, by the
+planner's own rule, or when --hero asks for it.
 """
 
 import argparse
+import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -30,11 +36,20 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+PLANNER = ROOT / ".github" / "scripts" / "ci_plan.py"
+HERO_JOB = "release-hero"
+HERO_DIR = ROOT / "scripts" / "release" / "hero"
+HERO_STAMP = HERO_DIR / "node_modules" / ".bazarr-ci-stamp"
+# Headless Chrome, rendering the still, is the one hero step that loads a
+# machine's cores, so the worker budget counts it at this weight rather than
+# at whatever weight Task defaults to next.
+HERO_RENDER_WEIGHT = 1
 
 # Rough first-run estimates in seconds, so the longest work starts first. Every
 # run records what each task really took and later runs use that instead.
@@ -179,10 +194,81 @@ def frontend_test_tasks(args, jobs: dict, frontend_dir: Path, work: Path) -> lis
     return tasks
 
 
+def _local_database_url(url: str, port, database: str) -> str:
+    """The step's own URL, pointed at the local server and one worker's database.
+
+    Only where it connects changes. The scheme, and with it the driver, stays
+    whatever ci.yml wrote, so the mirror cannot run a driver CI does not.
+    """
+    parts = urlsplit(url)
+    credentials, _, _ = parts.netloc.rpartition("@")
+    netloc = f"127.0.0.1:{port}"
+    if credentials:
+        netloc = f"{credentials}@{netloc}"
+    return urlunsplit(parts._replace(netloc=netloc, path=f"/{database}"))
+
+
 def _free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return probe.getsockname()[1]
+
+
+def hero_changed(base: str) -> bool:
+    """Whether the working tree touches what Release hero builds from, against
+    base's merge base. A change list git cannot give counts as touching it."""
+    def git(*command):
+        result = subprocess.run(["git", *command], cwd=ROOT, capture_output=True, text=True)
+        return result.stdout if result.returncode == 0 else None
+
+    merge_base = git("merge-base", base, "HEAD")
+    listing = git("diff", "--name-only", "--no-renames", merge_base.strip()) if merge_base else None
+    untracked = git("ls-files", "--others", "--exclude-standard")
+    if listing is None or untracked is None:
+        return True
+    spec = importlib.util.spec_from_file_location("_ci_plan", PLANNER)
+    planner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(planner)
+    return any(planner.touches_hero(path) for path in (listing + untracked).splitlines())
+
+
+def _hero_stamp() -> str:
+    """What decides the hero's node_modules are current: the two files `npm ci`
+    reads and the Node that runs what it installs, as the job's cache key takes
+    the same three."""
+    digest = hashlib.sha256()
+    for name in ("package.json", "package-lock.json"):
+        digest.update((HERO_DIR / name).read_bytes())
+    node = subprocess.run(["node", "--version"], capture_output=True)
+    digest.update(node.stdout if node.returncode == 0 else b"")
+    return digest.hexdigest()[:16]
+
+
+def hero_tasks(jobs: dict, work: Path) -> list:
+    """The Release hero job's steps, each after the one before. `npm ci` runs
+    only when the stamp of the last install no longer matches, and records a
+    fresh stamp once it has, so the mirror skips it as the job's cache does."""
+    job = jobs[HERO_JOB]
+    group = _job_name(HERO_JOB, job, "")
+    stamp = _hero_stamp()
+    installed = HERO_STAMP.is_file() and HERO_STAMP.read_text() == stamp
+    tasks = []
+    for step in job.get("steps") or []:
+        script = step.get("run")
+        if not isinstance(script, str):
+            continue
+        if installed and _is_setup(script):
+            continue
+        name = step.get("name") or "step"
+        if _is_setup(script):
+            script += f'\nprintf %s "{stamp}" > {shlex.quote(str(HERO_STAMP))}\n'
+        tasks.append(Task(group, name, ["bash", "-e", "-c", script],
+                          cwd=ROOT / step.get("working-directory", "."),
+                          env={"RUNNER_TEMP": str(work)},
+                          weight=HERO_RENDER_WEIGHT if "npm run still" in script else 1,
+                          after=(tasks[-1].key,) if tasks else (),
+                          key=f"{group}: {name}"))
+    return tasks
 
 
 def build_tasks(args, workflow: dict, work: Path) -> list:
@@ -245,6 +331,9 @@ def build_tasks(args, workflow: dict, work: Path) -> list:
                     tasks.append(Task(group, name, ["bash", "-e", "-c", script], env=env,
                                       needs_db=needs_db, after=(ui,), key=f"{group}: {name}"))
 
+    if args.hero or hero_changed(args.docs_base):
+        tasks.extend(hero_tasks(jobs, work))
+
     if args.mode == "all":
         docs_env = {"PATH": os.environ.get("PATH", "")}
         base = args.docs_base
@@ -276,8 +365,8 @@ def run(tasks: list, args, logs: Path, history: dict) -> None:
         env.update(task.env)
         if task.needs_db:
             task.database = databases.pop()
-            env["BAZARR_PG_TEST_URL"] = (
-                f"postgresql+psycopg://postgres:postgres@127.0.0.1:{args.pg_port}/{task.database}"
+            env["BAZARR_PG_TEST_URL"] = _local_database_url(
+                task.env["BAZARR_PG_TEST_URL"], args.pg_port, task.database
             )
         safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", f"{task.group}-{task.label}")[:150]
         task.log = logs / f"{counter:03d}-{safe}.log"
@@ -389,6 +478,8 @@ def main() -> int:
     parser.add_argument("--work", required=True)
     parser.add_argument("--history", default="")
     parser.add_argument("--docs-base", default="origin/development")
+    parser.add_argument("--hero", action="store_true",
+                        help="run Release hero even when nothing it builds from changed")
     args = parser.parse_args()
 
     workflow = yaml.safe_load(WORKFLOW.read_text())

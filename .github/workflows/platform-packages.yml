@@ -1,0 +1,409 @@
+name: Platform packages
+
+# The workflow_run trigger only uses the copy of this workflow on the default branch,
+# so the automation first fires for a release after a release PR carries this machinery
+# into master.
+on:
+  workflow_run:
+    workflows: [Build Docker Image]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published stable release tag, for example v2.7.0
+        required: true
+        type: string
+  pull_request:
+    paths:
+      - packaging/**
+      - LICENSE
+      - NOTICES.md
+      - .github/workflows/platform-packages.yml
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: platform-packages-${{ github.event.workflow_run.head_branch || inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    # Job-level if expressions cannot match regex, so completed builds of the image
+    # workflow that did not start from a v ref are skipped here, and the final-tag
+    # shape is enforced in the step below.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    permissions:
+      contents: read
+      packages: read
+      attestations: read
+    outputs:
+      lock_resolved: ${{ steps.lock.outputs.resolved }}
+      lock_version: ${{ steps.lock.outputs.version }}
+      lock_sha256: ${{ steps.lock.outputs.sha256 }}
+      lock_base: ${{ steps.lock.outputs.base }}
+      lock_base_sha256: ${{ steps.lock.outputs.base_sha256 }}
+      lock_artifact: resolved-lock-${{ github.run_id }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout package sources
+        uses: actions/checkout@v7
+        with:
+          # workflow_run runs use the default branch copy; dispatch replays use the selected ref.
+          ref: ${{ github.ref }}
+          persist-credentials: false
+
+      - name: Install package test dependency
+        run: python3 -m pip install PyYAML==6.0.3
+
+      - name: Test generation and bootstrap
+        run: |
+          python3 packaging/test_release.py
+          python3 packaging/stack/test_bootstrap.py
+          python3 packaging/test_marketplaces.py
+
+      - name: Validate final stable tag
+        if: github.event_name == 'workflow_run'
+        env:
+          RELEASE_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo 'Expected a final stable tag such as v2.7.0' >&2
+            exit 1
+          fi
+
+      - name: Resolve release lock
+        if: github.event_name == 'workflow_run'
+        id: lock
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          lock="packaging/releases/${RELEASE_TAG#v}.json"
+          if [[ -f "$lock" ]]; then
+            echo "${lock} already exists; using the reviewed lock"
+            echo "resolved=false" >> "$GITHUB_OUTPUT"
+          else
+            # Lock pull requests merge into development, so resolution bases on its reviewed locks.
+            development="${RUNNER_TEMP}/dev-releases"
+            mkdir "$development"
+            # Only the reviewed tip is needed, so a depth-1 fetch keeps the shallow checkout light.
+            git fetch --depth=1 origin development
+            git archive origin/development packaging/releases | tar -x -C "$development"
+            dev_lock="${development}/packaging/releases/${RELEASE_TAG#v}.json"
+            if [[ -f "$dev_lock" ]]; then
+              cp "$dev_lock" "$lock"
+              echo "${dev_lock} is already reviewed on development; reusing its lock"
+              echo "resolved=false" >> "$GITHUB_OUTPUT"
+            else
+              python3 packaging/release.py --resolve-lock --tag "$RELEASE_TAG" \
+                --releases-dir "${development}/packaging/releases"
+              echo "resolved=true" >> "$GITHUB_OUTPUT"
+              read -r base_lock base_sha256 < <(python3 packaging/release.py --lock-base --tag "$RELEASE_TAG" \
+                --releases-dir "${development}/packaging/releases")
+              echo "base=${base_lock}" >> "$GITHUB_OUTPUT"
+              echo "base_sha256=${base_sha256}" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+          echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "$lock" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare offline PR candidate
+        if: github.event_name == 'pull_request'
+        run: |
+          # Every checked-in lock is rendered, so template changes are checked against each release.
+          python3 packaging/release.py --all-locks packaging/releases \
+            --output "${RUNNER_TEMP}/platform-packages" > "${RUNNER_TEMP}/package-candidates"
+
+      - name: Verify published release and prepare packages
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.workflow_run.head_branch || inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo 'Expected a final stable tag such as v2.7.0' >&2
+            exit 1
+          fi
+          python3 packaging/release.py --tag "$RELEASE_TAG" \
+            --lock "packaging/releases/${RELEASE_TAG#v}.json" \
+            --output "${RUNNER_TEMP}/platform-packages" --verify-live > "${RUNNER_TEMP}/package-candidates"
+
+      - name: Validate generated package formats
+        env:
+          AppID: bazarr-plus
+          APP_DATA_DIR: /tmp/bazarr-package-app
+          ROOT_FOLDER_HOST: /tmp/bazarr-package-media
+          TZ: UTC
+        run: |
+          set -euo pipefail
+          mapfile -t candidates < "${RUNNER_TEMP}/package-candidates"
+          if (( ${#candidates[@]} == 0 )); then
+            echo 'No package candidates were prepared' >&2
+            exit 1
+          fi
+          for candidate in "${candidates[@]}"; do
+            generated="$candidate/rendered"
+            docker compose -f "$generated/stack/compose.yaml" config --quiet
+            docker compose -f "$generated/casaos/Apps/BazarrPlus/docker-compose.yml" config --quiet
+            docker compose -f "$generated/casaos/Apps/BazarrPlusStack/docker-compose.yml" config --quiet
+            docker compose -f "$generated/runtipi/bazarr-plus/docker-compose.yml" config --quiet
+            (cd "$candidate" && sha256sum --check SHA256SUMS)
+          done
+          python3 - "${candidates[@]}" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+          import xml.etree.ElementTree as ET
+          import yaml
+
+          for candidate in sys.argv[1:]:
+              root = Path(candidate) / "rendered"
+              for path in (root / "unraid").rglob("*.xml"):
+                  ET.parse(path)
+              json.loads((root / "runtipi/bazarr-plus/config.json").read_text())
+              for name in ("app.yaml", "questions.yaml", "ix_values.yaml"):
+                  yaml.safe_load((root / "truenas/ix-dev/community/bazarr-plus" / name).read_text())
+              print(f"{candidate}: generated Compose, XML, JSON and TrueNAS metadata parse successfully.")
+          PY
+
+      - name: Render TrueNAS templates with pinned platform tooling
+        run: |
+          set -euo pipefail
+          mapfile -t candidates < "${RUNNER_TEMP}/package-candidates"
+          validations=()
+          mkdir "${RUNNER_TEMP}/truenas-package-validation"
+          for candidate in "${candidates[@]}"; do
+            validation="${RUNNER_TEMP}/truenas-package-validation/$(basename "$candidate")"
+            cp -a "$candidate/rendered/truenas" "$validation"
+            cp -a packaging/truenas/ix-dev/community/bazarr-plus/templates/test_values \
+              "$validation/ix-dev/community/bazarr-plus/templates/test_values"
+            validations+=("$validation")
+          done
+          python3 - "${validations[@]}" <<'PY'
+          from pathlib import Path
+          import sys
+          import yaml
+
+          for validation in sys.argv[1:]:
+              app = Path(validation) / "ix-dev/community/bazarr-plus"
+              metadata = yaml.safe_load((app / "app.yaml").read_text())
+              item = {"icon_url": metadata.get("icon", ""), "categories": metadata.get("categories", []),
+                      "screenshots": metadata.get("screenshots", []), "tags": metadata.get("keywords", [])}
+              (app / "item.yaml").write_text(yaml.safe_dump(item))
+          PY
+          for validation in "${validations[@]}"; do
+            for values in basic-values.yaml media-host-paths.yaml; do
+              docker run --rm --network none --user "$(id -u):$(id -g)" -e FAKE_ENV=1 \
+                -v "$validation:/workspace" \
+                ghcr.io/truenas/apps_validation@sha256:3f38cdaa6ed9c54e5c9c43ec15790aabc0028631dd3f0c28129832a69fd1f30c \
+                apps_render_app render --path /workspace/ix-dev/community/bazarr-plus \
+                --values "/workspace/ix-dev/community/bazarr-plus/templates/test_values/$values"
+              docker compose -f "$validation/ix-dev/community/bazarr-plus/templates/rendered/docker-compose.yaml" config --quiet
+            done
+          done
+
+      - name: Export store-root candidates
+        env:
+          AppID: bazarr-plus
+          APP_DATA_DIR: /tmp/bazarr-package-app
+          ROOT_FOLDER_HOST: /tmp/bazarr-package-media
+          TZ: UTC
+          # Release and manual runs re-check the release and registry digests, so the export can be published.
+          GH_TOKEN: ${{ github.event_name != 'pull_request' && github.token || '' }}
+          VERIFY_LIVE: ${{ github.event_name != 'pull_request' }}
+        run: |
+          set -euo pipefail
+          # Pushing a store repository is a separate, reviewed step. Pull request exports stay offline.
+          live=()
+          if [[ "$VERIFY_LIVE" == true ]]; then
+            live=(--verify-live)
+          fi
+          mapfile -t candidates < "${RUNNER_TEMP}/package-candidates"
+          mkdir "${RUNNER_TEMP}/store-exports"
+          for candidate in "${candidates[@]}"; do
+            tag="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["tag"])' "$candidate/provenance.json")"
+            store="${RUNNER_TEMP}/store-exports/$tag"
+            python3 packaging/marketplaces.py --tag "$tag" --lock "packaging/releases/${tag#v}.json" \
+              --repository LavX/bazarr-packages --ref main --output "$store" "${live[@]}"
+            docker compose -f "$store/apps/bazarr-plus/docker-compose.yml" config --quiet
+            docker compose -f "$store/Apps/BazarrPlus/docker-compose.yml" config --quiet
+            docker compose -f "$store/Apps/BazarrPlusStack/docker-compose.yml" config --quiet
+            docker compose -f "$store/stacks/bazarr-plus/compose.yaml" config --quiet
+          done
+
+      - name: Upload resolved lock
+        if: github.event_name == 'workflow_run' && steps.lock.outputs.resolved == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: resolved-lock-${{ github.run_id }}
+          path: packaging/releases/${{ steps.lock.outputs.version }}.json
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+      - name: Upload reviewable packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: platform-packages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/platform-packages/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload reviewable store exports
+        uses: actions/upload-artifact@v7
+        with:
+          name: store-exports-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/store-exports/
+          # Keeps .github/workflows/store.yml and its export check in the bundle.
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publication boundary
+        run: |
+          echo 'Packages are workflow artifacts, not release assets or catalog listings.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Follow packaging/RELEASING.md after review.' >> "$GITHUB_STEP_SUMMARY"
+
+  propose-lock:
+    needs: [prepare]
+    if: >-
+      github.event_name == 'workflow_run' &&
+      needs.prepare.outputs.lock_resolved == 'true'
+    permissions:
+      contents: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out development
+        uses: actions/checkout@v7
+        with:
+          ref: development
+          # Credentials stay enabled so this job can push the lock branch.
+
+      - name: Download resolved lock
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.prepare.outputs.lock_artifact }}
+          path: resolved-lock
+
+      - name: Propose the resolved lock
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.prepare.outputs.lock_version }}
+          EXPECTED_SHA256: ${{ needs.prepare.outputs.lock_sha256 }}
+          RESOLVED: ${{ needs.prepare.outputs.lock_resolved }}
+          LOCK_BASE: ${{ needs.prepare.outputs.lock_base }}
+          LOCK_BASE_SHA256: ${{ needs.prepare.outputs.lock_base_sha256 }}
+          PRODUCING_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          IMAGE_BUILD_RUN: ${{ github.event.workflow_run.html_url }}
+        run: |
+          set -euo pipefail
+          lock="resolved-lock/${VERSION}.json"
+          actual="$(sha256sum "$lock" | cut -d' ' -f1)"
+          if [[ "$actual" != "$EXPECTED_SHA256" ]]; then
+            echo 'The downloaded lock differs from the lock the packages were prepared from' >&2
+            exit 1
+          fi
+          target="packaging/releases/${VERSION}.json"
+          if [[ -f "$target" ]]; then
+            if cmp -s "$target" "$lock"; then
+              echo "${target} is already reviewed on development with the same bytes; nothing to propose"
+              exit 0
+            fi
+            echo "${target} is already reviewed on development with different bytes than the resolved lock." >&2
+            echo "Decide by hand which lock fits the tag, put those bytes on development, and replay this lane." >&2
+            exit 1
+          fi
+          # A lower patch proposal still open means development lacks its reviewed lock, so
+          # this run resolved from an older base and would repeat its platform revisions
+          # while both pull requests merge cleanly. The current tag's own proposal is never
+          # caught here: a first run creates it and a replay refreshes it below.
+          line="${VERSION%.*}"
+          line_regex="${line//./\\.}"
+          patch="${VERSION##*.}"
+          pending="$(gh pr list --state open --base development --limit 200 \
+            --json headRefName --jq '.[].headRefName')"
+          if [[ "$(grep -c . <<<"$pending" || true)" -ge 200 ]]; then
+            echo 'There are 200 or more open development pull requests, too many to check the lock line safely' >&2
+            echo 'Investigate the open packaging lock proposals by hand, then replay this lane.' >&2
+            exit 1
+          fi
+          blocking=()
+          while IFS= read -r head; do
+            [[ "$head" =~ ^packaging/lock-v${line_regex}\.(0|[1-9][0-9]*)$ ]] || continue
+            if (( BASH_REMATCH[1] < patch )); then
+              blocking+=("v${line}.${BASH_REMATCH[1]}")
+            fi
+          done <<< "$pending"
+          if ((${#blocking[@]})); then
+            echo "The lock proposal for ${blocking[*]} is still open, so development does not carry its reviewed lock yet." >&2
+            echo "Merge the ${blocking[*]} release lock first, then Re-run all jobs." >&2
+            exit 1
+          fi
+          if [[ "$RESOLVED" == "true" ]]; then
+            # The resolved bytes were computed against development as it stood when the images
+            # started building. A lock pull request merging in that window changes the base, so
+            # the proposal would repeat or skip revisions against a base nobody checked. Refetch
+            # development and compare its closest previous lock against the recorded base.
+            development="${RUNNER_TEMP}/dev-releases"
+            mkdir -p "$development"
+            git fetch --depth=1 origin development
+            git archive origin/development packaging/releases | tar -x -C "$development"
+            python3 packaging/release.py --check-lock-base --tag "v${VERSION}" \
+              --releases-dir "${development}/packaging/releases" \
+              --expected-base "$LOCK_BASE" --expected-base-sha256 "$LOCK_BASE_SHA256"
+          fi
+          branch="packaging/lock-v${VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          cp "$lock" "$target"
+          git add "$target"
+          git commit -m "Add the ${VERSION} release lock resolved after the image build"
+          # The branch is automation-owned; rewinding it keeps a replayed run consistent.
+          git push --force origin "$branch"
+          python3 - "$lock" > proposal-body.md <<'PY'
+          import json, os, sys
+
+          lock = json.load(open(sys.argv[1]))
+          version = lock["version"]
+          digest = lock["app"]["digest"]
+          run = os.environ["PRODUCING_RUN"]
+          image_build = os.environ["IMAGE_BUILD_RUN"]
+          companions = "\n".join(f"- {name}: {entry['image']}:{entry['tag']}@{entry['digest']}"
+                                 for name, entry in sorted(lock["companions"].items()))
+          revisions = "\n".join(f"- {name}: {revision}"
+                                for name, revision in sorted(lock["platform_revisions"].items()))
+          print(f"""This pull request adds the release lock resolved automatically for version {version}. It was produced by {run} after the tagged image build completed, and the packages in that run were prepared from these exact bytes. The image build that published the app image is {image_build}.
+
+          - Version: {version}
+          - App image digest: {digest}
+
+          Companion pins:
+          {companions}
+
+          Platform revisions:
+          {revisions}
+
+          Nothing merges automatically. Companion upgrades, new runtime profiles and new major.minor lines still need a hand-authored lock.""")
+          PY
+          open="$(gh pr list --head "$branch" --state open --json number --jq '.[0].number // ""')"
+          if [[ -n "$open" ]]; then
+            echo "A proposal is already open: ${open}; updating its body"
+            gh pr edit "$open" --body-file proposal-body.md
+            exit 0
+          fi
+          gh pr create --base development --head "$branch" \
+            --title "Add the ${VERSION} release lock" --body-file proposal-body.md

@@ -3,24 +3,28 @@
 """Decide what one CI run has to do, and hand the answer to the jobs after it.
 
 Every job in .github/workflows/ci.yml that runs tests waits on this script's
-`plan` step and reads three outputs from it:
+`plan` step and reads four outputs from it:
 
 - `code`: "true" unless every file the change touches is documentation. Only
   then are the backend and frontend jobs skipped, and the docs job alone
   decides the pull request.
-- `docs`: "true" when a pull request touches documentation, which starts the
-  docs job.
+- `docs`: "true" when a pull request touches documentation, or one of the
+  documents a test reads, which starts the docs job.
 - `python`: the JSON list of Python versions the backend jobs run on. A pull
   request into anything but master gets one version, the one the Docker image
   ships, because that is the interpreter users run. Everything else gets the
   full matrix: pushes to development and master, the release pull request into
   master, the weekly schedule and a manual run.
+- `hero`: "true" when the change touches what the Release hero job builds
+  from, and on the release pull request into master, the weekly schedule and
+  a manual run. That job type-checks scripts/release/hero and renders one
+  still of it.
 
 The script fails towards running more. Anything it cannot work out, a missing
 parent commit, an unreadable event payload, an empty change list, a Dockerfile
-it cannot read a version out of, yields `code=true` and the full matrix. The
-only thing that can switch tests off is a change list the script read in full
-and found to be documentation from end to end.
+it cannot read a version out of, yields `code=true`, `hero=true` and the full
+matrix. The only thing that can switch tests off is a change list the script
+read in full and found to be documentation from end to end.
 
 tests/bazarr/test_ci_guard_list.py imports this file and checks that no test
 file, no Python file and none of the files the tests read can ever be
@@ -52,17 +56,29 @@ DOCS_PATTERNS = (
 # Files that look like documentation and are read by a test, so a change to
 # one of them has to run the backend. tests/bazarr/test_container_hardening.py
 # parses the compose block out of the README and checks the installer and the
-# getting-started guide for the same hardening.
+# getting-started guide for the same hardening. tests/bazarr/test_installer_backup.py
+# runs the installer's backup and the migration guide's backup and restore commands.
 TESTED_DOCUMENTS = frozenset({
     "README.md",
     "site/install.sh",
     "site/guides/getting-started.html",
+    "site/guides/migration.html",
 })
 
 # Trees that are never documentation, whatever the file inside them is called:
 # a Markdown fixture under tests/ is test input, and a README inside a source
 # tree ships with the code it sits next to.
 CODE_TREES = ("tests/", "bazarr/", "custom_libs/", "migrations/", "frontend/src/")
+
+# What the Release hero job builds from: the Remotion project, the brand font
+# its still copies in from site/fonts/, the Node version it installs, and the
+# job and planner that start it.
+HERO_TREES = ("scripts/release/hero/", "site/fonts/")
+HERO_FILES = frozenset({
+    ".github/workflows/ci.yml",
+    ".github/scripts/ci_plan.py",
+    "frontend/.nvmrc",
+})
 
 
 def is_documentation(path: str) -> bool:
@@ -73,6 +89,18 @@ def is_documentation(path: str) -> bool:
     if path.startswith(CODE_TREES) or path.endswith(".py"):
         return False
     return any(fnmatch.fnmatchcase(path, pattern) for pattern in DOCS_PATTERNS)
+
+
+def touches_hero(path: str) -> bool:
+    """Whether a change to this path can break the Release hero job."""
+    path = path.strip()
+    return path in HERO_FILES or path.startswith(HERO_TREES)
+
+
+def needs_docs_check(path: str) -> bool:
+    """Whether the docs job checks this path: documentation, and the documents a
+    test reads, which run the suites too but are still text a reader sees."""
+    return path.strip() in TESTED_DOCUMENTS or is_documentation(path)
 
 
 def docker_python(dockerfile: pathlib.Path = REPO_ROOT / "Dockerfile") -> str:
@@ -95,6 +123,7 @@ def plan(event: str, base_ref: str, changed, image_python: str = None) -> dict:
     files = [path for path in (changed or []) if path.strip()]
     documentation = [path for path in files if is_documentation(path)]
     docs_only = bool(files) and len(documentation) == len(files)
+    checked = any(needs_docs_check(path) for path in files)
 
     one_version = (
         event == "pull_request"
@@ -105,8 +134,14 @@ def plan(event: str, base_ref: str, changed, image_python: str = None) -> dict:
         "code": not docs_only,
         # An unreadable change list starts the docs job too, which then fails
         # loudly for the same reason instead of being skipped in silence.
-        "docs": event == "pull_request" and (changed is None or bool(documentation)),
+        "docs": event == "pull_request" and (changed is None or checked),
         "python": [image_python] if one_version else list(FULL_MATRIX),
+        "hero": (
+            not files
+            or event in ("schedule", "workflow_dispatch")
+            or (event == "pull_request" and base_ref == "master")
+            or any(touches_hero(path) for path in files)
+        ),
     }
 
 
@@ -158,6 +193,7 @@ def main() -> int:
         "code": "true" if decision["code"] else "false",
         "docs": "true" if decision["docs"] else "false",
         "python": json.dumps(decision["python"]),
+        "hero": "true" if decision["hero"] else "false",
     }
     lines = [f"{key}={value}" for key, value in outputs.items()]
     print("\n".join(lines))
@@ -178,6 +214,7 @@ def main() -> int:
                 f"- Backend and frontend: {'run' if decision['code'] else 'skipped, documentation only'}\n"
                 f"- Docs checks: {'run' if decision['docs'] else 'not needed'}\n"
                 f"- Python: {', '.join(decision['python'])}\n"
+                f"- Release hero: {'run' if decision['hero'] else 'not needed'}\n"
             )
     return 0
 

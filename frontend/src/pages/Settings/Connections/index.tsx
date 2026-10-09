@@ -4,6 +4,7 @@ import {
   Alert,
   Button,
   Group,
+  List,
   Modal,
   Skeleton,
   Stack,
@@ -22,12 +23,17 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
+  getArrInstanceDeleteConflict,
   getArrInstanceErrorMessage,
-  isArrInstanceConflict,
   useArrInstances,
   useDeleteArrInstance,
 } from "@/apis/hooks";
-import type { ArrInstance, ArrKind } from "@/apis/raw/arrInstances";
+import type {
+  ArrInstance,
+  ArrInstanceDeleteConflict,
+  ArrInstanceLibrary,
+  ArrKind,
+} from "@/apis/raw/arrInstances";
 import { Layout, Section } from "@/pages/Settings/components";
 import MediaServerSection from "@/pages/Settings/MediaServers/MediaServerSection";
 import PlexAccountSection from "@/pages/Settings/Plex/PlexAccountSection";
@@ -149,6 +155,31 @@ const KindSection: FunctionComponent<KindSectionProps> = ({
   );
 };
 
+function plural(count: number, one: string, many: string) {
+  return `${count} ${count === 1 ? one : many}`;
+}
+
+// What deleting an instance with its library removes, in the words the rest of
+// the UI uses. Empty categories are left out.
+function libraryItems(library: ArrInstanceLibrary) {
+  return [
+    plural(library.series, "series", "series"),
+    plural(library.episodes, "episode", "episodes"),
+    plural(library.movies, "movie", "movies"),
+    plural(library.history, "history entry", "history entries"),
+    plural(library.blacklist, "exclusion record", "exclusion records"),
+    plural(library.root_folders, "root folder record", "root folder records"),
+  ].filter((item) => !item.startsWith("0 "));
+}
+
+function librarySummary(library: ArrInstanceLibrary) {
+  const items = libraryItems(library);
+  if (items.length < 2) {
+    return items[0] ?? "records";
+  }
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
 const SettingsConnectionsView: FunctionComponent = () => {
   const instances = useArrInstances();
   const deleteInstance = useDeleteArrInstance();
@@ -170,7 +201,15 @@ const SettingsConnectionsView: FunctionComponent = () => {
 
   const [deleteTarget, setDeleteTarget] = useState<ArrInstance | null>(null);
   const [deleteOpened, setDeleteOpened] = useState(false);
-  const [conflictMessage, setConflictMessage] = useState<string | null>(null);
+  // Why the server refused the last delete, when it did.
+  const [refusal, setRefusal] = useState<ArrInstanceDeleteConflict | null>(
+    null,
+  );
+  // The refusal of an instance that owns a synced library. It opens the way to
+  // deleting the instance together with that library, as a second step.
+  const [ownedLibrary, setOwnedLibrary] =
+    useState<ArrInstanceDeleteConflict | null>(null);
+  const [confirmLibrary, setConfirmLibrary] = useState(false);
 
   const openCreate = (kind: ArrKind) => {
     setEditor({ kind, instance: null });
@@ -184,37 +223,81 @@ const SettingsConnectionsView: FunctionComponent = () => {
 
   const openDelete = (instance: ArrInstance) => {
     setDeleteTarget(instance);
-    setConflictMessage(null);
+    setRefusal(null);
+    setOwnedLibrary(null);
+    setConfirmLibrary(false);
     setDeleteOpened(true);
   };
 
-  const confirmDelete = () => {
+  // Deleting the only Sonarr or Radarr instance switches that kind off on the
+  // server, whether or not its library goes too.
+  const lastOfKind =
+    deleteTarget !== null &&
+    deleteTarget.kind !== "sportarr" &&
+    (instances.data ?? []).filter(
+      (instance) => instance.kind === deleteTarget.kind,
+    ).length === 1;
+
+  const confirmDelete = (removeLibrary: boolean) => {
     if (!deleteTarget) {
       return;
     }
     const removedName = deleteTarget.name;
-    deleteInstance.mutate(deleteTarget.id, {
-      onSuccess: () => {
-        showNotification({
-          color: "green",
-          message: `Instance "${removedName}" removed`,
-        });
-        setDeleteOpened(false);
-      },
-      onError: (error) => {
-        if (isArrInstanceConflict(error)) {
-          setConflictMessage(
-            getArrInstanceErrorMessage(
-              error,
-              "This instance still owns synced media.",
-            ),
-          );
-        } else {
+    setRefusal(null);
+    deleteInstance.mutate(
+      { id: deleteTarget.id, removeLibrary },
+      {
+        onSuccess: () => {
+          // Nothing about the kind switching off: the dialog said it would,
+          // and the switch, read again from the server, shows whether it did.
+          showNotification({
+            color: "green",
+            message: removeLibrary
+              ? `Instance "${removedName}" and its synced library removed`
+              : `Instance "${removedName}" removed`,
+          });
           setDeleteOpened(false);
-        }
+        },
+        onError: (error) => {
+          const conflict = getArrInstanceDeleteConflict(error);
+          if (!conflict) {
+            setDeleteOpened(false);
+          } else if (conflict.can_remove_library && conflict.library) {
+            setOwnedLibrary(conflict);
+          } else {
+            setRefusal({
+              ...conflict,
+              message: getArrInstanceErrorMessage(
+                error,
+                "Bazarr+ could not delete this instance.",
+              ),
+            });
+          }
+        },
       },
-    });
+    );
   };
+
+  const kindLabel = deleteTarget ? ARR_META[deleteTarget.kind].label : "";
+  const libraryStep = confirmLibrary && ownedLibrary?.library;
+  // Adding an instance later does not switch the kind back on by itself.
+  const switchOffNote = `This is your last ${kindLabel} instance, so Use ${kindLabel} is switched off too. Switch it back on when you add a new instance.`;
+
+  const refusalAlert = refusal && (
+    <Alert
+      color="yellow"
+      icon={<FontAwesomeIcon icon={faTriangleExclamation} />}
+      title={
+        refusal.error === "sync_in_progress"
+          ? "Library sync in progress"
+          : refusal.error === "job_in_progress"
+            ? "Subtitle job in progress"
+            : "Instance could not be deleted"
+      }
+    >
+      {refusal.message}
+    </Alert>
+  );
 
   return (
     <Layout name="Connections">
@@ -332,53 +415,127 @@ const SettingsConnectionsView: FunctionComponent = () => {
       <Modal
         opened={deleteOpened}
         onClose={() => setDeleteOpened(false)}
-        title="Delete instance"
+        title={
+          libraryStep ? "Delete instance and its library" : "Delete instance"
+        }
         centered
       >
-        <Stack gap="md">
-          <Text size="sm">
-            Delete{" "}
-            <Text span fw={600}>
-              {deleteTarget?.name}
-            </Text>{" "}
-            ({deleteTarget ? ARR_META[deleteTarget.kind].label : ""})? Its
-            {deleteTarget?.kind === "sportarr"
-              ? "connection settings and owned sports library, history and exclusion records will be removed. Media and subtitle files remain on disk. This cannot be undone."
-              : "connection settings will be removed. This cannot be undone."}
-          </Text>
-          {conflictMessage && (
-            <Alert
-              color="yellow"
-              icon={<FontAwesomeIcon icon={faTriangleExclamation} />}
-              title="Instance still in use"
-            >
-              <Stack gap={4}>
-                <span>{conflictMessage}</span>
-                <span>
-                  Remove or reassign its synced media to another instance, then
-                  delete it.
-                </span>
-              </Stack>
-            </Alert>
-          )}
-          <Group justify="flex-end">
-            <Button
-              type="button"
-              variant="default"
-              onClick={() => setDeleteOpened(false)}
-            >
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              color="red"
-              loading={deleteInstance.isPending}
-              onClick={confirmDelete}
-            >
-              Delete instance
-            </Button>
-          </Group>
-        </Stack>
+        {libraryStep ? (
+          <Stack gap="md">
+            <Text size="sm">
+              Delete{" "}
+              <Text span fw={600}>
+                {deleteTarget?.name}
+              </Text>{" "}
+              ({kindLabel}){" "}
+              {ownedLibrary?.last_of_kind
+                ? `together with every ${kindLabel} record Bazarr+ holds:`
+                : "together with everything Bazarr+ synced from it:"}
+            </Text>
+            <List size="sm">
+              {libraryItems(libraryStep).map((item) => (
+                <List.Item key={item}>{item}</List.Item>
+              ))}
+            </List>
+            <Text size="sm">
+              {`These are removed from the Bazarr+ database only. Video and subtitle files on disk are not touched, and nothing changes in ${kindLabel} itself.`}
+            </Text>
+            {ownedLibrary?.last_of_kind && (
+              <Text size="sm">{switchOffNote}</Text>
+            )}
+            <Text size="sm" fw={600}>
+              This cannot be undone.
+            </Text>
+            {refusalAlert}
+            <Group justify="flex-end">
+              <Button
+                type="button"
+                variant="default"
+                onClick={() => {
+                  setRefusal(null);
+                  setConfirmLibrary(false);
+                }}
+              >
+                Back
+              </Button>
+              <Button
+                type="button"
+                color="red"
+                loading={deleteInstance.isPending}
+                onClick={() => confirmDelete(true)}
+              >
+                Delete instance and library
+              </Button>
+            </Group>
+          </Stack>
+        ) : (
+          <Stack gap="md">
+            <Text size="sm">
+              Delete{" "}
+              <Text span fw={600}>
+                {deleteTarget?.name}
+              </Text>{" "}
+              ({kindLabel})?{" "}
+              {deleteTarget?.kind === "sportarr"
+                ? "Its connection settings and owned sports library, history and exclusion records will be removed. Media and subtitle files remain on disk. This cannot be undone."
+                : "Its connection settings will be removed. This cannot be undone."}
+            </Text>
+            {lastOfKind && <Text size="sm">{switchOffNote}</Text>}
+            {ownedLibrary?.library && (
+              <Alert
+                color="yellow"
+                icon={<FontAwesomeIcon icon={faTriangleExclamation} />}
+                title="This instance still has a synced library"
+              >
+                <Stack gap="xs">
+                  <span>
+                    {ownedLibrary.last_of_kind
+                      ? `Bazarr+ still holds ${librarySummary(ownedLibrary.library)} from ${kindLabel}, so its last instance cannot be deleted on its own.`
+                      : `Bazarr+ still holds ${librarySummary(ownedLibrary.library)} synced from it, so it cannot be deleted on its own.`}
+                  </span>
+                  <span>
+                    You can delete it together with that library. Video and
+                    subtitle files on disk are not touched.
+                  </span>
+                  <Group>
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="light"
+                      color="red"
+                      onClick={() => {
+                        setRefusal(null);
+                        setConfirmLibrary(true);
+                      }}
+                    >
+                      Delete with its synced library
+                    </Button>
+                  </Group>
+                </Stack>
+              </Alert>
+            )}
+            {refusalAlert}
+            <Group justify="flex-end">
+              <Button
+                type="button"
+                variant="default"
+                onClick={() => setDeleteOpened(false)}
+              >
+                Cancel
+              </Button>
+              {!ownedLibrary && (
+                <Button
+                  type="button"
+                  color="red"
+                  loading={deleteInstance.isPending}
+                  onClick={() => confirmDelete(false)}
+                >
+                  Delete instance
+                </Button>
+              )}
+            </Group>
+          </Stack>
+        )}
       </Modal>
     </Layout>
   );

@@ -16,9 +16,14 @@ and Ubuntu that is the `postgresql-client` package, on Alpine `postgresql-client
 Both archives also carry `config.yaml`. If the database step fails on either engine, no archive is written at
 all and the failure is reported: the backup is refused rather than half made.
 
-The connection comes from the same place the application reads it, so a backup always targets the database
-the instance is actually using: the `POSTGRES_*` environment variables win over `config.yaml`, and
-`POSTGRES_URL` fills in whatever the individual keys leave empty. The password is passed to the client tools
+The connection comes from the same resolver the application uses, so a backup always targets the database
+the instance is actually using. Each of the user, password, host, port and database comes from the first of
+these that sets it: its `POSTGRES_*` environment variable (`POSTGRES_USERNAME`, `POSTGRES_PASSWORD`,
+`POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DATABASE`), then `POSTGRES_URL`, then `config.yaml`. With a URL
+set, `config.yaml` only fills in what the URL leaves out, so its default `localhost` and `5432` no longer
+replace the URL's host and port, and a URL naming a `service` takes nothing from it. An environment variable
+set to an empty string changes nothing in the URL.
+Without a URL, the five settings are used as before. The password is passed to the client tools
 through `PGPASSWORD` in the child environment, never on a command line, which any process on the host can
 read.
 

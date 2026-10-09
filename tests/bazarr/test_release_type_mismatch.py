@@ -299,6 +299,7 @@ def _pool():
     from subliminal_patch.core import SZProviderPool
 
     pool = SZProviderPool.__new__(SZProviderPool)
+    pool.discarded_providers = set()
     pool.download_subtitle = lambda subtitle: True
     return pool
 
@@ -394,6 +395,7 @@ def test_core_persistent_passes_the_sink_through_to_the_pool():
 
     video = _episode_video()
     pool = MagicMock()
+    pool.list_subtitles_prioritized.return_value = ([], None)
     pool.download_best_subtitles.return_value = []
     sink = []
 
@@ -698,6 +700,53 @@ def search(monkeypatch):
 
     return SimpleNamespace(run=run, pool=pool, video=video, calls=calls,
                            module=download_module, monkeypatch=monkeypatch)
+
+
+@pytest.mark.parametrize("refined", [None, 5])
+def test_the_searched_video_names_the_instance_the_search_is_for(search, refined):
+    """A provider failure reports the video's ids, and an exclusion a provider
+    demands is recorded under the instance they name. The refiner can miss the
+    row of an instance with path mappings of its own, so the video carries the
+    instance the caller searches for."""
+    search.video.arr_instance_id = refined
+
+    search.run()
+
+    (video,) = search.calls.searches[0]["videos"]
+    assert video.arr_instance_id == 2
+
+
+def test_a_stop_pressed_mid_search_ends_the_search(search):
+    """Stop raises through the provider callback, inside the search itself.
+    The broad failure handler must not swallow it: a stopped batch search
+    would otherwise run every remaining language and episode of the current
+    show, logging a traceback for each."""
+    from app.jobs_queue import JobCancelled
+
+    def cancelled_by_stop(**kwargs):
+        raise JobCancelled("Job Search (1) was cancelled", job_id=1)
+
+    search.monkeypatch.setattr(search.module, "download_best_subtitles", cancelled_by_stop)
+
+    with pytest.raises(JobCancelled):
+        search.run(job_id=1)
+
+
+def test_another_jobs_stop_ends_this_search_as_one_failed_episode(search):
+    """The pool a search reports its progress through is shared between the
+    jobs of a profile, so the callback of a stopped job raises inside this
+    search as well. That stop belongs to the other job: it is one failed
+    episode here, not a stop of this job, whose own stop still ends it."""
+    from app.jobs_queue import JobCancelled
+
+    def cancelled_by_stop(**kwargs):
+        raise JobCancelled("Job Other Search (2) was cancelled", job_id=2)
+
+    search.monkeypatch.setattr(search.module, "download_best_subtitles", cancelled_by_stop)
+
+    # The search ends with no subtitle, like any failed episode, not with the
+    # stop of this job.
+    assert search.run(job_id=1) == []
 
 
 def test_the_search_hands_its_rejected_candidates_to_the_detector(search):

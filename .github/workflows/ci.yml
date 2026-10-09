@@ -13,6 +13,8 @@ name: CI
 #   versions, with exactly the same jobs and steps on each.
 # - A change that touches documentation only runs the Docs job and skips the
 #   rest; .github/scripts/ci_plan.py decides, and fails towards running more.
+# - Release hero runs for a change to what it builds from, and on the
+#   release pull request, the schedule and a manual run; the planner decides.
 #
 # scripts/ci/run-local.sh runs the same suites on a workstation, in parallel,
 # against a throwaway PostgreSQL.
@@ -62,6 +64,7 @@ jobs:
       code: ${{ steps.plan.outputs.code }}
       docs: ${{ steps.plan.outputs.docs }}
       python: ${{ steps.plan.outputs.python }}
+      hero: ${{ steps.plan.outputs.hero }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -159,6 +162,19 @@ jobs:
         run: npm run check:fmt
         working-directory: ${{ env.UI_DIRECTORY }}
 
+      - name: Check e2e harness tests are collected
+        # The e2e harness's own tests run in the Frontend tests shards as a
+        # vitest project of their own. A glob or a move that left it with no
+        # files would pass without a word, so it must find at least one.
+        run: |
+          files=$(npx vitest list --project e2e-harness --filesOnly)
+          if [ -z "$files" ]; then
+            echo "The e2e-harness vitest project collected no test files"
+            exit 1
+          fi
+          echo "$files"
+        working-directory: ${{ env.UI_DIRECTORY }}
+
   frontend-tests:
     name: Frontend tests ${{ matrix.shard }}/3
     needs: changes
@@ -231,6 +247,44 @@ jobs:
           npx vitest run --merge-reports=.vitest-reports --coverage
         working-directory: ${{ env.UI_DIRECTORY }}
 
+  # The Remotion project that renders each release's hero artwork. Nothing else
+  # builds it, so a broken tree used to surface only at the release cut. Plan
+  # starts it when the change touches what it builds from.
+  release-hero:
+    name: Release hero
+    needs: changes
+    if: ${{ needs.changes.outputs.hero == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - *checkout
+
+      - name: Cache node_modules
+        # An exact key and no restore-keys, so a hit is the tree `npm ci` would
+        # build. It also holds the headless Chrome that Remotion downloads.
+        id: hero-modules
+        uses: actions/cache@v6
+        with:
+          path: scripts/release/hero/node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('frontend/.nvmrc') }}-hero-${{ hashFiles('scripts/release/hero/package.json', 'scripts/release/hero/package-lock.json') }}
+
+      - *setup-node
+
+      - name: Install dependencies
+        if: ${{ steps.hero-modules.outputs.cache-hit != 'true' }}
+        run: npm ci
+        working-directory: scripts/release/hero
+
+      - name: Check Types
+        run: npx tsc --noEmit
+        working-directory: scripts/release/hero
+
+      - name: Render one still
+        # Frame 0 of the Hero composition, to the runner's temp folder rather
+        # than out/, which is where release artwork is written.
+        run: npm run still -- "$RUNNER_TEMP/hero.png" --frame=0
+        working-directory: scripts/release/hero
+
   # The backend is split into seven jobs per Python version. They share their
   # setup through YAML anchors, so every job installs exactly what the single
   # backend job used to, and every Python version runs exactly the same steps.
@@ -260,6 +314,7 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             dev-requirements.txt
+            postgres-requirements.txt
 
       - &install-ui
         name: Install UI
@@ -292,6 +347,12 @@ jobs:
       - name: Lint with ruff
         run: ruff check .
 
+      - name: Package release and fresh-volume bootstrap checks
+        run: |
+          python3 packaging/test_release.py
+          python3 packaging/stack/test_bootstrap.py
+          python3 packaging/test_marketplaces.py
+
       - name: pytest compat subpackage
         run: |
           pip install pytest pyjwt
@@ -309,7 +370,6 @@ jobs:
             tests/bazarr/test_app_cors.py \
             tests/bazarr/test_app_get_providers.py \
             tests/bazarr/test_retired_provider_config_compat.py \
-            tests/bazarr/test_settings_profile_deletion.py \
             tests/bazarr/test_standard_job_actions.py \
             tests/bazarr/test_jellyfin_apikey_location.py \
             tests/bazarr/test_emby_api.py \
@@ -346,6 +406,7 @@ jobs:
             tests/bazarr/test_mass_download_path_mapping.py \
             tests/bazarr/test_processing_postprocessing.py \
             tests/bazarr/test_upload_background_sync.py \
+            tests/bazarr/test_upload_auth_parsing.py \
             tests/bazarr/test_sync_progress_report.py \
             tests/bazarr/test_subsync_engines.py \
             tests/bazarr/test_autosubsync_diagnostics.py \
@@ -427,6 +488,7 @@ jobs:
             tests/bazarr/test_app_notifier.py \
             tests/bazarr/test_auto_translation_profile.py \
             tests/bazarr/test_backup_contract.py \
+            tests/bazarr/test_build_stamp.py \
             tests/bazarr/test_ci_guard_list.py \
             tests/bazarr/test_ci_plan.py \
             tests/bazarr/test_combine_aligner.py \
@@ -497,6 +559,8 @@ jobs:
             tests/bazarr/test_supervisor_stages.py \
             tests/bazarr/test_system_logs_api.py \
             tests/bazarr/test_tracemalloc_dumper.py \
+            tests/bazarr/test_translate_availability.py \
+            tests/bazarr/test_translate_failure_record.py \
             tests/bazarr/test_translate_job_media_name.py \
             tests/bazarr/test_translator_auth.py \
             tests/bazarr/test_upgrade_embedded_history.py \
@@ -561,11 +625,13 @@ jobs:
 
       - name: pytest cross-instance isolation guards 1/5 (isolated per file)
         env: &postgres-url
-          # Same throwaway credentials, in URL form.
-          BAZARR_PG_TEST_URL: postgresql+psycopg://postgres:postgres@localhost:5432/bazarr_test  # pragma: allowlist secret
+          # Same throwaway credentials, in URL form. The driver is the one the
+          # image installs from postgres-requirements.txt, named explicitly:
+          # a bare postgresql:// means psycopg 3 from SQLAlchemy 2.1 on.
+          BAZARR_PG_TEST_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/bazarr_test  # pragma: allowlist secret
         run: |
           set -e
-          pip install "psycopg[binary]"
+          pip install -r postgres-requirements.txt
           for f in \
             tests/bazarr/test_discover_digital_releases.py \
             tests/bazarr/test_discover_recent_episodes.py \
@@ -577,6 +643,7 @@ jobs:
             tests/bazarr/test_history_owner_resolution.py \
             tests/bazarr/test_navigation_local_ids.py \
             tests/bazarr/test_wanted_instance_scope.py \
+            tests/bazarr/test_wanted_translate_gate.py \
             tests/bazarr/test_api_utils_images.py \
             tests/bazarr/test_blacklist_delete_scope.py \
             tests/bazarr/test_threading_followup.py \
@@ -585,6 +652,7 @@ jobs:
             tests/bazarr/test_anilist_index.py \
             tests/bazarr/test_package_info_location.py \
             tests/bazarr/test_translate_owner_threading.py \
+            tests/bazarr/test_subtitle_delete_ownership.py \
             tests/bazarr/test_sports_library_lookup_pg.py ; do
             echo "::group::$f"
             pytest "$f" -p no:cacheprovider -q
@@ -611,7 +679,7 @@ jobs:
         env: *postgres-url
         run: |
           set -e
-          pip install "psycopg[binary]"
+          pip install -r postgres-requirements.txt
           for f in \
             tests/bazarr/test_discover_metadata.py \
             tests/bazarr/test_discover_feeds.py \
@@ -631,6 +699,7 @@ jobs:
             tests/bazarr/test_triage_low_findings.py \
             tests/bazarr/test_provider_hub_worker_reaper.py \
             tests/bazarr/test_embedded_track_eligibility.py \
+            tests/bazarr/test_settings_profile_deletion.py \
             tests/bazarr/test_upstream_db_adoption_pg.py ; do
             echo "::group::$f"
             pytest "$f" -p no:cacheprovider -q
@@ -657,7 +726,7 @@ jobs:
         env: *postgres-url
         run: |
           set -e
-          pip install "psycopg[binary]"
+          pip install -r postgres-requirements.txt
           for f in \
             tests/bazarr/test_discover_download.py \
             tests/bazarr/test_seerr_operations.py \
@@ -705,7 +774,7 @@ jobs:
         env: *postgres-url
         run: |
           set -e
-          pip install "psycopg[binary]"
+          pip install -r postgres-requirements.txt
           for f in \
             tests/bazarr/test_discover_episodes.py \
             tests/bazarr/test_discover_search.py \
@@ -715,6 +784,7 @@ jobs:
             tests/bazarr/test_sportarr_kind_migration.py \
             tests/bazarr/test_sportarr_events.py \
             tests/bazarr/test_sportarr_profile_hooks.py \
+            tests/bazarr/test_sportarr_translate_dedupe.py \
             tests/bazarr/test_subtitle_ownership_revision.py \
             tests/bazarr/test_sportarr_artifact_migration.py \
             tests/bazarr/test_sportarr_settings.py \
@@ -729,6 +799,7 @@ jobs:
             tests/bazarr/test_provider_hub_ai_events.py \
             tests/bazarr/test_ai_translated_history.py \
             tests/bazarr/test_embedded_translate_api_scope.py \
+            tests/bazarr/test_episode_download_label.py \
             tests/bazarr/test_upstream_db_adoption.py ; do
             echo "::group::$f"
             pytest "$f" -p no:cacheprovider -q
@@ -755,7 +826,7 @@ jobs:
         env: *postgres-url
         run: |
           set -e
-          pip install "psycopg[binary]"
+          pip install -r postgres-requirements.txt
           for f in \
             tests/bazarr/test_discover_copy_matching.py \
             tests/bazarr/test_discover_raw_query.py \
@@ -777,7 +848,9 @@ jobs:
             tests/bazarr/test_threading_scope.py \
             tests/bazarr/test_path_mappings_instance.py \
             tests/bazarr/test_job_module_identity.py \
-            tests/bazarr/test_parser_owner_threading.py ; do
+            tests/bazarr/test_episode_subtitle_job_completion.py \
+            tests/bazarr/test_parser_owner_threading.py \
+            tests/bazarr/test_postgres_driver_pin.py ; do
             echo "::group::$f"
             pytest "$f" -p no:cacheprovider -q
             echo "::endgroup::"
@@ -797,6 +870,7 @@ jobs:
       - frontend-checks
       - frontend-tests
       - frontend-coverage
+      - release-hero
       - backend-core
       - backend-suites
       - backend-isolation-1
@@ -821,10 +895,28 @@ jobs:
           problems = []
           if plan["result"] != "success":
               problems.append(f"Plan finished as {plan['result']}")
-          wanted = {"docs": outputs.get("docs") == "true"}
+          # The Plan output that gates each job, named per job rather than
+          # defaulted, so a test can compare this map with the jobs' own `if:`
+          # conditions. A job missing from it is a KeyError, which fails here.
+          gates = {
+              "docs": "docs",
+              "frontend-build": "code",
+              "frontend-checks": "code",
+              "frontend-tests": "code",
+              "frontend-coverage": "code",
+              "release-hero": "hero",
+              "backend-core": "code",
+              "backend-suites": "code",
+              "backend-isolation-1": "code",
+              "backend-isolation-2": "code",
+              "backend-isolation-3": "code",
+              "backend-isolation-4": "code",
+              "backend-isolation-5": "code",
+          }
+          wanted = {}
           for name in needs:
-              if name not in ("changes", "docs"):
-                  wanted[name] = outputs.get("code") == "true"
+              if name != "changes":
+                  wanted[name] = outputs.get(gates[name]) == "true"
           for name, required in sorted(wanted.items()):
               result = needs[name]["result"]
               expected = "success" if required else "skipped"

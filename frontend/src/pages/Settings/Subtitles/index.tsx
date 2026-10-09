@@ -696,6 +696,13 @@ const SettingsSubtitlesView: FunctionComponent = () => {
             label="Command"
             settingKey="settings-general-postprocessing_cmd"
           ></Text>
+          <Message>
+            The command runs directly, without a shell. For pipes, redirects, &&
+            or environment variables, put the command in a script and pass the
+            placeholders to it as separate arguments. On Windows, use an
+            executable, or an interpreter with a script file, instead of a .bat
+            or .cmd file.
+          </Message>
           <Table highlightOnHover fs="sm">
             <Table.Tbody>{commandOptionElements}</Table.Tbody>
           </Table>

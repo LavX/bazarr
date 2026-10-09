@@ -8,7 +8,7 @@ import rarfile
 
 from dogpile.cache.region import register_backend as register_cache_backend
 
-from app.config import settings, configure_captcha_func, write_config
+from app.config import settings, configure_captcha_func, remove_settings_section, write_config
 from app.get_args import args
 from app.logger import configure_logging
 from utilities.binaries import get_binary, BinaryNotFound
@@ -164,6 +164,13 @@ try:
 except Exception:  # pragma: no cover - hub failures must not prevent startup
     logging.exception("Unable to activate staged Provider Hub installations on startup")
 try:
+    # A package uploaded for an install that never ran: its job did not
+    # survive the restart, so nothing will install or remove it now.
+    from provider_hub.service import discard_local_package_uploads
+    discard_local_package_uploads()
+except Exception:  # pragma: no cover - hub failures must not prevent startup
+    logging.exception("Unable to remove leftover Provider Hub package uploads on startup")
+try:
     from provider_hub.registry import register_active_provider_classes
     registered = register_active_provider_classes()
     if registered:
@@ -196,7 +203,7 @@ if provider_hub_registration_ok:
         if provider_id not in existing_providers and hasattr(settings, provider_id)
     )
     for stale_provider_section in stale_provider_sections:
-        settings.unset(stale_provider_section.upper())
+        remove_settings_section(stale_provider_section)
     if stale_provider_sections:
         logging.info("Removed leftover config sections of retired providers: %s",
                      ", ".join(stale_provider_sections))

@@ -3,6 +3,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { credentials, loginIfAsked } from "./lib/auth";
+import { externalBaseURL } from "./lib/container";
 
 /**
  * Gives the run a private scratch directory the workers can coordinate in.
@@ -16,12 +17,15 @@ export default async function globalSetup() {
   process.env.BAZARR_E2E_RUN_DIR = runDir;
 
   const external = process.env.BAZARR_E2E_URL;
-  if (!external || credentials() === null) return;
+  if (!external) return;
+  // Refused here, once, before any login is tried against the wrong page.
+  const baseURL = externalBaseURL(external);
+  if (credentials() === null) return;
 
   const browser = await chromium.launch();
   try {
     const context = await browser.newContext({
-      baseURL: external.replace(/\/+$/, ""),
+      baseURL,
       locale: "en-US",
     });
     await loginIfAsked(await context.newPage());

@@ -56,6 +56,24 @@ class EpisodeApi extends BaseApi {
     return response.data;
   }
 
+  async historyBySeriesId(seriesId: number, signal?: AbortSignal) {
+    const response = await this.get<DataWrapperWithTotal<History.Episode>>(
+      "/history",
+      // The series detail table reads score + provider for every episode's
+      // subtitles in one request, including the Embedded Source rows the
+      // paginated history hides by default. It never reads upgradable, so
+      // the full-library upgrade scan is skipped for this call.
+      {
+        series_id: seriesId,
+        include_embedded: true,
+        length: -1,
+        include_upgradable: false,
+      },
+      signal,
+    );
+    return response.data;
+  }
+
   async downloadSubtitles(
     seriesid: number,
     episodeid: number,
@@ -63,11 +81,16 @@ class EpisodeApi extends BaseApi {
     arrInstanceId?: number,
   ) {
     // arr_instance_id (#156) routes the search/download to the owning instance.
-    await this.patch("/subtitles", form, {
-      seriesid,
-      episodeid,
-      arr_instance_id: arrInstanceId,
-    });
+    const response = await this.patch<{ job_id: number | null } | undefined>(
+      "/subtitles",
+      form,
+      {
+        seriesid,
+        episodeid,
+        arr_instance_id: arrInstanceId,
+      },
+    );
+    return response.data;
   }
 
   async uploadSubtitles(
@@ -109,7 +132,12 @@ class EpisodeApi extends BaseApi {
     episodeid: number,
     form: FormType.AddBlacklist,
   ) {
-    await this.post("/blacklist", form, { seriesid, episodeid });
+    const response = await this.post<{ job_id: number | null } | undefined>(
+      "/blacklist",
+      form,
+      { seriesid, episodeid },
+    );
+    return response.data;
   }
 
   async deleteBlacklist(all?: boolean, form?: FormType.DeleteBlacklist) {

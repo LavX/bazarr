@@ -221,10 +221,10 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
       if (!hasMedia) return;
       let cancelled = false;
       const infoUrl = appendArrInstanceParam(
-        `${Environment.baseUrl}/api/editor/info?mediaType=${mediaType}&mediaId=${mediaId}&apikey=${encodeURIComponent(apiKey)}`,
+        `${Environment.baseUrl}/api/editor/info?mediaType=${encodeURIComponent(mediaType)}&mediaId=${mediaId}`,
         arrInstanceId,
       );
-      fetch(infoUrl)
+      fetch(infoUrl, { headers: { "X-API-KEY": apiKey } })
         .then((r) => (r.ok ? r.json() : null))
         .then((data) => {
           if (cancelled || !data) return;

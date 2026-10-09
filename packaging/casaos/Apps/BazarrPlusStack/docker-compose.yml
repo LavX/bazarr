@@ -1,0 +1,301 @@
+name: bazarr-plus-stack
+
+services:
+  initialize:
+    image: ghcr.io/lavx/bazarr:2.7.0@sha256:90a5c184b0af41602ff78ea7286e0c5f2c4c284c9b18f71427d9ddbeb0b6531c
+    entrypoint: [python, -c]
+    command:
+      - |
+        import hashlib
+        import json
+        import os
+        from pathlib import Path
+        import re
+        import secrets
+        import stat
+        import sys
+
+        root, data = map(Path, sys.argv[1:3])
+        uid, gid, translator_uid, translator_gid = map(int, sys.argv[3:7])
+        config_dir = root / "config"
+        config = config_dir / "config.yaml"
+        key_file = data / "encryption.key"
+        marker = root / ".bazarr-stack-v1.json"
+        journal = root / ".bazarr-stack-init.json"
+        journal_format = '{"stack_init": 1, "key": "%s"}\n'
+        foreign = ("Stack setup was interrupted, but the volumes hold data it did not write. "
+                   "Existing data was left untouched; restore a backup or use fresh volumes.")
+        for path in (root, data, config_dir, config, key_file, marker, journal):
+            if path.is_symlink():
+                sys.exit("Stack initialization refused a symlink. Use fresh dedicated volumes.")
+
+        def read(path):
+            # Nonblocking so a FIFO cannot stall setup; only regular files are read.
+            handle = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                if not stat.S_ISREG(os.fstat(handle).st_mode):
+                    sys.exit("Stack initialization refused a file that is not a regular file. "
+                             "Existing data was left untouched.")
+                chunks = []
+                while True:
+                    chunk = os.read(handle, 65536)
+                    if not chunk:
+                        return b"".join(chunks)
+                    chunks.append(chunk)
+            finally:
+                os.close(handle)
+
+        def sync(directory):
+            handle = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(handle)
+            finally:
+                os.close(handle)
+
+        def write_all(handle, content):
+            view = memoryview(content)
+            while view:
+                view = view[os.write(handle, view):]
+
+        def replace(path, content, owner, group):
+            temporary = path.with_name(path.name + ".tmp")
+            handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            try:
+                write_all(handle, content)
+                os.fchown(handle, owner, group)
+                os.fsync(handle)
+            finally:
+                os.close(handle)
+            os.replace(temporary, path)
+            sync(path.parent)
+
+        def planned(key):
+            seed = {"translator": {
+                "openrouter_url": "http://subtitle-translator:8765",
+                "openrouter_encryption_key": key,
+            }}
+            for provider in ("legendasdivx", "napiprojekt", "opensubtitles", "prijevodionline",
+                             "sub_scene", "subs4series", "turkcealtyaziorg", "wizdom", "yavkanet"):
+                seed[provider] = {"flaresolverr_url": "http://flaresolverr:8191/v1"}
+            saved = {"version": 1, "key_sha256": hashlib.sha256(key.encode()).hexdigest()}
+            # The marker is written last: its presence means both volumes are complete.
+            return [(key_file, (key + "\n").encode(), translator_uid, translator_gid),
+                    (config, (json.dumps(seed, indent=2) + "\n").encode(), uid, gid),
+                    (marker, (json.dumps(saved) + "\n").encode(), uid, gid)]
+
+        def journal_key(content):
+            # A torn journal is a prefix of the fixed format; anything else is not ours.
+            template = (journal_format % ("#" * 64)).encode()
+            if len(content) > len(template) or any(
+                    found not in b"0123456789abcdef" if wanted == ord("#") else found != wanted
+                    for found, wanted in zip(content, template)):
+                sys.exit(foreign)
+            if len(content) < len(template):
+                return None
+            start = journal_format.index("%s")
+            return content[start:start + 64].decode()
+
+        def resume():
+            key = journal_key(read(journal))
+            with os.scandir(root) as entries:
+                root_names = {entry.name for entry in entries}
+            with os.scandir(data) as entries:
+                data_names = {entry.name for entry in entries}
+            if key is None:
+                if root_names != {journal.name} or data_names:
+                    sys.exit(foreign)
+                os.unlink(journal)
+                sync(root)
+                return None
+            owned = {}
+            for path, content, _, _ in planned(key):
+                owned[path] = (content, True)
+                owned[path.with_name(path.name + ".tmp")] = (content, False)
+            stale = []
+            directories = [root, data]
+            while directories:
+                directory = directories.pop()
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        path = directory / entry.name
+                        if path == journal:
+                            continue
+                        if path == config_dir and entry.is_dir(follow_symlinks=False):
+                            directories.append(path)
+                            continue
+                        if path not in owned or not entry.is_file(follow_symlinks=False):
+                            sys.exit(foreign)
+                        content, final = owned[path]
+                        found = read(path)
+                        if found != content and (final or not content.startswith(found)):
+                            sys.exit(foreign)
+                        if not final:
+                            stale.append(path)
+            for path in stale:
+                os.unlink(path)
+                sync(path.parent)
+            return key
+
+        def finish(key):
+            if not config_dir.exists():
+                os.mkdir(config_dir, 0o700)
+                sync(root)
+            os.chown(config_dir, uid, gid, follow_symlinks=False)
+            os.chown(root, uid, gid, follow_symlinks=False)
+            os.chown(data, translator_uid, translator_gid, follow_symlinks=False)
+            for path, content, owner, group in planned(key):
+                if not path.exists():
+                    replace(path, content, owner, group)
+            os.unlink(journal)
+            sync(root)
+
+        if marker.exists():
+            if not config.is_file() or not key_file.is_file():
+                sys.exit("Stack configuration or translator key is missing. Restore both volumes from backup.")
+            key = read(key_file).decode().strip()
+            saved = json.loads(read(marker))
+            if (not re.fullmatch(r"[0-9a-f]{64}", key)
+                    or saved != {"version": 1, "key_sha256": hashlib.sha256(key.encode()).hexdigest()}):
+                sys.exit("Stack volumes do not match. Restore their matching backup; the key was not changed.")
+            if journal.exists():
+                # Setup stopped after its final marker; drop the finished journal.
+                if read(journal) != (journal_format % key).encode():
+                    sys.exit("Stack volumes do not match. Restore their matching backup; the key was not changed.")
+                os.unlink(journal)
+                sync(root)
+            print("Existing stack configuration preserved.")
+            sys.exit(0)
+
+        if min(uid, gid, translator_uid, translator_gid) < 0:
+            sys.exit("User and group IDs must be non-negative integers.")
+        os.umask(0o077)
+        try:
+            key = resume() if journal.exists() else None
+            if key is None:
+                if any(root.iterdir()) or any(data.iterdir()):
+                    sys.exit("Stack initialization needs empty volumes. Existing data was left untouched.")
+                key = secrets.token_hex(32)
+                # The journal comes first so an interrupted setup can prove what it wrote.
+                handle = os.open(journal, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                try:
+                    write_all(handle, (journal_format % key).encode())
+                    os.fsync(handle)
+                finally:
+                    os.close(handle)
+                sync(root)
+            finish(key)
+        except OSError as exc:
+            sys.exit(f"Stack initialization could not finish: {exc.strerror or exc}. "
+                     "Fix volume ownership or permissions, then start the stack again; setup resumes safely.")
+        print("Stack initialized. Companion connections are ready; finish setup in Bazarr+.")
+      - /config
+      - /translator-data
+      - "1000"
+      - "1000"
+      - "1000"
+      - "1000"
+    volumes:
+      - bazarr-config:/config
+      - translator-data:/translator-data
+    network_mode: none
+    restart: "no"
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    healthcheck:
+      disable: true
+
+  bazarr:
+    image: ghcr.io/lavx/bazarr:2.7.0@sha256:90a5c184b0af41602ff78ea7286e0c5f2c4c284c9b18f71427d9ddbeb0b6531c
+    restart: unless-stopped
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+      subtitle-translator:
+        condition: service_healthy
+      flaresolverr:
+        condition: service_healthy
+    ports:
+      - "0.0.0.0:6767:6767"
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: UTC
+    volumes:
+      - bazarr-config:/config
+      # Add movie, TV and sports bind mounts here when connecting your library.
+    read_only: true
+    tmpfs: [/tmp:size=512m]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID]
+
+  subtitle-translator:
+    image: ghcr.io/lavx/ai-subtitle-translator:v2.1.1@sha256:e22abba9625b96df6727354f10933da312a084ffeae68f0eb1f9a82492f5e48d
+    restart: unless-stopped
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+    environment:
+      ENCRYPTION_KEY_FILE: /app/data/encryption.key
+      UI_ENABLED: "false"
+      TZ: UTC
+    volumes:
+      - translator-data:/app/data
+    read_only: true
+    tmpfs: [/tmp:size=256m]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:8765/health]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:v3.5.2@sha256:c80ae007ce2ccdcd217a12426e4f039ef763ff90738c808d38810c3e59323767
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: info
+      LOG_HTML: "false"
+      TZ: UTC
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:8191/health]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+volumes:
+  bazarr-config:
+  translator-data:
+
+x-casaos:
+  id: com.lavx.bazarr-plus-stack
+  main: bazarr
+  index: /
+  port_map: "6767"
+  scheme: http
+  icon: https://lavx.github.io/bazarr/screenshots/logo128.png
+  title:
+    en_US: Bazarr+ Stack
+  tagline:
+    en_US: Bazarr+, AI Subtitle Translator and FlareSolverr in one install.
+  description:
+    en_US: >-
+      A prewired subtitle stack for movies, TV and sports. Companion URLs and
+      translator authentication are set up automatically. Finish setup in
+      Bazarr+ and add your own OpenRouter key if you want AI translation.
+      Uses fresh persistent volumes; existing installations are not imported.
+  author: LavX
+  developer: Bazarr+
+  category: Media
+  architectures: [amd64, arm64]
+  version: "2.7.0"
+  website: https://lavx.github.io/bazarr/
+  repo: https://github.com/LavX/bazarr
+  support: https://github.com/LavX/bazarr/issues

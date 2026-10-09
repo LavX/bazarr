@@ -603,12 +603,16 @@ def test_real_settings_followup_failure_preserves_saved_metadata_and_retires_old
     def fail(statement):
         raise RuntimeError("synthetic-private-followup-error")
     monkeypatch.setattr(sys.modules["app.database"].database, "execute", fail)
+    # The saved change is announced to other open pages; no socket runs here.
+    events = []
+    monkeypatch.setattr(sys.modules["api.system.settings"], "event_stream", lambda *args, **_kwargs: events.append(args))
     response = authenticated_client.post("/api/system/settings", data={
         "settings-discover-tmdb_access_token": "5ecafe77cafe77cafe77cafe77cafe77", "settings-discover-locale": "hu-HU",
     }, headers={"X-API-KEY": "metadata-test-key"})
     assert response.status_code == 503
     assert response.json == {"code": "discover_settings_refresh_failed",
                              "message": "Metadata settings were saved, but application refresh failed. Reload settings before retrying."}
+    assert events[-1] == ("settings",)
     status = get(authenticated_client, "status").json["data"]
     assert status["status"] == "available"
     assert status["revision"] != old["revision"]

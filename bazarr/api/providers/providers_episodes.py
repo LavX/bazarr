@@ -12,6 +12,7 @@ from sonarr.history import history_log  # noqa: F401
 from app.config import settings  # noqa: F401
 from app.jobs_queue import jobs_queue  # noqa: F401
 from subtitles.indexer.series import store_subtitles, list_missing_subtitles
+from api.swaggerui import job_queued_model
 
 from ..utils import authenticate
 
@@ -90,7 +91,8 @@ class ProviderEpisodes(Resource):
 
         providers_list = get_providers_sorted()
 
-        data = manual_search(episodePath, profileId, providers_list, sceneName, title, 'series')
+        data = manual_search(episodePath, profileId, providers_list, sceneName, title, 'series',
+                             arr_instance_id=episodeInfo.arr_instance_id)
         if isinstance(data, str):
             return data, 500
         return marshal(data, self.get_response_model, envelope='data')
@@ -107,9 +109,11 @@ class ProviderEpisodes(Resource):
     post_request_parser.add_argument('arr_instance_id', type=int, required=False,
                                      help='Owning Sonarr instance id (#156); scopes the download to it')
 
+    post_job_model = api_ns_providers_episodes.model('JobQueued', job_queued_model)
+
     @authenticate
     @api_ns_providers_episodes.doc(parser=post_request_parser)
-    @api_ns_providers_episodes.response(204, 'Success')
+    @api_ns_providers_episodes.response(202, 'Manual subtitle download queued', post_job_model)
     @api_ns_providers_episodes.response(401, 'Not Authenticated')
     @api_ns_providers_episodes.response(404, 'Episode not found')
     @api_ns_providers_episodes.response(500, 'Custom error messages')
@@ -126,7 +130,7 @@ class ProviderEpisodes(Resource):
         episode_id = args.get('episodeid')
         arr_instance_id = args.get('arr_instance_id')
 
-        episode_manually_download_specific_subtitle(sonarr_series_id=series_id,
+        job_id = episode_manually_download_specific_subtitle(sonarr_series_id=series_id,
                                                     sonarr_episode_id=episode_id,
                                                     hi=args.get('hi').capitalize(),
                                                     forced=args.get('forced').capitalize(),
@@ -136,4 +140,4 @@ class ProviderEpisodes(Resource):
                                                     job_id=None,
                                                     arr_instance_id=arr_instance_id)
 
-        return '', 204
+        return {'job_id': job_id or None}, 202

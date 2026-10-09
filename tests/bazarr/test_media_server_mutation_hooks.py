@@ -644,7 +644,7 @@ def test_upload_postprocessing_change_survives_later_failure(upload_flow, mutati
     from subtitles import upload, processing
     flow = upload_flow
     monkeypatch.setattr(processing, '_postprocessing_config', lambda *args: (True, 'fixture', False, 0))
-    monkeypatch.setattr(upload, 'pp_replace', lambda *args: 'fixture')
+    monkeypatch.setattr(upload, 'pp_replace', lambda *args: ['fixture'])
 
     def postprocess(command, path, subtitle_path):
         if changed:
@@ -681,7 +681,7 @@ def download_postprocessing(colliding_media, upload_flow, monkeypatch):
     monkeypatch.setattr(processing, 'database', state.db)
     monkeypatch.setattr(processing, '_defaul_sync_checker', lambda subtitle: False)
     monkeypatch.setattr(processing, '_postprocessing_config', lambda *args: (True, 'fixture', False, 0))
-    monkeypatch.setattr(processing, 'pp_replace', lambda *args: 'fixture')
+    monkeypatch.setattr(processing, 'pp_replace', lambda *args: ['fixture'])
     monkeypatch.setattr(processing, 'set_chmod', lambda **kwargs: None)
     monkeypatch.setattr(processing.path_mappings, 'path_replace_reverse_instance',
                         lambda path, owner, kind: path.replace(str(state.roots[owner]), '/upstream'))
@@ -790,7 +790,7 @@ def test_download_keeps_resolved_postprocessing_directories_when_settings_change
     def publish():
         try:
             # A legacy caller resolves the newly configured destination once.
-            post_processing.postprocessing('write', run.video, subtitle_path=str(run.sidecar))
+            post_processing.postprocessing(['write'], run.video, subtitle_path=str(run.sidecar))
         except BaseException as error:
             failures.append(error)
 
@@ -971,3 +971,27 @@ def test_bulk_mod_action_reaches_the_publication_hook(upload_flow, mutations, mo
     assert len(mutations) == 1
     assert (mutations[0].media_type, mutations[0].operation, mutations[0].arr_instance_id) == (
         'movie', 'edit', 7)
+
+
+@pytest.mark.parametrize('media_type', ['movie', 'series'])
+def test_invalid_optional_command_keeps_download_finalization(
+        download_postprocessing, monkeypatch, media_type):
+    from subtitles import processing
+    from utilities.post_processing import pp_replace
+
+    run = download_postprocessing
+    monkeypatch.setattr(processing, 'pp_replace', pp_replace)
+    monkeypatch.setattr(processing, '_postprocessing_config',
+                        lambda *args: (True, 'python -c "print({{release_info}})"', False, 0))
+    postprocess = Mock()
+    monkeypatch.setattr(processing, 'postprocessing', postprocess)
+
+    result = run.process(media_type)
+
+    assert result
+    assert run.sidecar.read_bytes() == b'Original'
+    notify = processing.notify_sonarr if media_type == 'series' else processing.notify_radarr
+    assert notify.called
+    assert processing.event_stream.called
+    assert processing.call_external_webhook.called
+    postprocess.assert_not_called()

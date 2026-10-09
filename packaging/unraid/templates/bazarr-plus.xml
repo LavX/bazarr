@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Container version="2">
+  <Name>bazarr-plus</Name>
+  <Repository>ghcr.io/lavx/bazarr:2.7.0</Repository>
+  <Registry>https://github.com/LavX/bazarr/pkgs/container/bazarr</Registry>
+  <Network>bridge</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/LavX/bazarr/issues</Support>
+  <Project>https://lavx.github.io/bazarr/</Project>
+  <Overview>Bazarr+ manages subtitles for movies, TV, and sports. Start with a fresh config, then connect your libraries. Media folders and translation companions are optional. This is the LavX fork, separate from upstream Bazarr. Before migrating, stop upstream Bazarr and back up its config. Never run both against the same config directory.</Overview>
+  <Category>MediaApp:Video</Category>
+  <WebUI>http://[IP]:[PORT:6767]</WebUI>
+  <Icon>https://lavx.github.io/bazarr/screenshots/logo128.png</Icon>
+  <ExtraSearchTerms>subtitles sonarr radarr sportarr translation</ExtraSearchTerms>
+  <ExtraParams>--read-only --tmpfs /tmp:rw,nosuid,nodev,size=512m --cap-drop=ALL --cap-add=CHOWN --cap-add=SETUID --cap-add=SETGID --security-opt=no-new-privileges:true</ExtraParams>
+  <Config Name="Web UI port" Target="6767" Default="6767" Mode="tcp" Description="Choose another host port if upstream Bazarr already uses 6767." Type="Port" Display="always" Required="true" Mask="false">6767</Config>
+  <Config Name="Config directory" Target="/config" Default="/mnt/user/appdata/bazarr-plus" Mode="rw" Description="Persistent settings, database, and plugins. Use a separate folder for a fresh installation." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/bazarr-plus</Config>
+  <Config Name="User ID" Target="PUID" Default="99" Mode="" Description="Unraid nobody defaults to 99. This user must be able to write subtitles beside your media." Type="Variable" Display="always" Required="true" Mask="false">99</Config>
+  <Config Name="Group ID" Target="PGID" Default="100" Mode="" Description="Unraid users defaults to 100. Match the group that can access your media." Type="Variable" Display="always" Required="true" Mask="false">100</Config>
+  <Config Name="Time zone" Target="TZ" Default="Etc/UTC" Mode="" Description="Use an IANA time zone such as Europe/Budapest." Type="Variable" Display="always" Required="true" Mask="false">Etc/UTC</Config>
+</Container>

@@ -13,7 +13,8 @@
     "ignoreDeprecations": "6.0",
     "baseUrl": "./",
     "paths": {
-      "@e2e/*": ["./*"]
+      "@e2e/*": ["./*"],
+      "@/*": ["../src/*"]
     }
   },
   "include": ["./**/*.ts", "../playwright.config.ts"]

@@ -1,6 +1,7 @@
 # coding=utf-8
 
 import logging
+import re
 import time
 import threading
 
@@ -49,6 +50,15 @@ def _enabled_instances(kind):
     except Exception:
         return []
 
+
+def _has_instances(kind):
+    """Whether the kind has any instance, enabled or not. False if the
+    registry can't be read yet."""
+    try:
+        return bool(ArrInstanceRepository(database).list(kind))
+    except Exception:
+        return False
+
 SIGNALR_ACTIVE_STATES = {0, 1, 2}
 UNKNOWN_SONARR_VERSION_VALUES = {"", "unknown", None}
 
@@ -64,6 +74,32 @@ def _signalr_transport_state_value(connection):
 
 def _signalr_connection_active(connection):
     return _signalr_transport_state_value(connection) in SIGNALR_ACTIVE_STATES
+
+
+def _stop_connection_quietly(connection):
+    try:
+        connection.stop()
+    except Exception:
+        pass
+
+
+# The feed URL carries the arr API key as access_token, and an error page from
+# the arr or a proxy in front of it can echo that URL back.
+_ACCESS_TOKEN_RE = re.compile(r'(access_token)(?:=|%3D)[^&\s\'"]+', re.IGNORECASE)
+
+
+def _start_error_summary(error):
+    # One line: a refused websocket upgrade carries the raw HTTP response.
+    summary = ' '.join(f'{type(error).__name__}: {error}'.split())
+    return _ACCESS_TOKEN_RE.sub(r'\1=(removed)', summary)
+
+
+def _start_error_key(error):
+    # Tells a repeat of the last failure from a new one. Only the first line
+    # counts: the raw HTTP response of a refused upgrade has a Date header that
+    # changes on every attempt.
+    lines = str(error).splitlines()
+    return type(error), lines[0] if lines else ''
 
 
 def _sonarr_signalr_core_support_state():
@@ -110,7 +146,137 @@ def _instance_sonarr_signalr_core_support_state(arr_instance_id):
     return _version_supports_signalr_core(version), version
 
 
-class SonarrSignalrClient:
+class _SignalrClientLifecycle:
+    """Start and stop bookkeeping shared by the Sonarr and Radarr clients.
+
+    Every start() and stop() moves the client to a new generation. A start()
+    whose generation is no longer current was stopped, or superseded by a later
+    start() of the same client, so its retry loops return instead of retrying
+    beside the new one. The lock orders a generation change against configure(),
+    so a retired start() never replaces the connection a newer one is using.
+    """
+    arr_name = None
+
+    def __init__(self):
+        super(_SignalrClientLifecycle, self).__init__()
+        self._lifecycle_lock = threading.Lock()
+        self._generation = 0
+        # Left unstarted on purpose: its kind is switched on, and every one of
+        # its instances is disabled. Nothing is expected to connect, so not
+        # being connected is no disconnection.
+        self.idle = False
+
+    def _begin_generation(self):
+        with self._lifecycle_lock:
+            self._generation += 1
+            return self._generation
+
+    def _is_current(self, generation):
+        return self._generation == generation
+
+    def _instance_gone(self):
+        if self.arr_instance_id is None:
+            return False
+        try:
+            return client_for_instance(database, self.arr_instance_id) is None
+        except Exception:
+            # The registry could not be read; the instance may well still be
+            # there, so keep retrying rather than give up on it.
+            return False
+
+    def _keep_retrying(self, generation):
+        if not self._is_current(generation):
+            return False
+        # A per-instance client whose instance was deleted or disabled would
+        # otherwise retry a server that is gone every 5s forever (a transiently
+        # unreachable instance still resolves a client, so it keeps retrying).
+        if self._instance_gone():
+            logging.info('BAZARR %s instance %s is gone or disabled; '
+                         'not starting its SignalR feed.', self.arr_name, self.arr_instance_id)
+            self.connected = False
+            return False
+        return True
+
+    def _current_only(self, handler):
+        """Wrap a connection callback so it runs only while the start() that
+        built the connection is current. configure() runs under the lifecycle
+        lock, so the generation read here is that start()'s. A retired
+        connection can still finish its handshake after a stop() or a newer
+        start(), and must not change ``connected`` then.
+
+        The wrapper takes no lock: signalrcore runs the callbacks on the
+        connection's receive thread, and configure() joins that thread, with
+        the lock held, when it closes the previous connection.
+        """
+        generation = self._generation
+
+        def callback():
+            if self._is_current(generation):
+                handler()
+
+        return callback
+
+    def _configure_if_current(self, generation):
+        """Build this start()'s connection, or return None when it has been
+        stopped or superseded, or configure() bailed (instance deleted/disabled).
+        """
+        with self._lifecycle_lock:
+            if not self._is_current(generation):
+                return None
+            self.configure()
+            return self.connection
+
+    def _connect(self, generation, connection):
+        logging.info('BAZARR trying to connect to %s SignalR feed...', self.arr_name)
+        last_failure = None
+        while self._is_current(generation):
+            try:
+                started = connection.start()
+            except Exception as e:
+                # An arr that is down fails signalrcore's urllib negotiation with
+                # URLError, a proxy answering with a page instead of JSON fails
+                # it with ValueError, and a refused websocket upgrade raises
+                # SocketHandshakeError. Letting any of them escape ends the feed
+                # thread until the next restart.
+                failure = _start_error_key(e)
+                # Warn once for each new reason, so the log says why the feed
+                # is down without repeating it every 5s.
+                level = logging.DEBUG if failure == last_failure else logging.WARNING
+                last_failure = failure
+                logging.log(level, 'BAZARR cannot connect to %s SignalR feed yet: %s',
+                            self.arr_name, _start_error_summary(e))
+                # Once negotiation succeeds, signalrcore marks the new transport
+                # connecting before it opens the socket, so a refused websocket
+                # leaves a transport behind that looks active. Stop it so the
+                # retry starts from a disconnected transport.
+                _stop_connection_quietly(connection)
+                if not self._keep_retrying(generation):
+                    break
+                time.sleep(5)
+                continue
+            if _signalr_connection_active(connection):
+                break
+            if not started:
+                time.sleep(5)
+        if not self._is_current(generation):
+            # A stop() or a newer start() landed while this connection was
+            # starting. Close it so no feed keeps running without an owner.
+            _stop_connection_quietly(connection)
+
+    def stop(self):
+        with self._lifecycle_lock:
+            self._generation += 1
+            self.connected = False
+            connection = self.connection
+        if connection is None:
+            return
+        logging.info('BAZARR SignalR client for %s is now disconnected.', self.arr_name)
+        connection.stop()
+
+
+class SonarrSignalrClient(_SignalrClientLifecycle):
+    arr_name = 'Sonarr'
+
     def __init__(self, arr_instance_id=None):
         super(SonarrSignalrClient, self).__init__()
         # arr_instance_id None == the legacy scalar/default path (byte-identical:
@@ -131,6 +297,7 @@ class SonarrSignalrClient:
         return _instance_sonarr_signalr_core_support_state(self.arr_instance_id)
 
     def start(self):
+        generation = self._begin_generation()
         supports_signalr, sonarr_version = self._support_state()
         if supports_signalr is None:
             logging.warning(
@@ -138,15 +305,7 @@ class SonarrSignalrClient:
                 'Retrying before starting the Sonarr SignalR feed.'
             )
         while supports_signalr is None:
-            # Stop retrying if this per-instance client's instance was deleted or
-            # disabled: otherwise the version probe re-runs every 5s forever for a
-            # server that is gone (a transient-unreachable instance still resolves
-            # a client, so it keeps retrying as before).
-            if self.arr_instance_id is not None and \
-                    client_for_instance(database, self.arr_instance_id) is None:
-                logging.info('BAZARR Sonarr instance %s is gone or disabled; '
-                             'not starting its SignalR feed.', self.arr_instance_id)
-                self.connected = False
+            if not self._keep_retrying(generation):
                 return
             time.sleep(5)
             supports_signalr, sonarr_version = self._support_state()
@@ -161,35 +320,16 @@ class SonarrSignalrClient:
             event_stream(type='badges')
             return
 
-        self.configure()
-        if self.connection is None:
-            # configure() bailed (instance deleted/disabled); nothing to connect.
+        connection = self._configure_if_current(generation)
+        if connection is None:
             return
-        logging.info('BAZARR trying to connect to Sonarr SignalR feed...')
-        while not _signalr_connection_active(self.connection):
-            try:
-                started = self.connection.start()
-            except OSError:
-                # signalrcore negotiates over urllib, so an arr that is down
-                # raises URLError, not requests' ConnectionError. Both are
-                # OSError subclasses; catching only the latter killed the feed
-                # thread for good when the arr was down at startup.
-                time.sleep(5)
-                continue
-            if not started and not _signalr_connection_active(self.connection):
-                time.sleep(5)
-
-    def stop(self):
-        logging.info('BAZARR SignalR client for Sonarr is now disconnected.')
-        if self.connection is None:
-            return
-        self.connection.stop()
+        self._connect(generation, connection)
 
     def restart(self):
         if self.connection:
             if _signalr_connection_active(self.connection):
                 self.stop()
-        if settings.general.use_sonarr:
+        if settings.general.use_sonarr and not self.idle:
             self.start()
 
     def exception_handler(self):
@@ -240,24 +380,24 @@ class SonarrSignalrClient:
             base_url = client.base_url()
             self.apikey_sonarr = client.api_key
         # Tear down any prior connection before overwriting it so a stale
-        # signalrcore reconnect thread is not orphaned.
+        # signalrcore reconnect thread is not orphaned. This closes the
+        # connection directly: stop() would retire the start() calling us.
         if self.connection is not None:
-            try:
-                self.stop()
-            except Exception:
-                pass
+            _stop_connection_quietly(self.connection)
         self.connection = build_signalr_connection(
             f"{base_url}/signalr/messages?access_token={self.apikey_sonarr}",
             HEADERS,
         )
-        self.connection.on_open(self.on_connect_handler)
-        self.connection.on_reconnect(self.on_reconnect_handler)
+        self.connection.on_open(self._current_only(self.on_connect_handler))
+        self.connection.on_reconnect(self._current_only(self.on_reconnect_handler))
         self.connection.on_close(lambda: logging.debug('BAZARR SignalR client for Sonarr is disconnected.'))
         self.connection.on_error(self.exception_handler)
         self.connection.on("receiveMessage", lambda data: feed_queue(data, self.arr_instance_id))
 
 
-class RadarrSignalrClient:
+class RadarrSignalrClient(_SignalrClientLifecycle):
+    arr_name = 'Radarr'
+
     def __init__(self, arr_instance_id=None):
         super(RadarrSignalrClient, self).__init__()
         # arr_instance_id None == the legacy scalar/default path (byte-identical).
@@ -267,32 +407,17 @@ class RadarrSignalrClient:
         self.connected = False
 
     def start(self):
-        self.configure()
-        if self.connection is None:
-            # configure() bailed (instance deleted/disabled); nothing to connect.
+        generation = self._begin_generation()
+        connection = self._configure_if_current(generation)
+        if connection is None:
             return
-        logging.info('BAZARR trying to connect to Radarr SignalR feed...')
-        while not _signalr_connection_active(self.connection):
-            try:
-                started = self.connection.start()
-            except OSError:
-                # URLError from signalrcore's urllib negotiate, as for Sonarr.
-                time.sleep(5)
-                continue
-            if not started and not _signalr_connection_active(self.connection):
-                time.sleep(5)
-
-    def stop(self):
-        logging.info('BAZARR SignalR client for Radarr is now disconnected.')
-        if self.connection is None:
-            return
-        self.connection.stop()
+        self._connect(generation, connection)
 
     def restart(self):
         if self.connection:
             if _signalr_connection_active(self.connection):
                 self.stop()
-        if settings.general.use_radarr:
+        if settings.general.use_radarr and not self.idle:
             self.start()
 
     def exception_handler(self):
@@ -333,16 +458,13 @@ class RadarrSignalrClient:
             base_url = client.base_url()
             self.apikey_radarr = client.api_key
         if self.connection is not None:
-            try:
-                self.stop()
-            except Exception:
-                pass
+            _stop_connection_quietly(self.connection)
         self.connection = build_signalr_connection(
             f"{base_url}/signalr/messages?access_token={self.apikey_radarr}",
             HEADERS,
         )
-        self.connection.on_open(self.on_connect_handler)
-        self.connection.on_reconnect(self.on_reconnect_handler)
+        self.connection.on_open(self._current_only(self.on_connect_handler))
+        self.connection.on_reconnect(self._current_only(self.on_reconnect_handler))
         self.connection.on_close(lambda: logging.debug('BAZARR SignalR client for Radarr is disconnected.'))
         self.connection.on_error(self.exception_handler)
         self.connection.on("receiveMessage", lambda data: feed_queue(data, self.arr_instance_id))
@@ -406,6 +528,12 @@ def dispatcher(data):
             logging.debug(f'Event received from Sonarr for series: {series_title} ({series_year})')  # noqa: G004
             if episodesChanged:
                 # this will happen if a season's monitored status is changed.
+                # sync_episodes also serves the bulk sync, so this caller makes
+                # the check update_one_series and sync_one_episode make.
+                if arr_instance_id is None and resolution.skip_unscoped_sync(
+                        database, 'sonarr', settings.general.use_sonarr,
+                        f'the episodes of series {media_id}'):
+                    return
                 arr_client = client_for_instance(database, arr_instance_id) if arr_instance_id is not None else None
                 sync_episodes(series_id=media_id, defer_search=settings.sonarr.defer_search_signalr, is_signalr=True,
                               arr_instance_id=arr_instance_id, arr_client=arr_client)
@@ -431,10 +559,15 @@ def dispatcher(data):
                 update_one_movie(movie_id=media_id, action=action, defer_search=settings.radarr.defer_search_signalr,
                                  is_signalr=True)
     except Exception as e:
-        logging.debug(f'BAZARR an exception occurred while parsing SignalR feed: {repr(e)}')  # noqa: G004
+        # Formatted by logging, which reports a failure to format rather than
+        # raising it, so nothing can escape from this handler.
+        logging.debug('BAZARR an exception occurred while parsing SignalR feed: %r', e)
+    except BaseException:
+        # Nothing an event raises may end the thread that consumes the feed,
+        # not even an exception outside Exception.
+        pass
     finally:
         event_stream(type='badges')
-        return
 
 
 def filter_nested_dict(data: dict) -> dict:
@@ -551,14 +684,33 @@ def all_sonarr_signalr_connected():
     LIVE only when every enabled feed is up, so a secondary instance whose feed
     is DOWN is not masked by the singleton's state (#156).
     """
-    return (sonarr_signalr_client.connected
+    return ((sonarr_signalr_client.connected or sonarr_signalr_client.idle)
             and all(c.connected for c in _sonarr_signalr_clients))
 
 
 def all_radarr_signalr_connected():
     """Radarr counterpart of :func:`all_sonarr_signalr_connected`."""
-    return (radarr_signalr_client.connected
+    return ((radarr_signalr_client.connected or radarr_signalr_client.idle)
             and all(c.connected for c in _radarr_signalr_clients))
+
+
+def _stop_clients_for_kind(singleton, extra_list):
+    """Stop the singleton and every extra client of a kind, then forget the
+    extras.
+
+    Every client is stopped regardless of transport state. A client mid-reconnect
+    is not in an active state but its signalrcore auto-reconnect thread
+    (max_attempts=None) keeps feeding receiveMessage events tagged with the old
+    arr_instance_id forever unless we stop() it, and a client still retrying an
+    arr that is down only leaves its retry loop once stopped. stop() is
+    None/already-stopped tolerant, so this is safe.
+    """
+    for client in [singleton, *extra_list]:
+        try:
+            client.stop()
+        except Exception:
+            pass
+    extra_list.clear()
 
 
 def _start_clients_for_kind(kind, singleton, extra_list, client_cls):
@@ -571,24 +723,21 @@ def _start_clients_for_kind(kind, singleton, extra_list, client_cls):
     ``update_*_<id>`` scheduler job - which is the only sync job the scheduler
     now registers (the scalar Host form was removed, so the scalar config is
     stale, #156). With more than one instance, each remaining instance gets one
-    extra tagged client. Only when there are ZERO enabled instances does the
-    singleton fall back to the scalar/default path (arr_instance_id None); with
-    use_sonarr/use_radarr on and no instance row, there is nothing live to do.
+    extra tagged client. Only when the kind has no instance at all does the
+    singleton fall back to the scalar/default path (arr_instance_id None).
+    When it has instances and every one is disabled, nothing starts: the
+    scalar settings mirror the last default, which may since have been deleted,
+    and the scheduler registers no sync for the kind either. The singleton is
+    marked idle then, so it reads as nothing to watch rather than a feed that
+    is down, and its restart() leaves it stopped.
     Like the scheduler fan-out, new instances are picked up on (re)start.
     """
     instances = _enabled_instances(kind)
-    # Stop EVERY previously-started extra before re-fanning out, regardless of
-    # transport state. A client mid-reconnect is not in an active state but its
-    # signalrcore auto-reconnect thread (max_attempts=None) keeps feeding
-    # receiveMessage events tagged with the old arr_instance_id forever unless we
-    # stop() it. stop() is None/already-stopped tolerant, so this is safe. (#156)
-    for client in extra_list:
-        try:
-            client.stop()
-        except Exception:
-            pass
-    extra_list.clear()
+    _stop_clients_for_kind(singleton, extra_list)
 
+    singleton.idle = not instances and _has_instances(kind)
+    if singleton.idle:
+        return []
     if len(instances) >= 1:
         singleton.arr_instance_id = instances[0].id
         clients = [singleton] + [client_cls(inst.id) for inst in instances[1:]]
@@ -614,15 +763,15 @@ def start_radarr_signalr():
 
 def restart_sonarr_signalr():
     """Stop every Sonarr client and re-fan-out (used on settings/instance change)."""
-    if sonarr_signalr_client.connection and _signalr_connection_active(sonarr_signalr_client.connection):
-        sonarr_signalr_client.stop()
     if settings.general.use_sonarr:
         start_sonarr_signalr()
+    else:
+        _stop_clients_for_kind(sonarr_signalr_client, _sonarr_signalr_clients)
 
 
 def restart_radarr_signalr():
     """Stop every Radarr client and re-fan-out (used on settings/instance change)."""
-    if radarr_signalr_client.connection and _signalr_connection_active(radarr_signalr_client.connection):
-        radarr_signalr_client.stop()
     if settings.general.use_radarr:
         start_radarr_signalr()
+    else:
+        _stop_clients_for_kind(radarr_signalr_client, _radarr_signalr_clients)

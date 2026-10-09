@@ -392,7 +392,8 @@ def test_a_remembered_count_stays_exact_as_the_log_changes(tmp_path, seed):
                 assert page.total == len(expected), (stored_settings, level, contains, limit, offset)
                 assert page.entries == expected[offset:offset + limit]
         if rng.random() < 0.15:
-            # Rewritten in place: same inode, different bytes.
+            # Truncated and refilled on the same inode, with records the
+            # remembered one is not among.
             data = _random_log(rng, rng.randint(0, 30), delimiter, start=written)
             with open(path, 'r+b') as handle:
                 handle.truncate(0)
@@ -413,12 +414,13 @@ def test_a_remembered_count_stays_exact_as_the_log_changes(tmp_path, seed):
         written += 30
 
 
-def test_a_rewritten_file_is_counted_again_rather_than_trusted(tmp_path):
+def test_a_truncated_and_refilled_file_is_counted_again_rather_than_trusted(tmp_path):
     path = tmp_path / 'bazarr.log'
     _numbered_log(path, 300)
     cache = CountCache()
     assert read_log_page(path, cache=cache).total == 300
-    # Same inode, different content that runs past the remembered record.
+    # Truncated and refilled on the same inode, past where the remembered
+    # record was.
     with open(path, 'r+b') as handle:
         handle.truncate(0)
         levels = ['INFO'] * 700

@@ -15,6 +15,7 @@ import rarfile
 import requests
 
 from dataclasses import dataclass, field
+from functools import partial
 from os import scandir
 from collections import defaultdict
 from bs4 import UnicodeDammit
@@ -181,9 +182,9 @@ class _ProviderConfigs(dict):
                 # a provider that is merely unreachable right now comes back on
                 # its own, with the new config rather than the one the user
                 # just changed away from.
-                self._pool.throttle_callback(key, error)
+                self._pool._notify_throttle(key, error)
             else:
-                self._pool.initialized_providers[key] = provider
+                self._pool._install_provider(key, provider)
 
         if updated:
             logger.debug("Providers with config updates: %s", updated)
@@ -290,6 +291,28 @@ class ProviderExcludedError(KeyError):
     exception REPLACES an existing long backoff with the 10-minute default."""
 
 
+class ProviderExcludedWhileQueuedError(ProviderExcludedError):
+    """A request that waited for its turn on the provider's worker found the
+    provider excluded once it got there. Handled like any exclusion."""
+
+
+class ProviderBusyError(Exception):
+    """A request that could not get its turn on the provider's worker within
+    its own timeout. Deliberately not a ProviderExcludedError: an excluded
+    provider is discarded for the pool, and a busy one is healthy, so this
+    records no backoff and no discard."""
+
+
+def _outcome_recorded(provider):
+    """Tell a provider the pool has recorded the outcome of its last call.
+
+    A Provider Hub provider holds its next queued request until then; the
+    built-in providers have nothing to do.
+    """
+    recorded = getattr(provider, "outcome_recorded", None)
+    if recorded is not None:
+        recorded()
+
 
 def _adapt_throttle_callback(callback):
     """Negotiate the optional context once, without retrying callback failures."""
@@ -309,6 +332,44 @@ def _adapt_throttle_callback(callback):
     def legacy(*args, sports_context=None, **kwargs):
         return callback(*args, **kwargs)
     return legacy
+
+
+def _format_callback_failure(exc, error):
+    """Render the traceback of exc and of the exceptions chained to it, with
+    their types and raise sites but none of their messages or notes.
+
+    exc was raised by a throttle callback that was handed error, and the
+    callback may have copied error's text into its own message, a note, an
+    exception group or a wrapping error (a database error quoting the row it
+    failed to write, say). No message in the chain can be trusted to be free of
+    it, so none is printed. The chain stops at error, which the pool's handlers
+    log where they want it.
+    """
+    chain = []
+    seen = set()
+    link, connector = exc, None
+    while link is not None and link is not error and id(link) not in seen:
+        seen.add(id(link))
+        chain.append((link, connector))
+        if link.__cause__ is not None:
+            link, connector = link.__cause__, "The above exception was the direct cause of the following exception:"
+        elif not link.__suppress_context__:
+            link, connector = link.__context__, "During handling of the above exception, another exception occurred:"
+        else:
+            link = None
+
+    lines = []
+    for link, connector in reversed(chain):
+        lines.append("Traceback (most recent call last):\n")
+        lines.extend(traceback.format_tb(link.__traceback__))
+        exc_type = type(link)
+        module = exc_type.__module__
+        qualname = exc_type.__qualname__
+        lines.append((qualname if module in ("builtins", "__main__") else f"{module}.{qualname}") + "\n")
+        if connector:
+            lines.append(f"\n{connector}\n\n")
+    return "".join(lines)
+
 
 class SZProviderPool(ProviderPool):
     @staticmethod
@@ -451,9 +512,59 @@ class SZProviderPool(ProviderPool):
             logger.info('Initializing provider %s', name)
             provider = provider_registry[name](**self.provider_configs.get(name, {}))
             provider.initialize()
-            self.initialized_providers[name] = provider
+            self._install_provider(name, provider)
 
         return self.initialized_providers[name]
+
+    def _install_provider(self, name, provider):
+        """Store an instance this pool built, with the pool's admission check
+        attached, so a provider rebuilt by a settings save is gated like the
+        one it replaced."""
+        provider.admit = partial(self._admits, name)
+        self.initialized_providers[name] = provider
+
+    def _admits(self, name):
+        """Whether this pool may call the provider now: not discarded here,
+        and allowed by the adoption gate when one is set.
+
+        Consulted just before every provider call, not only on adoption, since
+        a provider can go on backoff after the search started. Never raises:
+        a broken check lets the call through rather than skipping a working
+        provider on every search.
+        """
+        try:
+            if name in self.discarded_providers:
+                return False
+            return self.adoption_gate is None or bool(self.adoption_gate(name))
+        except Exception:
+            logger.warning('Admission check for provider %r failed, calling it anyway', name, exc_info=True)
+            return True
+
+    def _notify_throttle(self, name, error, **context):
+        """Pass a provider failure to throttle_callback from an error handler.
+
+        A callback that raises is logged and otherwise ignored. Letting its
+        exception out would replace the provider's own failure, so the search
+        status, the backoff and the health record would all be derived from
+        the wrong cause, and the handler's remaining bookkeeping (discarding
+        the provider, dropping a torn-down instance) would be skipped. The
+        call is never retried; see _adapt_throttle_callback.
+        """
+        try:
+            self.throttle_callback(name, error, **context)
+        except Exception as callback_error:
+            # Provider messages can carry URLs with credentials in them, so
+            # the provider error is named by its type only.
+            if callback_error is error:
+                # The callback let the provider error itself out, so its
+                # traceback would end in that message; log without it.
+                logger.error('Throttle callback failed for provider %r by re-raising the %s it was recording',
+                             name, type(error).__name__)
+                return
+            # No exc_info: a formatter would print every message in the
+            # callback's chain, and any of them can quote the provider error.
+            logger.error('Throttle callback failed for provider %r while recording %s, messages left out:\n%s',
+                         name, type(error).__name__, _format_callback_failure(callback_error, error).rstrip())
 
     def retire_provider(self, name):
         """Terminate an initialized provider without throttling its name.
@@ -482,14 +593,14 @@ class SZProviderPool(ProviderPool):
             self.initialized_providers[name].terminate()
         except (requests.Timeout, socket.timeout) as e:
             logger.error('Provider %r timed out, improperly terminated', name)
-            self.throttle_callback(name, e)
+            self._notify_throttle(name, e)
         except Exception as e:
             logger.exception('Provider %r terminated unexpectedly', name)
-            self.throttle_callback(name, e)
+            self._notify_throttle(name, e)
+        finally:
+            del self.initialized_providers[name]
 
-        del self.initialized_providers[name]
-
-    def list_subtitles_provider(self, provider, video, languages, detailed=False):
+    def list_subtitles_provider(self, provider, video, languages, detailed=False, discard_on_failure=False):
         """List subtitles with a single provider.
 
         The video and languages are checked against the provider.
@@ -501,6 +612,10 @@ class SZProviderPool(ProviderPool):
         :type video: :class:`~subliminal.video.Video`
         :param languages: languages to search for.
         :type languages: set of :class:`~babelfish.language.Language`
+        :param bool discard_on_failure: the listing loops discard a provider
+            that returns None. With this set it is discarded here, before the
+            outcome is reported to the provider, so a request queued behind
+            this one already sees the discard when it rechecks admission.
         :return: found subtitles.
         :rtype: list of :class:`~subliminal.subtitle.Subtitle` or None
 
@@ -509,6 +624,10 @@ class SZProviderPool(ProviderPool):
             if detailed:
                 return ProviderSearchResult(provider, subtitles or [], status, reason)
             return subtitles
+
+        def discard():
+            if discard_on_failure:
+                self.discarded_providers.add(provider)
 
         logger.debug("Languages requested: %r", languages)
 
@@ -555,12 +674,19 @@ class SZProviderPool(ProviderPool):
         if self.provider_progress_callback:
             self.provider_progress_callback(provider)
 
+        initialized_provider = None
         try:
             try:
                 initialized_provider = self[provider]
+                # Rechecked for a provider this pool already holds, which
+                # adoption does not: it may have gone on backoff since.
+                excluded = not self._admits(provider)
             except ProviderExcludedError:
+                excluded = True
+            if excluded:
                 logger.info('Provider %r is currently excluded (disabled, '
                             'throttled or discarded); not searching it', provider)
+                discard()
                 return finish(None, "skipped", "provider_excluded")
             results = initialized_provider.list_subtitles(video, to_request)
             seen = []
@@ -595,6 +721,7 @@ class SZProviderPool(ProviderPool):
                     s.radarrId = video.radarrId if hasattr(video, 'radarrId') else None
                     s.sonarrSeriesId = video.sonarrSeriesId if hasattr(video, 'sonarrSeriesId') else None
                     s.sonarrEpisodeId = video.sonarrEpisodeId if hasattr(video, 'sonarrEpisodeId') else None
+                    s.arr_instance_id = getattr(video, 'arr_instance_id', None)
                     # Sports carries its event context on the video; the
                     # callback needs it at download time, when only the
                     # subtitle is in scope.
@@ -609,29 +736,53 @@ class SZProviderPool(ProviderPool):
 
             return finish(out, "success" if out else "empty")
 
+        except ProviderExcludedError:
+            # Refused by the worker once the request got its turn: the provider
+            # went on backoff or was discarded while it waited. Nothing reached
+            # the provider, so nothing is throttled.
+            logger.info('Provider %r was excluded (throttled or discarded) while its request '
+                        'waited for its turn; not searching it', provider)
+            discard()
+            return finish(None, "skipped", "provider_excluded")
+
+        except ProviderBusyError:
+            # A healthy provider serving other searches: no backoff, no
+            # discard, and an empty list so the listing loops move on.
+            logger.info('Provider %r did not get a turn within its timeout; not searching it', provider)
+            return finish([], "skipped", "provider_busy")
+
         except APIThrottled as e:
             ids = {
                 'radarrId': video.radarrId if hasattr(video, 'radarrId') else None,
                 'sonarrSeriesId': video.sonarrSeriesId if hasattr(video, 'sonarrSeriesId') else None,
                 'sonarrEpisodeId': video.sonarrEpisodeId if hasattr(video, 'sonarrEpisodeId') else None,
+                'arr_instance_id': getattr(video, 'arr_instance_id', None),
             }
             logger.warning('Provider %r throttled: %s', provider, e)
-            self.throttle_callback(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None,
-                                   sports_context=getattr(video, 'sports_context', None))
+            self._notify_throttle(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None,
+                                  sports_context=getattr(video, 'sports_context', None))
             if detailed:
                 return provider_search_failure(provider, e)
+            discard()
 
         except Exception as e:
             ids = {
                 'radarrId': video.radarrId if hasattr(video, 'radarrId') else None,
                 'sonarrSeriesId': video.sonarrSeriesId if hasattr(video, 'sonarrSeriesId') else None,
                 'sonarrEpisodeId': video.sonarrEpisodeId if hasattr(video, 'sonarrEpisodeId') else None,
+                'arr_instance_id': getattr(video, 'arr_instance_id', None),
             }
             logger.exception('Unexpected error in provider %r: %s', provider, traceback.format_exc())
-            self.throttle_callback(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None,
-                                   sports_context=getattr(video, 'sports_context', None))
+            self._notify_throttle(provider, e, ids=ids, language=list(languages)[0] if len(languages) else None,
+                                  sports_context=getattr(video, 'sports_context', None))
             if detailed:
                 return provider_search_failure(provider, e)
+            discard()
+
+        finally:
+            # After the throttle callback and the discard, so the next request
+            # queued on this provider sees them.
+            _outcome_recorded(initialized_provider)
 
     def list_subtitles(self, video, languages):
         """List subtitles.
@@ -656,10 +807,9 @@ class SZProviderPool(ProviderPool):
 
             # list subtitles
             try:
-                provider_subtitles = self.list_subtitles_provider(name, video, languages)
+                provider_subtitles = self.list_subtitles_provider(name, video, languages, discard_on_failure=True)
             except LanguageReverseError:
-                logger.exception("Unexpected language reverse error in %s, skipping. Error: %s", name,
-                                 traceback.format_exc())
+                logger.exception("Unexpected language reverse error in %s, skipping", name)
                 continue
 
             if provider_subtitles is None:
@@ -692,7 +842,7 @@ class SZProviderPool(ProviderPool):
                 and ("series" in orig_matches or "imdb_id" in orig_matches))
 
     def list_subtitles_prioritized(self, video, languages, min_score=0, provider_order=None, compute_score=None,
-                                   exhaustive=False):
+                                   exhaustive=False, report_stop=False):
         """List subtitles with priority-based provider search.
 
         Search providers in priority order. Stop only when every requested
@@ -702,6 +852,11 @@ class SZProviderPool(ProviderPool):
         When ``exhaustive=True`` (manual search), the early-exit on satisfied
         languages is disabled so every provider is queried and the user sees
         the full set of candidates regardless of score.
+
+        With ``report_stop=True`` the result is ``(subtitles, stopped_at)``:
+        the name of the provider that satisfied every language, or None when
+        the listing ran to the end. A caller resumes after that provider when
+        what it listed could not be downloaded.
         """
         from .score import compute_score as default_compute_score
         compute_score = compute_score or default_compute_score
@@ -717,7 +872,8 @@ class SZProviderPool(ProviderPool):
                 continue
 
             # Search this provider
-            provider_subtitles = SZProviderPool.list_subtitles_provider(self, name, video, languages)
+            provider_subtitles = SZProviderPool.list_subtitles_provider(self, name, video, languages,
+                                                                        discard_on_failure=True)
 
             if provider_subtitles is None:
                 logger.info('Discarding provider %s', name)
@@ -745,7 +901,7 @@ class SZProviderPool(ProviderPool):
                 try:
                     matches = subtitle.get_matches(video)
                 except AttributeError:
-                    logger.error("%r: Match computation failed: %s", subtitle, traceback.format_exc())
+                    logger.error("%r: Match computation failed", subtitle, exc_info=True)
                     continue
                 orig_matches = matches.copy()
                 score, _ = compute_score(matches, subtitle, video, False)
@@ -763,9 +919,9 @@ class SZProviderPool(ProviderPool):
 
             if not exhaustive and required_languages and satisfied_languages >= required_languages:
                 logger.info('All requested languages satisfied after provider %s, stopping search', name)
-                return all_subtitles
+                return (all_subtitles, name) if report_stop else all_subtitles
 
-        return all_subtitles
+        return (all_subtitles, None) if report_stop else all_subtitles
 
     def download_subtitle(self, subtitle):
         """Download `subtitle`'s :attr:`~subliminal.subtitle.Subtitle.content`.
@@ -782,6 +938,16 @@ class SZProviderPool(ProviderPool):
             logger.warning('Provider %r is discarded', subtitle.provider_name)
             return False
 
+        # Once, before the first attempt: a connection error records a backoff
+        # on the attempt that failed, and rechecking before every retry would
+        # end the retries at the first one.
+        if not self._admits(subtitle.provider_name):
+            logger.info('Provider %r is currently excluded (disabled, '
+                        'throttled or discarded); not downloading from it',
+                        subtitle.provider_name)
+            subtitle.skip_reason = 'provider_excluded'
+            return False
+
         logger.info('Downloading subtitle %r', subtitle)
         tries = 0
 
@@ -789,11 +955,13 @@ class SZProviderPool(ProviderPool):
             'radarrId': subtitle.radarrId if hasattr(subtitle, 'radarrId') else None,
             'sonarrSeriesId': subtitle.sonarrSeriesId if hasattr(subtitle, 'sonarrSeriesId') else None,
             'sonarrEpisodeId': subtitle.sonarrEpisodeId if hasattr(subtitle, 'sonarrEpisodeId') else None,
+            'arr_instance_id': getattr(subtitle, 'arr_instance_id', None),
         }
 
         # retry downloading on failure until settings' download retry limit hit
         while True:
             tries += 1
+            initialized_provider = None
             try:
                 if self.pre_download_hook:
                     self.pre_download_hook(subtitle)
@@ -804,12 +972,26 @@ class SZProviderPool(ProviderPool):
                     logger.info('Provider %r is currently excluded (disabled, '
                                 'throttled or discarded); not downloading from it',
                                 subtitle.provider_name)
+                    subtitle.skip_reason = 'provider_excluded'
                     return False
                 initialized_provider.download_subtitle(subtitle)
                 if self.post_download_hook:
                     self.post_download_hook(subtitle)
 
                 break
+            except ProviderExcludedError:
+                # Refused by the worker once the request got its turn.
+                logger.info('Provider %r was excluded (throttled or discarded) while its request '
+                            'waited for its turn; not downloading from it', subtitle.provider_name)
+                subtitle.skip_reason = 'provider_excluded'
+                return False
+
+            except ProviderBusyError:
+                logger.info('Provider %r did not get a turn within its timeout; not downloading from it',
+                            subtitle.provider_name)
+                subtitle.skip_reason = 'provider_busy'
+                return False
+
             except SubtitleCandidateRejected as e:
                 logger.warning('Subtitle candidate rejected: %s', e)
                 # Callers that only see False can still tell "nothing usable in
@@ -824,22 +1006,27 @@ class SZProviderPool(ProviderPool):
                     socket.timeout) as e:
                 logger.error('Provider %r connection error', subtitle.provider_name)
                 subtitle.download_error = e
-                self.throttle_callback(subtitle.provider_name, e, ids=ids, language=subtitle.language,
-                                       sports_context=getattr(subtitle, 'sports_context', None))
+                self._notify_throttle(subtitle.provider_name, e, ids=ids, language=subtitle.language,
+                                      sports_context=getattr(subtitle, 'sports_context', None))
 
             except (rarfile.BadRarFile, MustGetBlacklisted) as e:
-                self.throttle_callback(subtitle.provider_name, e, ids=ids, language=subtitle.language,
-                                       sports_context=getattr(subtitle, 'sports_context', None))
+                self._notify_throttle(subtitle.provider_name, e, ids=ids, language=subtitle.language,
+                                      sports_context=getattr(subtitle, 'sports_context', None))
                 return False
 
             except Exception as e:
                 logger.exception('Unexpected error in provider %r, Traceback: %s', subtitle.provider_name,
                                  traceback.format_exc())
                 subtitle.download_error = e
-                self.throttle_callback(subtitle.provider_name, e, ids=ids, language=subtitle.language,
-                                       sports_context=getattr(subtitle, 'sports_context', None))
+                self._notify_throttle(subtitle.provider_name, e, ids=ids, language=subtitle.language,
+                                      sports_context=getattr(subtitle, 'sports_context', None))
                 self.discarded_providers.add(subtitle.provider_name)
                 return False
+
+            finally:
+                # After the throttle callback and the discard, so the next
+                # request queued on this provider sees them.
+                _outcome_recorded(initialized_provider)
 
             if tries == DOWNLOAD_TRIES:
                 self.discarded_providers.add(subtitle.provider_name)
@@ -892,7 +1079,7 @@ class SZProviderPool(ProviderPool):
                     matches = cached
 
             except AttributeError:
-                logger.error("%r: Match computation failed: %s", s, traceback.format_exc())
+                logger.error("%r: Match computation failed", s, exc_info=True)
                 continue
 
             orig_matches = matches.copy()
@@ -944,6 +1131,15 @@ class SZProviderPool(ProviderPool):
 
         # download best subtitles, falling back on the next on error
         downloaded_subtitles = []
+        # Providers whose remaining candidates this round leaves alone, logged
+        # once each. A provider is often discarded by its own first failure
+        # here, or by a concurrent search on the same pool, and every later
+        # candidate of it would otherwise be refused with a warning of its own.
+        # A download that was busy or excluded discards nothing, so those are
+        # kept for this round only: a busy worker costs the round one wait,
+        # not one per candidate, and a concurrent search may still use it.
+        skip_reasons = {}
+        skipped_providers = set()
         for subtitle, score, score_without_hash, matches, orig_matches in scored_subtitles:
             # check score
             if score < min_score:
@@ -974,6 +1170,16 @@ class SZProviderPool(ProviderPool):
                              subtitle, score)
                 continue
 
+            skip_reason = skip_reasons.get(subtitle.provider_name)
+            if skip_reason is None and subtitle.provider_name in self.discarded_providers:
+                skip_reason = 'discarded'
+            if skip_reason is not None:
+                if subtitle.provider_name not in skipped_providers:
+                    skipped_providers.add(subtitle.provider_name)
+                    logger.info('Skipping the remaining candidates of provider %r in this round (%s)',
+                                subtitle.provider_name, skip_reason)
+                continue
+
             # make sure to preserve original subtitles format if requested
             subtitle.use_original_format = use_original_format
 
@@ -988,24 +1194,13 @@ class SZProviderPool(ProviderPool):
                 if only_one:
                     logger.debug('Only one subtitle downloaded')
                     break
+            elif getattr(subtitle, 'skip_reason', None):
+                skip_reasons[subtitle.provider_name] = subtitle.skip_reason
 
-        # --- WHISPER FALLBACK PRECONDITIONS ---
-        # 1. No regular provider results with at least minimum score
-        # 2. We are in a Bulk Task or Single Series search
-        # 3. User enabled the Whisper fallback setting
-        # 4. Whisper is actually in the active providers list
-        if (not downloaded_subtitles and 
-            fallback_allowed and 
-            'whisperai' in self.providers):
-            
-            for subtitle, score, score_without_hash, matches, orig_matches in scored_subtitles:
-                if subtitle.provider_name == 'whisperai':
-                    logger.info('BAZARR Bulk Task: Falling back to Whisper for %r', video.name)
-                    subtitle.use_original_format = use_original_format
-                    if self.download_subtitle(subtitle):
-                        subtitle.score = score
-                        downloaded_subtitles.append(subtitle)
-                        break
+        if not downloaded_subtitles and fallback_allowed:
+            downloaded_subtitles = self.download_fallback_subtitles(
+                subtitles, video, languages, hearing_impaired=hearing_impaired,
+                use_original_format=use_original_format)
 
         if candidate_sink is not None:
             # Identity, not equality: Subtitle equality is provider-defined and
@@ -1031,6 +1226,48 @@ class SZProviderPool(ProviderPool):
                 })
 
         return downloaded_subtitles
+
+    def download_fallback_subtitles(self, subtitles, video, languages, hearing_impaired=False,
+                                    use_original_format=False, candidate_sink=None):
+        """Transcribe with Whisper when nothing else could be downloaded.
+
+        The caller has already checked that nothing was downloaded and that the
+        fallback is allowed. Whisper's own candidates are tried best first,
+        whatever their score, and the first one that downloads is returned.
+
+        With ``candidate_sink`` the record a listing round already wrote for
+        the candidate is flagged downloaded, so a caller reading the sink sees
+        the fallback's outcome; a candidate no round scored is appended with
+        the same record shape.
+        """
+        if 'whisperai' not in self.providers:
+            return []
+
+        whisper_subtitles = [s for s in subtitles if s.provider_name == 'whisperai']
+        for subtitle, score, _score_without_hash, matches, orig_matches in self._score_subtitles(
+                whisper_subtitles, video, languages, hearing_impaired):
+            logger.info('BAZARR Bulk Task: Falling back to Whisper for %r', video.name)
+            subtitle.use_original_format = use_original_format
+            if self.download_subtitle(subtitle):
+                subtitle.score = score
+                if candidate_sink is not None:
+                    described = {
+                        'provider_name': subtitle.provider_name,
+                        'release_info': getattr(subtitle, 'release_info', None),
+                        'score': score,
+                        'matches': sorted(orig_matches or ()),
+                        'scored_matches': sorted(matches or ()),
+                    }
+                    for record in candidate_sink:
+                        if record.get('downloaded') is False and all(
+                                record.get(key) == value for key, value in described.items()):
+                            record['downloaded'] = True
+                            break
+                    else:
+                        candidate_sink.append(dict(described, downloaded=True))
+                return [subtitle]
+
+        return []
 
     def list_supported_languages(self):
         """List supported languages.
@@ -1116,12 +1353,13 @@ class SZAsyncProviderPool(SZProviderPool):
 
         return updated
 
-    def list_subtitles_provider(self, provider, video, languages, detailed=False):
+    def list_subtitles_provider(self, provider, video, languages, detailed=False, discard_on_failure=False):
         provider_subtitles = None
         try:
             if detailed:
                 return super().list_subtitles_provider(provider, video, languages, detailed=True)
-            provider_subtitles = super().list_subtitles_provider(provider, video, languages)
+            provider_subtitles = super().list_subtitles_provider(provider, video, languages,
+                                                                 discard_on_failure=discard_on_failure)
         except LanguageReverseError:
             logger.exception("Unexpected language reverse error in %s, skipping", provider)
             if detailed:
@@ -1136,7 +1374,8 @@ class SZAsyncProviderPool(SZProviderPool):
         subtitles = []
 
         with ThreadPoolExecutor(self.max_workers) as executor:
-            for provider, provider_subtitles in executor.map(self.list_subtitles_provider, self.providers,
+            for provider, provider_subtitles in executor.map(partial(self.list_subtitles_provider,
+                                                                     discard_on_failure=True), self.providers,
                                                              itertools.repeat(video, len(self.providers)),
                                                              itertools.repeat(languages, len(self.providers))):
                 # discard provider that failed

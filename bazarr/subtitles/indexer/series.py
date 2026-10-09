@@ -80,11 +80,12 @@ def store_subtitles(original_path, reversed_path, use_cache=True, arr_instance_i
                                                               arr_instance_id=owner_instance_id)
                     for subtitle_language, subtitle_forced, subtitle_hi, subtitle_codec in subtitle_languages:
                         try:
-                            if (settings.general.ignore_pgs_subs and subtitle_codec.lower() == "pgs") or \
-                                    (settings.general.ignore_vobsub_subs and subtitle_codec.lower() ==
-                                     "vobsub") or \
-                                    (settings.general.ignore_ass_subs and subtitle_codec.lower() ==
-                                     "ass"):
+                            # A track whose format the parser cannot name has no
+                            # codec, so no ignore switch can match it: keep it.
+                            codec = subtitle_codec.lower() if subtitle_codec else None
+                            if codec and ((settings.general.ignore_pgs_subs and codec == "pgs") or
+                                          (settings.general.ignore_vobsub_subs and codec == "vobsub") or
+                                          (settings.general.ignore_ass_subs and codec == "ass")):
                                 logging.debug("BAZARR skipping %s sub for language: %s" % (subtitle_codec, alpha2_from_alpha3(subtitle_language)))  # noqa: G002
                                 continue
 
@@ -512,7 +513,8 @@ def series_scan_disk(series_id, arr_instance_id=None, job_id=None):
     reported nothing while it did.
     """
     if not job_id:
-        return jobs_queue.add_job_from_function("Scanning disk for series subtitles", is_progress=False)
+        return jobs_queue.add_job_from_function("Scanning disk for series subtitles", is_progress=False,
+                                               return_existing=True)
 
     from app.job_errors import reason_of
     from app.jobs_queue import JobFailed

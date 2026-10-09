@@ -3,13 +3,12 @@
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
 
 from app.database import TableEpisodes, TableShows, TableBlacklist, database, select
-from arr_instances.resolution import scoped
 from subtitles.tools.delete import delete_subtitles
+from subtitles.tools.delete_ownership import SubtitleDeletionError, resolve_subtitle_for_deletion
 from sonarr.blacklist import blacklist_log, blacklist_delete_all, blacklist_delete
-from utilities.path_mappings import path_mappings
 from subtitles.mass_download import episode_download_subtitles
 from app.event_handler import event_stream
-from api.swaggerui import subtitles_language_model
+from api.swaggerui import subtitles_language_model, job_queued_model
 from utilities.pretty_date import pretty_date
 
 from ..utils import authenticate, postprocess
@@ -91,53 +90,57 @@ class EpisodesBlacklist(Resource):
     post_request_parser.add_argument('arr_instance_id', type=int, required=False,
                                      help='Owning Sonarr instance id (#156)')
 
+    post_response_model = api_ns_episodes_blacklist.model('JobQueued', job_queued_model)
+
     @authenticate
     @api_ns_episodes_blacklist.doc(parser=post_request_parser)
-    @api_ns_episodes_blacklist.response(200, 'Success')
+    @api_ns_episodes_blacklist.response(200, 'Subtitle excluded; replacement search queued', post_response_model)
     @api_ns_episodes_blacklist.response(401, 'Not Authenticated')
+    @api_ns_episodes_blacklist.response(403, "Subtitle is not one of this episode's current subtitles")
     @api_ns_episodes_blacklist.response(404, 'Episode not found')
+    @api_ns_episodes_blacklist.response(409, 'Owning instance is ambiguous, or ownership changed before deletion')
     @api_ns_episodes_blacklist.response(500, 'Subtitles file not found or permission issue.')
     def post(self):
         """Add an episodes subtitles to blacklist"""
         args = self.post_request_parser.parse_args()
-        sonarr_series_id = args.get('seriesid')
         sonarr_episode_id = args.get('episodeid')
         provider = args.get('provider')
         subs_id = args.get('subs_id')
         language = args.get('language')
-        arr_instance_id = args.get('arr_instance_id')
 
-        episodeInfo = database.execute(
-            scoped(
-                select(TableEpisodes.path)
-                .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id),
-                TableEpisodes.arr_instance_id, arr_instance_id)) \
-            .first()
+        try:
+            # The path only selects one of this episode's indexed subtitles; the
+            # file removed is that entry, mapped through the owning instance.
+            target = resolve_subtitle_for_deletion('series', sonarr_episode_id, args.get('subtitles_path'),
+                                                   args.get('arr_instance_id'), session=database)
+            sonarr_series_id = target.row.sonarrSeriesId
+            arr_instance_id = target.row.arr_instance_id
+            # Recorded by the deletion itself, once the file is really removed
+            # and while the write locks are still held, so a refused or failed
+            # deletion blacklists nothing.
+            removed = delete_subtitles(media_type='series',
+                                       language=language,
+                                       forced=False,
+                                       hi=False,
+                                       media_path=target.media_path,
+                                       subtitles_path=target.stored_path,
+                                       sonarr_series_id=sonarr_series_id,
+                                       sonarr_episode_id=sonarr_episode_id,
+                                       arr_instance_id=arr_instance_id,
+                                       revalidate=target.revalidate,
+                                       after_delete=lambda: blacklist_log(sonarr_series_id=sonarr_series_id,
+                                                                          sonarr_episode_id=sonarr_episode_id,
+                                                                          provider=provider,
+                                                                          subs_id=subs_id,
+                                                                          language=language,
+                                                                          arr_instance_id=arr_instance_id))
+        except SubtitleDeletionError as exc:
+            return str(exc), exc.status
 
-        if not episodeInfo:
-            return 'Episode not found', 404
-
-        media_path = episodeInfo.path
-        subtitles_path = args.get('subtitles_path')
-
-        blacklist_log(sonarr_series_id=sonarr_series_id,
-                      sonarr_episode_id=sonarr_episode_id,
-                      provider=provider,
-                      subs_id=subs_id,
-                      language=language,
-                      arr_instance_id=arr_instance_id)
-        if delete_subtitles(media_type='series',
-                            language=language,
-                            forced=False,
-                            hi=False,
-                            media_path=path_mappings.path_replace(media_path),
-                            subtitles_path=subtitles_path,
-                            sonarr_series_id=sonarr_series_id,
-                            sonarr_episode_id=sonarr_episode_id,
-                            arr_instance_id=arr_instance_id):
-            episode_download_subtitles(no=sonarr_episode_id, arr_instance_id=arr_instance_id)
+        if removed:
+            job_id = episode_download_subtitles(no=sonarr_episode_id, arr_instance_id=arr_instance_id)
             event_stream(type='episode-history')
-            return '', 200
+            return {'job_id': job_id or None}, 200
         else:
             return 'Subtitles file not found or permission issue.', 500
 

@@ -50,8 +50,9 @@ For another OpenSubtitles.com client that supports a base URL override:
   secrets and the shared Default token, which signs every client out and
   invalidates outstanding download links. Named keys keep their tokens.
 - Download links are time-limited bearer links (5 minutes by default) and are
-  not consumed on use. Logging out or rotating, disabling or deleting a key
-  does not revoke a link already issued.
+  not consumed on use. A link can stop working sooner when the search result
+  behind it expires or Bazarr+ restarts. Logging out or rotating, disabling or
+  deleting a key does not revoke a link already issued.
 
 ## Troubleshooting
 

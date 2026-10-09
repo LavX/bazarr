@@ -3,7 +3,7 @@
 import logging
 
 from flask import request
-from flask_restx import Namespace, Resource, reqparse
+from flask_restx import Namespace, Resource, inputs, reqparse
 
 from app.database import database
 from app.jobs_queue import jobs_queue
@@ -21,11 +21,11 @@ _create_parser.add_argument("kind", type=str, required=True, location="json")
 _create_parser.add_argument("name", type=str, required=True, location="json")
 _create_parser.add_argument("api_key", type=str, location="json")
 _create_parser.add_argument("ip", type=str, location="json")
-_create_parser.add_argument("port", type=int, location="json")
+_create_parser.add_argument("port", type=service.whole_number, location="json")
 _create_parser.add_argument("base_url", type=str, location="json")
 _create_parser.add_argument("ssl", type=bool, location="json")
 _create_parser.add_argument("verify_ssl", type=bool, location="json")
-_create_parser.add_argument("http_timeout", type=int, location="json")
+_create_parser.add_argument("http_timeout", type=service.whole_number, location="json")
 _create_parser.add_argument("enabled", type=bool, location="json")
 _create_parser.add_argument("is_default", type=bool, location="json")
 _create_parser.add_argument("subtitle_settings", type=dict, location="json")
@@ -38,11 +38,11 @@ _update_parser.add_argument("name", type=str, location="json")
 _update_parser.add_argument("api_key", type=str, location="json")
 _update_parser.add_argument("clear_api_key", type=bool, location="json")
 _update_parser.add_argument("ip", type=str, location="json")
-_update_parser.add_argument("port", type=int, location="json")
+_update_parser.add_argument("port", type=service.whole_number, location="json")
 _update_parser.add_argument("base_url", type=str, location="json")
 _update_parser.add_argument("ssl", type=bool, location="json")
 _update_parser.add_argument("verify_ssl", type=bool, location="json")
-_update_parser.add_argument("http_timeout", type=int, location="json")
+_update_parser.add_argument("http_timeout", type=service.whole_number, location="json")
 _update_parser.add_argument("enabled", type=bool, location="json")
 _update_parser.add_argument("is_default", type=bool, location="json")
 _update_parser.add_argument("subtitle_settings", type=dict, location="json")
@@ -54,21 +54,21 @@ _test_parser = reqparse.RequestParser()
 _test_parser.add_argument("kind", type=str, required=True, location="json")
 _test_parser.add_argument("api_key", type=str, location="json")
 _test_parser.add_argument("ip", type=str, location="json")
-_test_parser.add_argument("port", type=int, location="json")
+_test_parser.add_argument("port", type=service.whole_number, location="json")
 _test_parser.add_argument("base_url", type=str, location="json")
 _test_parser.add_argument("ssl", type=bool, location="json")
 _test_parser.add_argument("verify_ssl", type=bool, location="json")
-_test_parser.add_argument("http_timeout", type=int, location="json")
+_test_parser.add_argument("http_timeout", type=service.whole_number, location="json")
 
 # By-id test: the kind and API key come from the stored row (the key never
 # leaves the server), so only optional connection overrides are accepted here.
 _test_by_id_parser = reqparse.RequestParser()
 _test_by_id_parser.add_argument("ip", type=str, location="json")
-_test_by_id_parser.add_argument("port", type=int, location="json")
+_test_by_id_parser.add_argument("port", type=service.whole_number, location="json")
 _test_by_id_parser.add_argument("base_url", type=str, location="json")
 _test_by_id_parser.add_argument("ssl", type=bool, location="json")
 _test_by_id_parser.add_argument("verify_ssl", type=bool, location="json")
-_test_by_id_parser.add_argument("http_timeout", type=int, location="json")
+_test_by_id_parser.add_argument("http_timeout", type=service.whole_number, location="json")
 
 
 @api_ns_system_arr_instances.route("/system/arr-instances")
@@ -124,15 +124,49 @@ class ArrInstanceItem(Resource):
                 removed=not body.get("enabled", True))
         return body, status
 
+    delete_request_parser = reqparse.RequestParser()
+    # reqparse also puts help in front of the 400 for a value it cannot read,
+    # so it stays short. The docstring below has the details.
+    delete_request_parser.add_argument(
+        "remove_library", type=inputs.boolean, location="args", default=False,
+        help="Also delete the library synced from this Sonarr or Radarr instance.")
+
     @authenticate
+    @api_ns_system_arr_instances.expect(delete_request_parser)
+    @api_ns_system_arr_instances.response(204, "Deleted")
+    @api_ns_system_arr_instances.response(
+        409, "Still owns synced rows (can_remove_library and library say what), "
+             "or its library sync or a subtitle job for it is running")
     def delete(self, instance_id):
+        """Delete an instance.
+
+        A Sonarr or Radarr instance that still owns synced rows is refused
+        with 409 unless remove_library is true. With it, the series, episodes,
+        movies, history, exclusions and root folders Bazarr+ synced from the
+        instance go with it, and for the last instance of its kind that
+        includes the rows of that kind no instance owns. Database rows only:
+        no file on disk is touched. A Sonarr or Radarr delete, with or without
+        it, is refused with 409 while a library sync of the instance, or of
+        its whole kind, is running or queued (sync_in_progress), or while a
+        subtitle job that may write for it is running (job_in_progress), such
+        as a search its sync queued. Whether or not it is set,
+        deleting the last Sonarr or Radarr instance turns Use Sonarr or Use
+        Radarr off. Sportarr ignores it.
+        """
+        remove_library = self.delete_request_parser.parse_args()["remove_library"]
         # Capture the kind before the row is gone so the post-delete refresh can
         # scope to the right scheduler/SignalR feed and remove the orphaned job.
         existing, _ = service.get_instance(database, instance_id)
         kind = existing.get("kind") if isinstance(existing, dict) else None
-        body, status = service.delete_instance(database, instance_id)
+        body, status = service.delete_instance(database, instance_id,
+                                               remove_library=remove_library)
         if status < 400:
             database.commit()
+            # Switch a kind with no instance left off first: the refresh
+            # restarts the live feed, and with the kind still on and no
+            # instance it would start the fallback feed on the stored
+            # connection settings, which still describe the deleted server.
+            service.after_instance_deleted(database, kind, removed_library=remove_library)
             service.refresh_runtime(kind, instance_id=instance_id, removed=True)
         return body, status
 

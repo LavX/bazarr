@@ -36,7 +36,7 @@
     "name": "Bazarr+",
     "applicationCategory": "MultimediaApplication",
     "operatingSystem": "Docker, Linux, Windows, macOS",
-    "softwareVersion": "2.7.0",
+    "softwareVersion": "2.7.1",
     "license": "https://www.gnu.org/licenses/gpl-3.0.html",
     "url": "https://lavx.github.io/bazarr/",
     "codeRepository": "https://github.com/LavX/bazarr",
@@ -613,7 +613,7 @@
         </div>
         <pre><code>curl -fsSL https://lavx.github.io/bazarr/install.sh | bash</code></pre>
       </div>
-      <p class="prose">When it finishes, open the address printed by the installer and follow the setup wizard to choose your languages and providers.</p>
+      <p class="prose">When it finishes, open the address printed by the installer. The installer pre-enables three providers, so the app skips the first-run wizard and opens straight in Discover; to walk the wizard anyway, use <strong>Settings &gt; General &gt; Run first-time setup</strong>. If you browse from another machine, use your server's IP or hostname instead of <code class="inline">localhost</code>.</p>
 
       <h3>Prefer Docker Compose?</h3>
       <p class="prose">With Docker and Docker Compose installed, save this as <code class="inline">compose.yaml</code>. It works as-is for standalone Discover. For a library, uncomment only the folders you use and replace each <code class="inline">/path/to/...</code> with its location on your server. Set <code class="inline">PUID</code> and <code class="inline">PGID</code> to the user and group that own those folders.</p>
@@ -661,7 +661,7 @@
         </div>
         <pre><code>docker compose up -d</code></pre>
       </div>
-      <p class="prose">Open <code class="inline">http://localhost:6767</code>, or use your server's IP instead of <code class="inline">localhost</code>. Choose standalone Discover in the setup wizard, or connect your library under <strong>Settings &gt; Connections</strong>. The movie, TV and sports mounts are for Sonarr, Radarr and Sportarr libraries respectively; only <code class="inline">/config</code> is needed for standalone search.</p>
+      <p class="prose">Open <code class="inline">http://localhost:6767</code>, or use your server's IP or hostname instead of <code class="inline">localhost</code>. Choose standalone Discover in the setup wizard, or connect your library under <strong>Settings &gt; Connections</strong>. The TV, movie and sports mounts are for Sonarr, Radarr and Sportarr libraries respectively; only <code class="inline">/config</code> is needed for standalone search.</p>
       <p class="prose"><strong>Already using Bazarr?</strong> Stop the old container, back up its <code class="inline">/config</code> directory, then change its image to <code class="inline">ghcr.io/lavx/bazarr:latest</code> while keeping your existing mounts. See the <a href="guides/migration.html">migration guide</a>.</p>
       <p class="prose"><strong>Optional extras:</strong> add FlareSolverr for OpenSubtitles.org Cloudflare challenges or the AI translator sidecar for translation. The <a href="guides/getting-started.html">getting started guide</a> covers both.</p>
     </div>
@@ -749,7 +749,7 @@
         <li class="near">
           <h3>Shipped</h3>
           <span class="horizon-when">The v2 line so far</span>
-          <p><strong>v2.7.0 &ldquo;Atlas&rdquo;</strong> opens on Discover: search and pull subtitles
+          <p><strong>v2.7.1</strong> is a stability and security patch on the Atlas line. It moves API keys out of request URLs, runs post-processing commands as argument lists, and binds Provider Hub trust to the catalog source. <strong>v2.7.0 &ldquo;Atlas&rdquo;</strong> opens on Discover: search and pull subtitles
             for any title, whether or not it is in your library, and run with no library at all.
             It adds Sports as a third media type, folds Emby, Silo, Jellyfin and Plex onto one
             multi-instance layer, requests titles in Seerr, and gives Statistics a real page.

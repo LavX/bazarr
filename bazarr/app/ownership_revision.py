@@ -1,10 +1,12 @@
 """Transactional ownership revisions and bounded row change metadata."""
 
 import secrets
+from contextlib import contextmanager
 from threading import RLock
 
-from sqlalchemy import inspect, text
+from sqlalchemy import bindparam, delete, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.sql import column, table as table_clause
 
 OWNER_TABLES = ("arr_instances", "table_episodes", "table_movies", "table_sports_events")
 REVISION_TABLE = "subtitle_ownership_revision"
@@ -139,6 +141,69 @@ def install_ownership_revision(connection):
                     connection.execute(text(sql))
     else:
         raise ValueError('Unsupported subtitle ownership database')
+
+
+_CHANGES = table_clause(CHANGES_TABLE, column('table_name'), column('row_id'))
+_TRACKED = text("""SELECT c.relname FROM pg_trigger t
+    JOIN pg_class c ON c.oid = t.tgrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE t.tgname = 'ownership_revision' AND t.tgenabled IN ('O', 'A')
+    AND n.nspname = current_schema() AND c.relname IN :tables""").bindparams(
+    bindparam('tables', expanding=True))
+
+
+def _tracked(connection, tables):
+    found = {name for (name,) in connection.execute(_TRACKED, {'tables': list(tables)})}
+    return [name for name in OWNER_TABLES if name in found]
+
+
+@contextmanager
+def owner_rows_deleted_in_bulk(connection, doomed):
+    """Delete many owner rows under one ownership revision.
+
+    ``doomed`` maps an owner table name to a select of the ids the caller
+    deletes from it inside the block. The caller holds the transaction.
+
+    The row triggers bump the one revision row for every deleted row. On
+    PostgreSQL each of those updates inside one transaction leaves a version
+    of that row the next one has to step over, so a delete of thousands of
+    rows turned quadratic, all the while holding the revision row every other
+    write to these tables waits for. Here the row triggers of those tables are
+    off for the block, and it leaves what they would have left: no change
+    entry for a deleted row, one bump, and the full-resync marker at it.
+    ALTER TABLE is transactional there, so a failure takes the switch back
+    with the deletes, and no other transaction ever sees the triggers off.
+
+    The tables are locked first, arr_instances included and in the order
+    install_ownership_revision takes them, so a trigger reinstall waits for
+    the block rather than dropping a trigger under it or deadlocking with a
+    caller that also deletes an instance. SQLite keeps no row versions and
+    stays linear, and a table with no trigger on costs nothing, so both run
+    the deletes as they are.
+    """
+    if connection.dialect.name != 'postgresql' or not _tracked(connection, doomed):
+        yield
+        return
+    locked = [name for name in OWNER_TABLES if name == 'arr_instances' or name in doomed]
+    connection.execute(text('LOCK TABLE {} IN SHARE ROW EXCLUSIVE MODE'.format(
+        ', '.join(f'"{name}"' for name in locked))))
+    # Again under the lock, which a trigger install or drop has to wait for.
+    tables = _tracked(connection, doomed)
+    for name in tables:
+        connection.execute(text(f'ALTER TABLE "{name}" DISABLE TRIGGER ownership_revision'))
+        connection.execute(delete(_CHANGES).where(
+            _CHANGES.c.table_name == name, _CHANGES.c.row_id.in_(doomed[name])))
+    yield
+    if not tables:
+        return
+    if connection.execute(text(
+            "UPDATE subtitle_ownership_revision SET revision = revision + 1 WHERE id = 1")).rowcount != 1:
+        raise ValueError('Subtitle ownership revision missing')
+    connection.execute(text(
+        "INSERT INTO subtitle_ownership_changes VALUES ('*', 0, (SELECT revision FROM subtitle_ownership_revision WHERE id = 1)) "
+        "ON CONFLICT (table_name, row_id) DO UPDATE SET revision = EXCLUDED.revision"))
+    for name in tables:
+        connection.execute(text(f'ALTER TABLE "{name}" ENABLE TRIGGER ownership_revision'))
 
 
 def metadata_created(metadata, connection, **kwargs):

@@ -81,10 +81,21 @@ describe("whenJobFinishes", () => {
 });
 
 describe("refreshWhenJobFinishes", () => {
-  it("refreshes at once when nothing was queued", () => {
+  it("refreshes at once when nothing was queued, returning its promise", async () => {
+    const client = new QueryClient();
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    const finished = refreshWhenJobFinishes(client, null, refresh);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    await expect(finished).resolves.toBeUndefined();
+  });
+
+  it("returns undefined while the queued job is watched", () => {
     const client = new QueryClient();
     const refresh = vi.fn();
-    refreshWhenJobFinishes(client, null, refresh);
+    const finished = refreshWhenJobFinishes(client, 7, refresh);
+    expect(finished).toBeUndefined();
+    expect(refresh).not.toHaveBeenCalled();
+    setJob(client, 7, "completed");
     expect(refresh).toHaveBeenCalledTimes(1);
   });
 

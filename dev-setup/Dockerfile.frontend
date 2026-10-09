@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1
-ARG NODE_VERSION=20
+# The Node in frontend/.nvmrc, which CI builds and tests the frontend on.
+ARG NODE_VERSION=24.20.0
 
 FROM node:${NODE_VERSION}-alpine
 

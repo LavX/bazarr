@@ -28,7 +28,7 @@ def manual_library(indexed_library, monkeypatch, tmp_path):
     )
     from app.config import settings
     from arr_instances.resolution import clear_subtitle_settings_cache
-    from sportarr import notify, profile_hooks, subtitles as service
+    from sportarr import profile_hooks, subtitles as service
     from subtitles import pool
     from subliminal import Movie, Episode
     from subzero.language import Language
@@ -39,9 +39,6 @@ def manual_library(indexed_library, monkeypatch, tmp_path):
     sports(monkeypatch, session)
     monkeypatch.setattr(service, "database", session)
     monkeypatch.setattr(profile_hooks, "database", session)
-    # This provider fixture publishes real local files, but has no Sportarr
-    # HTTP service. Notification tests install their own transport recorder.
-    monkeypatch.setattr(notify, "_rescan_request", lambda owner, **kwargs: None)
     monkeypatch.setattr(settings.general, "use_embedded_subs", False)
     monkeypatch.setattr(settings.general, "use_postprocessing", False)
     monkeypatch.setattr(settings.subsync, "use_subsync", False)
@@ -317,9 +314,20 @@ def test_owner_mods_postprocessing_and_no_native_notifications(
 ):
     import shlex
     from app.database import TableArrInstances
+    from media_servers import dispatcher, events
     from subtitles import processing
 
     service, session, folder = manual_library
+    published = []
+
+    def record_publication(event):
+        published.append(
+            (event.media_type, event.video_path, event.operation,
+             event.arr_instance_id, event.subtitle_path)
+        )
+
+    monkeypatch.setattr(events, "notify_subtitle_mutation", record_publication)
+    monkeypatch.setattr(dispatcher, "notify_subtitle_mutation", record_publication)
     script = folder / "postprocess.py"
     script.write_text(
         'import sys\nfrom pathlib import Path\np=Path(sys.argv[1])\ns=p.read_text()\nassert "<i>" not in s\nassert sys.argv[2:] == ["", ""]\np.write_text(s.replace("Sporting event", "Owner A processed"))\n'
@@ -355,6 +363,19 @@ def test_owner_mods_postprocessing_and_no_native_notifications(
     assert "Owner A processed" in (folder / "1/event.en.srt").read_text()
     assert "Sporting event" in (folder / "2/event.en.srt").read_text()
     assert "Owner A processed" not in (folder / "2/event.en.srt").read_text()
+    # One publication per download, post-processed or not. The save reports
+    # its file after post-processing has finished, so a second report from the
+    # post-processing write would only queue a second full library scan.
+    assert published == [
+        (
+            "sports", str(folder / "1/event.mkv"), "download", 1,
+            str(folder / "1/event.en.srt"),
+        ),
+        (
+            "sports", str(folder / "2/event.mkv"), "download", 2,
+            str(folder / "2/event.en.srt"),
+        ),
+    ]
 
 
 @pytest.mark.parametrize("phase", ["worker", "writer"])
@@ -539,19 +560,25 @@ def test_owner_disable_during_processing_does_not_block_or_publish_stale_output(
 
         monkeypatch.setattr(SubSyncer, "_run_ffsubsync_engine", engine)
     else:
+        import shlex
+
+        script = folder / "postprocess.py"
+        command = (
+            f"{shlex.quote(sys.executable)} {shlex.quote(str(script))} "
+            "{{subtitles}}"
+        )
         options = {
             "general": {
                 "use_postprocessing": True,
-                "postprocessing_cmd": "{{subtitles}}",
+                "postprocessing_cmd": command,
                 "use_postprocessing_threshold_movie": False,
             }
         }
 
-        def postprocess(command, path):
-            import shlex
-
+        def postprocess(argv, path):
+            assert argv[:2] == [sys.executable, str(script)]
             disable_owner()
-            target = Path(shlex.split(command)[0])
+            target = Path(argv[2])
             target.write_text(
                 target.read_text().replace("Sporting event", "Stale processed result")
             )
@@ -1158,17 +1185,23 @@ def test_new_recorded_owner_during_processing_preserves_published_bytes(
             )
 
     if stage == "postprocess":
+        import shlex
+
         monkeypatch.setattr(settings.general, "use_postprocessing", True)
         monkeypatch.setattr(
             settings.general, "use_postprocessing_threshold_movie", False
         )
-        monkeypatch.setattr(settings.general, "postprocessing_cmd", "{{subtitles}}")
+        script = folder / "postprocess.py"
+        command = (
+            f"{shlex.quote(sys.executable)} {shlex.quote(str(script))} "
+            "{{subtitles}}"
+        )
+        monkeypatch.setattr(settings.general, "postprocessing_cmd", command)
 
-        def postprocess(command, _):
-            import shlex
-
+        def postprocess(argv, _):
+            assert argv[:2] == [sys.executable, str(script)]
             claim()
-            Path(shlex.split(command)[0]).write_text("Stale postprocessing output")
+            Path(argv[2]).write_text("Stale postprocessing output")
 
         monkeypatch.setattr(pp, "_postprocessing_locked", postprocess)
     else:

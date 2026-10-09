@@ -21,7 +21,7 @@ from .migration import (
 from .protocol import candidate_from_worker, language_to_payload, video_to_payload, worker_download_to_content
 from .state import active_installations
 from . import runtime_status
-from .worker import ProviderWorkerClient, WorkerError, worker_command
+from .worker import ProviderWorkerClient, RequestNotAdmitted, WorkerBusy, WorkerError, worker_command
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +78,10 @@ class HubProxyProvider(Provider):
     languages = set()
     video_types = (Episode, Movie)
     subtitle_class = None
+    #: Set by the pool that owns this instance: a callable answering whether
+    #: the pool may still call this provider. Searches and downloads recheck it
+    #: once they get their turn on the worker; None sends them ungated.
+    admit = None
 
     def __init__(self, timeout=None, worker_client=None, **config):
         # An explicit per-instance timeout override is optional; when absent the
@@ -93,6 +97,27 @@ class HubProxyProvider(Provider):
     def terminate(self):
         if self.worker_client:
             self.worker_client.stop()
+
+    def outcome_recorded(self):
+        """Called by the pool once the outcome of a call is recorded, so the
+        next queued request rechecks admission against it."""
+        recorded = getattr(self.worker_client, "outcome_recorded", None)
+        if recorded is not None:
+            recorded()
+
+    def _gated_request(self, op, request, timeout):
+        # The worker cannot raise what the pool catches, so its two refusals
+        # are translated here. Imported late: some suites stub subliminal_patch.
+        if self.admit is None:
+            return self._worker().request(op, request, timeout=timeout)
+        try:
+            return self._worker().request(op, request, timeout=timeout, admit=self.admit)
+        except RequestNotAdmitted as error:
+            from subliminal_patch.core import ProviderExcludedWhileQueuedError
+            raise ProviderExcludedWhileQueuedError(self.provider_name) from error
+        except WorkerBusy as error:
+            from subliminal_patch.core import ProviderBusyError
+            raise ProviderBusyError(self.provider_name) from error
 
     @classmethod
     def check(cls, video):
@@ -163,7 +188,7 @@ class HubProxyProvider(Provider):
             "video": video_to_payload(video),
             "languages": [language_to_payload(item) for item in languages],
         }
-        result = self._worker().request("search", request, timeout=timeout)
+        result = self._gated_request("search", request, timeout)
         _consume_runtime_events(
             self.provider_name,
             result,
@@ -195,7 +220,7 @@ class HubProxyProvider(Provider):
             "language": language_to_payload(subtitle.language),
             "config": self.config,
         }
-        result = self._worker().request("download", request, timeout=timeout)
+        result = self._gated_request("download", request, timeout)
         _consume_runtime_events(
             self.provider_name,
             result,

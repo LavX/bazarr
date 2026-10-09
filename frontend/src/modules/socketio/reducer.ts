@@ -1,5 +1,6 @@
 import { isArray, isEmpty, isNumber } from "lodash";
 import queryClient from "@/apis/queries";
+import { scheduleEpisodesHistoryRefresh } from "@/apis/queries/episodeHistory";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { notifyJobOutcome, resetJobNotifications } from "@/modules/jobs";
@@ -106,6 +107,11 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
       // keyed by ([QueryKeys.Episodes, <local id>]). The getQueryData lookup
       // below therefore resolves the right series_id for non-default instances;
       // when the episode isn't cached we fall back to invalidating all series.
+      // The history query is deliberately not touched here: episode rows change
+      // without any history row changing, every history write emits its own
+      // scoped event, and the indexer emits one event per episode, so a scan of
+      // a large show would otherwise refetch the heaviest query on the page
+      // hundreds of times over.
       update: (ids) => {
         // Currently invalidate episodes is impossible because we don't directly fetch episodes (we fetch episodes by series id)
         // So we need to invalidate series instead
@@ -222,6 +228,13 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
     },
     {
       key: "episode-history",
+      // New history writes carry the canonical local series id. Legacy events
+      // without a payload still refresh the general history page via `any`.
+      update: (seriesIds) => {
+        seriesIds.forEach((seriesId) => {
+          scheduleEpisodesHistoryRefresh(queryClient, seriesId);
+        });
+      },
       any: () => {
         void queryClient.invalidateQueries({
           queryKey: [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.History],
@@ -360,6 +373,13 @@ export function createDefaultReducer(): SocketIO.Reducer[] {
             })
             .catch((e: unknown) => {
               LOG("warning", "Failed to fetch job update", payload.job_id, e);
+              // The cached row still says what it said before the event, and
+              // everything following the job reads it. Mark the list stale
+              // so its observers read it again.
+              void queryClient.invalidateQueries({
+                queryKey: keys,
+                exact: true,
+              });
             });
         });
       },

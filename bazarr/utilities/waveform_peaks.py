@@ -104,22 +104,21 @@ def request_peaks(video_path, audio_track):
     """Answer ``("ready", peaks)`` from the cache, or ``("queued", job_id)``.
 
     A second request for the same file and track while its job is pending or
-    running gets that job's id rather than a second ffmpeg. ``("queued", None)``
-    means the job could not be queued.
+    running gets that job's id rather than a second ffmpeg, and follows that job
+    to its end even when it finishes, or fails, a moment later. A request made
+    after the job has failed queues a new attempt.
     """
-    for _ in range(2):
-        cached = read_cached_peaks(video_path, audio_track)
-        if cached is not None:
-            return 'ready', cached
-        job_id = enqueue_or_existing(f'Generating waveform for {os.path.basename(video_path)}',
-                                     PEAKS_MODULE, PEAKS_FUNC,
-                                     {'video_path': video_path, 'audio_track': audio_track},
-                                     is_progress=True, progress_max=100)
-        if job_id:
-            _start_in_waveform_lane(job_id)
-            return 'queued', job_id
-        # The matching job finished between the two looks: its cache is there now.
-    return 'queued', None
+    cached = read_cached_peaks(video_path, audio_track)
+    if cached is not None:
+        return 'ready', cached
+    job_id = enqueue_or_existing(f'Generating waveform for {os.path.basename(video_path)}',
+                                 PEAKS_MODULE, PEAKS_FUNC,
+                                 {'video_path': video_path, 'audio_track': audio_track},
+                                 is_progress=True, progress_max=100)
+    if not job_id:
+        return 'queued', None
+    _start_in_waveform_lane(job_id)
+    return 'queued', job_id
 
 
 def _start_in_waveform_lane(job_id):
@@ -223,7 +222,8 @@ def _extract_peaks(video_path, audio_track, duration, job_id):
     # A Stop that killed ffmpeg ends the read like the end of the file does, so
     # what was read so far is not a waveform.
     if job_id is not None and _job_cancelled(job_id):
-        raise JobCancelled(f'Generating the waveform for {os.path.basename(video_path)} was cancelled.')
+        raise JobCancelled(f'Generating the waveform for {os.path.basename(video_path)} was cancelled.',
+                           job_id=job_id)
     # An ffmpeg that read part of a damaged track and then failed leaves peaks
     # that stop short of the duration, so it fails the job like one that read
     # nothing, and nothing is cached.

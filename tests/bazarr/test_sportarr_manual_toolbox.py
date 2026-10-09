@@ -114,7 +114,7 @@ def sports_toolbox(indexed_library, monkeypatch):  # noqa: F811
     from api.subtitles import subtitles as endpoint
     from app.config import settings
     from media_servers import events
-    from sportarr import notify, workflows
+    from sportarr import workflows
     from sportarr import subtitles as service
     from subtitles.tools import mods
 
@@ -128,7 +128,6 @@ def sports_toolbox(indexed_library, monkeypatch):  # noqa: F811
     monkeypatch.setattr(mods, 'with_keep_lyrics', lambda chosen, owner: chosen)
     monkeypatch.setattr(endpoint, 'event_stream', lambda **kwargs: None)
     monkeypatch.setattr(events, 'notify_subtitle_mutation', lambda event: None)
-    monkeypatch.setattr(notify, '_rescan_request', lambda owner, **kwargs: None)
     return endpoint, session, folder
 
 
@@ -203,18 +202,13 @@ def test_toolbox_refreshes_destinations_once_after_a_renaming_mod(sports_toolbox
     from app.database import TableSportsEvents
     from app.config import settings
     from media_servers import events
-    from sportarr import notify
-    from subtitles import processing
 
     endpoint, session, folder = sports_toolbox
-    refreshes = []
     publications = []
     monkeypatch.setattr(settings.general, 'use_plex', True)
     monkeypatch.setattr(settings.general, 'use_jellyfin', True)
     monkeypatch.setattr(settings.general, 'use_emby', True)
     monkeypatch.setattr(events, 'notify_subtitle_mutation', publications.append)
-    monkeypatch.setattr(processing, 'notify_subtitle_mutation', publications.append)
-    monkeypatch.setattr(notify, 'notify_rescan', lambda owner: refreshes.append(('sportarr', owner)))
     assert run_toolbox(endpoint, monkeypatch, action='remove_HI',
                        path=str(folder / '1' / 'event.en.hi.srt')) == ('', 204)
     assert not (folder / '1' / 'event.en.hi.srt').exists()
@@ -223,7 +217,6 @@ def test_toolbox_refreshes_destinations_once_after_a_renaming_mod(sports_toolbox
     session.expire_all()
     entries = ast.literal_eval(session.get(TableSportsEvents, 61).subtitles)
     assert ['en', '/sports/event.en.srt'] in [entry[:2] for entry in entries]
-    assert refreshes == [('sportarr', 1)]
     assert [(event.operation, event.subtitle_path) for event in publications] == [('edit', str(output))]
 
 

@@ -3,8 +3,9 @@
 
 import logging
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from threading import Condition, RLock, Thread
+from threading import Condition, RLock, Thread, local
 
 from . import resolution
 from .events import SubtitleMutation
@@ -17,8 +18,8 @@ _OPERATIONS = {"download", "upload", "delete", "sync", "translate", "combine", "
 _ERROR_CODES = {
     "configuration_changed", "connection_disabled", "connection_error", "internal_error", "invalid_response",
     "invalid_url", "invalid_verify_ssl", "missing_credentials", "unauthorized", "forbidden", "not_found",
-    "request_rejected", "redirect_denied", "response_too_large", "timeout", "tls_error", "item_missing",
-    "item_ambiguous", "path_invalid", "mapping_invalid", "mapping_missing", "mapping_ambiguous",
+    "request_rejected", "server_error", "redirect_denied", "response_too_large", "timeout", "tls_error",
+    "item_missing", "item_ambiguous", "path_invalid", "mapping_invalid", "mapping_missing", "mapping_ambiguous",
     "library_missing", "library_invalid", "sidecar_unsupported", "observation_incomplete", "stream_disconnected",
     "scan_incomplete", "scan_failed", "scan_cancelled", "queue_overflow",
 }
@@ -594,7 +595,46 @@ def running_dispatcher():
         return _dispatcher
 
 
+_held = local()
+
+
+@contextmanager
+def queued_together():
+    """Queue the publications made in this block as one batch.
+
+    They are held until the block ends and then queued without letting a
+    worker in between, so publications for the same video coalesce into one
+    target and one refresh. Queued one at a time, a worker could pick up the
+    first and start its scan, and the next would ask for the same scan again.
+    """
+    if getattr(_held, "events", None) is not None:
+        yield
+        return
+    _held.events = []
+    try:
+        yield
+    finally:
+        events, _held.events = _held.events, None
+        dispatcher = None
+        if events:
+            try:
+                dispatcher = _get_dispatcher()
+            except Exception:
+                logging.warning("BAZARR native subtitle refresh could not be queued")
+        if dispatcher is not None:
+            with dispatcher.condition:
+                for event in events:
+                    try:
+                        dispatcher.notify(event)
+                    except Exception:
+                        logging.warning("BAZARR native subtitle refresh could not be queued")
+
+
 def notify_subtitle_mutation(event: SubtitleMutation) -> None:
+    held = getattr(_held, "events", None)
+    if held is not None:
+        held.append(event)
+        return
     try:
         _get_dispatcher().notify(event)
     except Exception:

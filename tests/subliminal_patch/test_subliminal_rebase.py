@@ -220,7 +220,7 @@ def test_provider_pool_keeps_configured_priority_order_for_early_stop(monkeypatc
 
     calls = []
 
-    def fake_list_subtitles_provider(self, provider, video, languages):
+    def fake_list_subtitles_provider(self, provider, video, languages, **kwargs):
         calls.append(provider)
         return [FakeSubtitle()] if provider == "preferred" else []
 
@@ -253,7 +253,7 @@ def test_provider_pool_continues_after_wrong_language_or_low_score(monkeypatch):
 
     calls = []
 
-    def fake_list_subtitles_provider(self, provider, video, languages):
+    def fake_list_subtitles_provider(self, provider, video, languages, **kwargs):
         calls.append(provider)
         if provider == "wrong-language":
             return [FakeSubtitle("wrong-language", Language("spa"))]
@@ -293,7 +293,7 @@ def test_provider_pool_continues_until_all_requested_languages_are_satisfied(mon
 
     calls = []
 
-    def fake_list_subtitles_provider(self, provider, video, languages):
+    def fake_list_subtitles_provider(self, provider, video, languages, **kwargs):
         calls.append(provider)
         if provider == "english":
             return [FakeSubtitle("english", Language("eng"))]

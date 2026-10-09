@@ -9,6 +9,7 @@ import os
 from functools import reduce
 
 from utilities.path_mappings import path_mappings
+from utilities.job_dedupe import enqueue_or_existing
 from subtitles.indexer.series import store_subtitles, list_missing_subtitles
 from arr_instances.resolution import scoped
 from sonarr.history import history_log
@@ -25,10 +26,10 @@ from ..download import generate_subtitles
 
 def series_download_subtitles(no, job_id=None, job_sub_function=False, arr_instance_id=None):
     if not job_sub_function and not job_id:
-        jobs_queue.add_job_from_function(f"""Downloading missing subtitles for {database.scalar(
+        return jobs_queue.add_job_from_function(f"""Downloading missing subtitles for {database.scalar(
             scoped(select(TableShows.title).where(TableShows.sonarrSeriesId == no),
-                   TableShows.arr_instance_id, arr_instance_id)) or 'Unknown Series'}""", is_progress=True)
-        return
+                   TableShows.arr_instance_id, arr_instance_id)) or 'Unknown Series'}""", is_progress=True,
+                   return_existing=True)
 
     series_row = database.execute(scoped(
         select(TableShows.path,
@@ -65,11 +66,20 @@ def series_download_subtitles(no, job_id=None, job_sub_function=False, arr_insta
     else:
         count_episodes_details = len(episodes_details)
 
-        jobs_queue.update_job_progress(job_id=job_id, progress_max=count_episodes_details)
+        if not job_sub_function:
+            jobs_queue.update_job_progress(job_id=job_id, progress_max=count_episodes_details)
         for i, episode in enumerate(episodes_details, start=1):
-            jobs_queue.update_job_progress(job_id=job_id, progress_value=i,
-                                           progress_message=f'{episode.title} - S{episode.season:02d}E'
-                                                            f'{episode.episode:02d} - {episode.episodeTitle}')
+            message = f'{episode.title} - S{episode.season:02d}E{episode.episode:02d} - {episode.episodeTitle}'
+            if not job_sub_function:
+                jobs_queue.update_job_progress(job_id=job_id, progress_value=i,
+                                               progress_message=message)
+            else:
+                # A sub-step cannot touch the parent's counters, but it must
+                # still pass through update_job_progress between episodes:
+                # that is where a pressed Stop is noticed, the same seam the
+                # sync sub-steps use. Without it a stopped batch search runs
+                # every remaining episode of the current show.
+                jobs_queue.update_job_progress(job_id=job_id, progress_message=message)
 
             providers_list = get_providers()
             fallback_allowed = settings.general.use_whisper_fallback and settings.general.use_whisper_fallback_series
@@ -78,24 +88,44 @@ def series_download_subtitles(no, job_id=None, job_sub_function=False, arr_insta
                                            providers_list=providers_list, fallback_allowed=fallback_allowed,
                                            arr_instance_id=episode.arr_instance_id)
             else:
-                jobs_queue.update_job_progress(job_id=job_id, progress_value=count_episodes_details)
+                if not job_sub_function:
+                    jobs_queue.update_job_progress(job_id=job_id, progress_value=count_episodes_details)
                 logging.info("BAZARR All providers are throttled")
                 throttled = True
                 break
 
     outcome_msg = ("All providers throttled" if throttled
                    else "Search completed")
-    jobs_queue.update_job_progress(job_id=job_id, progress_message=outcome_msg)
-    jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Downloaded missing subtitles for {series_row.title}")
+    if not job_sub_function:
+        jobs_queue.update_job_progress(job_id=job_id, progress_message=outcome_msg)
+        jobs_queue.update_job_name(job_id=job_id, new_job_name=f"Downloaded missing subtitles for {series_row.title}")
+
+
+def _episode_series_title(sonarr_episode_id, arr_instance_id):
+    """Title of the series that owns this episode, or None when that is not one series.
+
+    ``sonarr_episode_id`` is an episode id, so the series is reached through the
+    episode's local relationship, never by comparing it with a series id.
+    Without an owner the same upstream id can exist in several instances, and
+    a label that picked one of them would name the wrong series.
+    """
+    titles = database.execute(scoped(
+        select(TableShows.title)
+        .select_from(TableEpisodes)
+        .join(TableShows, TableEpisodes.series_id == TableShows.id)
+        .where(TableEpisodes.sonarrEpisodeId == sonarr_episode_id),
+        TableEpisodes.arr_instance_id, arr_instance_id).limit(2)).all()
+    return titles[0].title if len(titles) == 1 else None
 
 
 def episode_download_subtitles(no, job_id=None, job_sub_function=False, providers_list=None, fallback_allowed=False,
                                arr_instance_id=None):
     if not job_sub_function and not job_id:
-        jobs_queue.add_job_from_function(f"""Downloading missing subtitles for {database.scalar(
-            scoped(select(TableShows.title).where(TableShows.sonarrSeriesId == no),
-                   TableShows.arr_instance_id, arr_instance_id)) or 'Unknown Series'}""", is_progress=True)
-        return
+        # No local variables here: the queue re-binds this frame's locals as the
+        # job's keyword arguments.
+        return jobs_queue.add_job_from_function(
+            f"Downloading missing subtitles for {_episode_series_title(no, arr_instance_id) or 'Unknown Series'}",
+            is_progress=True, return_existing=True)
 
     conditions = [(TableEpisodes.sonarrEpisodeId == no)]
     conditions += get_exclusion_clause('series')
@@ -207,7 +237,10 @@ def episode_download_subtitles(no, job_id=None, job_sub_function=False, provider
 def episode_download_specific_subtitles(sonarr_series_id, sonarr_episode_id, language, hi, forced, job_id=None,
                                         arr_instance_id=None):
     if not job_id:
-        return jobs_queue.add_job_from_function("Searching subtitles", is_progress=True)
+        return enqueue_or_existing("Searching subtitles", __name__, 'episode_download_specific_subtitles',
+            {'sonarr_series_id': sonarr_series_id, 'sonarr_episode_id': sonarr_episode_id,
+             'language': language, 'hi': hi, 'forced': forced, 'job_id': job_id,
+             'arr_instance_id': arr_instance_id}, is_progress=True)
 
     episodeInfo = database.execute(
         scoped(

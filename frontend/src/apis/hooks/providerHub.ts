@@ -90,8 +90,8 @@ export function useProviderHubInstall() {
     mutationKey: [...providerHubKey, QueryKeys.Actions, "install"],
     // Resolves when the install job has finished, not when it was queued, and
     // rejects with the job's reason when it failed.
-    mutationFn: async ({ manifest }: ProviderHubInstallRequest) => {
-      const { job_id: jobId } = await api.providerHub.install(manifest);
+    mutationFn: async (request: ProviderHubInstallRequest) => {
+      const { job_id: jobId } = await api.providerHub.install(request);
       await waitForJob(client, jobId);
     },
     onSettled: () => {

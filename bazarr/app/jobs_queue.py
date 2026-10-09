@@ -34,8 +34,18 @@ bazarr_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class JobCancelled(Exception):
-    """Raised when a running job is cancelled by the user."""
-    pass
+    """Raised when a running job is cancelled by the user.
+
+    ``job_id`` names the stopped job. A stop can surface inside another job's
+    work, because the provider pool a search reports its progress through is
+    shared between the jobs of a profile, so work being interrupted checks
+    whose stop arrived before it ends its own job. The message is optional: a
+    caller that only signals the stop raises the class bare.
+    """
+
+    def __init__(self, message="", job_id=None):
+        super().__init__(message)
+        self.job_id = job_id
 
 
 class JobFailed(Exception):
@@ -60,6 +70,21 @@ class JobFailed(Exception):
 # carry paths or provider payloads, so it stays in the log.
 UNEXPECTED_JOB_ERROR = {"reason": "unexpected_error",
                         "message": "The job failed unexpectedly. Check the logs for details."}
+
+# The jobs that call the AI Subtitle Translator, by the module and function
+# they run: a library translation and an editor translation. They share the
+# translation lane. A job's name cannot decide that: it carries titles and
+# filenames, so a download for "Lost in Translation" read as a translation,
+# and it changes while the job runs.
+TRANSLATION_JOBS = frozenset({
+    ('subtitles.tools.translate.main', 'translate_subtitles_file'),
+    ('subtitles.tools.translate.editor', 'translate_editor_lines'),
+})
+
+
+def is_translation_job(job) -> bool:
+    """Whether ``job`` runs in the translation lane."""
+    return (job.module, job.func) in TRANSLATION_JOBS
 
 
 class Job:
@@ -111,6 +136,10 @@ class Job:
     :ivar stopped: Whether the job ended at Stop instead of finishing. It is still recorded as completed.
         ``cancelled`` only records that Stop was pressed, and a job past its last checkpoint finishes anyway.
     :type stopped: bool
+    :ivar origin: Who started the job: ``"user"`` for one an authenticated request enqueued, ``"scheduled"``
+        for one the scheduler's task pool enqueued, None when nothing knows. Sent with the job, so the
+        client can announce the user's own work and leave routine work quiet.
+    :type origin: str, optional
     """
     def __init__(self, job_id: int, job_name: str, module: str, func: str, args: list = None, kwargs: dict = None,
                  is_progress: bool = False, is_signalr: bool = False, progress_max: int = 0, job_returned_value=None,
@@ -135,6 +164,11 @@ class Job:
         self.retry_of = retry_of
         self.cancelled = False
         self.stopped = False
+        # Who started the job, read from the enqueuing thread: an
+        # authenticated request says the user, and the scheduler's task pool
+        # says routine work. Unlike the observations below it is sent with
+        # the job.
+        self.origin = activity.current_job_origin()
         # Observation only. ``last_run_time`` is overwritten at creation, start
         # and terminal state, so it cannot tell those three apart; these can.
         # They never take part in equality, scheduling or execution.
@@ -188,6 +222,12 @@ class JobsQueue:
         self._job_id_lock = Lock()  # Separate lock for ID generation
         self._import_lock = Lock()  # Lock for module imports
 
+        # Inline runs a batch job claimed in place of queueing one, each keyed
+        # like the job the queue would refuse to duplicate and owned by the
+        # claiming job's id. They are read in the same look, under this same
+        # lock, as the pending and running queues.
+        self._inline_claims = []
+
         # Throttle progress events: buffer latest payload per job, flush every 250 ms
         self._progress_buffer = {}
         self._progress_buffer_lock = Lock()
@@ -196,7 +236,7 @@ class JobsQueue:
 
     def feed_jobs_pending_queue(self, job_name, module, func, args: list = None, kwargs: dict = None,
                                 is_progress=False, is_signalr=False, progress_max: int = 0,
-                                retryable: bool = False, retry_of: int = None):
+                                retryable: bool = False, retry_of: int = None, return_existing: bool = False):
         """
         Adds a new job to the pending jobs queue with specified details and triggers an event
         to notify about the queue update. Each job is uniquely identified by a job ID,
@@ -223,7 +263,13 @@ class JobsQueue:
         :type retryable: bool
         :param retry_of: The id of the failed job this one retries.
         :type retry_of: int
-        :return: The unique job ID assigned to the newly queued job.
+        :param return_existing: When an identical job is already pending or running, or runs inline in a
+            claimed batch job, return that job's ID instead of False. It is read in the same look as the
+            match, under the queue lock, so the caller gets a job to follow even when that job finishes a
+            moment later.
+        :type return_existing: bool
+        :return: The unique job ID assigned to the newly queued job, or False when an identical job is already
+            pending or running.
         :rtype: int | bool
         """
         if args is None:
@@ -232,9 +278,18 @@ class JobsQueue:
             kwargs = {}
 
         with self._queue_lock:
-            if self._is_an_existing_job(module, func, args, kwargs):
+            existing = self._find_existing_job(module, func, args, kwargs)
+            if existing is not None:
                 logging.debug(f"Task {job_name} already exists in pending and running queue")  # noqa: G004
-                return False
+                return existing.job_id if return_existing else False
+
+            claim = self._find_inline_claim(module, func, args, kwargs)
+            if claim is not None:
+                # The work runs inline in the batch job that claimed it, so a
+                # request that would queue the same work follows that job
+                # instead of starting a second one.
+                logging.debug(f"Task {job_name} runs inline in job {claim['job_id']}")  # noqa: G004
+                return claim['job_id'] if return_existing else False
 
             with self._job_id_lock:
                 new_job_id = self.current_job_id = self.current_job_id + 1
@@ -489,7 +544,7 @@ class JobsQueue:
                 # Only final accounting of an already committed operation may
                 # report after cancellation. Work checks retain the default.
                 if job.cancelled and not allow_cancelled:
-                    raise JobCancelled(f"Job {job.job_name} ({job.job_id}) was cancelled")
+                    raise JobCancelled(f"Job {job.job_name} ({job.job_id}) was cancelled", job_id=job_id)
                 payload = self._build_progress_payload(job, progress_value, progress_max, progress_message)
                 with self._progress_buffer_lock:
                     self._progress_buffer[job_id] = payload
@@ -557,7 +612,7 @@ class JobsQueue:
         return False
 
     def add_job_from_function(self, job_name: str, is_progress: bool, progress_max: int = 0,
-                              wait_for_completion: bool = False) -> int | bool:
+                              wait_for_completion: bool = False, return_existing: bool = False) -> int | bool:
         """
         Adds a job to the pending queue using the details of the calling function. The job is then executed.
 
@@ -569,6 +624,8 @@ class JobsQueue:
         :type progress_max: int
         :param wait_for_completion: Flag indicating whether to wait for the job to complete before returning.
         :type wait_for_completion: bool
+        :param return_existing: Return the matching active job's id when this call is already queued.
+        :type return_existing: bool
         :return: ID of the added job.
         :rtype: int | bool
         """
@@ -602,7 +659,8 @@ class JobsQueue:
 
         # Feed the job to the pending queue
         job_id = self.feed_jobs_pending_queue(job_name=job_name, module=parent_function_path, func=parent_function_name,
-                                              kwargs=arguments, is_progress=is_progress, progress_max=progress_max)
+                                              kwargs=arguments, is_progress=is_progress, progress_max=progress_max,
+                                              return_existing=return_existing)
 
         if not job_id:
             return False
@@ -700,7 +758,7 @@ class JobsQueue:
                 return True
         return False
 
-    def force_start_pending_job(self, job_id: int) -> bool:
+    def force_start_pending_job(self, job_id: int, user_start: bool = False) -> bool:
         """
         Forces the execution of a job currently in the pending queue. Only jobs with
         a status of 'pending' will be processed. If a matching job is found and
@@ -708,6 +766,11 @@ class JobsQueue:
 
         :param job_id: Identifier of the job to be forcefully started.
         :type job_id: int
+        :param user_start: Whether the user chose this start, which makes the job's
+            outcome theirs to hear. The job was already queued by whoever first
+            scheduled it, so its origin is written here and not at creation. Internal
+            callers leave it off and the origin stays as it was.
+        :type user_start: bool
         :return: A boolean value indicating whether the job was successfully initiated.
         :rtype: bool
         """
@@ -722,6 +785,8 @@ class JobsQueue:
             # is counted exactly once and never sits in neither queue.
             self.jobs_pending_queue.remove(job)
             self.jobs_running_queue.append(job)
+            if user_start:
+                job.origin = 'user'
 
         job_thread = Thread(target=self._run_job, args=(job,))
         job_thread.daemon = True
@@ -776,19 +841,25 @@ class JobsQueue:
         sub-limit inside it, not a parallel gate: the settings field says
         "Number of concurrent jobs allowed in the jobs manager", and a
         translation admitted purely against its own lane meant a translation
-        plus a general job ran under a configured limit of 1.
+        plus a general job ran under a configured limit of 1. Which jobs are
+        translations is decided by ``is_translation_job``.
         """
         if len(self.jobs_running_queue) >= settings.general.concurrent_jobs:
             return False
 
-        if 'translat' not in (job.job_name or '').lower():
+        if not is_translation_job(job):
             return True
 
-        running_translations = sum(
-            1 for running in self.jobs_running_queue
-            if 'translat' in (running.job_name or '').lower()
-        )
+        running_translations = sum(1 for running in self.jobs_running_queue if is_translation_job(running))
         return running_translations < settings.translator.openrouter_max_concurrent
+
+    def translation_lane_counts(self) -> dict:
+        """The translations waiting and the ones holding a lane slot, counted the way the lane counts them."""
+        with self._queue_lock:
+            return {
+                'pending': sum(1 for job in self.jobs_pending_queue if is_translation_job(job)),
+                'running': sum(1 for job in self.jobs_running_queue if is_translation_job(job)),
+            }
 
     def _reserve_next_job(self):
         """Take the next runnable job off pending and put it on running, or None.
@@ -849,8 +920,9 @@ class JobsQueue:
                 payload["progress_message"] = job.progress_message
             event_stream(type='jobs', action='update', payload=payload)
 
-            logging.debug(f"Running job {job.job_name} (id {job.job_id}): "  # noqa: G004
-                          f"{job.module}.{job.func}({job.args}, {job.kwargs})")
+            # Never the arguments: they can hold API keys or a whole uploaded
+            # package, and an f-string formatted them even with debug off.
+            logging.debug("Running job %s (id %s): %s.%s", job.job_name, job.job_id, job.module, job.func)
             
             # Use import lock to prevent deadlocks
             with self._import_lock:
@@ -936,6 +1008,13 @@ class JobsQueue:
         :return: True if a matching job exists in pending or running queues, False otherwise.
         :rtype: bool
         """
+        return self._find_existing_job(module, func, args, kwargs) is not None
+
+    def _find_existing_job(self, module, func, args, kwargs):
+        """The pending or running job with the same module, function and arguments, or None.
+
+        A ``job_id`` in either set of keyword arguments is not part of the comparison.
+        """
         cleaned_kwargs = kwargs.copy()
         cleaned_kwargs.pop('job_id', None)
         with (self._queue_lock):
@@ -948,8 +1027,87 @@ class JobsQueue:
                         job.func == func and
                         job.args == args and
                         cleaned_job_kwargs == cleaned_kwargs):
-                    return True
-            return False
+                    return job
+            return None
+
+    def claim_inline_job(self, module, func, args=None, kwargs=None, job_id=None):
+        """Claim an inline run of work the queue would refuse to duplicate.
+
+        A batch job that runs the work itself, inline, publishes the run here
+        before it starts. The claim is read in the same look, under the same
+        lock, that ``feed_jobs_pending_queue`` makes before queueing, so both
+        directions of the race are covered: this batch leaves alone work a job
+        another request already queued or claimed, and a request that arrives
+        while the batch runs the work follows this job instead of queueing a
+        second one.
+
+        :param module: Module the inline work runs from.
+        :type module: str
+        :param func: Function the inline work runs.
+        :type func: str
+        :param args: Positional arguments of the work, as the queue would bind them.
+        :type args: list
+        :param kwargs: Keyword arguments of the work, as the queue would bind them.
+        :type kwargs: dict
+        :param job_id: The claiming batch job's id.
+        :type job_id: int
+        :return: The id of the job that owns the work: ``job_id`` when this
+            caller claimed it, or the id of the job that already does.
+        :rtype: int
+        """
+        args = list(args or [])
+        cleaned_kwargs = dict(kwargs or {})
+        cleaned_kwargs.pop('job_id', None)
+        with self._queue_lock:
+            existing = self._find_existing_job(module, func, args, cleaned_kwargs)
+            if existing is not None:
+                return existing.job_id
+            claim = self._find_inline_claim(module, func, args, cleaned_kwargs)
+            if claim is not None:
+                return claim['job_id']
+            self._inline_claims.append({'module': module, 'func': func, 'args': args,
+                                        'kwargs': cleaned_kwargs, 'job_id': job_id})
+            return job_id
+
+    def release_inline_job(self, module, func, args=None, kwargs=None):
+        """Drop the claim ``claim_inline_job`` recorded for this inline run.
+
+        The batch that claimed the run calls this when the run ends, whether it
+        completed, failed or was stopped, so a later request may start the work
+        again.
+
+        :param module: Module the inline work runs from.
+        :type module: str
+        :param func: Function the inline work runs.
+        :type func: str
+        :param args: Positional arguments of the work, as the queue would bind them.
+        :type args: list
+        :param kwargs: Keyword arguments of the work, as the queue would bind them.
+        :type kwargs: dict
+        """
+        args = list(args or [])
+        cleaned_kwargs = dict(kwargs or {})
+        cleaned_kwargs.pop('job_id', None)
+        with self._queue_lock:
+            for claim in self._inline_claims:
+                if (claim['module'] == module and claim['func'] == func and
+                        claim['args'] == args and claim['kwargs'] == cleaned_kwargs):
+                    self._inline_claims.remove(claim)
+                    return
+
+    def _find_inline_claim(self, module, func, args, kwargs):
+        """The inline claim for the same work, or None.
+
+        A ``job_id`` in either set of keyword arguments is not part of the
+        comparison, exactly as in ``_find_existing_job``.
+        """
+        cleaned_kwargs = dict(kwargs or {})
+        cleaned_kwargs.pop('job_id', None)
+        for claim in self._inline_claims:
+            if (claim['module'] == module and claim['func'] == func and
+                    claim['args'] == list(args or []) and claim['kwargs'] == cleaned_kwargs):
+                return claim
+        return None
 
 
 jobs_queue = JobsQueue()

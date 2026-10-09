@@ -65,3 +65,31 @@ describe("v2.7.0 Atlas slides", () => {
     expect(slide!.cta?.to).toBe("/settings/translator");
   });
 });
+
+describe("v2.7.1 patch slides", () => {
+  const slides = getWhatsNewSlides("2.7.1");
+
+  it("keeps the patch tour short enough to read", () => {
+    expect(slides.length).toBeGreaterThan(0);
+    expect(slides.length).toBeLessThanOrEqual(7);
+    slides.forEach((slide) => {
+      expect(slide.body.trim().split(/\s+/).length).toBeLessThanOrEqual(45);
+    });
+  });
+
+  it("leads with the key move and its rotation advice", () => {
+    const slide = slides.find((slide) => slide.title.includes("API keys"));
+    expect(slide).toBeDefined();
+    expect(slides[0]).toBe(slide);
+    expect(slide!.body).toContain("headers");
+    expect(slide!.body).toContain("rotate");
+    expect(slide!.cta?.to).toBe("/settings/translator");
+  });
+
+  it("warns about the two schema changes", () => {
+    const slide = slides.find((slide) => /database changes/.test(slide.title));
+    expect(slide).toBeDefined();
+    expect(slide!.body).toContain("first start");
+    expect(slide!.body.toLowerCase()).toContain("back up");
+  });
+});

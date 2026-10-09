@@ -12,6 +12,7 @@ from sportarr.connection import check_cancelled, connection_identity, owner_sync
 from sportarr.db import sports_transaction
 from sportarr.parser import parse_events, positive_id
 from app.config import settings
+from app.jobs_queue import jobs_queue
 from sportarr.settings import get_sports_settings
 from sportarr.sync.leagues import notify, require_sportarr
 from utilities.sql_limits import in_chunks
@@ -182,9 +183,12 @@ def _same_snapshot(first, second):
             and sorted(first, key=lambda item: item['file_id']) == sorted(second, key=lambda item: item['file_id']))
 
 
-def _expanded_snapshots(client, league_ids, owner, page_size, cancel, complete):
-    leagues = dict(database.execute(select(TableSportsLeagues.id, TableSportsLeagues.sportarrLeagueId).where(
-        TableSportsLeagues.arr_instance_id == owner)).all())
+def _expanded_snapshots(client, league_ids, owner, page_size, cancel, complete, job_id=None):
+    rows = database.execute(select(TableSportsLeagues.id, TableSportsLeagues.sportarrLeagueId,
+                                   TableSportsLeagues.title).where(
+        TableSportsLeagues.arr_instance_id == owner)).all()
+    leagues = {local: upstream for local, upstream, _ in rows}
+    titles = {local: title for local, _, title in rows}
     if not set(league_ids) <= set(leagues):
         raise SportsNotFound('Sports league not found for this owner')
     by_upstream = {upstream: local for local, upstream in leagues.items()}
@@ -192,7 +196,10 @@ def _expanded_snapshots(client, league_ids, owner, page_size, cancel, complete):
     def fetch(local):
         if local not in snapshots:
             snapshots[local] = read_events(client, leagues[local], page_size, cancel)
-    for local in league_ids:
+    for index, local in enumerate(league_ids):
+        if job_id:
+            jobs_queue.update_job_progress(job_id=job_id, progress_value=index + 1,
+                                           progress_message=titles.get(local))
         fetch(local)
     stored = database.execute(select(TableSportsEvents).where(
         TableSportsEvents.arr_instance_id == owner)).scalars().all()
@@ -315,7 +322,7 @@ def _rebind_artifacts(session, row, before, instance):
 
 
 def sync_event_leagues(league_ids, arr_instance_id, *, page_size=1000, cancel=None, expected_connection=None,
-                      http_get=None, lock_timeout=None, is_signalr=False, complete=False):
+                      http_get=None, job_id=None, lock_timeout=None, is_signalr=False, complete=False):
     with owner_sync_lock(arr_instance_id, cancel, timeout=lock_timeout):
         instance = require_sportarr(database, arr_instance_id)
         expected = connection_identity(instance)
@@ -323,7 +330,8 @@ def sync_event_leagues(league_ids, arr_instance_id, *, page_size=1000, cancel=No
             raise ValueError('Sportarr connection changed during synchronization')
         factory = ArrClientFactory()
         client = factory.from_row(instance, http_get=http_get) if http_get else factory.from_row(instance)
-        snapshots, leagues = _expanded_snapshots(client, league_ids, arr_instance_id, page_size, cancel, complete)
+        snapshots, leagues = _expanded_snapshots(client, league_ids, arr_instance_id, page_size, cancel, complete,
+                                                job_id=job_id)
         ids_by_league = {local: [] for local in snapshots}
         search_event_ids = []
         with sports_transaction(database) as transaction:

@@ -92,9 +92,14 @@ def test_disabled_owner_and_transaction_failure(library, monkeypatch):
     assert session.get(TableSportsLeagues, ids[0]).title == 'League'
 
 
-def test_sports_settings_merge_and_validation(schema_session):
+def test_sports_settings_merge_and_validation(schema_session, monkeypatch):
     from arr_instances.service import create_instance, update_instance
     from arr_instances.repository import ArrInstanceRepository
+    # The created instance turns post-processing on and inherits the global
+    # command, and the save refuses an enabled toggle with no command. This
+    # test is about the merge semantics, so give it a runnable command.
+    monkeypatch.setattr('app.config.settings.general.postprocessing_cmd',
+                        '/opt/scripts/process.sh "{{subtitles}}"', raising=False)
     body, status = create_instance(schema_session, {'kind': 'sportarr', 'name': 'Sports', 'sports_settings': {'sports_sync': 13, 'excluded_sports': ['Golf']}, 'subtitle_settings': {'general': {'use_postprocessing': True}}})
     assert status == 201 and body['sports_settings']['sports_sync'] == 13
 
@@ -405,6 +410,7 @@ def test_owner_changes_serialize_after_checked_sports_writes(library, monkeypatc
     import threading
     from app.database import TableArrInstances, TableSportsLeagues
     from sportarr import library as sports_library
+    from sportarr.db import error_sqlstate
 
     session, leagues = library
     engine = session.get_bind()
@@ -434,7 +440,7 @@ def test_owner_changes_serialize_after_checked_sports_writes(library, monkeypatc
                     if engine.dialect.name == 'sqlite':
                         assert exc.orig.sqlite_errorcode == 5
                     else:
-                        assert exc.orig.sqlstate == '55P03'
+                        assert error_sqlstate(exc) == '55P03'
                     connection.rollback()
                     outcome['first_write'] = 'blocked'
                 attempted.set()

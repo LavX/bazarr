@@ -4,8 +4,6 @@
 The repository is the single place where per-instance Sonarr/Radarr API keys
 are encrypted at rest. arr_instances rows live outside config.yaml's Fernet
 encryption, so the key is encrypted here on write and decrypted on read.
-
-Plan: docs/superpowers/plans/2026-05-27-multiple-arr-instances-final.md (Phase 2).
 """
 import pytest
 
@@ -210,6 +208,35 @@ def test_delete_refused_when_owned_media_rows_exist(schema_session):
     with pytest.raises(ValueError):
         repo.delete(inst.id)
     assert repo.get(inst.id) is not None
+
+
+def test_delete_with_remove_library_takes_the_owned_rows_along(schema_session):
+    from sqlalchemy import func, insert, select
+
+    from app.database import TableEpisodes, TableMovies, TableMoviesRootfolder, TableShows
+
+    repo = _repo(schema_session)
+    inst = repo.create("sonarr", "Main", api_key="k", port=1)
+    films = repo.create("radarr", "Films", api_key="k")
+    schema_session.execute(insert(TableShows).values(
+        id=5, sonarrSeriesId=1, path="/tv/show", title="Show", arr_instance_id=inst.id))
+    schema_session.execute(insert(TableEpisodes).values(
+        sonarrSeriesId=1, sonarrEpisodeId=2, series_id=5, path="/tv/show/e.mkv", title="E",
+        season=1, episode=1, arr_instance_id=inst.id))
+    schema_session.execute(insert(TableMovies).values(
+        radarrId=1, tmdbId="1", path="/m.mkv", title="M", arr_instance_id=films.id))
+    schema_session.execute(insert(TableMoviesRootfolder).values(
+        upstream_rootfolder_id=1, path="/movies", arr_instance_id=films.id))
+    assert repo.owned_row_counts(inst.id) == {"series": 1, "episodes": 1, "movies": 0,
+                                              "history": 0, "blacklist": 0, "root_folders": 0}
+
+    assert repo.delete(inst.id, remove_library=True) is True
+
+    assert repo.get(inst.id) is None
+    assert schema_session.execute(select(func.count()).select_from(TableShows)).scalar() == 0
+    assert schema_session.execute(select(func.count()).select_from(TableEpisodes)).scalar() == 0
+    assert repo.owned_row_counts(films.id) == {"series": 0, "episodes": 0, "movies": 1,
+                                               "history": 0, "blacklist": 0, "root_folders": 1}
 
 
 # ----------------------------------------------- default invariant maintenance

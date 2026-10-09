@@ -243,7 +243,6 @@ def _refresh_current_sports_outputs(context, signature, result, versions):
     from app.database import database
     from sportarr.output import SportsOutputNamespace
     from sportarr.subtitles import candidate_signature
-    from sportarr.notify import notify_rescan
     from utilities.post_processing import set_chmod
 
     namespace = SportsOutputNamespace(context, database)
@@ -258,13 +257,7 @@ def _refresh_current_sports_outputs(context, signature, result, versions):
             return
         for path in current_outputs:
             set_chmod(path)
-    try:
-        _index_sports_outputs(context)
-    finally:
-        # The writer already dispatched each file publication, which is every
-        # media server's refresh. Sportarr's rescan still runs even when the
-        # indexing above failed.
-        notify_rescan(context.arr_instance_id)
+    _index_sports_outputs(context)
 
 
 def _index_sports_outputs(context):
@@ -331,7 +324,8 @@ def sync_subtitles(video_path,
                    context=None,
                    validate=None,
                    cancel=None,
-                   publication_guard=None):
+                   publication_guard=None,
+                   return_job_id=False):
     try:
         if context is not None:
             if validate is None or publication_guard is None:
@@ -362,6 +356,13 @@ def sync_subtitles(video_path,
             return False
 
         if not job_id and track_job_progress:
+            # HTTP callers need the id to refresh only after the queued sync
+            # finishes. Internal callers retain the boolean outcome contract.
+            if return_job_id:
+                return jobs_queue.add_job_from_function(
+                    f"Syncing {srt_path}", is_progress=True,
+                    progress_max=_sync_progress_total(enabled_engines), return_existing=True,
+                )
             if not jobs_queue.add_job_from_function(
                 f"Syncing {srt_path}",
                 is_progress=True,

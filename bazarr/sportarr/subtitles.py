@@ -23,11 +23,11 @@ from app.database import (
 )
 from app.config import settings
 from app.get_providers import get_providers
+from media_servers.events import publication_callback
 from sportarr.connection import check_cancelled
-from sportarr.db import SportsTransactionOutcome, sports_transaction
+from sportarr.db import SportsTransactionOutcome, error_sqlstate, sports_transaction
 from sportarr.errors import SportsOwnersBusy
 from sportarr.identity import SportsEventContext, resolve_event_in_session
-from sportarr.notify import notify_rescan, rescan_batch
 from sportarr.output import (
     SportsOutputNamespace,
     lock_output_owners,
@@ -166,16 +166,16 @@ def _is_owner_contention(exc):
     cause behind retry wording and then repeats it for as long as the retry
     budget lasts.
 
-    Both spellings of the SQLSTATE are read. psycopg 2, which the image
-    ships, calls it ``pgcode``; psycopg 3, which the tests run on, exposes it
-    as ``sqlstate``. Reading only one of them silently classifies every real
-    lock refusal as a fault, because the attribute is simply absent on the
-    other driver.
+    The SQLSTATE is read through error_sqlstate, which takes both spellings.
+    psycopg2, the driver the image ships and CI runs on, calls it ``pgcode``;
+    psycopg 3 calls it ``sqlstate``. Reading only one of them silently
+    classifies every real lock refusal as a fault, because the attribute is
+    simply absent on the other driver.
     """
-    original = getattr(exc, 'orig', None)
-    state = getattr(original, 'sqlstate', None) or getattr(original, 'pgcode', None)
+    state = error_sqlstate(exc)
     if state is not None:
         return state in _CONTENTION_SQLSTATES
+    original = getattr(exc, 'orig', None)
     message = str(original or exc).lower()
     return 'database is locked' in message or 'database is busy' in message
 
@@ -358,7 +358,8 @@ def sports_history(
     return row
 
 
-def _remove_superseded_sports_subtitle(path, previous_artifact, written_paths, is_upgrade):
+def _remove_superseded_sports_subtitle(path, previous_artifact, written_paths, is_upgrade,
+                                      on_publish=None):
     """Delete the subtitle an upgrade replaced, when it lands under a new name.
 
     Mirrors subtitles/download.py:166. previous_artifact alone only proved the
@@ -370,6 +371,9 @@ def _remove_superseded_sports_subtitle(path, previous_artifact, written_paths, i
     A rewrite in place is not a replacement, so paths are compared by realpath
     to avoid deleting the file that was just written through a symlink or a
     differently-cased path.
+
+    A removed file is handed to ``on_publish``; the caller decides when the
+    media servers hear about it.
     """
     if not (is_upgrade and previous_artifact and written_paths):
         return
@@ -389,9 +393,44 @@ def _remove_superseded_sports_subtitle(path, previous_artifact, written_paths, i
         logging.exception(
             "BAZARR unable to remove superseded sports subtitle: %s", previous_path
         )
+        return
+    if on_publish is not None:
+        on_publish(previous_path)
 
 
-@rescan_batch()
+@contextmanager
+def _publish_after_release(video_path, arr_instance_id):
+    """Tell the media servers about a save's file changes once it lets go.
+
+    A refresh worker takes the video's subtitle locks before it scans, and the
+    save holds them through processing, history and indexing, so a report made
+    inside would park that server's only worker for all of it. Queuing the
+    refresh also takes the dispatcher's configuration lock, which a media
+    server settings save holds across its own database write, and must not
+    wait for it while the publication transaction holds the database writer.
+
+    Changes are recorded as they happen and reported on every exit, so a file
+    that reached disk is announced even when later work fails or is cancelled.
+    Everything the save publishes is queued as one batch once it lets go,
+    including what an automatic sync reports for its output on the way, so
+    an upgrade's new file, the one it replaced and a sync of it reach each
+    server as one refresh rather than one each.
+    """
+    from media_servers.dispatcher import queued_together
+    from subtitles.tools.subsync_engines import _report_subtitle_publication
+
+    changes = []
+    with queued_together():
+        try:
+            yield changes
+        finally:
+            for operation, subtitle_path in changes:
+                _report_subtitle_publication(
+                    publication_callback("sports", video_path, operation, arr_instance_id),
+                    subtitle_path,
+                )
+
+
 def save_sports_subtitle(
     video,
     subtitle,
@@ -429,12 +468,6 @@ def save_sports_subtitle(
     pending_replacement = replacement_state is not None
     publication_destination = None
 
-    def published(output_path):
-        # Record the physical write before later processing can fail or stop.
-        # The batch flushes these rescans after the final outputs are settled;
-        # the media servers were already told by the file publication itself.
-        notify_rescan(context.arr_instance_id)
-
     def validate(destination=None):
         nonlocal publication_destination
         if destination is not None:
@@ -453,7 +486,10 @@ def save_sports_subtitle(
             yield publication
         pending_replacement = False
 
-    with subtitle_write_locks(path, destination, cancel=cancel):
+    with (
+        _publish_after_release(path, context.arr_instance_id) as changes,
+        subtitle_write_locks(path, destination, cancel=cancel),
+    ):
         validate()
         if pending_replacement:
             from sportarr.artifacts import validate_replacement_state
@@ -489,7 +525,7 @@ def save_sports_subtitle(
                 validate=validate,
                 publication_guard=publication_guard,
                 written_paths=written_paths,
-                on_publish=published,
+                on_publish=lambda written: changes.append(("download", written)),
             )
             if not saved:
                 raise OSError("Could not save sports subtitles")
@@ -505,7 +541,8 @@ def save_sports_subtitle(
                 logging.exception(
                     "BAZARR could not clear the sports release-type mismatch after a save")
             _remove_superseded_sports_subtitle(
-                path, previous_artifact, written_paths, is_upgrade
+                path, previous_artifact, written_paths, is_upgrade,
+                on_publish=lambda removed: changes.append(("delete", removed)),
             )
             state["published"] = True
             phase = "processing"
@@ -577,10 +614,6 @@ def save_sports_subtitle(
                     )
                 except Exception:
                     logging.exception("BAZARR could not send a sports notification")
-            # Ask Sportarr to notice the subtitle it now records. The rescan is
-            # untargeted and dispatched per affected owner per operation, so it
-            # never blocks this state machine.
-            notify_rescan(context.arr_instance_id)
             phase = "index"
             outcome.refresh(candidate, database, cancel)
             if state["index"] != "completed":

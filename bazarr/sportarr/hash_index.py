@@ -2,16 +2,18 @@
 
 import hashlib
 import json
+import logging
 import os
 import stat
 import struct
+import time
 import unicodedata
 
 from sqlalchemy import select
 
 from app.config import settings
 from app.database import database, TableSportsEvents, TableSportsFileIndex
-from sportarr.connection import check_cancelled, connection_identity, owner_sync_lock, revalidate
+from sportarr.connection import check_cancelled, connection_identity, owner_sync_lock, revalidate, sync_waiting
 from sportarr.db import sports_transaction
 from sportarr.sync.leagues import require_sportarr
 from utilities.path_mappings import apply_sports_mapping, read_sports_mappings
@@ -150,26 +152,55 @@ class _IndexSignal:
         return not indexing_enabled() or self.parent is not None and self.parent.is_set()
 
 
+def _scan(arr_instance_id, event_ids, session, cancel, cursor, step_aside):
+    """Index the owner's events after ``cursor``.
+
+    Returns None once the scan is complete, or the last indexed event ID when
+    ``step_aside`` is set and a sync is waiting for the owner lock.
+    """
+    while True:
+        check_cancelled(cancel)
+        require_sportarr(session, arr_instance_id)
+        query = select(TableSportsEvents.id).where(TableSportsEvents.arr_instance_id == arr_instance_id,
+                                                   TableSportsEvents.id > cursor)
+        if event_ids is not None:
+            query = query.where(TableSportsEvents.id.in_(event_ids))
+        ids = session.execute(query.order_by(TableSportsEvents.id).limit(200)).scalars().all()
+        if not ids:
+            return None
+        for event_id in ids:
+            if step_aside and sync_waiting(arr_instance_id):
+                return cursor
+            for _ in range(2):
+                check_cancelled(cancel)
+                if refresh_recording(event_id, arr_instance_id, session=session, cancel=cancel) is not False:
+                    break
+            cursor = event_id
+
+
 def refresh_recording_index(arr_instance_id, event_ids=None, *, session=None, cancel=None, scheduled=False):
-    """Restart-safe keyset scan. No recording bytes are read in request threads."""
+    """Restart-safe keyset scan. No recording bytes are read in request threads.
+
+    The scheduled scan checks between recordings whether a sync is queued for
+    the owner lock. If one is, it releases the lock to that sync and then
+    resumes after the last recording it finished, so a startup sync no longer
+    waits for the whole library to be hashed. The scan a sync runs for its own
+    events holds the lock re-entrantly and never steps aside.
+    """
     session = database if session is None else session
-    if scheduled:
-        cancel = _IndexSignal(cancel)
-    with owner_sync_lock(arr_instance_id, cancel):
-        cursor = 0
-        while True:
+    if not scheduled:
+        with owner_sync_lock(arr_instance_id, cancel):
+            _scan(arr_instance_id, event_ids, session, cancel, 0, False)
+        return
+    cancel = _IndexSignal(cancel)
+    cursor = 0
+    while True:
+        with owner_sync_lock(arr_instance_id, cancel, count_waiter=False):
+            cursor = _scan(arr_instance_id, event_ids, session, cancel, cursor, True)
+        if cursor is None:
+            return
+        logging.debug('Sports recording index for instance %s paused for a Sportarr sync.', arr_instance_id)
+        # Resume only once the sync holds the lock, or has given up waiting.
+        while sync_waiting(arr_instance_id):
             check_cancelled(cancel)
-            require_sportarr(session, arr_instance_id)
-            query = select(TableSportsEvents.id).where(TableSportsEvents.arr_instance_id == arr_instance_id,
-                                                       TableSportsEvents.id > cursor)
-            if event_ids is not None:
-                query = query.where(TableSportsEvents.id.in_(event_ids))
-            ids = session.execute(query.order_by(TableSportsEvents.id).limit(200)).scalars().all()
-            if not ids:
-                return
-            for event_id in ids:
-                for _ in range(2):
-                    check_cancelled(cancel)
-                    if refresh_recording(event_id, arr_instance_id, session=session, cancel=cancel) is not False:
-                        break
-            cursor = ids[-1]
+            time.sleep(0.1)

@@ -64,6 +64,8 @@ def dispatch():
     # Every refusal Silo folds into request_rejected that is not the documented
     # 400: a refused event-stream handshake, a conflict, a rate limit.
     rejected_paths = set()
+    # Paths the server answers with a 5xx.
+    server_error_paths = set()
     libraries = [{"id": "7", "type": "movies", "paths": ["/media"]}]
 
     def server_error(code):
@@ -124,6 +126,8 @@ def dispatch():
             ensure_current()
             if path in rejected_paths:
                 raise server_error("request_rejected")
+            if path in server_error_paths:
+                raise server_error("server_error")
             if path in missing_paths:
                 if self.server == "emby":
                     raise server_error("item_missing")
@@ -139,7 +143,8 @@ def dispatch():
                           release=release, failures=failures, libraries=libraries, failed_paths=failed_paths,
                           emby_items=emby_items, rungs=rungs, resolves=resolves, library_calls=library_calls,
                           identifier_calls=identifier_calls, missing_paths=missing_paths,
-                          rejected_paths=rejected_paths, metadata=metadata, metadata_box=metadata_box,
+                          rejected_paths=rejected_paths, server_error_paths=server_error_paths,
+                          metadata=metadata, metadata_box=metadata_box,
                           generation=generation)
     release.set()
     assert dispatcher.wait_idle(3)
@@ -364,6 +369,21 @@ def test_a_refused_scan_request_never_escalates_to_the_whole_library(dispatch):
     assert dispatch.library_calls == [], 'a refused request is not a path Silo could not place'
     assert dispatch.dispatcher.status(IDS['silo']) == {
         'pending': 1, 'state': 'unconfirmed', 'error_code': 'request_rejected'}
+
+
+@pytest.mark.parametrize('foreign', [False, True], ids=['this generation', 'another generation'])
+def test_a_server_error_is_reported_as_the_servers_not_bazarrs(dispatch, foreign):
+    """The HTTP client answers a 5xx with server_error, a code the status did
+    not know, so the refresh was reported as a fault in Bazarr (internal_error)
+    rather than the server's."""
+    if foreign:
+        dispatch.generation.append(other_generation())
+    dispatch.server_error_paths.add('/media/A.mkv')
+    dispatch.release.set()
+    dispatch.dispatcher.notify(movie_event())
+    assert dispatch.dispatcher.wait_idle(3)
+    assert dispatch.dispatcher.status(IDS['silo']) == {
+        'pending': 1, 'state': 'unconfirmed', 'error_code': 'server_error'}
 
 
 @pytest.mark.parametrize('kind', ['emby', 'silo'])
@@ -861,3 +881,24 @@ def test_a_sports_publication_accepts_either_mapped_silo_library_type(dispatch):
                                                subtitle_path='/movies/sports/Event.en.srt'))
         assert dispatch.dispatcher.wait_idle(3)
         assert dispatch.dispatcher.status(IDS['silo'])['state'] == 'confirmed'
+
+
+def test_publications_queued_together_reach_each_server_as_one_refresh(dispatch, monkeypatch):
+    """An upgrade that renames a subtitle publishes the new file and the one it
+    replaced for the same video. Queued one at a time, a worker could start on
+    the first and scan, and the second would ask for the same scan again."""
+    from media_servers import dispatcher as module
+    monkeypatch.setattr(module, '_get_dispatcher', lambda: dispatch.dispatcher)
+    download = movie_event(media_type='sports', operation='download',
+                           video_path='/movies/sports/Event.mkv',
+                           subtitle_path='/movies/sports/Event.en.srt')
+    delete = replace(download, operation='delete', subtitle_path='/movies/sports/Event.en.ass')
+    with module.queued_together():
+        module.notify_subtitle_mutation(download)
+        module.notify_subtitle_mutation(delete)
+        # No worker has started, so none can pick up the first on its own.
+        assert dispatch.dispatcher.worker_count == 0
+    dispatch.release.set()
+    assert dispatch.dispatcher.wait_idle(3)
+    assert dispatch.library_calls == [('emby', ('sports', '/media/sports/Event.mkv'))]
+    assert [path for path, _ in dispatch.calls['silo']] == ['/media/sports/Event.mkv']

@@ -1,8 +1,14 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { QueryKeys } from "@/apis/queries/keys";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  EPISODES_HISTORY_DEBOUNCE_MS,
+  EPISODES_HISTORY_MAX_WAIT_MS,
+} from "@/apis/queries/episodeHistory";
+import { episodesHistoryKey, QueryKeys } from "@/apis/queries/keys";
+import api from "@/apis/raw";
 
 const queryClientMock = vi.hoisted(() => ({
   getQueryData: vi.fn(),
+  getQueryState: vi.fn(),
   invalidateQueries: vi.fn(),
   setQueryData: vi.fn(),
 }));
@@ -63,15 +69,21 @@ function emitEpisode(event: "update" | "delete", ids: number[]) {
 }
 
 describe("socketio reducer", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   beforeEach(() => {
     queryClientMock.getQueryData.mockReset();
+    queryClientMock.getQueryState.mockReset();
     queryClientMock.invalidateQueries.mockReset();
     queryClientMock.setQueryData.mockReset();
   });
 
   it.each(["update", "delete"] as const)(
     "invalidates the local series query for episode %s events",
-    (event) => {
+    async (event) => {
+      vi.useFakeTimers();
       const localSeriesIdKey = "series_id";
       queryClientMock.getQueryData.mockReturnValue({
         [localSeriesIdKey]: 501,
@@ -86,6 +98,15 @@ describe("socketio reducer", () => {
       ]);
       expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
         queryKey: [QueryKeys.Series, 501],
+      });
+      // The score history is not invalidated: episode rows change without
+      // history rows changing, and history writes carry their own event. The
+      // check waits out the window a scheduled or microtask refresh would
+      // land in, so it catches one that was only delayed.
+      await vi.advanceTimersByTimeAsync(EPISODES_HISTORY_DEBOUNCE_MS);
+      expect(queryClientMock.invalidateQueries).not.toHaveBeenCalledWith({
+        queryKey: episodesHistoryKey(501),
+        exact: true,
       });
       expect(queryClientMock.invalidateQueries).not.toHaveBeenCalledWith({
         queryKey: [QueryKeys.Series, 42],
@@ -145,4 +166,85 @@ describe("socketio reducer", () => {
       });
     },
   );
+
+  it("schedules one trailing history refresh per show", async () => {
+    vi.useFakeTimers();
+    const handler = reducerFor("episode-history").update as
+      | ((payload: number[]) => void)
+      | undefined;
+
+    handler?.([501, 502]);
+    expect(queryClientMock.invalidateQueries).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(EPISODES_HISTORY_DEBOUNCE_MS);
+    expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: episodesHistoryKey(501),
+      exact: true,
+    });
+    expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: episodesHistoryKey(502),
+      exact: true,
+    });
+  });
+
+  it("collapses a burst of history writes for one show into one refresh", async () => {
+    vi.useFakeTimers();
+    const handler = reducerFor("episode-history").update as
+      | ((payload: number[]) => void)
+      | undefined;
+
+    handler?.([501]);
+    await vi.advanceTimersByTimeAsync(600);
+    handler?.([501]);
+    await vi.advanceTimersByTimeAsync(600);
+    handler?.([501]);
+    expect(queryClientMock.invalidateQueries).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(EPISODES_HISTORY_DEBOUNCE_MS);
+    expect(queryClientMock.invalidateQueries).toHaveBeenCalledTimes(1);
+    expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: episodesHistoryKey(501),
+      exact: true,
+    });
+  });
+
+  it("still refreshes on time while the writes keep coming", async () => {
+    vi.useFakeTimers();
+    const handler = reducerFor("episode-history").update as
+      | ((payload: number[]) => void)
+      | undefined;
+
+    handler?.([501]);
+    // Writes closer together than the wait would hold the refresh back
+    // forever without its bound on the first write's wait.
+    for (
+      let elapsed = 0;
+      elapsed < EPISODES_HISTORY_MAX_WAIT_MS;
+      elapsed += 600
+    ) {
+      await vi.advanceTimersByTimeAsync(600);
+      handler?.([501]);
+    }
+    expect(queryClientMock.invalidateQueries).toHaveBeenCalledTimes(1);
+    expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: episodesHistoryKey(501),
+      exact: true,
+    });
+  });
+
+  it("marks the jobs list stale when a finished job cannot be fetched", async () => {
+    vi.mocked(api.system.jobs).mockRejectedValueOnce(new Error("offline"));
+    const handler = reducerFor("jobs").update as (payload: unknown[]) => void;
+
+    // eslint-disable-next-line camelcase
+    handler([{ job_id: 7, status: "completed", progress_value: null }]);
+
+    await vi.waitFor(() =>
+      expect(queryClientMock.invalidateQueries).toHaveBeenCalledWith({
+        queryKey: [QueryKeys.System, QueryKeys.Jobs],
+        exact: true,
+      }),
+    );
+    expect(queryClientMock.setQueryData).not.toHaveBeenCalled();
+  });
 });

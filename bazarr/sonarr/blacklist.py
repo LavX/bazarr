@@ -51,9 +51,13 @@ def blacklist_log(sonarr_series_id, sonarr_episode_id, provider, subs_id, langua
         language=language,
     )
 
-    # Stamp owner + local refs (episode_id/series_id -> the local PKs) from the
-    # episode row so blacklist rows are instance-owned (the INC2b pattern).
-    # Guarded; NULL for an unresolved row or pre-backfill install.
+    if arr_instance_id is not None:
+        values['arr_instance_id'] = arr_instance_id
+
+    # Resolve the owner and local refs (episode_id/series_id -> the local PKs)
+    # from the episode row when it is available. A missing episode must not
+    # discard an owner supplied by the caller. Without either, the row stays
+    # unowned: it still excludes the release everywhere.
     if sonarr_episode_id is not None:
         ep = _resolve_episode_owner_row(sonarr_episode_id, arr_instance_id)
         if ep is not None:

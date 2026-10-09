@@ -11,7 +11,6 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from datetime import datetime
-from operator import itemgetter
 
 from app.database import TableAnnouncements, database, insert, select
 
@@ -107,16 +106,34 @@ def get_online_announcements():
     try:
         with open(os.path.join(args.config_dir, 'config', 'announcements.json'), 'r', encoding='utf-8') as f:
             data = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return []
-    else:
-        for announcement in data['data']:
-            if 'enabled' not in announcement:
-                data['data'][announcement]['enabled'] = True
-            if 'dismissible' not in announcement:
-                data['data'][announcement]['dismissible'] = True
+    entries = data.get('data') if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        return []
+    # The file is stored as it was downloaded, so an entry with no text that can
+    # be hashed, or a timestamp pretty_date cannot handle, is skipped rather than
+    # failing the whole list. pretty_date dates an integer epoch (a millisecond
+    # epoch is past year 9999) and shows an empty timestamp as now.
+    online = []
+    for announcement in entries:
+        if not isinstance(announcement, dict) or not isinstance(announcement.get('text'), str) \
+                or 'timestamp' not in announcement:
+            continue
+        timestamp = announcement['timestamp']
+        if timestamp and type(timestamp) is not int:
+            continue
+        try:
+            announcement['text'].encode('UTF8')
+            if timestamp:
+                datetime.fromtimestamp(timestamp)
+        except (OverflowError, OSError, ValueError):
+            continue
+        announcement.setdefault('enabled', True)
+        announcement.setdefault('dismissible', True)
+        online.append(announcement)
 
-        return data['data']
+    return online
 
 
 def get_local_announcements():
@@ -125,7 +142,7 @@ def get_local_announcements():
 
 def get_all_announcements():
     # get announcements that haven't been dismissed yet
-    announcements = [parse_announcement_dict(x) for x in get_online_announcements() + get_local_announcements() if
+    announcements = [x for x in get_online_announcements() + get_local_announcements() if
                      x['enabled'] and (not x['dismissible'] or not
                      database.execute(
                          select(TableAnnouncements)
@@ -133,7 +150,13 @@ def get_all_announcements():
                                 hashlib.sha256(x['text'].encode('UTF8')).hexdigest()))
                                        .first())]
 
-    return sorted(announcements, key=itemgetter('timestamp'), reverse=True)
+    # sort on the integer timestamp before parse_announcement_dict replaces it
+    # with the relative-age text, which does not sort newest-first; an empty
+    # timestamp sorts as current, matching the now age pretty_date gives it
+    now = int(datetime.now().timestamp())
+    announcements = sorted(announcements, key=lambda x: x['timestamp'] or now, reverse=True)
+
+    return [parse_announcement_dict(x) for x in announcements]
 
 
 def mark_announcement_as_dismissed(hashed_announcement):

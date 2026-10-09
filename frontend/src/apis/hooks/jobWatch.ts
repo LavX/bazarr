@@ -83,17 +83,18 @@ export function whenJobFinishes(
 
 /**
  * Refresh the data a queued job changes when that job finishes, or at once
- * when no job was queued (the backend answers without an id when an identical
- * job is already pending, and older routes answer without one at all).
+ * when the route answers without an id to follow, as older routes still do.
+ * Returns the refresh's promise when it ran at once, so a caller that waits
+ * for the refresh can await it, and undefined when a job was queued.
  */
 export function refreshWhenJobFinishes(
   client: QueryClient,
   jobId: number | null | undefined,
-  refresh: () => void,
-) {
+  refresh: () => void | Promise<void>,
+): Promise<void> | undefined {
   if (typeof jobId === "number") {
     whenJobFinishes(client, jobId, refresh);
-  } else {
-    refresh();
+    return undefined;
   }
+  return Promise.resolve(refresh());
 }

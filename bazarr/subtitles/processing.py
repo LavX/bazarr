@@ -3,7 +3,7 @@
 
 import logging
 import os
-from media_servers.events import observe_subtitle_change, SubtitleMutation, notify_subtitle_mutation
+from media_servers.events import observe_subtitle_change
 
 from app.config import settings, sync_checker as _defaul_sync_checker
 from utilities.path_mappings import path_mappings
@@ -28,6 +28,7 @@ from .utils import _get_scores
 from .language_profiles import profile_item_language_code
 from .tools.combine.main import try_combine_for_video
 from .tools.subsync_engines import subtitle_write_locks
+from .tools.translate.availability import translation_available
 
 
 class ProcessSubtitlesResult:
@@ -68,6 +69,14 @@ def _trigger_auto_translation(downloaded_lang, subtitle_path, video_path, media_
     subtitles cover only foreign-language inserts and are not a valid
     translation seed, so we skip auto-translate for them.
     """
+    # The download already happened; the gate only decides whether anything
+    # gets queued for it. A closed gate leaves the language to the next
+    # wanted scan, which asks the same gate before keeping a language away
+    # from the provider search.
+    availability = translation_available()
+    if not availability.available:
+        logging.debug('BAZARR auto-translate skipped after this download: %s', availability.reason)
+        return
     if media_type == 'sports':
         from sportarr.profile_hooks import queue_translations
         if sports_operation is None:
@@ -265,22 +274,6 @@ def _postprocessing_config(media_type, arr_instance_id):
     return use_pp, cmd, use_threshold, threshold
 
 
-def refresh_sports_media_servers(video_path, subtitle_path, arr_instance_id):
-    """Tell every configured media server a sports subtitle changed.
-
-    Series and movies resolve by identifiers a sports event has not got, so
-    every destination falls to its configured SPORTS library, and a destination
-    with no sports library configured is left alone. Every kind refreshes
-    through the same publication dispatcher movies and episodes use, scoped to
-    its saved configuration, so a destination that cannot reach this video is
-    never asked to scan anything.
-    """
-    if any(getattr(settings.general, 'use_' + kind) is True
-           for kind in ('emby', 'jellyfin', 'plex', 'silo')):
-        notify_subtitle_mutation(
-            SubtitleMutation('sports', video_path, subtitle_path, 'download', arr_instance_id))
-
-
 def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_upgrade=False, is_manual=False,
                      job_id=None, arr_instance_id=None, *,
                      context=None, validate=None, cancel=None, publication_guard=None):
@@ -322,16 +315,11 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
     logging.debug("Sync checker: %s", sync_checker)
 
     if media_type == 'sports':
-        # No arr rescan here; the Sportarr whole-library rescan is dispatched
-        # through sportarr.notify, once per affected owner per operation, because
-        # /api/library/rescan walks every root folder and is untargeted. Sonarr
-        # and Radarr each take a per-item Rescan command, which is why they get
-        # one below.
-        #
-        # The media-server refresh happens later in this function, through
-        # refresh_sports_media_servers, which publishes once to the dispatcher.
-        # Every kind then scans its own configured sports libraries on its own
-        # worker.
+        # A subtitle write does not change Sportarr's video inventory, so
+        # Sportarr is not asked to rescan. The save that called this reports
+        # the final file to the media servers once it releases its locks,
+        # which is after the sync and post-processing below, and holds what
+        # the sync publishes until then.
         instance = validate()
         if path != context.mapped_path:
             raise ValueError('Sports subtitle path does not match its event')
@@ -406,9 +394,13 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                               downloaded_language_code3, audio_language, audio_language_code2, audio_language_code3,
                               percent_score, subtitle_id, downloaded_provider, uploader, release_info, series_id,
                               episode_id)
-        command = command_for_subtitle(downloaded_path)
+        try:
+            command = command_for_subtitle(downloaded_path)
+        except ValueError as exc:
+            logging.error('BAZARR invalid post-processing command: %s', exc)
+            command = None
 
-        if not use_pp_threshold or (use_pp_threshold and percent_score < pp_threshold):
+        if command is not None and (not use_pp_threshold or (use_pp_threshold and percent_score < pp_threshold)):
             logging.debug(f"BAZARR Using post-processing command: {command}")  # noqa: G004
             if publication_guard is not None:
                 # Sports stages its own write under the owned publication guard,
@@ -426,7 +418,7 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
                     with observe_subtitle_change(media_type, path, downloaded_path, 'download', owner_instance_id):
                         postprocessing(command, path, subtitle_path=downloaded_path, lock_paths=lock_paths)
                         set_chmod(subtitles_path=downloaded_path)
-        else:
+        elif command is not None:
             logging.debug(f"BAZARR post-processing skipped because subtitles score isn't below this "  # noqa: G004
                           f"threshold value: {pp_threshold}%")
 
@@ -437,7 +429,6 @@ def process_subtitle(subtitle, media_type, audio_language, path, max_score, is_u
         mappings = read_sports_mappings(instance.path_mappings)
         reversed_path = apply_sports_mapping(path, mappings, reverse=True)
         reversed_subtitles_path = apply_sports_mapping(downloaded_path, mappings, reverse=True)
-        refresh_sports_media_servers(path, downloaded_path, owner_instance_id)
     elif media_type == 'series':
         # Reverse-map through the owning instance's path_mappings (#156) now that
         # the owner is known; None owner => global mapping, unchanged.

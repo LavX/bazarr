@@ -1,6 +1,7 @@
 # coding=utf-8
 
 import logging
+import os
 
 from datetime import timedelta
 
@@ -19,6 +20,46 @@ from .get_args import args
 from .config import settings, base_url
 
 socketio = SocketIO()
+
+# docker/supervisor.py starts the backend with a per-boot token in this
+# variable and polls /api/system/status until an answer carries the token back
+# in SUPERVISOR_TOKEN_HEADER. On a network namespace shared by two instances
+# that is how a supervisor tells its own backend from a neighbour's.
+SUPERVISOR_TOKEN_ENV = 'BAZARR_SUPERVISOR_TOKEN'
+SUPERVISOR_TOKEN_HEADER = 'X-Bazarr-Supervisor-Token'
+# The supervisor also sets the address the backend binds, which is loopback.
+BACKEND_HOST_ENV = 'BAZARR_BACKEND_HOST'
+
+
+def supervisor_token():
+    """The token of the supervisor that started this process, or None."""
+    return os.environ.get(SUPERVISOR_TOKEN_ENV, '').strip() or None
+
+
+class SupervisorTokenMiddleware:
+    """Name this backend to its supervisor on every response.
+
+    The supervisor's proxy refuses any answer without the token, so this sits
+    in front of the whole WSGI stack: Flask-SocketIO answers the event stream
+    from its own middleware, where Flask's response hooks never run. The proxy
+    strips the header again, and without a supervisor there is nothing to add.
+    """
+
+    def __init__(self, wsgi_app):
+        self.wsgi_app = wsgi_app
+
+    def __call__(self, environ, start_response):
+        token = supervisor_token()
+        if not token:
+            return self.wsgi_app(environ, start_response)
+
+        def stamped_start_response(status, headers, exc_info=None):
+            headers = [(name, value) for name, value in headers
+                       if name.lower() != SUPERVISOR_TOKEN_HEADER.lower()]
+            headers.append((SUPERVISOR_TOKEN_HEADER, token))
+            return start_response(status, headers, exc_info)
+
+        return self.wsgi_app(environ, stamped_start_response)
 
 
 class CustomRequest(Request):
@@ -189,6 +230,8 @@ def create_app():
     socketio.init_app(app, path=f'{base_url.rstrip("/")}/api/socket.io',
                       cors_allowed_origins=socket_allowed_origins(),
                       async_mode='threading', allow_upgrades=False, transports='polling', engineio_logger=False)
+    # Outermost, so it also covers what Flask-SocketIO's middleware answers.
+    app.wsgi_app = SupervisorTokenMiddleware(app.wsgi_app)
 
     @app.errorhandler(404)
     def page_not_found(_):

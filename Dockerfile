@@ -5,7 +5,10 @@
 # Based on Debian Slim for better compatibility (unrar, etc.)
 # =============================================================================
 
-ARG BAZARR_VERSION=latest
+# A build must identify itself: the line version, the source commit and the
+# build date are required at bake time, so there is no default to fall back
+# on and an unstamped bake fails instead of shipping an unnamed image.
+ARG BAZARR_VERSION
 ARG BUILD_DATE
 ARG VCS_REF
 ARG ALASS_CLI_VERSION=2.0.0
@@ -124,8 +127,14 @@ COPY migrations ./migrations
 COPY bazarr.py ./
 COPY bazarr ./bazarr
 
+RUN test -n "${BAZARR_VERSION}" && test -n "${VCS_REF}" && test -n "${BUILD_DATE}" \
+    || { echo 'BAZARR_VERSION, VCS_REF and BUILD_DATE are required build args' >&2; exit 1; }
+
 # Write version to VERSION file so bazarr/main.py can read it
 RUN echo "${BAZARR_VERSION}" > /app/bazarr/VERSION
+
+# Write build stamp so System Status can show the commit and the build date
+RUN printf 'commit=%s\ndate=%s\n' "${VCS_REF}" "${BUILD_DATE}" > /app/bazarr/BUILD
 
 # Copy package identification file (shows version in System Status)
 COPY package_info /app/bazarr/package_info
@@ -168,9 +177,14 @@ VOLUME /config
 # Expose port
 EXPOSE 6767
 
-# Health check
+# Health check. The supervisor listens on general.port (6767 unless changed)
+# and writes the port it bound to /tmp/bazarr-supervisor.port, so the check
+# follows a changed port and never probes another instance that shares the
+# network namespace. The check runs as root and the file is writable by the
+# app user, so anything but a port number there fails the check instead of
+# reaching curl.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -sf http://localhost:6767/_supervisor/status | grep -q '"running"' || exit 1
+    CMD port=$(cat /tmp/bazarr-supervisor.port 2>/dev/null || echo 6767); case "$port" in ""|*[!0-9]*) exit 1 ;; esac; curl -sf "http://localhost:$port/_supervisor/status" | grep -q '"running"' || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["python", "docker/supervisor.py", "--no-update", "--config", "/config"]

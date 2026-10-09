@@ -8,12 +8,27 @@ from subliminal_patch.core import get_subtitle_path
 from subzero.language import Language
 
 from .core.translator_utils import validate_translation_params, convert_language_codes, get_title
+from .failure_record import clear_failed_translation, record_failed_translation
 from .services.translator_factory import TranslatorFactory
 from languages.get_languages import alpha3_from_alpha2
 from app.config import settings
 from app import activity
 from app.jobs_queue import jobs_queue, JobCancelled
 from subtitles.indexer.utils import get_subtitle_destination_path
+
+
+def _failure_record_media_id(media_type, radarr_id, sonarr_episode_id, sports_operation):
+    """The id the failed-translation record files this item under.
+
+    Each queue path names its media the way its own scan does: a movie by its
+    upstream id, an episode by its episode id, and a sports event by the id its
+    captured operation carries, which is the one the sports scan consults with.
+    """
+    if media_type == 'sports':
+        return sports_operation.context.event_id if sports_operation is not None else None
+    if media_type == 'episode':
+        return sonarr_episode_id
+    return radarr_id
 
 
 def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, forced, hi,
@@ -26,17 +41,16 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
     extracted by the job, so the request that queues it returns at once.
     """
     if not job_id:
-        # Build job label with media title. Note: no local variables can be
-        # assigned here because add_job_from_function introspects the frame
-        # and re-passes all locals as kwargs on re-invocation.
-        jobs_queue.add_job_from_function(
+        # Build the label inline: add_job_from_function captures the frame,
+        # which must contain only function parameters before it is called.
+        job_id = jobs_queue.add_job_from_function(
             (lambda t: f'Translating {t} ({from_lang.upper()} to {to_lang.upper()})' if t else
              f'Translating {from_lang.upper()} to {to_lang.upper()}')(
                 get_title(media_type, radarr_id, sonarr_series_id, sonarr_episode_id,
                           arr_instance_id,
                           **({'sports_context': sports_operation.context} if sports_operation else {}))),
-            is_progress=True)
-        return
+            is_progress=True, return_existing=media_type == 'episode')
+        return job_id if media_type == 'episode' else None
 
     translator_label = settings.translator.translator_type.replace("_", " ").title()
     # Observation only. The queue records a generic completed envelope for every
@@ -89,7 +103,12 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
             subtitle=os.path.basename(dest_srt_file_if_alongside_video)
         )
 
-        translator_type = settings.translator.translator_type or 'google'
+        # The stored setting is what the factory gets. Every spelling of "no
+        # translator" is normalized to 'none' at boot and at save time, and the
+        # availability gate keeps any of them from reaching this job at all, so
+        # there is no default to invent here: a switched off translator is not
+        # secretly a Google one.
+        translator_type = settings.translator.translator_type
         logging.debug(f'Using translator type: {translator_type}')  # noqa: G004
 
         translator = TranslatorFactory.create_translator(
@@ -158,6 +177,13 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         activity.note_publication(observed, outcome='partial' if partial_detail else 'success',
                                   detail=partial_detail)
 
+        # The item is served now, so a failure on record for it must not hold
+        # the next scan back from translating anything else it is asked for.
+        clear_failed_translation(arr_instance_id, media_type,
+                                 _failure_record_media_id(media_type, radarr_id, sonarr_episode_id,
+                                                          sports_operation),
+                                 from_lang, to_lang)
+
         # Get current job name (which batch.py already set with title) and mark as done
         completion_label = 'Partially translated' if partial_detail else 'Translated'
         current_name = jobs_queue.get_job_name(job_id)
@@ -173,6 +199,13 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
     except Exception as e:
         activity.note_publication(observed, outcome='failed', detail=str(e))
         logging.error(f'Translation failed: {str(e)}', exc_info=True)  # noqa: G004, G201
+        # Nothing was published, so the next scan would offer the same doomed
+        # job again: hold this item back until the hold expires or the world
+        # it described changes. A cancelled job is not a failed translation.
+        record_failed_translation(arr_instance_id, media_type,
+                                  _failure_record_media_id(media_type, radarr_id, sonarr_episode_id,
+                                                           sports_operation),
+                                  from_lang, to_lang)
         current_name = jobs_queue.get_job_name(job_id)
         if current_name and 'Translating' in current_name:
             fail_name = current_name.replace('Translating', 'Failed')

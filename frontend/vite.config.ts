@@ -150,6 +150,25 @@ export default defineConfig(({ mode, command }) => {
       // The Playwright suite runs against a real container with its own
       // runner (npm run e2e), never under vitest.
       exclude: [...configDefaults.exclude, "e2e/**"],
+      projects: [
+        // The app's unit tests, with every option above.
+        { extends: true, test: { name: "unit" } },
+        // The e2e harness's own tests, in plain Node: none of the options
+        // above, no DOM and no app setup. They stand in for docker and the
+        // network, so they never start a container.
+        {
+          extends: false,
+          resolve: {
+            alias: { "@e2e": path.resolve(__dirname, "./e2e") },
+          },
+          test: {
+            name: "e2e-harness",
+            root: __dirname,
+            environment: "node",
+            include: ["e2e/lib/**/*.test.ts"],
+          },
+        },
+      ],
       coverage: {
         // Count the WHOLE src tree, not just files an executed test happens to
         // import. Without an explicit `include`, vitest omits never-imported
