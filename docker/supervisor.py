@@ -812,7 +812,14 @@ class _RefusalReporter:
     acknowledgement protocol instead. The acknowledgement also names the
     windows the backend has logged and cleared, and this console discards
     the carried and mirrored copies it holds of them, so a window whose
-    summary has been paid is carried nowhere anymore.
+    summary has been paid is carried nowhere anymore. A window an answer
+    carries back, held by the backend and not yet paid, is owned from
+    the answer on by the aggregate the answer carries: the backend folded
+    the carried window into it before the answer was built, so the
+    mirror of the aggregate already stands for the folded lines, and
+    this console keeps no copy of its own beside the mirror, which a
+    restarted backend would count a second time beside the aggregate
+    that already counts them.
 
     Every report also carries the newest bounded refused names with this
     console's own recency stamps, and the backend's record takes the newer
@@ -927,11 +934,19 @@ class _RefusalReporter:
         The acknowledgement also resolves the window this report carried:
         its ID named among the windows the backend has logged and cleared
         means the one summary the window owes has been paid, and this
-        console discards its copy; one the backend still holds comes back
-        to the in-flight slot, re-carried on every later report until an
-        answer names it completed, so the pair stays owed the one summary
-        whichever layer holds the window. The window comes back marked as
-        sent, because the report that carried it was answered, so it
+        console discards its copy; one the answer carries back, held by
+        the backend, is owned from the answer on by the aggregate the
+        answer carries, which folded the carried window in before the
+        answer was built and already counts its lines: the mirrored copy
+        of the aggregate is what tells a restarted backend about them,
+        exactly as it tells one about the backend's own, so this console
+        keeps no second copy of the folded window beside the mirror,
+        which a restarted backend would count a second time beside the
+        aggregate that already counts them. An answer that carries no
+        window back, because the backend took nothing in, leaves the copy
+        in the in-flight slot, re-carried on every later report until an
+        answer resolves it. Either way the carry counts as sent from
+        here on, because the report that carried it was answered, so it
         reached the backend at the transport level whatever the answer
         said about the window, and the answer is an acknowledgement of
         some kind as well, so from here on the sustained-outage emission
@@ -946,6 +961,17 @@ class _RefusalReporter:
             return
         if carried[2] is not None and carried[2] in completed:
             return
+        if held is not None:
+            # The backend folds the carried window into the one it holds
+            # before it builds the answer, and this answer carries that
+            # window back: the aggregate already counts the carried copy's
+            # lines, so the copy belongs to the aggregate now, and the
+            # mirror of it is what tells a restarted backend about them,
+            # exactly as it tells one about the backend's own. A copy
+            # kept beside the mirror would hand a restarted backend the
+            # same lines twice, once in the aggregate and once as this
+            # console's own, so it does not return to the slot.
+            return
         self._carried = carried
         self._carried_sent = True
 
@@ -957,7 +983,11 @@ class _RefusalReporter:
         this copy back to it: the backend folds a window whose ID it has
         already counted nowhere, so the copy costs the backend that still
         holds the window nothing, while a backend that lost it to a
-        restart folds it in and owes its summary again. The copy waits
+        restart folds it in and owes its summary again. The copy stands
+        for every window the aggregate counts, the backend's own and each
+        one folded into it, so the one mirror is what re-delivers them
+        all to a backend that lost them to a restart, and the console
+        keeps no copy of a folded window beside it. The copy waits
         only the hour the window has left to run, on the horizon the line
         times use, so it never outlives the accounting it stands for.
         """

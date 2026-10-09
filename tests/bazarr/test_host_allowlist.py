@@ -4125,6 +4125,197 @@ async def test_a_merged_window_completes_the_folded_id_and_a_restart_replay_fold
 
 
 @pytest.mark.asyncio
+async def test_an_undue_aggregate_owns_its_folded_window_across_a_backend_restart(
+        tmp_path, monkeypatch, root_log, caplog):
+    """The backend holds a suppressed window of its own, opened before the
+    one the console's outage opens, and the recovery's first acknowledged
+    report carries the console's window over: the backend folds it into
+    its own, and the merged window's hour has not run yet, so the same
+    report pays nothing and the answer carries the aggregate back, which
+    the console mirrors. The answer resolves the carry as well: the
+    aggregate it carries back already counts the folded window's lines,
+    folded in before the answer was built, so the folded window belongs
+    to the aggregate from the answer on and the console keeps no copy of
+    its own beside the mirror. A backend restart before the aggregate's
+    hour runs therefore cannot count the folded lines twice: the
+    replay's report carries the mirror alone, the restarted backend
+    folds the aggregate in counting the folded lines the one time the
+    aggregate counts them, and the summary the hour finally runs to pays
+    the six lines the pair held back, not the eleven a copy re-delivered
+    beside the aggregate would have counted."""
+    from app import host_allowlist
+
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
+    monkeypatch.setenv("BAZARR_SUPERVISOR_TOKEN", "the-supervisor-token")
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    caplog.set_level(logging.INFO)
+
+    clock = [0]
+    recorder = host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0])
+    monkeypatch.setattr(host_allowlist, "_refusals", recorder)
+    config = _config()
+    delivered = []
+    backend_app = Flask(__name__)
+
+    def deliver(form):
+        """The backend's own notice route, over the form the report carried."""
+        with backend_app.test_request_context(
+                "/_supervisor/host_refusal", method="POST",
+                headers={supervisor.TOKEN_HEADER: "the-supervisor-token"}, data=form):
+            return host_allowlist.front_refusal_notice(config=config)
+
+    async def notice(request):
+        form = dict(await request.post())
+        delivered.append(form)
+        _body, _status, headers = deliver(form)
+        if _status != 204:
+            return web.Response(status=503)
+        return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                 "the-supervisor-token", **headers})
+
+    backend = web.Application()
+    backend.router.add_route("POST", "/_supervisor/host_refusal", notice)
+    answering_backend = TestClient(TestServer(backend))
+    await answering_backend.start_server()
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    try:
+        reporter = supervisor._active_reporter
+        monkeypatch.setattr(reporter, "_now", lambda: clock[0])
+        monkeypatch.setattr(reporter._lines, "_now", lambda: clock[0])
+
+        async def settle():
+            for _ in range(6000):
+                if not reporter.pending_reports():
+                    return
+                clock[0] += 0.06
+                await asyncio.sleep(0.01)
+            raise AssertionError("the reports never drained")
+
+        # The backend answers while the console refuses: the reported
+        # hostnames spend the backend's hour's cap of lines, one line each,
+        # and the console writes none of its own.
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", answering_backend.server.port)
+        monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+        for index in range(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR):
+            clock[0] = index
+            response = await client.get("/", headers={"Host": f"up{index}.example.com"})
+            assert response.status == 421
+        await settle()
+
+        # The cap's line times are still live, so one more refusal is held
+        # back into the backend's own window, and the acknowledgement of
+        # its report carries that window back to the console: the window's
+        # hour has not begun to run yet.
+        clock[0] = 3000
+        response = await client.get("/", headers={"Host": "upward.example.com"})
+        assert response.status == 421
+        await settle()
+        held = recorder.hour_suppressed_window()
+        assert held is not None
+        assert held[0] == 1
+        backend_window = held[2]
+
+        # The backend becomes unreachable, and this console spends one line
+        # of its own, because the line times the acknowledgements folded in
+        # have rolled out of the hour by then, and holds the refusals that
+        # follow it back into a window of its own.
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", None)
+        for index in range(6):
+            clock[0] = 3700 + index
+            response = await client.get("/", headers={"Host": "down.example.com"})
+            assert response.status == 421
+        named = [line for line in lines if line.startswith("Refused")]
+        assert len(named) == 1
+
+        # The recovery lands inside the aggregate's hour: the first
+        # acknowledged report carries the console's window, the backend
+        # folds it into its own earlier one, and the merged window is not
+        # due yet, so nothing is paid and the answer carries the aggregate
+        # back. The answer resolves the carry, and the aggregate it names
+        # owns the folded window from then on: the console holds the mirror
+        # of the aggregate and no copy of the folded window beside it.
+        clock[0] = 5000
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", answering_backend.server.port)
+        await settle()
+        aggregated = recorder.hour_suppressed_window()
+        assert aggregated is not None
+        assert aggregated[0] == 6
+        assert aggregated[2] == backend_window
+        mirrored = reporter.mirrored_summary()
+        assert mirrored is not None
+        assert mirrored[0] == 6
+        assert mirrored[2] == backend_window
+        console_summaries = [line for line in lines if line.startswith("Suppressed")]
+        backend_summaries = [message for message in root_log.messages
+                             if "host-refusal log lines" in message]
+        assert console_summaries == []
+        assert backend_summaries == []
+
+        # The backend restarts, its memory of the window IDs gone, well
+        # inside the hour the aggregate still has to run: a refusal at the
+        # console queues the replay's report, which carries the mirror
+        # alone, because the aggregate owns the folded window and no copy
+        # of it waits in the slot to be counted beside the aggregate that
+        # already counts it.
+        restarted = host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0])
+        monkeypatch.setattr(host_allowlist, "_refusals", restarted)
+        delivered.clear()
+        clock[0] = 6100
+        response = await client.get("/", headers={"Host": "replay.example.com"})
+        assert response.status == 421
+        for _ in range(2000):
+            if delivered:
+                break
+            clock[0] += 0.06
+            await asyncio.sleep(0.01)
+        assert delivered
+        assert "suppressed" not in delivered[0]
+        assert "suppressed_id" not in delivered[0]
+        assert int(delivered[0]["mirrored"]) == 6
+        assert delivered[0]["mirrored_id"] == backend_window
+        for _ in range(6000):
+            if not reporter.pending_reports():
+                break
+            clock[0] += 0.06
+            await asyncio.sleep(0.01)
+        assert reporter.pending_reports() == []
+
+        # The restarted backend folded the mirror in, so its window counts
+        # the folded lines the one time the aggregate counts them: the six
+        # the pair held back, and not the eleven a copy re-delivered beside
+        # the aggregate would have counted.
+        merged = restarted.hour_suppressed_window()
+        assert merged is not None
+        assert merged[0] == 6
+        assert merged[2] == backend_window
+
+        # The aggregate's hour runs, and the restarted backend pays the one
+        # summary the window owes, once, without the console ever naming a
+        # summary of its own.
+        clock[0] = 6700
+        response = await client.get("/", headers={"Host": "witness.example.com"})
+        assert response.status == 421
+        for _ in range(6000):
+            if not reporter.pending_reports():
+                break
+            clock[0] += 0.06
+            await asyncio.sleep(0.01)
+        assert reporter.pending_reports() == []
+
+        console_summaries = [line for line in lines if line.startswith("Suppressed")]
+        backend_summaries = [message for message in root_log.messages
+                             if "host-refusal log lines" in message]
+        assert console_summaries == []
+        assert len(backend_summaries) == 1
+        assert "suppressed 6 host-refusal log lines" in backend_summaries[0]
+    finally:
+        await client.close()
+        await answering_backend.close()
+
+
+@pytest.mark.asyncio
 async def test_a_backend_first_outage_keeps_the_pair_within_the_one_line_budget(
         tmp_path, monkeypatch, real_factory, root_log, caplog):
     """The backend can be the layer that spends the hour: it answers the
