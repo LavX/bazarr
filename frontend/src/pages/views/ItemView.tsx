@@ -22,6 +22,7 @@ import {
   faFilter,
   faSearch,
   faServer,
+  faTag,
   faTimes,
   faVolumeUp,
   faVolumeXmark,
@@ -47,6 +48,8 @@ interface Props<T extends Item.Base = Item.Base> {
   instanceOptions?: { value: string; label: string }[];
   instanceValues?: string[];
   onInstanceValuesChange?: (values: string[]) => void;
+  tagValues?: string[];
+  onTagValuesChange?: (values: string[]) => void;
   enableRowSelection?: boolean;
   onSelectionChanged?: (selections: T[]) => void;
   selectionToolbar?: ReactNode;
@@ -69,6 +72,8 @@ function ItemView<T extends Item.Base>({
   instanceOptions,
   instanceValues = [],
   onInstanceValuesChange,
+  tagValues = [],
+  onTagValuesChange,
   enableRowSelection,
   onSelectionChanged,
   selectionToolbar,
@@ -85,6 +90,15 @@ function ItemView<T extends Item.Base>({
   const langOptions = useMemo(
     () => audioLangs.map((l) => ({ value: l.code2, label: l.name })),
     [audioLangs],
+  );
+  const tagOptions = useMemo(
+    () =>
+      Array.from(
+        new Set((query.data?.data ?? []).flatMap((item) => item.tags ?? [])),
+      )
+        .sort((a, b) => a.localeCompare(b))
+        .map((tag) => ({ value: tag, label: tag })),
+    [query.data?.data],
   );
 
   const dataFilter = useCallback(
@@ -119,16 +133,23 @@ function ItemView<T extends Item.Base>({
           return false;
         }
       }
+      if (
+        tagValues.length > 0 &&
+        !tagValues.some((tag) => item.tags?.includes(tag))
+      ) {
+        return false;
+      }
       return true;
     },
-    [searchValue, audioLanguages, excludeLanguages, instanceValues],
+    [searchValue, audioLanguages, excludeLanguages, instanceValues, tagValues],
   );
 
   const hasActiveFilter =
     searchValue.length > 0 ||
     audioLanguages.length > 0 ||
     excludeLanguages.length > 0 ||
-    instanceValues.length > 0;
+    instanceValues.length > 0 ||
+    tagValues.length > 0;
 
   // Compute active filter count (excluding search which is always visible)
   const activeFilterCount = useMemo(() => {
@@ -137,8 +158,15 @@ function ItemView<T extends Item.Base>({
     if (excludeLanguages.length > 0) count++;
     if (searchValue.length > 0) count++;
     if (instanceValues.length > 0) count++;
+    if (tagValues.length > 0) count++;
     return count;
-  }, [audioLanguages, excludeLanguages, searchValue, instanceValues]);
+  }, [
+    audioLanguages,
+    excludeLanguages,
+    searchValue,
+    instanceValues,
+    tagValues,
+  ]);
 
   const activeFilterChips = useMemo(() => {
     const chips: {
@@ -193,18 +221,29 @@ function ItemView<T extends Item.Base>({
       });
     }
 
+    if (tagValues.length > 0 && onTagValuesChange) {
+      chips.push({
+        key: "tags",
+        label: `Tags: ${tagValues.join(", ")}`,
+        color: "violet",
+        onRemove: () => onTagValuesChange([]),
+      });
+    }
+
     return chips;
   }, [
     searchValue,
     audioLanguages,
     excludeLanguages,
     instanceValues,
+    tagValues,
     instanceOptions,
     langOptions,
     onSearchChange,
     onAudioLanguagesChange,
     onExcludeLanguagesChange,
     onInstanceValuesChange,
+    onTagValuesChange,
   ]);
 
   const clearAllFilters = useCallback(() => {
@@ -212,17 +251,20 @@ function ItemView<T extends Item.Base>({
     onAudioLanguagesChange?.([]);
     onExcludeLanguagesChange?.([]);
     onInstanceValuesChange?.([]);
+    onTagValuesChange?.([]);
   }, [
     onSearchChange,
     onAudioLanguagesChange,
     onExcludeLanguagesChange,
     onInstanceValuesChange,
+    onTagValuesChange,
   ]);
 
   const hasAnyFilterControl =
     onAudioLanguagesChange !== undefined ||
     onExcludeLanguagesChange !== undefined ||
-    showInstanceFilter;
+    showInstanceFilter ||
+    onTagValuesChange !== undefined;
 
   // The band's left side is never empty. While rows are selected it holds the
   // batch tools; otherwise it says how many rows there are and which filters
@@ -501,6 +543,37 @@ function ItemView<T extends Item.Base>({
                   data={instanceOptions}
                   value={instanceValues}
                   onChange={onInstanceValuesChange}
+                  clearable
+                  size="sm"
+                  maxDropdownHeight={250}
+                  styles={{
+                    input: {
+                      minHeight: 36,
+                    },
+                  }}
+                />
+              </Box>
+            )}
+            {onTagValuesChange !== undefined && (
+              <Box style={{ flex: "1 1 200px", maxWidth: 280 }}>
+                <Group gap={6} mb={4}>
+                  <FontAwesomeIcon icon={faTag} size="xs" opacity={0.6} />
+                  <Text size="xs" fw={500} c="var(--bz-text-tertiary)">
+                    Tags
+                  </Text>
+                </Group>
+                <MultiSelect
+                  placeholder={
+                    tagValues.length > 0
+                      ? undefined
+                      : tagOptions.length > 0
+                        ? "Filter by tags..."
+                        : "No tags available"
+                  }
+                  data={tagOptions}
+                  value={tagValues}
+                  onChange={onTagValuesChange}
+                  searchable
                   clearable
                   size="sm"
                   maxDropdownHeight={250}
