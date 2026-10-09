@@ -428,8 +428,10 @@ def translate_from_existing(context, target_code, cancel=None, translation_gate=
         return False
     if _already_translated_on_disk(context, target_code):
         return False
+    hi, forced = item.get("hi") == "True", item.get("forced") == "True"
     if translation_recently_failed(
-            context.arr_instance_id, "sports", context.event_id, source_lang, item["language"]):
+            context.arr_instance_id, "sports", context.event_id, source_lang, item["language"],
+            forced, hi):
         # The last translation of this event died inside the job, so
         # re-offering it would only queue another doomed job every scan; the
         # hold expires and every settings save clears it.
@@ -440,7 +442,6 @@ def translate_from_existing(context, target_code, cancel=None, translation_gate=
         )
         return False
 
-    hi, forced = item.get("hi") == "True", item.get("forced") == "True"
     destination = translation_destination(
         context.mapped_path, item["language"], forced, hi
     )

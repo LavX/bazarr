@@ -182,7 +182,7 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         clear_failed_translation(arr_instance_id, media_type,
                                  _failure_record_media_id(media_type, radarr_id, sonarr_episode_id,
                                                           sports_operation),
-                                 from_lang, to_lang)
+                                 from_lang, to_lang, forced, hi)
 
         # Get current job name (which batch.py already set with title) and mark as done
         completion_label = 'Partially translated' if partial_detail else 'Translated'
@@ -205,7 +205,7 @@ def translate_subtitles_file(video_path, source_srt_file, from_lang, to_lang, fo
         record_failed_translation(arr_instance_id, media_type,
                                   _failure_record_media_id(media_type, radarr_id, sonarr_episode_id,
                                                            sports_operation),
-                                  from_lang, to_lang)
+                                  from_lang, to_lang, forced, hi)
         current_name = jobs_queue.get_job_name(job_id)
         if current_name and 'Translating' in current_name:
             fail_name = current_name.replace('Translating', 'Failed')
