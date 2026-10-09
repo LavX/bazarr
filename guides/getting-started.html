@@ -167,7 +167,7 @@
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:6767/_supervisor/status | grep -q '\"running\"'"]
+      test: ["CMD-SHELL", "port=$$(cat /tmp/bazarr-supervisor.port 2>/dev/null || echo 6767); case \"$$port\" in \"\"|*[!0-9]*) exit 1 ;; esac; curl -sf \"http://localhost:$$port/_supervisor/status\" | grep -q '\"running\"'"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -215,6 +215,10 @@
         <pre><code>docker compose up -d</code></pre>
       </div>
 
+      <div class="note">
+        <strong>Changing the port:</strong> Bazarr+ listens on the <strong>Port</strong> under <strong>Settings &gt; General</strong>, 6767 unless you change it. A new port applies when the container restarts, and the container side of the <code>ports</code> mapping has to match it, for example <code>6868:6868</code>. Two instances that share a network, with <code>network_mode: host</code> or behind one VPN container, each need a port of their own.
+      </div>
+
       <h2 id="container-hardening">Container hardening</h2>
       <p>The hardening keys above (<code>read_only</code>, <code>tmpfs</code>, <code>cap_drop</code>, <code>cap_add</code>, <code>security_opt</code>) are what the image is built for. Bazarr+ owns its application tree as root and writes everything at runtime under <code>/config</code>, so freezing the rest of the filesystem costs nothing and keeps a provider plugin's worker process from rewriting the code Bazarr+ imports on its next restart. The <code>/tmp</code> tmpfs is what gives back the one writable path outside <code>/config</code> that is still needed: subtitle bundle downloads spill into it once they outgrow their in-memory buffer, the Provider Hub and sports workers put their per-request temporary directories there, and the alass shim falls back to it when the config cache cannot hold an executable. Extraction and the sync engines do not need it, they already work under <code>/config/cache</code> and beside the destination file. Keep the <code>size=</code> cap: an uncapped tmpfs may grow to half of host RAM, and it is charged to the host rather than to the container.</p>
 
@@ -237,8 +241,13 @@
   -p 6767:6767 \
   -e PUID=1000 -e PGID=1000 -e TZ=UTC \
   -v ./config:/config \
+  -v /path/to/movies:/movies \
+  -v /path/to/tv:/tv \
+  -v /path/to/sports:/sports \
   ghcr.io/lavx/bazarr:latest</code></pre>
       </div>
+
+      <p>Drop any <code>-v /path/to/...</code> line for a folder you do not use: Docker creates a host folder a mount names and does not find, so a copied line invents one on your host.</p>
 
       <div class="note">
         <strong>Developing against your own checkout?</strong> Mounting a source tree over <code>/app/bazarr</code> needs a writable filesystem, so drop <code>read_only</code> (or <code>--read-only</code>) for that container. Keep the rest.
