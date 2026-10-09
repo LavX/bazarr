@@ -93,9 +93,9 @@ def render(command, *, episode='/media/a show.mkv', subtitles='/media/a show.en.
 
 
 def test_posix_template_preserves_quoted_program_and_inline_arguments():
-    assert render('"/opt/my tools/process" --file={{episode}} '
+    assert render('"/opt/my tools/process" --input={{episode}} '
                   '"prefix {{subtitles}} suffix" --score={{score}}') == [
-        '/opt/my tools/process', '--file=/media/a show.mkv',
+        '/opt/my tools/process', '--input=/media/a show.mkv',
         'prefix /media/a show.en.srt suffix', '--score=91',
     ]
 
@@ -154,14 +154,14 @@ def test_argv_reaches_a_real_child_unchanged(tmp_path):
                        (sys.executable, str(helper), str(output)))
     # An empty placeholder still produces an argument, so two empty values
     # reach the child as argv ["", ""], unlike the old shell string.
-    argv = render(command + ' --file={{episode}} "{{release_info}}" "Name: {{release_info}}" '
+    argv = render(command + ' --input={{episode}} "{{release_info}}" "Name: {{release_info}}" '
                          '"{{series_id}}" "{{episode_id}}"',
                   episode=episode, release_info=payload, series_id='', episode_id='')
 
     _postprocessing_locked(argv, episode)
 
     assert json.loads(output.read_text(encoding='utf-8')) == [
-        '--file=' + episode, payload, 'Name: ' + payload, '', '',
+        '--input=' + episode, payload, 'Name: ' + payload, '', '',
     ]
     assert not marker.exists()
 
@@ -404,6 +404,171 @@ def test_find_exec_must_run_a_fixed_program():
         parse_postprocessing_command('find /media -exec {{provider}} \\;', windows=False)
 
 
+# The payload after find's -exec is a nested command's own argv, so its
+# interior is validated the way the top level is: a placeholder in the
+# payload's program position (env runs the word after it), after a
+# payload-interior shell's code option, or in an interior carrier option's
+# value is refused, at every nesting depth. A + that is not the batch
+# terminator (the {} + form) is an ordinary payload argument, so the span
+# runs on and the interior behind the stray + is refused too, and the
+# {} + batch terminator belongs to -exec and -execdir alone: -ok and
+# -okdir prompt for the command once per file and find itself rejects
+# the {} + form for them, so the + right behind an -ok payload is an
+# ordinary payload argument too and the interior behind it keeps its
+# refusal.
+@pytest.mark.parametrize('command', [
+    'find /media -exec env {{provider}} \\;',
+    'find /media -exec sh -c "{{provider}}" \\;',
+    'find /media -exec sh -c{{provider}} \\;',
+    'find /media -exec /opt/fixer --expression {{provider}} \\;',
+    'find /media -exec find /tmp -exec sh -c "{{provider}}" \\; \\;',
+    'find /media -exec env -u + sh -c "{{provider}}" \\;',
+    'find /media -ok tar -cf out.tar {} + -I {{provider}} \\;',
+    'find /media -okdir tar -cf out.tar {} + -I {{provider}} \\;',
+])
+def test_find_exec_payload_interior_stays_fixed(command):
+    with pytest.raises(ValueError):
+        parse_postprocessing_command(command, windows=False)
+
+
+def test_find_exec_payload_keeps_receiving_whole_operands():
+    """A fixed payload program with whole-operand placeholder arguments is
+    data to the program it names, and so stays open at every depth."""
+    assert render('find /media -exec /scripts/fix.sh {{episode}} \\;') == [
+        'find', '/media', '-exec', '/scripts/fix.sh', '/media/a show.mkv', ';',
+    ]
+    assert render('find /media -exec find /tmp -name \'*.srt\' -exec /scripts/fix.sh '
+                  '{{subtitles}} \\; \\;') == [
+        'find', '/media', '-exec', 'find', '/tmp', '-name', '*.srt', '-exec',
+        '/scripts/fix.sh', '/media/a show.en.srt', ';', ';',
+    ]
+
+
+# The whole-argv scan reads a find token the find tables leave unnamed with
+# the cross-program rules, so -prune, an action that reads no operand,
+# keeps its generic bundle reading there and the e it spells reads the
+# argument behind it as the -e carrier's value. When that argument is the
+# payload option token itself, the validated span still wins: the span
+# walk drew the span from the payload option and the nested validation
+# already read the payload with its own program's facts, so the interior
+# keeps that reading instead of find's, at the top level and inside the
+# nesting the module supports.
+@pytest.mark.parametrize('command, expected', [
+    ('find /media -prune -exec sort -f "{{subtitles}}" \\;',
+     ['find', '/media', '-prune', '-exec', 'sort', '-f', '/media/a show.en.srt', ';']),
+    ('find /media -prune -execdir sort -f "{{subtitles}}" \\;',
+     ['find', '/media', '-prune', '-execdir', 'sort', '-f', '/media/a show.en.srt', ';']),
+    ('find /media -prune -ok sort -f "{{subtitles}}" \\;',
+     ['find', '/media', '-prune', '-ok', 'sort', '-f', '/media/a show.en.srt', ';']),
+    ('find /media -prune -okdir sort -f "{{subtitles}}" \\;',
+     ['find', '/media', '-prune', '-okdir', 'sort', '-f', '/media/a show.en.srt', ';']),
+    ('find /media -exec find /tmp -prune -exec sort -f "{{subtitles}}" \\; \\;',
+     ['find', '/media', '-exec', 'find', '/tmp', '-prune', '-exec', 'sort', '-f',
+      '/media/a show.en.srt', ';', ';']),
+])
+def test_consumed_payload_option_still_consumes_its_span(command, expected):
+    assert render(command) == expected
+
+
+# The data-taking predicates each read one argument as data, so an operand
+# that looks like a payload option is that argument (the -name pattern):
+# the span the payload really runs starts at the next payload option, and
+# the shell payload behind it is refused, at the top level and inside the
+# nesting the module supports.
+@pytest.mark.parametrize('command', [
+    'find /media -name -exec -exec sh -c "{{provider}}" \\;',
+    # -samefile reads one filename operand and the -newerXY tests one
+    # reference operand, the same single data argument the other predicates
+    # read, so the operand that looks like a payload option never starts
+    # the span either.
+    'find /media -samefile -exec -exec sh -c "{{provider}}" \\;',
+    'find /media -newermt -exec -exec sh -c "{{provider}}" \\;',
+    'find /media -exec find /media -name -exec -exec sh -c "{{provider}}" \\; \\;',
+    'find /media -exec find /tmp -samefile -exec -exec sh -c "{{provider}}" \\; \\;',
+])
+def test_find_predicate_data_operand_does_not_start_an_execution_span(command):
+    with pytest.raises(ValueError):
+        parse_postprocessing_command(command, windows=False)
+
+
+# find's data actions read their operands as data too, by the counts the
+# arity table names (-printf its format, -fprintf the file and the
+# format), so an operand that looks like a payload option is that data:
+# the span the payload really runs starts at the next payload option, and
+# the shell payload behind it is refused, at the top level and inside the
+# nesting the module supports.
+@pytest.mark.parametrize('command', [
+    'find /media -printf -exec -exec sh -c "{{provider}}" \\;',
+    'find /media -fprintf /tmp/log -exec -exec sh -c "{{provider}}" \\;',
+    'find /media -exec find /tmp -printf -exec -exec sh -c "{{provider}}" \\; \\;',
+    'find /media -exec find /tmp -fprintf /tmp/log -exec -exec sh -c "{{provider}}" \\; \\;',
+])
+def test_find_data_action_operands_do_not_start_an_execution_span(command):
+    with pytest.raises(ValueError):
+        parse_postprocessing_command(command, windows=False)
+
+
+# find's output actions -fprint, -fprint0 and -fls read one argument of
+# their own too, the file each prints its output to, so their count sits
+# in the data-action arity table with -printf's and -fprintf's: an operand
+# that looks like a payload option is that file, the span the payload
+# really runs starts at the next payload option, and the shell payload
+# behind it is refused, at the top level and inside the nesting the
+# module supports.
+@pytest.mark.parametrize('command', [
+    'find /media -fprint -exec -exec sh -c "{{provider}}" \\;',
+    'find /media -fprint0 -exec -exec sh -c "{{provider}}" \\;',
+    'find /media -fls -exec -exec sh -c "{{provider}}" \\;',
+    'find /media -exec find /tmp -fprint -exec -exec sh -c "{{provider}}" \\; \\;',
+    'find /media -exec find /tmp -fprint0 -exec -exec sh -c "{{provider}}" \\; \\;',
+    'find /media -exec find /tmp -fls -exec -exec sh -c "{{provider}}" \\; \\;',
+])
+def test_find_output_action_operands_do_not_start_an_execution_span(command):
+    with pytest.raises(ValueError):
+        parse_postprocessing_command(command, windows=False)
+
+
+# find's operand-reading options outside the tests and actions read one
+# plain data argument each: -files0-from reads the file it takes its
+# starting points from, -regextype the regex syntax the -regex and
+# -iregex tests parse their patterns with, and -D the debug flags find
+# prints its diagnostics under, warning and continuing past a flag it
+# does not recognise, so an operand that looks like a payload option is
+# that data (the first -exec below is -files0-from's file operand and
+# -D's debug-flag operand), and the span the payload really runs starts
+# at the payload option behind it, at the top level and inside the
+# nesting the module supports.
+@pytest.mark.parametrize('command', [
+    'find -files0-from -exec -exec sh -c "{{provider}}" \\;',
+    'find -regextype -exec -exec sh -c "{{provider}}" \\;',
+    'find -D -exec /media -exec sh -c "{{provider}}" \\;',
+    'find /media -exec find -files0-from -exec -exec sh -c "{{provider}}" \\; \\;',
+    'find /media -exec find -regextype -exec -exec sh -c "{{provider}}" \\; \\;',
+])
+def test_find_global_data_option_operands_do_not_start_an_execution_span(command):
+    with pytest.raises(ValueError):
+        parse_postprocessing_command(command, windows=False)
+
+
+# find's data predicates and actions read their operands as plain data,
+# so a placeholder pattern or format stays open: the carrier scan consumes
+# the operand with its token by the same arity the span walk uses instead
+# of reading the predicate as a short bundle, at the top level and inside
+# the nesting the module supports.
+@pytest.mark.parametrize('command, expected', [
+    ('find /media -name "{{episode_name}}" -print',
+     ['find', '/media', '-name', 'a show', '-print']),
+    ('find /media -printf "{{episode_name}}" -print',
+     ['find', '/media', '-printf', 'a show', '-print']),
+    ('find /media -exec find /tmp -name "{{episode_name}}" -print \\;',
+     ['find', '/media', '-exec', 'find', '/tmp', '-name', 'a show', '-print', ';']),
+    ('find /media -exec find /tmp -printf "{{episode_name}}" -print \\;',
+     ['find', '/media', '-exec', 'find', '/tmp', '-printf', 'a show', '-print', ';']),
+])
+def test_find_data_operands_stay_open(command, expected):
+    assert render(command) == expected
+
+
 @pytest.mark.parametrize('command, expected', [
     ("awk '/plain/ {print}' {{subtitles}}",
      ['awk', '/plain/ {print}', '/media/a show.en.srt']),
@@ -433,6 +598,935 @@ def test_positional_code_programs_can_receive_file_data(command, expected):
     """After the fixed program text a placeholder is file or positional data,
     the way it is for a plain script."""
     assert render(command) == expected
+
+
+# An option whose value the program can execute refuses placeholders for
+# every program alike, not only the ones the per-family rules model. The
+# attached value slips past those rules once the fixed program text is in
+# place, so the cross-program grammar is what catches it.
+@pytest.mark.parametrize('command', [
+    'sed "s/a/b/" --expression={{release_info}} /tmp/in',
+    'sed "s/a/b/" -e{{release_info}} /tmp/in',
+    'gawk "BEGIN{}" -f{{release_info}} /tmp/in',
+    "awk 'BEGIN{}' --source={{release_info}} /tmp/in",
+    # The separate operand keeps the refusal the per-family rules give it.
+    'sed "s/a/b/" --expression {{release_info}} /tmp/in',
+    'sed "s/a/b/" -e {{release_info}} /tmp/in',
+])
+def test_script_option_values_stay_fixed(command):
+    with pytest.raises(ValueError, match='must be fixed'):
+        parse_postprocessing_command(command, windows=False)
+
+
+@pytest.mark.parametrize('command', [
+    'tar --checkpoint-action=exec={{release_info}} -cf out.tar /media',
+    'tar --checkpoint-action exec={{release_info}} -cf out.tar /media',
+])
+def test_command_option_values_stay_fixed(command):
+    with pytest.raises(ValueError, match='can carry executable code'):
+        parse_postprocessing_command(command, windows=False)
+
+
+# These options hand their value to a program that runs it: tar's
+# --to-command pipes each extracted file to the command, tar's -I is the
+# short form of --use-compress-program, tar's --info-script and
+# --new-volume-script name the scripts tar runs at volume changes, and
+# sort's --compress-program names the program sort runs to compress its
+# temporary output. tar's remote pair joins them: --rsh-command names the
+# shell tar reaches a remote archive through and --rmt-command the tape
+# program it runs on the far side instead of its own rmt. The attached,
+# separate and abbreviated spellings are refused alike, in a find payload
+# and behind a wrapper too, and the abbreviation is the proper prefix a
+# GNU parser could resolve the token to. The I value rides in through
+# the old-style block as well: GNU tar reads a first undashed argument as
+# a bundle of option letters whose value-taking letters read the
+# arguments behind the bundle in order (cfI out.tar prog is -c -f
+# out.tar -I prog), so the block's I operand is refused the way the
+# dashed -I's value is.
+@pytest.mark.parametrize('command', [
+    'tar --to-command={{release_info}} -xf /tmp/archive.tar',
+    'tar --to-command {{release_info}} -xf /tmp/archive.tar',
+    'tar --to-comm={{release_info}} -xf /tmp/archive.tar',
+    'find /media -exec tar --to-command={{release_info}} -xf /tmp/archive.tar \\;',
+    'tar -I {{release_info}} -cf out.tar /media',
+    'tar -I{{release_info}} -cf out.tar /media',
+    'find /media -exec tar -I {{release_info}} -cf out.tar /media \\;',
+    'nice tar -I {{release_info}} -cf out.tar /media',
+    'tar cfI out.tar {{provider}} /media',
+    'sort --compress-program={{release_info}} -o /tmp/out /tmp/in',
+    'sort --compress-program {{release_info}} -o /tmp/out /tmp/in',
+    'sort --compress-prog={{release_info}} -o /tmp/out /tmp/in',
+    'find /media -exec sort --compress-program={{release_info}} -o /tmp/out /tmp/in \\;',
+    'nice sort --compress-program={{release_info}} -o /tmp/out /tmp/in',
+    'tar --info-script={{release_info}} -cf out.tar /media',
+    'tar --info-script {{release_info}} -cf out.tar /media',
+    'tar --new-volume-script={{release_info}} -cf out.tar /media',
+    'tar --new-volume-script {{release_info}} -cf out.tar /media',
+    'tar --info-scr={{release_info}} -cf out.tar /media',
+    'find /media -exec tar --info-script={{release_info}} -cf out.tar /media \\;',
+    'tar --rsh-command={{provider}} -cf host:/tmp/archive.tar /media',
+    'tar --rmt-command={{provider}} -cf host:/tmp/archive.tar /media',
+])
+def test_program_running_option_values_stay_fixed(command):
+    with pytest.raises(ValueError, match='can carry executable code'):
+        render(command)
+
+
+# rsync runs the value of --rsync-path on the remote side and the value of
+# --rsh as the transport shell, both through a shell, so a placeholder there
+# is remote code; the attached and the separate-value forms are refused
+# alike, and -e, rsync's short spelling of --rsh, is covered by the generic
+# carrier letter.
+@pytest.mark.parametrize('command', [
+    'rsync --rsync-path={{release_info}} -a src dest',
+    'rsync --rsync-path {{release_info}} -a src dest',
+    'rsync --rsh={{release_info}} -a src dest',
+    'rsync --rsh {{release_info}} -a src dest',
+    'rsync -e {{release_info}} -a src dest',
+])
+def test_remote_execution_carrier_values_stay_fixed(command):
+    with pytest.raises(ValueError, match='can carry executable code'):
+        parse_postprocessing_command(command, windows=False)
+
+
+# rsync's -E (executability) and -F (its --filter shortcut) are value-less
+# flags, so neither is the value-taking -e/-f carrier its lowercase spells:
+# each leaves the element behind it its own reading, and the carrier there
+# keeps its refusal, with its separate value and behind a bare -- that a
+# data option keeps as its own value, at the top level, in a find payload
+# and behind a wrapper. sort's -f is the ignore-case flag the same way,
+# value-less even though its letter is the file carrier's own lowercase:
+# the documented letter resolves ahead of the cross-program reading, alone
+# and in a cluster of documented letters (-bf), and the compression
+# program behind it keeps its refusal.
+@pytest.mark.parametrize('command', [
+    'rsync -E --rsh {{release_info}} -a src host:dest',
+    'find /media -exec rsync -E --rsh {{release_info}} -a src host:dest \\;',
+    'nice rsync -E --rsh {{release_info}} -a src host:dest',
+    'rsync -E --suffix -- --rsh={{release_info}} -a src host:dest',
+    'find /media -exec rsync -E --suffix -- --rsh={{release_info}} -a src host:dest \\;',
+    'rsync -F --suffix -- --rsync-path={{release_info}} -a src host:dest',
+    'find /media -exec rsync -F --suffix -- --rsync-path={{release_info}} -a src host:dest \\;',
+    'sort -f --compress-program {{provider}} /tmp/in',
+    'sort -bf --compress-program {{provider}} /tmp/in',
+    'find /media -exec sort -f --compress-program {{provider}} /tmp/in \\;',
+    'nice sort -f --compress-program {{provider}} /tmp/in',
+])
+def test_documented_flag_letters_do_not_hide_carriers(command):
+    with pytest.raises(ValueError, match='can carry executable code'):
+        render(command)
+
+
+# tar's documented value-less flags are never the carriers their names
+# prefix: --checkpoint enables the checkpoint display and --compress
+# names the compress filter, and neither ever takes a value from the next
+# argument (the checkpoint's optional count attaches with the separator),
+# so neither is --checkpoint-action or --compress-program, and the carrier
+# option behind each keeps its own reading and its refusal. sort's --check
+# joins them: the check flag is not --checkpoint-action the name prefixes,
+# and its optional argument attaches with the separator and never comes
+# from the next argument, so the compression program behind it stays live.
+@pytest.mark.parametrize('command', [
+    'tar --checkpoint --checkpoint-action exec={{provider}} -cf out.tar /media',
+    'tar --compress --checkpoint-action exec={{provider}} -cf out.tar /media',
+    'sort --check --compress-program {{provider}} /tmp/in',
+])
+def test_documented_value_less_long_flags_do_not_hide_carriers(command):
+    with pytest.raises(ValueError, match='can carry executable code'):
+        render(command)
+
+
+# A documented value-less flag reads nothing behind it, so the element
+# after it keeps its own reading: sort's -f is its ignore-case flag and
+# its --check the check flag, so the operand behind either is an input
+# filename the placeholder fills as plain data, and --check's optional
+# argument attaches with the separator and never comes from the next
+# argument, so its attached value is data the way every attached value of
+# a value-less flag is.
+def test_documented_value_less_flags_leave_the_next_element_open():
+    assert render('sort -f {{subtitles}} /tmp/in') == [
+        'sort', '-f', '/media/a show.en.srt', '/tmp/in',
+    ]
+    assert render('sort --check {{subtitles}} /tmp/in') == [
+        'sort', '--check', '/media/a show.en.srt', '/tmp/in',
+    ]
+    assert render('sort --check={{provider}} /tmp/in') == [
+        'sort', '--check=provider', '/tmp/in',
+    ]
+
+
+# rsync's -T reads its directory operand and its -M the option it
+# forwards to the remote side, plain data to the local scan both, the way
+# tar's -C does, so the operand is consumed before the carrier scan reads
+# what follows: the first --rsh is the data value, and the live transport
+# option behind it keeps its refusal, at the top level and inside a find
+# payload. sort's -o reads its output filename and its -T the directory
+# it keeps its temporary files in, data however the name is spelled, so
+# the first --compress-program is that filename or directory and the
+# compression program sort runs behind it keeps its refusal too.
+@pytest.mark.parametrize('command', [
+    'rsync -T --rsh --rsh {{provider}} src host:dest',
+    'find /media -exec rsync -T --rsh --rsh {{provider}} src host:dest \\;',
+    'rsync -M --rsh --rsh {{provider}} src host:dest',
+    'sort -o --compress-program --compress-program {{provider}} /media/input',
+    'sort -T --compress-program --compress-program {{provider}} /media/input',
+])
+def test_documented_data_option_letters_do_not_hide_carriers(command):
+    with pytest.raises(ValueError, match='can carry executable code'):
+        render(command)
+
+
+# rsync's -T carries its directory operand glued to the letter or in the
+# next argument, and the operand is plain data either way, so a
+# placeholder there rides in as data and the carrier scan never reads the
+# attached value as a bundle of names. rsync's -M and sort's -o read
+# their operands in the next argument the same way, the option rsync
+# forwards to the remote side and the filename sort writes its output to,
+# so a placeholder there rides in as data too.
+def test_documented_data_option_letter_operands_stay_open():
+    assert render('rsync -T=/tmp src {{subtitles}} host:dest') == [
+        'rsync', '-T=/tmp', 'src', '/media/a show.en.srt', 'host:dest',
+    ]
+    assert render('rsync -T{{directory}} src host:dest') == [
+        'rsync', '-T/media', 'src', 'host:dest',
+    ]
+    assert render('rsync -M {{provider}} -a src host:dest') == [
+        'rsync', '-M', 'provider', '-a', 'src', 'host:dest',
+    ]
+    assert render('sort -o {{subtitles}} /tmp/in') == [
+        'sort', '-o', '/media/a show.en.srt', '/tmp/in',
+    ]
+    assert render('sort -T {{subtitles}} /tmp/in') == [
+        'sort', '-T', '/media/a show.en.srt', '/tmp/in',
+    ]
+
+
+# A documented data-option operand is consumed as plain data before the
+# carrier scan reads what follows, so the live option behind it keeps its
+# refusal: the first --rsh is the --exclude pattern or the --suffix backup
+# suffix operand rsync reads as data, rsync's --remote-option the option
+# it forwards to the remote side to parse there, data to the local scan
+# however it is spelled, and the first --checkpoint-action the
+# --files-from filename or the --directory operand tar reads as data,
+# while the transport and execution options behind them stay live, at the
+# top level and inside a find payload. sort's path operands join them:
+# --output reads the filename it writes its output to,
+# --temporary-directory the directory of its temporary files,
+# --random-source the file it seeds its random hash from and
+# --files0-from the file of the input names, each a path however it is
+# spelled, so the first --compress-program is that path and the
+# compression program behind it stays live.
+@pytest.mark.parametrize('command', [
+    'rsync --exclude --rsh --rsh {{provider}} src host:dest',
+    'find /media -exec rsync --exclude --rsh --rsh {{provider}} src host:dest \\;',
+    'tar --checkpoint=1 -cf out.tar --files-from --checkpoint-action '
+    '--checkpoint-action exec={{provider}} /media',
+    'find /media -exec tar --checkpoint=1 -cf out.tar --files-from '
+    '--checkpoint-action --checkpoint-action exec={{provider}} /media \\;',
+    'tar --checkpoint=1 -cf out.tar -T --checkpoint-action '
+    '--checkpoint-action exec={{provider}} /media',
+    'tar --directory --checkpoint-action --checkpoint-action exec={{provider}} -cf out.tar /media',
+    'find /media -exec tar --directory --checkpoint-action '
+    '--checkpoint-action exec={{provider}} -cf out.tar /media \\;',
+    'rsync --suffix --rsh --rsh {{provider}} src host:dest',
+    'find /media -exec rsync --suffix --rsh --rsh {{provider}} src host:dest \\;',
+    'rsync --remote-option --rsh --rsh {{provider}} src host:dest',
+    'sort --output --compress-program --compress-program {{provider}} /media/input',
+    'sort --temporary-directory --compress-program --compress-program {{provider}} /media/input',
+    'sort --random-source --compress-program --compress-program {{provider}} /media/input',
+    'sort --files0-from --compress-program --compress-program {{provider}} /media/input',
+])
+def test_documented_data_option_operands_do_not_hide_carriers(command):
+    with pytest.raises(ValueError, match='can carry executable code'):
+        render(command)
+
+
+# GNU option parsing accepts unambiguous prefixes of long option names,
+# so an abbreviated data-option spelling consumes the element behind it
+# as that option's operand exactly as the full spelling does: --files-f
+# is tar's --files-from, the first --checkpoint-action its file-list
+# operand, so the execution option behind it stays live. A genuinely
+# ambiguous prefix leaves the operand unconsumed, because more than one
+# documented data option of the installed GNU tar starts with --own
+# (--owner, --owner-map), so the carrier behind it keeps its reading.
+@pytest.mark.parametrize('command', [
+    'tar --files-f --checkpoint-action --checkpoint-action exec={{provider}} -cf out.tar /media',
+    'tar --own --checkpoint-action exec={{provider}} -cf out.tar /media',
+])
+def test_abbreviated_data_option_operands_do_not_hide_carriers(command):
+    with pytest.raises(ValueError, match='can carry executable code'):
+        render(command)
+
+
+# The documented data-option operands themselves stay open to metadata
+# the way every plain data operand is: rsync's --exclude pattern, attached
+# or separate, its --files-from file list, its --remote-option operand and
+# its -f filter rule are data rsync reads, and tar's -T file list is data
+# tar reads, glued or separate, and sort reads its --output filename and
+# its --temporary-directory, --random-source and --files0-from paths as
+# data the same way.
+def test_documented_data_option_operand_values_stay_open():
+    assert render('rsync --exclude={{episode_name}} -a src host:dest') == [
+        'rsync', '--exclude=a show', '-a', 'src', 'host:dest',
+    ]
+    assert render('rsync --exclude {{provider}} -a src host:dest') == [
+        'rsync', '--exclude', 'provider', '-a', 'src', 'host:dest',
+    ]
+    assert render('rsync --files-from {{subtitles}} -a src host:dest') == [
+        'rsync', '--files-from', '/media/a show.en.srt', '-a', 'src', 'host:dest',
+    ]
+    assert render('rsync --remote-option {{provider}} -a src host:dest') == [
+        'rsync', '--remote-option', 'provider', '-a', 'src', 'host:dest',
+    ]
+    assert render('rsync -f {{provider}} -a src host:dest') == [
+        'rsync', '-f', 'provider', '-a', 'src', 'host:dest',
+    ]
+    assert render('tar -cf out.tar -T{{subtitles}} /media') == [
+        'tar', '-cf', 'out.tar', '-T/media/a show.en.srt', '/media',
+    ]
+    assert render('sort --output {{subtitles}} /tmp/in') == [
+        'sort', '--output', '/media/a show.en.srt', '/tmp/in',
+    ]
+    assert render('sort --temporary-directory {{subtitles}} /tmp/in') == [
+        'sort', '--temporary-directory', '/media/a show.en.srt', '/tmp/in',
+    ]
+    assert render('sort --random-source {{provider}} /tmp/in') == [
+        'sort', '--random-source', 'provider', '/tmp/in',
+    ]
+    assert render('sort --files0-from {{subtitles}} /tmp/in') == [
+        'sort', '--files0-from', '/media/a show.en.srt', '/tmp/in',
+    ]
+
+
+# A documented data option resolves ahead of the carrier-prefix fallback,
+# the way GNU option parsing resolves a name before a prefix: rsync's
+# --info is its verbosity flag list, not --info-script, and tar's --so is
+# its --sort abbreviated, not --source, so the value each reads stays the
+# data the program documents.
+@pytest.mark.parametrize('command, expected', [
+    ('rsync --info={{release_info}} src host:dest',
+     ['rsync', '--info=release', 'src', 'host:dest']),
+    ('tar --so={{release_info}} -cf out.tar /media',
+     ['tar', '--so=release', '-cf', 'out.tar', '/media']),
+])
+def test_documented_data_option_names_beat_carrier_prefixes(command, expected):
+    assert render(command) == expected
+
+
+# The operand an execution-capable option keeps reading as its payload is
+# the executed value too, for a tool outside the tables as much as for the
+# awk script file or the find -exec command the shape comes from.
+@pytest.mark.parametrize('command', [
+    '/opt/fixer -f {{release_info}} /media/input',
+    '/opt/fixer -exec {{release_info}} \\;',
+])
+def test_executing_option_payloads_stay_fixed(command):
+    with pytest.raises(ValueError, match='can carry executable code'):
+        parse_postprocessing_command(command, windows=False)
+
+
+# A short cluster behind an equals separator keeps the carrier reading: the
+# parser hands the text from the separator on to the carrier as its value
+# (-ne={{...}}, where sed's -e receives the script ={{...}}), so the
+# placeholder rides the value with the separator as without it, and the
+# plain attached forms stay covered beside the equals forms.
+@pytest.mark.parametrize('command', [
+    '/opt/fixer -ne={{release_info}} /media/input',
+    '/opt/fixer -nf={{episode}} /media/input',
+    '/opt/fixer -ne{{release_info}} /media/input',
+    '/opt/fixer -nf{{episode}} /media/input',
+])
+def test_short_cluster_carrier_values_stay_fixed_with_or_without_equals(command):
+    with pytest.raises(ValueError, match='can carry executable code'):
+        parse_postprocessing_command(command, windows=False)
+
+
+# An option named like an execution carrier is refused even when a custom
+# tool means it as plain data; the temporary strictness is the price of one
+# grammar holding for the programs the per-family rules do not model. GNU
+# option parsing also accepts unambiguous prefixes of long option names, so
+# a proper prefix of a carrier name is refused as the carrier a GNU parser
+# could resolve it to, with its value attached and as a separate operand.
+@pytest.mark.parametrize('command', [
+    '"/opt/my tools/process" --file={{episode}} "prefix {{subtitles}} suffix"',
+    'python /opt/scripts/capture.py --file={{episode}} "{{release_info}}"',
+    '/opt/fixer --checkpoint-act=exec={{release_info}} /media/input',
+    '/opt/fixer --checkpoint-act exec={{release_info}} /media/input',
+])
+def test_carrier_named_options_refuse_placeholders_for_custom_tools_too(command):
+    with pytest.raises(ValueError, match='can carry executable code'):
+        render(command)
+
+
+# The name of an option must be fixed the way its program position is: the
+# rendering can turn a placeholder in the name into a carrier's attached
+# form, so the position it fills cannot be vouched for as data. In a short
+# bundle the cluster is read positionally, so a placeholder at or in front
+# of the carrier letter is part of the names, behind it the value's.
+@pytest.mark.parametrize('command', [
+    '/opt/fixer --{{release_info}} /media/input',
+    '/opt/fixer --check{{release_info}} /media/input',
+    '/opt/fixer -{{release_info}} /media/input',
+    '/opt/fixer -{{provider}} {{release_info}}',
+    '/opt/fixer -{{provider}}e /media/input',
+])
+def test_option_names_containing_placeholders_stay_fixed(command):
+    with pytest.raises(ValueError, match='must be fixed'):
+        parse_postprocessing_command(command, windows=False)
+
+
+def test_data_operands_after_a_separator_stay_open():
+    """An unconsumed -- ends option parsing for its command's argv, at the
+    top level and inside a find payload, so the tokens after it are data
+    operands; the same shapes without the terminator keep their refusal."""
+    assert render('/opt/fixer -- --expression={{release_info}}') == [
+        '/opt/fixer', '--', '--expression=release',
+    ]
+    assert render('find /media -exec /opt/fixer -- --expression={{release_info}} \\;') == [
+        'find', '/media', '-exec', '/opt/fixer', '--', '--expression=release', ';',
+    ]
+    with pytest.raises(ValueError, match='can carry executable code'):
+        render('/opt/fixer --expression={{release_info}}')
+    with pytest.raises(ValueError, match='can carry executable code'):
+        render('find /media -exec /opt/fixer --expression={{release_info}} \\;')
+
+
+# A -- a carrier read as its separate value was consumed, so it does not end
+# option parsing: the options after it stay options, and a placeholder reaches
+# the carrier behind them, at the top level and inside a find payload.
+@pytest.mark.parametrize('command', [
+    'rsync --rsync-path -- --rsh={{release_info}} -a src host:dest',
+    'find /media -exec rsync --rsync-path -- --rsh={{release_info}} -a src host:dest \\;',
+])
+def test_separator_consumed_as_carrier_value_keeps_option_parsing(command):
+    with pytest.raises(ValueError, match='can carry executable code'):
+        render(command)
+
+
+# By the GNU convention a bare -- right behind an option that has read no
+# value yet is that option's separate value, so it does not end option
+# parsing and a placeholder still reaches the carrier behind it, at the top
+# level and inside a find payload.
+@pytest.mark.parametrize('command', [
+    'rsync --suffix -- --rsh={{release_info}} -a src host:dest',
+    'find /media -exec rsync --suffix -- --rsh={{release_info}} -a src host:dest \\;',
+    'tar --label -- --checkpoint=1 --checkpoint-action=exec={{release_info}} -cf out.tar /media',
+    'find /media -exec tar --label -- --checkpoint=1 '
+    '--checkpoint-action=exec={{release_info}} -cf out.tar /media \\;',
+])
+def test_separator_consumed_as_data_option_value_keeps_option_parsing(command):
+    with pytest.raises(ValueError, match='can carry executable code'):
+        render(command)
+
+
+# The token a carrier read as its separate value is never scanned as an
+# option itself, so the -- behind it ends option parsing and the data
+# operands after it stay open. The boundaries keep their readings: a --
+# after the program or after a data operand ends parsing, and an option
+# with an attached value does not take a following -- as its own.
+def test_separator_behind_carrier_value_ends_option_parsing():
+    assert render('/opt/fixer --exec --file -- --expression={{release_info}}') == [
+        '/opt/fixer', '--exec', '--file', '--', '--expression=release',
+    ]
+    assert render('/opt/fixer --label=x -- --expression={{release_info}}') == [
+        '/opt/fixer', '--label=x', '--', '--expression=release',
+    ]
+    assert render('/opt/fixer operand -- --expression={{release_info}}') == [
+        '/opt/fixer', 'operand', '--', '--expression=release',
+    ]
+    assert render('/opt/fixer -- --expression={{release_info}}') == [
+        '/opt/fixer', '--', '--expression=release',
+    ]
+
+
+# A data option the program documents reads its operand as plain data, so
+# the carrier-looking token behind it stays open: tar's --label reads the
+# next element as the literal archive label, and a placeholder there is
+# metadata in the label, at the top level and inside a find payload.
+def test_documented_data_option_operands_stay_open():
+    assert render('tar --label --expression={{release_info}} -cf /tmp/archive.tar /tmp/input') == [
+        'tar', '--label', '--expression=release', '-cf', '/tmp/archive.tar', '/tmp/input',
+    ]
+    assert render('find /media -exec tar --label --expression={{release_info}} '
+                  '-cf /tmp/archive.tar /tmp/input \\;') == [
+        'find', '/media', '-exec', 'tar', '--label', '--expression=release',
+        '-cf', '/tmp/archive.tar', '/tmp/input', ';',
+    ]
+
+
+# tar's -C carries its directory operand glued to the letter, so the token
+# has already read its value: the bare -- behind it stays the separator,
+# exactly as behind an attached-value long option, and the checkpoint
+# action behind it a data operand, at the top level and inside a find
+# payload.
+def test_glued_data_option_value_keeps_the_separator():
+    assert render('tar -cf out.tar -C/media -- --checkpoint-action=exec={{release_info}}') == [
+        'tar', '-cf', 'out.tar', '-C/media', '--', '--checkpoint-action=exec=release',
+    ]
+    assert render('find /media -exec tar -cf out.tar -C/media '
+                  '-- --checkpoint-action=exec={{release_info}} \\;') == [
+        'find', '/media', '-exec', 'tar', '-cf', 'out.tar', '-C/media', '--',
+        '--checkpoint-action=exec=release', ';',
+    ]
+
+
+# A short bundle whose carrier letter carries its value glued to it
+# (-essh, the -e carrier with ssh attached) has already read its value
+# exactly as an equals-attached long option has, so the bare -- behind the
+# token is the separator and the carrier-looking token behind it a data
+# operand, at the top level and inside a find payload.
+@pytest.mark.parametrize('command, expected', [
+    ('rsync -essh -- --rsh={{release_info}} src host:dest',
+     ['rsync', '-essh', '--', '--rsh=release', 'src', 'host:dest']),
+    ('find /media -exec rsync -essh -- --rsh={{release_info}} src host:dest \\;',
+     ['find', '/media', '-exec', 'rsync', '-essh', '--', '--rsh=release', 'src', 'host:dest', ';']),
+])
+def test_glued_carrier_value_keeps_the_separator(command, expected):
+    assert render(command) == expected
+
+
+# A documented value-less flag reads nothing behind it, so the bare --
+# right behind one is the separator, not a value the flag would take:
+# rsync's -E, tar's -v and sort's -f leave the -- the separator's
+# reading and the carrier-looking token behind it a data operand, at the
+# top level and inside a find payload.
+def test_separator_behind_a_documented_value_less_flag_stays_the_separator():
+    assert render('rsync -E -- --rsh={{release_info}} src host:dest') == [
+        'rsync', '-E', '--', '--rsh=release', 'src', 'host:dest',
+    ]
+    assert render('find /media -exec rsync -E -- --rsh={{release_info}} src host:dest \\;') == [
+        'find', '/media', '-exec', 'rsync', '-E', '--', '--rsh=release', 'src', 'host:dest', ';',
+    ]
+    assert render('tar -v -- --checkpoint-action=exec={{provider}}') == [
+        'tar', '-v', '--', '--checkpoint-action=exec=provider',
+    ]
+    assert render('sort -f -- --compress-program={{provider}} /tmp/in') == [
+        'sort', '-f', '--', '--compress-program=provider', '/tmp/in',
+    ]
+
+
+# rsync's documented value-less short flags, its -a archive mode among
+# them, and a cluster of them (-av) read nothing behind them, so the bare
+# -- behind one is the separator and the carrier-looking token behind it
+# a data operand, at the top level and inside a find payload. sort's -bf
+# cluster keeps the same reading.
+@pytest.mark.parametrize('command, expected', [
+    ('rsync -a -- --rsh={{release_info}} src host:dest',
+     ['rsync', '-a', '--', '--rsh=release', 'src', 'host:dest']),
+    ('rsync -av -- --rsh={{release_info}} src host:dest',
+     ['rsync', '-av', '--', '--rsh=release', 'src', 'host:dest']),
+    ('find /media -exec rsync -a -- --rsh={{release_info}} src host:dest \\;',
+     ['find', '/media', '-exec', 'rsync', '-a', '--', '--rsh=release', 'src', 'host:dest', ';']),
+    ('find /media -exec rsync -av -- --rsh={{release_info}} src host:dest \\;',
+     ['find', '/media', '-exec', 'rsync', '-av', '--', '--rsh=release', 'src', 'host:dest', ';']),
+    ('sort -bf -- --compress-program={{provider}} /tmp/in',
+     ['sort', '-bf', '--', '--compress-program=provider', '/tmp/in']),
+])
+def test_documented_flag_clusters_keep_the_separator(command, expected):
+    assert render(command) == expected
+
+
+# rsync's documented value-less long flags, --archive the long spelling of
+# the -a archive mode and --copy-links the -L symlink transform among
+# them, tar's --verbose and sort's --stable read nothing behind them, so
+# the bare -- right behind one is the separator and the carrier-looking
+# token behind it a data operand, at the top level and inside a find
+# payload.
+@pytest.mark.parametrize('command, expected', [
+    ('rsync --archive -- --rsh={{release_info}} src host:dest',
+     ['rsync', '--archive', '--', '--rsh=release', 'src', 'host:dest']),
+    ('find /media -exec rsync --archive -- --rsh={{release_info}} src host:dest \\;',
+     ['find', '/media', '-exec', 'rsync', '--archive', '--', '--rsh=release',
+      'src', 'host:dest', ';']),
+    ('rsync --copy-links -- --rsh={{release_info}} src host:dest',
+     ['rsync', '--copy-links', '--', '--rsh=release', 'src', 'host:dest']),
+    ('tar --verbose -- --checkpoint-action=exec={{provider}}',
+     ['tar', '--verbose', '--', '--checkpoint-action=exec=provider']),
+    ('sort --stable -- --compress-program={{provider}} /tmp/in',
+     ['sort', '--stable', '--', '--compress-program=provider', '/tmp/in']),
+    # rsync negates its options with --no- and GNU option parsing accepts
+    # unambiguous abbreviations, so the value-less reading holds behind a
+    # supported negation and behind an abbreviation only one entry of the
+    # value-less set matches, at the top level and inside a find payload.
+    ('rsync --no-archive -- --rsh={{release_info}} src host:dest',
+     ['rsync', '--no-archive', '--', '--rsh=release', 'src', 'host:dest']),
+    ('rsync --arch -- --rsh={{release_info}} src host:dest',
+     ['rsync', '--arch', '--', '--rsh=release', 'src', 'host:dest']),
+    ('find /media -exec rsync --no-archive -- --rsh={{release_info}} src host:dest \\;',
+     ['find', '/media', '-exec', 'rsync', '--no-archive', '--', '--rsh=release',
+      'src', 'host:dest', ';']),
+])
+def test_documented_value_less_long_flags_keep_the_separator(command, expected):
+    assert render(command) == expected
+
+
+# A long option the arity tables leave undocumented keeps the
+# GNU-convention value reading the pinned rows rely on: the bare -- right
+# behind it is that option's separate value, so it does not end option
+# parsing and the placeholder still reaches the carrier behind it. A
+# genuinely ambiguous abbreviation keeps the reading too: more than one
+# documented value-less flag of the installed rsync starts with --a.
+def test_undocumented_value_less_long_options_keep_the_gnu_convention_reading():
+    with pytest.raises(ValueError, match='can carry executable code'):
+        render('rsync --nonsense -- --rsh={{release_info}} src host:dest')
+    with pytest.raises(ValueError, match='can carry executable code'):
+        render('rsync --a -- --rsh={{release_info}} src host:dest')
+
+
+# A wrapper consumes its own -- as the end of its options, so the program it
+# wraps begins after it without a separator of its own: the child's executable
+# options keep their refusal, at the top level and inside a find payload.
+@pytest.mark.parametrize('command', [
+    'nice -- tar --checkpoint=1 --checkpoint-action=exec={{release_info}} -cf out.tar /media',
+    'find /media -exec nice -- tar --checkpoint=1 --checkpoint-action=exec={{release_info}} '
+    '-cf out.tar \\;',
+])
+def test_wrapper_separator_does_not_hide_child_options(command):
+    with pytest.raises(ValueError, match='can carry executable code'):
+        render(command)
+
+
+# A wrapper's value-taking option carries its value either as the argument
+# behind it (-c 0) or attached to its spelling (-c0, --cpu-list=0), the
+# GNU attached form, and the walks resolve the attached value to the
+# option's own rules: the value rides with the token, so the walk consumes
+# the token alone, the option that removes the positional operand
+# (taskset's -c, runuser's -u) removes it on its attached spelling too,
+# and the child program keeps its true position. Without the resolution
+# the walks left the spelling unrecognized, consumed the child program as
+# the positional operand and drew the boundary one word late, out.tar in
+# the program position, where tar's -I carrier never resolves and the
+# program it runs behind the wrapper kept its placeholder.
+@pytest.mark.parametrize('command', [
+    'taskset -c0 tar -cf out.tar -I {{provider}} /media',
+    'taskset --cpu-list=0 tar -cf out.tar -I {{provider}} /media',
+    'runuser -unobody tar -cf out.tar -I {{provider}} /media',
+    'runuser --user=nobody tar -cf out.tar -I {{provider}} /media',
+])
+def test_attached_wrapper_option_values_do_not_hide_the_child(command):
+    with pytest.raises(ValueError, match='can carry executable code'):
+        render(command)
+
+
+# GNU option parsing bundles short options into one token: every letter
+# that takes no value stands on its own in the cluster, and the first
+# letter that takes a value ends the cluster, reading the rest of the
+# token as its attached value (-punobody is -p and -u with nobody behind
+# it) or, when the cluster ends at that letter, awaiting the argument
+# behind it (-nw 5, -cn 5, -rn 5, -Ep prompt). The walks resolve a cluster
+# letter by letter with each letter's arity, so the value a cluster
+# carries never takes the child program's place: the attached value rides
+# with the token, the awaited one is consumed behind it, and the resolved
+# value-taking name keeps its rules, the value it reads and the
+# positional operand it removes (runuser's -u). The misreading swallowed
+# the child as the wrapper's positional operand (runuser's user) or left
+# the unawaited value in the child position (flock's timeout, watch's
+# interval, xargs's limit, sudo's prompt), and the child's -I carrier
+# went unchecked behind every one of them. The spellings the installed
+# tools reject are not rowed: taskset reads its cpu list only as a
+# separate argument, and the real runuser refuses -l together with -u as
+# mutually exclusive, so neither hides a child a real tool runs.
+@pytest.mark.parametrize('command', [
+    'runuser -punobody tar -cf out.tar -I {{provider}} /media',
+    'runuser -munobody tar -cf out.tar -I {{provider}} /media',
+    'sudo -Ep prompt tar -cf out.tar -I {{provider}} /media',
+    'flock -nw 5 /tmp/lock tar -cf out.tar -I {{provider}} /media',
+    'watch -cn 5 tar -cf out.tar -I {{provider}} /media',
+    'xargs -rn 5 tar -cf out.tar -I {{provider}} /media',
+])
+def test_clustered_wrapper_options_do_not_hide_the_child(command):
+    with pytest.raises(ValueError, match='can carry executable code'):
+        render(command)
+
+
+# The wrapper walks read a short option with the case the GNU parser reads
+# it in: an uppercase letter spells the option of its own and never the
+# lowercase one beside it, so xargs's -P max-procs and sudo's -C close-from
+# and -D chdir carry their values behind their letters, where a lowercased
+# comparison left the letters unmatched and the walk consumed the value as
+# the child program. The tables carry the arity the real options have:
+# ionice's -t is the ignore flag and reads nothing, and xargs's -i, -l and
+# -e take their replace string, line count and eof string only attached to
+# their own spelling (-i{}, -l2), never a separate argument, so a bare
+# spelling reads nothing behind it and the program sits in the program
+# position (the installed findutils names the separate form unreal: -l 2
+# makes 2 the command it runs). Behind every one of the misreadings the
+# child's -I carrier went unchecked.
+@pytest.mark.parametrize('command', [
+    'xargs -P 2 tar -cf out.tar -I {{provider}} /media',
+    'sudo -C 5 tar -cf out.tar -I {{provider}} /media',
+    'sudo -D /tmp tar -cf out.tar -I {{provider}} /media',
+    'ionice -t tar -cf out.tar -I {{provider}} /media',
+    'xargs -i tar -cf out.tar -I {{provider}} /media',
+    'xargs -l tar -cf out.tar -I {{provider}} /media',
+    'xargs -e tar -cf out.tar -I {{provider}} /media',
+])
+def test_wrapper_option_arity_does_not_hide_the_child(command):
+    with pytest.raises(ValueError, match='can carry executable code'):
+        render(command)
+
+
+# The wrapper value tables read a value option's long spelling the same way
+# the short walk reads its letter, and the tables were missing them: a
+# long name no value table held resolved as an unknown flag, so the value
+# it reads landed in the child position and the program behind it went
+# unscanned, with the child's -I carrier keeping its placeholder. The sets
+# come from the installed tools' help: sudo's -h host entry, reported
+# beyond the round before and confirmed by the review, with the longs of
+# its other value options, xargs's --max-procs with the rest of its
+# documented set, ionice's --class, stdbuf's --output, flock's --timeout
+# beside the --wait the installed tool also accepts, runuser's --shell and
+# --whitelist-environment, watch's --equexit and --shotsdir, and chrt's
+# deadline parameters, each carrying its value so the child program keeps
+# its position behind it. The last two rows hold the same boundary inside
+# a find payload and behind a second wrapper.
+@pytest.mark.parametrize('command', [
+    'sudo -h host tar -cf out.tar -I {{provider}} /media',
+    'sudo --user nobody tar -cf out.tar -I {{provider}} /media',
+    'xargs --max-procs 2 tar -cf out.tar -I {{provider}} /media',
+    'sudo --host host tar -cf out.tar -I {{provider}} /media',
+    'sudo --close-from 5 tar -cf out.tar -I {{provider}} /media',
+    'sudo --chdir /tmp tar -cf out.tar -I {{provider}} /media',
+    'sudo --other-user nobody tar -cf out.tar -I {{provider}} /media',
+    'ionice --class 3 tar -cf out.tar -I {{provider}} /media',
+    'stdbuf --output 1M tar -cf out.tar -I {{provider}} /media',
+    'xargs --max-args 2 tar -cf out.tar -I {{provider}} /media',
+    'xargs --max-chars 4096 tar -cf out.tar -I {{provider}} /media',
+    'xargs --process-slot-var SLOT tar -cf out.tar -I {{provider}} /media',
+    'flock --timeout 5 /tmp/lock tar -cf out.tar -I {{provider}} /media',
+    'runuser --shell /bin/sh nobody tar -cf out.tar -I {{provider}} /media',
+    'runuser --whitelist-environment FOO nobody tar -cf out.tar -I {{provider}} /media',
+    'watch --equexit 5 tar -cf out.tar -I {{provider}} /media',
+    'watch --shotsdir /tmp/shots tar -cf out.tar -I {{provider}} /media',
+    'chrt -d --sched-runtime 1e5 --sched-period 2e5 --sched-deadline 3e5 0 tar -cf '
+    'out.tar -I {{provider}} /media',
+    'find /media -exec sudo --user nobody tar -cf out.tar -I {{provider}} \\;',
+    'nice -n5 xargs --max-procs 2 tar -cf out.tar -I {{provider}} /media',
+])
+def test_long_wrapper_option_values_do_not_hide_the_child(command):
+    with pytest.raises(ValueError, match='can carry executable code'):
+        render(command)
+
+
+# The wrapper tables read a value option's short letter the way they read
+# its long name, and the round before left the shorts of runuser's --shell
+# and --whitelist-environment and watch's --equexit and --shotsdir off the
+# tables, so each flag reading dropped its value into the child position
+# and the program behind it went unscanned (sudo's list-only -U stays off
+# by the review's ruling: the real sudo runs nothing behind it). GNU
+# option parsing also accepts an unambiguous abbreviation of a long option
+# name, so the long spellings now resolve the way the program tables
+# resolve theirs: the exact name first, then an abbreviation exactly one
+# documented long value spelling begins with (xargs's --max-pr is
+# --max-procs, sudo's --use is --user), while a prefix more than one entry
+# matches stays the unresolved name it is, the way a genuinely ambiguous
+# prefix does. The rows hold the two named inputs, the short twins, one
+# abbreviation per wrapper the tables name, and the last two hold the
+# same boundary inside a find payload and behind a second wrapper.
+@pytest.mark.parametrize('command', [
+    'runuser -u nobody -w FOO tar -cf out.tar -I {{provider}} /media',
+    'watch -x -q 5 tar -cf out.tar -I {{provider}} /media',
+    'runuser -s /bin/sh nobody tar -cf out.tar -I {{provider}} /media',
+    'watch -s /tmp/shots tar -cf out.tar -I {{provider}} /media',
+    'watch -xq 5 tar -cf out.tar -I {{provider}} /media',
+    'xargs --max-pr 2 tar -cf out.tar -I {{provider}} /media',
+    'sudo --use nobody tar -cf out.tar -I {{provider}} /media',
+    'flock --time 5 /tmp/lock tar -cf out.tar -I {{provider}} /media',
+    'runuser --whitelist FOO nobody tar -cf out.tar -I {{provider}} /media',
+    'watch --eq 5 tar -cf out.tar -I {{provider}} /media',
+    'stdbuf --out 1M tar -cf out.tar -I {{provider}} /media',
+    'chrt -d --sched-r 1e5 0 tar -cf out.tar -I {{provider}} /media',
+    'timeout --kill 5 1 tar -cf out.tar -I {{provider}} /media',
+    'ionice --classd 3 tar -cf out.tar -I {{provider}} /media',
+    'su --whitelist FOO nobody tar -cf out.tar -I {{provider}} /media',
+    'find /media -exec runuser -u nobody -w FOO tar -cf out.tar -I {{provider}} \\;',
+    'nice -n5 xargs --max-pr 2 tar -cf out.tar -I {{provider}} /media',
+])
+def test_wrapper_short_and_abbreviated_options_do_not_hide_the_child(command):
+    with pytest.raises(ValueError, match='can carry executable code'):
+        render(command)
+
+
+# The generic carrier matching met a long spelling a program's documented
+# vocabulary resolves before it resolved it: rsync's --exec is its
+# documented --executability abbreviated, a flag reading nothing, but the
+# cross-program exec match read it as the carrier and consumed the --rsh
+# behind it as its payload, so the transport shell rsync runs its value
+# through kept its placeholder. The documented reading now resolves ahead
+# of the generic exact match the way it already resolved ahead of the
+# carrier-prefix fallback, the same discipline the wrapper longs gained:
+# the full name or the abbreviation exactly one documented entry resolves
+# to, while a prefix more than one entry matches stays unresolved. The
+# installed rsync rejects --exec outright (its popt does no long
+# abbreviation), so the named input is a template the installed tool never
+# runs, and the refusal still holds the model's reading: --executability
+# is the flag --exec abbreviates for a GNU parser that does.
+@pytest.mark.parametrize('command', [
+    'rsync --exec --rsh {{provider}} src host:dest',
+    'rsync --exec --rsync-path {{provider}} src host:dest',
+    'find /media -exec rsync --exec --rsh {{provider}} src host:dest \\;',
+])
+def test_documented_long_reading_precedes_the_generic_carrier_match(command):
+    with pytest.raises(ValueError, match='can carry executable code'):
+        render(command)
+
+
+# watch assembles the command line it is given into a shell command string
+# in its default mode (its help: -x passes the command to exec instead of
+# "sh -c"), so a placeholder in it rides into shell text the lane refuses
+# everywhere else, while -x or --exec hands the command line to execvp
+# directly and the placeholders stay the plain arguments of a fixed
+# program. The wrapper walk now requires the exec mode when the command
+# watch runs carries a placeholder, at the top level, inside a find payload
+# and behind a second wrapper.
+@pytest.mark.parametrize('command', [
+    'watch -n 5 /opt/pp.sh "{{provider}}"',
+    'watch /opt/pp.sh "{{provider}}"',
+    'find /media -exec watch -n 5 /opt/pp.sh "{{provider}}" \\;',
+    'nice -n5 watch -n 5 /opt/pp.sh "{{provider}}"',
+])
+def test_watch_shell_assembly_with_placeholders_requires_exec_mode(command):
+    with pytest.raises(ValueError, match='shell command text'):
+        render(command)
+
+
+# A wrapper's -- ends its own options the way a GNU parser ends them, but
+# both walks kept reading the words behind it as the wrapper's own, so
+# watch counted an -x sitting in the command text behind the separator as
+# its exec mode and the round-22 gate let the shell-assembled placeholder
+# through. The installed watch honors the separator (its header shows the
+# words behind it as the command it runs at its default interval), and the
+# walks now stop reading options and modes there: the words behind it fill
+# the remaining positional operands and start the command among them, an
+# option-looking word included, while an option that has read no value yet
+# keeps the next word as its value the way the GNU parser does (nice -n --
+# reads the adjustment --). Every separator-honoring tool the survey probed
+# dies at an option-looking word in the command position, so the shapes the
+# walks used to misread are templates the real tools never run, and the
+# rows hold the mode spellings that changed a verdict: the named input,
+# its long and abbreviated spellings, the separator behind real options,
+# and the same boundary inside a find payload.
+@pytest.mark.parametrize('command', [
+    'watch -- -x /opt/pp.sh "{{provider}}"',
+    'watch -- --exec /opt/pp.sh "{{provider}}"',
+    'watch -- --ex /opt/pp.sh "{{provider}}"',
+    'watch -n 5 -- -x /opt/pp.sh "{{provider}}"',
+    'find /media -exec watch -- -x /opt/pp.sh "{{provider}}" \\;',
+])
+def test_wrapper_separator_words_are_not_wrapper_options(command):
+    with pytest.raises(ValueError, match='shell command text'):
+        render(command)
+
+
+# chrt's deadline parameters read their nanosecond values behind their
+# short letters the way they read them behind their long names, but the
+# tables carried only the longs, so the walk read the installed tool's
+# -T, -P and -D as unknown flags and their values as positional
+# operands: the first value took the priority operand and the second
+# became the program the wrapper runs, so the child's -I carrier kept
+# its placeholder (chrt -d -T 1000000 -P 2000000 -D 2000000 0 tar
+# -cf out.tar -I {{provider}}, where tar executes the program the -I
+# value names). The installed chrt documents the three letters beside
+# their longs and reads each as a required separate or attached value
+# (a bare -T takes the word behind it: chrt names that word its
+# runtime argument), so the letters sit beside their longs in the table.
+# Regression rows cover the named input at the top level and the same
+# boundary inside a find payload.
+@pytest.mark.parametrize('command', [
+    'chrt -d -T 1000000 -P 2000000 -D 2000000 0 tar -cf out.tar -I {{provider}} /media',
+    'find /media -exec chrt -d -T 1000000 -P 2000000 -D 2000000 0 tar -cf out.tar -I {{provider}} /media \\;',
+])
+def test_chrt_deadline_shorts_do_not_hide_the_child(command):
+    with pytest.raises(ValueError, match='can carry executable code'):
+        render(command)
+
+
+# A short option the arity tables leave to its generic reading, because
+# its operand must parse as a value and an option-shaped word never
+# parses as one (sort's -S size, -t separator character and -k key
+# definition, tar's -b blocking factor), still reads that operand
+# attached to its letter the way GNU getopt reads it, but the walk never
+# recorded the attached value, so it treated the token as a letter still
+# awaiting one and the bare -- behind it as that value: the option
+# parsing the separator should have ended stayed live and the
+# carrier-shaped filename behind it kept its refusal (sort -S1M --
+# --compress-program={{provider}}, refused while the separate form
+# -S 1M -- accepted, though the installed sort reads both the same way:
+# the attached -S1M supplies the size, the separator ends the options and
+# the last word is the filename sort cannot open, while a bare -S takes
+# the -- as its value the GNU way, and tar's -b20 reads the same). The
+# walk now records the attached operand the letter has read the way it
+# records a documented data option's glued operand, so the bare -- behind
+# the token is the separator it is and the words behind it keep their
+# filename readings, at the top level and inside a find payload.
+def test_attached_short_operands_keep_the_separator_behind_them():
+    assert render('sort -S1M -- --compress-program={{provider}} /media') == [
+        'sort', '-S1M', '--', '--compress-program=provider', '/media',
+    ]
+    assert render('sort -t: -- --compress-program={{provider}} /media') == [
+        'sort', '-t:', '--', '--compress-program=provider', '/media',
+    ]
+    assert render('sort -k2 -- --compress-program={{provider}} /media') == [
+        'sort', '-k2', '--', '--compress-program=provider', '/media',
+    ]
+    assert render('tar -b20 -- --checkpoint-action=exec={{release_info}} -cf out.tar /media') == [
+        'tar', '-b20', '--', '--checkpoint-action=exec=release', '-cf', 'out.tar', '/media',
+    ]
+    assert render('find /media -exec sort -S1M -- --compress-program={{provider}} /media \\;') == [
+        'find', '/media', '-exec', 'sort', '-S1M', '--', '--compress-program=provider', '/media',
+        ';',
+    ]
+
+
+# The wrapper rules scan the child argv with the wrapped program's own
+# facts, so the whole-argv scan consumes the validated child instead of
+# rereading its interior with the wrapper's: tar's --label keeps reading
+# the expression-looking token as its archive label behind nice, and
+# watch's --exec is a flag naming the command it runs, so the validated
+# child boundary holds even when the scan reads --exec with the
+# cross-program rules and its value consumption covers the child program
+# token, at the top level and inside a find payload.
+def test_wrapper_child_keeps_its_own_program_facts():
+    assert render('nice tar --label --expression={{release_info}} -cf /tmp/archive.tar /tmp/input') == [
+        'nice', 'tar', '--label', '--expression=release', '-cf', '/tmp/archive.tar', '/tmp/input',
+    ]
+    assert render('find /media -exec nice tar --label --expression={{release_info}} '
+                  '-cf /tmp/archive.tar /tmp/input \\;') == [
+        'find', '/media', '-exec', 'nice', 'tar', '--label', '--expression=release',
+        '-cf', '/tmp/archive.tar', '/tmp/input', ';',
+    ]
+    assert render('watch --exec sort -f "{{subtitles}}"') == [
+        'watch', '--exec', 'sort', '-f', '/media/a show.en.srt',
+    ]
+    assert render('find /media -exec watch --exec sort -f "{{subtitles}}" \\;') == [
+        'find', '/media', '-exec', 'watch', '--exec', 'sort', '-f', '/media/a show.en.srt', ';',
+    ]
+
+
+# The first word after a wrapper's own options and operands is the program
+# it runs, and the words behind it are that program's own argv: an
+# operand that names a wrapper of its own is data the child consumes,
+# never a program the wrapper runs, so the validation stays with the real
+# child and its transport option keeps its refusal, at the top level and
+# inside a find payload.
+@pytest.mark.parametrize('command', [
+    'nice rsync nice tar -C --rsh={{provider}} src host:dest',
+    'find /media -exec nice rsync nice tar -C --rsh={{provider}} src host:dest \\;',
+])
+def test_wrapper_child_operands_are_not_programs(command):
+    with pytest.raises(ValueError, match='can carry executable code'):
+        render(command)
+
+
+def test_plain_data_option_values_stay_open():
+    assert render('/opt/fixer --audio={{episode_language}} --series={{series_id}} "{{release_info}}"') == [
+        '/opt/fixer', '--audio=English', '--series=12', 'release',
+    ]
+    # A carrier option with a fixed value keeps running too; only the
+    # placeholder in its value is refused.
+    assert render('tar --checkpoint-action=exec=/opt/fixed.sh "{{episode}}"') == [
+        'tar', '--checkpoint-action=exec=/opt/fixed.sh', '/media/a show.mkv',
+    ]
 
 
 @pytest.mark.parametrize('command', [
@@ -536,8 +1630,8 @@ def test_fixed_interpreter_script_after_option_operand_can_receive_data():
      ['taskset', '-c', '0-3', '/opt/pp.sh', '/media/a show.en.srt']),
     ('taskset 0x1 /opt/pp.sh "{{subtitles}}"',
      ['taskset', '0x1', '/opt/pp.sh', '/media/a show.en.srt']),
-    ('watch -n 5 /opt/pp.sh "{{subtitles}}"',
-     ['watch', '-n', '5', '/opt/pp.sh', '/media/a show.en.srt']),
+    ('watch -x -n 5 /opt/pp.sh "{{subtitles}}"',
+     ['watch', '-x', '-n', '5', '/opt/pp.sh', '/media/a show.en.srt']),
     # -x and --exec are watch flags, not options taking a value: the fixed
     # program still sits in the program position behind them.
     ('watch -x /opt/pp.sh "{{subtitles}}"',
