@@ -1056,6 +1056,33 @@ def test_cross_league_move_preserves_owned_event_history(library, monkeypatch, f
     assert len(calls) == 1
 
 
+def test_the_event_pass_reports_per_league_progress(library, monkeypatch):
+    """The fetch pass of a queued library sync ran silently, so its running
+    card had no live per-league line, unlike the Sonarr and Radarr syncs. A
+    sync with a job id reports each league as it is fetched; the direct live
+    paths bring no job id and stay silent."""
+    from app.database import TableSportsLeagues
+
+    session, sync = library
+    session.execute(sa.insert(TableSportsLeagues).values(
+        id=53, arr_instance_id=1, sportarrLeagueId=9, title='Second'))
+    calls = []
+    monkeypatch.setattr(sync.jobs_queue, 'update_job_progress',
+                        lambda job_id, **kwargs: calls.append(kwargs))
+
+    def get(path):
+        return SimpleNamespace(status_code=200, json=lambda: dict(page=1, pageSize=1000,
+                                                                  totalRecords=0, totalPages=0, records=[]))
+    monkeypatch.setattr(sync.ArrClientFactory, 'from_row', lambda *a: SimpleNamespace(get=get))
+
+    sync.sync_event_leagues([51, 53], 1, job_id=77, complete=True)
+    assert calls == [dict(progress_value=1, progress_message='League'),
+                     dict(progress_value=2, progress_message='Second')]
+    calls.clear()
+    sync.sync_event_leagues([51, 53], 1, complete=True)
+    assert calls == []
+
+
 def _move_remote(monkeypatch, sync, snapshots, *, failure=None, cancel=None):
     calls = []
     def get(path):
