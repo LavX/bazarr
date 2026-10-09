@@ -35,6 +35,16 @@ CODE_BYTES = 8
 # The logger that writes the approval code to the console and nowhere else.
 CODE_LOGGER_NAME = 'bazarr.host_approval'
 
+# The acknowledgement of a front listener's report carries this backend's own
+# accounting on these headers: the times of the refusal lines its hour has
+# spent, and the suppressed window it holds with its stable ID. The
+# supervisor defines the same names on its side, because the two processes
+# share no imports.
+HOUR_LINES_HEADER = 'X-Bazarr-Hour-Lines'
+SUPPRESSED_HEADER = 'X-Bazarr-Suppressed'
+SUPPRESSED_SINCE_HEADER = 'X-Bazarr-Suppressed-Since'
+SUPPRESSED_ID_HEADER = 'X-Bazarr-Suppressed-Id'
+
 # Where the shim in app.py keeps the Host header the request arrived with,
 # before the forwarded-header middleware replaces environ['HTTP_HOST'].
 RAW_HOST_ENVIRON = 'bazarr.raw_host'
@@ -231,7 +241,7 @@ _approval_code = _ApprovalCode()
 
 def _log_suppressed_summary(summary):
     """One line for the refusals past the hour's log ceiling, by window."""
-    count, opened, closed = summary
+    count, opened, closed, _window_id = summary
     opened_at = time.strftime('%H:%M', time.localtime(opened))
     closed_at = time.strftime('%H:%M', time.localtime(closed))
     logging.info('BAZARR suppressed %d host-refusal log lines between %s and %s.',
@@ -262,7 +272,8 @@ def verify_approval_code(supplied):
 
 
 def record_refusal(host, config=settings, line_at=None, hour_lines=None, suppressed=0,
-                   suppressed_since=None):
+                   suppressed_since=None, suppressed_id=None, mirrored=0, mirrored_since=None,
+                   mirrored_id=None):
     """Record a refused hostname and keep a code on the console.
 
     The backend's own refusals call this, and so does the report the front
@@ -278,13 +289,22 @@ def record_refusal(host, config=settings, line_at=None, hour_lines=None, suppres
     lines' times. A report from a console whose backend was down also
     carries the suppressed window it holds, so the two layers owe the one
     summary the combined window counts.
+
+    The window travels under its stable ID, so a report whose answer was
+    lost and whose retry carries it again folds it in once however many
+    times it arrives, and the window the console mirrors back from the last
+    acknowledgement folds nowhere while this backend still holds it: the
+    mirrored window is this backend's own, carried back to it so that a
+    restart that lost it can be told it again, not a second window owed a
+    second summary.
     """
     shown = effective_host(host)
     if not shown or not check_active(config):
         return
     if hour_lines:
         _refusals.merge_hour_lines(hour_lines)
-    _refusals.merge_summary(suppressed, suppressed_since)
+    _refusals.merge_summary(suppressed, suppressed_since, suppressed_id)
+    _refusals.merge_summary(mirrored, mirrored_since, mirrored_id)
     if _refusals.note(shown, line_at):
         logging.warning('BAZARR refused a request for an unrecognized host: %s. Allow it under '
                         'Settings > General > Allowed Hosts, or set %s.', shown, ALLOWED_HOSTS_ENV)
@@ -302,8 +322,16 @@ def front_refusal_notice(config=settings):
     here is only the bookkeeping and the announcement. It also carries the
     time that console spent the hostname's refusal line, the times of the
     refusal lines it spent within the hour, and the suppressed window it
-    holds, so the hour's line budget and its one summary are the two
-    processes' shared allowance.
+    holds under that window's stable ID, so the hour's line budget and its
+    one summary are the two processes' shared allowance.
+
+    The answer carries this backend's own accounting back on the response
+    headers: the times of the lines its hour has spent and the suppressed
+    window it holds, again with the ID. The window goes as a copy and not a
+    take, so an answer that is lost or mis-delivered leaves this backend
+    holding what it held, and the console keeps the copy beside its own
+    window rather than inside it, so the one summary a window owes is
+    logged once, by whichever layer holds the window when its hour runs.
     """
     from flask import request
 
@@ -333,9 +361,33 @@ def front_refusal_notice(config=settings):
         window_opens = float(suppressed_since) if suppressed_since else None
     except ValueError:
         window_opens = None
+    window_id = request.form.get('suppressed_id', '') or None
+    mirrored = request.form.get('mirrored', '')
+    try:
+        mirrored_back = int(mirrored) if mirrored else 0
+    except ValueError:
+        mirrored_back = 0
+    mirrored_since = request.form.get('mirrored_since', '')
+    try:
+        mirrored_opens = float(mirrored_since) if mirrored_since else None
+    except ValueError:
+        mirrored_opens = None
+    mirrored_id = request.form.get('mirrored_id', '') or None
     record_refusal(request.form.get('host', ''), config=config, line_at=line_at,
-                   hour_lines=spent, suppressed=held_back, suppressed_since=window_opens)
-    return '', 204
+                   hour_lines=spent, suppressed=held_back, suppressed_since=window_opens,
+                   suppressed_id=window_id, mirrored=mirrored_back, mirrored_since=mirrored_opens,
+                   mirrored_id=mirrored_id)
+    headers = {}
+    times = _refusals.hour_line_times()
+    if times:
+        headers[HOUR_LINES_HEADER] = ','.join(str(stamp) for stamp in times)
+    held = _refusals.hour_suppressed_window()
+    if held is not None:
+        headers[SUPPRESSED_HEADER] = str(held[0])
+        headers[SUPPRESSED_SINCE_HEADER] = str(held[1])
+        if held[2] is not None:
+            headers[SUPPRESSED_ID_HEADER] = held[2]
+    return '', 204, headers
 
 
 def health_issues(config=settings):

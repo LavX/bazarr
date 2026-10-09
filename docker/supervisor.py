@@ -83,6 +83,15 @@ PORT_FILE = Path("/tmp/bazarr-supervisor.port")
 # gave it, so the readiness poll can tell its own backend from a neighbour's.
 TOKEN_HEADER = "X-Bazarr-Supervisor-Token"
 
+# The backend's acknowledgement of a refused-host report carries its own
+# accounting on these headers: the times of the lines its hour has spent, and
+# the suppressed window it holds with its stable ID. The backend defines the
+# same names on its side, because the two processes share no imports.
+ACCOUNTING_HOUR_LINES_HEADER = "X-Bazarr-Hour-Lines"
+ACCOUNTING_SUPPRESSED_HEADER = "X-Bazarr-Suppressed"
+ACCOUNTING_SUPPRESSED_SINCE_HEADER = "X-Bazarr-Suppressed-Since"
+ACCOUNTING_SUPPRESSED_ID_HEADER = "X-Bazarr-Suppressed-Id"
+
 # Paths that get proxied to the backend
 PROXY_PREFIXES = ("/api/", "/images/", "/test/", "/system/backup/download/", "/bazarr.log")
 
@@ -765,6 +774,19 @@ class _RefusalReporter:
     once by whichever layer holds it: the hour's line budget and its one
     summary are the two processes' shared allowance, even though they
     share no memory.
+
+    The allowance flows back the other way as well: every acknowledgement
+    carries the backend's own hour with it, and this console folds the
+    spent line times into its recorder exactly as it folds its own, so a
+    backend that spent the hour and then became unreachable leaves this
+    console nothing more to spend. The window the acknowledgement carried
+    is kept beside this console's own, never inside it, because one window
+    is owed one summary by whichever layer holds it when its hour runs:
+    a window held in two recorders would be reported twice, and this copy
+    is never reported here at all. It is handed back on every report
+    instead, under its ID, so the backend that still holds it folds it
+    nowhere and a backend that lost it to a restart folds it in and owes
+    its summary again.
     """
 
     def __init__(self, notice_path: str, now=time.time):
@@ -776,6 +798,7 @@ class _RefusalReporter:
         self._accounted = OrderedDict()  # host -> time this console last spent its line
         self._report_times = []  # times of this hour's acknowledged report deliveries
         self._last_failure = None  # when the last delivery failed, until an ack or readiness
+        self._mirrored = None  # the window the last acknowledgement carried back
         self._wake = asyncio.Event()  # refusals and readiness wake the worker
         self._drain_task: "asyncio.Task | None" = None
 
@@ -820,6 +843,42 @@ class _RefusalReporter:
         hour's line budget even though they share no memory.
         """
         return self._lines.hour_line_times()
+
+    def merge_acknowledged(self, hour_lines, held):
+        """Fold the accounting the backend's acknowledgement carried back.
+
+        The line times join this console's hour budget exactly as its own
+        do, so the two layers stay on the one spent allowance whichever of
+        them spent it. The window the acknowledgement carried is kept
+        beside this console's own, never inside it: whichever layer holds
+        a window when its hour runs is the one that reports it, so a
+        window held in two recorders would be reported twice, and this
+        copy is never reported here at all. The acknowledgement replaces
+        whatever the last one carried, so a repeated one cannot double it.
+        """
+        self._lines.merge_hour_lines(hour_lines)
+        self._mirrored = held
+
+    def mirrored_summary(self):
+        """The window the last acknowledgement carried back, for the report
+        to hand to a backend that lost it.
+
+        A backend that answers holds its window still, and a report hands
+        this copy back to it: the backend folds a window whose ID it has
+        already counted nowhere, so the copy costs the backend that still
+        holds the window nothing, while a backend that lost it to a
+        restart folds it in and owes its summary again. The copy waits
+        only the hour the window has left to run, on the horizon the line
+        times use, so it never outlives the accounting it stands for.
+        """
+        now = self._now()
+        held = self._mirrored
+        if held is None:
+            return None
+        if now - held[1] >= host_policy.HOUR_SECONDS:
+            self._mirrored = None
+            return None
+        return held
 
     def take_carried_summary(self):
         """Take this console's suppressed window, for the report to carry.
@@ -1021,10 +1080,17 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
     in the same hour, and a hostname refused for the first time once it
     answers draws on the one merged hour budget, which rolls over exactly
     at those lines' times. The first report a backend acknowledges carries
-    the suppressed window this console holds as well, so the summary the
-    window owes is paid once by whichever layer holds it: the two processes
-    share the hour's line budget and its one summary even though they share
-    no memory.
+    the suppressed window this console holds as well, under the window's
+    stable ID, so the summary the window owes is paid once by whichever
+    layer holds it: the two processes share the hour's line budget and its
+    one summary even though they share no memory.
+
+    The report also hands the backend back the window the last
+    acknowledgement carried, and the acknowledgement that lands carries the
+    backend's own hour back: this console folds the spent line times in and
+    keeps the window beside its own, so the two layers stay on the one
+    allowance whichever of them spent it, and a window owed a summary is
+    held by the one layer that will report it.
     """
     data = {"host": host}
     logged = reporter.line_time(host)
@@ -1037,6 +1103,14 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
     if carried is not None:
         data["suppressed"] = str(carried[0])
         data["suppressed_since"] = str(carried[1])
+        if carried[2] is not None:
+            data["suppressed_id"] = carried[2]
+    mirrored = reporter.mirrored_summary()
+    if mirrored is not None:
+        data["mirrored"] = str(mirrored[0])
+        data["mirrored_since"] = str(mirrored[1])
+        if mirrored[2] is not None:
+            data["mirrored_id"] = mirrored[2]
     delivered = False
     try:
         async with session.post(f"http://{BACKEND_HOST}:{port}{reporter.notice_path}",
@@ -1047,6 +1121,7 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
             if response.status == 204 and response.headers.get(TOKEN_HEADER) == token:
                 delivered = True
                 reporter.report_sent(host)
+                reporter.merge_acknowledged(*_acknowledged_accounting(response))
                 return
     except Exception:
         pass
@@ -1056,6 +1131,36 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
         if not delivered and carried is not None:
             reporter.merge_carried_summary(carried)
     reporter.report_failed(host)
+
+
+def _acknowledged_accounting(response):
+    """The accounting a backend's acknowledgement carries back, if any.
+
+    The headers hold the times of the lines the backend's hour has spent
+    and the suppressed window it holds, and an answer that carries none of
+    them folds nothing. Every value is parsed the defensive way the
+    backend's own notice route parses what arrives, because the two
+    processes only ever share words on the wire.
+    """
+    times = []
+    for stamp in response.headers.get(ACCOUNTING_HOUR_LINES_HEADER, "").split(","):
+        try:
+            times.append(float(stamp))
+        except ValueError:
+            pass
+    count = response.headers.get(ACCOUNTING_SUPPRESSED_HEADER, "")
+    try:
+        suppressed = int(count) if count else 0
+    except ValueError:
+        suppressed = 0
+    since = response.headers.get(ACCOUNTING_SUPPRESSED_SINCE_HEADER, "")
+    try:
+        opened = float(since) if since else None
+    except ValueError:
+        opened = None
+    window_id = response.headers.get(ACCOUNTING_SUPPRESSED_ID_HEADER) or None
+    held = (suppressed, opened, window_id) if suppressed and opened is not None else None
+    return times, held
 
 
 async def _drain_refusal_notices(reporter: _RefusalReporter) -> None:
@@ -1120,7 +1225,7 @@ def _print_due_refusal_summary(reporter: _RefusalReporter) -> None:
     """
     summary = reporter.take_summary()
     if summary:
-        count, opened, closed = summary
+        count, opened, closed, _window_id = summary
         _print_refusal_line(f"Suppressed {count} host-refusal lines between "
                             f"{_clock_minutes(opened)} and {_clock_minutes(closed)}.")
 

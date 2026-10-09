@@ -13,6 +13,7 @@ layers share, so neither can record or log more than the agreed ceiling.
 
 import os
 import re
+import secrets
 import threading
 import time
 from collections import OrderedDict
@@ -46,6 +47,18 @@ DAY_SECONDS = 86400.0
 # Per hour: at most this many per-host refusal lines, then one line an hour
 # that counts the suppressed ones.
 REFUSAL_LOG_LINES_PER_HOUR = 20
+
+# A suppressed window's identity, minted once when the window opens: the
+# two layers that share a window have no memory in common, so this is how
+# each tells a window it has already counted from one it has not, however
+# often the window changes hands between them. The bits are random, so two
+# windows minted in the two layers at the same moment are still distinct.
+WINDOW_ID_BYTES = 8
+
+
+def _mint_window_id():
+    """A fresh window ID: 64 random bits, unique across both layers."""
+    return secrets.token_hex(WINDOW_ID_BYTES)
 
 
 def effective_host(host):
@@ -262,6 +275,18 @@ class BoundedRefusalRecorder:
     ``take_carried_summary``, and ``merge_summary`` folds it into this
     layer's, so the two layers together owe the one summary the combined
     window counts.
+
+    The window carries a stable ID from the moment it opens, wherever it
+    travels next: the report that carries it and the acknowledgement that
+    carries one back both hold it, and ``merge_summary`` folds nowhere a
+    window whose ID this layer has already counted, whether it minted the
+    ID at the window's first line or folded the window in from elsewhere.
+    So a delivery that has to be retried, in either direction, counts the
+    same window exactly once: the backend keeps the window it holds even
+    when its acknowledgement is lost, because ``hour_suppressed_window``
+    hands out a copy and not a take, and the console keeps its own through
+    the take and fold back of a failed report, so neither direction can
+    lose accounting to a delivery that did not land.
     """
 
     def __init__(self, now=time.time):
@@ -272,6 +297,23 @@ class BoundedRefusalRecorder:
         self._line_times = []  # times of per-host refusal lines this hour
         self._suppressed = 0
         self._window_opens = None  # when the current suppressed count started
+        self._window_id = None  # the current window's ID, minted at its first line
+        self._counted_windows = OrderedDict()  # window ID -> when it was counted here
+        self._first_failures = OrderedDict()  # host -> when its first failed notice counted
+
+    def _count_suppressed(self, now):
+        """Count one held-back line into the window, minting its stable ID.
+
+        The ID is minted when the window opens, at its first held-back line,
+        and never regenerated: every later handoff of the window, in a
+        report, an acknowledgement or the console's fold back, carries the
+        same one, so whichever layer receives the window can tell whether
+        it has already counted it.
+        """
+        if not self._suppressed:
+            self._window_id = _mint_window_id()
+            self._counted_windows[self._window_id] = now
+        self._suppressed += 1
 
     def note(self, host, line_at=None):
         """Record a refusal; True when a per-host line may be written now.
@@ -300,7 +342,7 @@ class BoundedRefusalRecorder:
                     self._last_lines[host] = line_at
                 return False
             if host in self._last_lines or len(self._line_times) >= REFUSAL_LOG_LINES_PER_HOUR:
-                self._suppressed += 1
+                self._count_suppressed(now)
                 return False
             self._last_lines[host] = now
             self._line_times.append(now)
@@ -342,11 +384,25 @@ class BoundedRefusalRecorder:
         that says a stream of refusals was held back when one hostname's
         line was. The refusal record itself is left alone, because a
         report's retry is not a new refusal.
+
+        The first failure is different: a report whose delivery fails leaves
+        its hostname named nowhere else, so the first failed notice of a
+        host whose line the hour's cap holds back counts toward the window
+        the way its own held-back line would, and the host's later retries
+        of that notice do not. The host is marked when it is counted, on the
+        hour horizon every other roll here uses, because the log pace
+        cannot tell the two apart: no line was ever written for the host,
+        so ``_last_lines`` holds nothing for it.
         """
         now = self._now()
         with self._lock:
             self._prune(now)
-            if host in self._last_lines or len(self._line_times) >= REFUSAL_LOG_LINES_PER_HOUR:
+            if host in self._last_lines:
+                return False
+            if len(self._line_times) >= REFUSAL_LOG_LINES_PER_HOUR:
+                if host not in self._first_failures:
+                    self._first_failures[host] = now
+                    self._count_suppressed(now)
                 return False
             self._last_lines[host] = now
             self._line_times.append(now)
@@ -356,14 +412,22 @@ class BoundedRefusalRecorder:
         self._line_times = [stamp for stamp in self._line_times if now - stamp < HOUR_SECONDS]
         self._last_lines = OrderedDict(
             (name, stamp) for name, stamp in self._last_lines.items() if now - stamp < HOUR_SECONDS)
+        self._first_failures = OrderedDict(
+            (name, stamp) for name, stamp in self._first_failures.items()
+            if now - stamp < HOUR_SECONDS)
+        self._counted_windows = OrderedDict(
+            (window_id, stamp) for window_id, stamp in self._counted_windows.items()
+            if now - stamp < HOUR_SECONDS)
 
     def take_summary(self):
         """The suppressed window when a summary line is due, else ``None``.
 
         A count that starts being suppressed is held for a full hour before
         it is reported, so the line counts every refusal suppressed in that
-        window. The answer is that count with the window's two ends, and
-        taking it clears the window.
+        window. The answer is that count with the window's two ends and its
+        stable ID, and taking it clears the window. Taking it does not
+        forget the ID: the window has been counted here, so a copy of it
+        that arrives again, from the other layer, folds nowhere.
         """
         now = self._now()
         with self._lock:
@@ -376,9 +440,31 @@ class BoundedRefusalRecorder:
                 return None
             suppressed = self._suppressed
             opened = self._window_opens
+            window_id = self._window_id
             self._suppressed = 0
             self._window_opens = None
-            return suppressed, opened, now
+            self._window_id = None
+            return suppressed, opened, now, window_id
+
+    def hour_suppressed_window(self):
+        """The suppressed window this hour holds, taken by no one.
+
+        The acknowledgement of a report carries it back the way the report
+        carries the hour's spent line times: a copy, not a take, because the
+        layer that holds the window keeps holding it whether or not its
+        answer arrives, so an acknowledgement that is lost or mis-delivered
+        never takes accounting with it. The ID travels with the copy, so
+        the layer that holds the original recognizes the window when the
+        copy is handed back and folds it nowhere.
+        """
+        now = self._now()
+        with self._lock:
+            self._prune(now)
+            if not self._suppressed:
+                return None
+            if self._window_opens is None:
+                self._window_opens = now
+            return self._suppressed, self._window_opens, self._window_id
 
     def take_carried_summary(self):
         """Take the suppressed window out, for the report that carries it.
@@ -390,7 +476,10 @@ class BoundedRefusalRecorder:
         it into its own and the two layers together owe the one summary, not
         one each. A window taken for a delivery the backend did not
         acknowledge is folded back in, so a recovery that fails loses
-        nothing.
+        nothing. The window's ID is taken out with it as well: for as long
+        as the window is in flight this layer has not counted it, so the
+        fold back below lands and is not refused as a window this layer has
+        already counted.
         """
         now = self._now()
         with self._lock:
@@ -398,24 +487,42 @@ class BoundedRefusalRecorder:
                 return None
             count = self._suppressed
             opened = self._window_opens if self._window_opens is not None else now
+            window_id = self._window_id
             self._suppressed = 0
             self._window_opens = None
-            return count, opened
+            self._window_id = None
+            if window_id is not None:
+                self._counted_windows.pop(window_id, None)
+            return count, opened, window_id
 
-    def merge_summary(self, count, opened):
+    def merge_summary(self, count, opened, window_id=None):
         """Fold a suppressed window another layer carried into this one.
 
         The window that opened first keeps its place, so the lines one layer
         held back before the recovery and the lines the other held back
         after it are counted by the one summary the combined window owes,
         once its hour has run.
+
+        The window's ID is what makes the fold safe to repeat: a window
+        this layer has already counted, whether it minted the ID at the
+        window's first line or folded the window in from elsewhere, folds
+        nowhere, so a report whose acknowledgement was lost and whose
+        retry carries the window again does not count it twice, and the
+        window the other layer hands back while this one still holds it
+        costs nothing either. The IDs are held on the hour horizon the
+        line times use, so the set of them stays bounded.
         """
         if not count or opened is None:
             return
         with self._lock:
+            if window_id is not None and window_id in self._counted_windows:
+                return
+            if window_id is not None:
+                self._counted_windows[window_id] = self._now()
             self._suppressed += count
             if self._window_opens is None or opened < self._window_opens:
                 self._window_opens = opened
+                self._window_id = window_id
 
     def recent(self, within_seconds):
         """The refused hosts of the window, newest first."""

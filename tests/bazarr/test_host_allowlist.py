@@ -552,9 +552,12 @@ def test_the_summary_counts_the_whole_window(fresh_state):
         # The first suppressed refusal opens the window; nothing is due yet.
         assert recorder.take_summary() is None
 
-    # Due: the count, with the window's two ends for the line to name.
+    # Due: the count, with the window's two ends for the line to name and
+    # its stable ID for whoever carries it next.
     clock[0] = 3600
-    assert recorder.take_summary() == (20, 0, 3600)
+    count, opened, closed, window_id = recorder.take_summary()
+    assert (count, opened, closed) == (20, 0, 3600)
+    assert window_id
 
     # The count is reset, and the next suppression opens a fresh window.
     assert recorder.take_summary() is None
@@ -562,7 +565,9 @@ def test_the_summary_counts_the_whole_window(fresh_state):
         recorder.note(f"h{index}.example.com")
     assert recorder.take_summary() is None
     clock[0] = 7300
-    assert recorder.take_summary() == (2, 3600, 7300)
+    count, opened, closed, second_id = recorder.take_summary()
+    assert (count, opened, closed) == (2, 3600, 7300)
+    assert second_id and second_id != window_id
 
 
 def test_a_due_summary_is_logged_even_when_the_refusals_stop(fresh_state, root_log, caplog,
@@ -2633,6 +2638,233 @@ async def test_the_console_and_the_backend_share_the_one_summary_window(
         await client.close()
         server.close()
         thread.join(timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_a_retried_report_counts_its_carried_window_once(tmp_path, monkeypatch, root_log,
+                                                               caplog):
+    """A report the backend processes but whose answer is lost stays
+    pending and is retried, and the retry carries the console's suppressed
+    window again: the backend folds a window it has already counted
+    nowhere, so the one summary the window owes when its hour runs counts
+    the lines it holds once, and not once per delivery attempt."""
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    caplog.set_level(logging.INFO)
+    from app import host_allowlist
+
+    clock = [0]
+    monkeypatch.setattr(host_allowlist, "_refusals",
+                        host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0]))
+    config = _config()
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    reporter = supervisor._active_reporter
+    monkeypatch.setattr(reporter, "_now", lambda: clock[0])
+    monkeypatch.setattr(reporter._lines, "_now", lambda: clock[0])
+    try:
+        # The outage: this console spends the hour's cap of lines and holds
+        # the rest back, which opens its suppressed window.
+        for index in range(25):
+            clock[0] = index
+            response = await client.get("/", headers={"Host": f"down{index}.example.com"})
+            assert response.status == 421
+        named = [line for line in lines if line.startswith("Refused")]
+        assert len(named) == supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR
+
+        answers = {"lost": True}
+
+        async def notice(request):
+            form = await request.post()
+            carried = {}
+            logged = form.get("logged")
+            if logged:
+                carried["line_at"] = float(logged)
+            hour_lines = form.get("hour_lines")
+            if hour_lines:
+                carried["hour_lines"] = [float(stamp) for stamp in hour_lines.split(",")]
+            for field, parse in (("suppressed", int), ("suppressed_since", float),
+                                 ("mirrored", int), ("mirrored_since", float)):
+                if form.get(field):
+                    carried[field] = parse(form[field])
+            for field in ("suppressed_id", "mirrored_id"):
+                if form.get(field):
+                    carried[field] = form[field]
+            # The backend takes the report in, and then its answer is lost.
+            host_allowlist.record_refusal(form["host"], config=config, **carried)
+            if answers["lost"]:
+                answers["lost"] = False
+                return web.Response(status=503)
+            return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                     "the-supervisor-token"})
+
+        backend_app = web.Application()
+        backend_app.router.add_route("POST", "/_supervisor/host_refusal", notice)
+        backend = TestClient(TestServer(backend_app))
+        await backend.start_server()
+        try:
+            monkeypatch.setattr(supervisor, "BACKEND_PORT", backend.server.port)
+            monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+            for _ in range(6000):
+                if not reporter.pending_reports():
+                    break
+                clock[0] += 0.06
+                await asyncio.sleep(0.01)
+            assert reporter.pending_reports() == []
+        finally:
+            await backend.close()
+
+        # The window's hour runs: the backend holds it, folded once, so it
+        # alone logs the one summary the window owes, counting it once
+        # however many times the report that carried it was delivered.
+        clock[0] = 3700
+        host_allowlist.health_issues(config)
+        console_summaries = [line for line in lines if line.startswith("Suppressed")]
+        backend_summaries = [message for message in root_log.messages
+                             if "host-refusal log lines" in message]
+        assert console_summaries == []
+        assert len(backend_summaries) == 1
+        assert "suppressed 5 host-refusal log lines" in backend_summaries[0]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_backend_first_outage_keeps_the_pair_within_the_one_line_budget(
+        tmp_path, monkeypatch, real_factory, root_log, caplog):
+    """The backend can be the layer that spends the hour: it answers the
+    reports and writes the refusal lines itself, and then becomes
+    unreachable. Every acknowledgement carries its spent hour back to the
+    console, which folds the line times into its recorder as its own, so
+    the console that keeps refusing names no further line and counts every
+    one it holds back into the one window that comes due here: the pair
+    stays on the one budget whichever layer spent it."""
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
+    console_lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", console_lines.append)
+    caplog.set_level(logging.INFO)
+    from waitress.server import create_server
+
+    from app import host_allowlist
+    from app.app import waitress_server_options
+
+    monkeypatch.setenv("BAZARR_SUPERVISOR_TOKEN", "the-supervisor-token")
+    clock = [0]
+    monkeypatch.setattr(host_allowlist, "_refusals",
+                        host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0]))
+
+    # The backend answers the reports over a real socket, the way the
+    # supervisor sends them, with the real notice route.
+    with socket.socket() as reserve:
+        reserve.bind(("127.0.0.1", 0))
+        port = reserve.getsockname()[1]
+    server = create_server(real_factory, host="127.0.0.1", port=port,
+                           threads=4, **waitress_server_options())
+
+    def serve():
+        try:
+            server.run()
+        except OSError:
+            pass
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    monkeypatch.setattr(supervisor, "BACKEND_PORT", port)
+    monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    try:
+        reporter = supervisor._active_reporter
+        monkeypatch.setattr(reporter, "_now", lambda: clock[0])
+        monkeypatch.setattr(reporter._lines, "_now", lambda: clock[0])
+
+        async def settle():
+            for _ in range(6000):
+                if not reporter.pending_reports():
+                    return
+                clock[0] += 0.06
+                await asyncio.sleep(0.01)
+            raise AssertionError("the reports never drained")
+
+        # The backend owns the lines while it answers, and spends the
+        # hour's whole allowance on one per host. Each report is let to
+        # land before the next refusal, with the clock moving a step for
+        # it, so every line the backend spends has a time of its own the
+        # way a real hour's do.
+        for index in range(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR):
+            response = await client.get("/", headers={"Host": f"spent{index}.example.com"})
+            assert response.status == 421
+            for _ in range(2000):
+                if not reporter.pending_reports():
+                    break
+                clock[0] += 1
+                await asyncio.sleep(0.005)
+        await settle()
+        backend_lines = [message for message in root_log.messages
+                         if "refused a request" in message]
+        assert len(backend_lines) == supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR
+        assert [line for line in console_lines if line.startswith("Refused")] == []
+
+        # The backend becomes unreachable, and the console keeps refusing
+        # hosts: the budget the acknowledgements folded in is spent, so it
+        # holds every further line back and opens its window here.
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", None)
+        for index in range(5):
+            clock[0] = 3000 + index
+            response = await client.get("/", headers={"Host": f"late{index}.example.com"})
+            assert response.status == 421
+        named = [line for line in console_lines if line.startswith("Refused")]
+        assert named == []
+
+        # The window's hour runs: the console, the only layer that can be
+        # reached, reports the lines the pair held back, once.
+        clock[0] = 6700
+        response = await client.get("/", headers={"Host": "after.example.com"})
+        assert response.status == 421
+        console_summaries = [line for line in console_lines if line.startswith("Suppressed")]
+        backend_summaries = [message for message in root_log.messages
+                             if "host-refusal log lines" in message]
+        assert len(backend_lines) + len(named) == (
+            supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR)
+        assert console_summaries
+        assert "Suppressed 5 host-refusal lines" in console_summaries[0]
+        assert len(console_summaries) + len(backend_summaries) == 1
+    finally:
+        await client.close()
+        server.close()
+        thread.join(timeout=10)
+
+
+def test_first_failed_notices_of_distinct_hosts_count_once_past_the_ceiling(monkeypatch):
+    """A report that fails delivery leaves its hostname named nowhere else:
+    the first failed notice of each distinct host the hour's cap holds back
+    counts toward the summary window, the way the host's own held-back line
+    would, and its later delivery retries do not count it again."""
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    clock = [0]
+    reporter = supervisor._RefusalReporter("/_supervisor/host_refusal", now=lambda: clock[0])
+
+    # An outage spends the hour's cap on per-host lines.
+    for index in range(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR):
+        assert reporter.note_line(f"early{index}.example.com") is True
+
+    # The backend answers, and a longer roll of distinct hosts is refused
+    # while it does: every one of their first notices fails its delivery.
+    late = [f"late{index}.example.com" for index in range(25)]
+    for host in late:
+        assert reporter.report_due(host) is True
+        reporter.report_failed(host)
+    # A retry of an earlier host's notice fails too, and counts nothing.
+    reporter.report_failed(late[0])
+
+    assert reporter.take_summary() is None
+    clock[0] += int(supervisor.host_policy.HOUR_SECONDS) + 1
+    summary = reporter.take_summary()
+    assert summary is not None
+    assert summary[0] == len(late)
+    assert lines == []
 
 
 class _CountingWake:
