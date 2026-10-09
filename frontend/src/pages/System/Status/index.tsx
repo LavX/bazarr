@@ -289,8 +289,14 @@ const SystemStatusView: FunctionComponent = () => {
               )}
             </Group>
           </Row>
+          {status?.build_commit !== "" && (
+            <Row title="Build">
+              {status?.build_commit}
+              {status?.build_date !== "" ? ` (${status?.build_date})` : ""}
+            </Row>
+          )}
           {status?.package_version !== "" && (
-            <Row title="Package Version">{status?.package_version}</Row>
+            <Row title="Last Released Package">{status?.package_version}</Row>
           )}
           {/* Every integration row is conditional, on the rule Sportarr has
               used since sports landed: the product's master toggle is on and

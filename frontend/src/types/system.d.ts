@@ -88,6 +88,8 @@ declare namespace System {
     bazarr_config_directory: string;
     bazarr_directory: string;
     bazarr_version: string;
+    build_commit: string;
+    build_date: string;
     database_engine: string;
     database_migration: string;
     operating_system: string;
