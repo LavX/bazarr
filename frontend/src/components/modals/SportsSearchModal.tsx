@@ -1,9 +1,17 @@
 import { useState } from "react";
-import { Checkbox, Group, NativeSelect, Stack } from "@mantine/core";
+import {
+  Alert,
+  Checkbox,
+  Group,
+  NativeSelect,
+  Stack,
+  Text,
+} from "@mantine/core";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { QueryKeys } from "@/apis/queries/keys";
 import sports, { SportsEventReference } from "@/apis/raw/sports";
 import { withModal } from "@/modules/modals";
+import { waitForJob } from "@/utilities/jobs";
 import {
   useEnabledLanguages,
   useLanguageProfileBy,
@@ -48,6 +56,12 @@ function SportsSearchView({
   const [hi, setHi] = useState(initialHi);
   const [forced, setForced] = useState(initialForced);
   const [downloading, setDownloading] = useState(false);
+  const [queued, setQueued] = useState(false);
+  // A job can complete with a warning the queue records as its last progress
+  // message (published, but part of the follow-up work did not finish). The
+  // job resolves rather than rejects, so the message needs its own channel to
+  // the user, which this is.
+  const [jobWarning, setJobWarning] = useState<string | null>(null);
 
   function useSearch() {
     return useQuery({
@@ -71,12 +85,19 @@ function SportsSearchView({
   ) {
     if (downloading) return;
     setDownloading(true);
+    setJobWarning(null);
     try {
-      // Queued as a backend job, the way the library's manual download is:
-      // the row is marked once the job is queued, and the job reports its
-      // outcome, or the reason it failed, through the jobs drawer.
-      await sports.downloadSubtitle(event, candidate);
+      // Queued as a backend job, the way the library's manual download is.
+      // The row is marked only once the job completes: a failed or stopped
+      // job rejects with its reason and leaves the row retryable.
+      const { job_id: jobId } = await sports.downloadSubtitle(event, candidate);
+      setQueued(jobId != null);
+      const job = await waitForJob(client, jobId);
+      if (job?.progress_message) {
+        setJobWarning(job.progress_message);
+      }
     } finally {
+      setQueued(false);
       // The sports root, not just "events". Wanted, history and blacklist are
       // all cached under [Sports, <kind>, ...], so invalidating only "events"
       // left a downloaded language still showing as missing on the Wanted
@@ -112,6 +133,12 @@ function SportsSearchView({
           disabled={downloading}
         />
       </Group>
+      {queued && (
+        <Text size="sm" c="dimmed" role="status">
+          Queued in Jobs. You can close this window; Jobs reports the result.
+        </Text>
+      )}
+      {jobWarning && <Alert color="yellow">{jobWarning}</Alert>}
       <ManualSearchView
         key={`${language}:${hi}:${forced}`}
         item={item}

@@ -1,0 +1,19 @@
+# Optional overlay. Replace the network name and host media root before use.
+# Save as compose.media.yaml beside compose.yaml, then run:
+# docker compose -f compose.yaml -f compose.media.yaml up -d
+services:
+  bazarr:
+    networks:
+      - default
+      - media
+    volumes:
+      - type: bind
+        source: /path/to/your/media
+        target: /media
+        bind:
+          create_host_path: false
+
+networks:
+  media:
+    external: true
+    name: your-existing-media-network

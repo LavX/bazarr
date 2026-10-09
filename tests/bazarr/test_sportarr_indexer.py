@@ -733,8 +733,12 @@ def test_profile_editor_changes_recompute_sports_missing(indexed_library, monkey
     # The save queues the recalculation instead of running it; the job is run
     # below, which is where the sports rows are recomputed now.
     queued = []
-    monkeypatch.setattr(endpoint, "queue_missing_subtitles_recalculation",
-                        lambda **kwargs: queued.append(kwargs))
+
+    def queue(**kwargs):
+        queued.append(kwargs)
+        return len(queued)  # a job id, as the real helper returns
+
+    monkeypatch.setattr(endpoint, "queue_missing_subtitles_recalculation", queue)
     monkeypatch.setattr(settings.general, "use_sonarr", False)
     monkeypatch.setattr(settings.general, "use_radarr", False)
     # The sports recompute is gated on the master toggle now, like the sonarr
@@ -777,6 +781,7 @@ def test_checked_subtitle_writes_lock_owner_until_commit(
 ):
     import threading
     from app.database import TableArrInstances
+    from sportarr.db import error_sqlstate
 
     session, _ = indexed_library
     module = sports(monkeypatch, session)
@@ -806,7 +811,7 @@ def test_checked_subtitle_writes_lock_owner_until_commit(
                     assert (
                         error.orig.sqlite_errorcode == 5
                         if engine.dialect.name == "sqlite"
-                        else error.orig.sqlstate == "55P03"
+                        else error_sqlstate(error) == "55P03"
                     )
                     connection.rollback()
                     results.append("blocked")
@@ -1517,3 +1522,81 @@ def test_indexing_retires_a_release_type_mismatch_that_is_no_longer_missing(
 
     session.expire_all()
     assert session.execute(select(TableReleaseTypeMismatch)).scalars().all() == []
+
+
+# A stored index entry is [language, path, size], but a row another build wrote
+# can hold an embedded entry with more, such as the track's codec. Every
+# sports path that recomputes missing languages from the stored column goes
+# through _missing, which must take the language and path and ignore whatever
+# follows them.
+STORED_ENTRIES = {
+    "three": [["en:hi", "/sports/event.en.hi.srt", 60], ["fr", None, None]],
+    "four": [["en:hi", "/sports/event.en.hi.srt", 60], ["fr", None, None, "subrip"]],
+}
+
+
+def stored_entry_event(session, monkeypatch, shape):
+    """Event 61 of owner 1 under a fr/en/de profile, holding a stored index."""
+    from app import database as db
+    from sportarr import library
+
+    module = sports(monkeypatch, session)
+    items = [
+        dict(
+            id=i,
+            language=language,
+            hi="False",
+            forced="False",
+            audio_exclude="False",
+            audio_only_include="False",
+        )
+        for i, language in enumerate(("fr", "en", "de"), 1)
+    ]
+    session.execute(
+        sa.insert(db.TableLanguagesProfiles).values(
+            profileId=5, name="Sports", items=json.dumps(items)
+        )
+    )
+    db.update_profile_id_list.invalidate()
+    assert library.assign_profile(session, 51, 1, 5)
+    session.execute(
+        sa.update(db.TableSportsEvents)
+        .where(db.TableSportsEvents.id == 61)
+        .values(subtitles=str(STORED_ENTRIES[shape]), missing_subtitles="[]")
+    )
+    return module
+
+
+def test_missing_ignores_elements_after_the_path(indexed_library, monkeypatch):
+    session, _ = indexed_library
+    module = stored_entry_event(session, monkeypatch, "three")
+
+    three = module._missing(5, STORED_ENTRIES["three"], "['French']", "[]")
+    four = module._missing(5, STORED_ENTRIES["four"], "['French']", "[]")
+
+    assert three == ["de"]
+    assert four == three
+
+
+@pytest.mark.parametrize("caller", ["event", "league", "recalculation"])
+@pytest.mark.parametrize("shape", sorted(STORED_ENTRIES))
+def test_missing_recompute_reads_every_stored_entry_shape(
+    indexed_library, monkeypatch, shape, caller
+):
+    from app.config import settings
+    from sportarr import library
+    from subtitles.indexer import missing_refresh
+
+    session, _ = indexed_library
+    module = stored_entry_event(session, monkeypatch, shape)
+    if caller == "event":
+        module.list_missing_subtitles_sports(event_id=61, arr_instance_id=1)
+    elif caller == "league":
+        library.refresh_league_profiles([51], 1)
+    else:
+        monkeypatch.setattr(settings.general, "use_sonarr", False)
+        monkeypatch.setattr(settings.general, "use_radarr", False)
+        missing_refresh.recalculate_missing_subtitles(job_id=1)
+
+    assert ast.literal_eval(row(session, 61).missing_subtitles) == ["de"]
+    assert ast.literal_eval(row(session, 61).subtitles) == STORED_ENTRIES[shape]

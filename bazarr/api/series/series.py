@@ -279,7 +279,7 @@ class Series(Resource):
 
     @authenticate
     @api_ns_series.doc(parser=patch_request_parser)
-    @api_ns_series.response(202, 'scan-disk queued as a job', patch_job_model)
+    @api_ns_series.response(202, 'Scan or subtitle search queued as a job', patch_job_model)
     @api_ns_series.response(204, 'Success for every other action')
     @api_ns_series.response(400, 'Unknown action')
     @api_ns_series.response(401, 'Not Authenticated')
@@ -295,11 +295,11 @@ class Series(Resource):
             return {'job_id': job_id or None}, 202
         elif action == "search-missing":
             try:
-                series_download_subtitles(seriesid, arr_instance_id=arr_instance_id)
+                job_id = series_download_subtitles(seriesid, arr_instance_id=arr_instance_id)
             except OSError:
                 return 'Series directory not found. Path mapping issue?', 500
             else:
-                return '', 204
+                return {'job_id': job_id or None}, 202
         elif action == "search-wanted":
             wanted_search_missing_subtitles_series()
             return '', 204

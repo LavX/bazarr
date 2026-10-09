@@ -14,7 +14,7 @@ import time
 from collections import OrderedDict
 
 from app import activity
-from app.jobs_queue import jobs_queue, JobCancelled
+from app.jobs_queue import jobs_queue, JobCancelled, JobFailed, UNEXPECTED_JOB_ERROR
 from utilities.job_dedupe import enqueue_or_existing
 
 from .services.openrouter_translator import OpenRouterTranslatorService
@@ -24,7 +24,8 @@ EDITOR_TRANSLATION_FUNC = 'translate_editor_lines'
 
 # The queue keeps only the last ten finished jobs across everything it runs, so a
 # translation the editor has not collected yet could be pushed out by unrelated
-# work. Finished editor results are kept here too, bounded and for an hour.
+# work. Finished editor results, and the reasons failed ones gave, are kept here
+# too, bounded and for an hour.
 RESULT_RETENTION_SECONDS = 3600
 RESULT_RETENTION_COUNT = 32
 _results = OrderedDict()
@@ -52,9 +53,8 @@ def _retained_result(job_id):
 def editor_translation_label(title, source_language, target_language, line_count):
     """The job name, in the queue's "Translating <what> (<from> to <to>)" form.
 
-    It has to start with "Translating": the queue counts a job against the
-    translation concurrency lane by that word, and the completion rename below
-    swaps it for "Translated".
+    It has to start with "Translating", because the completion rename below
+    swaps that word for "Translated".
     """
     languages = f'{source_language or "auto-detected"} to {target_language}'
     if line_count == 1:
@@ -115,10 +115,15 @@ def translate_editor_lines(lines, positions, source_language, target_language, t
     except JobCancelled:
         # submit_content has already cancelled the sidecar's job.
         raise
-    except Exception:
+    except Exception as exc:
         # A TranslationServiceError is a JobFailed, so its reason becomes the
         # job's error, which the editor, the failure toast and the drawer show.
         _rename(job_id, 'Failed')
+        if job_id:
+            # The same sentence the queue records, so the editor can still say
+            # why after the job has left the queue.
+            message = str(exc) if isinstance(exc, JobFailed) else UNEXPECTED_JOB_ERROR['message']
+            _retain_result(job_id, {'error': message})
         raise
 
     result_lines = []
@@ -160,6 +165,8 @@ def editor_translation_state(job_id):
         retained = _retained_result(job_id)
         if retained is None:
             return None
+        if 'error' in retained:
+            return {'jobId': job_id, 'status': 'failed', 'error': retained['error'] or 'Translation failed.'}
         return {'jobId': job_id, 'status': 'completed', 'lines': retained.get('lines') or [],
                 'partial': retained.get('partial')}
     if job.get('module') != EDITOR_TRANSLATION_MODULE or job.get('func') != EDITOR_TRANSLATION_FUNC:

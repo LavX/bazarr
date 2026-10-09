@@ -39,7 +39,9 @@ export default defineConfig({
     locale: "en-US",
     actionTimeout: 10_000,
     navigationTimeout: 20_000,
-    trace: "on-first-retry",
+    // Every failure keeps its trace, console and network included, so a
+    // flake that does not come back on a retry still leaves its evidence.
+    trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
   projects: [

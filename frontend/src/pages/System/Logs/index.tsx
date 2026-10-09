@@ -62,8 +62,21 @@ const SystemLogsView: FunctionComponent = () => {
   // against it, so they hold still while new lines arrive.
   const [baseline, setBaseline] = useState<number | null>(null);
 
-  // A changed filter starts again from the newest entry.
-  const filterKey = `${level ?? ""}\n${contains}\n${pageSize}`;
+  const { data: settings } = useSystemSettings();
+
+  // A changed filter starts again from the newest entry. That includes the
+  // stored filter the Filter modal saves: the server applies it to every read,
+  // so against the old baseline its change would look like new lines arriving.
+  const stored = settings?.log;
+  const filterKey = [
+    level ?? "",
+    contains,
+    pageSize,
+    stored?.include_filter,
+    stored?.exclude_filter,
+    stored?.ignore_case,
+    stored?.use_regex,
+  ].join("\n");
   const [pageFilterKey, setPageFilterKey] = useState(filterKey);
   if (pageFilterKey !== filterKey) {
     setPageFilterKey(filterKey);
@@ -101,12 +114,21 @@ const SystemLogsView: FunctionComponent = () => {
   );
 
   // Emptying the log, or new lines under a narrower filter, can leave the
-  // page past the end.
+  // page past the end, or leave nothing to page through at all. Only a page
+  // that loaded counts: a failed load keeps the reader where they were.
   useEffect(() => {
-    if (!isPlaceholderData && pageCount > 0 && page >= pageCount) {
-      setPage(pageCount - 1);
+    if (
+      !isPlaceholderData &&
+      data !== undefined &&
+      page > 0 &&
+      page >= pageCount
+    ) {
+      setPage(Math.max(0, pageCount - 1));
+      if (pageCount === 0) {
+        setBaseline(null);
+      }
     }
-  }, [isPlaceholderData, page, pageCount]);
+  }, [isPlaceholderData, data, page, pageCount]);
 
   useEffect(() => {
     ScrollToTop();
@@ -120,7 +142,6 @@ const SystemLogsView: FunctionComponent = () => {
 
   useDocumentTitle(`Logs - ${useAppTitle()} (System)`);
 
-  const { data: settings } = useSystemSettings();
   const modals = useModals();
 
   const suffix = () => {
@@ -146,10 +167,21 @@ const SystemLogsView: FunctionComponent = () => {
       }
     };
 
+    // The filter key above catches the new stored filter only once the
+    // settings have reloaded, and the save reloads an older page at the same
+    // moment, against the old baseline. Going back to the newest page as the
+    // save goes out leaves that page nothing to reload.
+    const startAgainOnSave = (changes: LooseObject) => {
+      if (Object.keys(changes).some((key) => key.startsWith("settings-log-"))) {
+        setPage(0);
+        setBaseline(null);
+      }
+    };
+
     const id = modals.openModal({
       title: "Set Log Debug and Filter Options",
       children: (
-        <LayoutModal callbackModal={callbackModal}>
+        <LayoutModal callbackModal={callbackModal} onSave={startAgainOnSave}>
           <Stack>
             <Check label="Debug" settingKey="settings-general-debug"></Check>
             <Message>Debug logging should only be enabled temporarily</Message>

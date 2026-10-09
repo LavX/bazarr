@@ -38,7 +38,7 @@ from .processing import process_subtitle
 
 @update_pools
 def manual_search(path, profile_id, providers, sceneName, title, media_type, *, context=None,
-                  language_set=None, original_format=False, cancel=None):
+                  language_set=None, original_format=False, cancel=None, arr_instance_id=None):
     logging.debug(f'BAZARR Manually searching subtitles for this file: {path}')  # noqa: G004
 
     # A manual search runs synchronously on the request thread and never enters
@@ -49,11 +49,12 @@ def manual_search(path, profile_id, providers, sceneName, title, media_type, *, 
                                      title=title):
         return _manual_search(path, profile_id, providers, sceneName, title, media_type,
                               context=context, language_set=language_set,
-                              original_format=original_format, cancel=cancel)
+                              original_format=original_format, cancel=cancel,
+                              arr_instance_id=arr_instance_id)
 
 
 def _manual_search(path, profile_id, providers, sceneName, title, media_type, *, context=None,
-                   language_set=None, original_format=False, cancel=None):
+                   language_set=None, original_format=False, cancel=None, arr_instance_id=None):
     final_subtitles = []
 
     pool = _get_pool(media_type, profile_id, context=context) if context is not None else _get_pool(media_type, profile_id)
@@ -73,6 +74,11 @@ def _manual_search(path, profile_id, providers, sceneName, title, media_type, *,
     else:
         logging.info("BAZARR All providers are throttled")
         return 'All providers are throttled'
+    if video and arr_instance_id is not None:
+        # As in generate_subtitles: the database refiner can miss the row of
+        # an instance with a path mapping of its own, and a provider failure
+        # while listing records its exclusion under the video's instance.
+        video.arr_instance_id = arr_instance_id
     if video:
         try:
             if providers:
@@ -210,6 +216,11 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
 
     from subtitles.tools.mods import get_subzero_mods
     subtitle.mods = get_subzero_mods(arr_instance_id)
+    # The listing tagged the subtitle with the instance the database refiner
+    # found, which can be none. Its download failure reports the subtitle's
+    # ids, so it names the instance this download is for.
+    if arr_instance_id is not None:
+        subtitle.arr_instance_id = arr_instance_id
     video = get_video(force_unicode(path), title, sceneName, providers={provider}, media_type=media_type,
                       **({'context': context, 'cancel': cancel} if context is not None else {}))
     if not video:
@@ -279,7 +290,8 @@ def manual_download_subtitle(path, audio_language, hi, forced, subtitle, provide
 def episode_manually_download_specific_subtitle(sonarr_series_id, sonarr_episode_id, hi, forced, use_original_format,
                                                 selected_provider, subtitle, job_id=None, arr_instance_id=None):
     if not job_id:
-        return jobs_queue.add_job_from_function("Manually downloading Subtitles",is_progress=False)
+        return jobs_queue.add_job_from_function("Manually downloading Subtitles", is_progress=False,
+                                                return_existing=True)
 
     episodeInfo = database.execute(scoped(
         select(

@@ -1,0 +1,141 @@
+name: Store feeds
+
+# Pull requests and manual runs build the CasaOS v2 feed and the legacy v1 ZIP with pinned
+# official tooling. Only a manual run on main publishes, and only from a clean, live-verified
+# export. Approval comes from the required reviewers configured on the github-pages
+# environment in repository settings, not from the environment name.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+# Builds and the deploy share one queue per ref, so an older main build cannot publish last.
+concurrency:
+  group: store-feeds-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  casaos-v2:
+    name: Build CasaOS v2 feed
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout store export
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Verify export file hashes
+        id: export
+        run: python3 .github/scripts/verify_export.py
+
+      - name: Build feed with the official engine
+        uses: IceWhaleTech/build-appstore-action@c9bb47fad5b32d7928a07978fad68801f52e910f
+        with:
+          source: .
+          output: ${{ runner.temp }}/store-v2/dist
+          base-url: ${{ steps.export.outputs.casaos-feed }}
+          report-json: ${{ runner.temp }}/store-v2/build-v2-report.json
+
+      - name: Upload v2 feed and report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: casaos-v2
+          path: ${{ runner.temp }}/store-v2/
+          if-no-files-found: error
+          retention-days: 30
+
+  legacy-v1:
+    # The upstream builder stages in a fixed /tmp/appstore-v1, so it gets a runner of its own.
+    name: Build legacy v1 ZIP
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout store export
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Verify export file hashes
+        run: python3 .github/scripts/verify_export.py
+
+      - name: Checkout pinned legacy builder
+        uses: actions/checkout@v7
+        with:
+          repository: IceWhaleTech/CasaOS-AppStore
+          ref: 0909364b800950030e71ea82355a5969a1c08b39
+          path: .store-tools/casaos-appstore
+          sparse-checkout: .github/actions/build-store-v1
+          persist-credentials: false
+
+      - name: Build legacy ZIP
+        run: |
+          python3 .store-tools/casaos-appstore/.github/actions/build-store-v1/scripts/build_store_v1.py \
+            --source . --output-zip "${RUNNER_TEMP}/store-v1/store/main.zip" \
+            --report-json "${RUNNER_TEMP}/store-v1/build-v1-report.json"
+
+      - name: Upload v1 ZIP and report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: casaos-v1
+          path: ${{ runner.temp }}/store-v1/
+          if-no-files-found: error
+          retention-days: 30
+
+  pages:
+    name: Prepare Pages site
+    needs: [casaos-v2, legacy-v1]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout store export
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Require a clean, live-verified export for this repository
+        run: python3 .github/scripts/verify_export.py --publish --repository "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
+
+      - name: Download built feeds
+        uses: actions/download-artifact@v8
+        with:
+          pattern: casaos-v*
+          path: ${{ runner.temp }}/feeds
+
+      - name: Assemble site
+        run: |
+          set -euo pipefail
+          cp -a "${RUNNER_TEMP}/feeds/casaos-v2/dist" "${RUNNER_TEMP}/site"
+          install -D -m 0644 "${RUNNER_TEMP}/feeds/casaos-v1/store/main.zip" "${RUNNER_TEMP}/site/store/main.zip"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: ${{ runner.temp }}/site
+
+  deploy:
+    name: Deploy Pages
+    needs: pages
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

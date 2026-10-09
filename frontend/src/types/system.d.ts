@@ -32,6 +32,8 @@ declare namespace System {
     action?: JobAction | null;
     /** The job ended at Stop instead of finishing. It still reads as completed. */
     stopped?: boolean;
+    /** Who started the job: "user" for one an authenticated request enqueued, "scheduled" for the scheduler's own work. Null when nothing knows. */
+    origin?: "user" | "scheduled" | null;
     /** Whether a failed job may be queued again with its original arguments. */
     retryable?: boolean;
     /** The failed job this one retries. */
@@ -86,6 +88,8 @@ declare namespace System {
     bazarr_config_directory: string;
     bazarr_directory: string;
     bazarr_version: string;
+    build_commit: string;
+    build_date: string;
     database_engine: string;
     database_migration: string;
     operating_system: string;

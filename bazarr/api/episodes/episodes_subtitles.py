@@ -15,12 +15,15 @@ from subtitles.upload import manual_upload_subtitle
 from subtitles.mass_download.series import episode_download_specific_subtitles
 from subtitles.download import generate_subtitles  # noqa: F401
 from subtitles.tools.delete import delete_subtitles
+from subtitles.tools.delete_ownership import SubtitleDeletionError, resolve_subtitle_for_deletion
 from subtitles.tools.combine.main import try_combine_for_video
 from app.jobs_queue import jobs_queue  # noqa: F401
 from app.event_handler import event_stream  # noqa: F401
 from app.config import settings  # noqa: F401
+from api.swaggerui import job_queued_model
 
-from ..utils import authenticate
+from ..utils import (MAX_SUBTITLE_UPLOAD_SIZE, UploadTooLarge, authenticate, read_bounded_upload,
+                     upload_declared_too_large, upload_too_large_message)
 
 api_ns_episodes_subtitles = Namespace('Episodes Subtitles', description='Download, upload or delete episodes subtitles')
 
@@ -36,9 +39,11 @@ class EpisodesSubtitles(Resource):
     patch_request_parser.add_argument('arr_instance_id', type=int, required=False,
                                       help='Owning Sonarr/Radarr instance id (#156)')
 
+    patch_response_model = api_ns_episodes_subtitles.model('JobQueued', job_queued_model)
+
     @authenticate
     @api_ns_episodes_subtitles.doc(parser=patch_request_parser)
-    @api_ns_episodes_subtitles.response(204, 'Success')
+    @api_ns_episodes_subtitles.response(202, 'Subtitle search queued', patch_response_model)
     @api_ns_episodes_subtitles.response(401, 'Not Authenticated')
     @api_ns_episodes_subtitles.response(404, 'Episode not found')
     @api_ns_episodes_subtitles.response(409, 'Unable to save subtitles file. Permission or path mapping issue?')
@@ -47,13 +52,13 @@ class EpisodesSubtitles(Resource):
         """Download an episode subtitles"""
         args = self.patch_request_parser.parse_args()
 
-        episode_download_specific_subtitles(sonarr_series_id=args.get('seriesid'),
-                                            sonarr_episode_id=args.get('episodeid'),
-                                            language=args.get('language'), hi=args.get('hi').capitalize(),
-                                            forced=args.get('forced').capitalize(), job_id=None,
-                                            arr_instance_id=args.get('arr_instance_id'))
+        job_id = episode_download_specific_subtitles(sonarr_series_id=args.get('seriesid'),
+                                                     sonarr_episode_id=args.get('episodeid'),
+                                                     language=args.get('language'), hi=args.get('hi').capitalize(),
+                                                     forced=args.get('forced').capitalize(), job_id=None,
+                                                     arr_instance_id=args.get('arr_instance_id'))
 
-        return '', 204
+        return {'job_id': job_id or None}, 202
 
     post_request_parser = reqparse.RequestParser()
     post_request_parser.add_argument('seriesid', type=int, required=True, help='Series ID')
@@ -69,19 +74,24 @@ class EpisodesSubtitles(Resource):
     @authenticate
     @api_ns_episodes_subtitles.doc(parser=post_request_parser)
     @api_ns_episodes_subtitles.response(204, 'Success')
+    @api_ns_episodes_subtitles.response(400, 'A subtitle of an invalid format was uploaded')
     @api_ns_episodes_subtitles.response(401, 'Not Authenticated')
     @api_ns_episodes_subtitles.response(404, 'Episode not found')
     @api_ns_episodes_subtitles.response(409, 'Unable to save subtitles file. Permission or path mapping issue?')
+    @api_ns_episodes_subtitles.response(413, 'Subtitle file is too large')
     @api_ns_episodes_subtitles.response(500, 'Episode file not found. Path mapping issue?')
     def post(self):
         """Upload an episode subtitles"""
+        # Refused from the declared length before the form is parsed.
+        if upload_declared_too_large(MAX_SUBTITLE_UPLOAD_SIZE):
+            return upload_too_large_message('Subtitle file', MAX_SUBTITLE_UPLOAD_SIZE), 413
         args = self.post_request_parser.parse_args()
 
         uploaded_file = args.get('file')
         _, ext = os.path.splitext(uploaded_file.filename)
 
         if not isinstance(ext, str) or ext.lower() not in SUBTITLE_EXTENSIONS:
-            raise ValueError('A subtitle of an invalid format was uploaded.')
+            return 'A subtitle of an invalid format was uploaded.', 400
 
         sonarrSeriesId = args.get('seriesid')
         sonarrEpisodeId = args.get('episodeid')
@@ -101,7 +111,10 @@ class EpisodesSubtitles(Resource):
         if not os.path.exists(episodePath):
             return 'Episode file not found. Path mapping issue?', 500
 
-        subtitle_content = BytesIO(uploaded_file.read())
+        try:
+            subtitle_content = BytesIO(read_bounded_upload(uploaded_file, MAX_SUBTITLE_UPLOAD_SIZE))
+        except UploadTooLarge:
+            return upload_too_large_message('Subtitle file', MAX_SUBTITLE_UPLOAD_SIZE), 413
 
         manual_upload_subtitle(path=episodePath,
                                language=args.get('language'),
@@ -131,41 +144,34 @@ class EpisodesSubtitles(Resource):
     @api_ns_episodes_subtitles.doc(parser=delete_request_parser)
     @api_ns_episodes_subtitles.response(204, 'Success')
     @api_ns_episodes_subtitles.response(401, 'Not Authenticated')
+    @api_ns_episodes_subtitles.response(403, "Subtitle is not one of this episode's current subtitles")
     @api_ns_episodes_subtitles.response(404, 'Episode not found')
+    @api_ns_episodes_subtitles.response(409, 'Owning instance is ambiguous, or ownership changed before deletion')
     @api_ns_episodes_subtitles.response(500, 'Subtitles file not found or permission issue.')
     def delete(self):
         """Delete an episode subtitles"""
         args = self.delete_request_parser.parse_args()
-        sonarrSeriesId = args.get('seriesid')
         sonarrEpisodeId = args.get('episodeid')
-        arr_instance_id = args.get('arr_instance_id')
-        episodeInfo = database.execute(scoped(
-            select(TableEpisodes.path)
-            .where(TableEpisodes.sonarrEpisodeId == sonarrEpisodeId),
-            TableEpisodes.arr_instance_id, arr_instance_id)) \
-            .first()
 
-        if not episodeInfo:
-            return 'Episode not found', 404
+        try:
+            # The path only selects one of this episode's indexed subtitles; the
+            # file removed is that entry, mapped through the owning instance.
+            target = resolve_subtitle_for_deletion('series', sonarrEpisodeId, args.get('path'),
+                                                   args.get('arr_instance_id'), session=database)
+            removed = delete_subtitles(media_type='series',
+                                       language=args.get('language'),
+                                       forced=args.get('forced'),
+                                       hi=args.get('hi'),
+                                       media_path=target.media_path,
+                                       subtitles_path=target.stored_path,
+                                       sonarr_series_id=target.row.sonarrSeriesId,
+                                       sonarr_episode_id=sonarrEpisodeId,
+                                       arr_instance_id=target.row.arr_instance_id,
+                                       revalidate=target.revalidate)
+        except SubtitleDeletionError as exc:
+            return str(exc), exc.status
 
-        episodePath = path_mappings.path_replace(episodeInfo.path)
-
-        language = args.get('language')
-        forced = args.get('forced')
-        hi = args.get('hi')
-        subtitlesPath = args.get('path')
-
-        subtitlesPath = path_mappings.path_replace_reverse(subtitlesPath)
-
-        if delete_subtitles(media_type='series',
-                            language=language,
-                            forced=forced,
-                            hi=hi,
-                            media_path=episodePath,
-                            subtitles_path=subtitlesPath,
-                            sonarr_series_id=sonarrSeriesId,
-                            sonarr_episode_id=sonarrEpisodeId,
-                            arr_instance_id=arr_instance_id):
+        if removed:
             return '', 204
         else:
             return 'Subtitles file not found or permission issue.', 500

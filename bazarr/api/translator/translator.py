@@ -41,19 +41,8 @@ class TranslatorStatus(Resource):
             response = requests.get(f"{service_url}/api/v1/status", headers=get_translator_auth_headers(), timeout=10)
             if response.status_code == 200:
                 data = response.json()
-                # Count Bazarr-side pending translation jobs
-                pending_count = sum(
-                    1 for job in jobs_queue.jobs_pending_queue
-                    if 'translat' in (job.job_name or '').lower()
-                )
-                running_count = sum(
-                    1 for job in jobs_queue.jobs_running_queue
-                    if 'translat' in (job.job_name or '').lower()
-                )
-                data['bazarr_queue'] = {
-                    'pending': pending_count,
-                    'running': running_count,
-                }
+                # Bazarr-side translation jobs, the same ones the translation lane counts
+                data['bazarr_queue'] = jobs_queue.translation_lane_counts()
                 return data, 200
             else:
                 return {"error": f"Service returned {response.status_code}"}, 502

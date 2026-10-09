@@ -92,3 +92,11 @@ def test_the_owning_instance_path_mapping_wins(episode_module, monkeypatch):
         module.episode_download_subtitles(1, job_id=1, job_sub_function=True)
 
     assert indexed == [(unindexed.path, "/mnt/instance7/Show/Season 1/Show.S01E01.mkv", 7)]
+
+
+def test_episode_search_returns_the_job_id_to_track_its_completion(episode_module, monkeypatch):
+    module, _ = episode_module
+    monkeypatch.setattr(module, "_episode_series_title", lambda *_: "Show")
+    monkeypatch.setattr(module.jobs_queue, "feed_jobs_pending_queue", lambda *args, **kwargs: 73)
+
+    assert module.episode_download_subtitles(1, arr_instance_id=7) == 73

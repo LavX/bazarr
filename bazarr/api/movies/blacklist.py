@@ -3,10 +3,9 @@
 from flask_restx import Resource, Namespace, reqparse, fields, marshal
 
 from app.database import TableMovies, TableBlacklistMovie, database, select
-from arr_instances.resolution import scoped
 from subtitles.tools.delete import delete_subtitles
+from subtitles.tools.delete_ownership import SubtitleDeletionError, resolve_subtitle_for_deletion
 from radarr.blacklist import blacklist_log_movie, blacklist_delete_all_movie, blacklist_delete_movie
-from utilities.path_mappings import path_mappings
 from subtitles.mass_download import movies_download_subtitles
 from app.event_handler import event_stream
 from api.swaggerui import subtitles_language_model
@@ -91,7 +90,9 @@ class MoviesBlacklist(Resource):
     @api_ns_movies_blacklist.doc(parser=post_request_parser)
     @api_ns_movies_blacklist.response(200, 'Success')
     @api_ns_movies_blacklist.response(401, 'Not Authenticated')
+    @api_ns_movies_blacklist.response(403, "Subtitle is not one of this movie's current subtitles")
     @api_ns_movies_blacklist.response(404, 'Movie not found')
+    @api_ns_movies_blacklist.response(409, 'Owning instance is ambiguous, or ownership changed before deletion')
     @api_ns_movies_blacklist.response(500, 'Subtitles file not found or permission issue.')
     def post(self):
         """Add a movies subtitles to blacklist"""
@@ -100,37 +101,37 @@ class MoviesBlacklist(Resource):
         provider = args.get('provider')
         subs_id = args.get('subs_id')
         language = args.get('language')
-        arr_instance_id = args.get('arr_instance_id')
         # TODO
         forced = False
         hi = False
 
-        data = database.execute(
-            scoped(
-                select(TableMovies.path)
-                .where(TableMovies.radarrId == radarr_id),
-                TableMovies.arr_instance_id, arr_instance_id))\
-            .first()
+        try:
+            # The path only selects one of this movie's indexed subtitles; the
+            # file removed is that entry, mapped through the owning instance.
+            target = resolve_subtitle_for_deletion('movie', radarr_id, args.get('subtitles_path'),
+                                                   args.get('arr_instance_id'), session=database)
+            arr_instance_id = target.row.arr_instance_id
+            # Recorded by the deletion itself, once the file is really removed
+            # and while the write locks are still held, so a refused or failed
+            # deletion blacklists nothing.
+            removed = delete_subtitles(media_type='movie',
+                                       language=language,
+                                       forced=forced,
+                                       hi=hi,
+                                       media_path=target.media_path,
+                                       subtitles_path=target.stored_path,
+                                       radarr_id=radarr_id,
+                                       arr_instance_id=arr_instance_id,
+                                       revalidate=target.revalidate,
+                                       after_delete=lambda: blacklist_log_movie(radarr_id=radarr_id,
+                                                                                provider=provider,
+                                                                                subs_id=subs_id,
+                                                                                language=language,
+                                                                                arr_instance_id=arr_instance_id))
+        except SubtitleDeletionError as exc:
+            return str(exc), exc.status
 
-        if not data:
-            return 'Movie not found', 404
-
-        media_path = data.path
-        subtitles_path = args.get('subtitles_path')
-
-        blacklist_log_movie(radarr_id=radarr_id,
-                            provider=provider,
-                            subs_id=subs_id,
-                            language=language,
-                            arr_instance_id=arr_instance_id)
-        if delete_subtitles(media_type='movie',
-                            language=language,
-                            forced=forced,
-                            hi=hi,
-                            media_path=path_mappings.path_replace_movie(media_path),
-                            subtitles_path=subtitles_path,
-                            radarr_id=radarr_id,
-                            arr_instance_id=arr_instance_id):
+        if removed:
             movies_download_subtitles(radarr_id, arr_instance_id=arr_instance_id)
             event_stream(type='movie-history')
             return '', 200

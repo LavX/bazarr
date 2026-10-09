@@ -28,6 +28,12 @@ let settingsWrites: unknown[] = [];
 let refuse: MediaServerKind | null = null;
 // The rows land but the write that turns their master switch on does not.
 let refuseSwitch = false;
+// The write lands, but the settings API answers 503 settings_refresh_failed:
+// the configuration reached the disk and only applying it failed.
+let switchFollowupFails = false;
+// Every master-switch write this backend has seen, landed or not, so a test
+// can count the attempts.
+let switchWriteAttempts = 0;
 // Holds the master-switch write open, so a step can be left mid-save.
 let heldSwitch: Promise<void> | null = null;
 // The same for the create itself.
@@ -87,15 +93,25 @@ function stageBackend() {
     // The settings writer posts FormData, not JSON.
     http.post("/api/system/settings", async ({ request }) => {
       const written = Object.fromEntries((await request.formData()).entries());
+      const isSwitchWrite = Object.keys(written).some((key) =>
+        key.startsWith("settings-general-use_"),
+      );
+      if (isSwitchWrite) {
+        switchWriteAttempts += 1;
+      }
       if (heldSwitch) {
         await heldSwitch;
       }
-      if (
-        refuseSwitch &&
-        Object.keys(written).some((key) =>
-          key.startsWith("settings-general-use_"),
-        )
-      ) {
+      if (isSwitchWrite && switchFollowupFails) {
+        return HttpResponse.json(
+          {
+            code: "settings_refresh_failed",
+            message: "Settings were saved, but applying them failed.",
+          },
+          { status: 503 },
+        );
+      }
+      if (isSwitchWrite && refuseSwitch) {
         return new HttpResponse(null, { status: 500 });
       }
       settingsWrites.push(written);
@@ -125,6 +141,8 @@ describe("media server selection", () => {
     settingsWrites = [];
     refuse = null;
     refuseSwitch = false;
+    switchFollowupFails = false;
+    switchWriteAttempts = 0;
     heldSwitch = null;
     heldCreate = null;
     stageBackend();
@@ -468,11 +486,12 @@ describe("media server selection", () => {
     ).toBeInTheDocument();
   });
 
-  it("keeps a failed master switch on screen instead of walking past it", async () => {
+  it("keeps a failed master switch on screen until Continue retries it", async () => {
     // Marking the draft saved is what removes this step from the wizard, so
     // setting the warning and advancing in the same breath unmounted it before
     // it could render: the reader reached Finish with the server reported as
-    // connected and nothing refreshing.
+    // connected and nothing refreshing. Continue now retries the switch and
+    // moves on only once it is on.
     refuseSwitch = true;
     const user = userEvent.setup();
     customRender(<OnboardingWizardView />);
@@ -486,18 +505,114 @@ describe("media server selection", () => {
       screen.getByRole("heading", { name: /^jellyfin$/i }),
     ).toBeInTheDocument();
     expect(creates).toHaveLength(1);
+    // One write has been attempted, and it was refused.
+    expect(switchWriteAttempts).toBe(1);
 
-    await user.click(screen.getByRole("button", { name: /continue anyway/i }));
+    // The retry is one settings write and no create: the row is already
+    // written, and writing it again would leave two of the same server.
+    refuseSwitch = false;
+    await user.click(
+      screen.getByRole("button", { name: /turn on jellyfin and continue/i }),
+    );
 
     expect(
       await screen.findByRole("heading", { name: /^seerr$/i }),
     ).toBeInTheDocument();
-    // The row was already written; accepting the warning must not write it
-    // again.
     expect(creates).toHaveLength(1);
+    expect(switchWriteAttempts).toBe(2);
+    expect(settingsWrites).toEqual([
+      { "settings-general-use_jellyfin": "true" },
+    ]);
+
+    // Saved with its switch on, so a look back finds the picker and no
+    // warning, not a step still holding one.
+    await user.click(screen.getByRole("button", { name: /^back$/i }));
+    await screen.findByRole("heading", { name: /^media servers$/i });
+    expect(
+      screen.queryByText(/master switch could not be turned on/i),
+    ).toBeNull();
+    expect(screen.getByText("1 saved")).toBeInTheDocument();
   });
 
-  it("still says so after a trip back to the picker", async () => {
+  it("keeps the step and the warning when the retry fails too", async () => {
+    refuseSwitch = true;
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+
+    await connectJellyfin(user);
+    await screen.findByText(/master switch could not be turned on/i);
+
+    await user.click(
+      screen.getByRole("button", { name: /turn on jellyfin and continue/i }),
+    );
+    await waitFor(() => expect(switchWriteAttempts).toBe(2));
+
+    // The retry was refused as well, so the reader is standing on the same
+    // step, with the same warning and the same single row.
+    expect(
+      screen.getByRole("heading", { name: /^jellyfin$/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/master switch could not be turned on/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^seerr$/i })).toBeNull();
+    expect(creates).toHaveLength(1);
+    expect(settingsWrites).toEqual([]);
+  });
+
+  it("treats a 503 settings_refresh_failed first write as the switch written", async () => {
+    // The same answer means the same thing on the first press: the
+    // configuration reached the disk and only applying it failed, so the
+    // switch is on. The step advances on that one press, with no warning to
+    // accept and nothing to retry.
+    switchFollowupFails = true;
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+
+    await connectJellyfin(user);
+
+    expect(
+      await screen.findByRole("heading", { name: /^seerr$/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/master switch could not be turned on/i),
+    ).toBeNull();
+    expect(creates).toHaveLength(1);
+    expect(switchWriteAttempts).toBe(1);
+    // No 204 ever came back, so the advance rests on the 503 code alone.
+    expect(settingsWrites).toEqual([]);
+  });
+
+  it("treats a 503 settings_refresh_failed retry as the switch written", async () => {
+    // The settings API answers 503 settings_refresh_failed when the
+    // configuration reached the disk and only applying it failed. The first
+    // write is refused outright, which is what shows the warning; the retry's
+    // answer carries the code, so it counts as written, clears the warning
+    // and moves on rather than write the same switch again.
+    refuseSwitch = true;
+    const user = userEvent.setup();
+    customRender(<OnboardingWizardView />);
+
+    await connectJellyfin(user);
+    await screen.findByText(/master switch could not be turned on/i);
+
+    refuseSwitch = false;
+    switchFollowupFails = true;
+    await user.click(
+      screen.getByRole("button", { name: /turn on jellyfin and continue/i }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: /^seerr$/i }),
+    ).toBeInTheDocument();
+    expect(creates).toHaveLength(1);
+    // The refused first write and the one retry, and nothing after the retry
+    // was told the switch was already on.
+    expect(switchWriteAttempts).toBe(2);
+    expect(settingsWrites).toEqual([]);
+  });
+
+  it("still says so after a trip back to the picker, and retries from there", async () => {
     refuseSwitch = true;
     const user = userEvent.setup();
     customRender(<OnboardingWizardView />);
@@ -513,10 +628,16 @@ describe("media server selection", () => {
     expect(
       await screen.findByText(/master switch could not be turned on/i),
     ).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /continue anyway/i }));
+    refuseSwitch = false;
+    await user.click(
+      screen.getByRole("button", { name: /turn on jellyfin and continue/i }),
+    );
 
     await screen.findByRole("heading", { name: /^seerr$/i });
     expect(creates).toHaveLength(1);
+    expect(settingsWrites).toEqual([
+      { "settings-general-use_jellyfin": "true" },
+    ]);
   });
 
   it("leaving setup forgets the servers that were ticked", async () => {

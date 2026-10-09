@@ -40,7 +40,7 @@ export interface WhatsNewSlide {
  * cutting a release. Kept as an explicit token so the wizard never has to parse the
  * fork's `version + YYMMDD` runtime string.
  */
-export const latestWhatsNewVersion = "2.7.0";
+export const latestWhatsNewVersion = "2.7.1";
 
 // v2.6.0 feature slides; v2.6.1 (a patch on the same line) leads with its
 // fix and keeps the whole Clockwork tour behind it.
@@ -95,6 +95,49 @@ const clockworkSlides: WhatsNewSlide[] = [
 ];
 
 export const whatsNew: Record<string, WhatsNewSlide[]> = {
+  // v2.7.1 (a patch on the Atlas line) stands alone, as v2.6.2 did:
+  // the patch's own story is the tour.
+  "2.7.1": [
+    {
+      title: "Your API keys leave the URL",
+      body: "The AI Translator and the Subtitle Editor now send their API keys in request headers instead of URLs. The editor's native HLS playback still reads its key from the URL. If you use the translator, rotate your Gemini and OpenRouter keys after upgrading.",
+      icon: faShieldHalved,
+      cta: { label: "Open Translator settings", to: "/settings/translator" },
+    },
+    {
+      title: "Post-processing commands run as argument lists",
+      body: "Commands no longer pass through a shell. The saved command is validated when settings are saved, and a stored template that no longer passes raises a health issue instead of holding a job.",
+      icon: faSliders,
+      cta: { label: "Open Subtitles settings", to: "/settings/subtitles" },
+    },
+    {
+      title: "Provider Hub trust follows the catalog source",
+      body: "A provider install is trusted only when it came from the official catalog line, and updates only arrive from the source it was installed from. A community source no longer inherits official trust.",
+      icon: faStore,
+      cta: { label: "Open Providers", to: "/settings/providers" },
+    },
+    {
+      title: "Deletes and blacklists check ownership first",
+      body: "A script can no longer delete or blacklist a subtitle the item does not own or cannot find. The request is refused with a clear 403 or 409 instead of acting on it.",
+      icon: faScaleBalanced,
+      cta: { label: "Open History", to: "/history/series" },
+    },
+    {
+      title: "Uploads are bounded, and refusals say so",
+      body: "Subtitle uploads and Provider Hub packages are checked for size before anything is spooled into memory, and a file that is too large is refused with a clear answer. Failed jobs release their buffer.",
+      icon: faFileZipper,
+    },
+    {
+      title: "Two database changes run on first start",
+      body: "This patch carries two small schema changes, applied automatically on the first start after upgrading. Back up your configuration and database first, as with any upgrade.",
+      icon: faDatabase,
+    },
+    {
+      title: "Syncs and jobs report honestly",
+      body: "The Sonarr sync finishes with a skip count instead of crashing, the scheduled Sportarr sync appears in Jobs beside the Sonarr and Radarr syncs, and a job that loses its connection still reports its outcome.",
+      icon: faListCheck,
+    },
+  ],
   "2.7.0": [
     {
       title: "Find subtitles for any film or show",

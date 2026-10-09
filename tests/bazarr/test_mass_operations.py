@@ -688,11 +688,136 @@ class TestProcessMediaActions:
     def test_search_missing_series(self, mock_jobs_queue, mock_download):
         from subtitles.mass_operations import _process_media_action
 
+        mock_jobs_queue.claim_inline_job.return_value = 'test'
         items = [{'type': 'series', 'sonarrSeriesId': 1}]
         result = _process_media_action(items, action='search-missing', job_id='test')
 
-        mock_download.assert_called_once_with(1, arr_instance_id=None)
+        mock_download.assert_called_once_with(1, job_id='test', job_sub_function=True, arr_instance_id=None)
         assert result['queued'] == 1
+        # The kwargs mirror the ones the series route's self-queue binds, so
+        # this is the job a series-page Search queued for the same show.
+        mock_jobs_queue.claim_inline_job.assert_called_once_with(
+            'subtitles.mass_download.series', 'series_download_subtitles',
+            kwargs={'no': 1, 'job_sub_function': False, 'arr_instance_id': None}, job_id='test')
+        mock_jobs_queue.release_inline_job.assert_called_once_with(
+            'subtitles.mass_download.series', 'series_download_subtitles',
+            kwargs={'no': 1, 'job_sub_function': False, 'arr_instance_id': None})
+
+    @patch('subtitles.mass_operations.series_download_subtitles')
+    @patch('subtitles.mass_operations.jobs_queue')
+    def test_search_missing_releases_a_show_whose_search_failed_or_was_stopped(self, mock_jobs_queue,
+                                                                               mock_download):
+        from app.jobs_queue import JobCancelled, JobFailed
+        from subtitles.mass_operations import _process_media_action
+
+        items = [{'type': 'series', 'sonarrSeriesId': 1}]
+
+        # A show whose directory is gone fails its item, and Stop raises out
+        # of the batch. The claim is released either way, or the show could
+        # never be searched again this run.
+        mock_jobs_queue.claim_inline_job.return_value = 'test'
+        mock_download.side_effect = OSError('Series directory not found. Path mapping issue?')
+        with pytest.raises(JobFailed):
+            _process_media_action(items, action='search-missing', job_id='test')
+
+        mock_jobs_queue.release_inline_job.assert_called_once_with(
+            'subtitles.mass_download.series', 'series_download_subtitles',
+            kwargs={'no': 1, 'job_sub_function': False, 'arr_instance_id': None})
+
+        mock_jobs_queue.reset_mock()
+        mock_jobs_queue.claim_inline_job.return_value = 'test'
+        mock_download.side_effect = JobCancelled('Job Search (test) was cancelled', job_id='test')
+        with pytest.raises(JobCancelled):
+            _process_media_action(items, action='search-missing', job_id='test')
+
+        mock_jobs_queue.release_inline_job.assert_called_once_with(
+            'subtitles.mass_download.series', 'series_download_subtitles',
+            kwargs={'no': 1, 'job_sub_function': False, 'arr_instance_id': None})
+
+    @patch('subtitles.mass_operations.series_download_subtitles')
+    @patch('subtitles.mass_operations.jobs_queue')
+    def test_search_missing_skips_a_series_another_job_is_already_searching(self, mock_jobs_queue,
+                                                                            mock_download):
+        from subtitles.mass_operations import _process_media_action
+
+        mock_jobs_queue.claim_inline_job.return_value = 99
+        items = [{'type': 'series', 'sonarrSeriesId': 1, 'arr_instance_id': 7}]
+        result = _process_media_action(items, action='search-missing', job_id='test')
+
+        mock_download.assert_not_called()
+        # Another job owns the search, so this batch leaves its claim alone.
+        mock_jobs_queue.release_inline_job.assert_not_called()
+        assert result == {'queued': 0, 'skipped': 1, 'errors': []}
+
+    @patch('subtitles.mass_operations.series_download_subtitles')
+    @patch('subtitles.mass_operations.jobs_queue')
+    def test_search_missing_runs_one_search_for_a_series_repeated_in_the_selection(self, mock_jobs_queue,
+                                                                                   mock_download):
+        from subtitles.mass_operations import _process_media_action
+
+        mock_jobs_queue.claim_inline_job.return_value = 'test'
+        items = [{'type': 'series', 'sonarrSeriesId': 1},
+                 {'type': 'episode', 'sonarrSeriesId': 1, 'sonarrEpisodeId': 5}]
+        result = _process_media_action(items, action='search-missing', job_id='test')
+
+        mock_download.assert_called_once_with(1, job_id='test', job_sub_function=True, arr_instance_id=None)
+        # The repeated show is skipped by the batch's own record of searched
+        # shows, before another claim is asked for.
+        mock_jobs_queue.claim_inline_job.assert_called_once()
+        assert result['queued'] == 1
+        assert result['skipped'] == 1
+
+    def test_the_batch_claim_matches_the_self_queued_series_search(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from app import jobs_queue as jobs_module
+        from subtitles.mass_download import series as series_module
+
+        class NoThread:
+            def __init__(self, **kwargs):
+                pass
+
+            def start(self):
+                pass
+
+        monkeypatch.setattr(jobs_module, 'Thread', NoThread)
+        monkeypatch.setattr(jobs_module, 'event_stream', lambda **kwargs: None)
+        queue = jobs_module.JobsQueue()
+        monkeypatch.setattr(series_module, 'jobs_queue', queue)
+        # The self-queue names the job from the show's title.
+        monkeypatch.setattr(series_module, 'database',
+                            MagicMock(scalar=MagicMock(return_value='Some Show')))
+
+        claim = {'no': 42, 'job_sub_function': False, 'arr_instance_id': 7}
+
+        try:
+            # A series-page Search queues the show's search: the real function
+            # binding its own arguments, job_id and all.
+            queued = series_module.series_download_subtitles(42, arr_instance_id=7)
+
+            # A batch that asks afterwards gets that job's id, not its own:
+            # the show is already being searched.
+            assert queue.claim_inline_job('subtitles.mass_download.series',
+                                          'series_download_subtitles',
+                                          kwargs=claim, job_id=10) == queued
+
+            # A batch that claims first publishes its run: a Search that
+            # arrives for that show follows the batch job instead of queueing
+            # a second search.
+            other = dict(claim, no=43)
+            assert queue.claim_inline_job('subtitles.mass_download.series',
+                                          'series_download_subtitles',
+                                          kwargs=other, job_id=10) == 10
+            assert series_module.series_download_subtitles(43, arr_instance_id=7) == 10
+            assert len(queue.jobs_pending_queue) == 1
+
+            # Once the batch releases its claim, the show's search queues again.
+            queue.release_inline_job('subtitles.mass_download.series',
+                                     'series_download_subtitles', kwargs=other)
+            assert series_module.series_download_subtitles(43, arr_instance_id=7) != 10
+        finally:
+            queue.jobs_pending_queue.clear()
+            queue._inline_claims.clear()
 
     @patch('subtitles.mass_operations.movies_download_subtitles')
     @patch('subtitles.mass_operations.jobs_queue')

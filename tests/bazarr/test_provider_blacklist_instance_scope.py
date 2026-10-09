@@ -1,6 +1,7 @@
 # coding=utf-8
 
 from flask import Flask
+import pytest
 
 
 def test_provider_movie_missing_recompute_keeps_instance_scope(schema_session, tmp_path, monkeypatch):
@@ -30,13 +31,18 @@ def test_provider_movie_missing_recompute_keeps_instance_scope(schema_session, t
         lambda **kwargs: calls.append(kwargs),
     )
     monkeypatch.setattr(providers_movies, "get_providers_sorted", lambda: [])
-    monkeypatch.setattr(providers_movies, "manual_search", lambda *args, **kwargs: [])
+    searches = []
+    monkeypatch.setattr(providers_movies, "manual_search",
+                        lambda *args, **kwargs: searches.append(kwargs) or [])
 
     app = Flask(__name__)
     with app.test_request_context("/api/providers/movies?radarrid=801"):
         providers_movies.ProviderMovies.get.__wrapped__(providers_movies.ProviderMovies())
 
     assert calls == [{"no": 1, "arr_instance_id": 7}]
+    # The search names the instance, so an exclusion a provider demands
+    # while it lists is recorded under it.
+    assert [search.get("arr_instance_id") for search in searches] == [7]
 
 
 def test_provider_episode_missing_recompute_keeps_instance_scope(schema_session, tmp_path, monkeypatch):
@@ -78,13 +84,16 @@ def test_provider_episode_missing_recompute_keeps_instance_scope(schema_session,
         lambda **kwargs: calls.append(kwargs),
     )
     monkeypatch.setattr(providers_episodes, "get_providers_sorted", lambda: [])
-    monkeypatch.setattr(providers_episodes, "manual_search", lambda *args, **kwargs: [])
+    searches = []
+    monkeypatch.setattr(providers_episodes, "manual_search",
+                        lambda *args, **kwargs: searches.append(kwargs) or [])
 
     app = Flask(__name__)
     with app.test_request_context("/api/providers/episodes?episodeid=902"):
         providers_episodes.ProviderEpisodes.get.__wrapped__(providers_episodes.ProviderEpisodes())
 
     assert calls == [{"epno": 2, "arr_instance_id": 8}]
+    assert [search.get("arr_instance_id") for search in searches] == [8]
 
 
 # F8 (#156): the manual-download POST passes the upstream radarrId straight to
@@ -206,7 +215,7 @@ def test_provider_episode_post_passes_upstream_id_not_local_id(schema_session, m
     ):
         response = providers_episodes.ProviderEpisodes.post.__wrapped__(providers_episodes.ProviderEpisodes())
 
-    assert response == ("", 204)
+    assert response == ({"job_id": None}, 202)
     assert calls[0]["sonarr_series_id"] == 999
     assert calls[0]["sonarr_episode_id"] == 1001
     assert calls[0]["arr_instance_id"] == 8
@@ -225,16 +234,26 @@ def test_movie_blacklist_post_keeps_instance_scope(schema_session, tmp_path, mon
         path=str(movie_path),
         title="Movie",
         tmdbId="1001",
+        subtitles="[['en', '/subs/movie.en.srt', 10]]",
     ))
     schema_session.flush()
 
+    from subtitles.tools import delete_ownership
+
     delete_calls = []
     download_calls = []
+    logged = []
     monkeypatch.setattr(blacklist, "database", schema_session)
-    monkeypatch.setattr(blacklist.path_mappings, "path_replace_movie", lambda value: value)
-    monkeypatch.setattr(blacklist, "blacklist_log_movie", lambda **kwargs: None)
+    monkeypatch.setattr(delete_ownership.path_mappings, "path_replace_instance", lambda value, *args: value)
+    monkeypatch.setattr(blacklist, "blacklist_log_movie", lambda **kwargs: logged.append(kwargs))
     monkeypatch.setattr(blacklist, "event_stream", lambda **kwargs: None)
-    monkeypatch.setattr(blacklist, "delete_subtitles", lambda **kwargs: delete_calls.append(kwargs) or True)
+
+    def delete_with_callback(**kwargs):
+        delete_calls.append(kwargs)
+        kwargs["after_delete"]()
+        return True
+
+    monkeypatch.setattr(blacklist, "delete_subtitles", delete_with_callback)
     monkeypatch.setattr(blacklist, "movies_download_subtitles", lambda *args, **kwargs: download_calls.append((args, kwargs)))
 
     app = Flask(__name__)
@@ -247,10 +266,12 @@ def test_movie_blacklist_post_keeps_instance_scope(schema_session, tmp_path, mon
 
     assert result == ("", 200)
     assert delete_calls[0]["arr_instance_id"] == 9
+    assert [call["arr_instance_id"] for call in logged] == [9]
     assert download_calls == [((3,), {"arr_instance_id": 9})]
 
 
-def test_episode_blacklist_post_keeps_instance_scope(schema_session, tmp_path, monkeypatch):
+@pytest.mark.parametrize('job_id', [73, None])
+def test_episode_blacklist_post_keeps_instance_scope(schema_session, tmp_path, monkeypatch, job_id):
     from api.episodes import blacklist
     from app.database import TableEpisodes, TableShows
 
@@ -275,17 +296,31 @@ def test_episode_blacklist_post_keeps_instance_scope(schema_session, tmp_path, m
         title="Pilot",
         season=1,
         episode=1,
+        subtitles="[['en', '/subs/episode.en.srt', 10]]",
     ))
     schema_session.flush()
 
+    from subtitles.tools import delete_ownership
+
     delete_calls = []
     download_calls = []
+    logged = []
     monkeypatch.setattr(blacklist, "database", schema_session)
-    monkeypatch.setattr(blacklist.path_mappings, "path_replace", lambda value: value)
-    monkeypatch.setattr(blacklist, "blacklist_log", lambda **kwargs: None)
+    monkeypatch.setattr(delete_ownership.path_mappings, "path_replace_instance", lambda value, *args: value)
+    monkeypatch.setattr(blacklist, "blacklist_log", lambda **kwargs: logged.append(kwargs))
     monkeypatch.setattr(blacklist, "event_stream", lambda **kwargs: None)
-    monkeypatch.setattr(blacklist, "delete_subtitles", lambda **kwargs: delete_calls.append(kwargs) or True)
-    monkeypatch.setattr(blacklist, "episode_download_subtitles", lambda *args, **kwargs: download_calls.append((args, kwargs)))
+
+    def delete_with_callback(**kwargs):
+        delete_calls.append(kwargs)
+        kwargs["after_delete"]()
+        return True
+
+    monkeypatch.setattr(blacklist, "delete_subtitles", delete_with_callback)
+    def queue_replacement(*args, **kwargs):
+        download_calls.append((args, kwargs))
+        return job_id
+
+    monkeypatch.setattr(blacklist, "episode_download_subtitles", queue_replacement)
 
     app = Flask(__name__)
     with app.test_request_context(
@@ -295,6 +330,7 @@ def test_episode_blacklist_post_keeps_instance_scope(schema_session, tmp_path, m
     ):
         result = blacklist.EpisodesBlacklist.post.__wrapped__(blacklist.EpisodesBlacklist())
 
-    assert result == ("", 200)
+    assert result == ({"job_id": job_id}, 200)
     assert delete_calls[0]["arr_instance_id"] == 10
+    assert [call["arr_instance_id"] for call in logged] == [10]
     assert download_calls == [((), {"no": 5, "arr_instance_id": 10})]

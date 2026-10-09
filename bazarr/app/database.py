@@ -20,6 +20,7 @@ from alembic.migration import MigrationContext
 from flask_sqlalchemy import SQLAlchemy
 
 from .ownership_revision import metadata_created, install_ownership_revision
+from .postgres_url import postgres_engine_url
 from .config import settings
 from .get_args import args
 from .upstream_adoption import (adopt_upstream_database, explain_unknown_revision,
@@ -88,53 +89,18 @@ def log_sqlite_runtime_version(engine_to_log):
 if postgresql:
     # insert is different between database types
     from sqlalchemy.dialects.postgresql import insert
-    from sqlalchemy.engine import URL, make_url
 
-    postgres_database = os.getenv("POSTGRES_DATABASE", settings.postgresql.database)
-    postgres_username = os.getenv("POSTGRES_USERNAME", settings.postgresql.username)
-    postgres_password = os.getenv("POSTGRES_PASSWORD", settings.postgresql.password)
-    postgres_host = os.getenv("POSTGRES_HOST", settings.postgresql.host)
-    postgres_port = os.getenv("POSTGRES_PORT", settings.postgresql.port)
-    postgres_url = os.getenv("POSTGRES_URL", settings.postgresql.url)
-
-    if postgres_url:
-        url = make_url(postgres_url)
-        backend_name = url.get_backend_name()
-        if backend_name != 'postgresql':
-            raise ValueError(f"Invalid Postgres URL, scheme must be 'postgresql', got {backend_name}")
-        
-        # Allow overriding individual components of the URL
-        url_overrides = {
-            'username': postgres_username if postgres_username else None,
-            'password': postgres_password if postgres_password else None,
-            'host': postgres_host if postgres_host else None,
-            'port': postgres_port if postgres_port else None,
-            'database': postgres_database if postgres_database else None,
-        }
-        url = url.set(**{k: v for k, v in url_overrides.items()})
-    else:
-        url = URL.create(
-            drivername="postgresql",
-            username=postgres_username,
-            password=postgres_password,
-            host=postgres_host,
-            port=postgres_port,
-            database=postgres_database
-        )
-    # Build the log message from individual non-secret components instead of
-    # going through `url`. SQLAlchemy's render_as_string(hide_password=True)
-    # masks the password at render time, but the URL object still carries the
-    # password value, which trips CodeQL's py/clear-text-logging-sensitive-data
-    # because that masking call is not recognised as a sanitizer.
-    log_user = postgres_username or "<default>"
-    log_host = postgres_host or "<default>"
-    log_port = postgres_port or "<default>"
-    log_db = postgres_database or "<default>"
-    if postgres_url:
-        log_db = f"{log_db} (via POSTGRES_URL)"
+    url = postgres_engine_url(settings)
+    # Log the target the engine really connects to, from its non-secret
+    # components rather than by rendering `url`. SQLAlchemy's
+    # render_as_string(hide_password=True) masks the password at render time,
+    # but the URL object still carries the password value, which trips
+    # CodeQL's py/clear-text-logging-sensitive-data because that masking call
+    # is not recognised as a sanitizer.
     logger.debug(
         "Connecting to PostgreSQL database: postgresql://%s@%s:%s/%s",
-        log_user, log_host, log_port, log_db,
+        url.username or "<default>", url.host or "<default>", url.port or "<default>",
+        url.database or "<default>",
     )
 
     # Postgres: use SQLAlchemy's default QueuePool. NullPool would force a
@@ -315,6 +281,16 @@ class TableArrInstances(Base):
         return {column.name: getattr(self, column.name) for column in self.__table__.columns}
 
 
+class TableArrInstanceRetiredIds(Base):
+    # The id of every deleted arr_instances row. SQLite hands the highest id
+    # out again once its row is gone, and a write already in flight when the
+    # delete committed can still land afterwards, naming it. The repository
+    # picks new ids above these, so no instance ever takes over such a row.
+    __tablename__ = 'arr_instance_retired_ids'
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=False)
+
+
 class TableCompatApiKeys(Base):
     # Distribution Hub: named API keys for the OpenSubtitles-compat endpoint.
     # The full token is never stored - only its sha256 (key_hash) and an
@@ -362,6 +338,10 @@ class TableBlacklist(Base):
     __table_args__ = (
         Index('ix_blacklist_instance_upstream_series', 'arr_instance_id', 'sonarr_series_id'),
         Index('ix_blacklist_instance_upstream_episode', 'arr_instance_id', 'sonarr_episode_id'),
+        # The media links, looked up once per deleted show or episode: see
+        # the comment on table_history.
+        Index('ix_table_blacklist_series_id', 'series_id'),
+        Index('ix_table_blacklist_episode_id', 'episode_id'),
     )
 
     # multi-instance additive columns (#156): nullable owner + local refs.
@@ -382,6 +362,7 @@ class TableBlacklistMovie(Base):
     # Composite instance-scoped index matches the Phase 1e cutover (fresh==upgraded).
     __table_args__ = (
         Index('ix_blacklist_movie_instance_upstream', 'arr_instance_id', 'radarr_id'),
+        Index('ix_table_blacklist_movie_movie_id', 'movie_id'),
     )
 
     # multi-instance additive columns (#156): nullable owner + local ref.
@@ -467,6 +448,12 @@ class TableHistory(Base):
               sqlite_where=text('action != 7'), postgresql_where=text('action != 7')),
         Index('ix_history_instance_upstream_series', 'arr_instance_id', 'sonarrSeriesId'),
         Index('ix_history_instance_upstream_episode', 'arr_instance_id', 'sonarrEpisodeId'),
+        # The media links and the upgrade chain: each deleted show, episode or
+        # history row looks up the rows pointing at it by these, so without
+        # them removing a library read this table once per deleted row.
+        Index('ix_table_history_series_id', 'series_id'),
+        Index('ix_table_history_episode_id', 'episode_id'),
+        Index('ix_table_history_upgraded_from_id', 'upgradedFromId'),
     )
 
     # multi-instance additive columns (#156): nullable owner + local refs.
@@ -505,6 +492,9 @@ class TableHistoryMovie(Base):
         Index('ix_table_history_movie_events', 'timestamp',
               sqlite_where=text('action != 7'), postgresql_where=text('action != 7')),
         Index('ix_history_movie_instance_upstream', 'arr_instance_id', 'radarrId'),
+        # Same as table_history: see the comment there.
+        Index('ix_table_history_movie_movie_id', 'movie_id'),
+        Index('ix_table_history_movie_upgraded_from_id', 'upgradedFromId'),
     )
 
     # multi-instance additive columns (#156): nullable owner + local ref.
@@ -1152,6 +1142,22 @@ def migrate_db(app):
     except Exception:
         database.rollback()
         logging.exception("Multi-instance default backfill failed; continuing startup")
+
+    # A library row can name an instance that is gone: deleting an instance
+    # keeps its rows, and a one-item write past its owner lookup still lands
+    # naming it. Discover counts such a row like one with no owner, so put
+    # every one back under the default instance of its kind, or to no owner
+    # when the kind has no default. Runs after the backfill above, which would
+    # otherwise stamp rows cleared here onto an instance rebuilt from the
+    # scalar config of the server just deleted. Idempotent and guarded so a
+    # hiccup never blocks startup.
+    try:
+        from arr_instances.service import reconcile_dangling_library_owners
+        reconcile_dangling_library_owners(database)
+        database.commit()
+    except Exception:
+        database.rollback()
+        logging.exception("Dangling library owner reconcile failed; continuing startup")
 
     # Heal installs whose default instance was created directly via the API
     # (onboarding wizard / Connections page) rather than backfilled from the

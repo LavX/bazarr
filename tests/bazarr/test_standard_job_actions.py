@@ -423,34 +423,93 @@ def call_hub(resource_name, method, *args, json_body=None, query=None):
         return getattr(resource, method).__wrapped__(resource(), *args)
 
 
-def test_install_is_queued_and_answers_at_once(queue, monkeypatch):
+EXAMPLE_ENTRY = ("community", "examplehub", "1.0.0", "Example")
+
+
+@pytest.fixture
+def hub_catalog(tmp_path, monkeypatch):
+    """A community catalog source that lists Example 1.0.0."""
+    from provider_hub.state import load_state, save_state
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "state.json"))
+    state = load_state()
+    state["catalog_sources"]["community"] = {
+        "id": "community", "name": "community", "type": "github", "enabled": True,
+        "url": "https://github.com/owner/repo/blob/main/catalog.json"}
+    state["catalog_entries"]["community:examplehub:1.0.0"] = {
+        "source": "community", "provider_id": "examplehub", "name": "Example", "version": "1.0.0",
+        "manifest": {"provider_id": "examplehub", "name": "Example", "version": "1.0.0"}}
+    save_state(state)
+
+
+def test_install_is_queued_and_answers_at_once(queue, hub_catalog, monkeypatch):
     from provider_hub import service
 
     monkeypatch.setattr(service, "stage_install", lambda manifest: pytest.fail("installed in the request"))
-    body, status = call_hub("ProviderHubInstallations", "post",
-                            json_body={"manifest": {"provider_id": "examplehub", "name": "Example"}})
+    body, status = call_hub("ProviderHubInstallations", "post", json_body={
+        "source": "community", "provider_id": "examplehub", "version": "1.0.0"})
 
     [job] = pending(queue)
     assert status == 202 and body == {"job_id": job.job_id}
     assert job.job_name == "Installing provider Example"
     assert (job.module, job.func) == ("provider_hub.jobs", "install_provider")
+    assert job.kwargs == {"source_id": "community", "provider_id": "examplehub", "version": "1.0.0",
+                          "name": "Example"}
+
+
+def test_an_install_naming_no_catalog_entry_is_refused_and_queues_nothing(queue, hub_catalog):
+    forged = {"provider_id": "examplehub", "name": "Example", "version": "1.0.0",
+              "source": {"catalog_url": "https://github.com/LavX/bazarr-provider-catalog/blob/main/catalog.json"}}
+
+    body, status = call_hub("ProviderHubInstallations", "post", json_body={"manifest": forged})
+    assert status == 400 and "matches no catalog entry" in body
+    body, status = call_hub("ProviderHubInstallations", "post", json_body={
+        "source": "community", "provider_id": "examplehub", "version": "9.9.9"})
+    assert status == 400 and "does not list examplehub 9.9.9" in body
+    assert pending(queue) == []
 
 
 def test_a_second_identical_install_follows_the_first_job(queue):
     from provider_hub import jobs as hub_jobs
 
-    manifest = {"provider_id": "examplehub", "name": "Example"}
-    assert hub_jobs.queue_install(manifest) == hub_jobs.queue_install(manifest)
+    assert hub_jobs.queue_install(*EXAMPLE_ENTRY) == hub_jobs.queue_install(*EXAMPLE_ENTRY)
     assert len(pending(queue)) == 1
+
+
+def test_a_duplicate_install_follows_the_first_job_even_when_it_ends_at_once(queue, monkeypatch):
+    """The queue refuses the duplicate and names the job it matched in one step.
+
+    The id used to be looked up afterwards, in the pending and running queues
+    only. When the first install failed in between, the second request got a
+    null job id, and the page treated a request with no job to follow as a
+    success.
+    """
+    from provider_hub import jobs as hub_jobs
+
+    monkeypatch.setattr("app.jobs_queue.activity.finish", lambda *args, **kwargs: None)
+    first = hub_jobs.queue_install(*EXAMPLE_ENTRY)
+    running = queue._reserve_next_job()
+    feed = queue.feed_jobs_pending_queue
+
+    def first_install_fails_right_after_the_answer(*args, **kwargs):
+        answer = feed(*args, **kwargs)
+        queue._mark_failed(running)
+        return answer
+
+    monkeypatch.setattr(queue, "feed_jobs_pending_queue", first_install_fails_right_after_the_answer)
+
+    assert hub_jobs.queue_install(*EXAMPLE_ENTRY) == first
+    assert queue.list_jobs_from_queue(job_id=first)[0]["status"] == "failed"
+    assert pending(queue) == []
 
 
 def test_install_job_success_returns_the_installation(queue, monkeypatch):
     from provider_hub import jobs as hub_jobs
     from provider_hub import service
 
-    monkeypatch.setattr(service, "stage_install", lambda manifest, **_: {"provider_id": "examplehub",
-                                                                          "state": "staged"})
-    hub_jobs.queue_install({"provider_id": "examplehub", "name": "Example"})
+    monkeypatch.setattr(service, "install_catalog_entry",
+                        lambda *reference, **_: {"provider_id": "examplehub", "state": "staged"})
+    hub_jobs.queue_install(*EXAMPLE_ENTRY)
     job = run_next(queue)
 
     assert job["status"] == "completed"
@@ -461,11 +520,11 @@ def test_install_job_failure_names_the_provider_and_the_reason(queue, monkeypatc
     from provider_hub import jobs as hub_jobs
     from provider_hub import service
 
-    def mismatch(manifest, **_):
+    def mismatch(*reference, **_):
         raise service.ProviderHubInstallError("bundle hash mismatch for provider.py")
 
-    monkeypatch.setattr(service, "stage_install", mismatch)
-    hub_jobs.queue_install({"provider_id": "examplehub", "name": "Example"})
+    monkeypatch.setattr(service, "install_catalog_entry", mismatch)
+    hub_jobs.queue_install(*EXAMPLE_ENTRY)
     job = run_next(queue)
 
     assert job["status"] == "failed"
@@ -580,6 +639,21 @@ def hub_install(tmp_path, monkeypatch, queue):
         if control.stop_at == name:
             press_stop(queue)
 
+    def offer(version):
+        from provider_hub.state import load_state, save_state
+
+        state = load_state()
+        state["catalog_sources"]["community"] = {
+            "id": "community", "name": "community", "type": "github", "enabled": True,
+            "url": "https://github.com/owner/repo/blob/main/catalog.json"}
+        state["catalog_entries"][f"community:examplehub:{version}"] = {
+            "source": "community", "provider_id": "examplehub", "version": version,
+            "manifest": control.manifest(version)}
+        save_state(state)
+        return "community", "examplehub", version
+
+    control.offer = offer
+
     def fake_get(url, timeout):
         step("download")
         return _FakeResponse(content=content)
@@ -619,7 +693,7 @@ def test_stopping_an_install_records_no_provider_and_removes_what_it_staged(queu
     from provider_hub.service import load_state
 
     hub_install.stop_at = "download"
-    hub_jobs.queue_install(hub_install.manifest("1.0.0"))
+    hub_jobs.queue_install(*hub_install.offer("1.0.0"))
     assert_stopped(run_next(queue))
 
     assert "examplehub" not in load_state()["installations"]
@@ -637,7 +711,7 @@ def test_stopping_an_update_keeps_the_active_version_untouched(queue, hub_instal
     active = load_state()["installations"]["examplehub"]
     assert active["active_version"] == "1.0.0"
     hub_install.stop_at = "smoke"
-    hub_jobs.queue_install(hub_install.manifest("1.1.0"))
+    hub_jobs.queue_install(*hub_install.offer("1.1.0"))
     assert_stopped(run_next(queue))
 
     assert load_state()["installations"]["examplehub"] == active
@@ -683,6 +757,250 @@ def test_an_uninstall_stopped_before_it_ran_keeps_the_provider(queue, hub_state)
 
     assert_stopped(queue.list_jobs_from_queue(job_id=job.job_id)[0])
     assert load_state()["installations"]["examplehub"]["state"] == "active"
+
+
+# ---------------------------------------------------------------------------
+# Provider Hub local packages: a bounded upload, spooled to disk for the job
+# ---------------------------------------------------------------------------
+#
+# The route used to read the whole upload into memory before any size check and
+# queue the bytes as the job's argument, where they stayed until the job ran and
+# then in the finished-jobs history.
+
+@pytest.fixture
+def package_uploads(tmp_path, monkeypatch, queue):
+    """The Hub's upload spool, under a private state directory."""
+    from provider_hub import jobs as hub_jobs
+
+    monkeypatch.setenv("BAZARR_PROVIDER_HUB_STATE", str(tmp_path / "provider_hub" / "state.json"))
+    monkeypatch.setattr(hub_jobs, "_queued_packages", set())
+    return tmp_path / "provider_hub" / "uploads"
+
+
+def spooled(directory):
+    return sorted(directory.iterdir()) if directory.exists() else []
+
+
+def post_package(content, filename="package.zip", declared=None):
+    """Post a package to the local install route as the browser sends it."""
+    from io import BytesIO
+
+    from api.provider_hub import provider_hub as endpoint
+
+    resource = endpoint.ProviderHubLocalInstallations
+    environ = {"CONTENT_LENGTH": str(declared)} if declared is not None else None
+    with Flask(__name__).test_request_context("/", method="POST",
+                                              data={"file": (BytesIO(content), filename)},
+                                              content_type="multipart/form-data",
+                                              environ_overrides=environ):
+        return resource.post.__wrapped__(resource())
+
+
+def small_package_ceiling(monkeypatch, size):
+    from provider_hub import service
+
+    monkeypatch.setattr(service, "MAX_LOCAL_PACKAGE_SIZE", size)
+
+
+def test_the_package_ceiling_is_100_mib():
+    from provider_hub import service
+
+    assert service.MAX_LOCAL_PACKAGE_SIZE == 100 * 1024 * 1024
+
+
+def test_a_package_declared_over_the_ceiling_is_refused_before_it_is_read(queue, package_uploads):
+    from api.utils import UPLOAD_FORM_ALLOWANCE
+    from provider_hub import service
+
+    # The declared length alone decides: parsing this body against that length
+    # would fail some other way, so a 413 shows nothing was read.
+    declared = service.MAX_LOCAL_PACKAGE_SIZE + UPLOAD_FORM_ALLOWANCE + 1
+    body, status = post_package(b"PK\x03\x04", declared=declared)
+
+    assert status == 413
+    assert "too large" in body
+    assert pending(queue) == []
+    assert spooled(package_uploads) == []
+
+
+def test_a_package_over_the_ceiling_is_refused_without_a_job_or_a_file(queue, package_uploads, monkeypatch):
+    small_package_ceiling(monkeypatch, 4096)
+
+    body, status = post_package(b"x" * 4097)
+
+    assert status == 413
+    assert pending(queue) == []
+    assert spooled(package_uploads) == []
+
+
+def test_a_package_at_the_ceiling_is_spooled_and_its_job_carries_only_the_path(
+        queue, package_uploads, monkeypatch):
+    small_package_ceiling(monkeypatch, 4096)
+    content = b"x" * 4096
+
+    body, status = post_package(content, filename="myplugin.zip")
+
+    [job] = pending(queue)
+    [spool] = spooled(package_uploads)
+    assert status == 202 and body == {"job_id": job.job_id}
+    assert job.job_name == "Installing provider package myplugin.zip"
+    assert (job.module, job.func) == ("provider_hub.jobs", "install_local_provider")
+    assert job.kwargs == {"package_path": str(spool), "filename": "myplugin.zip"}
+    assert not any(isinstance(value, (bytes, bytearray)) for value in job.kwargs.values())
+    assert spool.read_bytes() == content
+    # The job removes the file when it ends, so it must never be offered for retry.
+    assert job.retryable is False
+
+
+def test_an_empty_package_is_refused_and_leaves_no_file(queue, package_uploads):
+    assert post_package(b"") == ("uploaded package is empty", 400)
+    assert pending(queue) == []
+    assert spooled(package_uploads) == []
+
+
+def test_each_upload_gets_its_own_spooled_file(queue, package_uploads):
+    post_package(b"PK first")
+    post_package(b"PK first")
+
+    first, second = pending(queue)
+    assert first.kwargs["package_path"] != second.kwargs["package_path"]
+    assert len(spooled(package_uploads)) == 2
+
+
+@pytest.mark.parametrize("outcome", ["installed", "failed", "stopped"])
+def test_the_spooled_package_is_removed_when_its_install_ends(queue, package_uploads, monkeypatch, outcome):
+    from pathlib import Path
+
+    from provider_hub import service
+
+    read = []
+
+    def stage(package, checkpoint=None):
+        read.append(Path(package).read_bytes())
+        if outcome == "failed":
+            raise service.ProviderHubInstallError("uploaded package is not a valid .zip archive")
+        if outcome == "stopped":
+            raise service.ProviderHubStopped("Cancelled by user")
+        return {"provider_id": "localhub", "name": "Local"}
+
+    monkeypatch.setattr(service, "stage_install_local", stage)
+    post_package(b"PK package", filename="local.zip")
+    job = run_next(queue)
+
+    assert read == [b"PK package"]
+    assert job["status"] == ("failed" if outcome == "failed" else "completed")
+    if outcome == "failed":
+        assert job["error"]["message"] == ("Could not install local.zip: "
+                                           "uploaded package is not a valid .zip archive")
+    assert spooled(package_uploads) == []
+
+
+def test_a_package_whose_file_is_gone_fails_with_a_reason(queue, package_uploads):
+    post_package(b"PK package", filename="local.zip")
+    for spool in spooled(package_uploads):
+        spool.unlink()
+
+    job = run_next(queue)
+
+    assert job["status"] == "failed"
+    assert job["error"]["message"] == "Could not install local.zip: uploaded package could not be read"
+
+
+def test_a_real_package_installs_from_its_spooled_file(queue, package_uploads, tmp_path, monkeypatch):
+    from provider_hub.state import load_state
+    from test_provider_hub import _manifest, _patch_local_install_env, _provider_zip
+
+    content = b"class LocalProvider: pass\n"
+    manifest = _manifest(provider_id="spooledhub", name="Spooled Hub", provider_content=content,
+                         dependencies={"requirements": []})
+    _patch_local_install_env(monkeypatch, tmp_path)
+
+    assert post_package(_provider_zip(manifest, {"provider.py": content}), filename="spooled.zip")[1] == 202
+    job = run_next(queue)
+
+    assert job["status"] == "completed"
+    assert job["job_name"] == "Installing provider Spooled Hub"
+    installation = load_state()["installations"]["spooledhub"]
+    assert (installation["state"], installation["origin"], installation["trusted"]) == ("staged", "local", False)
+    assert spooled(package_uploads) == []
+
+
+def test_the_package_of_a_job_removed_before_it_ran_goes_with_the_next_upload(queue, package_uploads):
+    from pathlib import Path
+
+    post_package(b"PK first", filename="first.zip")
+    [first] = pending(queue)
+    assert queue.remove_job_from_pending_queue(first.job_id)
+
+    post_package(b"PK second", filename="second.zip")
+
+    [second] = pending(queue)
+    assert spooled(package_uploads) == [Path(second.kwargs["package_path"])]
+
+
+def test_the_packages_of_an_emptied_pending_queue_go_with_the_next_upload(queue, package_uploads):
+    from pathlib import Path
+
+    post_package(b"PK one")
+    post_package(b"PK two")
+    assert queue.empty_jobs_queue("pending")
+
+    post_package(b"PK three")
+
+    [job] = pending(queue)
+    assert spooled(package_uploads) == [Path(job.kwargs["package_path"])]
+
+
+def test_the_next_upload_keeps_the_packages_of_jobs_waiting_or_running(queue, package_uploads):
+    post_package(b"PK running")
+    assert queue._reserve_next_job() is not None
+    post_package(b"PK waiting")
+
+    post_package(b"PK third")
+
+    assert len(queue.jobs_running_queue) == 1 and len(pending(queue)) == 2
+    assert [spool.read_bytes() for spool in spooled(package_uploads)].count(b"PK running") == 1
+    assert len(spooled(package_uploads)) == 3
+
+
+def test_a_package_still_being_uploaded_is_never_taken_for_an_abandoned_one(queue, package_uploads):
+    # No job has been queued for it yet: its upload is still being copied in.
+    package_uploads.mkdir(parents=True)
+    in_progress = package_uploads / "package-in-progress.zip"
+    in_progress.write_bytes(b"PK partial")
+
+    post_package(b"PK other")
+
+    assert in_progress.read_bytes() == b"PK partial"
+
+
+def test_leftover_spooled_packages_are_discarded_at_startup(package_uploads):
+    from pathlib import Path
+
+    from provider_hub import service
+
+    package_uploads.mkdir(parents=True)
+    (package_uploads / "package-left.zip").write_bytes(b"PK left behind")
+    (package_uploads / "package-other.zip").write_bytes(b"PK another")
+
+    service.discard_local_package_uploads()
+
+    assert spooled(package_uploads) == []
+    # Pending jobs never survive a restart, so nothing still needs these files.
+    # A call, not text: a commented-out call would not count.
+    import ast
+
+    init = ast.parse((Path(__file__).resolve().parents[2] / "bazarr" / "init.py").read_text(encoding="utf-8"))
+    assert any(isinstance(node, ast.Call) and getattr(node.func, "id", None) == "discard_local_package_uploads"
+               for node in ast.walk(init))
+
+
+def test_the_startup_sweep_tolerates_a_missing_spool(package_uploads):
+    from provider_hub import service
+
+    service.discard_local_package_uploads()
+
+    assert spooled(package_uploads) == []
 
 
 # ---------------------------------------------------------------------------
@@ -789,3 +1107,177 @@ def test_a_sports_download_published_with_warnings_says_so_on_its_job(queue, mon
     assert job["status"] == "completed"
     assert job["job_name"] == "Downloaded Subtitles with warnings for Final"
     assert job["progress_message"] == warning
+
+
+# ---------------------------------------------------------------------------
+# Job origin: who started the work
+# ---------------------------------------------------------------------------
+
+def test_an_authenticated_request_marks_its_jobs_but_a_webhook_does_not(monkeypatch):
+    # The queue records who started a job from the thread that enqueues it,
+    # so the request itself has to mark its own thread before the handler
+    # queues anything. A webhook is a media server's machine call, not a
+    # user's, so it stays unmarked and the jobs it triggers stay routine.
+    from flask import Flask
+
+    from api.utils import authenticate
+    from app import activity
+    from app.config import settings
+
+    seen = []
+
+    @authenticate
+    def handler():
+        seen.append(activity.current_job_origin())
+        return "done"
+
+    monkeypatch.setattr(settings.auth, "apikey", "test-key")
+    app = Flask(__name__)
+    with app.test_request_context("/api/system/jobs", headers={"X-API-KEY": "test-key"}):
+        assert handler() == "done"
+    with app.test_request_context("/api/webhooks/sonarr", headers={"X-API-KEY": "test-key"}):
+        assert handler() == "done"
+    assert seen == ["user", None]
+
+
+def test_run_now_records_the_press_the_user_made(monkeypatch):
+    # Run Now runs the task through the scheduler's pool like every routine
+    # run, so the mark taken here is the only thing that tells the pool the
+    # next execution of the task is the user's own.
+    from types import SimpleNamespace
+
+    from flask import Flask
+
+    from api import api_bp
+    from api.system import tasks as system_tasks
+    from app import activity
+    from app.config import settings
+
+    pressed = []
+    monkeypatch.setattr(system_tasks, "scheduler",
+                        SimpleNamespace(execute_job_now=lambda taskid: pressed.append(taskid)))
+    monkeypatch.setattr(settings.auth, "apikey", "test-key")
+    app = Flask(__name__)
+    app.register_blueprint(api_bp)
+    response = app.test_client().post("/api/system/tasks",
+                                      headers={"X-API-KEY": "test-key"},
+                                      data={"taskid": "wanted_search_missing_subtitles_series"})
+
+    assert response.status_code == 204
+    assert pressed == ["wanted_search_missing_subtitles_series"]
+    assert activity.take_user_run("wanted_search_missing_subtitles_series") is True
+
+
+def test_the_signalr_reconnect_presses_do_not_mark_their_runs_as_a_user(monkeypatch):
+    # The SignalR clients press execute_job_now on every (re)connect for
+    # their live syncs, so that path records no mark: those runs stay
+    # routine, and only the Tasks page's Run Now announces.
+    from types import SimpleNamespace
+
+    from app import activity
+    from app.scheduler import scheduler
+
+    pressed = []
+    monkeypatch.setattr(scheduler, "aps_scheduler",
+                        SimpleNamespace(modify_job=lambda taskid, **rest: pressed.append(taskid)))
+
+    scheduler.execute_job_now(taskid="update_series_1")
+
+    assert pressed == ["update_series_1"]
+    assert activity.take_user_run("update_series_1") is False
+
+
+def test_a_failed_run_now_press_leaves_no_mark_behind(monkeypatch):
+    # A task id the scheduler never registered fails the press, so the mark
+    # goes with it: a later periodic run never announces as the user's own.
+    from types import SimpleNamespace
+
+    from apscheduler.jobstores.base import JobLookupError
+    from flask import Flask
+
+    from api import api_bp
+    from app import activity
+    from app.config import settings
+    from app.scheduler import scheduler
+
+    def refuse(taskid, **rest):
+        raise JobLookupError(taskid)
+
+    monkeypatch.setattr(scheduler, "aps_scheduler", SimpleNamespace(modify_job=refuse))
+    monkeypatch.setattr(settings.auth, "apikey", "test-key")
+    app = Flask(__name__)
+    app.register_blueprint(api_bp)
+    response = app.test_client().post("/api/system/tasks",
+                                      headers={"X-API-KEY": "test-key"},
+                                      data={"taskid": "no_such_task"})
+
+    assert response.status_code == 500
+    assert activity.take_user_run("no_such_task") is False
+
+
+def test_the_queue_records_a_job_the_user_started(queue, mod_job):
+    mods, subtitle = mod_job
+    from app import activity
+
+    with activity.user_action():
+        mods.apply_subtitle_mods("en", str(subtitle), ["remove_HI"], str(subtitle.parent / "Movie.mkv"),
+                                media_type="movie", media_id=5, arr_instance_id=2)
+
+    [job] = pending(queue)
+    assert job.origin == "user"
+
+
+def test_the_queue_records_a_job_a_scheduled_task_started(queue, mod_job):
+    mods, subtitle = mod_job
+    from app import activity
+
+    with activity.scheduler_run("wanted_search_missing_subtitles_series"):
+        mods.apply_subtitle_mods("en", str(subtitle), ["remove_HI"], str(subtitle.parent / "Movie.mkv"),
+                                media_type="movie", media_id=5, arr_instance_id=2)
+
+    [job] = pending(queue)
+    assert job.origin == "scheduled"
+
+
+def test_the_queue_leaves_a_job_unattributed_when_nothing_knows(queue, mod_job):
+    mods, subtitle = mod_job
+
+    mods.apply_subtitle_mods("en", str(subtitle), ["remove_HI"], str(subtitle.parent / "Movie.mkv"),
+                             media_type="movie", media_id=5, arr_instance_id=2)
+
+    [job] = pending(queue)
+    assert job.origin is None
+
+
+def test_force_starting_a_pending_job_makes_its_outcome_the_users(monkeypatch, queue, mod_job):
+    # Force Start runs a job that was already queued by whoever scheduled
+    # it, so its origin is not written at creation: the API serving the
+    # press says the user chose this start, and the outcome is theirs to
+    # hear. Internal force starts leave the origin as it was.
+    mods, subtitle = mod_job
+    from flask import Flask
+
+    from api import api_bp
+    from api.system import jobs as system_jobs
+    from app import activity
+    from app.config import settings
+
+    with activity.scheduler_run("wanted_search_missing_subtitles_series"):
+        mods.apply_subtitle_mods("en", str(subtitle), ["remove_HI"], str(subtitle.parent / "Movie.mkv"),
+                                media_type="movie", media_id=5, arr_instance_id=2)
+
+    [job] = pending(queue)
+    assert job.origin == "scheduled"
+
+    # The api package was imported by earlier tests before this queue existed,
+    # so its reference is pointed at this test's own queue by hand.
+    monkeypatch.setattr(system_jobs, "jobs_queue", queue)
+    monkeypatch.setattr(settings.auth, "apikey", "test-key")
+    app = Flask(__name__)
+    app.register_blueprint(api_bp)
+    response = app.test_client().post("/api/system/jobs",
+                                      headers={"X-API-KEY": "test-key"},
+                                      data={"id": job.job_id, "action": "force_start"})
+
+    assert response.status_code == 204
+    assert queue.list_jobs_from_queue(job_id=job.job_id)[0]["origin"] == "user"

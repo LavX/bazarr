@@ -53,11 +53,16 @@ class ProviderApi extends BaseApi {
     form: FormType.ManualDownload,
     arrInstanceId?: number,
   ) {
-    await this.post("/episodes", form, {
-      seriesid,
-      episodeid,
-      arr_instance_id: arrInstanceId,
-    });
+    const response = await this.post<{ job_id: number | null } | undefined>(
+      "/episodes",
+      form,
+      {
+        seriesid,
+        episodeid,
+        arr_instance_id: arrInstanceId,
+      },
+    );
+    return response.data;
   }
 }
 

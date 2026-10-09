@@ -208,7 +208,7 @@ pip install --no-deps signalrcore==1.0.2
 cd frontend && npm ci && npm run build && cd ..
 
 # Run
-python3 docker/supervisor.py --config ./data --port 6767
+python3 docker/supervisor.py --config ./data
 ```
 
 **System dependencies** (install via your package manager):
@@ -224,6 +224,7 @@ python3 docker/supervisor.py --config ./data --port 6767
 **Notes:**
 - The `--config` flag sets where the database, logs, and settings are stored
 - The supervisor runs a lightweight aiohttp server on the same port, serving the frontend instantly and proxying API requests to the backend. You get a startup screen with progress stages while the backend initializes, and automatic restart on crashes.
+- The supervisor listens on the Port under Settings > General, 6767 unless you change it, and picks up a new port when the supervisor itself restarts. `--port <number>` pins the port and overrides that setting.
 - Media paths are configured in the web UI under Settings > Connections. None of that is required to start: with no library connected, Discover still searches and downloads subtitles for any title
 
 ---
@@ -537,6 +538,9 @@ services:
     depends_on:
       ai-subtitle-translator:
         condition: service_healthy
+    # The right-hand side is the Port under Settings > General (6767 unless
+    # changed) and has to match it; the left-hand side is the port on this
+    # host. A new port applies after a container restart.
     ports:
       - "6767:6767"
     environment:

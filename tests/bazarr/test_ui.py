@@ -1,6 +1,11 @@
 """
 Test for Bazarr UI functionality including authentication decorators.
 """
+import logging
+import socket
+import threading
+from contextlib import contextmanager
+
 import pytest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch  # noqa: F401
@@ -304,6 +309,208 @@ def test_cover_route_does_not_dress_an_upstream_failure_as_an_image(monkeypatch)
     assert "Cache-Control" not in response.headers
 
 
+# --- a cover that breaks off partway ------------------------------------------
+
+COVER_PATH = "/images/movies/radarr/MediaCover/1/poster.jpg?arr_instance_id=9"
+
+
+class _BreakingUpstream:
+    """A Radarr cover answer that sends one chunk and then loses the connection,
+    the way urllib3's IncompleteRead reaches a streaming requests response."""
+
+    status_code = 200
+
+    def __init__(self, headers):
+        from requests.structures import CaseInsensitiveDict
+
+        self.headers = CaseInsensitiveDict({"Content-Type": "image/jpeg", **headers})
+        self.closed = False
+
+    def iter_content(self, chunk_size):
+        import requests
+
+        yield b"x" * 100
+        raise requests.exceptions.ChunkedEncodingError("Connection broken: IncompleteRead(100 bytes read)")
+
+    def close(self):
+        self.closed = True
+
+
+def _cover_app(monkeypatch, upstream):
+    from app import ui
+    import arr_instances.resolution as resolution
+
+    class RadarrClient:
+        kind = "radarr"
+        api_key = "key"
+        verify_ssl = True
+        _base_url_raw = "/radarr"
+
+        def base_url(self):
+            return "https://radarr.example:7878/radarr"
+
+    monkeypatch.setattr(ui, "settings", SimpleNamespace(auth=SimpleNamespace(type=None)))
+    monkeypatch.setattr(ui.requests, "get", lambda url, stream, timeout, verify, headers: upstream)
+    monkeypatch.setattr(resolution, "client_for_instance", lambda session, instance_id: RadarrClient())
+
+    app = Flask(__name__)
+    app.register_blueprint(ui.ui_bp)
+    return app
+
+
+def test_a_cover_that_breaks_off_aborts_the_response_and_releases_the_upstream(monkeypatch, caplog):
+    """Ending the body quietly would finish the response, and the browser would
+    keep a truncated poster for a day. It has to fail, as the exception the
+    logger knows not to print a traceback for."""
+    from app.logger import CoverStreamAborted
+
+    upstream = _BreakingUpstream({"Content-Length": "1000"})
+    response = _cover_app(monkeypatch, upstream).test_client().get(COVER_PATH)
+
+    assert response.status_code == 200
+    with caplog.at_level("DEBUG"), pytest.raises(CoverStreamAborted):
+        response.get_data()
+    assert upstream.closed is True
+    assert [record.levelname for record in caplog.records if "cover" in record.getMessage()] == ["DEBUG"]
+
+
+def test_a_whole_cover_releases_the_upstream_too(monkeypatch):
+    class WholeUpstream(_BreakingUpstream):
+        def iter_content(self, chunk_size):
+            yield b"x" * 100
+
+    upstream = WholeUpstream({"Content-Length": "100"})
+    response = _cover_app(monkeypatch, upstream).test_client().get(COVER_PATH)
+
+    assert response.get_data() == b"x" * 100
+    assert upstream.closed is True
+
+
+def test_a_head_request_for_a_cover_releases_the_upstream(monkeypatch):
+    """A HEAD answer has no body, so the body's generator never starts and cannot
+    be what closes the upstream response. Left open, it holds a pooled connection
+    to the arr until it is garbage collected."""
+    upstream = _BreakingUpstream({"Content-Length": "1000"})
+    response = _cover_app(monkeypatch, upstream).test_client().head(COVER_PATH)
+
+    assert response.status_code == 200
+    assert response.get_data() == b""
+    response.close()
+    assert upstream.closed is True
+
+
+@pytest.mark.parametrize("upstream_headers,relayed", [
+    ({"Content-Length": "1000"}, "1000"),
+    ({"Content-Length": "1000", "Content-Encoding": "identity"}, "1000"),
+    # requests decodes a compressed body, so the upstream length is not this one's.
+    ({"Content-Length": "400", "Content-Encoding": "gzip"}, None),
+    # Chunking wins over a length sent beside it, so that length need not match.
+    ({"Content-Length": "400", "Transfer-Encoding": "chunked"}, None),
+    ({"Content-Length": "a lot"}, None),
+    ({}, None),
+])
+def test_a_cover_carries_the_upstream_length_when_it_is_the_length_sent(monkeypatch, upstream_headers, relayed):
+    """Without a length, a reverse proxy speaking HTTP/1.0 to Bazarr, as nginx does
+    by default, reads a dropped connection as the end of a complete image."""
+    upstream = _BreakingUpstream(upstream_headers)
+    response = _cover_app(monkeypatch, upstream).test_client().get(COVER_PATH)
+
+    assert response.headers.get("Content-Length") == relayed
+    response.close()
+
+
+@contextmanager
+def _waitress(app):
+    """Serve the app with the WSGI server Bazarr runs, on a loopback port of its own."""
+    from waitress import wasyncore
+    from waitress.server import create_server
+
+    server = create_server(app, host="127.0.0.1", port=0, threads=1)
+    stop = threading.Event()
+
+    def serve():
+        # The loop's own thread closes its sockets once it has stopped: closed
+        # from the test's thread, they would vanish under a select() in progress.
+        try:
+            while not stop.is_set():
+                wasyncore.loop(timeout=0.1, map=server._map, count=1)
+        finally:
+            server.task_dispatcher.shutdown()
+            wasyncore.close_all(server._map)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        yield server.effective_port
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+
+
+def _raw_get(port, path, version):
+    """One request as a proxy or browser sends it, read to the end of the connection."""
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as connection:
+        connection.sendall(f"GET {path} HTTP/{version}\r\nHost: 127.0.0.1\r\n\r\n".encode())
+        received = b""
+        while True:
+            chunk = connection.recv(65536)
+            if not chunk:
+                break
+            received += chunk
+    head, _, body = received.partition(b"\r\n\r\n")
+    status, *header_lines = head.decode("latin-1").split("\r\n")
+    headers = {name.lower(): value.strip() for name, _, value in (line.partition(":") for line in header_lines)}
+    return status, headers, body
+
+
+@pytest.mark.parametrize("version", ["1.0", "1.1"])
+def test_a_cover_that_breaks_off_is_visibly_incomplete_on_the_wire(monkeypatch, version):
+    """What a browser or a reverse proxy actually receives from waitress.
+
+    The response declares the upstream length and the connection closes short
+    of it, so neither can take the partial image for a whole one.
+    """
+    from app.logger import CoverStreamAborted, UnwantedWaitressMessageFilter
+
+    waitress_logger = logging.getLogger("waitress")
+    monkeypatch.setattr(waitress_logger, "filters", [])
+    records = []
+    capture = logging.Handler()
+    capture.emit = records.append
+    waitress_logger.addHandler(capture)
+    upstream = _BreakingUpstream({"Content-Length": "1000"})
+    try:
+        with _waitress(_cover_app(monkeypatch, upstream)) as port:
+            status, headers, body = _raw_get(port, COVER_PATH, version)
+    finally:
+        waitress_logger.removeHandler(capture)
+
+    assert status.split()[1] == "200"
+    assert headers["content-length"] == "1000"
+    assert body == b"x" * 100
+    assert upstream.closed is True
+    # waitress reports the abort, and the filter configure_logging installs
+    # recognises that exact record, so a normal install logs no traceback.
+    served = [record for record in records if record.getMessage().startswith("Exception while serving")]
+    assert len(served) == 1
+    assert isinstance(served[0].exc_info[1], CoverStreamAborted)
+    assert not UnwantedWaitressMessageFilter(debug=False).filter(served[0])
+
+
+def test_a_chunked_cover_that_breaks_off_never_gets_its_last_chunk(monkeypatch):
+    """With no upstream length, HTTP/1.1 marks the end with an empty chunk, and
+    that is the one thing an aborted cover must not send."""
+    upstream = _BreakingUpstream({})
+    monkeypatch.setattr(logging.getLogger("waitress"), "disabled", True)
+    with _waitress(_cover_app(monkeypatch, upstream)) as port:
+        status, headers, body = _raw_get(port, COVER_PATH, "1.1")
+
+    assert status.split()[1] == "200"
+    assert headers["transfer-encoding"] == "chunked"
+    assert b"x" * 100 in body
+    assert not body.endswith(b"0\r\n\r\n")
+
+
 def test_check_login_no_authentication():
     """
     Test check_login decorator when no authentication is configured.
@@ -527,14 +734,16 @@ def test_proxy_route_rejects_wrong_api_key(monkeypatch):
 
 # --- backup download containment (path-traversal hardening) ------------------
 
-def test_backup_download_rejects_sibling_prefix(monkeypatch, tmp_path):
-    """backup_download must not serve a sibling directory that merely shares the
-    backup-folder name prefix, while still serving a real backup."""
+@pytest.fixture
+def backup_app(monkeypatch, tmp_path):
+    """A backup folder holding one real backup, with a config file beside it and
+    a sibling directory that shares the folder's name as a prefix."""
     from app import ui
 
     backup_dir = tmp_path / "backup"
     backup_dir.mkdir()
     (backup_dir / "bazarr_backup.zip").write_text("zip-bytes")
+    (tmp_path / "config.yaml").write_text("apikey: top-secret")
     sibling = tmp_path / "backup-evil"
     sibling.mkdir()
     (sibling / "secret.txt").write_text("top-secret")
@@ -544,9 +753,34 @@ def test_backup_download_rejects_sibling_prefix(monkeypatch, tmp_path):
         backup=SimpleNamespace(folder=str(backup_dir))))
     app = Flask(__name__)
     app.register_blueprint(ui.ui_bp)
+    return app, tmp_path
 
+
+@pytest.mark.parametrize("filename", [
+    ".",
+    "../config.yaml",
+    "ABSOLUTE",
+    "../backup-evil/secret.txt",
+])
+def test_backup_download_refuses_anything_outside_the_backup_folder(backup_app, filename):
+    """The folder itself, a parent-relative path, an absolute path and a sibling
+    directory sharing the folder's name prefix are all a plain 404."""
+    from app import ui
+
+    app, root = backup_app
+    if filename == "ABSOLUTE":
+        filename = str(root / "config.yaml")
     with app.test_request_context():
-        # sibling-prefix escape is refused
-        assert ui.backup_download("../backup-evil/secret.txt") == ('', 404)
-        # a genuine backup inside the folder is served
-        assert ui.backup_download("bazarr_backup.zip").status_code == 200
+        assert ui.backup_download(filename) == ('', 404)
+
+
+def test_backup_download_serves_a_real_backup(backup_app):
+    from app import ui
+
+    app, _ = backup_app
+    with app.test_request_context():
+        response = ui.backup_download("bazarr_backup.zip")
+        response.direct_passthrough = False
+        assert response.status_code == 200
+        assert response.get_data() == b"zip-bytes"
+        assert "attachment" in response.headers["Content-Disposition"]

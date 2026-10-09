@@ -1,6 +1,7 @@
 # coding=utf-8
 
 import os
+import re
 import secrets as _secrets
 import time
 import uuid
@@ -110,6 +111,35 @@ def get_decrypted_token():
     return apikey if apikey else None
 
 
+def _plex_pass_required(feature_name):
+    return (f'Plex Pass subscription required. The "{feature_name}" feature requires Plex Pass. '
+            'Please subscribe at https://www.plex.tv/plans/')
+
+
+def _plex_sign_in_required(message):
+    """The answer when Bazarr holds no Plex token for what was asked.
+
+    A 409 rather than a 401: the web client reads any 401 as its own Bazarr
+    session ending and goes back to the login page, when only Plex is signed
+    out. The Plex panel reads the code and asks for a Plex sign-in instead.
+    """
+    return {'error': message, 'error_code': 'sign_in_required'}, 409
+
+
+def _refused_plex_pass(error):
+    """Whether plex.tv refused a Plex Pass endpoint to this account.
+
+    plexapi raises BadRequest for every status but 404, or its Unauthorized
+    subclass for a 401 and an invalid-token 422, with the status first in its
+    message and the response body after it. plex.tv answers 403 with code 1043
+    when the account has no Plex Pass, which is an answer to show, not a
+    failure. A 403 for any other reason is a failure.
+    """
+    message = str(error)
+    return (isinstance(error, BadRequest) and message.startswith('(403)')
+            and re.search(r'\bcode\W{1,3}1043\b', message) is not None)
+
+
 def check_plex_pass_feature(account, feature_name):
     """
     Check if a Plex account has access to a specific Plex Pass feature.
@@ -128,10 +158,7 @@ def check_plex_pass_feature(account, feature_name):
     """
     # Check if subscription is active first
     if not account.subscriptionActive:
-        return False, (
-            f'Plex Pass subscription required. The "{feature_name}" feature requires Plex Pass. '
-            'Please subscribe at https://www.plex.tv/plans/'
-        )
+        return False, _plex_pass_required(feature_name)
     
     # Check if specific feature is in the subscription features list
     if feature_name not in account.subscriptionFeatures:
@@ -862,10 +889,7 @@ class PlexTestConnection(Resource):
 
         decrypted_token = get_decrypted_token()
         if not decrypted_token:
-            return {
-                'error': 'No authentication token available',
-                'code': 'UNAUTHORIZED'
-            }, 401
+            return _plex_sign_in_required('Sign in to Plex to test the connection.')
 
         try:
             headers = {
@@ -1060,6 +1084,9 @@ class PlexWebhookCreate(Resource):
             }
 
         except BadRequest as e:
+            if _refused_plex_pass(e):
+                logger.warning(f"plex.tv refused to create a webhook without Plex Pass: {e}")
+                return {'error': _plex_pass_required('webhooks')}, 403
             error_msg = str(e)
             logger.error(f"Plex API rejected webhook creation: {error_msg}")
             
@@ -1076,9 +1103,21 @@ class PlexWebhookCreate(Resource):
             
             return {'error': f'Plex API error: {error_msg}'}, 502
 
+        except UnauthorizedError:  # noqa: F405
+            return _plex_sign_in_required('Sign in to Plex to manage webhooks.')
         except Exception as e:
             logger.error(f"Failed to create Plex webhook: {e}")
             return {'error': f'Failed to create webhook: {str(e)}'}, 502
+
+
+def _webhook_listing(webhooks, subscription):
+    return {
+        'data': {
+            'webhooks': webhooks,
+            'count': len(webhooks),
+            'plexPassSubscription': subscription
+        }
+    }
 
 
 @api_ns_plex.route('plex/webhook/list')
@@ -1096,7 +1135,24 @@ class PlexWebhookList(Resource):
             from plexapi.myplex import MyPlexAccount
             account = MyPlexAccount(token=decrypted_token)
             
-            webhooks = account.webhooks()
+            subscription = {
+                'active': account.subscriptionActive,
+                'has_webhooks_feature': 'webhooks' in account.subscriptionFeatures,
+                'plan': getattr(account, 'subscriptionPlan', None)
+            }
+            # Without Plex Pass, plex.tv refuses the webhooks endpoint. The page
+            # only needs to know that, to show its Plex Pass notice, so it is
+            # told so instead of asking for a list that cannot come.
+            if not subscription['has_webhooks_feature']:
+                return _webhook_listing([], subscription)
+            try:
+                webhooks = account.webhooks()
+            except BadRequest as e:
+                if not _refused_plex_pass(e):
+                    raise
+                # The account said it has the feature, so this is worth a line.
+                logger.info(f"plex.tv refused to list webhooks without Plex Pass: {e}")
+                return _webhook_listing([], dict(subscription, has_webhooks_feature=False))
             webhook_list = []
             
             for webhook in webhooks:
@@ -1117,18 +1173,10 @@ class PlexWebhookList(Resource):
                     logger.warning(f"Failed to process webhook {webhook}: {e}")
                     continue
             
-            return {
-                'data': {
-                    'webhooks': webhook_list,
-                    'count': len(webhook_list),
-                    'plexPassSubscription': {
-                        'active': account.subscriptionActive,
-                        'has_webhooks_feature': 'webhooks' in account.subscriptionFeatures,
-                        'plan': getattr(account, 'subscriptionPlan', None)
-                    }
-                }
-            }
+            return _webhook_listing(webhook_list, subscription)
 
+        except UnauthorizedError:  # noqa: F405
+            return _plex_sign_in_required('Sign in to Plex to manage webhooks.')
         except Exception as e:
             logger.error(f"Failed to list Plex webhooks: {e}")
             return {'error': f'Failed to list webhooks: {str(e)}'}, 502
@@ -1142,10 +1190,10 @@ class PlexWebhookDelete(Resource):
     @authenticate
     @api_ns_plex.doc(parser=post_request_parser)
     def post(self):
+        # Outside the try, so a request without the URL is answered 400.
+        args = self.post_request_parser.parse_args()
+        webhook_url = args.get('webhook_url')
         try:
-            args = self.post_request_parser.parse_args()
-            webhook_url = args.get('webhook_url')
-            
             logger.info(f"Attempting to delete Plex webhook: {webhook_url}")
             
             decrypted_token = get_decrypted_token()
@@ -1174,7 +1222,12 @@ class PlexWebhookDelete(Resource):
                 }
             }
 
+        except UnauthorizedError:  # noqa: F405
+            return _plex_sign_in_required('Sign in to Plex to manage webhooks.')
         except Exception as e:
+            if _refused_plex_pass(e):
+                logger.warning(f"plex.tv refused to delete a webhook without Plex Pass: {e}")
+                return {'error': _plex_pass_required('webhooks')}, 403
             logger.error(f"Failed to delete Plex webhook: {e}")
             return {'error': f'Failed to delete webhook: {str(e)}'}, 502
 
@@ -1203,7 +1256,7 @@ class PlexAutopulseConfig(Resource):
                 return {'error': 'Failed to get Plex configuration for Autopulse'}, 400
 
         except UnauthorizedError:  # noqa: F405
-            return {'error': 'Plex authentication required'}, 401
+            return _plex_sign_in_required('Sign in to Plex to generate an Autopulse configuration.')
         except Exception as e:
             logger.error(f"Failed to get Autopulse config: {e}")
             return {'error': f'Failed to get Autopulse config: {str(e)}'}, 500

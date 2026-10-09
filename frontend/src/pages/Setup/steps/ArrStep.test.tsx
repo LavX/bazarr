@@ -1,4 +1,5 @@
 import userEvent from "@testing-library/user-event";
+import { AxiosError, AxiosHeaders } from "axios";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   useArrInstances,
@@ -751,7 +752,63 @@ describe("ArrStep", () => {
       screen.getByRole("button", { name: /remove typo sonarr/i }),
     );
 
-    expect(deleteMutate).toHaveBeenCalledWith(7, expect.anything());
+    expect(deleteMutate).toHaveBeenCalledWith({ id: 7 }, expect.anything());
+  });
+
+  it("points a refused remove of a synced instance to Settings, Connections", async () => {
+    const user = userEvent.setup();
+    setInstances([
+      {
+        id: 7,
+        kind: "sonarr",
+        name: "Old Sonarr",
+        ip: "10.0.0.9",
+        port: 8989,
+        // eslint-disable-next-line camelcase -- the server's field name
+        base_url: "/",
+        ssl: false,
+      },
+    ]);
+    deleteMutate.mockImplementationOnce(
+      (_vars: unknown, opts?: { onError?: (error: unknown) => void }) => {
+        opts?.onError?.(
+          new AxiosError(
+            "Request failed with status code 409",
+            "ERR_BAD_REQUEST",
+            undefined,
+            undefined,
+            {
+              status: 409,
+              statusText: "CONFLICT",
+              headers: {},
+              config: { headers: new AxiosHeaders() },
+              data: {
+                error: "conflict",
+                message: "cannot delete an instance that still owns rows",
+                // eslint-disable-next-line camelcase -- the server's field name
+                can_remove_library: true,
+              },
+            },
+          ),
+        );
+      },
+    );
+
+    customRender(<ArrStep kind="sonarr" onNext={onNext} />);
+
+    await user.click(
+      screen.getByRole("button", { name: /remove and enter it again/i }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: /remove old sonarr/i }),
+    );
+
+    expect(
+      await screen.findByText(
+        "Old Sonarr has already synced its library, so setup cannot remove it on its own. After setup, you can delete it together with that library in Settings, Connections.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/still owns rows/)).toBeNull();
   });
 
   it("renders no skip control of its own", () => {

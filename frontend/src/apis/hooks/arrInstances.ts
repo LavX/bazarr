@@ -6,6 +6,7 @@ import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import type {
   ArrInstanceCreate,
+  ArrInstanceDeleteConflict,
   ArrInstanceTest,
   ArrInstanceTestOverrides,
   ArrInstanceUpdate,
@@ -29,6 +30,19 @@ export function getArrInstanceErrorMessage(error: unknown, fallback: string) {
 
 export function isArrInstanceConflict(error: unknown) {
   return error instanceof AxiosError && error.response?.status === 409;
+}
+
+// The body of a refused delete, or null for any other error.
+export function getArrInstanceDeleteConflict(
+  error: unknown,
+): ArrInstanceDeleteConflict | null {
+  if (!isArrInstanceConflict(error)) {
+    return null;
+  }
+  const data = (error as AxiosError).response?.data;
+  return data && typeof data === "object"
+    ? (data as ArrInstanceDeleteConflict)
+    : null;
 }
 
 export function useArrInstances() {
@@ -136,14 +150,24 @@ export function useDeleteArrInstance() {
   const client = useQueryClient();
   return useMutation({
     mutationKey: [...arrKey, QueryKeys.Actions, "delete"],
-    mutationFn: (id: number) => api.arrInstances.remove(id),
+    mutationFn: ({
+      id,
+      removeLibrary,
+    }: {
+      id: number;
+      removeLibrary?: boolean;
+    }) => api.arrInstances.remove(id, removeLibrary),
     onSuccess: () => {
       showNotification({ color: "green", message: "Instance deleted" });
       client.invalidateQueries({ queryKey: arrKey });
+      // Deleting a kind's last instance switches that kind off on the server.
+      void client.invalidateQueries({
+        queryKey: [QueryKeys.System, QueryKeys.Settings],
+      });
     },
     onError: (error) => {
-      // A 409 conflict (instance still owns synced media) is surfaced inline
-      // by the delete confirmation dialog with actionable guidance.
+      // A 409 (the instance still owns synced media, or its library sync is
+      // running) is surfaced inline by the delete confirmation dialog.
       if (isArrInstanceConflict(error)) {
         return;
       }

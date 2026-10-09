@@ -534,9 +534,12 @@ def get_upgradable_episode_subtitles(history_id_list=None):
         TableHistory, subtitles_to_upgrade, _provider_sourced_actions(query_actions), minimum_timestamp)
 
     upgradable_episode_subtitles = {}
+    # The history page passes every id of one show. Membership against the
+    # list walked every candidate row past thousands of ids; a set does not.
+    history_id_set = set(history_id_list) if history_id_list else None
     for subtitle_to_upgrade in subtitles_to_upgrade:
         # exclude subtitles that are not in history_id_list if provided
-        if history_id_list and subtitle_to_upgrade.id not in history_id_list:
+        if history_id_set is not None and subtitle_to_upgrade.id not in history_id_set:
             continue
 
         # exclude a translated row a real subtitle has already replaced, so the
@@ -625,9 +628,12 @@ def get_upgradable_movies_subtitles(history_id_list=None):
         TableHistoryMovie, subtitles_to_upgrade, _provider_sourced_actions(query_actions), minimum_timestamp)
 
     upgradable_movie_subtitles = {}
+    # The history page passes every id of one movie. Membership against the
+    # list walked every candidate row past thousands of ids; a set does not.
+    history_id_set = set(history_id_list) if history_id_list else None
     for subtitle_to_upgrade in subtitles_to_upgrade:
         # exclude subtitles that are not in history_id_list if provided
-        if history_id_list and subtitle_to_upgrade.id not in history_id_list:
+        if history_id_set is not None and subtitle_to_upgrade.id not in history_id_set:
             continue
 
         # exclude a translated row a real subtitle has already replaced, so the

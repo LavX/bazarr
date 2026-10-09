@@ -78,6 +78,115 @@ def test_ffsubsync_searches_without_an_offset_window(monkeypatch):
     assert args.max_offset_seconds == UNCONSTRAINED_MAX_OFFSET_SECONDS
 
 
+@pytest.mark.parametrize('debug', [False, True], ids=['normal', 'subsync debug'])
+def test_ffsubsync_keeps_a_log_file_only_for_a_subsync_debug_test_case(monkeypatch, debug):
+    """ffsubsync appends to <folder>/ffsubsync.log on every run it is given a folder,
+    and nothing rotates that file. Only the debug test case archive needs it."""
+    from app.config import settings
+    from subtitles.tools.subsyncer import SubSyncer
+
+    monkeypatch.setattr(settings.subsync, 'debug', debug)
+    monkeypatch.setattr(SubSyncer, '_ensure_ffmpeg_path', lambda self: '/usr/bin')
+    syncer = SubSyncer()
+    syncer.reference, syncer.srtin = '/media/Movie.mkv', '/media/Movie.en.srt'
+
+    args = syncer._build_ffsubsync_args(output_path='/media/Movie.en.synced.srt', no_fix_framerate=True, gss=False,
+                                        log_dir_path='/tmp/one-run' if debug else None)
+
+    assert args.log_dir_path == ('/tmp/one-run' if debug else None)
+    assert args.make_test_case is debug
+
+
+@pytest.mark.parametrize('outcome', ['returns', 'raises'])
+def test_a_subsync_debug_run_logs_into_a_folder_of_its_own_that_goes_away(monkeypatch, tmp_path, outcome):
+    """The test case archive then holds this run's log alone, and nothing is left
+    behind to grow in the log folder."""
+    import os
+
+    import ffsubsync.ffsubsync
+    from app.config import settings
+    from app.get_args import args as bazarr_args
+    from subtitles.tools.subsyncer import SubSyncer
+
+    monkeypatch.setattr(settings.subsync, 'debug', True)
+    monkeypatch.setattr(SubSyncer, '_ensure_ffmpeg_path', lambda self: '/usr/bin')
+    seen = {}
+
+    def fake_run(parsed):
+        seen['folder'] = parsed.log_dir_path
+        seen['existed'] = os.path.isdir(parsed.log_dir_path)
+        with open(os.path.join(parsed.log_dir_path, 'ffsubsync.log'), 'w') as log:
+            log.write('this run only\n')
+        if outcome == 'raises':
+            raise RuntimeError('ffmpeg went away')
+        return {'retval': 0, 'sync_was_successful': True, 'offset_seconds': 0.0, 'framerate_scale_factor': 1.0}
+
+    monkeypatch.setattr(ffsubsync.ffsubsync, 'run', fake_run)
+    syncer = SubSyncer()
+    syncer.reference, syncer.srtin = '/media/Movie.mkv', '/media/Movie.en.srt'
+
+    if outcome == 'raises':
+        with pytest.raises(RuntimeError):
+            syncer._run_ffsubsync_engine(output_path=str(tmp_path / 'out.srt'), no_fix_framerate=True, gss=False)
+    else:
+        syncer._run_ffsubsync_engine(output_path=str(tmp_path / 'out.srt'), no_fix_framerate=True, gss=False)
+
+    assert seen['existed'] is True
+    assert os.path.realpath(seen['folder']) != os.path.realpath(os.path.join(bazarr_args.config_dir, 'log'))
+    assert not os.path.exists(seen['folder'])
+
+
+def test_a_normal_run_gives_ffsubsync_no_log_folder(monkeypatch, tmp_path):
+    import ffsubsync.ffsubsync
+    from app.config import settings
+    from subtitles.tools.subsyncer import SubSyncer
+
+    monkeypatch.setattr(settings.subsync, 'debug', False)
+    monkeypatch.setattr(SubSyncer, '_ensure_ffmpeg_path', lambda self: '/usr/bin')
+    seen = []
+    monkeypatch.setattr(ffsubsync.ffsubsync, 'run', lambda parsed: seen.append(parsed) or {'retval': 0})
+    syncer = SubSyncer()
+    syncer.reference, syncer.srtin = '/media/Movie.mkv', '/media/Movie.en.srt'
+
+    syncer._run_ffsubsync_engine(output_path=str(tmp_path / 'out.srt'), no_fix_framerate=True, gss=False)
+
+    assert seen[0].log_dir_path is None
+    assert seen[0].make_test_case is False
+
+
+@pytest.mark.parametrize('first_read', [False, True], ids=['turned on mid-run', 'turned off mid-run'])
+def test_a_test_case_and_its_log_folder_come_from_one_reading_of_the_setting(monkeypatch, tmp_path, first_read):
+    """A test case run without a folder of its own writes ffsubsync.log into the
+    process's working directory, where parallel syncs share one file. The setting
+    can change while a sync starts, so one run must not read it twice."""
+    import itertools
+    from types import SimpleNamespace
+
+    import ffsubsync.ffsubsync
+    from subtitles.tools import subsyncer
+    from subtitles.tools.subsyncer import SubSyncer
+
+    monkeypatch.setattr(SubSyncer, '_ensure_ffmpeg_path', lambda self: '/usr/bin')
+    syncer = SubSyncer()
+    syncer.reference, syncer.srtin = '/media/Movie.mkv', '/media/Movie.en.srt'
+    readings = itertools.cycle([first_read, not first_read])
+
+    class ChangingSubsync(SimpleNamespace):
+        @property
+        def debug(self):
+            return next(readings)
+
+    monkeypatch.setattr(subsyncer, 'settings', SimpleNamespace(subsync=ChangingSubsync(
+        force_audio=False, use_original_language=False, auto_use_original_language=False)))
+    seen = []
+    monkeypatch.setattr(ffsubsync.ffsubsync, 'run', lambda parsed: seen.append(parsed) or {'retval': 0})
+
+    syncer._run_ffsubsync_engine(output_path=str(tmp_path / 'out.srt'), no_fix_framerate=True, gss=False)
+
+    assert seen[0].make_test_case is first_read
+    assert (seen[0].log_dir_path is not None) is first_read
+
+
 def test_offset_beyond_the_maximum_is_rejected_and_the_next_engine_runs(monkeypatch, in_memory_runner, tmp_path):
     subtitle = tmp_path / 'Movie.en.srt'
     _write(subtitle, 'original')

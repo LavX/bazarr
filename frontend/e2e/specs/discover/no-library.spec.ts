@@ -1,11 +1,23 @@
 /**
  * Discover on an instance with no Sonarr, Radarr or Sportarr, which is what
- * the shared instance is. Nothing here changes it.
+ * the shared instance is. Nothing here changes it. An install that does have
+ * one, such as a real one the suite is pointed at, skips these tests.
  */
 import { expect, test } from "@e2e/fixtures";
 import { openDiscover } from "@e2e/lib/discover";
 
 test.describe("Discover without a library", { tag: ["@discover"] }, () => {
+  test.beforeEach(async ({ api }) => {
+    // The app's own test for "no library": no enabled instance of any kind.
+    const response = await api.get("/api/system/arr-instances");
+    expect(response.ok()).toBe(true);
+    const instances = (await response.json()) as { enabled: boolean }[];
+    test.skip(
+      instances.some((instance) => instance.enabled),
+      "Skipped: this instance has an enabled Sonarr, Radarr or Sportarr",
+    );
+  });
+
   test("the global catalog is the whole page", async ({ page }) => {
     await openDiscover(page);
 

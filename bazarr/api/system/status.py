@@ -13,6 +13,7 @@ from sportarr.info import get_sportarr_info
 from sonarr.info import get_sonarr_info
 from app.get_args import args
 from init import startTime
+from utilities.build import read_build_stamp
 
 from ..utils import authenticate
 
@@ -50,6 +51,8 @@ class SystemStatus(Resource):
         if 'BAZARR_PACKAGE_AUTHOR' in os.environ and os.environ['BAZARR_PACKAGE_AUTHOR'] != '':
             package_version = f'{package_version} by {os.environ["BAZARR_PACKAGE_AUTHOR"]}'
 
+        build_stamp = read_build_stamp()
+
         try:
             timezone = get_localzone_name() or "Undefined"
         except Exception:
@@ -59,6 +62,8 @@ class SystemStatus(Resource):
         system_status = {}
         system_status.update({'bazarr_version': os.environ["BAZARR_VERSION"]})
         system_status.update({'package_version': package_version})
+        system_status.update({'build_commit': build_stamp.get('commit', '')})
+        system_status.update({'build_date': build_stamp.get('date', '')})
         system_status.update({'sonarr_version': get_sonarr_info.version()})
         system_status.update({'radarr_version': get_radarr_info.version()})
         system_status.update({'sportarr_version': get_sportarr_info.version()})

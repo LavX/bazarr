@@ -48,7 +48,13 @@ interface CatalogCardProps {
   isLocal?: boolean;
 }
 
-type CtaState = "install" | "installed" | "update" | "restart" | "broken";
+type CtaState =
+  | "install"
+  | "installed"
+  | "update"
+  | "restart"
+  | "broken"
+  | "blocked";
 
 function isPendingRemoval(installed: ProviderHubInstallation | null) {
   return installed?.pending_restart === true && installed.state === "removed";
@@ -76,9 +82,13 @@ function deriveCta(
   manifestValid: boolean,
 ): CtaState {
   if (!installed && !manifestValid) return "broken";
-  if (!installed) return "install";
+  if (!installed) return entry.blocked_reason ? "blocked" : "install";
   if (installed.pending_restart) return "restart";
-  if (installed.active_version && installed.active_version !== entry.version) {
+  if (
+    installed.active_version &&
+    installed.active_version !== entry.version &&
+    !entry.blocked_reason
+  ) {
     return "update";
   }
   return "installed";
@@ -157,6 +167,14 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
             </Button>
           </Tooltip>
         );
+      case "blocked":
+        return (
+          <Tooltip label={entry.blocked_reason} multiline w={260}>
+            <Button size="xs" variant="light" color="gray" disabled>
+              Unavailable
+            </Button>
+          </Tooltip>
+        );
       case "install":
       default:
         return (
@@ -175,7 +193,7 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
 
   const sourceLabel = isLocal
     ? "local package"
-    : (entry.source ?? entry.source_name ?? "Unknown source");
+    : (entry.source_name ?? entry.source ?? "Unknown source");
   const description =
     (manifest?.description as string | undefined) ??
     (manifest?.summary as string | undefined) ??
@@ -257,6 +275,11 @@ export const CatalogCard: FunctionComponent<CatalogCardProps> = ({
       </div>
       {description && (
         <div className={styles.hubCardDescription}>{description}</div>
+      )}
+      {installed?.trust_note && (
+        <div className={styles.hubCardDescription} role="note">
+          {installed.trust_note}
+        </div>
       )}
       <TranslationQuotaLine status={installed?.runtime_status} />
       <div className={styles.hubCardChips}>

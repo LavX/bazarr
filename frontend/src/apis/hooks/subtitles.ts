@@ -1,6 +1,7 @@
 import { showNotification } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { refreshWhenJobFinishes } from "@/apis/hooks/jobWatch";
+import { invalidateEpisodeHistory } from "@/apis/queries/episodeHistory";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import { BatchAction, BatchItem, BatchOptions } from "@/apis/raw/subtitles";
@@ -18,44 +19,54 @@ export function useSubtitleAction() {
     mutationFn: (param: Param) =>
       api.subtitles.modify(param.action, param.form),
 
-    onSuccess: (_, param) => {
-      // TODO: Query less
-      const { type, id } = param.form;
-      if (type === "episode") {
-        // id is the sonarrEpisodeId, the upstream id. Keep it: the ref-track
-        // query is keyed [Episodes, sonarrEpisodeId, Subtitles, ...], so this
-        // prefix-matches and refreshes it, and those queries are active exactly
-        // when this mutation fires. It does NOT reach the [Episodes, localId]
-        // entries primed by cacheEpisodes, which are read directly rather than
-        // through a query, so nothing there needs invalidating.
-        client.invalidateQueries({
-          queryKey: [QueryKeys.Episodes, id],
-        });
-        client.invalidateQueries({
-          queryKey: [QueryKeys.Series],
-        });
-      } else if (type === "sports") {
-        // Sports library, wanted, history and exclusion queries all live under
-        // this one root, as the batch hook already invalidates them. Falling
-        // through to the Movies prefix refreshed nothing here: it matched no
-        // sports query and left the lists stale until the socket event arrived.
-        client.invalidateQueries({
-          queryKey: [QueryKeys.Sports],
-        });
-      } else {
-        // The prefix, not [Movies, id]. Movie queries are cached under the
-        // canonical LOCAL id while this id is the upstream radarrId, so a key
-        // built from it matches nothing once the two diverge, which is any
-        // install with a second Radarr. Worse than a no-op: it can match a
-        // different movie that happens to hold that local id.
-        // One call: react-query matches by key prefix, so [Movies] already
-        // covers [Movies, History] and every per-movie entry. The separate
-        // history invalidation this replaces was needed only while the first
-        // key was [Movies, id].
-        client.invalidateQueries({
-          queryKey: [QueryKeys.Movies],
-        });
-      }
+    onSuccess: (data, param) => {
+      const refresh = () => {
+        // TODO: Query less
+        const { type, id } = param.form;
+        if (type === "episode") {
+          // id is the sonarrEpisodeId, the upstream id. Keep it: the ref-track
+          // query is keyed [Episodes, sonarrEpisodeId, Subtitles, ...], so this
+          // prefix-matches and refreshes it, and those queries are active exactly
+          // when this mutation fires. It does NOT reach the [Episodes, localId]
+          // entries primed by cacheEpisodes, which are read directly rather than
+          // through a query, so nothing there needs invalidating.
+          client.invalidateQueries({
+            queryKey: [QueryKeys.Episodes, id],
+          });
+          client.invalidateQueries({
+            queryKey: [QueryKeys.Series],
+          });
+          return invalidateEpisodeHistory(client, {
+            episodeId: id,
+            arrInstanceId: param.form.arr_instance_id,
+          });
+        } else if (type === "sports") {
+          // Sports library, wanted, history and exclusion queries all live under
+          // this one root, as the batch hook already invalidates them. Falling
+          // through to the Movies prefix refreshed nothing here: it matched no
+          // sports query and left the lists stale until the socket event arrived.
+          client.invalidateQueries({
+            queryKey: [QueryKeys.Sports],
+          });
+        } else {
+          // The prefix, not [Movies, id]. Movie queries are cached under the
+          // canonical LOCAL id while this id is the upstream radarrId, so a key
+          // built from it matches nothing once the two diverge, which is any
+          // install with a second Radarr. Worse than a no-op: it can match a
+          // different movie that happens to hold that local id.
+          // One call: react-query matches by key prefix, so [Movies] already
+          // covers [Movies, History] and every per-movie entry. The separate
+          // history invalidation this replaces was needed only while the first
+          // key was [Movies, id].
+          client.invalidateQueries({
+            queryKey: [QueryKeys.Movies],
+          });
+        }
+      };
+      // Only the episode modify answers with a job to wait on; movie and
+      // sports sync and translation still answer without one.
+      const jobId = param.form.type === "episode" ? data?.job_id : undefined;
+      return refreshWhenJobFinishes(client, jobId, refresh);
     },
   });
 }
@@ -82,13 +93,17 @@ export function useEpisodeSubtitleModification() {
         param.arrInstanceId,
       ),
 
-    onSuccess: () => {
-      // Invalidate by prefix. Series queries are cached under the canonical
-      // LOCAL series id, while seriesId here is the upstream one, so a key
-      // built from it never matched a series cache entry.
-      client.invalidateQueries({
-        queryKey: [QueryKeys.Series],
-      });
+    onSuccess: (data, param) => {
+      const refresh = () => {
+        // Invalidate by prefix. Series queries are cached under the canonical
+        // LOCAL series id, while seriesId here is the upstream one, so a key
+        // built from it never matched a series cache entry.
+        void client.invalidateQueries({
+          queryKey: [QueryKeys.Series],
+        });
+        return invalidateEpisodeHistory(client, param);
+      };
+      return refreshWhenJobFinishes(client, data?.job_id, refresh);
     },
   });
 
@@ -103,13 +118,14 @@ export function useEpisodeSubtitleModification() {
         param.arrInstanceId,
       ),
 
-    onSuccess: () => {
+    onSuccess: (_, param) => {
       // Invalidate by prefix. Series queries are cached under the canonical
       // LOCAL series id, while seriesId here is the upstream one, so a key
       // built from it never matched a series cache entry.
       client.invalidateQueries({
         queryKey: [QueryKeys.Series],
       });
+      return invalidateEpisodeHistory(client, param);
     },
   });
 
@@ -124,7 +140,7 @@ export function useEpisodeSubtitleModification() {
         param.arrInstanceId,
       ),
 
-    onSuccess: () => {
+    onSuccess: (_, param) => {
       // Invalidate by prefix. A previous targeted invalidation keyed on the
       // upstream seriesId never matched, because series queries are cached
       // under the LOCAL id; it was redundant as well as wrong, since this
@@ -132,6 +148,7 @@ export function useEpisodeSubtitleModification() {
       client.invalidateQueries({
         queryKey: [QueryKeys.Series],
       });
+      return invalidateEpisodeHistory(client, param);
     },
   });
 
@@ -346,18 +363,26 @@ export function useBatchAction() {
       action: BatchAction;
       options?: BatchOptions;
     }) => api.subtitles.batch(params.items, params.action, params.options),
-    onSuccess: (data) => {
+    onSuccess: (data, params) => {
       // The request only queues the batch, so refreshing now would refetch the
       // tables before anything changed. Refresh when the job finishes instead.
       refreshWhenJobFinishes(client, data?.job_id, () => {
+        params.items.forEach((item) => {
+          if (item.type === "episode" || item.type === "series") {
+            void invalidateEpisodeHistory(client, {
+              episodeId: item.sonarrEpisodeId,
+              seriesId: item.sonarrSeriesId,
+              arrInstanceId: item.arr_instance_id,
+            });
+          }
+        });
         void client.invalidateQueries({
           queryKey: [QueryKeys.Series],
         });
         void client.invalidateQueries({
           queryKey: [QueryKeys.Movies],
         });
-        // Episode/movie history live under the Series/Movies roots above. The
-        // only history query not covered is the System history stats.
+        // Score history has its own key and is refreshed per owner above.
         void client.invalidateQueries({
           queryKey: [QueryKeys.System, QueryKeys.History],
         });
@@ -468,6 +493,10 @@ export function usePromoteSyncSubtitle() {
     onSuccess: (_, params) => {
       if (params.mediaType === "episode") {
         client.invalidateQueries({ queryKey: [QueryKeys.Series] });
+        void invalidateEpisodeHistory(client, {
+          episodeId: params.mediaId,
+          arrInstanceId: params.arrInstanceId,
+        });
       } else if (params.mediaType === "sports") {
         // Same reason as useSubtitleAction: every sports query hangs off this
         // one root, while the Movies prefix that used to take this branch
@@ -476,9 +505,7 @@ export function usePromoteSyncSubtitle() {
       } else {
         client.invalidateQueries({ queryKey: [QueryKeys.Movies] });
       }
-      // Episode, movie and sports history live under the Series, Movies and
-      // Sports roots above; only the System history stats need a separate
-      // invalidation.
+      // Also refresh the general history statistics.
       client.invalidateQueries({
         queryKey: [QueryKeys.System, QueryKeys.History],
       });
@@ -523,6 +550,10 @@ export function useSubtitleCreate() {
     onSuccess: (_, params) => {
       if (params.mediaType === "episode") {
         client.invalidateQueries({ queryKey: [QueryKeys.Series] });
+        return invalidateEpisodeHistory(client, {
+          episodeId: params.mediaId,
+          arrInstanceId: params.arrInstanceId,
+        });
       } else if (params.mediaType === "sports") {
         // Same reason as useSubtitleAction: every sports query hangs off this
         // one root, while the Movies prefix that used to take this branch

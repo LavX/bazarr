@@ -17,6 +17,8 @@ logic:
 import os
 import types
 
+import pytest
+
 from sqlalchemy import insert
 
 from app.database import TableShows, TableEpisodes, TableMovies
@@ -148,15 +150,101 @@ def test_signalr_zero_instances_falls_back_to_scalar_path(monkeypatch):
 
     monkeypatch.setattr(sc.threading, "Thread", _FakeThread)
     monkeypatch.setattr(sc, "_enabled_instances", lambda kind: [])
+    monkeypatch.setattr(sc, "_has_instances", lambda kind: False)
 
     singleton = sc.SonarrSignalrClient()
     extras = []
     clients = sc._start_clients_for_kind("sonarr", singleton, extras, sc.SonarrSignalrClient)
 
-    # No enabled instance -> the singleton falls back to the scalar/default path.
+    # No instance at all -> the singleton falls back to the scalar/default path.
     assert singleton.arr_instance_id is None
     assert clients == [singleton]
     assert extras == []
+
+
+@pytest.mark.parametrize("kind", ["sonarr", "radarr"])
+def test_signalr_starts_no_feed_when_every_instance_of_the_kind_is_disabled(
+        schema_session, monkeypatch, kind):
+    """Deleting the only enabled instance while a disabled one remains leaves
+    the kind switched on. The scalar fallback would then connect with the
+    stored connection settings, which still describe the deleted server."""
+    import app.signalr_client as sc
+    from arr_instances.repository import ArrInstanceRepository
+
+    repo = ArrInstanceRepository(schema_session)
+    enabled = repo.create(kind, "Main", port=1)
+    repo.create(kind, "Spare", port=2, enabled=False)
+    repo.delete(enabled.id)
+    schema_session.commit()
+    monkeypatch.setattr(sc, "database", schema_session)
+    started = []
+    monkeypatch.setattr(sc.threading, "Thread",
+                        lambda target=None, **_kw: types.SimpleNamespace(
+                            daemon=False, start=lambda: started.append(target)))
+
+    client_cls = sc.SonarrSignalrClient if kind == "sonarr" else sc.RadarrSignalrClient
+    singleton = client_cls(arr_instance_id=enabled.id)
+    extras = [client_cls(arr_instance_id=99)]
+    stopped = []
+    for client in [singleton, *extras]:
+        monkeypatch.setattr(client, "stop", lambda client=client: stopped.append(client))
+    old_extras = list(extras)
+
+    clients = sc._start_clients_for_kind(kind, singleton, extras, client_cls)
+
+    assert clients == []
+    assert started == []
+    # What ran before is stopped, as on any restart.
+    assert stopped == [singleton, *old_extras]
+    assert extras == []
+    # Never pointed at the scalar fallback.
+    assert singleton.arr_instance_id is not None
+
+
+@pytest.mark.parametrize("kind", ["sonarr", "radarr"])
+def test_a_feed_left_unstarted_for_disabled_instances_is_not_a_disconnection(
+        schema_session, monkeypatch, kind):
+    """With every instance of a switched-on kind disabled, nothing is expected
+    to connect. Discover and the live badge must not report that as a feed
+    that is down, and the next start with an enabled instance counts again."""
+    import app.signalr_client as sc
+    from app.config import settings
+    from arr_instances.repository import ArrInstanceRepository
+    from discover.summary import _live_feed_observations
+
+    repo = ArrInstanceRepository(schema_session)
+    spare = repo.create(kind, "Spare", port=2, enabled=False)
+    schema_session.commit()
+    monkeypatch.setattr(sc, "database", schema_session)
+    monkeypatch.setattr(sc.threading, "Thread",
+                        lambda target=None, **_kw: types.SimpleNamespace(
+                            daemon=False, start=lambda: None))
+    client_cls = sc.SonarrSignalrClient if kind == "sonarr" else sc.RadarrSignalrClient
+    singleton = client_cls(arr_instance_id=spare.id)
+    monkeypatch.setattr(singleton, "stop", lambda: None)
+    monkeypatch.setattr(sc, f"{kind}_signalr_client", singleton)
+    monkeypatch.setattr(sc, f"_{kind}_signalr_clients", [])
+    other = "radarr" if kind == "sonarr" else "sonarr"
+    monkeypatch.setattr(settings.general, f"use_{kind}", True)
+    monkeypatch.setattr(settings.general, f"use_{other}", False)
+    all_connected = getattr(sc, f"all_{kind}_signalr_connected")
+
+    assert getattr(sc, f"start_{kind}_signalr")() == []
+    assert _live_feed_observations() == []
+    assert all_connected() is True
+    # Its error handler's restart() does not bring it up either.
+    started = []
+    monkeypatch.setattr(singleton, "start", lambda: started.append(singleton))
+    singleton.restart()
+    assert started == []
+    monkeypatch.delattr(singleton, "start")
+
+    repo.update(spare.id, enabled=True)
+    schema_session.commit()
+    assert getattr(sc, f"start_{kind}_signalr")() == [singleton]
+    assert _live_feed_observations() == [
+        {"kind": kind, "arr_instance_id": spare.id, "connected": False}]
+    assert all_connected() is False
 
 
 def test_signalr_multi_instance_fans_out_per_instance(monkeypatch):

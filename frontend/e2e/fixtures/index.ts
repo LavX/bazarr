@@ -17,29 +17,24 @@
  * `baseURL` follows `bazarr`, so page.goto("/setup") just works, and `api` is
  * a request context that sends the API key on every call. Against an instance
  * with a login, every browser context starts with the session global setup
- * signed in once for the run.
+ * signed in once for the run. `page` loads a page again when a host network
+ * change dropped its scripts (see lib/network.ts).
  */
-import type { BazarrInstance } from "@e2e/lib/container";
+import type { BazarrInstance, ContainerSlot } from "@e2e/lib/container";
 import {
+  containerForFile,
   DEFAULT_IMAGE,
   dockerUnavailable,
   externalBazarr,
-  startBazarr,
+  REMOVAL_ALLOWANCE_MS,
 } from "@e2e/lib/container";
+import { reloadOnNetworkChange } from "@e2e/lib/network";
 import { sharedBazarr } from "@e2e/lib/shared";
 import type { APIRequestContext } from "@playwright/test";
 import { expect, test as base } from "@playwright/test";
 
-/** Extra time a test gets when it has to wait for a container to boot. */
-const STARTUP_ALLOWANCE_MS = 200_000;
-
-interface Held {
-  file: string;
-  instance: BazarrInstance;
-}
-
 interface WorkerFixtures {
-  containerSlot: { held: Held | null };
+  containerSlot: ContainerSlot;
 }
 
 interface TestFixtures {
@@ -50,11 +45,13 @@ interface TestFixtures {
 export const test = base.extend<TestFixtures, WorkerFixtures>({
   containerSlot: [
     async ({}, use) => {
-      const slot: { held: Held | null } = { held: null };
+      const slot: ContainerSlot = { held: null };
       await use(slot);
       await slot.held?.instance.stop();
     },
-    { scope: "worker" },
+    // A worker fixture otherwise gets the suite's test timeout, and removing
+    // the last file's container can take longer than that on a busy host.
+    { scope: "worker", timeout: REMOVAL_ALLOWANCE_MS },
   ],
 
   bazarr: async ({ containerSlot }, use, testInfo) => {
@@ -68,21 +65,20 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
     testInfo.skip(missing !== null, `Skipped: ${missing}`);
 
     if (testInfo.project.name === "stateless") {
-      testInfo.setTimeout(testInfo.timeout + STARTUP_ALLOWANCE_MS);
-      await use(await sharedBazarr());
+      await use(await sharedBazarr(testInfo));
       return;
     }
 
-    if (containerSlot.held?.file !== testInfo.file) {
-      await containerSlot.held?.instance.stop();
-      containerSlot.held = null;
-      testInfo.setTimeout(testInfo.timeout + STARTUP_ALLOWANCE_MS);
-      containerSlot.held = {
-        file: testInfo.file,
-        instance: await startBazarr({ image }),
-      };
-    }
-    await use(containerSlot.held.instance);
+    await use(
+      await containerForFile(containerSlot, testInfo.file, testInfo, {
+        image,
+      }),
+    );
+  },
+
+  page: async ({ page }, use, testInfo) => {
+    reloadOnNetworkChange(page, testInfo);
+    await use(page);
   },
 
   storageState: async ({ storageState }, use) => {

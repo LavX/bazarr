@@ -1103,6 +1103,13 @@ def test_a_full_rescan_clears_the_overflow_it_covers(monkeypatch):
     assert _rescan(monkeypatch, snap, refusing) == {'requested': 2, 'failed': 1}
     assert workers.status(snap.id)['error_code'] == 'queue_overflow'
 
+    # Nor is one that failed in a way the client never turned into a refusal.
+    failing = _Rescanner('plex', answers={('movie',): KeyError('Items'),
+                                          ('episode',): {'status': 'requested'},
+                                          ('sports',): {'status': 'requested'}})
+    assert _rescan(monkeypatch, snap, failing) == {'requested': 2, 'failed': 1}
+    assert workers.status(snap.id)['error_code'] == 'queue_overflow'
+
     _rescan(monkeypatch, snap, _Rescanner('plex'))
     assert workers.status(snap.id)['error_code'] is None
 
@@ -1139,6 +1146,83 @@ def test_a_server_that_cannot_be_reached_stops_the_run_at_once(monkeypatch, code
         _rescan(monkeypatch, snapshot('plex'), client)
     assert error.value.code == code
     assert client.calls == [('movie',)]
+
+
+def test_a_scope_that_fails_unexpectedly_is_counted_and_logged(monkeypatch, caplog):
+    """Only a refusal used to count as a failure. Anything else, such as a
+    KeyError from a response shaped differently than the client expects, went
+    to the debug log, so the button reported success with nothing failed and
+    the log above debug held no trace of it."""
+    import logging
+    client = _Rescanner('plex', answers={('movie',): {'status': 'requested'},
+                                         ('episode',): KeyError('Items'),
+                                         ('sports',): {'status': 'requested'}})
+    with caplog.at_level(logging.WARNING):
+        assert _rescan(monkeypatch, snapshot('plex'), client) == {'requested': 2, 'failed': 1}
+    assert client.calls == [('movie',), ('episode',), ('sports',)]
+    record, = [record for record in caplog.records if 'episode' in record.getMessage()]
+    assert record.levelno == logging.WARNING
+    assert record.exc_info and record.exc_info[0] is KeyError
+
+
+def test_a_run_that_failed_unexpectedly_everywhere_is_not_a_missing_library(monkeypatch):
+    """With nothing requested and nothing counted as refused, the run told the
+    user the server held no library the instance points at, which sends them
+    to a setting that is fine."""
+    from media_servers.http import MediaServerError
+    client = _Rescanner('plex', answers={('movie',): TypeError('synthetic'),
+                                         ('episode',): TypeError('synthetic'),
+                                         ('sports',): TypeError('synthetic')})
+    with pytest.raises(MediaServerError) as error:
+        _rescan(monkeypatch, snapshot('plex'), client)
+    assert error.value.code == 'internal_error'
+    assert client.calls == [('movie',), ('episode',), ('sports',)]
+
+
+class _ForeignRefusal(Exception):
+    """A MediaServerError of another module generation: same code, other class."""
+
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
+def test_a_refusal_is_read_by_its_code_not_its_class(monkeypatch):
+    """As the refresh worker does, so a refusal whose class came from another
+    module generation is still counted as that refusal, not as a fault."""
+    client = _Rescanner('plex', answers={('movie',): _ForeignRefusal('server_error'),
+                                         ('episode',): {'status': 'requested'}})
+    assert _rescan(monkeypatch, snapshot('plex'), client) == {'requested': 1, 'failed': 1}
+
+    client = _Rescanner('plex', answers={('movie',): _ForeignRefusal('timeout'),
+                                         ('episode',): {'status': 'requested'}})
+    with pytest.raises(_ForeignRefusal) as error:
+        _rescan(monkeypatch, snapshot('plex'), client)
+    assert error.value.code == 'timeout'
+    assert client.calls == [('movie',)]
+
+
+def test_a_code_that_is_not_a_refusal_is_still_a_fault(monkeypatch, caplog):
+    """Only a code the dispatcher knows is a refusal. Other exceptions carry
+    codes of their own, as SQLAlchemy's do, and one of those was counted as a
+    refusal and logged without the traceback that finds the fault."""
+    import logging
+    from media_servers.http import MediaServerError
+    client = _Rescanner('plex', answers={('movie',): _ForeignRefusal('e3q8'),
+                                         ('episode',): {'status': 'requested'}})
+    with caplog.at_level(logging.WARNING):
+        assert _rescan(monkeypatch, snapshot('plex'), client) == {'requested': 1, 'failed': 1}
+    record, = [record for record in caplog.records if 'movie' in record.getMessage()]
+    assert record.levelno == logging.WARNING
+    assert 'unexpected error' in record.getMessage()
+    assert record.exc_info and record.exc_info[0] is _ForeignRefusal
+
+    client = _Rescanner('plex', answers={('movie',): _ForeignRefusal('e3q8'),
+                                         ('episode',): _ForeignRefusal('e3q8')})
+    with pytest.raises(MediaServerError) as error:
+        _rescan(monkeypatch, snapshot('plex'), client)
+    assert error.value.code == 'internal_error'
+    assert client.calls == [('movie',), ('episode',), ('sports',)]
 
 
 # --- The real OAuth handlers, against a faked Plex ---------------------------

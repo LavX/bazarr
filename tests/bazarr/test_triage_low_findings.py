@@ -1,5 +1,5 @@
 # coding=utf-8
-"""Two defects the v2.6.0 pre-release triage turned up.
+"""Defects that pre-release triage turned up, the first two before v2.6.0.
 
 1. ``apply_default_profile`` binds every unprofiled item id into a single IN
    clause. SQLite built with the legacy limit rejects a statement binding more
@@ -12,9 +12,19 @@
    jobs are threads in one process, so two syncs starting together can both
    install, and the second one's sweep can delete the directory the first is
    about to hand to a running alass.
+
+3. ``get_online_announcements`` indexed the announcements list with the entry
+   itself whenever an entry had no ``enabled`` or ``dismissible``, and the
+   TypeError turned System > Announcements and every badge refresh into a 500.
+   The file is stored exactly as downloaded, so an entry of any other wrong
+   shape, a timestamp too large to date, text that cannot be hashed, or a file
+   that is not JSON or not UTF-8, did the same.
 """
+import hashlib
+import json
 import os
 import threading
+from datetime import datetime
 
 import pytest
 
@@ -159,3 +169,196 @@ def test_concurrent_callers_install_one_launcher(tmp_path, monkeypatch):
     assert len(installs) == 1, (
         f'{len(installs)} threads installed a launcher; only one should have, and '
         'the others must reuse it')
+
+
+# ------------------------------------------------- the announcements file
+
+class _NothingDismissed:
+    """The dismissed-announcement lookup, answering that nothing is dismissed."""
+
+    def execute(self, statement):
+        return self
+
+    def first(self):
+        return None
+
+
+@pytest.fixture
+def announcements(tmp_path, monkeypatch):
+    """The announcements module, reading its file from an empty config dir."""
+    from app import announcements
+
+    (tmp_path / 'config').mkdir()
+    monkeypatch.setattr(announcements.args, 'config_dir', str(tmp_path))
+    monkeypatch.setattr(announcements, 'database', _NothingDismissed())
+    return announcements
+
+
+def _write_announcements(announcements, payload):
+    path = os.path.join(announcements.args.config_dir, 'config', 'announcements.json')
+    if isinstance(payload, bytes):
+        with open(path, 'wb') as handle:
+            handle.write(payload)
+    else:
+        with open(path, 'w', encoding='utf-8') as handle:
+            json.dump(payload, handle)
+
+
+def test_an_announcement_without_the_flags_is_enabled_and_dismissible(announcements):
+    """parse_announcement_dict already assumes both flags are on when missing."""
+    _write_announcements(announcements, {'data': [{'text': 'Hello', 'timestamp': 1_700_000_000}]})
+
+    assert announcements.get_online_announcements() == [
+        {'text': 'Hello', 'timestamp': 1_700_000_000, 'enabled': True, 'dismissible': True}]
+
+    listed = announcements.get_all_announcements()
+    assert [(item['text'], item['enabled'], item['dismissible'], item['hash']) for item in listed] == [
+        ('Hello', True, True, hashlib.sha256(b'Hello').hexdigest())]
+
+
+def test_explicit_announcement_flags_are_kept(announcements):
+    _write_announcements(announcements, {'data': [
+        {'text': 'Shown', 'timestamp': 1_700_000_000, 'enabled': True, 'dismissible': False},
+        {'text': 'Hidden', 'timestamp': 1_700_000_000, 'enabled': False},
+    ]})
+
+    listed = announcements.get_all_announcements()
+
+    assert [(item['text'], item['dismissible']) for item in listed] == [('Shown', False)]
+
+
+@pytest.mark.parametrize('payload', [
+    {},
+    {'data': None},
+    {'data': 'x'},
+    {'data': {'text': 'Hello', 'timestamp': 1_700_000_000}},
+    [],
+    ['x'],
+    'announcements',
+    42,
+    b'<html>not json</html>',
+    b'\xff\xfe{"data": []}',
+], ids=['no-data', 'null', 'string', 'object', 'empty-list', 'list', 'text', 'number', 'html', 'not-utf8'])
+def test_a_malformed_announcements_file_lists_nothing(announcements, payload):
+    _write_announcements(announcements, payload)
+
+    assert announcements.get_online_announcements() == []
+    assert announcements.get_all_announcements() == []
+
+
+def test_announcements_that_cannot_be_shown_are_skipped(announcements):
+    """An entry needs text to hash and an integer timestamp pretty_date can date."""
+    _write_announcements(announcements, {'data': [
+        {'text': 'Kept', 'timestamp': 1_700_000_000},
+        'junk',
+        None,
+        {'timestamp': 1_700_000_000},
+        {'text': 1, 'timestamp': 1_700_000_000},
+        {'text': '\ud800', 'timestamp': 1_700_000_000},
+        {'text': 'No timestamp'},
+        {'text': 'Text timestamp', 'timestamp': 'yesterday'},
+        {'text': 'Float timestamp', 'timestamp': 1_700_000_000.5},
+        {'text': 'Flag timestamp', 'timestamp': True},
+        {'text': 'Millisecond timestamp', 'timestamp': 1_700_000_000_000},
+        {'text': 'Huge timestamp', 'timestamp': 10 ** 20},
+        {'text': 'Huge negative timestamp', 'timestamp': -10 ** 20},
+    ]})
+
+    assert [item['text'] for item in announcements.get_all_announcements()] == ['Kept']
+
+
+@pytest.mark.parametrize('timestamp', [None, False, '', 0.0], ids=['null', 'false', 'empty', 'zero-float'])
+def test_an_announcement_with_an_empty_timestamp_is_dated_now(announcements, timestamp):
+    """pretty_date renders an empty timestamp as now, so such an entry is still shown."""
+    _write_announcements(announcements, {'data': [{'text': 'Undated', 'timestamp': timestamp}]})
+
+    listed = announcements.get_all_announcements()
+
+    assert [(item['text'], item['timestamp']) for item in listed] == [('Undated', 'now')]
+
+
+def test_entries_without_a_timestamp_sort_ahead_of_dated_ones(announcements):
+    """pretty_date dates an empty timestamp as now, so the integer sort has
+    to compare it with dated entries instead of raising, and it keeps the
+    entry ahead of the dated ones, where the age-text sort put it."""
+    now = int(datetime.now().timestamp())
+    _write_announcements(announcements, {'data': [
+        {'text': 'Undated first', 'timestamp': None},
+        {'text': 'Four months old', 'timestamp': now - 120 * 86400},
+        {'text': 'Undated second', 'timestamp': None},
+        {'text': 'Ten hours old', 'timestamp': now - 10 * 3600},
+    ]})
+
+    listed = announcements.get_all_announcements()
+
+    assert [item['text'] for item in listed] == [
+        'Undated first', 'Undated second', 'Ten hours old', 'Four months old']
+    assert [item['timestamp'] for item in listed] == [
+        'now', 'now', '10 hours ago', '4 months ago']
+
+
+def test_the_announcements_feed_lists_the_newer_entry_first(announcements):
+    """The feed is ordered by date, not by the relative-age text, whose order
+    disagrees here: '10 hours ago' sorts below '4 months ago', so sorting the
+    text lists the older entry first."""
+    now = int(datetime.now().timestamp())
+    _write_announcements(announcements, {'data': [
+        {'text': 'Four months old', 'timestamp': now - 120 * 86400},
+        {'text': 'Ten hours old', 'timestamp': now - 10 * 3600},
+    ]})
+
+    listed = announcements.get_all_announcements()
+
+    assert [item['text'] for item in listed] == ['Ten hours old', 'Four months old']
+    assert [item['timestamp'] for item in listed] == ['10 hours ago', '4 months ago']
+
+
+def test_announcements_sharing_a_timestamp_keep_their_file_order(announcements):
+    """Entries with the same date keep the order the announcements.json file
+    lists them in, since the sort is stable. This also holds while the sort is
+    on the age text, where both entries share one string; it guards the
+    equal-timestamp criterion of the date sort."""
+    _write_announcements(announcements, {'data': [
+        {'text': 'First in the file', 'timestamp': 1_700_000_000},
+        {'text': 'Second in the file', 'timestamp': 1_700_000_000},
+    ]})
+
+    assert [item['text'] for item in announcements.get_all_announcements()] == [
+        'First in the file', 'Second in the file']
+
+
+@pytest.mark.parametrize('payload, count', [
+    ({'data': [
+        {'text': 'No flags', 'timestamp': 1_700_000_000},
+        'junk',
+        {'text': 'No timestamp'},
+        {'timestamp': 1_700_000_000},
+        {'text': 'Flagged', 'timestamp': 1_700_000_000, 'enabled': True, 'dismissible': True},
+    ]}, 2),
+    ({}, 0),
+    ({'data': None}, 0),
+    ({'data': 'x'}, 0),
+], ids=['bad-entries', 'no-data', 'null-data', 'string-data'])
+def test_the_badge_poll_survives_a_malformed_announcements_file(
+        announcements, schema_session, monkeypatch, payload, count):
+    """GET /api/badges counts the announcements on every refresh, so a feed with
+    entries or a data key of the wrong shape must still let every badge answer."""
+    from flask import Flask
+
+    from api.badges import badges
+    from sportarr import workflows
+
+    monkeypatch.setattr(badges, 'database', schema_session)
+    monkeypatch.setattr(badges, 'get_throttled_providers', lambda: {})
+    monkeypatch.setattr(badges, 'get_health_issues', lambda: [])
+    monkeypatch.setattr(badges, 'all_sonarr_signalr_connected', lambda: True)
+    monkeypatch.setattr(badges, 'all_radarr_signalr_connected', lambda: True)
+    monkeypatch.setattr(badges, 'all_sportarr_sse_connected', lambda: True)
+    monkeypatch.setattr(workflows, 'wanted_badge', lambda session: 0)
+    _write_announcements(announcements, payload)
+
+    with Flask(__name__).test_request_context('/api/badges'):
+        result = badges.Badges.get.__wrapped__(badges.Badges())
+
+    assert result['announcements'] == count
+    assert (result['episodes'], result['movies'], result['providers'], result['status']) == (0, 0, 0, 0)

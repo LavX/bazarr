@@ -34,6 +34,10 @@ from ..core.translator_utils import add_translator_info, get_description, create
 logger = logging.getLogger(__name__)
 DEFAULT_GEMINI_BATCH_SIZE = 300
 DEFAULT_GEMINI_KEY_COOLDOWN_SECONDS = 60
+# Connect and read seconds. Gemini sends nothing until a whole batch is
+# translated, so the read budget has to cover a large batch; a hung call then
+# fails into the normal retry path instead of holding the job forever.
+GEMINI_REQUEST_TIMEOUT = (10, 600)
 _GEMINI_KEY_COOLDOWNS = {}
 _GEMINI_KEY_COOLDOWNS_LOCK = threading.Lock()
 
@@ -156,9 +160,10 @@ class GeminiTranslatorService:
                 return self.dest_srt_file
             if self.media_type == 'episode':
                 history_log(action=6, sonarr_series_id=self.sonarr_series_id, sonarr_episode_id=self.sonarr_episode_id,
-                            result=result)
+                            result=result, arr_instance_id=self.arr_instance_id)
             else:
-                history_log_movie(action=6, radarr_id=self.radarr_id, result=result)
+                history_log_movie(action=6, radarr_id=self.radarr_id, result=result,
+                                  arr_instance_id=self.arr_instance_id)
 
     @staticmethod
     def get_instruction(language: str, description: str) -> str:
@@ -388,17 +393,21 @@ class GeminiTranslatorService:
             total (int): Total number of subtitles to translate
         """
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.current_api_key}"
+        # The key goes in a header: a failed request's error text carries the URL
+        # into job messages and the log.
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent"
 
         payload = json.dumps(self._build_generate_payload(batch), ensure_ascii=False)
         headers = {
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'x-goog-api-key': self.current_api_key,
         }
 
         try:
             check_cancelled(self.cancel)
             jobs_queue.update_job_progress(job_id=self.job_id)
-            response = requests.request("POST", url, headers=headers, data=payload)
+            response = requests.request("POST", url, headers=headers, data=payload,
+                                        timeout=GEMINI_REQUEST_TIMEOUT)
             check_cancelled(self.cancel)
             response.raise_for_status()  # Raise an exception for bad status codes
 

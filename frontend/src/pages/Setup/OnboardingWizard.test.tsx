@@ -1,8 +1,11 @@
 import userEvent, { UserEvent } from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useSettingsMutation } from "@/apis/hooks";
 import { customRender, screen, waitFor } from "@/tests";
+import server from "@/tests/mocks/node";
 import OnboardingWizardView from "./OnboardingWizard";
+import { settleSetupComplete } from "./setupCompleteCache";
 
 // Navigation + the settings mutation are the only external effects we assert.
 const navigate = vi.fn();
@@ -30,7 +33,38 @@ vi.mock("@/apis/hooks", async (importOriginal) => {
   };
 });
 
+// The real cache settle unless a test holds it open, which is how the window
+// between the write landing and the settings read coming back is staged.
+vi.mock("./setupCompleteCache", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./setupCompleteCache")>();
+  return {
+    ...actual,
+    settleSetupComplete: vi.fn(actual.settleSetupComplete),
+  };
+});
+
 const mockedSettingsMutation = vi.mocked(useSettingsMutation);
+
+// Holds the next cache settle open until the returned function is called.
+function holdSettle(): () => void {
+  let settled: (() => void) | undefined;
+  vi.mocked(settleSetupComplete).mockImplementationOnce(
+    () =>
+      new Promise<void>((resolve) => {
+        settled = resolve;
+      }),
+  );
+  return () => settled?.();
+}
+
+// A write that lands at once, so what is left pending is the cache settle.
+function writeLandsAtOnce() {
+  mutate.mockImplementation(
+    (_input: unknown, opts?: { onSuccess?: () => unknown }) => {
+      void opts?.onSuccess?.();
+    },
+  );
+}
 
 describe("OnboardingWizardView", () => {
   beforeEach(() => {
@@ -337,6 +371,84 @@ describe("OnboardingWizardView", () => {
     expect(
       screen.getByRole("button", { name: /^leave setup$/i }),
     ).toBeInTheDocument();
+  });
+
+  it("cannot be dismissed while the settings read is still settling", async () => {
+    // The write answers before the cache settles, and the settle is what the
+    // navigation waits for. Only the write counted as pending, so for that
+    // second wait Keep going, Escape and the close button all worked, and the
+    // reader who used one still landed on the home page.
+    const user = userEvent.setup();
+    const settle = holdSettle();
+    writeLandsAtOnce();
+
+    customRender(<OnboardingWizardView />);
+
+    await user.click(screen.getByRole("button", { name: /set up later/i }));
+    await user.click(
+      await screen.findByRole("button", { name: /^leave setup$/i }),
+    );
+
+    expect(mutate).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: /keep going/i })).toBeDisabled();
+    // Loading, so a second press cannot write again.
+    expect(
+      screen.getByRole("button", { name: /^leave setup$/i }),
+    ).toBeDisabled();
+    await user.keyboard("{Escape}");
+    expect(
+      screen.getByRole("button", { name: /^leave setup$/i }),
+    ).toBeInTheDocument();
+    expect(navigate).not.toHaveBeenCalledWith("/");
+
+    settle();
+
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("/"));
+    expect(navigate.mock.calls.filter(([to]) => to === "/").length).toBe(1);
+    expect(mutate).toHaveBeenCalledTimes(1);
+  });
+
+  it("Finish takes Back and Set up later away until it has left", async () => {
+    // Back unmounted Finish while its write or the settle after it was still
+    // going, and the success that followed cleared the wizard and navigated
+    // away from under the step the reader had gone back to.
+    const user = userEvent.setup();
+    localStorage.setItem("bazarr.onboarding.intent", "discover");
+    localStorage.setItem("bazarr.onboarding.step", "finish");
+    server.use(
+      http.get("/api/system/media-server-instances", () =>
+        HttpResponse.json({ data: [] }),
+      ),
+    );
+    const settle = holdSettle();
+    writeLandsAtOnce();
+
+    customRender(<OnboardingWizardView />);
+
+    await screen.findByRole("heading", { name: /you are all set/i });
+    expect(screen.getByRole("button", { name: /^back$/i })).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: /finish and open discover/i }),
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: /^back$/i }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.getByRole("button", { name: /set up later/i }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: /finish and open discover/i }),
+    ).toBeDisabled();
+    expect(navigate).not.toHaveBeenCalledWith("/discover");
+
+    settle();
+
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("/discover"));
+    expect(mutate).toHaveBeenCalledTimes(1);
   });
 
   it("the providers step can be skipped instead of trapping the reader", async () => {

@@ -130,7 +130,11 @@ export const UpdatesPanel: FunctionComponent<UpdatesPanelProps> = ({
               </Text>
               <div className={styles.cardGrid}>
                 {stagedRows.map((p) => {
-                  const latest = getLatestCatalogEntry(catalog, p.provider_id);
+                  const latest = getLatestCatalogEntry(
+                    catalog,
+                    p.provider_id,
+                    p.source_id ?? null,
+                  );
                   return (
                     <UpdateCard
                       key={p.provider_id}
@@ -162,7 +166,11 @@ export const UpdatesPanel: FunctionComponent<UpdatesPanelProps> = ({
               </Group>
               <div className={styles.cardGrid}>
                 {availableRows.map((p) => {
-                  const latest = getLatestCatalogEntry(catalog, p.provider_id);
+                  const latest = getLatestCatalogEntry(
+                    catalog,
+                    p.provider_id,
+                    p.source_id ?? null,
+                  );
                   if (!latest) return null;
                   return (
                     <UpdateCard

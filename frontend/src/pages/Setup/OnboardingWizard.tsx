@@ -64,6 +64,11 @@ const OnboardingWizardBody: FunctionComponent = () => {
   const client = useQueryClient();
   const [leaving, setLeaving] = useState(false);
   const [leaveError, setLeaveError] = useState<string | null>(null);
+  // The write answers before the cache has settled, and the navigation waits
+  // for the settle. TanStack does not count a mutate callback's own work as
+  // pending, so without this the modal went live again for that second wait.
+  const [settling, setSettling] = useState(false);
+  const leavePending = mutation.isPending || settling;
 
   const signature = drafts
     .map((draft) => `${draft.draftId}:${draft.kind}:${draft.instanceId ?? ""}`)
@@ -235,11 +240,17 @@ const OnboardingWizardBody: FunctionComponent = () => {
   // also fail, and a failed write used to produce nothing at all: no spinner,
   // no message, no navigation, just a button that had apparently done nothing.
   const handleLeave = () => {
+    if (leavePending) {
+      return;
+    }
     setLeaveError(null);
     mutation.mutate(
       { "settings-general-setup_complete": true },
       {
         onSuccess: async () => {
+          // Never cleared: the navigation below unmounts the wizard, and the
+          // settle does not reject.
+          setSettling(true);
           await settleSetupComplete(client, true);
           left.current = true;
           reset();
@@ -299,15 +310,16 @@ const OnboardingWizardBody: FunctionComponent = () => {
           // Dismissing does not cancel the write, so while one is in the air
           // there is nothing to dismiss to: pressing Keep going and then
           // landing on the home page anyway is the answer the reader did not
-          // give.
+          // give. The same holds until the cache has settled and the
+          // navigation has gone.
           onClose={() => {
-            if (!mutation.isPending) {
+            if (!leavePending) {
               setLeaving(false);
             }
           }}
-          closeOnClickOutside={!mutation.isPending}
-          closeOnEscape={!mutation.isPending}
-          withCloseButton={!mutation.isPending}
+          closeOnClickOutside={!leavePending}
+          closeOnEscape={!leavePending}
+          withCloseButton={!leavePending}
           title="Leave setup?"
           centered
         >
@@ -325,15 +337,11 @@ const OnboardingWizardBody: FunctionComponent = () => {
               <Button
                 variant="default"
                 onClick={() => setLeaving(false)}
-                disabled={mutation.isPending}
+                disabled={leavePending}
               >
                 Keep going
               </Button>
-              <Button
-                color="red"
-                onClick={handleLeave}
-                loading={mutation.isPending}
-              >
+              <Button color="red" onClick={handleLeave} loading={leavePending}>
                 Leave setup
               </Button>
             </Group>

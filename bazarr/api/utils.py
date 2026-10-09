@@ -1,6 +1,7 @@
 # coding=utf-8
 
 import ast
+import contextlib
 import hmac
 import logging
 
@@ -9,6 +10,7 @@ from flask import request, abort
 from operator import itemgetter
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from app import activity
 from app.config import settings, base_url
 from languages.get_languages import language_from_alpha2, alpha3_from_alpha2
 from app.database import get_audio_profile_languages, get_desired_languages
@@ -17,6 +19,62 @@ from utilities.path_mappings import path_mappings
 None_Keys = ['null', 'undefined', '', None]
 
 False_Keys = ['False', 'false', '0']
+
+# A subtitle file uploaded on its own. A VobSub .sub or an .ass carrying its
+# fonts runs to tens of megabytes, so the ceiling is generous.
+MAX_SUBTITLE_UPLOAD_SIZE = 150 * 1024 * 1024  # 150 MiB
+
+# Room for the multipart boundaries and the small form fields sent beside the
+# file, so a file right at its ceiling is not refused by the declared length.
+UPLOAD_FORM_ALLOWANCE = 64 * 1024
+
+_UPLOAD_COPY_CHUNK = 1024 * 1024
+
+
+class UploadTooLarge(Exception):
+    pass
+
+
+def upload_too_large_message(what, limit):
+    return f'{what} is too large: the limit is {limit // (1024 * 1024)} MiB.'
+
+
+def upload_declared_too_large(limit):
+    """Whether the request declares a body too large for a file of ``limit`` bytes.
+
+    Checked before anything touches ``request.files``, so an oversized upload
+    is refused before its body is parsed.
+    """
+    length = request.content_length
+    return bool(length) and length > limit + UPLOAD_FORM_ALLOWANCE
+
+
+def read_bounded_upload(upload, limit):
+    """The uploaded file's bytes, reading at most one byte past ``limit``.
+
+    Raises UploadTooLarge instead of buffering an oversized file whole.
+    """
+    data = upload.read(limit + 1)
+    if len(data) > limit:
+        raise UploadTooLarge()
+    return data
+
+
+def copy_bounded_upload(upload, destination, limit):
+    """Copy the uploaded file into ``destination`` in chunks, and return its size.
+
+    Raises UploadTooLarge as soon as more than ``limit`` bytes have arrived;
+    whatever was written by then is the caller's to discard.
+    """
+    size = 0
+    while True:
+        chunk = upload.read(min(_UPLOAD_COPY_CHUNK, limit + 1 - size))
+        if not chunk:
+            return size
+        size += len(chunk)
+        if size > limit:
+            raise UploadTooLarge()
+        destination.write(chunk)
 
 
 def image_proxy_path_with_instance(path, arr_instance_id):
@@ -60,6 +118,17 @@ def _safe_apikey_compare(provided, expected):
     return hmac.compare_digest(str(provided), str(expected))
 
 
+def _user_request_scope():
+    """Mark the request thread as a user's own for the authenticated handler.
+
+    A webhook is a media server's machine call, not a user's, so its requests
+    stay unmarked: the jobs one triggers deeper in the chain announce nothing.
+    """
+    if '/webhooks/' in request.path:
+        return contextlib.nullcontext()
+    return activity.user_action()
+
+
 def authenticate(actual_method):
     @wraps(actual_method)
     def wrapper(*args, **kwargs):
@@ -67,20 +136,29 @@ def authenticate(actual_method):
         apikey_header = request.headers.get('X-API-KEY')
 
         if _safe_apikey_compare(apikey_header, apikey_settings):
-            return actual_method(*args, **kwargs)
+            with _user_request_scope():
+                return actual_method(*args, **kwargs)
 
-        # Legacy: accept API key from query string or form data with deprecation warning
-        # Suppress warning for webhook endpoints (Plex webhooks use ?apikey= in callback URLs)
+        # Legacy: accept API key from query string or an urlencoded form body, with
+        # a deprecation warning. Suppress the warning for webhook endpoints (Plex
+        # webhooks use ?apikey= in callback URLs)
+        # The form is read only for an urlencoded body. Reading request.form parses
+        # the whole request, whatever its content type, so a multipart upload was
+        # parsed (and spooled) just to look for one field: before this 401, and
+        # before the route's own declared-length refusal. An urlencoded body is
+        # the form a client posts a key in, so that fallback is kept.
         apikey_get = request.args.get('apikey')
-        apikey_post = request.form.get('apikey')
+        apikey_post = (request.form.get('apikey')
+                       if request.mimetype == 'application/x-www-form-urlencoded' else None)
         if _safe_apikey_compare(apikey_get, apikey_settings) or _safe_apikey_compare(apikey_post, apikey_settings):
             if '/webhooks/' not in request.path:
                 logging.warning(
-                    'API key passed via query string or form data is deprecated. '
+                    'API key passed via query string or an urlencoded form body is deprecated. '
                     'Use the X-API-KEY header instead. '
                     'Endpoint: %s %s', request.method, request.path
                 )
-            return actual_method(*args, **kwargs)
+            with _user_request_scope():
+                return actual_method(*args, **kwargs)
 
         return abort(401)
 

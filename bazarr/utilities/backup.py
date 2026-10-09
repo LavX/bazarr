@@ -14,6 +14,7 @@ from glob import glob
 
 from app.get_args import args
 from app.config import settings
+from app.postgres_url import postgres_engine_url
 from app.event_handler import event_stream
 from app.jobs_queue import jobs_queue
 from literals import EXIT_RESTORE_ERROR
@@ -91,48 +92,80 @@ def _postgres_enabled():
     return bool(settings.postgresql.enabled)
 
 
+def _split_query_host_entries(value):
+    """The query's host entries, each split from the port it may carry inline.
+
+    A URL can name its hosts in the query string with the port inside the
+    entry, the way postgresql:///?host=primary:5432&host=standby:5433 does.
+    The application's dialect splits those into host='primary,standby' and
+    port='5432,5433' before libpq sees them, so the same split is made here: a
+    conninfo host list that keeps the inline ports, host=primary:5432,standby:5433,
+    is not a form libpq reads, and the reachability check, pg_dump and
+    pg_restore would all fail against a database the application connects to.
+
+    An entry is split on its last colon, and only when what follows is digits
+    or nothing, so an IPv6 address is not taken for a host and a port.
+
+    Returns (hosts, ports): the hosts in order, and the port of each entry in
+    the same order, None for an entry that carries none.
+    """
+    entries = value if isinstance(value, tuple) else value.split(',')
+    hosts, ports = [], []
+    for entry in entries:
+        host, colon, port = entry.rpartition(':')
+        if colon and (port.isdigit() or not port):
+            hosts.append(host)
+            ports.append(port)
+        else:
+            hosts.append(entry)
+            ports.append(None)
+    return hosts, ports
+
+
 def _postgres_connection_settings():
     """Resolve the PostgreSQL connection the application itself uses.
 
-    Mirrors app.database: the POSTGRES_* environment variables win over
-    config.yaml, and a connection URL fills in whatever the individual keys
-    leave empty.
+    Goes through the application's own resolver, so a backup reaches the same
+    database the instance runs on.
     """
-    connection = {
-        'host': os.getenv('POSTGRES_HOST', settings.postgresql.host),
-        'port': os.getenv('POSTGRES_PORT', settings.postgresql.port),
-        'database': os.getenv('POSTGRES_DATABASE', settings.postgresql.database),
-        'username': os.getenv('POSTGRES_USERNAME', settings.postgresql.username),
-        'password': os.getenv('POSTGRES_PASSWORD', settings.postgresql.password),
-        # libpq options from the URL's query string, such as sslmode, sslcert
-        # or service. The application's own connection uses them.
-        'options': {},
+    try:
+        url = postgres_engine_url(settings)
+    except Exception as error:
+        # Raised rather than allowed out: restore_from_backup runs during
+        # boot, and an unparseable URL must fail the backup, not the start.
+        raise BackupError(f'The configured PostgreSQL connection URL cannot be parsed: {error}') from error
+
+    # libpq options from the URL's query string, such as sslmode, sslcert or
+    # service. The application's own connection uses them. A host entry's
+    # inline port is split off the way the dialect splits it, so the conninfo
+    # holds the host list and the port list libpq reads.
+    options = {key: ','.join(value) if isinstance(value, tuple) else value
+               for key, value in url.query.items() if key != 'host'}
+    if 'host' in url.query:
+        query_hosts, query_ports = _split_query_host_entries(url.query['host'])
+        options['host'] = ','.join(query_hosts)
+        if any(port is not None for port in query_ports):
+            # The ports the entries carry win over the port the URL itself
+            # holds, as they do for the application's own connection.
+            options['port'] = ','.join(port or '' for port in query_ports)
+    # A password in the query goes the way of every other password, through
+    # PGPASSWORD, never onto the command line. It wins over the URL's own
+    # password, as it does for the application's connection.
+    query_password = options.pop('password', None)
+    return {
+        'host': url.host,
+        'port': url.port,
+        'database': url.database,
+        'username': url.username,
+        'password': query_password or url.password,
+        'options': options,
     }
 
-    postgres_url = os.getenv('POSTGRES_URL', settings.postgresql.url)
-    if postgres_url:
-        from sqlalchemy.engine import make_url
-        try:
-            parsed_url = make_url(postgres_url)
-        except Exception as error:
-            # Raised rather than allowed out: restore_from_backup runs during
-            # boot, and an unparseable URL must fail the backup, not the start.
-            raise BackupError(f'The configured PostgreSQL connection URL cannot be parsed: {error}') from error
-        for key, value in (('host', parsed_url.host), ('port', parsed_url.port),
-                           ('database', parsed_url.database), ('username', parsed_url.username),
-                           ('password', parsed_url.password)):
-            if not connection[key]:
-                connection[key] = value
-        options = {key: ','.join(value) if isinstance(value, tuple) else value
-                   for key, value in parsed_url.query.items()}
-        # A password in the query goes the way of every other password, through
-        # PGPASSWORD, never onto the command line.
-        query_password = options.pop('password', None)
-        if not connection['password']:
-            connection['password'] = query_password
-        connection['options'] = options
 
-    return connection
+def _postgres_names_database(connection):
+    """Whether the connection names a database, in its fields, its query or a service entry."""
+    options = connection['options']
+    return bool(connection['database'] or options.get('dbname') or options.get('service'))
 
 
 def _postgres_conninfo(connection):
@@ -231,26 +264,23 @@ def _postgres_server_major(connection):
     Best effort and only used to word a warning, so every failure here is
     answered with None rather than an exception.
 
-    The image ships psycopg 2 (postgres-requirements.txt) and the test
-    environment installs psycopg 3, so whichever is present answers.
+    The image ships psycopg 2 (postgres-requirements.txt), and CI installs the
+    same file. psycopg 3 answers only where psycopg 2 is missing, as on a
+    source install that chose it. The connection is made the way the
+    reachability check makes it, so the URL's query options apply here too.
     """
     try:
-        arguments = dict(host=connection['host'] or None,
-                         port=int(connection['port']) if connection['port'] else None,
-                         dbname=connection['database'],
-                         user=connection['username'] or None,
-                         password=str(connection['password']) if connection['password'] else None,
-                         connect_timeout=5)
         try:
-            import psycopg2
+            import psycopg2 as driver
         except ImportError:
-            import psycopg
-            with psycopg.connect(**arguments) as server_connection:
-                return str(server_connection.info.server_version // 10000)
+            import psycopg as driver
+        arguments = {'connect_timeout': 5}
+        if connection['password']:
+            arguments['password'] = str(connection['password'])
         # A psycopg 2 connection used as a context manager ends the transaction
         # and stays open, so it is closed explicitly.
-        with closing(psycopg2.connect(**arguments)) as server_connection:
-            return str(server_connection.server_version // 10000)
+        with closing(driver.connect(_postgres_conninfo(connection), **arguments)) as server_connection:
+            return str(server_connection.info.server_version // 10000)
     except Exception:
         return None
 
@@ -286,7 +316,7 @@ def _dump_postgres_database(dest_path):
         raise BackupError(f'pg_dump was not found on PATH. {_PG_TOOLS_HINT}')
 
     connection = _postgres_connection_settings()
-    if not connection['database']:
+    if not _postgres_names_database(connection):
         raise BackupError('No PostgreSQL database name is configured, so there is nothing to back up.')
 
     # Custom format rather than plain SQL: it is what pg_restore reads, and it
@@ -303,7 +333,7 @@ def _restore_postgres_database(dump_path):
         raise BackupError(f'pg_restore was not found on PATH. {_PG_TOOLS_HINT}')
 
     connection = _postgres_connection_settings()
-    if not connection['database']:
+    if not _postgres_names_database(connection):
         raise BackupError('No PostgreSQL database name is configured, so there is nothing to restore into.')
     _check_postgres_reachable(connection)
 

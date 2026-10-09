@@ -15,6 +15,7 @@ import {
   useDiscoverPreview,
   useDiscoverSearch,
 } from "@/apis/hooks/discover";
+import { JOB_WATCH_POLL_MS } from "@/apis/hooks/jobWatch";
 import { QueryKeys } from "@/apis/queries/keys";
 import api from "@/apis/raw";
 import {
@@ -32,6 +33,7 @@ import type {
 } from "@/types/discover";
 import { writeStoredValue } from "@/utilities/browserStorage";
 import { filenameFromContentDisposition, saveBlobAs } from "@/utilities/files";
+import { UNKNOWN_JOB_OUTCOME } from "@/utilities/jobs";
 import {
   copyTargetKey,
   DISCOVER_LANGUAGE_KEY,
@@ -548,6 +550,48 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
     [saveTicket],
   );
 
+  /** Move a pending row on from its job's terminal state. */
+  const applyJob = useCallback(
+    (feedback: DiscoverDownloadFeedback, key: string, job: System.Jobs) => {
+      if (job.status === "completed") {
+        const action = job.action;
+        if (
+          action?.kind === "discover.save" &&
+          typeof action.ticket === "number"
+        )
+          void autoSave(
+            job.job_id,
+            action.ticket,
+            typeof action.filename === "string" ? action.filename : undefined,
+          );
+        else
+          dispatch({
+            type: "download",
+            key,
+            feedback: {
+              ...feedback,
+              status: "failed",
+              message: job.progress_message || "The download was cancelled.",
+              retryable: true,
+            },
+          });
+      } else if (job.status === "failed") {
+        dispatch({
+          type: "download",
+          key,
+          feedback: {
+            ...feedback,
+            status:
+              job.error?.reason === "expired_handle" ? "expired" : "failed",
+            message: job.error?.message,
+            retryable: !!job.retryable,
+          },
+        });
+      }
+    },
+    [autoSave],
+  );
+
   /**
    * Follow the row's job in the standard jobs cache, which the jobs socket
    * events keep current. A retry started from the job's notification or the
@@ -598,38 +642,8 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
       return;
     }
     seenJobs.current.add(job.job_id);
-    if (job.status === "completed") {
-      const action = job.action;
-      if (action?.kind === "discover.save" && typeof action.ticket === "number")
-        void autoSave(
-          job.job_id,
-          action.ticket,
-          typeof action.filename === "string" ? action.filename : undefined,
-        );
-      else
-        dispatch({
-          type: "download",
-          key,
-          feedback: {
-            ...feedback,
-            status: "failed",
-            message: job.progress_message || "The download was cancelled.",
-            retryable: true,
-          },
-        });
-    } else if (job.status === "failed") {
-      dispatch({
-        type: "download",
-        key,
-        feedback: {
-          ...feedback,
-          status: job.error?.reason === "expired_handle" ? "expired" : "failed",
-          message: job.error?.message,
-          retryable: !!job.retryable,
-        },
-      });
-    }
-  }, [client, autoSave]);
+    applyJob(feedback, key, job);
+  }, [client, applyJob]);
 
   useEffect(
     () =>
@@ -646,6 +660,46 @@ export function DiscoverProvider({ children }: PropsWithChildren) {
   );
   // The job may have finished before its id reached the row.
   useEffect(() => followJob(), [state.download, followJob]);
+
+  // The cache only moves on socket events. A terminal event lost while the
+  // socket was down, or a refetch that failed, would leave the row pending
+  // until its ticket expired, so a pending row also asks for its job directly.
+  const pendingJobId =
+    state.download?.status === "pending" ? state.download.jobId : undefined;
+  useEffect(() => {
+    if (pendingJobId === undefined) return;
+    const timer = setInterval(() => {
+      api.system
+        .jobs(pendingJobId)
+        .then((jobs) => {
+          const feedback = currentState.current.download;
+          if (
+            feedback?.status !== "pending" ||
+            feedback.jobId !== pendingJobId ||
+            !feedback.contextKey
+          )
+            return;
+          const job = Array.isArray(jobs) ? jobs[0] : undefined;
+          if (job) {
+            applyJob(feedback, feedback.contextKey, job);
+            return;
+          }
+          // Aged out of the queue's short history, or the backend restarted.
+          dispatch({
+            type: "download",
+            key: feedback.contextKey,
+            feedback: {
+              ...feedback,
+              status: "failed",
+              message: UNKNOWN_JOB_OUTCOME,
+              retryable: true,
+            },
+          });
+        })
+        .catch(() => undefined);
+    }, JOB_WATCH_POLL_MS);
+    return () => clearInterval(timer);
+  }, [pendingJobId, applyJob]);
 
   /** Save a ticket; a failure also fails the row that is waiting on it. */
   const saveOrFail = useCallback(

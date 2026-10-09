@@ -24,10 +24,12 @@ from .manifest import validate_manifest
 from .bundle import verify_bundle_tree
 from .migration import (
     MIGRATED_BUILT_IN_PROVIDER_IDS,
+    OFFICIAL_CATALOG_PROVIDER_IDS,
     RETIRED_BUILT_IN_PROVIDER_IDS,
     validation_built_in_provider_ids,
 )
 from .state import (
+    OFFICIAL_CATALOG_REPO,
     OFFICIAL_CATALOG_SOURCE_ID,
     OFFICIAL_CATALOG_URL,
     catalog_source_for_entry,
@@ -328,6 +330,144 @@ def _fetch_github_catalog(
     return payload, commit
 
 
+# The official source is trusted only on these branches of the official catalog
+# repository, or on a commit that is an ancestor of one of them.
+_TRUSTED_BRANCHES = ("main", "beta")
+# The reasons a refresh records when it trusts the official source.
+_TRUST_REASONS = ("default branch", "beta", *(f"ancestor of {branch}" for branch in _TRUSTED_BRANCHES))
+
+
+class _NoAnswer(Exception):
+    """GitHub could not be asked (rate limit, network, an error status).
+
+    Not an answer either way: no trust is granted or taken on it."""
+
+
+def _github_api(path: str) -> Any:
+    """GET ``api.github.com/repos/<path>``. None is GitHub's 404: it does not know
+    the commit, which is an answer, unlike any other failure."""
+    try:
+        response = requests.get(f"https://api.github.com/repos/{path}", timeout=20)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.HTTPError as error:
+        status = getattr(getattr(error, "response", None), "status_code", None)
+        if status == 404:
+            return None
+        if status in (403, 429):
+            raise _NoAnswer("could not verify: rate limited") from error
+        raise _NoAnswer(f"could not verify: GitHub returned HTTP {status}") from error
+    except (requests.exceptions.RequestException, ValueError) as error:
+        raise _NoAnswer("could not verify: GitHub could not be reached") from error
+
+
+def _is_commit_sha(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 40 and all(
+        char in "0123456789abcdefABCDEF" for char in value
+    )
+
+
+def _compare_status(repo: str, base: str, head: str) -> str | None:
+    """GitHub's compare status of ``head`` against ``base``, or None for a 404."""
+    comparison = _github_api(f"{repo}/compare/{base}...{head}")
+    if comparison is None:
+        return None
+    status = comparison.get("status") if isinstance(comparison, dict) else None
+    if not isinstance(status, str):
+        raise _NoAnswer("could not verify: GitHub returned no comparison")
+    return status
+
+
+class _OfficialAncestry:
+    """Whether a commit is on ``main`` or ``beta`` of the official catalog.
+
+    One instance serves one refresh, which reads both branch heads in a single
+    call. Answers are kept in state per commit and branch, and hold only for the
+    heads they were computed against. When a head moved by fast-forward, its yes
+    answers carry over, because an ancestor of the old head is one of the new head
+    too; its no answers are asked again. A head that moved any other way is asked
+    again in full. A failure is never stored.
+    """
+
+    def __init__(self, state: dict[str, Any]):
+        cache = state.get("trust_cache")
+        if not isinstance(cache, dict):
+            cache = {}
+            state["trust_cache"] = cache
+        self._cache = cache
+        self._heads_read = False
+        self._heads_failure: str | None = None
+
+    def _read_heads(self) -> None:
+        if self._heads_read:
+            return
+        self._heads_read = True
+        try:
+            refs = _github_api(f"{OFFICIAL_CATALOG_REPO}/git/matching-refs/heads/")
+        except _NoAnswer as error:
+            self._heads_failure = str(error)
+            return
+        heads: dict[str, str] = {}
+        for ref in refs if isinstance(refs, list) else []:
+            name = str((ref or {}).get("ref") or "").removeprefix("refs/heads/")
+            sha = ((ref or {}).get("object") or {}).get("sha")
+            if name in _TRUSTED_BRANCHES and _is_commit_sha(sha):
+                heads[name] = sha.lower()
+        if set(heads) != set(_TRUSTED_BRANCHES):
+            # Both branches always exist, so an answer without them is not one.
+            self._heads_failure = "could not verify: GitHub did not list main and beta"
+            return
+        previous = self._cache.get("heads") if isinstance(self._cache.get("heads"), dict) else {}
+        answers = self._cache.get("answers") if isinstance(self._cache.get("answers"), dict) else {}
+        for branch in _TRUSTED_BRANCHES:
+            old, new = previous.get(branch), heads.get(branch)
+            if old == new:
+                continue
+            fast_forward = False
+            if old and new:
+                try:
+                    fast_forward = _compare_status(OFFICIAL_CATALOG_REPO, old, new) == "ahead"
+                except _NoAnswer:
+                    fast_forward = False
+            for commit_answers in answers.values():
+                if not (fast_forward and commit_answers.get(branch) is True):
+                    commit_answers.pop(branch, None)
+        self._cache["heads"] = heads
+        self._cache["answers"] = {commit: value for commit, value in answers.items() if value}
+
+    def check(self, commit: Any) -> tuple[bool | None, str]:
+        """(True, reason), (False, reason), or (None, why it could not be asked)."""
+        if not _is_commit_sha(commit):
+            return False, "unknown commit"
+        commit = commit.lower()
+        self._read_heads()
+        if self._heads_failure:
+            return None, self._heads_failure
+        heads = self._cache["heads"]
+        answers = self._cache["answers"].setdefault(commit, {})
+        failure = None
+        for branch in _TRUSTED_BRANCHES:
+            if branch not in answers:
+                try:
+                    status = _compare_status(OFFICIAL_CATALOG_REPO, heads[branch], commit)
+                except _NoAnswer as error:
+                    failure = str(error)
+                    continue
+                # "unknown" is GitHub's 404: the commit is not in the repository.
+                answers[branch] = status in ("identical", "behind") or (
+                    "unknown" if status is None else False
+                )
+            if answers[branch] is True:
+                return True, f"ancestor of {branch}"
+        if failure:
+            if not answers:
+                del self._cache["answers"][commit]
+            return None, failure
+        if "unknown" in answers.values():
+            return False, "unknown commit"
+        return False, "outside main and beta"
+
+
 def _catalog_source_error_message(error: Exception) -> str:
     if isinstance(error, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
         return (
@@ -444,6 +584,14 @@ def remove_catalog_source(name: str) -> bool:
                     continue
                 if entry.get("source") == name or entry.get("source_name") == removed_name:
                     del entries[key]
+            # Its installs stay, with no source to update from. A source added
+            # later under the same name is a different catalog and must not
+            # inherit them.
+            for installation in (state.get("installations") or {}).values():
+                if (isinstance(installation, dict) and installation.get("source_bound")
+                        and installation.get("source_id") == name):
+                    installation["source_id"] = None
+                    installation["trust_note"] = _SOURCE_REMOVED_NOTE
             return True, removed_name
 
         removed, _removed_name = mutate_state(remove_source)
@@ -538,9 +686,21 @@ def list_catalog(auto_refresh: bool = False) -> dict[str, Any]:
     if auto_refresh and _catalog_needs_auto_refresh(state):
         refresh_catalog()
         state = load_state()
+    sources = state.get("catalog_sources") or {}
+    entries = []
+    for entry in (state.get("catalog_entries") or {}).values():
+        if isinstance(entry, dict):
+            # Named from the source record as it is now, and marked when its
+            # source may not install it.
+            source = catalog_source_for_entry(sources, entry)
+            entry = {**entry, "source_name": source.get("name") or entry.get("source")}
+            refusal = _install_refusal(state, entry.get("source"), entry.get("provider_id"))
+            if refusal:
+                entry["blocked_reason"] = refusal
+        entries.append(entry)
     return {
         "sources": list((state.get("catalog_sources") or {}).values()),
-        "entries": list((state.get("catalog_entries") or {}).values()),
+        "entries": entries,
     }
 
 
@@ -649,6 +809,157 @@ def autoinstall_enabled_builtins() -> list[str]:
     return staged
 
 
+def _set_official_trust(
+    source: dict[str, Any], commit: str, previous_commit: Any, ancestry: _OfficialAncestry
+) -> None:
+    """Trust the official source only on main or beta, or a commit on either."""
+    ref = source.get("dev_ref") or "main"
+    if ref in _TRUSTED_BRANCHES:
+        # Resolved by name in the official repository.
+        trusted, reason = True, ("default branch" if ref == "main" else "beta")
+    else:
+        trusted, reason = ancestry.check(commit)
+        if trusted is None:
+            # No answer keeps the verdict a refresh already gave this same
+            # commit, so a commit without an earlier yes stays untrusted.
+            earlier = source.get("trust_reason")
+            trusted = bool(source.get("trusted")) and previous_commit == commit and earlier in _TRUST_REASONS
+            if trusted:
+                reason = earlier
+    source["trusted"] = trusted
+    source["trust_reason"] = reason
+
+
+_UNKNOWN_SOURCE_NOTE = (
+    "No configured catalog source is known to have published this version, so it "
+    "gets no updates. Reinstall it from a catalog source to get updates again."
+)
+_SOURCE_REMOVED_NOTE = (
+    "Its catalog source was removed, so it gets no updates. Reinstall it from a "
+    "catalog source to get updates again."
+)
+_FOREIGN_REPO_NOTE = (
+    "No longer trusted: its code does not come from the official catalog repository. "
+    "Reinstall it from the official catalog to trust it again."
+)
+_SHADOWS_BUILT_IN_NOTE = (
+    " It replaces a built-in provider, so it leaves provider searches at the next restart."
+)
+
+
+def _commit_demotion_note(reason: str) -> str:
+    where = "unknown to GitHub" if reason == "unknown commit" else "outside main and beta"
+    return (
+        f"No longer trusted: the official catalog commit it was installed from is {where}. "
+        "It is trusted again once that commit is on main or beta, or when it is "
+        "reinstalled from the official catalog."
+    )
+
+
+def _demote_installation(row: dict[str, Any], note: str, shadows: bool, for_commit: bool) -> None:
+    row["trusted"] = False
+    row["source_id"] = None
+    row["source_bound"] = True
+    row["demoted_commit"] = for_commit
+    row["trust_note"] = note + (_SHADOWS_BUILT_IN_NOTE if shadows else "")
+
+
+def _bind_by_evidence(row: dict[str, Any], manifest: Any, origin: dict[str, Any], state: dict[str, Any]) -> None:
+    """Bind an untrusted install to the community source its code came from.
+
+    The evidence is its manifest equalling an entry that source holds, or its
+    catalog URL naming that source at the source's commit or an ancestor of it.
+    A matching id alone is none: an unrelated catalog can publish the same id. An
+    unanswered comparison leaves the install unbound, to be asked again.
+    """
+    sources = state.get("catalog_sources") or {}
+    manifest = manifest if isinstance(manifest, dict) else {}
+    bound = None
+    for entry in (state.get("catalog_entries") or {}).values():
+        if not isinstance(entry, dict) or entry.get("source") == OFFICIAL_CATALOG_SOURCE_ID:
+            continue
+        if entry.get("source") not in sources or not isinstance(entry.get("manifest"), dict):
+            continue
+        if (entry.get("provider_id") == manifest.get("provider_id")
+                and entry.get("version") == manifest.get("version")
+                and _trust_manifest(entry["manifest"]) == _trust_manifest(manifest)):
+            bound = entry["source"]
+            break
+    unanswered = False
+    commit = origin.get("commit")
+    for key, source in sources.items():
+        if bound or key == OFFICIAL_CATALOG_SOURCE_ID or not isinstance(source, dict):
+            continue
+        resolved = source.get("resolved_commit")
+        if origin.get("catalog_url") != source.get("url") or not (
+                _is_commit_sha(resolved) and _is_commit_sha(commit)):
+            continue
+        if resolved.lower() == commit.lower():
+            bound = key
+            continue
+        try:
+            owner, repo, _ref, _path = _parse_github_file_url(source["url"])
+            status = _compare_status(f"{owner}/{repo}", resolved, commit)
+        except CatalogSourceError:
+            continue
+        except _NoAnswer:
+            unanswered = True
+            continue
+        if status in ("identical", "behind"):
+            bound = key
+    if bound:
+        row.update(source_bound=True, source_id=bound, trust_note=None)
+    elif not unanswered:
+        row.update(source_bound=True, source_id=None, trust_note=_UNKNOWN_SOURCE_NOTE)
+
+
+def _recheck_installed_trust(state: dict[str, Any], ancestry: _OfficialAncestry) -> None:
+    """Bind, demote or restore installations by where their code came from.
+
+    Runs with every refresh of the official source, and its first run binds the
+    installs made before an install recorded its source. A trusted install stays
+    trusted only while its official commit is on main or beta, and one demoted for
+    its commit is trusted again once a later check says yes. Only a definite
+    answer changes an install; a check that fails is repeated next time.
+    """
+    built_in_ids = None
+    for provider_id, row in (state.get("installations") or {}).items():
+        if not isinstance(row, dict):
+            continue
+        if row.get("origin") == "local":
+            row["source_bound"] = True
+            continue
+        manifest = row.get("staged_manifest")
+        if not isinstance(manifest, dict):
+            manifest = row.get("manifest")
+        origin = manifest.get("source") if isinstance(manifest, dict) else None
+        origin = origin if isinstance(origin, dict) else {}
+        if not row.get("source_bound"):
+            if not row.get("trusted"):
+                _bind_by_evidence(row, manifest, origin, state)
+                continue
+            # Only the official source ever made an install trusted.
+            row["source_bound"] = True
+            row["source_id"] = OFFICIAL_CATALOG_SOURCE_ID
+        if not (row.get("trusted") or row.get("demoted_commit")):
+            continue
+        if built_in_ids is None:
+            built_in_ids = _built_in_provider_ids()
+        shadows = str(provider_id) in built_in_ids
+        if origin.get("repo") != OFFICIAL_CATALOG_REPO:
+            if row.get("trusted"):
+                _demote_installation(row, _FOREIGN_REPO_NOTE, shadows, for_commit=False)
+            continue
+        verdict, reason = ancestry.check(origin.get("commit"))
+        if verdict is None:
+            continue
+        if verdict and row.get("demoted_commit"):
+            row.update(trusted=True, source_id=OFFICIAL_CATALOG_SOURCE_ID,
+                       demoted_commit=False, trust_note=None)
+        elif not verdict and row.get("trusted"):
+            _demote_installation(row, _commit_demotion_note(reason), shadows, for_commit=True)
+
+
 def _normalize_catalog_manifest(manifest: dict[str, Any], source: dict[str, Any], commit: str) -> dict[str, Any]:
     normalized = dict(manifest)
     manifest_source = dict(normalized.get("source") or {})
@@ -678,7 +989,8 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
             entries_count = 0
             sources_count = 0
             failed_sources: list[str] = []
-            for source in (state.get("catalog_sources") or {}).values():
+            ancestry = _OfficialAncestry(state)
+            for source_key, source in (state.get("catalog_sources") or {}).items():
                 if not isinstance(source, dict):
                     continue
                 if source_ids is not None and source.get("id") not in source_ids:
@@ -687,6 +999,7 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     checkpoint(f"Fetching {source.get('name') or source.get('id') or 'a catalog source'}")
                 sources_count += 1
                 source["last_attempted_at"] = now
+                previous_commit = source.get("resolved_commit")
                 try:
                     catalog, commit = _fetch_github_catalog(
                         source["url"], override_ref=source.get("dev_ref")
@@ -700,6 +1013,10 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     failed_sources.append(source.get("name") or source.get("id") or "?")
                     continue
 
+                is_official = source_key == OFFICIAL_CATALOG_SOURCE_ID
+                if is_official:
+                    _set_official_trust(source, commit, previous_commit, ancestry)
+                    published_ids = set()
                 for item in catalog.get("providers", []):
                     if not isinstance(item, dict):
                         continue
@@ -725,12 +1042,18 @@ def refresh_catalog(source_ids: set[str] | None = None, checkpoint=None) -> dict
                     }
                     refreshed_entry_keys.add(key)
                     entries_count += 1
+                    if is_official:
+                        published_ids.add(str(provider_id))
+                if is_official and source["trusted"]:
+                    source["provider_ids"] = sorted(published_ids)
             for key, entry in list(entries.items()):
                 if not isinstance(entry, dict):
                     continue
                 if entry.get("source") in refreshed_sources:
                     if key not in refreshed_entry_keys:
                         del entries[key]
+            if source_ids is None or OFFICIAL_CATALOG_SOURCE_ID in source_ids:
+                _recheck_installed_trust(state, ancestry)
             ok_sources = sources_count - len(failed_sources)
             return {
                 "refreshed_at": now,
@@ -1163,14 +1486,44 @@ def _fetch_bundle(manifest, deadline: float | None = None) -> Path:
 _LOCAL_PACKAGE_MAX_MEMBERS = 5000
 _LOCAL_PACKAGE_MAX_TOTAL_BYTES = 100 * 1024 * 1024  # 100 MB uncompressed
 
+# The uploaded .zip itself, bounded by the upload route before it is spooled.
+MAX_LOCAL_PACKAGE_SIZE = 100 * 1024 * 1024  # 100 MiB
 
-def _safe_extract_zip(archive_bytes: bytes, dest: Path) -> None:
-    """Extract a zip into ``dest`` with zip-slip, size and read-error guards."""
+
+def local_package_uploads_dir() -> Path:
+    """Where an uploaded package waits on disk for its install job."""
+    return provider_hub_dir() / "uploads"
+
+
+def discard_local_package(path: str | Path) -> None:
+    with contextlib.suppress(OSError):
+        Path(path).unlink()
+
+
+def discard_local_package_uploads() -> None:
+    """Remove every spooled package. Run at startup: pending jobs do not survive
+    a restart, so nothing is waiting for these files any more."""
+    uploads = local_package_uploads_dir()
+    if not uploads.is_dir():
+        return
+    for leftover in uploads.iterdir():
+        if leftover.is_file():
+            discard_local_package(leftover)
+
+
+def _safe_extract_zip(package: bytes | str | Path, dest: Path) -> None:
+    """Extract a zip into ``dest`` with zip-slip, size and read-error guards.
+
+    ``package`` is the path of the spooled upload, or the package's bytes.
+    """
     dest_root = dest.resolve()
+    source = io.BytesIO(package) if isinstance(package, (bytes, bytearray)) else package
     try:
-        archive = zipfile.ZipFile(io.BytesIO(archive_bytes))
+        archive = zipfile.ZipFile(source)
     except zipfile.BadZipFile as error:
         raise ProviderHubInstallError("uploaded package is not a valid .zip archive") from error
+    except OSError as error:
+        raise ProviderHubInstallError("uploaded package could not be read") from error
     with archive:
         infos = archive.infolist()
         # Bound the work before extracting so an oversized or zip-bomb upload
@@ -1260,68 +1613,76 @@ def _trust_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def _catalog_manifest_trusted(manifest: dict[str, Any], state: dict[str, Any]) -> bool:
+def _catalog_binding(
+    manifest: dict[str, Any], state: dict[str, Any], source_id: str | None = None
+) -> tuple[str | None, bool]:
+    """The catalog source an install of ``manifest`` binds to, and its trust.
+
+    Only an entry Bazarr+ holds binds an install: one whose manifest equals this
+    one apart from ``source.trusted``, from ``source_id`` when it is given, else a
+    trusted source first. A forged manifest matches no trusted entry and installs
+    untrusted. The manifest's own source fields are data, never its identity.
+    """
     provider_id = manifest.get("provider_id")
     version = manifest.get("version")
     sources = state.get("catalog_sources") or {}
-
+    binding: tuple[str | None, bool] | None = None
     for entry in (state.get("catalog_entries") or {}).values():
         if not isinstance(entry, dict):
             continue
-        catalog_source = catalog_source_for_entry(sources, entry)
-        if not bool(catalog_source.get("trusted", False)):
-            continue
         if entry.get("provider_id") != provider_id or entry.get("version") != version:
             continue
+        if source_id is not None and entry.get("source") != source_id:
+            continue
         entry_manifest = entry.get("manifest") if isinstance(entry.get("manifest"), dict) else {}
-        if _trust_manifest(entry_manifest) == _trust_manifest(manifest):
-            return bool(entry.get("trusted", False))
-    return False
+        if _trust_manifest(entry_manifest) != _trust_manifest(manifest):
+            continue
+        trusted = bool(catalog_source_for_entry(sources, entry).get("trusted", False)) and bool(
+            entry.get("trusted", False))
+        if binding is None or (trusted and not binding[1]):
+            binding = (entry.get("source"), trusted)
+    return binding or (None, False)
 
 
-def _catalog_source_id_for_manifest(manifest: dict[str, Any], state: dict[str, Any]) -> str | None:
-    """Return the configured catalog source id whose url matches the manifest's
-    catalog_url, or None when no configured source matches."""
-    if not isinstance(manifest, dict):
-        return None
-    source = manifest.get("source")
-    catalog_url = source.get("catalog_url") if isinstance(source, dict) else None
-    if not catalog_url:
-        return None
-    for source_id, configured in (state.get("catalog_sources") or {}).items():
-        if isinstance(configured, dict) and configured.get("url") == catalog_url:
-            return source_id
+RESERVED_ID_REASON = (
+    "The official catalog publishes this provider, so only the official catalog can "
+    "install or update it."
+)
+
+
+def _reserved_provider_ids(state: dict[str, Any]) -> set[str]:
+    """Ids only the official catalog may install: its last trusted refresh, the
+    snapshot shipped with this release, and the built-in ids plugins take over."""
+    official = (state.get("catalog_sources") or {}).get(OFFICIAL_CATALOG_SOURCE_ID)
+    published = official.get("provider_ids") if isinstance(official, dict) else None
+    return (
+        {str(item) for item in published or [] if isinstance(item, str)}
+        | OFFICIAL_CATALOG_PROVIDER_IDS
+        | MIGRATED_BUILT_IN_PROVIDER_IDS
+        | RETIRED_BUILT_IN_PROVIDER_IDS
+    )
+
+
+def _install_refusal(state: dict[str, Any], source_id: str | None, provider_id: Any) -> str | None:
+    if source_id != OFFICIAL_CATALOG_SOURCE_ID and str(provider_id) in _reserved_provider_ids(state):
+        return RESERVED_ID_REASON
     return None
 
 
-def _install_origin(manifest: dict[str, Any], state: dict[str, Any]) -> tuple[str, str | None]:
-    """Resolve (origin, source_id) for a catalog install.
-
-    A catalog install is always origin="catalog"; the source_id is the configured
-    source matching the manifest's catalog_url, or None if none is configured (the
-    source may have been removed, or this is an older install). "local" is reserved
-    for uploads, which stage_install_local records explicitly. This is for
-    display/grouping only and is independent of the trust gate.
-    """
-    return ("catalog", _catalog_source_id_for_manifest(manifest, state))
-
-
 def _with_origin(provider: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-    """Ensure a serialized installation carries origin/source_id.
+    """A serialized installation with its origin and the source Bazarr+ bound it to.
 
-    A stored origin of "local" is authoritative (a local upload is never
-    relabelled as a catalog provider). Otherwise it is a catalog install and the
-    source_id is resolved from the manifest's catalog_url against the current
-    sources, so source-config changes are reflected on read.
+    The stored ``source_id`` is authoritative once the install is bound; the name
+    comes from Bazarr+'s own source record, never from the manifest. An install
+    that is not bound, or whose source is gone, has no source name.
     """
     result = dict(provider)
-    if result.get("origin") == "local":
-        result.setdefault("source_id", result.get("source_id"))
-        return result
-    result["origin"] = "catalog"
-    result["source_id"] = _catalog_source_id_for_manifest(
-        result.get("manifest") or {}, state
-    )
+    if result.get("origin") != "local":
+        result["origin"] = "catalog"
+    source_id = result.get("source_id") if result.get("source_bound") else None
+    source = (state.get("catalog_sources") or {}).get(source_id) if source_id else None
+    result["source_id"] = source_id
+    result["source_name"] = source.get("name") if isinstance(source, dict) else None
     return result
 
 
@@ -1371,6 +1732,7 @@ def _staged_installation(
         "trusted": bool(source_trusted),
         "origin": origin,
         "source_id": source_id,
+        "source_bound": True,
         "manifest": existing.get("manifest") if existing.get("active_version") else validated.raw,
         "enabled": existing.get("enabled", True),
         "config": existing.get("config", {}),
@@ -1415,6 +1777,7 @@ def _failed_installation(
         "trusted": bool(source_trusted),
         "origin": origin,
         "source_id": source_id,
+        "source_bound": True,
         "manifest": validated.raw,
         "enabled": existing.get("enabled", True),
         "config": existing.get("config", {}),
@@ -1548,10 +1911,19 @@ def _discard_stopped_install(paths, existing) -> None:
 
 def stage_install(
     manifest: dict[str, Any], install_timeout: float | None = None, checkpoint=None,
+    source_id: str | None = None,
 ) -> dict[str, Any]:
+    """Install ``manifest``, bound to the catalog entry Bazarr+ holds for it.
+
+    ``source_id`` names the source whose entry it is; without it, the entry whose
+    manifest equals this one binds it. A manifest no entry holds installs
+    untrusted with no source, so it gets no updates.
+    """
     state = load_state()
-    source_trusted = _catalog_manifest_trusted(manifest, state) if isinstance(manifest, dict) else False
-    origin, source_id = _install_origin(manifest, state) if isinstance(manifest, dict) else ("local", None)
+    if isinstance(manifest, dict):
+        source_id, source_trusted = _catalog_binding(manifest, state, source_id)
+    else:
+        source_id, source_trusted = None, False
     validated = validate_manifest(
         manifest,
         built_in_provider_ids=_validation_built_in_provider_ids(
@@ -1559,6 +1931,10 @@ def stage_install(
             source_trusted,
         ),
     )
+    refusal = _install_refusal(state, source_id, validated.provider_id)
+    if refusal:
+        raise ProviderHubInstallError(refusal)
+    origin = "catalog"
     manifest_source = validated.raw.get("source") if isinstance(validated.raw, dict) else None
     catalog_url = manifest_source.get("catalog_url") if isinstance(manifest_source, dict) else None
     return _stage_validated(
@@ -1573,15 +1949,81 @@ def stage_install(
     )
 
 
-def stage_install_local(archive_bytes: bytes, checkpoint=None) -> dict[str, Any]:
+def _held_catalog_entry(
+    state: dict[str, Any], source_id: Any, provider_id: Any, version: Any
+) -> dict[str, Any] | None:
+    for entry in (state.get("catalog_entries") or {}).values():
+        if (isinstance(entry, dict) and entry.get("source") == source_id
+                and entry.get("provider_id") == provider_id and entry.get("version") == version
+                and isinstance(entry.get("manifest"), dict)):
+            return entry
+    return None
+
+
+def _requested_entry(
+    state: dict[str, Any], source_id: Any, provider_id: Any, version: Any, manifest: Any = None,
+) -> dict[str, Any]:
+    if manifest is not None:
+        if not isinstance(manifest, dict):
+            raise ProviderHubInstallError("manifest must be an object")
+        source_id, _trusted = _catalog_binding(manifest, state)
+        if source_id is None:
+            raise ProviderHubInstallError(
+                "the manifest matches no catalog entry; install it by source, provider_id and version"
+            )
+        provider_id, version = manifest.get("provider_id"), manifest.get("version")
+    elif not all(isinstance(value, str) and value for value in (source_id, provider_id, version)):
+        raise ProviderHubInstallError("source, provider_id and version are required")
+    entry = _held_catalog_entry(state, source_id, provider_id, version)
+    if entry is None:
+        raise ProviderHubInstallError(
+            f"{source_id} does not list {provider_id} {version}; refresh the catalog and try again"
+        )
+    refusal = _install_refusal(state, source_id, provider_id)
+    if refusal:
+        raise ProviderHubInstallError(refusal)
+    return entry
+
+
+def resolve_catalog_install(
+    source_id: Any = None, provider_id: Any = None, version: Any = None, manifest: Any = None,
+) -> dict[str, Any]:
+    """The catalog entry an install request names, as ``{source, provider_id,
+    version, name}``, or ProviderHubInstallError with the reason it is refused.
+
+    A request names an entry by source, provider id and version. A raw manifest
+    is taken only when it equals an entry Bazarr+ holds, and then names that one.
+    """
+    entry = _requested_entry(load_state(), source_id, provider_id, version, manifest)
+    return {
+        "source": entry["source"],
+        "provider_id": entry["provider_id"],
+        "version": entry["version"],
+        "name": entry.get("name") or entry["provider_id"],
+    }
+
+
+def install_catalog_entry(source_id: str, provider_id: str, version: str, checkpoint=None) -> dict[str, Any]:
+    """Install the entry ``source_id`` lists for ``provider_id`` at ``version``."""
+    entry = _requested_entry(load_state(), source_id, provider_id, version)
+    return stage_install(entry["manifest"], checkpoint=checkpoint, source_id=source_id)
+
+
+def stage_install_local(package: bytes | str | Path, checkpoint=None) -> dict[str, Any]:
     """Install a Provider Hub provider from an uploaded .zip package.
+
+    ``package`` is the path of the spooled upload, or the package's bytes.
 
     A local package has no catalog vouching for it, so it is always recorded as
     origin="local" and forced untrusted: it can never shadow a built-in provider.
     Its files are still hash-verified against the manifest and smoke-tested before
     activation, exactly like a catalog install.
     """
-    if not isinstance(archive_bytes, (bytes, bytearray)) or not archive_bytes:
+    if isinstance(package, (bytes, bytearray)):
+        if not package:
+            raise ProviderHubInstallError("uploaded package is empty")
+        package = bytes(package)
+    elif not isinstance(package, (str, Path)):
         raise ProviderHubInstallError("uploaded package is empty")
 
     # A local upload can be the very first Provider Hub write, before any catalog
@@ -1590,7 +2032,7 @@ def stage_install_local(archive_bytes: bytes, checkpoint=None) -> dict[str, Any]
     hub_dir.mkdir(parents=True, exist_ok=True)
     work_dir = Path(tempfile.mkdtemp(prefix="phub-local-", dir=str(hub_dir)))
     try:
-        _safe_extract_zip(bytes(archive_bytes), work_dir)
+        _safe_extract_zip(package, work_dir)
         manifest, bundle_root = _find_local_manifest(work_dir)
         # Untrusted (full built-in set, no replacements): a local package can
         # never shadow a built-in provider.
@@ -1800,7 +2242,9 @@ def check_updates() -> dict[str, Any]:
             active_version = installation.get("active_version")
             if not active_version:
                 continue
-            latest = _latest_catalog_manifest(state, provider_id, active_version)
+            latest = _latest_catalog_manifest(
+                state, provider_id, active_version, _bound_source_id(installation)
+            )
             if not isinstance(latest, dict):
                 continue
             latest_version = latest.get("version")
@@ -1857,11 +2301,25 @@ def _version_key(version: Any) -> tuple[Any, ...] | None:
     return (0, tuple(tokens))
 
 
-def _latest_catalog_manifest(state: dict[str, Any], provider_id: str, active_version: Any) -> dict[str, Any] | None:
+def _bound_source_id(installation: dict[str, Any]) -> str | None:
+    """The source an install updates from: the one it is bound to, if any."""
+    return installation.get("source_id") if installation.get("source_bound") else None
+
+
+def _latest_catalog_manifest(
+    state: dict[str, Any], provider_id: str, active_version: Any, source_id: str | None,
+) -> dict[str, Any] | None:
+    """The newest version ``source_id`` lists for ``provider_id`` that this host can
+    run. An install updates only from the source it is bound to, so an install with
+    none gets no update, and a reserved id is updated only from the official one."""
+    if source_id is None or _install_refusal(state, source_id, provider_id):
+        return None
     active_key = _version_key(active_version)
     candidates: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
     for entry in (state.get("catalog_entries") or {}).values():
         if not isinstance(entry, dict) or entry.get("provider_id") != provider_id:
+            continue
+        if entry.get("source") != source_id:
             continue
         manifest = entry.get("manifest")
         if not isinstance(manifest, dict):
@@ -1870,6 +2328,14 @@ def _latest_catalog_manifest(state: dict[str, Any], provider_id: str, active_ver
         if version_key is None:
             continue
         if active_key is not None and version_key <= active_key:
+            continue
+        try:
+            validate_manifest(
+                manifest,
+                built_in_provider_ids=_validation_built_in_provider_ids(
+                    manifest, bool(entry.get("trusted", False))),
+            )
+        except ValueError:
             continue
         candidates.append((version_key, manifest))
     if not candidates:
@@ -1885,10 +2351,12 @@ def apply_update(provider_id: str, checkpoint=None) -> dict[str, Any] | None:
         # A local package is never replaced by a catalog update; ignore the request.
         return _redact_installation(provider)
     state = load_state()
-    manifest = provider.get("available_manifest") or _latest_catalog_manifest(
+    source_id = _bound_source_id(provider)
+    manifest = _latest_catalog_manifest(
         state,
         provider_id,
         provider.get("active_version") or provider.get("staged_version"),
+        source_id,
     )
     if not isinstance(manifest, dict):
         target_name = provider.get("name") or provider_id
@@ -1912,7 +2380,7 @@ def apply_update(provider_id: str, checkpoint=None) -> dict[str, Any] | None:
             )
         return _redact_installation(provider)
     try:
-        return stage_install(manifest, checkpoint=checkpoint)
+        return stage_install(manifest, checkpoint=checkpoint, source_id=source_id)
     except ProviderHubInstallError:
         return get_provider(provider_id)
 

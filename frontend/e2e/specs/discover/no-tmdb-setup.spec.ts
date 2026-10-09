@@ -20,6 +20,25 @@ const SETUP_COPY = [
   /explore\s+beyond\s+your\s+library/i,
 ];
 
+/**
+ * The feeds below Trending. Each ends with its titles, its notice that TMDB
+ * is down, or its text for a window with nothing in it.
+ */
+const OTHER_FEEDS = [
+  {
+    region: "New episodes",
+    list: "New episodes",
+    notice:
+      /^(New episodes are temporarily unavailable|No qualifying episodes were found)/,
+  },
+  {
+    region: "Recent digital releases",
+    list: "Recent digital films",
+    notice:
+      /^(Digital releases are temporarily unavailable|No recent digital releases found)/,
+  },
+];
+
 /** What each feed says while it is still asking TMDB. */
 const LOADING_COPY = [
   "Loading weekly trending titles.",
@@ -47,6 +66,24 @@ test.describe(
       await expect(titles.first().or(notice).first()).toBeVisible({
         timeout: FEED_TIMEOUT_MS,
       });
+
+      // The promise is about every feed, so each has to be on the page and
+      // finish. A feed that is missing, or never gets past loading, would
+      // otherwise pass as one that asked for nothing.
+      for (const feed of OTHER_FEEDS) {
+        const region = page.getByRole("region", {
+          name: feed.region,
+          exact: true,
+        });
+        await expect(region).toBeVisible();
+        const items = region
+          .getByRole("list", { name: feed.list, exact: true })
+          .getByRole("listitem");
+        const ended = region.getByText(feed.notice);
+        await expect(items.first().or(ended).first()).toBeVisible({
+          timeout: FEED_TIMEOUT_MS,
+        });
+      }
 
       // Only once every feed has answered does "no prompt" mean anything.
       for (const loading of LOADING_COPY) {

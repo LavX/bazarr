@@ -38,6 +38,46 @@ def test_the_replaced_file_is_deleted(tmp_path, remove_superseded, monkeypatch):
     assert new.exists()
 
 
+def test_the_replaced_file_is_handed_back_for_publication(tmp_path, remove_superseded, monkeypatch):
+    """The save reports the removal with its own write, once its locks are released."""
+    old = tmp_path / "race.en.srt"
+    new = tmp_path / "race.en.ass"
+    old.write_text("old")
+    new.write_text("new")
+    removed, events = [], []
+    import contextlib
+
+    monkeypatch.setattr(
+        "subtitles.tools.subsync_engines.subtitle_mutation",
+        lambda *a, **k: contextlib.nullcontext(),
+    )
+    monkeypatch.setattr("media_servers.events.notify_subtitle_mutation", events.append)
+
+    remove_superseded(str(tmp_path / "race.mkv"), (str(old), "proof"), [str(new)], True,
+                      on_publish=removed.append)
+
+    assert removed == [str(old)]
+    assert events == []
+
+
+def test_a_file_that_was_not_removed_is_not_handed_back(tmp_path, remove_superseded, monkeypatch):
+    same = tmp_path / "race.en.srt"
+    same.write_text("rewritten")
+    removed = []
+    import contextlib
+
+    monkeypatch.setattr(
+        "subtitles.tools.subsync_engines.subtitle_mutation",
+        lambda *a, **k: contextlib.nullcontext(),
+    )
+    remove_superseded(str(tmp_path / "race.mkv"), (str(same), "proof"), [str(same)], True,
+                      on_publish=removed.append)
+    remove_superseded(str(tmp_path / "race.mkv"), (str(tmp_path / "gone.srt"), "proof"),
+                      [str(same)], True, on_publish=removed.append)
+
+    assert removed == []
+
+
 def test_a_rewrite_in_place_is_not_a_replacement(tmp_path, remove_superseded, monkeypatch):
     """Deleting here would destroy the subtitle that was just written."""
     same = tmp_path / "race.en.srt"

@@ -28,7 +28,7 @@ from sportarr.artifacts import (
     validate_artifact_stat,
 )
 from sportarr.connection import check_cancelled
-from sportarr.db import sports_transaction, SportsTransactionOutcome
+from sportarr.db import error_sqlstate, sports_transaction, SportsTransactionOutcome
 from sportarr.identity import resolve_event_in_session
 from sportarr.subtitles import (
     candidate_signature,
@@ -255,7 +255,7 @@ def blacklist_log_sports(context, provider, subs_id, language):
         except OperationalError as exc:
             # A PostgreSQL SERIALIZABLE snapshot may predate the competing
             # callback's commit. Retry that transaction with a fresh snapshot.
-            if getattr(exc.orig, "sqlstate", None) != "40001" or attempt == 2:
+            if error_sqlstate(exc) != "40001" or attempt == 2:
                 raise
     notify([])
 

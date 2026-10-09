@@ -201,6 +201,10 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.documentation=https://lavx.github.io/bazarr/guides/getting-started.html
 
+      - name: Stamp the build date
+        id: stamp
+        run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Build and Push Docker Image
         id: push
         uses: docker/build-push-action@v7
@@ -222,7 +226,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=bazarr-main
           build-args: |
             BAZARR_VERSION=${{ steps.version.outputs.fork_version }}
-            BUILD_DATE=${{ github.event.repository.updated_at }}
+            BUILD_DATE=${{ steps.stamp.outputs.date }}
             VCS_REF=${{ github.sha }}
 
       - name: Generate Artifact Attestation

@@ -65,13 +65,15 @@ def postprocessing(command, path, subtitle_path=None, *, lock_paths=None,
 
 def _postprocessing_locked(command, path):
     try:
+        if not isinstance(command, (list, tuple)) or not command or not all(isinstance(arg, str) for arg in command):
+            raise ValueError('Post-processing requires an argument list')
         encoding = getpreferredencoding()
         if os.name == 'nt':
             from ctypes import windll
             code_page = windll.kernel32.GetConsoleOutputCP()
             encoding = f"cp{code_page}"
             
-        process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE,
+        process = subprocess.Popen(command, shell=False, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, encoding=encoding)
         # wait for the process to terminate
         out, err = process.communicate()

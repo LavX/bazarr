@@ -3,8 +3,6 @@
 # ruff: noqa: F811
 import importlib.util
 import json
-import threading
-import time
 from threading import Event
 
 import pytest
@@ -30,6 +28,7 @@ def private_queue(monkeypatch):
     queue._import_lock = RLock()
     queue._progress_buffer_lock = RLock()
     queue._progress_buffer = {}
+    queue._inline_claims = []
     return queue
 
 
@@ -268,6 +267,7 @@ def test_actual_queue_capture_and_execution_has_no_hidden_locals(
     queue._import_lock = RLock()
     queue._progress_buffer_lock = RLock()
     queue._progress_buffer = {}
+    queue._inline_claims = []
     monkeypatch.setattr(workflows, "jobs_queue", queue)
     job_id = workflows.automatic_search_sports(61, 1)
     assert job_id
@@ -968,6 +968,7 @@ def test_real_job_signal_cancellation_keeps_committed_publication(
     ("module", "func"),
     [
         ("sportarr.sync.leagues", "update_sports_for_instance"),
+        ("sportarr.sync.leagues", "sync_sports_for_instance"),
         ("sportarr.sync.events", "sync_one_league"),
     ],
 )
@@ -1088,6 +1089,321 @@ def test_cancel_disabled_jobs_removes_and_stops_manual_downloads(workflow_librar
     assert removed == [41] and cancelled == [42]
 
 
+def _scheduled_sync_queue(workflow_library, monkeypatch):
+    """The real capture and run of the scheduled library sync.
+
+    The sync module and the canceller share the fixture's private queue and
+    database, so the enqueue, the owner lookups and the stop all meet in one
+    place, the way they do in the running app.
+    """
+    from sportarr.sync import leagues
+
+    _, _, workflows, _, session, _ = workflow_library
+    monkeypatch.setattr(leagues, "jobs_queue", workflows.jobs_queue)
+    monkeypatch.setattr(leagues, "database", session)
+    return leagues, workflows, workflows.jobs_queue, session
+
+
+def _instance_goes_away(session, owner, change):
+    from app.database import TableArrInstances
+
+    where = TableArrInstances.id == owner
+    if change == "disabled":
+        session.execute(sa.update(TableArrInstances).where(where).values(enabled=0))
+    else:
+        session.execute(sa.delete(TableArrInstances).where(where))
+
+
+def test_scheduled_sports_sync_is_registered_through_the_jobs_queue(
+    workflow_library, monkeypatch
+):
+    """The scheduled sync ran the whole library sync inside the scheduler
+    thread, so it never appeared in System > Jobs and could not be stopped.
+    It registers the queueing wrapper and waits for the queued run instead, the
+    way the Sonarr and Radarr syncs do."""
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from app.get_args import args
+    from sportarr.scheduler import configure_sports_jobs
+    from sportarr.sync import leagues
+
+    _, _, _, _, session, _ = workflow_library
+    monkeypatch.setattr(args, "no_signalr", True)
+    scheduler = BackgroundScheduler()
+    configure_sports_jobs(scheduler, session)
+    job = scheduler.get_job("update_sports_1")
+    assert job.func is leagues.sync_sports_for_instance
+    assert job.kwargs == {"arr_instance_id": 1, "wait_for_completion": True}
+    assert job.name == "Sync with Sportarr (1)"
+
+
+def test_scheduled_sports_sync_queues_one_named_job_and_forwards_the_queued_run(
+    workflow_library, monkeypatch
+):
+    """Without a job_id the wrapper queues itself once, named for its instance,
+    and syncs nothing in the calling thread. The queued run carries the job_id
+    the queue injects and hands it on, which is what gives the sync its per-job
+    stop signal."""
+    from app.database import TableArrInstances
+
+    leagues, workflows, queue, session = _scheduled_sync_queue(workflow_library, monkeypatch)
+    session.execute(
+        sa.update(TableArrInstances).where(TableArrInstances.id == 1).values(name="Main")
+    )
+    synced = []
+    monkeypatch.setattr(
+        leagues,
+        "update_sports_for_instance",
+        lambda owner, **kwargs: synced.append((owner, kwargs)) or [1, 2, 3],
+    )
+
+    leagues.sync_sports_for_instance(1)
+    # A second tick while the first run is still queued adds nothing.
+    leagues.sync_sports_for_instance(1)
+    assert synced == []
+    rows = queue.list_jobs_from_queue()
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["module"], row["func"]) == ("sportarr.sync.leagues", "sync_sports_for_instance")
+    assert row["kwargs"]["arr_instance_id"] == 1
+    assert row["status"] == "pending"
+    assert row["job_name"] == "Syncing sports library with Sportarr (instance 1)"
+    assert row["is_progress"] is True
+    assert workflows.is_sports_job(row)
+
+    job = queue.jobs_pending_queue.popleft()
+    queue.jobs_running_queue.append(job)
+    assert queue._run_job(job)
+    assert synced == [(1, {"job_id": job.job_id})]
+    assert job.job_name == "Synced sports library with Sportarr (instance 1)"
+    assert job.progress_message == "3 leagues synced"
+
+    leagues.sync_sports_for_instance(2, job_id=77)
+    assert synced[-1] == (2, {"job_id": 77})
+    assert not queue.jobs_pending_queue
+
+
+def test_the_queued_sync_counts_its_leagues_and_threads_the_job_id_into_the_event_pass(
+    workflow_library, monkeypatch
+):
+    """The queued run reported no progress and its event pass ran without the
+    job id, so the System > Jobs card showed neither a ring nor a live line,
+    unlike the Sonarr and Radarr syncs. The queued run now counts its leagues
+    up front and hands the job id on. The live stream and the webhook call
+    update_sports_for_instance directly with no job, so they report nothing."""
+    from sportarr import rootfolder
+    from sportarr.sync import events as sync_events_module
+
+    leagues, workflows, queue, session = _scheduled_sync_queue(workflow_library, monkeypatch)
+    recorded = []
+    monkeypatch.setattr(rootfolder, "sync_rootfolders", lambda owner, **kwargs: None)
+    monkeypatch.setattr(leagues, "sync_leagues", lambda owner, **kwargs: [51, 53])
+    monkeypatch.setattr(sync_events_module, "sync_event_leagues",
+                        lambda ids, owner, **kwargs: recorded.append(kwargs))
+
+    leagues.sync_sports_for_instance(1)
+    rows = queue.list_jobs_from_queue()
+    assert len(rows) == 1
+    assert rows[0]["is_progress"] is True
+    job = queue.jobs_pending_queue.popleft()
+    queue.jobs_running_queue.append(job)
+    assert queue._run_job(job)
+    assert job.progress_max == 2
+    assert len(recorded) == 1
+    assert recorded[0]["job_id"] == job.job_id
+
+    # The direct path carries no job, so it reports no progress and no id.
+    progress = []
+    monkeypatch.setattr(queue, "update_job_progress",
+                        lambda job_id, **kwargs: progress.append(kwargs))
+    leagues.update_sports_for_instance(1)
+    assert recorded[-1].get("job_id") is None
+    assert not progress
+
+
+@pytest.mark.parametrize("synced_ids, summary", [([2, 4], "2 leagues synced"),
+                                                ([1], "1 league synced")])
+def test_a_stop_landing_after_the_last_checkpoint_still_records_the_summary(
+    workflow_library, monkeypatch, synced_ids, summary
+):
+    """A Stop that landed after the sync's last checkpoint must not turn a
+    committed sync into "Cancelled by user": the summary is the final
+    accounting of work that already happened."""
+    leagues, _, queue, session = _scheduled_sync_queue(workflow_library, monkeypatch)
+
+    def committed(owner, **kwargs):
+        queue.jobs_running_queue[0].cancelled = True
+        return synced_ids
+
+    monkeypatch.setattr(leagues, "update_sports_for_instance", committed)
+    leagues.sync_sports_for_instance(1)
+    job = queue.jobs_pending_queue.popleft()
+    queue.jobs_running_queue.append(job)
+    assert queue._run_job(job)
+    assert job.progress_message == summary
+    assert not job.stopped and job.status == "completed"
+    assert list(queue.jobs_completed_queue) == [job]
+
+
+def test_a_queued_scheduled_sync_is_cancelled_when_the_master_toggle_goes_off(
+    workflow_library, monkeypatch
+):
+    """The master toggle can flip off between a tick's check and this queued
+    run, after the setting change swept the pending jobs but before this one
+    was swept. The queued run rechecks the toggle, so the sync stops as
+    cancelled instead of running a whole library sweep the setting just
+    turned off."""
+    leagues, workflows, queue, session = _scheduled_sync_queue(workflow_library, monkeypatch)
+    synced = []
+    monkeypatch.setattr(
+        leagues, "update_sports_for_instance",
+        lambda owner, **kwargs: synced.append((owner, kwargs)),
+    )
+
+    leagues.sync_sports_for_instance(1)
+    assert queue.list_jobs_from_queue()
+    monkeypatch.setattr(leagues.settings.general, "use_sportarr", False, raising=False)
+
+    job = queue.jobs_pending_queue.popleft()
+    queue.jobs_running_queue.append(job)
+    assert queue._run_job(job) is False
+    assert job.stopped is True
+    assert job.progress_message == "Cancelled by user"
+    assert synced == []
+
+
+@pytest.mark.parametrize("change", ["disabled", "deleted"])
+def test_a_queued_scheduled_sync_is_removed_when_its_owner_goes_away(
+    workflow_library, monkeypatch, change
+):
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from app.get_args import args
+    from sportarr.scheduler import configure_sports_jobs
+
+    leagues, _, queue, session = _scheduled_sync_queue(workflow_library, monkeypatch)
+    monkeypatch.setattr(args, "no_signalr", True)
+    leagues.sync_sports_for_instance(1)
+    leagues.sync_sports_for_instance(2)
+    _instance_goes_away(session, 1, change)
+    configure_sports_jobs(BackgroundScheduler(), session)
+    assert [job.kwargs["arr_instance_id"] for job in queue.jobs_pending_queue] == [2]
+
+
+@pytest.mark.parametrize("change", ["disabled", "deleted"])
+def test_a_running_scheduled_sync_stops_when_its_owner_goes_away(
+    workflow_library, monkeypatch, change
+):
+    """A scheduled sync kept going for minutes after its instance was deleted,
+    then failed with "Enabled Sportarr instance not found". Queued, the refresh
+    that follows the instance change cancels it, and its own job signal stops
+    it at the next checkpoint instead of after the whole library."""
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from app.get_args import args
+    from sportarr import rootfolder
+    from sportarr.connection import check_cancelled
+    from sportarr.scheduler import configure_sports_jobs
+
+    leagues, _, queue, session = _scheduled_sync_queue(workflow_library, monkeypatch)
+    monkeypatch.setattr(args, "no_signalr", True)
+    reached = []
+
+    def owner_changes_mid_sync(owner, *, cancel, **kwargs):
+        _instance_goes_away(session, owner, change)
+        configure_sports_jobs(BackgroundScheduler(), session)
+        check_cancelled(cancel)
+        reached.append("after the checkpoint")
+
+    monkeypatch.setattr(rootfolder, "sync_rootfolders", owner_changes_mid_sync)
+    monkeypatch.setattr(leagues, "sync_leagues", lambda *a, **k: reached.append("leagues"))
+    leagues.sync_sports_for_instance(1)
+    job = queue.jobs_pending_queue.popleft()
+    queue.jobs_running_queue.append(job)
+    assert queue._run_job(job) is False
+    assert job.cancelled and job.stopped
+    assert job.status == "completed" and job.progress_message == "Cancelled by user"
+    assert reached == []
+    assert not queue.jobs_failed_queue
+
+
+@pytest.mark.parametrize("change", ["disabled", "deleted"])
+@pytest.mark.parametrize("moment", ["before the run", "during the run"])
+def test_a_scheduled_sync_whose_owner_goes_away_before_the_sweep_ends_cancelled(
+    workflow_library, monkeypatch, caplog, change, moment
+):
+    """The instance refresh stops the event streams before it cancels the
+    owner's jobs, and that can take several seconds. A sync that meets the
+    missing owner in that window has been stopped by it, so it ends cancelled
+    rather than as a failed job with an error traceback. During the run the
+    owner is checked the way revalidate does, just after a cached stop check
+    that still says enabled."""
+    import logging
+
+    from sportarr import rootfolder
+    from sportarr.connection import revalidate
+
+    leagues, _, queue, session = _scheduled_sync_queue(workflow_library, monkeypatch)
+    reached = []
+
+    def owner_changes_mid_sync(owner, *, cancel, expected_connection, **kwargs):
+        if moment == "during the run":
+            _instance_goes_away(session, owner, change)
+        revalidate(session, owner, expected_connection, cancel)
+        reached.append("after the checkpoint")
+
+    monkeypatch.setattr(rootfolder, "sync_rootfolders", owner_changes_mid_sync)
+    monkeypatch.setattr(leagues, "sync_leagues", lambda *a, **k: reached.append("leagues"))
+    leagues.sync_sports_for_instance(1)
+    if moment == "before the run":
+        _instance_goes_away(session, 1, change)
+    job = queue.jobs_pending_queue.popleft()
+    queue.jobs_running_queue.append(job)
+    with caplog.at_level(logging.ERROR):
+        assert queue._run_job(job) is False
+    assert job.stopped and job.error is None
+    assert job.status == "completed" and job.progress_message == "Cancelled by user"
+    assert reached == []
+    assert not queue.jobs_failed_queue
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
+def test_an_unrelated_sync_failure_still_fails_the_scheduled_job(
+    workflow_library, monkeypatch
+):
+    """Only the owner's own stop becomes a cancellation. A sync that fails
+    while its owner is still enabled is a real failure and is reported."""
+    from sportarr import rootfolder
+
+    leagues, _, queue, session = _scheduled_sync_queue(workflow_library, monkeypatch)
+
+    def malformed(owner, **kwargs):
+        raise ValueError("Malformed Sportarr league")
+
+    monkeypatch.setattr(rootfolder, "sync_rootfolders", malformed)
+    leagues.sync_sports_for_instance(1)
+    job = queue.jobs_pending_queue.popleft()
+    queue.jobs_running_queue.append(job)
+    assert queue._run_job(job) is False
+    assert not job.stopped and job.status == "failed"
+    assert list(queue.jobs_failed_queue) == [job]
+
+
+@pytest.mark.parametrize("change", ["off", "disabled", "deleted"])
+def test_a_scheduled_tick_queues_nothing_for_an_owner_it_no_longer_serves(
+    workflow_library, monkeypatch, change
+):
+    """The refresh sweeps the owner's queued syncs before it drops the
+    scheduler entry, so a tick that fires in between must not queue a sync the
+    sweep has already passed."""
+    from app.config import settings
+
+    leagues, _, queue, session = _scheduled_sync_queue(workflow_library, monkeypatch)
+    if change == "off":
+        monkeypatch.setattr(settings.general, "use_sportarr", False)
+    else:
+        _instance_goes_away(session, 1, change)
+    assert leagues.sync_sports_for_instance(1) is None
+    assert not queue.jobs_pending_queue
+
+
 @pytest.mark.parametrize(
     "queue_work",
     [
@@ -1147,103 +1463,59 @@ def test_a_stop_after_one_language_published_keeps_that_download(workflow_librar
     assert len(session.execute(sa.select(TableHistorySports)).all()) == 1
 
 
-def test_the_rescan_request_targets_the_untargeted_route_through_the_transport():
-    """POST /api/library/rescan is the only route Sportarr exposes, and it is
-    untargeted, so the request has to go through the same per-instance client
-    every other Sportarr call uses."""
-    import inspect
+def _record_publications(monkeypatch):
+    from media_servers import dispatcher
 
-    from sportarr import notify
-
-    source = inspect.getsource(notify._rescan_request)
-    assert "'/api/library/rescan'" in source
-    assert "ArrClientFactory" in source
-    assert "require_sportarr" in source
-
-
-def test_notify_rescan_outside_a_batch_dispatches_immediately(monkeypatch):
-    from sportarr import notify
-
-    requested = []
-    done = threading.Event()
-
-    def record(owner, *, client_factory=None):
-        requested.append(owner)
-        done.set()
-
-    monkeypatch.setattr(notify, "_rescan_request", record)
-    notify.notify_rescan(3)
-    assert done.wait(5)
-    time.sleep(0.05)
-    assert requested == [3]
+    published = []
+    monkeypatch.setattr(
+        dispatcher,
+        "notify_subtitle_mutation",
+        lambda event: published.append(
+            (event.media_type, event.video_path, event.operation,
+             event.arr_instance_id, event.subtitle_path)
+        ),
+    )
+    return published
 
 
-def test_notify_rescan_coalesces_one_request_per_owner_per_batch(monkeypatch):
-    """A batch that writes several events of one owner must ask for exactly one
-    whole-library rescan for it, and one for each other affected owner."""
-    from sportarr import notify
-
-    requested = []
-    done = threading.Event()
-
-    def record(owner, *, client_factory=None):
-        requested.append(owner)
-        if len(requested) == 2:
-            done.set()
-
-    monkeypatch.setattr(notify, "_rescan_request", record)
-    with notify.rescan_batch():
-        notify.notify_rescan(7)
-        notify.notify_rescan(7)
-        assert requested == []
-        notify.notify_rescan(9)
-    assert done.wait(5)
-    time.sleep(0.05)
-    assert sorted(requested) == [7, 9]
-
-
-def test_a_league_download_requests_one_rescan_for_the_owner(workflow_library, monkeypatch):
-    """A real download operation through the workflows batch must ask Sportarr
-    to rescan, exactly once for the affected owner."""
-
-    from sportarr import notify
-
-    requested = []
-    done = threading.Event()
-
-    def record(owner, *, client_factory=None):
-        requested.append(owner)
-        done.set()
-
-    monkeypatch.setattr(notify, "_rescan_request", record)
+def test_a_league_download_publishes_each_subtitle_once(workflow_library, monkeypatch):
     automatic, history, workflows, service, session, folder = workflow_library
+    published = _record_publications(monkeypatch)
     workflows.sports_download_subtitles(51, 1, job_id="test")
-    assert done.wait(5)
-    time.sleep(0.05)
-    assert requested == [1]
     assert (folder / "1/event.en.srt").exists()
+    assert published == [
+        ("sports", str(folder / "1/event.mkv"), "download", 1, str(folder / "1/event.en.srt")),
+    ]
 
 
-def test_a_single_manual_download_requests_one_rescan(manual_library, monkeypatch):
-    """The non-batch manual download path asks for one rescan for the owner."""
-
-    from sportarr import notify
-
-    requested = []
-    done = threading.Event()
-
-    def record(owner, *, client_factory=None):
-        requested.append(owner)
-        done.set()
-
-    monkeypatch.setattr(notify, "_rescan_request", record)
+def test_a_single_manual_download_publishes_its_subtitle_once(manual_library, monkeypatch):
     service, session, folder = manual_library
+    published = _record_publications(monkeypatch)
     result = service.manual_search_sports(61, "en", arr_instance_id=1)[0]
     service.manual_download_sports(61, result, 1)
-    assert done.wait(5)
-    time.sleep(0.05)
-    assert requested == [1]
     assert (folder / "1/event.en.srt").exists()
+    assert published == [
+        ("sports", str(folder / "1/event.mkv"), "download", 1, str(folder / "1/event.en.srt")),
+    ]
+
+
+def test_no_subtitle_change_asks_sportarr_to_rescan_its_library():
+    """A subtitle write leaves Sportarr's video inventory unchanged.
+
+    POST /api/library/rescan walks every root folder of the instance. It ran in
+    a background thread, so a runtime check could pass before it fired; the
+    route and its module are therefore checked for directly.
+    """
+    from pathlib import Path
+
+    assert importlib.util.find_spec("sportarr.notify") is None
+    root = Path(__file__).resolve().parents[2] / "bazarr"
+    callers = [
+        str(path.relative_to(root))
+        for path in root.rglob("*.py")
+        if "library/rescan" in path.read_text(encoding="utf-8")
+    ]
+    assert callers == []
 
 
 # --------------------------------------------------------------------------
@@ -1978,3 +2250,33 @@ def test_sportarr_ai_upgrade_requires_human_result_to_beat_hash_inflated_score(
     assert rows[-1].action == 3
     assert rows[-1].upgradedFromId == rows[0].id
     assert rows[-1].score == hash_inflated_score + 1
+
+
+@pytest.mark.parametrize("shape", ["three", "four"])
+def test_the_cutoff_recheck_reads_every_stored_entry_shape(
+    workflow_library, monkeypatch, shape
+):
+    """The recheck before each language reads the stored column, not the list
+    the indexer returned, so whatever another writer stored reaches it."""
+    from app.database import TableSportsEvents
+    from test_sportarr_indexer import STORED_ENTRIES
+
+    automatic, _, _, _, session, folder = workflow_library
+    stored = [entry for entry in STORED_ENTRIES[shape] if entry[1] is None]
+    real_index = automatic.store_subtitles_sports
+
+    def index_then_store(event_id, arr_instance_id=None, **kwargs):
+        indexed = real_index(event_id, arr_instance_id, **kwargs)
+        session.execute(
+            sa.update(TableSportsEvents)
+            .where(TableSportsEvents.id == event_id)
+            .values(subtitles=str(indexed + stored))
+        )
+        return indexed
+
+    monkeypatch.setattr(automatic, "store_subtitles_sports", index_then_store)
+
+    result = automatic.search_event(61, 1)
+
+    assert result["status"] == "downloaded"
+    assert (folder / "1/event.en.srt").exists()

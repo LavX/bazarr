@@ -5,16 +5,18 @@
 # frontend build, checks, unit tests and coverage floor; ruff and every backend
 # pytest group, with the isolation files each in their own process; the
 # application startup check; and the docs checks against origin/development.
+# The Release hero job runs too when the change touches what it builds from.
 # The suites are read out of ci.yml, so nothing here lists a test file.
 #
 # Usage: scripts/ci/run-local.sh [--backend-only | --frontend-only]
-#                                [--python VERSION] [--jobs N]
+#                                [--python VERSION] [--jobs N] [--hero]
 #
 #   --backend-only   ruff, pytest groups and the startup check (the UI is
 #                    still built, because the backend jobs run with it)
 #   --frontend-only  frontend build, checks, tests and coverage
 #   --python X.Y     backend interpreter; default: the Docker image's version
 #   --jobs N         processes at a time; default: the number of CPUs
+#   --hero           run Release hero even when nothing it builds from changed
 #
 # Needs python X.Y (found through uv when it is installed), node and npm, and
 # docker for a throwaway PostgreSQL 16 on a random local port, removed on exit.
@@ -26,8 +28,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MODE=all
 PYTHON_VERSION=""
 JOBS="$(nproc 2>/dev/null || echo 4)"
+HERO=()
 
-usage() { sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -37,6 +40,7 @@ while [[ $# -gt 0 ]]; do
     --python=*) PYTHON_VERSION="${1#*=}" ;;
     --jobs) JOBS="${2:?--jobs needs a number}"; shift ;;
     --jobs=*) JOBS="${1#*=}" ;;
+    --hero) HERO=(--hero) ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -75,7 +79,7 @@ if [[ "$(cat "$ROOT/frontend/node_modules/.bazarr-ci-stamp" 2>/dev/null)" != "$L
 fi
 
 ARGS=(--mode "$MODE" --python "$PYTHON_VERSION" --jobs "$JOBS" --logs "$LOGS"
-      --work "$WORK" --history "$CACHE/durations.json")
+      --work "$WORK" --history "$CACHE/durations.json" ${HERO[@]+"${HERO[@]}"})
 
 if [[ "$MODE" != frontend ]]; then
   PYTHON=""
@@ -104,7 +108,8 @@ if entries:
   fi
 
   VENV="$CACHE/venv-$PYTHON_VERSION"
-  VENV_STAMP="$(cat "$ROOT/requirements.txt" "$ROOT/dev-requirements.txt" <("$PYTHON" -VV) <(echo "$PYTHON") | sha256sum | cut -c1-16)"
+  VENV_STAMP="$(cat "$ROOT/requirements.txt" "$ROOT/dev-requirements.txt" "$ROOT/postgres-requirements.txt" \
+    <("$PYTHON" -VV) <(echo "$PYTHON") | sha256sum | cut -c1-16)"
   if [[ "$(cat "$VENV/.bazarr-ci-stamp" 2>/dev/null)" != "$VENV_STAMP" ]]; then
     say "Creating the Python $PYTHON_VERSION virtualenv in $VENV"
     rm -rf "$VENV"
@@ -113,11 +118,12 @@ if entries:
     else
       "$PYTHON" -m venv "$VENV"
     fi
-    # The same installs as the CI backend jobs, psycopg included.
+    # The same installs as the CI backend jobs. The PostgreSQL driver is the
+    # one the image ships, installed from the file the isolation jobs install.
     "$VENV/bin/pip" install -q -r "$ROOT/requirements.txt"
     "$VENV/bin/pip" install -q --no-deps signalrcore==1.0.2
     "$VENV/bin/pip" install -q -r "$ROOT/dev-requirements.txt"
-    "$VENV/bin/pip" install -q "psycopg[binary]"
+    "$VENV/bin/pip" install -q -r "$ROOT/postgres-requirements.txt"
     echo "$VENV_STAMP" > "$VENV/.bazarr-ci-stamp"
   fi
   ORCHESTRATOR_PYTHON="$VENV/bin/python"

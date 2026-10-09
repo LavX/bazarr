@@ -9,9 +9,9 @@ local id, the upstream id becomes unique only per instance, FKs repoint to the
 local PK and still CASCADE, no rows are lost, and future bare inserts
 autoincrement.
 
-Skips when no Postgres is reachable (set BAZARR_PG_TEST_URL, default the
-docker-compose/dev container on 55432). CI provides a postgres service so this
-does NOT skip there.
+Skips when BAZARR_PG_TEST_URL is unset and the docker-compose/dev container
+on 55432 does not answer. With the variable set, as CI sets it, an unreachable
+server or a missing driver fails instead, so the lane cannot go quietly green.
 """
 import importlib.util
 import os
@@ -21,7 +21,7 @@ import sqlalchemy as sa
 
 _PG_URL = os.environ.get(
     "BAZARR_PG_TEST_URL",
-    "postgresql+psycopg://postgres:test@127.0.0.1:55432/bazarr")
+    "postgresql+psycopg2://postgres:test@127.0.0.1:55432/bazarr")
 
 _MIGRATION_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "migrations", "versions",
@@ -41,15 +41,15 @@ def _pg_engine():
         with eng.connect() as c:
             c.execute(sa.text("SELECT 1"))
         return eng
-    except Exception:
-        return None
+    except Exception as exc:  # driver missing or server unreachable
+        if os.environ.get("BAZARR_PG_TEST_URL"):
+            pytest.fail(f"BAZARR_PG_TEST_URL is set, but PostgreSQL is not usable: {exc}")
+        pytest.skip(f"Postgres not reachable at the default URL: {exc}")
 
 
 @pytest.fixture
 def pg_bind():
     eng = _pg_engine()
-    if eng is None:
-        pytest.skip(f"Postgres not reachable at {_PG_URL}")
     with eng.begin() as conn:
         conn.execute(sa.text("DROP SCHEMA public CASCADE; CREATE SCHEMA public"))
     try:

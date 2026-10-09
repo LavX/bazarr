@@ -21,7 +21,8 @@ from sonarr.info import get_sonarr_info
 from app.jobs_queue import jobs_queue
 from app.notifier import send_notifications
 from subtitles.adaptive_searching import is_search_active
-from arr_instances.resolution import client_for_instance, scoped, sonarr_series_owner, stamp_owner
+from arr_instances.resolution import (client_for_instance, scoped, skip_unscoped_sync,
+                                      sonarr_series_owner, stamp_owner)
 
 from .parser import episodeParser
 from .utils import get_episodes_from_sonarr_api, get_episodesFiles_from_sonarr_api
@@ -36,6 +37,12 @@ FEATURE_PREFIX = "SYNC_EPISODES "
 # while still amortizing round-trip cost for typical full-season
 # inserts on modern SQLite/PostgreSQL deployments.
 EPISODE_INSERT_CHUNK_SIZE = 50
+
+# Returned by sync_episodes when the series' episode-file answer could not be
+# decoded and the series was skipped whole, so the bulk sync can count that
+# series as skipped the way it counts a failed episode fetch. Every other
+# return, including the implicit one, means the sync itself ran.
+SYNC_SKIPPED_UNREADABLE_EPISODE_FILES = object()
 
 
 def trace(message):
@@ -162,6 +169,17 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
             # episodeFile API endpoint results
             episodeFiles = get_episodesFiles_from_sonarr_api(apikey_sonarr=apikey_sonarr, series_id=series_id,
                                                              arr_client=arr_client)
+            if episodeFiles is None:
+                # A body that is not JSON is a failed fetch, not an empty
+                # answer. Without the episodeFile records no episode below
+                # carries its file, so every one of them would count as gone
+                # and the sync would delete the whole series. Skip the series
+                # instead, the way a failed episodes fetch does. The sentinel
+                # return tells the bulk sync this series was skipped, where an
+                # empty return would read as a sync that ran.
+                logging.error("BAZARR could not read the episode files of series %s from Sonarr; "
+                              "the series was skipped and no episode was deleted", series_id)
+                return SYNC_SKIPPED_UNREADABLE_EPISODE_FILES
             if episodeFiles:
                 for episode in episodes:
                     if episodeFiles and episode['hasFile']:
@@ -339,7 +357,8 @@ def sync_episodes(series_id, defer_search=False, is_signalr=False, episodes_data
                                                            module='subtitles.mass_download.series',
                                                            func='episode_download_subtitles',
                                                            args=[],
-                                                           kwargs={'no': episode['sonarrEpisodeId']},
+                                                           kwargs={'no': episode['sonarrEpisodeId'],
+                                                                   'arr_instance_id': owner_instance_id},
                                                            is_signalr=is_signalr)
                     else:
                         logging.debug('BAZARR cannot find this episode file yet (Sonarr may be slow to import episode '
@@ -375,6 +394,9 @@ def sync_one_episode_for_instance(arr_instance_id, episode_id, **kwargs):
 def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
                      arr_instance_id=None, arr_client=None):
     logging.debug('BAZARR syncing this specific episode from Sonarr: %s', episode_id)
+    if arr_instance_id is None and skip_unscoped_sync(
+            database, 'sonarr', settings.general.use_sonarr, f'episode {episode_id}'):
+        return
     apikey_sonarr = settings.sonarr.apikey
 
     # Check if there's a row in database for this episode ID
@@ -521,7 +543,8 @@ def sync_one_episode(episode_id, defer_search=False, is_signalr=False,
                                                    module='subtitles.mass_download.series',
                                                    func='episode_download_subtitles',
                                                    args=[],
-                                                   kwargs={'no': episode_id},
+                                                   kwargs={'no': episode_id,
+                                                           'arr_instance_id': owner_instance_id},
                                                    is_signalr=is_signalr)
             else:
                 if is_signalr and settings.general.notify_if_nothing_is_missing_for_signalr_event:

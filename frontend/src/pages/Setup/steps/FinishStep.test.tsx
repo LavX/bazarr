@@ -1,6 +1,6 @@
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   useArrInstances,
   useLanguageProfiles,
@@ -11,6 +11,8 @@ import {
   ConnectionTest,
   recordConnectionTest,
 } from "@/pages/Setup/connectionTests";
+import { settleSetupComplete } from "@/pages/Setup/setupCompleteCache";
+import { StepBusyProvider, useStepBusy } from "@/pages/Setup/useStepBusy";
 import { customRender, screen, waitFor } from "@/tests";
 import server from "@/tests/mocks/node";
 import FinishStep from "./FinishStep";
@@ -74,6 +76,33 @@ vi.mock("@/apis/hooks", async (importOriginal) => {
     useSettingsMutation: vi.fn(),
   };
 });
+
+// The real cache settle unless a test holds it open, which is how the window
+// between the write landing and the settings read coming back is staged.
+vi.mock("@/pages/Setup/setupCompleteCache", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/pages/Setup/setupCompleteCache")>();
+  return {
+    ...actual,
+    settleSetupComplete: vi.fn(actual.settleSetupComplete),
+  };
+});
+
+// What the shell reads to decide whether Back, Set up later and the browser's
+// Back may take the step away.
+function ShellBusy() {
+  return <span>{useStepBusy() ? "step busy" : "step free"}</span>;
+}
+
+function renderInShell() {
+  setMediaServers({});
+  return customRender(
+    <StepBusyProvider>
+      <FinishStep onNext={vi.fn()} onBack={vi.fn()} />
+      <ShellBusy />
+    </StepBusyProvider>,
+  );
+}
 
 const mockedUseArrInstances = vi.mocked(useArrInstances);
 const mockedUseLanguageProfiles = vi.mocked(useLanguageProfiles);
@@ -139,6 +168,10 @@ describe("FinishStep", () => {
     } as unknown as ReturnType<typeof useSettingsMutation>);
   });
 
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("summarizes the configured state", async () => {
     setMediaServers({ plex: ["Plex"] });
     customRender(<FinishStep onNext={vi.fn()} />);
@@ -189,10 +222,10 @@ describe("FinishStep", () => {
   });
 
   it("does not call a server connected whose kind is switched off", async () => {
-    // "Continue anyway" on a configure step whose master switch write failed
-    // leaves an enabled row under a use_<kind> that is still false. The
-    // dispatcher reads that switch before any row, so nothing refreshes at
-    // all; the recap counted the row, reported the server connected and
+    // Skipping or backing out of a configure step whose master switch write
+    // failed leaves an enabled row under a use_<kind> that is still false.
+    // The dispatcher reads that switch before any row, so nothing refreshes
+    // at all; the recap counted the row, reported the server connected and
     // dropped the line saying where to finish the job.
     setMediaServers({ emby: ["Emby"], silo: ["Silo"] });
     setGeneral({
@@ -247,6 +280,97 @@ describe("FinishStep", () => {
     expect(navigate).not.toHaveBeenCalled();
     onSuccess?.();
     await waitFor(() => expect(navigate).toHaveBeenCalledWith("/"));
+  });
+
+  it("holds the wizard while the completion write is in flight", () => {
+    // Back unmounted the step mid-write, and the write's success still cleared
+    // the wizard's state and navigated away from under whatever step the
+    // reader had gone back to.
+    mockedUseSettingsMutation.mockReturnValue({
+      mutate,
+      isPending: true,
+    } as unknown as ReturnType<typeof useSettingsMutation>);
+
+    renderInShell();
+
+    expect(screen.getByText("step busy")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^finish$/i })).toBeDisabled();
+  });
+
+  it("stays finishing until the settings read settles", async () => {
+    // The write answers first and the cache settles after it, and nothing
+    // counted that second wait: Finish stopped spinning, Back came back and a
+    // second click wrote again while the first was still on its way out.
+    const user = userEvent.setup();
+    let settled: (() => void) | undefined;
+    vi.mocked(settleSetupComplete).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          settled = resolve;
+        }),
+    );
+    mutate.mockImplementation(
+      (_input: unknown, opts?: { onSuccess?: () => unknown }) => {
+        void opts?.onSuccess?.();
+      },
+    );
+
+    renderInShell();
+    expect(screen.getByText("step free")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /^finish$/i }));
+
+    expect(await screen.findByText("step busy")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^finish$/i })).toBeDisabled();
+    expect(mutate).toHaveBeenCalledTimes(1);
+    expect(navigate).not.toHaveBeenCalled();
+
+    settled?.();
+
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("/"));
+    expect(navigate).toHaveBeenCalledTimes(1);
+    expect(mutate).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets the reader go back again when the finish write fails", async () => {
+    const user = userEvent.setup();
+    mutate.mockImplementation(
+      (_input: unknown, opts?: { onError?: () => void }) => {
+        opts?.onError?.();
+      },
+    );
+
+    renderInShell();
+    await user.click(screen.getByRole("button", { name: /^finish$/i }));
+
+    expect(
+      await screen.findByText(/could not finish setup/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText("step free")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^finish$/i })).toBeEnabled();
+  });
+
+  it("does not call a row connected on another install's Test", () => {
+    // Two installs on one origin, one served from the root and this one from
+    // a subpath, share localStorage, and their row ids are the same small
+    // numbers. The root install's result for its own arr:1 said nothing about
+    // this install's.
+    localStorage.setItem(
+      "bazarr.onboarding.connection-tests",
+      JSON.stringify({ "arr:1": "passed", "arr:2": "passed" }),
+    );
+    vi.stubGlobal("Bazarr", { baseUrl: "/bazarr" });
+    setMediaServers({});
+
+    customRender(<FinishStep onNext={vi.fn()} />);
+
+    expect(
+      screen.getByText("Sonarr saved (1 instance), connection not tested"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Radarr saved (1 instance), connection not tested"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/sonarr connected/i)).toBeNull();
   });
 
   it("renders a Back button when onBack is provided", () => {

@@ -85,6 +85,38 @@ def test_a_running_job_is_followed_rather_than_repeated(queue, tmp_path):
     assert len(queue.list_jobs_from_queue()) == 1
 
 
+def test_a_request_follows_the_job_it_matched_even_when_that_job_then_fails(queue, monkeypatch, tmp_path):
+    """The queue names the job it matched in the same look, so the editor
+    follows that job to its end and shows its failure. It does not queue a
+    second ffmpeg because the job failed a moment after the match. Asking
+    again once the job has failed starts a new attempt."""
+    video = tmp_path / 'film.mkv'
+    video.write_bytes(b'x')
+    _, job_id = waveform_peaks.request_peaks(str(video), 0)
+    job = queue.jobs_pending_queue.popleft()
+    queue.jobs_running_queue.append(job)
+    feed = queue.feed_jobs_pending_queue
+
+    def feed_then_fail(*args, **kwargs):
+        answer = feed(*args, **kwargs)
+        if job in queue.jobs_running_queue:
+            job.error = {'reason': 'probe_failed', 'message': 'ffprobe could not read the file'}
+            queue._mark_failed(job)
+        return answer
+
+    monkeypatch.setattr(queue, 'feed_jobs_pending_queue', feed_then_fail)
+
+    assert waveform_peaks.request_peaks(str(video), 0) == ('queued', job_id)
+    assert [(item['job_id'], item['status']) for item in queue.list_jobs_from_queue()] == [(job_id, 'failed')]
+
+    monkeypatch.setattr(queue, 'feed_jobs_pending_queue', feed)
+    state, retry_id = waveform_peaks.request_peaks(str(video), 0)
+
+    assert state == 'queued'
+    assert retry_id not in (None, job_id)
+    assert [pending.job_id for pending in queue.jobs_pending_queue] == [retry_id]
+
+
 def test_only_one_waveform_jumps_the_queue_at_a_time(queue, tmp_path):
     """Force-starting skips the concurrent jobs limit, so every uncached editor
     page used to start another full-file ffmpeg. One waveform may jump the

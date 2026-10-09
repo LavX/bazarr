@@ -363,7 +363,7 @@ def queue_translations(operation, source, downloaded_lang, score, forced, cancel
         )
 
 
-def translate_from_existing(context, target_code, cancel=None):
+def translate_from_existing(context, target_code, cancel=None, translation_gate=None):
     """Translate a missing sports language from a subtitle already on disk.
 
     The series and movies wanted scans do this: when the profile says a
@@ -374,14 +374,29 @@ def translate_from_existing(context, target_code, cancel=None):
     never got its translation and stayed missing forever, re-searched by every
     subsequent wanted scan.
 
-    Returns True when a translation was queued, in which case the caller must
-    not fall through to a provider search for this language.
+    Returns True when a translation was newly queued, in which case the caller
+    must not fall through to a provider search for this language. A job that
+    was already pending is not a new one: the queue already has it, the
+    language is still coming, and this answers False so the caller counts no
+    download and the provider search runs anyway. A closed translation gate and
+    a recent failed translation answer the same False, for the same reason:
+    nothing is coming, so the language goes to the providers instead of being
+    kept from them.
     """
+    from app.jobs_queue import jobs_queue
+    from subtitles.tools.translate.failure_record import translation_recently_failed
     from subtitles.tools.translate.main import translate_subtitles_file
-    from subtitles.wanted.utils import _find_existing_subtitle_path
+    from subtitles.wanted.utils import _find_existing_subtitle_path, evaluate_translation_gate
 
     operation = capture_profile_operation(context, candidate_signature(context), cancel=cancel)
     if not operation.profile:
+        return False
+
+    # The scan run reads the gate once and hands it down; reading it here
+    # covers every entry point that reaches this function on its own.
+    if translation_gate is None:
+        translation_gate = evaluate_translation_gate()
+    if not translation_gate:
         return False
 
     item = next(
@@ -413,6 +428,17 @@ def translate_from_existing(context, target_code, cancel=None):
         return False
     if _already_translated_on_disk(context, target_code):
         return False
+    if translation_recently_failed(
+            context.arr_instance_id, "sports", context.event_id, source_lang, item["language"]):
+        # The last translation of this event died inside the job, so
+        # re-offering it would only queue another doomed job every scan; the
+        # hold expires and every settings save clears it.
+        logging.debug(
+            "BAZARR sports auto-translate skipped for event %s: a recent translation of "
+            "%s -> %s failed (falling back to a provider search)",
+            context.event_id, source_lang, item["language"],
+        )
+        return False
 
     hi, forced = item.get("hi") == "True", item.get("forced") == "True"
     destination = translation_destination(
@@ -426,7 +452,7 @@ def translate_from_existing(context, target_code, cancel=None):
         source_score=None,
         cancel=cancel,
     )
-    translate_subtitles_file(
+    translate_kwargs = dict(
         video_path=context.mapped_path,
         source_srt_file=source_srt,
         from_lang=source_lang,
@@ -440,7 +466,22 @@ def translate_from_existing(context, target_code, cancel=None):
         metadata=None,
         arr_instance_id=context.arr_instance_id,
         sports_operation=bound,
+        embedded_source=None,
     )
+    # Guard: skip if an identical translate job is already pending or running,
+    # the way the series and movies wanted scans do. The kwargs have to name
+    # every parameter the queued job binds, including the defaulted ones: the
+    # queue compares the whole dict, so a partial dict never matched. A job
+    # that was already pending is not a new download to count, so the caller
+    # hears False and the provider search runs for this language anyway.
+    if jobs_queue._is_an_existing_job(
+            module="subtitles.tools.translate.main",
+            func="translate_subtitles_file",
+            args=[],
+            kwargs=translate_kwargs,
+    ):
+        return False
+    translate_subtitles_file(**translate_kwargs)
     return True
 
 

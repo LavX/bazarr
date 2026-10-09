@@ -1,0 +1,80 @@
+name: bazarr-plus
+
+services:
+  bazarr-plus:
+    image: ghcr.io/lavx/bazarr:2.7.0
+    container_name: bazarr-plus
+    restart: unless-stopped
+    ports:
+      - target: 6767
+        published: "6767"
+        protocol: tcp
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - type: bind
+        source: /DATA/AppData/$AppID/config
+        target: /config
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    x-casaos:
+      envs:
+        - container: PUID
+          description:
+            en_US: User ID used for media and configuration file permissions.
+        - container: PGID
+          description:
+            en_US: Group ID used for media and configuration file permissions.
+        - container: TZ
+          description:
+            en_US: Time zone, for example Europe/Budapest.
+      ports:
+        - container: "6767"
+          description:
+            en_US: Bazarr+ web interface.
+      volumes:
+        - container: /config
+          description:
+            en_US: Persistent Bazarr+ configuration, database, and logs.
+
+x-casaos:
+  id: com.lavx.bazarr-plus
+  main: bazarr-plus
+  index: /
+  port_map: "6767"
+  scheme: http
+  icon: https://lavx.github.io/bazarr/screenshots/logo128.png
+  title:
+    en_US: Bazarr+
+  tagline:
+    en_US: Subtitles for movies, TV, and sports.
+  description:
+    en_US: >-
+      Find and download subtitles for movies, TV episodes, and sports video
+      libraries. Bazarr+ runs as a standalone service for manual searches;
+      media managers and translation helpers are optional. Add only the media
+      folders you want to expose through Docker Compose bind mounts.
+  author: LavX
+  developer: Bazarr+
+  category: Media
+  architectures:
+    - amd64
+    - arm64
+  version: "2.7.0"
+  update_at: "2026-09-28"
+  thumbnail: thumbnail.png
+  website: https://lavx.github.io/bazarr/
+  repo: https://github.com/LavX/bazarr
+  support: https://github.com/LavX/bazarr/issues
+  docs: https://lavx.github.io/bazarr/guides/getting-started.html

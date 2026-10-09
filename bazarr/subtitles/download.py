@@ -17,6 +17,7 @@ from subliminal_patch.core_persistent import download_best_subtitles
 
 from app.config import settings
 from app.database import TableEpisodes, TableMovies, database, select, get_profiles_list
+from app.jobs_queue import JobCancelled
 from utilities.path_mappings import path_mappings
 from utilities.helper import get_target_folder, force_unicode
 from languages.get_languages import alpha3_from_alpha2
@@ -57,6 +58,13 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
         return None
 
     if video:
+        # The caller's value wins over the database refiner's, which reverses
+        # the path through the global mapping and can miss the row of an
+        # instance with a mapping of its own. A provider failure reports the
+        # video's ids, and an exclusion the provider demands is recorded under
+        # the instance they name.
+        if arr_instance_id is not None:
+            video.arr_instance_id = arr_instance_id
         minimum_score = settings.general.minimum_score
         minimum_score_movie = settings.general.minimum_score_movie
         min_score, max_score, scores = _get_scores(media_type, minimum_score_movie, minimum_score)
@@ -114,6 +122,16 @@ def generate_subtitles(path, languages, audio_language, sceneName, title, media_
                                                                        fallback_allowed=fallback_allowed,
                                                                        candidate_sink=candidate_sink)
                     except Exception as e:
+                        if isinstance(e, JobCancelled) and e.job_id == job_id:
+                            # The provider callback raised through the pool
+                            # because Stop was pressed on this job. That is
+                            # not a download failure, and swallowing it here
+                            # would run every remaining language and episode
+                            # of a stopped search. The pool is shared between
+                            # the jobs of a profile, so a different job's stop
+                            # arrives here as well; it keeps the handling
+                            # below, one failed episode.
+                            raise
                         logging.exception(f'BAZARR Error downloading Subtitles for this file {path}: {repr(e)}')  # noqa: G004
                         return None
 

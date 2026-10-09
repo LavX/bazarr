@@ -39,16 +39,18 @@ test.beforeEach(async ({ page }) => {
 });
 
 /**
- * The arr and media server rows the page should show, worked out from what
- * the install has configured: a product switched on, an enabled instance of
- * it, and for an arr the version it reported. A fresh container has none.
+ * The arr and media server rows the page should show. An arr row is worked
+ * out from what the install has configured: the product switched on, an
+ * enabled instance of it, and the version it reported. A media server row is
+ * one per entry of the status answer, because the backend decides which
+ * servers belong there and the page renders exactly that list. A fresh
+ * container has none of either.
  */
 async function expectedRows(api: APIRequestContext) {
-  const [settings, arrs, servers, status] = await Promise.all(
+  const [settings, arrs, status] = await Promise.all(
     [
       "/api/system/settings",
       "/api/system/arr-instances",
-      "/api/system/media-server-instances",
       "/api/system/status",
     ].map(async (path) => {
       const response = await api.get(path);
@@ -65,13 +67,10 @@ async function expectedRows(api: APIRequestContext) {
       arrInstances.some((i) => i.kind === kind && i.enabled) &&
       !!versions[`${kind}_version`],
   ).map(({ row }) => row);
-  const mediaServers = (
-    servers as {
-      data: { kind: string; enabled: boolean; api_key_set: boolean }[];
-    }
-  ).data.filter(
-    (s) => s.enabled && s.api_key_set && general[`use_${s.kind}`] === true,
-  ).length;
+  // Rebuilding this from the instance list misses the servers the backend
+  // leaves out, such as an enabled one whose stored settings no longer
+  // validate or whose key cannot be decrypted.
+  const mediaServers = ((versions.media_servers ?? []) as unknown[]).length;
   return { arrRows, mediaServers };
 }
 

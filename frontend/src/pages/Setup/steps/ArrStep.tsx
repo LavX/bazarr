@@ -11,6 +11,7 @@ import {
   TextInput,
 } from "@mantine/core";
 import {
+  getArrInstanceDeleteConflict,
   getArrInstanceErrorMessage,
   useArrInstances,
   useCreateArrInstance,
@@ -299,22 +300,29 @@ const ArrStep: FC<ArrStepProps> = ({ kind, onNext, onBack, stepKey }) => {
       return;
     }
     setRemoveError(null);
-    remove.mutate(existing.id, {
-      onSuccess: () => {
-        setConfirmRemove(false);
-        // The row this message was about is gone, so the message goes with it,
-        // and so does the memory of having written it.
-        setSaveError(null);
-        setCreatedId(null);
-      },
-      onError: (error) =>
-        setRemoveError(
-          getArrInstanceErrorMessage(
-            error,
-            `Bazarr+ could not remove ${existing.name}. You can edit it in Settings, Connections after setup.`,
+    remove.mutate(
+      { id: existing.id },
+      {
+        onSuccess: () => {
+          setConfirmRemove(false);
+          // The row this message was about is gone, so the message goes with it,
+          // and so does the memory of having written it.
+          setSaveError(null);
+          setCreatedId(null);
+        },
+        onError: (error) =>
+          setRemoveError(
+            // Deleting it together with its library is offered in Settings,
+            // Connections only, behind its own confirmation.
+            getArrInstanceDeleteConflict(error)?.can_remove_library
+              ? `${existing.name} has already synced its library, so setup cannot remove it on its own. After setup, you can delete it together with that library in Settings, Connections.`
+              : getArrInstanceErrorMessage(
+                  error,
+                  `Bazarr+ could not remove ${existing.name}. You can edit it in Settings, Connections after setup.`,
+                ),
           ),
-        ),
-    });
+      },
+    );
   };
 
   const testResult = test.data;

@@ -8,6 +8,7 @@ shape fails here rather than in someone's install.
 
 import inspect
 import threading
+import time
 
 import pytest
 import sqlalchemy as sa
@@ -58,6 +59,187 @@ def test_the_owner_sync_lock_wait_can_be_bounded():
     # is done the same call succeeds.
     with owner_sync_lock(owner, timeout=5):
         pass
+
+
+def _until(predicate, seconds=5):
+    deadline = time.monotonic() + seconds
+    while not predicate():
+        assert time.monotonic() < deadline, "the lock never reached the expected state"
+        time.sleep(0.01)
+
+
+def _hold(owner):
+    """Hold the owner lock on another thread until the returned event is set."""
+    from sportarr.connection import owner_sync_lock
+
+    holding, release = threading.Event(), threading.Event()
+
+    def hold():
+        with owner_sync_lock(owner):
+            holding.set()
+            release.wait(10)
+
+    thread = threading.Thread(target=hold, daemon=True)
+    thread.start()
+    assert holding.wait(5), "the holder never acquired the lock"
+    return release, thread
+
+
+def test_a_waiting_sync_is_counted_until_it_holds_the_lock():
+    """A long background holder can only step aside for a sync it can see.
+
+    The scheduled recording index held the owner lock for its whole scan and
+    nothing told it that a sync had queued behind it, so a startup sync waited
+    until every recording was hashed. A waiter counts from the moment it finds
+    the lock taken until it holds the lock, and each waiter counts separately.
+    """
+    from sportarr import connection
+    from sportarr.connection import owner_sync_lock, sync_waiting
+
+    owner = 987655
+    release, holder = _hold(owner)
+    assert not sync_waiting(owner)
+    entered, done = [], threading.Event()
+
+    def sync(name):
+        with owner_sync_lock(owner, timeout=10):
+            entered.append(name)
+            done.wait(10)
+
+    first = threading.Thread(target=sync, args=('first',), daemon=True)
+    first.start()
+    _until(lambda: sync_waiting(owner))
+    second = threading.Thread(target=sync, args=('second',), daemon=True)
+    second.start()
+    _until(lambda: connection._waiting.get(owner) == 2)
+    try:
+        release.set()
+        holder.join(10)
+        # Waiters are not served in order, so either one may get the lock.
+        _until(lambda: len(entered) == 1)
+        # One sync holds the lock now; the other is still queued and counted.
+        assert connection._waiting.get(owner) == 1
+    finally:
+        release.set()
+        done.set()
+        first.join(10)
+        second.join(10)
+    assert sorted(entered) == ['first', 'second']
+    assert not sync_waiting(owner)
+    assert owner not in connection._waiting
+
+
+def test_a_sync_counts_as_waiting_before_its_first_timed_wait():
+    """The index checks for a queued sync between recordings.
+
+    A sync that only counted once its first 0.1 s wait ran out could miss that
+    check when it arrived near the end of a recording, and then sit behind one
+    more hash. It counts as soon as it finds the lock taken.
+    """
+    from sportarr import connection
+    from sportarr.connection import owner_sync_lock, sync_waiting
+
+    owner = 987658
+
+    class Taken:
+        """Refuses the first try, then records what a timed wait could see."""
+
+        def __init__(self):
+            self.seen = []
+
+        def acquire(self, blocking=True, timeout=-1):
+            if not blocking:
+                return False
+            self.seen.append(sync_waiting(owner))
+            return True
+
+        def release(self):
+            pass
+
+    lock = connection._locks[owner] = Taken()
+    try:
+        with owner_sync_lock(owner, timeout=5):
+            pass
+    finally:
+        connection._locks.pop(owner, None)
+    assert lock.seen == [True]
+    assert not sync_waiting(owner)
+
+
+def test_a_waiter_that_gives_up_or_does_not_count_leaves_no_trace():
+    """Cancelled and timed-out waits stop counting, and the index's own wait never counts.
+
+    A stale count would leave the index waiting for a sync that is no longer
+    there. A counted index wait would let one scan make another step aside,
+    and the two would keep yielding to each other.
+    """
+    from sportarr.connection import SportsSyncBusy, owner_sync_lock, sync_waiting
+
+    owner = 987656
+    release, holder = _hold(owner)
+    try:
+        with pytest.raises(SportsSyncBusy):
+            with owner_sync_lock(owner, timeout=0.3):
+                pytest.fail("acquired a lock another thread was holding")
+        assert not sync_waiting(owner)
+
+        cancel = threading.Event()
+        timer = threading.Timer(0.3, cancel.set)
+        timer.start()
+        with pytest.raises(ValueError, match='stopped'):
+            with owner_sync_lock(owner, cancel=cancel):
+                pytest.fail("acquired a lock another thread was holding")
+        timer.join(5)
+        assert not sync_waiting(owner)
+
+        outcome, seen = [], []
+
+        def quiet():
+            try:
+                with owner_sync_lock(owner, timeout=0.5, count_waiter=False):
+                    outcome.append('entered')
+            except SportsSyncBusy:
+                outcome.append('busy')
+
+        waiter = threading.Thread(target=quiet, daemon=True)
+        waiter.start()
+        while waiter.is_alive():
+            seen.append(sync_waiting(owner))
+            time.sleep(0.02)
+        assert outcome == ['busy']
+        assert seen and not any(seen)
+    finally:
+        release.set()
+        holder.join(10)
+
+
+def test_the_log_tells_the_index_wait_apart_from_a_sync_wait(caplog):
+    """A wait line followed by a long gap has to say who was waiting.
+
+    The scheduled recording index waits for the owner lock again when it
+    resumes after stepping aside, and that wait lasts as long as the sync. With
+    one shared line, a sync stuck behind the index and the index queued behind
+    a sync read the same in the log.
+    """
+    import logging
+    from sportarr.connection import SportsSyncBusy, owner_sync_lock
+
+    owner = 987657
+    release, holder = _hold(owner)
+    try:
+        with caplog.at_level(logging.DEBUG):
+            for count_waiter in (True, False):
+                with pytest.raises(SportsSyncBusy):
+                    with owner_sync_lock(owner, timeout=0.3, count_waiter=count_waiter):
+                        pytest.fail("acquired a lock another thread was holding")
+    finally:
+        release.set()
+        holder.join(10)
+    waits = [record.getMessage() for record in caplog.records if 'sync lock' in record.getMessage()]
+    assert waits == [
+        f'Waiting for the Sportarr sync lock on instance {owner}.',
+        f'The Sports recording index is waiting for the Sportarr sync lock on instance {owner}.',
+    ]
 
 
 def test_sports_sync_busy_is_not_a_value_error():
@@ -1060,15 +1242,19 @@ def test_partial_keep_all_indexes_only_current_publications_after_cancellation(s
 @pytest.mark.parametrize('cancelled', [False, True])
 def test_sports_sync_refreshes_final_outputs_once_even_after_partial_cancellation(
         sync_library, sports_refresh_targets, monkeypatch, toolbox, cancelled):  # noqa: F811
+    import ast
+    from app.database import TableSportsEvents
     from app.jobs_queue import JobCancelled
     from api.subtitles import subtitles as endpoint
     from subtitles import sync
     from subtitles.indexer import sports as indexer
     from subtitles.tools.subsyncer import SubSyncer
     from sportarr.subtitles import sports_manual_operation
+    from media_servers import events
 
-    _, session, folder, published, _ = sync_library
-    refreshed, _ = sports_refresh_targets
+    _, session, folder, _, refreshed = sync_library
+    publications = sports_refresh_targets
+    monkeypatch.setattr(sync, 'publication_callback', events.publication_callback)
     indexer.store_subtitles_sports(61, 1)
     monkeypatch.setattr(endpoint, 'database', session)
     monkeypatch.setattr(endpoint, 'event_stream', lambda **kwargs: None)
@@ -1100,10 +1286,16 @@ def test_sports_sync_refreshes_final_outputs_once_even_after_partial_cancellatio
         assert run() == (('', 204) if toolbox else True)
     output = folder / '1/event.en.hi.ffsubsync.srt'
     assert output.exists()
-    assert len(published) == 1
-    # One rescan for the owner, once, whatever the engines did. Every media
-    # server refreshes off that single publication on its own worker.
-    assert refreshed == [('sportarr', 1)]
+    assert len(publications) == 1
+    publication = publications[0]
+    assert publication.media_type == 'sports'
+    assert publication.video_path == str(folder / '1/event.mkv')
+    assert publication.subtitle_path == str(output)
+    assert publication.operation == 'sync'
+    assert publication.arr_instance_id == 1
+    indexed = ast.literal_eval(session.get(TableSportsEvents, 61).subtitles)
+    assert any(item[1] == '/sports/' + output.name for item in indexed)
+    assert refreshed == [{'type': 'sports', 'payload': 61}]
 
 
 @pytest.mark.parametrize('filters, expected', [

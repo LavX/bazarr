@@ -413,6 +413,47 @@ def test_stream_routing_uses_owned_existing_events_before_remote_lookup(
         sse.reconcile_work(a.id, sse.PendingWork(full=True), **kwargs)
 
 
+def test_stream_full_sync_runs_inline_and_never_through_the_jobs_queue(
+    schema_session, monkeypatch
+):
+    """Only the scheduled sync goes through the jobs queue. The stream and the
+    webhook repair run on their own worker with their own stop signal and lock
+    timeout, so they keep calling the sync directly rather than the queueing
+    wrapper, which would drop both and wait on the queue instead."""
+    from arr_instances.repository import ArrInstanceRepository
+    from sportarr import sse_client as sse
+    from sportarr.connection import connection_identity
+    from sportarr.sync import leagues
+
+    owner = ArrInstanceRepository(schema_session).create("sportarr", "A")
+    monkeypatch.setattr(sse, "database", schema_session)
+    full, queued = [], []
+    monkeypatch.setattr(
+        leagues, "update_sports_for_instance",
+        lambda owner_id, **kw: full.append((owner_id, kw)),
+    )
+    monkeypatch.setattr(
+        leagues, "sync_sports_for_instance",
+        lambda *a, **k: queued.append(("wrapper", a, k)),
+    )
+    monkeypatch.setattr(
+        leagues.jobs_queue, "add_job_from_function",
+        lambda *a, **k: queued.append(("queue", a, k)),
+    )
+    cancel = threading.Event()
+    sse.reconcile_work(
+        owner.id, sse.PendingWork(full=True), cancel=cancel,
+        expected_connection=connection_identity(owner), lock_timeout=5,
+    )
+    assert queued == []
+    assert len(full) == 1
+    owner_id, kwargs = full[0]
+    assert owner_id == owner.id
+    assert kwargs["cancel"] is cancel
+    assert kwargs["lock_timeout"] == 5 and kwargs["is_signalr"] is True
+    assert "job_id" not in kwargs
+
+
 def test_frame_cursor_acknowledgment_requires_safe_enqueue():
     from sportarr.sse_client import SportarrSSEClient, SSEFrame
 

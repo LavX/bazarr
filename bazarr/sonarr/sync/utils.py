@@ -23,6 +23,28 @@ def _api_get(suffix, v3_path, apikey_sonarr, arr_client):
     )
 
 
+def _safe_response_json(response, context, default=None):
+    """Decode a Sonarr reply, treating a body that is not JSON as a failed fetch.
+
+    A proxy error page or a body cut short by a struggling Sonarr can arrive as
+    a 200. Raising from here would escape the caller's error handling and stop
+    a whole library sync partway.
+    """
+    try:
+        return response.json()
+    except requests.exceptions.JSONDecodeError:
+        content = response.content or b''
+        logging.error(
+            "BAZARR non-JSON response from Sonarr while %s: status=%s content_type=%s bytes=%s body_preview=%r",
+            context,
+            response.status_code,
+            response.headers.get('content-type', ''),
+            len(content),
+            response.text[:200],
+        )
+        return default
+
+
 def get_profile_list():
     return []
 
@@ -70,11 +92,11 @@ def get_series_from_sonarr_api(apikey_sonarr, sonarr_series_id=None, arr_client=
         return
     else:
         if r.status_code == 200:
-            result = r.json()
+            result = _safe_response_json(
+                r, f"getting series {sonarr_series_id}" if sonarr_series_id else "getting the series list")
             if isinstance(result, dict):
                 return [result]
-            else:
-                return r.json()
+            return result
         else:
             return
 
@@ -107,7 +129,8 @@ def get_episodes_from_sonarr_api(apikey_sonarr, series_id=None, episode_id=None,
         return
     else:
         if r.status_code == 200:
-            return r.json()
+            return _safe_response_json(
+                r, f"getting episodes series_id={series_id} episode_id={episode_id}")
         else:
             return
 
@@ -140,7 +163,8 @@ def get_episodesFiles_from_sonarr_api(apikey_sonarr, series_id=None, episode_fil
         return
     else:
         if r.status_code == 200:
-            return r.json()
+            return _safe_response_json(
+                r, f"getting episodeFiles series_id={series_id} episode_file_id={episode_file_id}")
         else:
             return
 

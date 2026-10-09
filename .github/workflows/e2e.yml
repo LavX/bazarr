@@ -44,7 +44,13 @@ jobs:
         working-directory: ${{ env.UI_DIRECTORY }}
 
       - name: Build image
-        run: docker build --tag "$BAZARR_E2E_IMAGE" .
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          docker build \
+            --build-arg BAZARR_VERSION="e2e-${short_sha}" \
+            --build-arg VCS_REF="${short_sha}" \
+            --build-arg BUILD_DATE="$(date -u +%F)" \
+            --tag "$BAZARR_E2E_IMAGE" .
 
       - name: Install Chromium
         run: npx playwright install --with-deps chromium

@@ -3,10 +3,12 @@ import { createMemoryRouter, RouterProvider } from "react-router";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import queryClient from "@/apis/queries";
+import { QueryKeys } from "@/apis/queries/keys";
 import type { SportsEvent } from "@/apis/raw/sports";
 import { sportarr } from "@/pages/Settings/Connections/__tests__/fixtures";
 import { AllProviders } from "@/providers";
-import { rawRender, screen, waitFor, within } from "@/tests";
+import { act, rawRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
 import * as files from "@/utilities/files";
 import { registerAppNavigate } from "@/utilities/whatsNew";
@@ -1254,6 +1256,25 @@ it("queues the sports download as a job and refreshes the event", async () => {
   await userEvent.click(
     await dialog.findByRole("button", { name: "Download" }),
   );
+  // The page refreshes once the queued job reports that it completed.
+  act(() => {
+    queryClient.setQueryData(
+      [QueryKeys.System, QueryKeys.Jobs],
+      [
+        {
+          job_id: 9,
+          job_name: "Downloading Event subtitles",
+          status: "completed",
+          last_run_time: "",
+          is_progress: false,
+          is_signalr: false,
+          progress_value: 0,
+          progress_max: 0,
+          progress_message: "",
+        },
+      ],
+    );
+  });
   // Scoped to the page table: the search modal renders a results table too,
   // and "en" appears in both, so anything wider is ambiguous.
   await waitFor(() => {

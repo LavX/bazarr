@@ -2,7 +2,22 @@
 # fmt: off
 
 import ast
+import logging
 import os
+
+
+def evaluate_translation_gate():
+    """Whether the configured translator can translate, asked once per scan run.
+
+    A closed gate is logged here with its reason, because a scan that queues
+    nothing would otherwise say nothing at all about the languages it then sent
+    to providers instead of translating.
+    """
+    from subtitles.tools.translate.availability import translation_available
+    availability = translation_available()
+    if not availability.available:
+        logging.info("BAZARR is not translating missing subtitles: %s", availability.reason)
+    return availability.available
 
 
 def _find_existing_subtitle_path(subtitles_field, source_lang, path_replace_fn=None):

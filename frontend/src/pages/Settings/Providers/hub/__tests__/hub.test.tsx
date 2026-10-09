@@ -572,7 +572,61 @@ describe("Settings > Providers (Provider Hub)", () => {
     ).toBeInTheDocument();
   });
 
-  it("preserves the trusted-source attribution when installing from catalog", async () => {
+  describe("installing a local package", () => {
+    const MiB = 1024 * 1024;
+
+    function packageOfSize(name: string, size: number) {
+      const file = new File(["PK"], name, { type: "application/zip" });
+      Object.defineProperty(file, "size", { value: size });
+      return file;
+    }
+
+    async function pickPackage(file: File) {
+      customRender(<SettingsProvidersView />);
+      await userEvent.click(screen.getByRole("tab", { name: /Marketplace/i }));
+      const panel = await screen.findByRole("tabpanel", {
+        name: /Marketplace/i,
+      });
+      // The package picker is a hidden native file input behind the button.
+      // eslint-disable-next-line testing-library/no-node-access
+      const input = panel.querySelector<HTMLInputElement>('input[type="file"]');
+      expect(input).not.toBeNull();
+      await userEvent.upload(input!, file);
+    }
+
+    it("refuses a package over 100 MiB without uploading it", async () => {
+      const uploadRequest = vi.fn();
+      server.use(
+        http.post("/api/provider-hub/installations/local", () => {
+          uploadRequest();
+          return HttpResponse.json({ job_id: null }, { status: 202 });
+        }),
+      );
+
+      await pickPackage(packageOfSize("large.zip", 100 * MiB + 1));
+
+      expect(
+        await screen.findByText(/large\.zip is larger than 100 MiB/i),
+      ).toBeInTheDocument();
+      expect(uploadRequest).not.toHaveBeenCalled();
+    });
+
+    it("uploads a package of exactly 100 MiB", async () => {
+      const uploadRequest = vi.fn();
+      server.use(
+        http.post("/api/provider-hub/installations/local", () => {
+          uploadRequest();
+          return HttpResponse.json({ job_id: null }, { status: 202 });
+        }),
+      );
+
+      await pickPackage(packageOfSize("plugin.zip", 100 * MiB));
+
+      await waitFor(() => expect(uploadRequest).toHaveBeenCalledTimes(1));
+    });
+  });
+
+  it("installs a catalog card by its source, provider id and version", async () => {
     const installRequest = vi.fn();
     server.use(
       http.post("/api/provider-hub/installations", async ({ request }) => {
@@ -608,14 +662,92 @@ describe("Settings > Providers (Provider Hub)", () => {
 
     await waitFor(() => {
       expect(installRequest).toHaveBeenCalledWith({
-        manifest: expect.objectContaining({
-          provider_id: "officialhub",
-          source: expect.objectContaining({
-            repo: "LavX/bazarr-provider-catalog",
-            trusted: true,
-          }),
-        }),
+        source: "Official",
+        provider_id: "officialhub",
+        version: "1.0.0",
       });
     });
+  });
+
+  it("names an installed card's source from Bazarr+'s records, not its manifest", async () => {
+    server.use(
+      http.get("/api/provider-hub/catalog", () =>
+        HttpResponse.json({ sources: [], entries: [] }),
+      ),
+      http.get("/api/provider-hub/providers", () =>
+        HttpResponse.json({
+          data: [
+            {
+              provider_id: "officialhub",
+              name: "Official Hub Provider",
+              active_version: "1.0.0",
+              state: "active",
+              pending_restart: false,
+              trusted: false,
+              origin: "catalog",
+              source_bound: true,
+              source_id: null,
+              source_name: null,
+              trust_note:
+                "Its catalog source was removed, so it gets no updates.",
+              manifest: {
+                ...manifest,
+                source: { ...manifest.source, name: "Official catalog" },
+              },
+            },
+          ],
+        }),
+      ),
+    );
+
+    customRender(<SettingsProvidersView />);
+    await userEvent.click(screen.getByRole("tab", { name: /Marketplace/i }));
+    const panel = await screen.findByRole("tabpanel", { name: /Marketplace/i });
+
+    expect(
+      await within(panel).findByText("v1.0.0 from Unknown source"),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).getByText(/Its catalog source was removed/),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).queryByText(/Official catalog/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("warns before a Dev mode ref other than main or beta leaves the official source", async () => {
+    server.use(
+      http.get("/api/provider-hub/catalog", () =>
+        HttpResponse.json({
+          sources: [
+            {
+              id: "official",
+              name: "Official",
+              url: "https://github.com/LavX/bazarr-provider-catalog/blob/main/catalog.json",
+              official: true,
+              trusted: true,
+            },
+          ],
+          entries: [],
+        }),
+      ),
+    );
+
+    customRender(<SettingsProvidersView />);
+    await userEvent.click(screen.getByRole("tab", { name: /Marketplace/i }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /Manage sources/i }),
+    );
+    await userEvent.click(await screen.findByLabelText("Dev mode"));
+    const branch = await screen.findByLabelText("Branch");
+    const warning = /Only main and beta are trusted/;
+
+    await userEvent.clear(branch);
+    await userEvent.type(branch, "beta");
+    expect(screen.queryByText(warning)).not.toBeInTheDocument();
+
+    await userEvent.clear(branch);
+    await userEvent.type(branch, "feat/someone-else");
+    expect(screen.getByText(warning)).toBeInTheDocument();
   });
 });

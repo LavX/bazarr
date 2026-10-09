@@ -9,8 +9,9 @@ passing proves little on its own:
 * ``CAST(x AS INTEGER)`` rounds on PostgreSQL but truncates on SQLite, which
   would shift every histogram bucket by one.
 
-Skips when no Postgres is reachable (set BAZARR_PG_TEST_URL, default the dev
-container on 55432). CI provides a postgres service so this does NOT skip there.
+Skips when BAZARR_PG_TEST_URL is unset and the dev container on 55432 does not
+answer. With the variable set, as CI sets it, an unreachable server or a missing
+driver fails instead, so the lane cannot go quietly green.
 """
 import os
 from datetime import datetime, timedelta
@@ -21,7 +22,7 @@ from flask import Flask
 
 _PG_URL = os.environ.get(
     "BAZARR_PG_TEST_URL",
-    "postgresql+psycopg://postgres:test@127.0.0.1:55432/bazarr")
+    "postgresql+psycopg2://postgres:test@127.0.0.1:55432/bazarr")
 
 
 def _pg_session():
@@ -34,7 +35,9 @@ def _pg_session():
         with engine.connect() as conn:
             conn.execute(sa.text("SELECT 1"))
     except Exception as exc:  # pragma: no cover - environment dependent
-        pytest.skip(f"PostgreSQL not reachable at {_PG_URL}: {exc}")
+        if os.environ.get("BAZARR_PG_TEST_URL"):
+            pytest.fail(f"BAZARR_PG_TEST_URL is set, but PostgreSQL is not usable: {exc}")
+        pytest.skip(f"PostgreSQL not reachable at the default URL: {exc}")
 
     # Fresh schema per run so repeated runs do not accumulate rows.
     with engine.begin() as conn:
