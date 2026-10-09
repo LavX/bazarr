@@ -1126,6 +1126,38 @@ def test_the_front_listener_report_records_the_host_and_announces(real_factory, 
     assert _announced_code(console_log) is not None
 
 
+def test_a_report_of_a_refusal_the_console_already_named_writes_no_second_line(
+        real_factory, root_log, monkeypatch):
+    """The report of a refusal the front listener named on its own console
+    while the backend could not be told carries the time of that line: the
+    hostname is recorded and the code is announced all the same, but no
+    second line is written for it within that hour. A carried time past the
+    hour suppresses nothing."""
+    from app import host_allowlist
+    from app.config import settings
+
+    monkeypatch.setenv("BAZARR_SUPERVISOR_TOKEN", "supervisor-token")
+    client = real_factory.test_client()
+    headers = {"Host": "127.0.0.1:6767", "X-Bazarr-Supervisor-Token": "supervisor-token"}
+
+    report = client.post("/_supervisor/host_refusal", headers=headers,
+                         data={"host": "front.example.com", "logged": repr(time.time() - 60)})
+    assert report.status_code == 204
+
+    issues = host_allowlist.health_issues(settings)
+    assert any("front.example.com" in issue["issue"] for issue in issues)
+    refused = [message for message in root_log.messages if "refused a request" in message]
+    assert refused == []
+
+    # Past the carried hour, the backend's own line is written.
+    report = client.post("/_supervisor/host_refusal", headers=headers,
+                         data={"host": "late.example.com", "logged": repr(time.time() - 3700)})
+    assert report.status_code == 204
+    refused = [message for message in root_log.messages if "refused a request" in message]
+    assert len(refused) == 1
+    assert "late.example.com" in refused[0]
+
+
 def test_a_refusal_names_the_hostname_that_failed_and_recovers_from_it(
         real_factory, shell_template, console_log, monkeypatch):
     """Raw Host refused while the forwarded host would pass: the page, the
@@ -1866,7 +1898,13 @@ async def test_refusals_while_the_backend_is_down_are_named_here_and_reported_wh
                 if reports:
                     break
                 await asyncio.sleep(0.01)
-            assert reports == [("the-supervisor-token", {"host": FOREIGN_HOST})]
+            assert len(reports) == 1
+            assert reports[0][0] == "the-supervisor-token"
+            assert reports[0][1]["host"] == FOREIGN_HOST
+            # The console named the hostname while the backend was down, so
+            # the report carries the time of that line and the backend writes
+            # no second one for it.
+            assert float(reports[0][1]["logged"]) > 0
             # The worker clears the pending set once it has read the answer,
             # not when the handler records it, so wait for its own clock.
             for _ in range(200):
@@ -1991,6 +2029,30 @@ def test_the_report_cooldown_does_not_outlive_the_backend():
     reporter.ready_to_deliver()
     assert reporter.report_due("restarted.example.com") is True
     assert reporter.take_due_report() == "restarted.example.com"
+
+
+def test_a_host_refused_again_while_waiting_is_not_evicted():
+    """A hostname refused again while its report is still waiting is the
+    newest news about it, so it moves to the end of the pending queue: the
+    eviction drops the oldest waiting, and a frequently refused hostname is
+    not pushed out by names that arrived after its last refusal."""
+    clock = [0]
+    reporter = supervisor._RefusalReporter("/_supervisor/host_refusal", now=lambda: clock[0])
+
+    assert reporter.report_due("often.example.com") is True
+    for index in range(supervisor.host_policy.REFUSED_HOSTS_LIMIT - 1):
+        assert reporter.report_due(f"h{index}.example.com") is True
+    assert len(reporter.pending_reports()) == supervisor.host_policy.REFUSED_HOSTS_LIMIT
+
+    # Refused again while still waiting, and one more name arrives after it.
+    assert reporter.report_due("often.example.com") is False
+    clock[0] = 10
+    assert reporter.report_due("newest.example.com") is True
+
+    pending = reporter.pending_reports()
+    assert len(pending) == supervisor.host_policy.REFUSED_HOSTS_LIMIT
+    assert "h0.example.com" not in pending
+    assert pending[-2:] == ["often.example.com", "newest.example.com"]
 
 
 def test_the_report_pace_is_bounded_globally_too():
@@ -2275,6 +2337,59 @@ async def test_a_thousand_refusals_while_the_backend_is_down_stay_bounded(
         assert in_flight["peak"] <= 1
         assert reporter.pending_reports() == []
         assert len(lines) <= 21
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_the_console_and_the_backend_share_the_refusal_log_budget(
+        tmp_path, monkeypatch, fresh_state, root_log):
+    """An outage is named on this console under the hour's line cap, and once
+    the backend answers, the reports arrive and the backend owns the lines: a
+    hostname this console already spent a line on, or held back under its
+    cap, is not named a second time, so the two paths together stay within
+    the hour's cap and the one line past it."""
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    config = _config()
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    try:
+        # The outage: this console is the only place a refusal is named.
+        for index in range(25):
+            response = await client.get("/", headers={"Host": f"down{index}.example.com"})
+            assert response.status == 421
+        assert len(lines) == supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR
+
+        async def notice(request):
+            form = await request.post()
+            logged = form.get("logged")
+            fresh_state.record_refusal(form["host"], config=config,
+                                       line_at=float(logged) if logged else None)
+            return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                     "the-supervisor-token"})
+
+        backend_app = web.Application()
+        backend_app.router.add_route("POST", "/_supervisor/host_refusal", notice)
+        backend = TestClient(TestServer(backend_app))
+        await backend.start_server()
+        try:
+            monkeypatch.setattr(supervisor, "BACKEND_PORT", backend.server.port)
+            monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+            reporter = supervisor._active_reporter
+            for _ in range(4000):
+                if not reporter.pending_reports():
+                    break
+                await asyncio.sleep(0.01)
+            assert reporter.pending_reports() == []
+        finally:
+            await backend.close()
+
+        backend_lines = [message for message in root_log.messages
+                         if "refused a request" in message]
+        assert len(lines) + len(backend_lines) <= (
+            supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR + 1)
     finally:
         await client.close()
 

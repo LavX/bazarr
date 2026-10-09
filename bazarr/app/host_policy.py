@@ -245,6 +245,13 @@ class BoundedRefusalRecorder:
     has run. The caller owns the wording and the channel: ``note`` returns
     whether a per-host line may be written now, and ``take_summary`` returns
     the suppressed window when a summary line is due (and clears it).
+
+    The two processes that apply this policy share no memory, so the hour's
+    line budget is shared through the front listener's report: ``note`` takes
+    ``line_at``, the time a console elsewhere already spent this hostname's
+    line within the hour, and records the refusal without writing or
+    suppressing a line for it, so the hostname is not named twice in the
+    same window.
     """
 
     def __init__(self, now=time.time):
@@ -256,8 +263,18 @@ class BoundedRefusalRecorder:
         self._suppressed = 0
         self._window_opens = None  # when the current suppressed count started
 
-    def note(self, host):
-        """Record a refusal; True when a per-host line may be written now."""
+    def note(self, host, line_at=None):
+        """Record a refusal; True when a per-host line may be written now.
+
+        ``line_at`` carries the time a console elsewhere spent this
+        hostname's line within the hour, reported by the front listener
+        that wrote it while the backend it fronts could not be told: the
+        refusal is recorded all the same, but no second line is written
+        for it and this hour's cap here is not spent on the one already
+        spent there. A line held back this way is not counted as
+        suppressed either, because the console that spent it keeps its own
+        count of what it held back.
+        """
         now = self._now()
         with self._lock:
             if host in self._hosts:
@@ -266,6 +283,12 @@ class BoundedRefusalRecorder:
             while len(self._hosts) > REFUSED_HOSTS_LIMIT:
                 self._hosts.popitem(last=False)
             self._prune(now)
+            if line_at is not None and now - line_at < HOUR_SECONDS:
+                if host in self._last_lines:
+                    self._last_lines[host] = max(self._last_lines[host], line_at)
+                else:
+                    self._last_lines[host] = line_at
+                return False
             if host in self._last_lines or len(self._line_times) >= REFUSAL_LOG_LINES_PER_HOUR:
                 self._suppressed += 1
                 return False

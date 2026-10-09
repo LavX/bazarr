@@ -754,7 +754,11 @@ class _RefusalReporter:
     report reaches it and its own record writes them. This console writes
     them while the backend cannot be told, and again whenever a delivery
     fails, because from that moment this console is the only place the
-    hostname is named.
+    hostname is named. A hostname this console spent a line on, or held
+    back under its ceiling, carries the time of that with its report, so
+    the backend writes no second line for it in the same hour: the hour's
+    line budget is the one the two processes share, even though they share
+    no memory.
     """
 
     def __init__(self, notice_path: str, now=time.time):
@@ -763,6 +767,7 @@ class _RefusalReporter:
         self._lines = host_policy.BoundedRefusalRecorder(now=now)
         self._last_report = OrderedDict()  # host -> time of its last acknowledged report
         self._pending = OrderedDict()  # host -> time of its last attempt (None until tried)
+        self._accounted = OrderedDict()  # host -> time this console last spent its line
         self._report_times = []  # times of this hour's acknowledged report deliveries
         self._last_failure = None  # when the last delivery failed, until an ack or readiness
         self._wake = asyncio.Event()  # refusals and readiness wake the worker
@@ -770,7 +775,34 @@ class _RefusalReporter:
 
     def note_line(self, host):
         """Record a refusal; True when a console line may be written now."""
-        return self._lines.note(host)
+        accounted = self._lines.note(host)
+        self._account_line(host)
+        return accounted
+
+    def _account_line(self, host):
+        """Remember that this console spent this hostname's line for the hour.
+
+        The report the backend eventually takes carries the time, so the
+        backend writes no second line for the same hostname in the same
+        hour: the two processes share the hour's line budget even though
+        they share no memory. The bookkeeping is bounded and rolled past
+        its hour like every other roll here.
+        """
+        now = self._now()
+        self._accounted = OrderedDict(
+            (name, stamp) for name, stamp in self._accounted.items()
+            if now - stamp < host_policy.HOUR_SECONDS)
+        self._accounted[host] = now
+        while len(self._accounted) > host_policy.REFUSED_HOSTS_LIMIT:
+            self._accounted.popitem(last=False)
+
+    def line_time(self, host):
+        """When this console last spent this hostname's line, within the hour."""
+        now = self._now()
+        stamp = self._accounted.get(host)
+        if stamp is not None and now - stamp < host_policy.HOUR_SECONDS:
+            return stamp
+        return None
 
     def take_summary(self):
         """The suppressed window of this console's refusal lines, if due."""
@@ -781,15 +813,21 @@ class _RefusalReporter:
 
         True when the hostname is newly waiting to be told: one acknowledged
         within the hour is done until the hour runs, and one already waiting
-        is the worker's to deliver. The pending set holds the
-        REFUSED_HOSTS_LIMIT newest of them, the same number the backend's
-        record keeps, so a longer roll of hostnames cannot grow a longer
-        queue: the ones the eviction drops are the oldest waiting, the ones
-        the backend's record has dropped too.
+        is the worker's to deliver. A hostname refused again while it waits
+        moves to the end of the queue, the newest place, so the eviction
+        drops the oldest waiting and a frequently refused hostname is not
+        pushed out by names that arrived after its last refusal. The pending
+        set holds the REFUSED_HOSTS_LIMIT newest of them, the same number the
+        backend's record keeps, so a longer roll of hostnames cannot grow a
+        longer queue: the ones the eviction drops are the oldest waiting,
+        the ones the backend's record has dropped too.
         """
         now = self._now()
         self._prune_reports(now)
-        if host in self._last_report or host in self._pending:
+        if host in self._last_report:
+            return False
+        if host in self._pending:
+            self._pending.move_to_end(host)
             return False
         self._pending[host] = None
         while len(self._pending) > host_policy.REFUSED_HOSTS_LIMIT:
@@ -870,6 +908,7 @@ class _RefusalReporter:
         self._last_failure = self._now()
         if host in self._pending:
             self._pending[host] = self._now()
+        self._account_line(host)
         if self._lines.note_retry(host):
             _print_refusal_line(_refusal_line_text(host))
 
@@ -941,11 +980,21 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
     for the next try. Redirects are not followed on this call, because an
     ordinary page reached by following one is an answer this backend did not
     give about this report.
+
+    The report also carries the time this console spent the hostname's line,
+    while the backend could not be told and this console was the only place
+    a refusal was named: the backend then writes no second line for the same
+    hostname in the same hour, so the two processes share the hour's line
+    budget even though they share no memory.
     """
+    data = {"host": host}
+    logged = reporter.line_time(host)
+    if logged is not None:
+        data["logged"] = str(logged)
     try:
         async with session.post(f"http://{BACKEND_HOST}:{port}{reporter.notice_path}",
                                 headers={TOKEN_HEADER: token},
-                                data={"host": host},
+                                data=data,
                                 allow_redirects=False) as response:
             await response.read()
             if response.status == 204 and response.headers.get(TOKEN_HEADER) == token:

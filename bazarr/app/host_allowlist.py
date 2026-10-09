@@ -261,19 +261,21 @@ def verify_approval_code(supplied):
     return _approval_code.verify(supplied)
 
 
-def record_refusal(host, config=settings):
+def record_refusal(host, config=settings, line_at=None):
     """Record a refused hostname and keep a code on the console.
 
     The backend's own refusals call this, and so does the report the front
     listener in front of this backend sends: the hostnames that layer refuses
     never reach this process, so without the report they would never appear on
     the health page and the console code would never be repeated while they
-    continue.
+    continue. The report also carries the time that console spent the
+    hostname's refusal line while this backend could not be told, so no
+    second line is written for it in the same hour.
     """
     shown = effective_host(host)
     if not shown or not check_active(config):
         return
-    if _refusals.note(shown):
+    if _refusals.note(shown, line_at):
         logging.warning('BAZARR refused a request for an unrecognized host: %s. Allow it under '
                         'Settings > General > Allowed Hosts, or set %s.', shown, ALLOWED_HOSTS_ENV)
     _flush_suppressed_summary()
@@ -287,7 +289,9 @@ def front_refusal_notice(config=settings):
 
     It carries the token the supervisor started this process with, and the
     sender bounds it to at most one report per hostname per hour, so the work
-    here is only the bookkeeping and the announcement.
+    here is only the bookkeeping and the announcement. It also carries the
+    time that console spent the hostname's refusal line, so the hour's line
+    budget is the one the two processes share.
     """
     from flask import request
 
@@ -296,7 +300,12 @@ def front_refusal_notice(config=settings):
     supplied = request.headers.get(SUPERVISOR_TOKEN_HEADER, '')
     if not expected or not secrets.compare_digest(supplied.encode('utf-8'), expected.encode('utf-8')):
         return '', 403
-    record_refusal(request.form.get('host', ''), config=config)
+    logged = request.form.get('logged', '')
+    try:
+        line_at = float(logged) if logged else None
+    except ValueError:
+        line_at = None
+    record_refusal(request.form.get('host', ''), config=config, line_at=line_at)
     return '', 204
 
 
