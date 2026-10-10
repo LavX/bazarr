@@ -873,6 +873,7 @@ class _RefusalReporter:
         self._last_report = OrderedDict()  # host -> time of its last acknowledged report
         self._pending = OrderedDict()  # host -> time of its last attempt (None until tried)
         self._pending_at = OrderedDict()  # host -> when this console last refused a waiting host
+        self._pending_accounted = set()  # waiting hosts whose refusal this console already counted
         self._accounted = OrderedDict()  # host -> time this console last spent its line
         self._recent = OrderedDict()  # host -> time this console last refused it
         self._report_times = []  # times of this hour's acknowledged report deliveries
@@ -1205,28 +1206,33 @@ class _RefusalReporter:
         this console's recorder, and the next report carries it again.
 
         A copy whose delivery reached a backend that readiness has since
-        swapped for a fresh one never returns to the slot: the backend
-        its request went to folded the window in, and the fresh
-        generation holds no record of the fold, so a copy re-carried
-        would be folded in a second time and the pair would log two
-        summaries of one window. The delivery belongs to the generation
-        it was taken in, exactly as the payment a mirror's delivery could
-        report does, and the copy is dropped with the swap rather than
-        carried to a backend it cannot vouch for. A copy no delivery
-        ever connected for keeps its place whatever generation is
-        current, because nothing could have counted it anywhere.
+        swapped for a fresh one is decided by the record of completed
+        windows the two processes share, the same way a mirror's payment
+        is: a copy the record names paid is dropped, because the old
+        backend logged the one summary the window owes and the fresh
+        generation holds no record that refuses a fold of it, and a copy
+        the record names unpaid keeps its place, because the backend the
+        delivery reached folded nothing and paid nothing it can vouch
+        for, so the copy is the only remaining record of the lines the
+        window counts and the next report carries it to the fresh backend,
+        which owes its summary. A copy no delivery ever connected for
+        keeps its place whatever generation is current, because nothing
+        could have counted it anywhere.
         """
         if carried is None:
             return
         if reached:
-            if self._delivery_generation != self._ready_generation:
+            if (self._delivery_generation != self._ready_generation
+                    and host_policy.completed_windows_record_has(carried[2])):
                 # The backend this delivery reached has been swapped for a
-                # fresh one while its answer was unresolved, so the fold
-                # the delivery's arrival made lives in a generation that
-                # is gone: a copy restored and re-carried would hand the
-                # same lines to a backend that counts them a second time,
-                # so the pair keeps the one summary the old backend holds
-                # or logs, and the copy is dropped with the swap.
+                # fresh one while its answer was unresolved, and the shared
+                # record of completed windows shows the one summary this
+                # window owes was paid: the fold the delivery's arrival may
+                # have made is gone with the backend that made it, but the
+                # payment outlives it on the record, so a copy restored and
+                # re-carried would hand paid lines to a backend that counts
+                # them a second time, and the pair keeps the one summary
+                # the old backend logged.
                 return
             self._carried_sent = True
         self._carried = carried
@@ -1322,7 +1328,12 @@ class _RefusalReporter:
         the ones the backend's record has dropped too. The eviction resolves
         the notices it drops, their first-failure accounting with them: the
         accounting lives exactly as long as the notice, so a fresh notice
-        of an evicted host counts its own first failure anew. An eviction
+        of an evicted host counts its own first failure anew. The eviction
+        counts the refusal of a notice it drops only when no count of that
+        refusal is held already: the outage's refusal path counted a notice
+        it queued while the backend could not be told, and a failed delivery
+        named its notice's refusal at its failure, so the eviction counts
+        neither of those a second time. An eviction
         that catches the notice whose delivery is still in flight is
         remembered for the failure that delivery will eventually report,
         so the mark the failure counts resolves with the notice it was
@@ -1349,14 +1360,18 @@ class _RefusalReporter:
                 # acknowledged, so no backend will count this refusal: this
                 # console is the pair's only recorder for it, and it counts
                 # the repeat into its own window the way the outage's
-                # held-back lines are counted. The recorder answers whether
-                # a console line may be written as well, and the answer is
-                # discarded, because while the backend answers the backend
-                # owns the refusal lines: the per-host pace of the line the
-                # backend logged, or the hour's shared ceiling once that
-                # line was held back, holds the repeat back as one more
-                # suppressed line, whose summary the pair owes exactly once.
-                self._lines.note(host)
+                # held-back lines are counted, while the per-host pace of
+                # the line the backend logged, or the hour's shared ceiling
+                # once that line was held back, holds the repeat back as
+                # one more suppressed line, whose summary the pair owes
+                # exactly once. A repeat that arrives once the pace has run,
+                # while the report cooldown still holds it back, is granted
+                # its line, and the console writes it: the refusal reached
+                # no backend and no summary counts it, so the line is
+                # written by the only layer that can rather than spent on
+                # a slot that neither layer ever names.
+                if self.note_line(host):
+                    _print_refusal_line(_refusal_line_text(host))
             return False
         if host in self._pending:
             # The repeat coalesces into the notice already waiting, so no
@@ -1374,6 +1389,12 @@ class _RefusalReporter:
             return False
         self._pending[host] = None
         self._pending_at[host] = now
+        if BACKEND_PORT is None:
+            # The backend cannot be told, so the refusal path counted this
+            # refusal already, in a line or in the window its held-back
+            # lines count into: the notice owes no count of its own, and an
+            # eviction after the recovery counts nothing for it.
+            self._pending_accounted.add(host)
         while len(self._pending) > host_policy.REFUSED_HOSTS_LIMIT:
             dropped, _attempt = self._pending.popitem(last=False)
             self._pending_at.pop(dropped, None)
@@ -1384,18 +1405,25 @@ class _RefusalReporter:
                 # failure clears the mark it counts instead of leaving it
                 # for a notice nothing will ever resolve.
                 self._in_flight_evicted = True
-            elif BACKEND_PORT is not None:
+            elif (BACKEND_PORT is not None
+                    and dropped not in self._pending_accounted):
                 # The evicted notice will never be delivered, so no backend
                 # will count the refusal it carries: while the backend
                 # answers, this console is the pair's only recorder for
                 # that refusal, and it counts the notice's one refusal into
                 # its own window at the eviction, exactly once, so the
-                # queue's bound loses no refusal. While the backend cannot
-                # be told, the refusal path counted it already, and nothing
-                # is counted here. The notice in flight is left to its
-                # delivery: the backend counts its refusal when the report
-                # lands, and the failure names it here when it does not.
+                # queue's bound loses no refusal. A notice this console
+                # already counted is owed nothing here: the outage's
+                # refusal path counted it while the backend could not be
+                # told, and a failed delivery named it at its failure, so
+                # the eviction counts neither of those a second time.
+                # While the backend cannot be told, the refusal path
+                # counted the notice already, and nothing is counted here.
+                # The notice in flight is left to its delivery: the
+                # backend counts its refusal when the report lands, and
+                # the failure names it here when it does not.
                 self._lines.note_unreported()
+            self._pending_accounted.discard(dropped)
             self._lines.first_failure_resolved(dropped)
         self._wake.set()
         return True
@@ -1479,6 +1507,7 @@ class _RefusalReporter:
         self._last_report[host] = now
         self._pending.pop(host, None)
         self._pending_at.pop(host, None)
+        self._pending_accounted.discard(host)
         self._report_times.append(now)
         self._last_failure = None
         self._lines.first_failure_resolved(host)
@@ -1515,8 +1544,17 @@ class _RefusalReporter:
             self._in_flight = None
             self._in_flight_evicted = False
         self._account_line(host)
-        if self._lines.note_retry(host):
+        counted = self._lines.note_retry(host)
+        if counted:
             _print_refusal_line(_refusal_line_text(host))
+        if (not evicted and host in self._pending
+                and (counted or self._lines.first_failure_is_counted(host))):
+            # The failure named this notice's refusal here, in the line it
+            # wrote or in the first failure the hour's cap held back, or an
+            # earlier failure of the same notice already did, so the
+            # refusal is counted and an eviction after the failure counts
+            # nothing for it a second time.
+            self._pending_accounted.add(host)
         if evicted:
             # The notice this failure was taken for has already left the
             # queue, so nothing will ever resolve the mark it counts: the
@@ -1525,6 +1563,37 @@ class _RefusalReporter:
             # leaving the next notice of the same hostname to count its own
             # first failure anew.
             self._lines.first_failure_resolved(host)
+
+    def delivery_spoke_for_the_live_backend(self):
+        """Whether the delivery the worker took still speaks for the backend
+        that answers now.
+
+        The take remembered the generation it was taken in, and a readiness
+        that swears in a fresh backend while the delivery's answer is
+        unresolved leaves it speaking for the old one: whatever its answer
+        says once it arrives, it counts for the backend that gave it alone.
+        """
+        return self._delivery_generation == self._ready_generation
+
+    def report_requeued_for_the_fresh_backend(self, host):
+        """Resolve a delivery the swapped-out backend acknowledged, without
+        telling the fresh one anything.
+
+        The answer came from a generation readiness has since sworn out, so
+        the backend that would have counted the report is gone and the one
+        that answers now was told nothing: the notice keeps its place and is
+        due at once, the way readiness makes everything due, and neither the
+        hour's bound nor the cooldown is spent, because the fresh backend
+        spends them when its own acknowledgement lands. The notice's
+        first-failure mark is left as it is: the notice is still the same
+        notice, waiting for the backend that never received it.
+        """
+        if host in self._pending:
+            self._pending[host] = None
+        if self._in_flight == host:
+            self._in_flight = None
+            self._in_flight_evicted = False
+        self._wake.set()
 
     def pending_reports(self):
         """The hostnames the backend has not been told about, oldest first."""
@@ -1566,10 +1635,12 @@ class _RefusalReporter:
 
         The readiness also swears in a new backend generation, and any
         delivery whose answer is still unresolved belongs to the one that
-        went before: the fold its arrival made stays with that backend, so
-        the carried copy it could have delivered is dropped at the restore
-        rather than handed to a fresh generation that holds no record of
-        it.
+        went before: the carried copy it could have delivered is decided
+        by the record of completed windows the two processes share, so a
+        copy whose payment the record proves is dropped at the restore,
+        and an unpaid one keeps its place for the fresh generation, which
+        holds no record of a fold the backend it reached may never have
+        made.
         """
         self._ready_generation += 1
         for host in self._pending:
@@ -1682,7 +1753,12 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
     held as sent and never emitted here, because the backend may have
     logged its summary before whatever failure ended the exchange, and
     one no delivery ever connected for keeps the sustained-outage
-    emission, because only then could nothing have summarized it. The
+    emission, because only then could nothing have summarized it. A
+    success whose delivery belongs to a generation readiness has since
+    swapped out counts for the backend that gave it alone: the notice is
+    requeued for the fresh one rather than cooled down, and neither the
+    hour's bound nor the cooldown is spent by an answer the live backend
+    never gave. The
     mirrored copy's payment is not this delivery's to know: the backend
     pays at the arrival, and the moment this request went out is not the
     arrival, so the payment is read from the record of completed windows
@@ -1734,7 +1810,17 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
             await response.read()
             if response.status == 204 and response.headers.get(TOKEN_HEADER) == token:
                 delivered = True
-                reporter.report_sent(host)
+                if reporter.delivery_spoke_for_the_live_backend():
+                    reporter.report_sent(host)
+                else:
+                    # The answer comes from the generation readiness swapped
+                    # out while this delivery waited, so the backend that
+                    # would have counted the report is gone and the one that
+                    # answers now was told nothing: the notice keeps its
+                    # place for the fresh backend, and neither the hour's
+                    # bound nor the cooldown is spent by an answer the live
+                    # backend never gave.
+                    reporter.report_requeued_for_the_fresh_backend(host)
                 reporter.merge_acknowledged(carried, *_acknowledged_accounting(response))
                 return
     except (ClientConnectorError, ConnectionTimeoutError):

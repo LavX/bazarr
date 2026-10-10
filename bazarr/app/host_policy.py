@@ -90,6 +90,9 @@ def _mint_line_id():
 # of payment and the pair never folds paid lines in twice.
 COMPLETED_WINDOWS_RECORD = 'host-refusal-completed-windows.json'
 COMPLETED_WINDOWS_RECORD_FILE_ENV = 'BAZARR_REFUSAL_COMPLETIONS_FILE'
+# The lock that serializes updates of the record: a file beside the record,
+# in whatever directory resolved the record itself.
+COMPLETED_WINDOWS_RECORD_LOCK_SUFFIX = '.lock'
 
 
 def completed_windows_record_path(environ=None):
@@ -132,18 +135,40 @@ def record_completed_windows(window_ids, paid_at, path=None):
     past the whole span no copy is still held to be verified. The write is
     best effort: a record nothing can write proves no payment, and the
     pair keeps the lose-not-double trade rather than fail a payment.
+
+    Both processes pay into the one record, the backend at the arrival of
+    a report and the console on its own timer, so two payments can be in
+    flight at once: each update reads the record, merges its payment in
+    and replaces the file, and one complete update is held against the
+    next on the lock file beside the record, so neither payment can erase
+    the other's proof.
     """
     if not window_ids:
         return
     path = completed_windows_record_path() if path is None else path
-    record = _read_completed_windows_record(path)
-    record = {window_id: stamp for window_id, stamp in record.items()
-              if isinstance(stamp, (int, float)) and paid_at - stamp < CARRY_RETENTION_SECONDS}
-    for window_id in window_ids:
-        record[window_id] = paid_at
+    record_path = Path(path)
+    lock_handle = None
     try:
-        record_path = Path(path)
         record_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_handle = open(str(record_path) + COMPLETED_WINDOWS_RECORD_LOCK_SUFFIX, 'a+')
+        # flock is the serialization: the operating system holds the lock
+        # to the open file and releases it when its holder closes it or
+        # dies, so a process that crashes mid-update leaves no lock behind.
+        # The lock is best effort with the write it guards, exactly as the
+        # write is: a platform or a directory it cannot be taken in
+        # proceeds as one unlocked update rather than proving no payment.
+        import fcntl
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        if lock_handle is not None:
+            lock_handle.close()
+            lock_handle = None
+    try:
+        record = _read_completed_windows_record(path)
+        record = {window_id: stamp for window_id, stamp in record.items()
+                  if isinstance(stamp, (int, float)) and paid_at - stamp < CARRY_RETENTION_SECONDS}
+        for window_id in window_ids:
+            record[window_id] = paid_at
         fd, tmp = tempfile.mkstemp(dir=str(record_path.parent),
                                    prefix=f".{record_path.name}.")
         try:
@@ -155,6 +180,9 @@ def record_completed_windows(window_ids, paid_at, path=None):
             raise
     except Exception:
         pass
+    finally:
+        if lock_handle is not None:
+            lock_handle.close()
 
 
 def completed_windows_record_has(window_id, path=None):
@@ -664,6 +692,20 @@ class BoundedRefusalRecorder:
         """
         with self._lock:
             self._first_failures.pop(host, None)
+
+    def first_failure_is_counted(self, host):
+        """Whether a failed notice of this host already counted its line.
+
+        The failure path of a report asks its line pace, and a line the
+        hour's cap holds back counts once as the notice's first failure:
+        the mark lives exactly as long as the notice, and the layer that
+        resolves the notice clears it. The eviction of a pending notice
+        asks this before it counts the refusal the notice carries, because
+        a notice whose first failure already counted its line into the
+        window counts nowhere a second time.
+        """
+        with self._lock:
+            return host in self._first_failures
 
     def _prune(self, now):
         spent = [(stamp, line_id) for stamp, line_id in zip(self._line_times, self._line_ids)
