@@ -461,10 +461,16 @@ class BoundedRefusalRecorder:
         its hostname named nowhere else, so the first failed notice of a
         host whose line the hour's cap holds back counts toward the window
         the way its own held-back line would, and the host's later retries
-        of that notice do not. The host is marked when it is counted, on the
-        hour horizon every other roll here uses, because the log pace
-        cannot tell the two apart: no line was ever written for the host,
-        so ``_last_lines`` holds nothing for it.
+        of that notice do not. The host is marked when it is counted, and
+        the mark lives exactly as long as the notice: the log pace cannot
+        tell the retries of one notice from a fresh notice of the same
+        host, because no line was ever written for the host and
+        ``_last_lines`` holds nothing for it, so the notice's own
+        lifetime is the only boundary. The console clears the mark when
+        the notice resolves, at the acknowledgement of its report and at
+        the pending queue's eviction alike, and no hour horizon clears
+        it in between, so a retry of an unchanged notice counts its
+        first failure once, in whichever hour it fails.
         """
         now = self._now()
         with self._lock:
@@ -480,13 +486,30 @@ class BoundedRefusalRecorder:
             self._line_times.append(now)
             return True
 
+    def first_failure_resolved(self, host):
+        """Clear the first-failure mark of a notice that resolved.
+
+        The mark lives exactly as long as the pending notice it was
+        counted for: the console clears it when the backend acknowledges
+        the notice's report and when the pending queue evicts the notice,
+        the two ways a notice leaves, so a fresh notice of the same host
+        counts its own first failure anew however soon it follows one
+        that resolved.
+        """
+        with self._lock:
+            self._first_failures.pop(host, None)
+
     def _prune(self, now):
         self._line_times = [stamp for stamp in self._line_times if now - stamp < HOUR_SECONDS]
         self._last_lines = OrderedDict(
             (name, stamp) for name, stamp in self._last_lines.items() if now - stamp < HOUR_SECONDS)
-        self._first_failures = OrderedDict(
-            (name, stamp) for name, stamp in self._first_failures.items()
-            if now - stamp < HOUR_SECONDS)
+        # The first failures are not on the hourly roll: a mark lives
+        # exactly as long as the pending notice it was counted for, and
+        # the console clears it when the notice resolves, at the
+        # acknowledgement of its report or at the pending queue's
+        # eviction, so an hour rolling over under an unchanged notice
+        # adds nothing to the window and a retry of the notice counts
+        # its first failure once, in whichever hour it fails.
         # The window IDs are the carry protocol, not the hourly line budget,
         # so the two lists holding them outlast the hour: they are kept for
         # the whole span the console may keep re-carrying a sent copy no
@@ -625,9 +648,14 @@ class BoundedRefusalRecorder:
         nowhere, so a report whose acknowledgement was lost and whose
         retry carries the window again does not count it twice, and the
         window the other layer hands back while this one still holds it
-        costs nothing either. A window whose summary this layer has
-        already paid folds nowhere as well: its ID on the completed list
-        refuses the fold, and the arrival renews the record's lease, so
+        costs nothing either. That last refusal belongs to the window the
+        layer is still holding, ahead of the retention lists: a live
+        window outlives its counted record's lease, and a replay of its
+        own mirror arriving once that lease has aged out must not fold
+        in the lines the window already counts, so a live window can
+        never count its own mirror twice. A window whose summary this
+        layer has already paid folds nowhere as well: its ID on the completed
+        list refuses the fold, and the arrival renews the record's lease, so
         the completion is kept exactly until the sender stops re-carrying
         its copy and the pair never risks a second summary of a window
         the first one paid. The IDs are held for the whole span the
@@ -648,6 +676,15 @@ class BoundedRefusalRecorder:
         if not count or opened is None:
             return
         with self._lock:
+            if window_id is not None and (window_id == self._window_id
+                                          or window_id in self._window_ids):
+                # The ID belongs to the window this layer is still
+                # holding: the window already counts the lines the
+                # carried copy stands for, and a live window outlives
+                # the counted record's lease, so a replay of its own
+                # mirror arriving once that lease has aged out must not
+                # fold the lines in a second time.
+                return
             if window_id is not None and window_id in self._counted_windows:
                 return
             if window_id is not None and window_id in self._completed_windows:
