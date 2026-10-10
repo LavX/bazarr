@@ -467,7 +467,7 @@ Select multiple movies or series from the library pages and apply operations in 
 - **Bulk profile assignment**: select multiple movies or series and assign a language profile to all of them at once
 
 ### Smaller UI Differences from Upstream
-- **Table filters** on Wanted and Library pages: include/exclude audio language (multi-select), missing subtitle language filter, title search, with active filter chips and a collapsible filter panel
+- **Table filters** on Wanted and Library pages: include/exclude audio language (multi-select), missing subtitle language filter, title search, and tags from configured Sonarr, Radarr, or Sportarr instances. The tags filter remains available when no tags are configured. Active filters appear as chips in a collapsible filter panel.
 - **Floating save button** with Ctrl+S/Cmd+S keyboard shortcut, visible only when settings have unsaved changes
 - **Three-button unsaved changes modal**: Save & Leave, Discard, or Keep Editing (upstream only has Leave/Stay)
 - **Navy + amber dark theme**: custom color palette from `#121125` (navy black) to `#fff8e1` (cream), with amber brand accents (`#e68a00` to `#b36b00`)
