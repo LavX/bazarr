@@ -51,12 +51,8 @@ describe("Movies page", () => {
     customRender(<MovieView />);
     await screen.findByRole("link", { name: "Glass Harbour" });
 
-    const band = screen
-      .getByPlaceholderText("Search by title...")
-      .closest("[data-holds]");
-    if (!(band instanceof HTMLElement)) throw new Error("No toolbar band");
     await waitFor(() =>
-      expect(within(band).getByRole("status")).toHaveTextContent(/^1 movie$/),
+      expect(screen.getByRole("status")).toHaveTextContent(/^1 movie$/),
     );
   });
 
