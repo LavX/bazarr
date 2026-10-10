@@ -86,11 +86,16 @@ TOKEN_HEADER = "X-Bazarr-Supervisor-Token"
 
 # The backend's acknowledgement of a refused-host report carries its own
 # accounting on these headers: the times of the lines its hour has spent,
-# the suppressed window it holds with its stable ID, and the IDs of the
-# windows it has logged and cleared, so this console can drop every copy it
-# holds of a window whose summary has been paid. The backend defines the
-# same names on its side, because the two processes share no imports.
+# with the hostname each of them was logged for, the suppressed window it
+# holds with its stable ID, and the IDs of the windows it has logged and
+# cleared, so this console can drop every copy it holds of a window whose
+# summary has been paid. The backend defines the same names on its side,
+# because the two processes share no imports. The per-host pace travels as
+# two parallel lists, the same shape the report's newest names use, because
+# a hostname itself is not a safe separator.
 ACCOUNTING_HOUR_LINES_HEADER = "X-Bazarr-Hour-Lines"
+ACCOUNTING_HOUR_HOSTS_HEADER = "X-Bazarr-Hour-Hosts"
+ACCOUNTING_HOUR_HOST_LINES_HEADER = "X-Bazarr-Hour-Host-Lines"
 ACCOUNTING_SUPPRESSED_HEADER = "X-Bazarr-Suppressed"
 ACCOUNTING_SUPPRESSED_SINCE_HEADER = "X-Bazarr-Suppressed-Since"
 ACCOUNTING_SUPPRESSED_ID_HEADER = "X-Bazarr-Suppressed-Id"
@@ -777,7 +782,16 @@ class _RefusalReporter:
     report carries the times of the lines this console spent within the
     hour, so a hostname refused for the first time once the backend answers
     draws on the one merged budget, which rolls over exactly when those
-    lines do. The first report a backend acknowledges also carries this
+    lines do.
+
+    The repeats of a hostname the hour has already acknowledged are the
+    case no report covers: no delivery goes out for them, so no backend
+    counts them, and while the backend answers every one of them is
+    counted into this console's own window instead, the same idempotent
+    aggregate the outage holds its lines in, so the pair owes the repeats
+    one summary whichever recorder ends up holding it.
+
+    The first report a backend acknowledges also carries this
     console's suppressed window, so the summary the window owes is paid
     once by whichever layer holds it: the hour's line budget and its one
     summary are the two processes' shared allowance, even though they
@@ -791,7 +805,10 @@ class _RefusalReporter:
     carries the backend's own hour with it, and this console folds the
     spent line times into its recorder exactly as it folds its own, so a
     backend that spent the hour and then became unreachable leaves this
-    console nothing more to spend. The window the acknowledgement carried
+    console nothing more to spend. The pace of each of those lines travels
+    with the times, the hostname every one was logged for, so a hostname
+    the backend named is not named again by this console in the same
+    hour, whichever layer ends up the only one that can write. The window the acknowledgement carried
     is kept beside this console's own, never inside it, because one window
     is owed one summary by whichever layer holds it when its hour runs:
     a window held in two recorders would be reported twice, and this copy
@@ -823,14 +840,19 @@ class _RefusalReporter:
     mirror of the aggregate already stands for the folded lines, and
     this console keeps no copy of its own beside the mirror, which a
     restarted backend would count a second time beside the aggregate
-    that already counts them. A mirrored window a delivery reached the
-    backend past its hour has been paid whether or not the answer
-    survived, and this console knows it by the reach alone: the marked
-    copy is carried only within the envelope the payment's memory runs
-    in, the whole span that begins at the window's hour, and dropped at
-    a backend that starts fresh, so a copy this console still carries
+    that already counts them. A mirrored window whose delivery went out
+    past its hour has been paid whether or not the answer survived, and
+    this console knows it by the reach alone, the moment the request
+    went out and not the moment the failure landed: the marked copy is
+    carried only within the envelope the payment's memory runs in, the
+    whole span that begins at the window's hour, and dropped at a
+    backend that starts fresh, so a copy this console still carries
     always meets a backend that still remembers paying it and the pair
-    never folds a paid window in twice.
+    never folds a paid window in twice. A delivery whose answer is still
+    unresolved when readiness swears in a fresh backend speaks for the
+    one it was sent to, and the payment its reach could report is left
+    with that backend: the copy is dropped with the swap rather than
+    carried to a generation it cannot vouch for.
 
     Every report also carries the newest bounded refused names with this
     console's own recency stamps, and the backend's record takes the newer
@@ -859,6 +881,8 @@ class _RefusalReporter:
         self._last_ack = None  # when the last acknowledgement of any kind arrived
         self._in_flight = None  # the hostname whose delivery the worker took, until it resolves
         self._in_flight_evicted = False  # whether the queue evicted that notice mid-delivery
+        self._ready_generation = 0  # how many fresh backends readiness has sworn in
+        self._delivery_generation = None  # the generation the in-flight delivery was taken in
         self._wake = asyncio.Event()  # refusals and readiness wake the worker
         self._drain_task: "asyncio.Task | None" = None
 
@@ -931,12 +955,20 @@ class _RefusalReporter:
         while len(self._recent) > host_policy.REFUSED_HOSTS_LIMIT:
             self._recent.popitem(last=False)
 
-    def merge_acknowledged(self, carried, hour_lines, held, completed):
+    def merge_acknowledged(self, carried, hour_lines, hour_hosts, held, completed):
         """Fold the accounting the backend's acknowledgement carried back.
 
         The line times join this console's hour budget exactly as its own
         do, so the two layers stay on the one spent allowance whichever of
-        them spent it. The window the acknowledgement carried is kept
+        them spent it. The per-host pace of those lines travels with them,
+        each hostname with the time its line was logged for, and joins this
+        console's recorder as a line spent elsewhere within the hour: the
+        fold charges no second hourly slot, because the aggregate of times
+        the same answer carries already counts each of those lines once,
+        and it holds this console from naming a hostname again in the
+        same hour the backend named it, whichever layer ends up the only
+        one that can write.
+        The window the acknowledgement carried is kept
         beside this console's own, never inside it: whichever layer holds
         a window when its hour runs is the one that reports it, so a
         window held in two recorders would be reported twice, and this
@@ -973,9 +1005,18 @@ class _RefusalReporter:
         of a carried window is barred.
         """
         self._lines.merge_hour_lines(hour_lines)
+        now = self._now()
+        for host, stamp in hour_hosts:
+            if now - stamp < host_policy.HOUR_SECONDS:
+                # A line the backend logged holds this console's pace for
+                # the hostname without spending anything here: the hourly
+                # slot was already charged in the aggregate above, and a
+                # hostname the backend named is not named again in the
+                # same hour by whichever layer ends up the only one that
+                # can write.
+                self._lines.note(host, line_at=stamp)
         if held is not None and held[2] is not None and held[2] in completed:
             held = None
-        now = self._now()
         self._mirrored = held
         self._mirrored_paid = False
         self._last_ack = now
@@ -1053,27 +1094,57 @@ class _RefusalReporter:
             self._mirrored_paid = False
         return self._mirrored
 
-    def note_mirror_paid(self, mirrored, reached):
+    def note_mirror_paid(self, mirrored, reached, reached_at):
         """Mark the mirrored window's summary as paid, when the delivery that
-        carried the copy reached the backend past the window's hour.
+        carried the copy sent its request past the window's hour.
 
         The flush that follows every arrival pays whichever due window the
-        backend holds, so a delivery that reached the backend once the
+        backend holds, so a delivery whose request went out once the
         mirrored window's hour had run paid the window in that very
         processing, or arrived after an earlier flush had paid it,
         whatever became of the answer: the reach past the hour is this
         console's own knowledge of the payment, and no answer is needed
-        to make it. A delivery that never connected marks nothing, and
-        an answer that lands clears the mirror on its own accounting, so
-        only the failed delivery that reached the backend calls this.
+        to make it. The reach is the moment the request went out and not
+        the moment the failure landed, because the backend pays at the
+        arrival and not at the failure: a report it processed before the
+        window's hour had run, whose answer fails only after the hour,
+        paid nothing, and a mark made on the failure's own clock would
+        hand the readiness that follows a paid copy for lines no backend
+        ever summarized. A delivery that never connected marks nothing,
+        and an answer that lands clears the mirror on its own accounting,
+        so only the failed delivery that reached the backend calls this.
         The mark is what ends the hold on the paid copy within the
         envelope the payment's memory runs in, so the pair never hands a
         paid window to a backend that has forgotten paying it.
+
+        The mark also keeps to the backend generation its delivery was
+        taken in. Readiness can swear in a fresh backend while a
+        delivery's answer is still unresolved, and the reach that paid
+        the window vouches for the backend the request went to, not for
+        the one that answered since: the old backend kept the summary it
+        paid, the fresh one holds no record that refuses the copy's fold,
+        and a mark carried across the swap would re-deliver the paid
+        lines to a backend that counts them a second time. The delivery
+        that can no longer vouch for the copy loses it instead: the
+        payment stays where it reached, and the pair keeps one summary
+        per window whichever generation holds the record.
         """
         if mirrored is None or not reached:
             return
-        if self._now() - mirrored[1] >= host_policy.HOUR_SECONDS:
-            self._mirrored_paid = True
+        if reached_at - mirrored[1] < host_policy.HOUR_SECONDS:
+            return
+        if self._delivery_generation != self._ready_generation:
+            # The backend this delivery reached has been swapped for a
+            # fresh one while its answer was unresolved, so the reach past
+            # the window's hour says the old backend paid and nothing
+            # about the fresh one: the copy is dropped rather than marked
+            # or carried, because the pair keeps the one summary the old
+            # backend logged and a fresh backend would fold the paid
+            # lines in a second time.
+            self._mirrored = None
+            self._mirrored_paid = False
+            return
+        self._mirrored_paid = True
 
     def take_carried_summary(self):
         """Take the window the next report carries, the in-flight slot first.
@@ -1232,7 +1303,18 @@ class _RefusalReporter:
         is the worker's to deliver. A hostname refused again while it waits
         moves to the end of the queue, the newest place, so the eviction
         drops the oldest waiting and a frequently refused hostname is not
-        pushed out by names that arrived after its last refusal. The pending
+        pushed out by names that arrived after its last refusal.
+
+        A hostname the hour has already acknowledged is skipped by its
+        reports, so no backend will count a repeat of it: while the
+        backend answers, the repeat is counted into this console's own
+        window here, one suppressed line each, because the pair owes the
+        repeats one summary whichever recorder holds them and the line
+        the pair spent on the hostname this hour is already spent. While
+        the backend cannot be told, the refusal path has counted the
+        repeat already, and nothing is counted here.
+
+        The pending
         set holds the REFUSED_HOSTS_LIMIT newest of them, the same number the
         backend's record keeps, so a longer roll of hostnames cannot grow a
         longer queue: the ones the eviction drops are the oldest waiting,
@@ -1261,6 +1343,19 @@ class _RefusalReporter:
         self._prune_reports(now)
         self._note_recent(host, now)
         if host in self._last_report:
+            if BACKEND_PORT is not None:
+                # No report goes out for a hostname the hour has already
+                # acknowledged, so no backend will count this refusal: this
+                # console is the pair's only recorder for it, and it counts
+                # the repeat into its own window the way the outage's
+                # held-back lines are counted. The recorder answers whether
+                # a console line may be written as well, and the answer is
+                # discarded, because while the backend answers the backend
+                # owns the refusal lines: the per-host pace of the line the
+                # backend logged, or the hour's shared ceiling once that
+                # line was held back, holds the repeat back as one more
+                # suppressed line, whose summary the pair owes exactly once.
+                self._lines.note(host)
             return False
         if host in self._pending:
             self._pending.move_to_end(host)
@@ -1296,6 +1391,12 @@ class _RefusalReporter:
         its response, and the failure that eventually arrives must resolve
         the accounting of the notice it was taken for, and not of whatever
         fresh notice of the same hostname the queue may hold by then.
+        The take remembers the backend generation as well: a readiness
+        that swears in a fresh backend while this delivery's answer is
+        unresolved leaves it speaking for the old one, and the payment
+        its reach could report is left with that backend rather than
+        carried to the fresh generation on the mirror it could vouch
+        for.
         """
         now = self._now()
         self._prune_reports(now)
@@ -1308,6 +1409,7 @@ class _RefusalReporter:
                 self._pending[host] = now
                 self._in_flight = host
                 self._in_flight_evicted = False
+                self._delivery_generation = self._ready_generation
                 return host
         return None
 
@@ -1435,7 +1537,15 @@ class _RefusalReporter:
         lines would be counted a second time, while an unmarked copy is
         a backend's only remaining record of a window it holds unpaid
         and keeps its place for the next report.
+
+        The readiness also swears in a new backend generation, and any
+        delivery whose answer is still unresolved belongs to the one that
+        went before: whatever its reach ends up saying about a payment,
+        it says about the backend its request went to and not about the
+        fresh one, so the mirror it could have vouched for is not carried
+        to a generation it cannot speak for.
         """
+        self._ready_generation += 1
         for host in self._pending:
             self._pending[host] = None
         self._last_failure = None
@@ -1541,11 +1651,17 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
     summary before whatever failure ended the exchange, and one no delivery
     ever connected for keeps the sustained-outage emission, because only
     then could nothing have summarized it. The mirrored copy gets the
-    same reach read: a delivery that reached the backend past the
+    same reach read: a delivery whose request went out past the
     mirrored window's hour has paid its summary, whatever became of the
-    answer, and the failed exchange marks the copy as paid, so it is
-    held only within the span the payment's memory runs in and never
-    re-delivered to a backend that has forgotten paying it.
+    answer, and the failed exchange marks the copy as paid, decided on
+    the moment the request went out and not the moment the failure
+    landed, because the backend pays at the arrival. The mark keeps to
+    the backend generation the delivery was taken in as well, so a
+    readiness that swore in a fresh backend under an unresolved answer
+    never hands the copy to a generation the payment cannot vouch for:
+    the paid copy is held only within the span the payment's memory
+    runs in and never re-delivered to a backend that has forgotten
+    paying it.
     """
     data = {"host": host}
     logged = reporter.line_time(host)
@@ -1575,6 +1691,11 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
         data["recent_at"] = ",".join(str(stamp) for _name, stamp in recent)
     delivered = False
     reached = False
+    # The moment this request goes out is the delivery's reach, and the
+    # backend pays a due window at the arrival: the mirror's payment is
+    # decided on this time and not on the moment the answer failed, which
+    # can land on the far side of the window's hour from the arrival.
+    reached_at = reporter._now()
     try:
         async with session.post(f"http://{BACKEND_HOST}:{port}{reporter.notice_path}",
                                 headers={TOKEN_HEADER: token},
@@ -1619,13 +1740,15 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
         # mirrored window's hour had run, paid that window in the flush
         # that followed or arrived after an earlier flush had paid it,
         # whatever became of this answer: the console knows it by the
-        # reach alone, holds the paid copy only within the span its
-        # payment's memory runs in, and never hands it to a backend that
-        # has forgotten paying it.
+        # reach alone, counted from the moment the request went out, and
+        # holds the paid copy only within the span its payment's memory
+        # runs in, never handing it to a backend that has forgotten
+        # paying it or to a fresh generation the delivery cannot vouch
+        # for.
         if not delivered and carried is not None:
             reporter.restore_carried_summary(carried, reached)
         if not delivered:
-            reporter.note_mirror_paid(mirrored, reached)
+            reporter.note_mirror_paid(mirrored, reached, reached_at)
     reporter.report_failed(host)
 
 
@@ -1633,11 +1756,12 @@ def _acknowledged_accounting(response):
     """The accounting a backend's acknowledgement carries back, if any.
 
     The headers hold the times of the lines the backend's hour has spent,
-    the suppressed window it holds, and the IDs of the windows it has
-    logged and cleared, and an answer that carries none of them folds
-    nothing. Every value is parsed the defensive way the backend's own
-    notice route parses what arrives, because the two processes only ever
-    share words on the wire.
+    the hostnames those lines were logged for with the time of each, the
+    suppressed window it holds, and the IDs of the windows it has logged
+    and cleared, and an answer that carries none of them folds nothing.
+    Every value is parsed the defensive way the backend's own notice
+    route parses what arrives, because the two processes only ever share
+    words on the wire.
     """
     times = []
     for stamp in response.headers.get(ACCOUNTING_HOUR_LINES_HEADER, "").split(","):
@@ -1645,6 +1769,15 @@ def _acknowledged_accounting(response):
             times.append(float(stamp))
         except ValueError:
             pass
+    hosts = [name for name in response.headers.get(ACCOUNTING_HOUR_HOSTS_HEADER,
+                                                   "").split(",") if name]
+    stamps = []
+    for stamp in response.headers.get(ACCOUNTING_HOUR_HOST_LINES_HEADER, "").split(","):
+        try:
+            stamps.append(float(stamp))
+        except ValueError:
+            stamps.append(None)
+    hour_hosts = [(name, stamp) for name, stamp in zip(hosts, stamps) if stamp is not None]
     count = response.headers.get(ACCOUNTING_SUPPRESSED_HEADER, "")
     try:
         suppressed = int(count) if count else 0
@@ -1660,7 +1793,7 @@ def _acknowledged_accounting(response):
     completed = [window_id for window_id in
                  response.headers.get(ACCOUNTING_COMPLETED_WINDOWS_HEADER, "").split(",")
                  if window_id]
-    return times, held, completed
+    return times, hour_hosts, held, completed
 
 
 async def _drain_refusal_notices(reporter: _RefusalReporter) -> None:
