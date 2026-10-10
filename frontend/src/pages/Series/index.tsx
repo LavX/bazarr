@@ -66,6 +66,7 @@ const SeriesView: FunctionComponent = () => {
   const [audioLanguages, setAudioLanguages] = useState<string[]>([]);
   const [excludeLanguages, setExcludeLanguages] = useState<string[]>([]);
   const [instanceFilter, setInstanceFilter] = useState<string[]>([]);
+  const [tagFilter, setTagFilter] = useState<string[]>([]);
   const {
     multiInstance,
     nameById: instanceNameById,
@@ -594,6 +595,8 @@ const SeriesView: FunctionComponent = () => {
         instanceOptions={multiInstance ? instanceOptions : undefined}
         instanceValues={instanceFilter}
         onInstanceValuesChange={setInstanceFilter}
+        tagValues={tagFilter}
+        onTagValuesChange={setTagFilter}
         enableRowSelection
         onSelectionChanged={setSelections}
         selectionToolbar={selectionToolbar}

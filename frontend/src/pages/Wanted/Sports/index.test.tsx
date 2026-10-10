@@ -11,30 +11,7 @@ import {
 import WantedSportsView from "@/pages/Wanted/Sports";
 import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
-
-/** Open a themed select by its input's placeholder and return its listbox,
- *  like the shared Discover helper: a click focuses without opening in jsdom,
- *  so the opener falls back to ArrowDown, and the dropdown is queried hidden
- *  because its transition never settles here. The WantedView filter labels are
- *  plain text siblings, not Mantine `label` props, so the placeholder is what
- *  identifies the control, and every select on the page renders its options
- *  eagerly, so the opened dropdown is the one the input's aria-controls
- *  points at. */
-async function openSelect(
-  actor: ReturnType<typeof userEvent.setup>,
-  placeholder: string,
-) {
-  const input = await screen.findByPlaceholderText(placeholder);
-  await actor.click(input);
-  if (input.getAttribute("aria-expanded") !== "true")
-    await actor.keyboard("{ArrowDown}");
-  const controlled = input.getAttribute("aria-controls");
-  const listboxes = await screen.findAllByRole("listbox", { hidden: true });
-  return (
-    listboxes.find((box) => box.getAttribute("id") === controlled) ??
-    listboxes[0]
-  );
-}
+import { openSelect } from "@/tests/select";
 
 function owners(enabled = true) {
   server.use(
@@ -465,6 +442,65 @@ it("maps audio track names to code2 through the language catalogue", () => {
     nameToCode,
   );
   expect(row.audio_language).toEqual(["hu", "en", "Klingon"]);
+});
+
+it("preserves Sportarr league tags on wanted event rows", () => {
+  const row = toSportsWantedRow({
+    ...event,
+    tags: ["Playoffs"],
+  } as SportsEvent);
+  expect(row.tags).toEqual(["Playoffs"]);
+});
+
+it("filters wanted sports events by their owning league tags", async () => {
+  owners();
+  const actor = userEvent.setup();
+  server.use(
+    http.get("/api/sports/wanted", () =>
+      HttpResponse.json({
+        data: [
+          { ...event, title: "Final", tags: ["Playoffs"] },
+          {
+            ...event,
+            id: 12,
+            title: "Friendly",
+            tags: ["Exhibition"],
+          },
+        ],
+        total: 2,
+      }),
+    ),
+  );
+  customRender(<WantedSportsView />);
+  await screen.findByRole("row", { name: /Friendly/ }, { timeout: 8000 });
+  await actor.click(
+    await screen.findByRole("button", { name: "Toggle filters" }),
+  );
+  const listbox = await openSelect(actor, "Filter by tags...");
+  await actor.click(
+    within(listbox).getByRole("option", { name: "Playoffs", hidden: true }),
+  );
+
+  expect(screen.getByRole("row", { name: /Final/ })).toBeInTheDocument();
+  expect(screen.queryByRole("row", { name: /Friendly/ })).toBeNull();
+  expect(screen.getByText("Tags: Playoffs")).toBeInTheDocument();
+});
+
+it("keeps the Wanted sports tag filter visible when there are no tags", async () => {
+  owners();
+  const actor = userEvent.setup();
+  server.use(
+    http.get("/api/sports/wanted", () =>
+      HttpResponse.json({ data: [event], total: 1 }),
+    ),
+  );
+  customRender(<WantedSportsView />);
+  await screen.findByRole("row", { name: /Final/ }, { timeout: 8000 });
+  await actor.click(
+    await screen.findByRole("button", { name: "Toggle filters" }),
+  );
+
+  expect(screen.getByPlaceholderText("No tags available")).toBeInTheDocument();
 });
 
 it("re-fetches wanted rows when the audio catalogue lands after them", async () => {

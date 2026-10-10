@@ -42,6 +42,8 @@ export interface SportsEventReference {
 export interface SportsEvent extends SportsEventReference {
   sceneName?: string;
   title: string;
+  /** Tags inherited from the owning Sportarr league, included on wanted rows. */
+  tags?: string[];
   eventDate: string | null;
   broadcastDate: string | null;
   hasFile: boolean;

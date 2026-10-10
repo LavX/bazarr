@@ -827,8 +827,81 @@ class TestProcessMediaActions:
         items = [{'type': 'movie', 'radarrId': 10}]
         result = _process_media_action(items, action='search-missing', job_id='test')
 
-        mock_download.assert_called_once_with(10, arr_instance_id=None)
+        mock_download.assert_called_once_with(
+            10, job_id='test', job_sub_function=True, arr_instance_id=None)
         assert result['queued'] == 1
+
+    @patch('subtitles.mass_operations.movies_download_subtitles')
+    @patch('subtitles.mass_operations.jobs_queue')
+    def test_cancelled_movie_stops_the_batch_without_queuing_more_movies(self, mock_jobs_queue, mock_download):
+        from app.jobs_queue import JobCancelled
+        from subtitles.mass_operations import _process_media_action
+
+        mock_download.side_effect = JobCancelled('batch stopped', job_id='test')
+        items = [
+            {'type': 'movie', 'radarrId': 10},
+            {'type': 'movie', 'radarrId': 11},
+        ]
+
+        with pytest.raises(JobCancelled):
+            _process_media_action(items, action='search-missing', job_id='test')
+
+        mock_download.assert_called_once_with(
+            10, job_id='test', job_sub_function=True, arr_instance_id=None)
+
+    def test_inline_movie_search_keeps_progress_owned_by_the_batch_job(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from subtitles.mass_download import movies
+
+        movie = SimpleNamespace(
+            path='/movies/Example.mkv',
+            missing_subtitles='[]',
+            audio_language='[]',
+            radarrId=10,
+            sceneName='Example',
+            title='Example',
+            year='2025',
+            tags='[]',
+            monitored='True',
+            profileId=None,
+            arr_instance_id=None,
+            subtitles='[]',
+        )
+        progress = []
+        names = []
+
+        class Queue:
+            def add_job_from_function(self, *args, **kwargs):
+                pytest.fail('An inline movie search must not enqueue another job')
+
+            def update_job_progress(self, **kwargs):
+                progress.append(kwargs)
+
+            def update_job_name(self, **kwargs):
+                names.append(kwargs)
+
+        monkeypatch.setattr(movies, 'jobs_queue', Queue())
+        monkeypatch.setattr(
+            movies, 'database',
+            SimpleNamespace(execute=lambda _: SimpleNamespace(first=lambda: movie)),
+        )
+        monkeypatch.setattr(movies, 'get_exclusion_clause', lambda _: [])
+        monkeypatch.setattr(movies, 'get_audio_profile_languages', lambda _: [])
+        monkeypatch.setattr(movies, 'get_providers', lambda: [])
+        monkeypatch.setattr(
+            movies.path_mappings,
+            'path_replace_instance',
+            lambda path, owner, kind: '/movies/Example.mkv',
+        )
+        monkeypatch.setattr(movies.os.path, 'exists', lambda _: True)
+
+        movies.movies_download_subtitles(10, job_id=7, job_sub_function=True)
+
+        assert len(progress) == 2
+        assert all(update['job_id'] == 7 for update in progress)
+        assert all('progress_max' not in update and 'progress_value' not in update for update in progress)
+        assert names == []
 
     @patch('subtitles.mass_operations.series_scan_subtitles')
     @patch('subtitles.mass_operations.jobs_queue')

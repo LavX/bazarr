@@ -29,6 +29,7 @@ const WantedMoviesView: FunctionComponent = () => {
   const [search, setSearch] = useState("");
   const [audioLanguages, setAudioLanguages] = useState<string[]>([]);
   const [excludeLanguages, setExcludeLanguages] = useState<string[]>([]);
+  const [tagFilter, setTagFilter] = useState<string[]>([]);
   const [missingLanguage, setMissingLanguage] = useState<string | null>(null);
   const [debouncedSearch] = useDebouncedValue(search, 300);
 
@@ -36,6 +37,7 @@ const WantedMoviesView: FunctionComponent = () => {
     debouncedSearch.length > 0 ||
     audioLanguages.length > 0 ||
     excludeLanguages.length > 0 ||
+    tagFilter.length > 0 ||
     missingLanguage !== null;
 
   const { data: audioLangs = [] } = useAudioLanguages();
@@ -86,9 +88,21 @@ const WantedMoviesView: FunctionComponent = () => {
           return false;
         }
       }
+      if (
+        tagFilter.length > 0 &&
+        !tagFilter.some((tag) => item.tags?.includes(tag))
+      ) {
+        return false;
+      }
       return true;
     },
-    [debouncedSearch, audioLanguages, excludeLanguages, missingLanguage],
+    [
+      debouncedSearch,
+      audioLanguages,
+      excludeLanguages,
+      missingLanguage,
+      tagFilter,
+    ],
   );
 
   const columns = useMemo<ColumnDef<Wanted.Movie>[]>(
@@ -232,6 +246,8 @@ const WantedMoviesView: FunctionComponent = () => {
       onAudioLanguagesChange={setAudioLanguages}
       excludeLanguages={excludeLanguages}
       onExcludeLanguagesChange={setExcludeLanguages}
+      tagValues={tagFilter}
+      onTagValuesChange={setTagFilter}
       missingLanguage={missingLanguage ?? undefined}
       onMissingLanguageChange={setMissingLanguage}
       langOptions={langOptions}

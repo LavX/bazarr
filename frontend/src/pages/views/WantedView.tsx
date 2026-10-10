@@ -23,6 +23,7 @@ import {
   faHardDrive,
   faLanguage,
   faSearch,
+  faTag,
   faTimes,
   faVolumeUp,
   faVolumeXmark,
@@ -53,6 +54,8 @@ interface Props<T extends Wanted.Base> {
   onAudioLanguagesChange?: (values: string[]) => void;
   excludeLanguages?: string[];
   onExcludeLanguagesChange?: (values: string[]) => void;
+  tagValues?: string[];
+  onTagValuesChange?: (values: string[]) => void;
   missingLanguage?: string;
   onMissingLanguageChange?: (value: string | null) => void;
   langOptions?: LangOption[];
@@ -73,6 +76,8 @@ function WantedView<T extends Wanted.Base>({
   onAudioLanguagesChange,
   excludeLanguages = [],
   onExcludeLanguagesChange,
+  tagValues = [],
+  onTagValuesChange,
   missingLanguage,
   onMissingLanguageChange,
   langOptions = [],
@@ -87,6 +92,15 @@ function WantedView<T extends Wanted.Base>({
   const modals = useModals();
   const [selectedRows, setSelectedRows] = useState<Row<T>[]>([]);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const tagOptions = useMemo(
+    () =>
+      Array.from(
+        new Set((query.data?.data ?? []).flatMap((item) => item.tags ?? [])),
+      )
+        .sort((a, b) => a.localeCompare(b))
+        .map((tag) => ({ value: tag, label: tag })),
+    [query.data?.data],
+  );
 
   useDocumentTitle(`Wanted ${name} - ${useAppTitle()}`);
 
@@ -116,8 +130,15 @@ function WantedView<T extends Wanted.Base>({
     if (excludeLanguages.length > 0) count++;
     if (missingLanguage) count++;
     if (searchValue.length > 0) count++;
+    if (tagValues.length > 0) count++;
     return count;
-  }, [audioLanguages, excludeLanguages, missingLanguage, searchValue]);
+  }, [
+    audioLanguages,
+    excludeLanguages,
+    missingLanguage,
+    searchValue,
+    tagValues,
+  ]);
 
   const activeFilterChips = useMemo(() => {
     const chips: {
@@ -172,18 +193,29 @@ function WantedView<T extends Wanted.Base>({
       });
     }
 
+    if (tagValues.length > 0 && onTagValuesChange) {
+      chips.push({
+        key: "tags",
+        label: `Tags: ${tagValues.join(", ")}`,
+        color: "violet",
+        onRemove: () => onTagValuesChange([]),
+      });
+    }
+
     return chips;
   }, [
     searchValue,
     audioLanguages,
     excludeLanguages,
     missingLanguage,
+    tagValues,
     langOptions,
     missingLangOptions,
     onSearchChange,
     onAudioLanguagesChange,
     onExcludeLanguagesChange,
     onMissingLanguageChange,
+    onTagValuesChange,
   ]);
 
   const clearAllFilters = useCallback(() => {
@@ -191,17 +223,20 @@ function WantedView<T extends Wanted.Base>({
     onAudioLanguagesChange?.([]);
     onExcludeLanguagesChange?.([]);
     onMissingLanguageChange?.(null);
+    onTagValuesChange?.([]);
   }, [
     onSearchChange,
     onAudioLanguagesChange,
     onExcludeLanguagesChange,
     onMissingLanguageChange,
+    onTagValuesChange,
   ]);
 
   const hasAnyFilterControl =
     onAudioLanguagesChange !== undefined ||
     onExcludeLanguagesChange !== undefined ||
-    onMissingLanguageChange !== undefined;
+    onMissingLanguageChange !== undefined ||
+    onTagValuesChange !== undefined;
 
   return (
     <Stack gap={0}>
@@ -439,6 +474,37 @@ function WantedView<T extends Wanted.Base>({
                   />
                 </Box>
               )}
+            {onTagValuesChange !== undefined && (
+              <Box style={{ flex: "1 1 200px", maxWidth: 280 }}>
+                <Group gap={6} mb={4}>
+                  <FontAwesomeIcon icon={faTag} size="xs" opacity={0.6} />
+                  <Text size="xs" fw={500} c="var(--bz-text-tertiary)">
+                    Tags
+                  </Text>
+                </Group>
+                <MultiSelect
+                  placeholder={
+                    tagValues.length > 0
+                      ? undefined
+                      : tagOptions.length > 0
+                        ? "Filter by tags..."
+                        : "No tags available"
+                  }
+                  data={tagOptions}
+                  value={tagValues}
+                  onChange={onTagValuesChange}
+                  searchable
+                  clearable
+                  size="sm"
+                  maxDropdownHeight={250}
+                  styles={{
+                    input: {
+                      minHeight: 36,
+                    },
+                  }}
+                />
+              </Box>
+            )}
           </Group>
         </Paper>
       </Collapse>

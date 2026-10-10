@@ -5,6 +5,7 @@ import { HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
+import { openSelect } from "@/tests/select";
 import SeriesView from ".";
 
 describe("Series page", () => {
@@ -27,16 +28,29 @@ describe("Series page", () => {
       ).toBeInTheDocument();
     });
   });
+
+  it("shows tag filtering when no tags are available", async () => {
+    const user = userEvent.setup();
+    customRender(<SeriesView />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Toggle filters" }),
+    );
+    expect(await screen.findByText("Tags")).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText("No tags available"),
+    ).toBeInTheDocument();
+  });
 });
 
-function series(id: number, title: string): Item.Series {
+function series(id: number, title: string, tags: string[] = []): Item.Series {
   return {
     id,
     sonarrSeriesId: id,
     arr_instance_id: 1,
     title,
     path: `/tv/${title}`,
-    tags: [],
+    tags,
     monitored: true,
     audio_language: [{ code2: "en", name: "English" }],
     profileId: null,
@@ -62,9 +76,9 @@ function series(id: number, title: string): Item.Series {
 // have to get wrong first.
 describe("Series toolbar band", () => {
   const rows = [
-    series(1, "Northern Light"),
-    series(2, "The Long Shore"),
-    series(3, "Glass Harbour"),
+    series(1, "Northern Light", ["Drama"]),
+    series(2, "The Long Shore", ["Comedy"]),
+    series(3, "Glass Harbour", ["Drama", "Mystery"]),
   ];
 
   beforeEach(() => {
@@ -183,5 +197,26 @@ describe("Series toolbar band", () => {
     expect(
       within(band()).getByRole("button", { name: "Clear all" }),
     ).toBeInTheDocument();
+  });
+
+  it("filters series by any selected Sonarr tag", async () => {
+    const user = userEvent.setup();
+    customRender(<SeriesView />);
+    await screen.findByRole("link", { name: "Northern Light" });
+
+    await user.click(screen.getByRole("button", { name: "Toggle filters" }));
+    const listbox = await openSelect(user, "Filter by tags...");
+    await user.click(
+      within(listbox).getByRole("option", { name: "Drama", hidden: true }),
+    );
+
+    expect(
+      screen.getByRole("link", { name: "Northern Light" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Glass Harbour" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "The Long Shore" })).toBeNull();
+    expect(screen.getByText("Tags: Drama")).toBeInTheDocument();
   });
 });

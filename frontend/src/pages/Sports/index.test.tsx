@@ -12,6 +12,7 @@ import {
 import Sports from "@/pages/Sports";
 import { act, customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
+import { openSelect } from "@/tests/select";
 
 describe("sports library", () => {
   beforeEach(() => {
@@ -307,6 +308,85 @@ describe("sports library", () => {
       ),
     ).toBeInTheDocument();
     expect(requests).toBe(0);
+  });
+  it("filters leagues by any selected Sportarr tag", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([sportarr]),
+      ),
+      http.get("/api/sports/leagues", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: 51,
+              arr_instance_id: 42,
+              sportarrLeagueId: 7,
+              title: "Premier League",
+              sport: "Football",
+              monitored: true,
+              tags: ["Football"],
+              audio_language: [],
+              eventCount: 4,
+              eventFileCount: 4,
+              profileId: null,
+            },
+            {
+              id: 52,
+              arr_instance_id: 42,
+              sportarrLeagueId: 8,
+              title: "Basketball League",
+              sport: "Basketball",
+              monitored: true,
+              tags: ["Basketball"],
+              audio_language: [],
+              eventCount: 2,
+              eventFileCount: 2,
+              profileId: null,
+            },
+          ],
+          total: 2,
+        }),
+      ),
+    );
+    customRender(<Sports />);
+    await screen.findByRole(
+      "link",
+      { name: "Basketball League" },
+      { timeout: 8000 },
+    );
+
+    await user.click(screen.getByRole("button", { name: "Toggle filters" }));
+    const listbox = await openSelect(user, "Filter by tags...");
+    await user.click(
+      within(listbox).getByRole("option", { name: "Football", hidden: true }),
+    );
+
+    expect(
+      screen.getByRole("link", { name: "Premier League" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "Basketball League" }),
+    ).toBeNull();
+  });
+  it("keeps the league tags filter visible when no tags are available", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get("/api/system/arr-instances", () =>
+        HttpResponse.json([sportarr]),
+      ),
+      http.get("/api/sports/leagues", () =>
+        HttpResponse.json({ data: [], total: 0 }),
+      ),
+    );
+    customRender(<Sports />);
+    await screen.findByRole("table", undefined, { timeout: 8000 });
+
+    await user.click(screen.getByRole("button", { name: "Toggle filters" }));
+
+    expect(
+      screen.getByPlaceholderText("No tags available"),
+    ).toBeInTheDocument();
   });
   it("drops a disabled owner's cached leagues while another owner stays enabled", async () => {
     let enabled = true;

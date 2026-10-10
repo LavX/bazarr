@@ -183,11 +183,49 @@ def test_blacklist_old_history_preserves_unproven_files(workflow_library, change
     assert subtitle.read_bytes() == before
 
 
+def test_sports_event_serialization_includes_owner_tags(monkeypatch):
+    from types import SimpleNamespace
+
+    from sportarr import library
+
+    event = SimpleNamespace(
+        to_dict=lambda: {
+            "ffprobe_cache": None,
+            "created_at_timestamp": None,
+            "updated_at_timestamp": None,
+            "missing_subtitles": "['en']",
+            "failedAttempts": "[]",
+            "audio_language": "[]",
+            "subtitles": "[]",
+            "monitored": "True",
+            "partNumber": 0,
+        },
+        path="/sports/event.mkv",
+    )
+    monkeypatch.setattr(library, "read_sports_mappings", lambda _: [])
+    monkeypatch.setattr(library, "apply_sports_mapping", lambda path, _: path)
+
+    result = library._serialize_event((event, 1, "[]", "['Playoffs']"))
+
+    assert result["tags"] == ["Playoffs"]
+
+
 def test_wanted_and_mass_respect_owner_monitoring_and_profiles(workflow_library):
-    from app.database import TableArrInstances, TableSportsEvents
+    from app.database import TableArrInstances, TableSportsEvents, TableSportsLeagues
 
     automatic, _, workflows, _, session, folder = workflow_library
-    assert {item["id"] for item in workflows.wanted_rows(session)} == {61, 62}
+    session.execute(
+        sa.update(TableSportsLeagues)
+        .where(TableSportsLeagues.id == 51)
+        .values(tags="['Playoffs']")
+    )
+    session.commit()
+    wanted = workflows.wanted_rows(session)
+    assert {item["id"] for item in wanted} == {61, 62}
+    assert {item["id"]: item["tags"] for item in wanted} == {
+        61: ["Playoffs"],
+        62: [],
+    }
     session.execute(
         sa.update(TableArrInstances)
         .where(TableArrInstances.id == 1)
