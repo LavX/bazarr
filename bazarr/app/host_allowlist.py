@@ -37,11 +37,16 @@ CODE_LOGGER_NAME = 'bazarr.host_approval'
 
 # The acknowledgement of a front listener's report carries this backend's own
 # accounting on these headers: the times of the refusal lines its hour has
-# spent, the suppressed window it holds with its stable ID, and the IDs of
-# the windows it has logged and cleared, so the console can drop every copy
-# it holds of a window whose summary has been paid. The supervisor defines
-# the same names on its side, because the two processes share no imports.
+# spent, the hostnames those lines were logged for with the time of each, the
+# suppressed window it holds with its stable ID, and the IDs of the windows
+# it has logged and cleared, so the console can drop every copy it holds of
+# a window whose summary has been paid. The supervisor defines the same
+# names on its side, because the two processes share no imports. The
+# per-host pace travels as two parallel lists, the same shape the report's
+# newest names use, because a hostname itself is not a safe separator.
 HOUR_LINES_HEADER = 'X-Bazarr-Hour-Lines'
+HOUR_HOSTS_HEADER = 'X-Bazarr-Hour-Hosts'
+HOUR_HOST_LINES_HEADER = 'X-Bazarr-Hour-Host-Lines'
 SUPPRESSED_HEADER = 'X-Bazarr-Suppressed'
 SUPPRESSED_SINCE_HEADER = 'X-Bazarr-Suppressed-Since'
 SUPPRESSED_ID_HEADER = 'X-Bazarr-Suppressed-Id'
@@ -374,14 +379,18 @@ def front_refusal_notice(config=settings):
     delivered.
 
     The answer carries this backend's own accounting back on the response
-    headers: the times of the lines its hour has spent, the suppressed
-    window it holds, again with the ID, and the IDs of the windows it has
-    logged and cleared, so the console discards every copy it holds of a
-    window whose summary has been paid. The window goes as a copy and not a
-    take, so an answer that is lost or mis-delivered leaves this backend
-    holding what it held, and the console keeps the copy beside its own
-    window rather than inside it, so the one summary a window owes is
-    logged once, by whichever layer holds the window when its hour runs.
+    headers: the times of the lines its hour has spent, the hostnames those
+    lines were logged for with the time of each, the suppressed window it
+    holds, again with the ID, and the IDs of the windows it has logged and
+    cleared, so the console discards every copy it holds of a window whose
+    summary has been paid. The hostnames travel as the per-host pace of the
+    hour's line budget, so the console that folds them holds a hostname
+    this backend named from being named again in the same hour, whichever
+    layer ends up the only one that can write. The window goes as a copy
+    and not a take, so an answer that is lost or mis-delivered leaves this
+    backend holding what it held, and the console keeps the copy beside
+    its own window rather than inside it, so the one summary a window owes
+    is logged once, by whichever layer holds the window when its hour runs.
     """
     from flask import request
 
@@ -445,6 +454,10 @@ def front_refusal_notice(config=settings):
     times = _refusals.hour_line_times()
     if times:
         headers[HOUR_LINES_HEADER] = ','.join(str(stamp) for stamp in times)
+    hour_hosts = _refusals.hour_line_hosts()
+    if hour_hosts:
+        headers[HOUR_HOSTS_HEADER] = ','.join(host for host, _stamp in hour_hosts)
+        headers[HOUR_HOST_LINES_HEADER] = ','.join(str(stamp) for _host, stamp in hour_hosts)
     held = _refusals.hour_suppressed_window()
     if held is not None:
         headers[SUPPRESSED_HEADER] = str(held[0])

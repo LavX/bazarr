@@ -401,6 +401,22 @@ class BoundedRefusalRecorder:
             self._prune(now)
             return list(self._line_times)
 
+    def hour_line_hosts(self):
+        """The hostnames this hour has spent lines for, with each line's time.
+
+        The acknowledgement of a report carries them back beside the
+        aggregate line times, as the per-host pace of the hour's line
+        budget: each hostname with the time its line was logged for, so
+        the console that folds the answer holds a hostname this layer
+        named from being named again in the same hour, whichever layer
+        ends up the only one that can write. The answer is a copy and not
+        a take, exactly as the aggregate line times are.
+        """
+        now = self._now()
+        with self._lock:
+            self._prune(now)
+            return list(self._last_lines.items())
+
     def merge_hour_lines(self, times):
         """Fold a console elsewhere's spent line times into this hour's cap.
 
