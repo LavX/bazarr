@@ -140,6 +140,15 @@ _EXPECTED_FAILURE_WORDS = {
     "CloudflareBlockedError": "automated access blocked",
     "URLError": "connection failure",
     "TimeoutError": "timed out",
+    # The requests-style timeout names a plugin worker carries: the search
+    # outcome and the backoff already read the same three names.
+    "Timeout": "timed out",
+    "ConnectTimeout": "timed out",
+    "ReadTimeout": "timed out",
+    # The remote name of the requests connection failure. The name match is
+    # exact, so it cannot catch the built-in ConnectionError's siblings, which
+    # carry names of their own; those keep their traceback.
+    "ConnectionError": "connection failure",
     # The plugins raise PermissionError with a message of their own for a
     # refused login and never with an errno; see provider_failure_words, which
     # keeps the operating system's form of the class off this entry.

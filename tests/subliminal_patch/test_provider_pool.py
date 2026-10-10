@@ -906,6 +906,10 @@ _EXPECTED_SEARCH_FAILURES = [
     _plugin_error("CloudflareBlockedError"),
     _plugin_error("URLError"),
     _plugin_error("TimeoutError"),
+    _plugin_error("Timeout"),
+    _plugin_error("ConnectTimeout"),
+    _plugin_error("ReadTimeout"),
+    _plugin_error("ConnectionError"),
     WorkerError("fixture deadline", code="timeout"),
 ]
 
@@ -1012,6 +1016,10 @@ _GENERIC_DOWNLOAD_FAILURES = [
     _plugin_error("CloudflareBlockedError"),
     _plugin_error("TimeoutError"),
     _plugin_error("URLError"),
+    _plugin_error("Timeout"),
+    _plugin_error("ConnectTimeout"),
+    _plugin_error("ReadTimeout"),
+    _plugin_error("ConnectionError"),
     WorkerError("fixture deadline", code="timeout"),
 ]
 
