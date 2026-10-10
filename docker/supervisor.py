@@ -823,7 +823,14 @@ class _RefusalReporter:
     mirror of the aggregate already stands for the folded lines, and
     this console keeps no copy of its own beside the mirror, which a
     restarted backend would count a second time beside the aggregate
-    that already counts them.
+    that already counts them. A mirrored window a delivery reached the
+    backend past its hour has been paid whether or not the answer
+    survived, and this console knows it by the reach alone: the marked
+    copy is carried only within the envelope the payment's memory runs
+    in, the whole span that begins at the window's hour, and dropped at
+    a backend that starts fresh, so a copy this console still carries
+    always meets a backend that still remembers paying it and the pair
+    never folds a paid window in twice.
 
     Every report also carries the newest bounded refused names with this
     console's own recency stamps, and the backend's record takes the newer
@@ -845,10 +852,13 @@ class _RefusalReporter:
         self._report_times = []  # times of this hour's acknowledged report deliveries
         self._last_failure = None  # when the last delivery failed, until an ack or readiness
         self._mirrored = None  # the window the last acknowledgement carried back
+        self._mirrored_paid = False  # whether a delivery reached the backend past its hour
         self._carried = None  # the window a report has carried, held in flight here
         self._carried_at = None  # when the carry began
         self._carried_sent = False  # whether a delivery for it ever reached the backend
         self._last_ack = None  # when the last acknowledgement of any kind arrived
+        self._in_flight = None  # the hostname whose delivery the worker took, until it resolves
+        self._in_flight_evicted = False  # whether the queue evicted that notice mid-delivery
         self._wake = asyncio.Event()  # refusals and readiness wake the worker
         self._drain_task: "asyncio.Task | None" = None
 
@@ -935,6 +945,11 @@ class _RefusalReporter:
         and a held window the same answer reports completed is dropped
         instead, because the two cannot both be true of one window and
         the completed list is the one that says the summary has been paid.
+        A fresh copy starts unpaid as well: whether a mirrored window's
+        summary has been paid is this console's own knowledge, read from
+        a delivery's reach past the window's hour, and the window an
+        answer names is the one the backend holds now, whose hour has
+        produced no payment this console could know of.
 
         The acknowledgement also resolves the window this report carried:
         its ID named among the windows the backend has logged and cleared
@@ -962,6 +977,7 @@ class _RefusalReporter:
             held = None
         now = self._now()
         self._mirrored = held
+        self._mirrored_paid = False
         self._last_ack = now
         if carried is None:
             return
@@ -993,22 +1009,71 @@ class _RefusalReporter:
         for every window the aggregate counts, the backend's own and each
         one folded into it, so the one mirror is what re-delivers them
         all to a backend that lost them to a restart, and the console
-        keeps no copy of a folded window beside it. The copy is kept
-        until an answer reconciles its payment and not dropped by the
-        hour the window had left to run, nor by any span of silence
-        since the last answer carried it: an aggregate whose hour ends
-        while it is still unpaid, and whose backend restarts before it
-        pays, has this copy for its only remaining record, however long
-        the outage runs, so the next report tells the restarted backend
-        again, and the answer that names the window completed clears the
-        mirror here. The paid double-summary risk is not this hold's to
-        guard: the backend refuses the fold of a window its completed
-        list names and renews the record's lease on every arrival, so a
-        copy this console can still carry always meets a backend that
-        still remembers paying it, and the summary already logged is
-        never logged a second time.
+        keeps no copy of a folded window beside it. An unmarked copy, one
+        no delivery has reached the backend past its hour, is kept until
+        an answer reconciles its payment and not dropped by the hour the
+        window had left to run, nor by any span of silence since the last
+        answer carried it: an aggregate whose hour ends while it is still
+        unpaid, and whose backend restarts before it pays, has this copy
+        for its only remaining record, however long the outage runs, so
+        the next report tells the restarted backend again, and the
+        answer that names the window completed clears the mirror here.
+
+        A marked copy is a different hold, because its payment has
+        already reached the backend: a delivery that carried it landed
+        past the window's hour, and the flush that follows every arrival
+        paid the window in that very processing or found it already
+        paid, whatever became of the answer. The answer that reconciles
+        the payment may simply be lost, so the marked copy is still
+        carried while the backend's completed record can refuse its
+        folds, renewed by every replay that reaches it. The hold ends
+        within the envelope that record's own lease runs in: the payment
+        cannot have happened before the window's hour, so past the whole
+        span that begins there no backend can still remember paying the
+        window, and the copy is dropped before any report can carry it
+        to one that forgot, because a fold into a backend that forgot
+        would count the paid lines a second time. A copy this console
+        still carries therefore always meets a backend that still
+        remembers paying it, and the summary already logged is never
+        logged a second time.
         """
+        if (self._mirrored is not None and self._mirrored_paid
+                and self._now() - self._mirrored[1]
+                >= host_policy.HOUR_SECONDS + host_policy.CARRY_RETENTION_SECONDS):
+            # The delivery that reached the backend past the window's hour
+            # paid the summary, and the whole span that begins at that hour
+            # has run past with no arrival to renew the record the payment
+            # left behind: no backend remembers paying the window any more,
+            # so a report carrying the copy would hand it to one that folds
+            # it in as a window it has never seen and logs a second line
+            # for lines a first summary already paid. The pair keeps the
+            # one summary the window owes, which was logged when the copy
+            # was paid, rather than risk the second line.
+            self._mirrored = None
+            self._mirrored_paid = False
         return self._mirrored
+
+    def note_mirror_paid(self, mirrored, reached):
+        """Mark the mirrored window's summary as paid, when the delivery that
+        carried the copy reached the backend past the window's hour.
+
+        The flush that follows every arrival pays whichever due window the
+        backend holds, so a delivery that reached the backend once the
+        mirrored window's hour had run paid the window in that very
+        processing, or arrived after an earlier flush had paid it,
+        whatever became of the answer: the reach past the hour is this
+        console's own knowledge of the payment, and no answer is needed
+        to make it. A delivery that never connected marks nothing, and
+        an answer that lands clears the mirror on its own accounting, so
+        only the failed delivery that reached the backend calls this.
+        The mark is what ends the hold on the paid copy within the
+        envelope the payment's memory runs in, so the pair never hands a
+        paid window to a backend that has forgotten paying it.
+        """
+        if mirrored is None or not reached:
+            return
+        if self._now() - mirrored[1] >= host_policy.HOUR_SECONDS:
+            self._mirrored_paid = True
 
     def take_carried_summary(self):
         """Take the window the next report carries, the in-flight slot first.
@@ -1174,7 +1239,12 @@ class _RefusalReporter:
         the ones the backend's record has dropped too. The eviction resolves
         the notices it drops, their first-failure accounting with them: the
         accounting lives exactly as long as the notice, so a fresh notice
-        of an evicted host counts its own first failure anew. The notice
+        of an evicted host counts its own first failure anew. An eviction
+        that catches the notice whose delivery is still in flight is
+        remembered for the failure that delivery will eventually report,
+        so the mark the failure counts resolves with the notice it was
+        counted for, and not with whatever fresh notice of the same
+        hostname the queue may hold by then. The notice
         keeps the time of the refusal it reports on as well, refreshed by
         every refusal while it waits: the newest-refused set is bounded and
         a roll of newer names rolls a waiting hostname out of it, and the
@@ -1201,6 +1271,13 @@ class _RefusalReporter:
         while len(self._pending) > host_policy.REFUSED_HOSTS_LIMIT:
             dropped, _attempt = self._pending.popitem(last=False)
             self._pending_at.pop(dropped, None)
+            if dropped == self._in_flight:
+                # The notice whose delivery is in flight is among the ones
+                # this eviction drops: its resolution has to reach the
+                # failure that delivery will eventually report, so the
+                # failure clears the mark it counts instead of leaving it
+                # for a notice nothing will ever resolve.
+                self._in_flight_evicted = True
             self._lines.first_failure_resolved(dropped)
         self._wake.set()
         return True
@@ -1214,6 +1291,11 @@ class _RefusalReporter:
         alone, and a delivery that failed holds every later attempt back
         for one pace, so a failing backend is asked once per pace and not
         in a stream, and cannot spend the hour instead of the recovery.
+        The take also remembers the notice the delivery belongs to: the
+        pending queue can evict the hostname while the delivery awaits
+        its response, and the failure that eventually arrives must resolve
+        the accounting of the notice it was taken for, and not of whatever
+        fresh notice of the same hostname the queue may hold by then.
         """
         now = self._now()
         self._prune_reports(now)
@@ -1224,6 +1306,8 @@ class _RefusalReporter:
         for host, last_try in self._pending.items():
             if last_try is None or now - last_try >= RETRY_PACE_SECONDS:
                 self._pending[host] = now
+                self._in_flight = host
+                self._in_flight_evicted = False
                 return host
         return None
 
@@ -1262,6 +1346,9 @@ class _RefusalReporter:
         recovery. The notice's first-failure accounting resolves with it as
         well: the accounting lives exactly as long as the notice, so a
         fresh notice of the same host counts its own first failure anew.
+        The delivery that carried the notice is resolved with it too, so
+        an eviction that happened while it waited in flight is forgotten
+        rather than held against a later notice of the same host.
         """
         now = self._now()
         self._last_report[host] = now
@@ -1270,6 +1357,9 @@ class _RefusalReporter:
         self._report_times.append(now)
         self._last_failure = None
         self._lines.first_failure_resolved(host)
+        if self._in_flight == host:
+            self._in_flight = None
+            self._in_flight_evicted = False
 
     def report_failed(self, host):
         """The backend did not take the report: it stays pending, pace
@@ -1278,13 +1368,38 @@ class _RefusalReporter:
         failure also holds every later attempt back for one pace, and the
         line below asks its pace without counting a held-back line as
         suppressed, so an hour of failing retries does not add up to a
-        summary that says a stream of refusals was held back."""
+        summary that says a stream of refusals was held back.
+
+        The failure resolves the notice it was taken for, the one whose
+        delivery has just come back, rather than whatever the queue holds
+        now: the pending queue can evict a notice while its delivery waits
+        for its response, and a mark counted for that evicted notice would
+        be a mark nothing will ever resolve, because the hostname's next
+        refusal arrives as a fresh notice. The failure of an evicted notice
+        still counts its own line, the news the notice carried, but the
+        mark it counts resolves together with it: the mark lives exactly
+        as long as the notice, and the notice is already gone, so the mark
+        a later notice of the same hostname counts is its own and a
+        genuine first failure still reads as one.
+        """
         self._last_failure = self._now()
         if host in self._pending:
             self._pending[host] = self._now()
+        evicted = self._in_flight == host and self._in_flight_evicted
+        if self._in_flight == host:
+            self._in_flight = None
+            self._in_flight_evicted = False
         self._account_line(host)
         if self._lines.note_retry(host):
             _print_refusal_line(_refusal_line_text(host))
+        if evicted:
+            # The notice this failure was taken for has already left the
+            # queue, so nothing will ever resolve the mark it counts: the
+            # failure still counts the notice's own line, the news it
+            # carried, and the mark resolves here together with the notice,
+            # leaving the next notice of the same hostname to count its own
+            # first failure anew.
+            self._lines.first_failure_resolved(host)
 
     def pending_reports(self):
         """The hostnames the backend has not been told about, oldest first."""
@@ -1312,12 +1427,29 @@ class _RefusalReporter:
         the hostnames the old one acknowledged: its refusal record died with
         it, and the stamps would hold those hostnames back for up to an hour
         while its status page names none of them. The hour's global bound
-        still caps what goes out.
+        still caps what goes out. A marked mirror, one whose payment has
+        already reached the backend past its hour, is dropped with the
+        cooldown stamps rather than handed back: the fresh backend holds
+        no record that refuses its fold, so a marked copy given to it
+        would be folded in as a window it has never seen and its paid
+        lines would be counted a second time, while an unmarked copy is
+        a backend's only remaining record of a window it holds unpaid
+        and keeps its place for the next report.
         """
         for host in self._pending:
             self._pending[host] = None
         self._last_failure = None
         self._last_report.clear()
+        if self._mirrored is not None and self._mirrored_paid:
+            # This console knows the marked window's summary was paid by the
+            # backend the delivery reached, and that backend has just been
+            # swapped for one that holds nothing about it: the completed
+            # record that refused the copy's folds is gone, so handing the
+            # copy to the fresh backend would re-deliver lines its payment
+            # already covered. The old backend kept the summary logged, and
+            # the pair keeps one summary per window, paid where it reached.
+            self._mirrored = None
+            self._mirrored_paid = False
         self._wake.set()
 
     def _prune_reports(self, now):
@@ -1408,7 +1540,12 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
     sent and never emitted here, because the backend may have logged its
     summary before whatever failure ended the exchange, and one no delivery
     ever connected for keeps the sustained-outage emission, because only
-    then could nothing have summarized it.
+    then could nothing have summarized it. The mirrored copy gets the
+    same reach read: a delivery that reached the backend past the
+    mirrored window's hour has paid its summary, whatever became of the
+    answer, and the failed exchange marks the copy as paid, so it is
+    held only within the span the payment's memory runs in and never
+    re-delivered to a backend that has forgotten paying it.
     """
     data = {"host": host}
     logged = reporter.line_time(host)
@@ -1478,8 +1615,17 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
         # transport outcome travels with the copy, so a window the request
         # reached the backend with is never emitted here, and one no
         # delivery ever connected for keeps the sustained-outage emission.
+        # A delivery the request reached the backend with, once the
+        # mirrored window's hour had run, paid that window in the flush
+        # that followed or arrived after an earlier flush had paid it,
+        # whatever became of this answer: the console knows it by the
+        # reach alone, holds the paid copy only within the span its
+        # payment's memory runs in, and never hands it to a backend that
+        # has forgotten paying it.
         if not delivered and carried is not None:
             reporter.restore_carried_summary(carried, reached)
+        if not delivered:
+            reporter.note_mirror_paid(mirrored, reached)
     reporter.report_failed(host)
 
 
