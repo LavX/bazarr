@@ -338,7 +338,22 @@ class BoundedRefusalRecorder:
             self._counted_windows[self._window_id] = now
         self._suppressed += 1
 
-    def note(self, host, line_at=None):
+    def _keep_newest_hosts(self):
+        """Order the record by the refusal stamps and keep the newest bound.
+
+        The record's places are the stamps' places, not the arrival order
+        of the notices that carried them: a report delivered late carries
+        an older refusal, so ordering by stamp keeps it from the newest
+        place, and the bound then drops the oldest refusal by its stamp
+        and not a genuinely newer one an earlier report happened to name
+        first.
+        """
+        self._hosts = OrderedDict(
+            sorted(self._hosts.items(), key=lambda item: item[1]))
+        while len(self._hosts) > REFUSED_HOSTS_LIMIT:
+            self._hosts.popitem(last=False)
+
+    def note(self, host, line_at=None, refused_at=None):
         """Record a refusal; True when a per-host line may be written now.
 
         ``line_at`` carries the time a console elsewhere spent this
@@ -349,14 +364,22 @@ class BoundedRefusalRecorder:
         spent there. A line held back this way is not counted as
         suppressed either, because the console that spent it keeps its own
         count of what it held back.
+
+        ``refused_at`` carries the refusal's own time for a report that
+        lands late, so the record holds when the refusal happened and not
+        when its notice was delivered: the record is ordered by these
+        stamps and its bound drops the oldest refusal by its stamp, so a
+        delayed notice displaces no genuinely newer refusal, and a newer
+        stamp already recorded for the host is never moved back.
         """
         now = self._now()
         with self._lock:
-            if host in self._hosts:
-                self._hosts.move_to_end(host)
-            self._hosts[host] = now
-            while len(self._hosts) > REFUSED_HOSTS_LIMIT:
-                self._hosts.popitem(last=False)
+            stamp = refused_at if refused_at is not None else now
+            known = self._hosts.get(host)
+            if known is not None and known > stamp:
+                stamp = known
+            self._hosts[host] = stamp
+            self._keep_newest_hosts()
             self._prune(now)
             if line_at is not None and now - line_at < HOUR_SECONDS:
                 if host in self._last_lines:
@@ -405,10 +428,12 @@ class BoundedRefusalRecorder:
         so it holds the most recently refused names whichever layer saw them:
         a hostname whose report is skipped or held back would otherwise age
         out of the record while refusals of it stay the newest news about it.
-        A newer stamp moves the host to the end, the newest place, and the
-        bound drops the oldest exactly as ``note`` drops it. The log pace is
-        not consulted and not spent: these are names a refusal already named,
-        not lines to write.
+        The record is ordered by the stamps before the bound drops anything,
+        exactly as ``note`` orders it, so a set that arrives late folds the
+        newest names in by their own recency and the bound drops the oldest
+        refusal by its stamp, not a genuinely newer one an earlier report
+        happened to name first. The log pace is not consulted and not
+        spent: these are names a refusal already named, not lines to write.
         """
         now = self._now()
         with self._lock:
@@ -418,11 +443,8 @@ class BoundedRefusalRecorder:
                 known = self._hosts.get(host)
                 if known is not None and known >= stamp:
                     continue
-                if known is not None:
-                    self._hosts.move_to_end(host)
                 self._hosts[host] = stamp
-                while len(self._hosts) > REFUSED_HOSTS_LIMIT:
-                    self._hosts.popitem(last=False)
+            self._keep_newest_hosts()
 
     def note_retry(self, host):
         """Record a retry's line; True when a per-host line may be written now.

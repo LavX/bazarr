@@ -321,15 +321,24 @@ def record_refusal(host, config=settings, line_at=None, hour_lines=None, suppres
         _refusals.merge_hour_lines(hour_lines)
     _refusals.merge_summary(suppressed, suppressed_since, suppressed_id)
     _refusals.merge_summary(mirrored, mirrored_since, mirrored_id)
+    refused_at = None
     if recent:
         named = []
         for name, stamp in recent:
             shown_name = effective_host(name)
             if shown_name:
                 named.append((shown_name, stamp))
+                if shown_name == shown:
+                    refused_at = stamp
         if named:
             _refusals.merge_recent(named)
-    if _refusals.note(shown, line_at):
+    # A report that lands late still carries the refusal's own time, in the
+    # set of the newest names or in the line the console spent for it: the
+    # record keeps that time and not the delivery's, so a delayed notice
+    # displaces no genuinely newer refusal.
+    if refused_at is None:
+        refused_at = line_at
+    if _refusals.note(shown, line_at, refused_at):
         logging.warning('BAZARR refused a request for an unrecognized host: %s. Allow it under '
                         'Settings > General > Allowed Hosts, or set %s.', shown, ALLOWED_HOSTS_ENV)
     _flush_suppressed_summary()

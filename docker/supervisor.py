@@ -987,16 +987,17 @@ class _RefusalReporter:
         for every window the aggregate counts, the backend's own and each
         one folded into it, so the one mirror is what re-delivers them
         all to a backend that lost them to a restart, and the console
-        keeps no copy of a folded window beside it. The copy waits
-        only the hour the window has left to run, on the horizon the line
-        times use, so it never outlives the accounting it stands for.
+        keeps no copy of a folded window beside it. The copy is kept
+        until an answer reconciles its payment and not dropped by the
+        hour the window had left to run: an aggregate whose hour ends
+        while it is still unpaid, and whose backend restarts before it
+        pays, has this copy for its only remaining record, so the next
+        report tells the restarted backend again however late it arrives,
+        and the answer that names the window completed clears the mirror
+        here.
         """
-        now = self._now()
         held = self._mirrored
         if held is None:
-            return None
-        if now - held[1] >= host_policy.HOUR_SECONDS:
-            self._mirrored = None
             return None
         return held
 
