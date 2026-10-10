@@ -12,7 +12,7 @@
 import { expect, test } from "@e2e/fixtures";
 import { completeOnboarding } from "@e2e/lib/shared";
 import { skipWhatsNew } from "@e2e/lib/whatsNew";
-import type { Page } from "@playwright/test";
+import type { Page, Request } from "@playwright/test";
 
 const USERNAME = "e2e-admin";
 const PASSWORD = "e2e-only-password";
@@ -44,6 +44,18 @@ test.describe("form authentication", { tag: ["@auth", "@stateful"] }, () => {
   test("a session signs in, survives a reload and ends on sign-out", async ({
     page,
   }) => {
+    // Every request the page sends from here on sits in a set until it
+    // finishes or fails, and the end of this test waits for that set to
+    // drain: a read still on its way when the logout fires is the one
+    // that can answer after it and re-issue a fresh signed session, and
+    // the session only exists after the sign-in below, so every read
+    // that can carry it is counted from its own start. The listeners
+    // only watch; they send nothing.
+    const outstanding = new Set<Request>();
+    page.on("request", (request) => outstanding.add(request));
+    page.on("requestfinished", (request) => outstanding.delete(request));
+    page.on("requestfailed", (request) => outstanding.delete(request));
+
     // No session yet: the app asks for the login instead of its pages.
     await page.goto("/");
     const password = passwordField(page);
@@ -75,6 +87,22 @@ test.describe("form authentication", { tag: ["@auth", "@stateful"] }, () => {
     // The session is over: the login comes back on its own, and the next
     // page asks for it again.
     await expect(password).toBeVisible();
+    // The reads still on their way are waited out first: the one that
+    // answers last can re-issue a fresh signed session into the jar after
+    // the cookie was already seen gone, and the set only drains, so the
+    // wait itself cannot bring the session back.
+    await expect.poll(() => outstanding.size).toBe(0);
+    // The jar is watched until the session cookie is really gone, and a
+    // goto that races a resurrected cookie renders the signed-in app.
+    // Waiting first keeps the last assertion about the signed-out state
+    // rather than about the race resolving favorably on its own.
+    await expect
+      .poll(async () =>
+        (await page.context().cookies()).filter(
+          (cookie) => cookie.name === "session",
+        ),
+      )
+      .toEqual([]);
     await page.goto("/");
     await expect(passwordField(page)).toBeVisible();
   });

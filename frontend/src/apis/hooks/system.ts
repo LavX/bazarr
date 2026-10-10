@@ -495,7 +495,15 @@ export function useSystem() {
 
     onSuccess: () => {
       setAuthenticated(false);
-      client.clear();
+      // The cache is dropped one task later, on purpose. A clear that runs
+      // here is observed by this mutation's own completion re-render, which
+      // rebuilds every still-mounted query over the emptied cache and sends
+      // its reads out again while the signed-in session is still in the
+      // jar, and each answer re-issues a fresh login for the next page.
+      // One task later the navigation above has already unmounted the app,
+      // so nothing is left mounted to restart and the cache only refills
+      // on the next sign-in.
+      window.setTimeout(() => client.removeQueries(), 0);
     },
   });
 
