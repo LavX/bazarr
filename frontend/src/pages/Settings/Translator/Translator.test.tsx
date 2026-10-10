@@ -1,4 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { FunctionComponent } from "react";
+import { useForm } from "@mantine/form";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  FormContext,
+  type FormValues,
+} from "@/pages/Settings/utilities/FormValues";
+import { SettingsProvider } from "@/pages/Settings/utilities/SettingsProvider";
+import { customRender, screen } from "@/tests";
+import { TestConnectionButton } from "./index";
 import {
   aiTranslatorConcurrentOptions,
   aiTranslatorModelOptions,
@@ -68,5 +78,92 @@ describe("Translator options", () => {
       o.label.includes("Default"),
     );
     expect(labelled.map((o) => o.value)).toEqual(["smartfast"]);
+  });
+});
+
+const mutate = vi.fn();
+
+// The rows below render the real button through the settings form it lives in,
+// with only the mutation swapped out: what is asserted is what the button
+// sends and when it can be pressed at all, never what the service answers.
+vi.mock("@/apis/hooks/translator", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/apis/hooks/translator")>()),
+  useTestTranslator: () => ({ mutate, isPending: false }),
+}));
+
+// The loaded configuration the page would hand the button. `settings` stands
+// in for the saved values, so a row can hold the gate open with a service URL
+// and no Bazarr-side key.
+const TestButtonHarness: FunctionComponent<{ settings: LooseObject }> = ({
+  settings,
+}) => {
+  const mantineForm = useForm<FormValues>({
+    initialValues: { settings: {}, hooks: {} },
+  });
+
+  return (
+    <SettingsProvider value={settings as unknown as Settings}>
+      <FormContext.Provider value={mantineForm}>
+        <TestConnectionButton />
+      </FormContext.Provider>
+    </SettingsProvider>
+  );
+};
+
+describe("Translator Test Connection button", () => {
+  beforeEach(() => {
+    mutate.mockReset();
+  });
+
+  it("tests an open gate with no Bazarr-side API key, because the sidecar can hold its own", async () => {
+    // The availability gate treats the service URL as the only thing Bazarr
+    // must supply for the OpenRouter engine. With the sidecar holding its
+    // own key, an empty Bazarr-side key must not stop the button from
+    // testing, or the gate is open while the button refuses to test.
+    customRender(
+      <TestButtonHarness
+        settings={{
+          translator: {
+            openrouter_url: "http://localhost:8990",
+            openrouter_api_key: "",
+          },
+        }}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: /test connection/i });
+    expect(button).toBeEnabled();
+
+    const user = userEvent.setup();
+    await user.click(button);
+
+    // The call carries the configured service URL. The Bazarr-side key is
+    // passed through as the empty string the field holds, and the test
+    // endpoint treats an empty key as absent, so nothing here pins it.
+    expect(mutate).toHaveBeenCalledTimes(1);
+    expect(mutate.mock.calls[0][0]).toMatchObject({
+      serviceUrl: "http://localhost:8990",
+    });
+  });
+
+  it("stays disabled while the service URL is missing, the one thing Bazarr cannot supply itself", async () => {
+    customRender(
+      <TestButtonHarness
+        settings={{
+          translator: {
+            openrouter_url: "",
+            openrouter_api_key: "sk-or-v1-bazarr-side-key",
+          },
+        }}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: /test connection/i });
+    expect(button).toBeDisabled();
+
+    const user = userEvent.setup();
+    await user.click(button);
+
+    expect(mutate).not.toHaveBeenCalled();
   });
 });
