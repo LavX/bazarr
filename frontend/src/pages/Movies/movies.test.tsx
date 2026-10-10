@@ -1,3 +1,4 @@
+import userEvent from "@testing-library/user-event";
 import { http } from "msw";
 import { HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
