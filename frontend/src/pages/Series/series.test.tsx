@@ -37,7 +37,9 @@ describe("Series page", () => {
       await screen.findByRole("button", { name: "Toggle filters" }),
     );
     expect(await screen.findByText("Tags")).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("No tags available")).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText("No tags available"),
+    ).toBeInTheDocument();
   });
 });
 

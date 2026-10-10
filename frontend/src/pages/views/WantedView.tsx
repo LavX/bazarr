@@ -132,7 +132,13 @@ function WantedView<T extends Wanted.Base>({
     if (searchValue.length > 0) count++;
     if (tagValues.length > 0) count++;
     return count;
-  }, [audioLanguages, excludeLanguages, missingLanguage, searchValue, tagValues]);
+  }, [
+    audioLanguages,
+    excludeLanguages,
+    missingLanguage,
+    searchValue,
+    tagValues,
+  ]);
 
   const activeFilterChips = useMemo(() => {
     const chips: {
@@ -468,37 +474,37 @@ function WantedView<T extends Wanted.Base>({
                   />
                 </Box>
               )}
-              {onTagValuesChange !== undefined && (
-                <Box style={{ flex: "1 1 200px", maxWidth: 280 }}>
-                  <Group gap={6} mb={4}>
-                    <FontAwesomeIcon icon={faTag} size="xs" opacity={0.6} />
-                    <Text size="xs" fw={500} c="var(--bz-text-tertiary)">
-                      Tags
-                    </Text>
-                  </Group>
-                  <MultiSelect
-                    placeholder={
-                      tagValues.length > 0
-                        ? undefined
-                        : tagOptions.length > 0
-                          ? "Filter by tags..."
-                          : "No tags available"
-                    }
-                    data={tagOptions}
-                    value={tagValues}
-                    onChange={onTagValuesChange}
-                    searchable
-                    clearable
-                    size="sm"
-                    maxDropdownHeight={250}
-                    styles={{
-                      input: {
-                        minHeight: 36,
-                      },
-                    }}
-                  />
-                </Box>
-              )}
+            {onTagValuesChange !== undefined && (
+              <Box style={{ flex: "1 1 200px", maxWidth: 280 }}>
+                <Group gap={6} mb={4}>
+                  <FontAwesomeIcon icon={faTag} size="xs" opacity={0.6} />
+                  <Text size="xs" fw={500} c="var(--bz-text-tertiary)">
+                    Tags
+                  </Text>
+                </Group>
+                <MultiSelect
+                  placeholder={
+                    tagValues.length > 0
+                      ? undefined
+                      : tagOptions.length > 0
+                        ? "Filter by tags..."
+                        : "No tags available"
+                  }
+                  data={tagOptions}
+                  value={tagValues}
+                  onChange={onTagValuesChange}
+                  searchable
+                  clearable
+                  size="sm"
+                  maxDropdownHeight={250}
+                  styles={{
+                    input: {
+                      minHeight: 36,
+                    },
+                  }}
+                />
+              </Box>
+            )}
           </Group>
         </Paper>
       </Collapse>

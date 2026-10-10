@@ -365,7 +365,9 @@ describe("sports library", () => {
     expect(
       screen.getByRole("link", { name: "Premier League" }),
     ).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "Basketball League" })).toBeNull();
+    expect(
+      screen.queryByRole("link", { name: "Basketball League" }),
+    ).toBeNull();
   });
   it("keeps the league tags filter visible when no tags are available", async () => {
     const user = userEvent.setup();
@@ -382,7 +384,9 @@ describe("sports library", () => {
 
     await user.click(screen.getByRole("button", { name: "Toggle filters" }));
 
-    expect(screen.getByPlaceholderText("No tags available")).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText("No tags available"),
+    ).toBeInTheDocument();
   });
   it("drops a disabled owner's cached leagues while another owner stays enabled", async () => {
     let enabled = true;

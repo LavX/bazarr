@@ -36,7 +36,9 @@ describe("Movies page", () => {
       await screen.findByRole("button", { name: "Toggle filters" }),
     );
     expect(await screen.findByText("Tags")).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("No tags available")).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText("No tags available"),
+    ).toBeInTheDocument();
   });
 
   it("counts one movie as a movie in the toolbar band", async () => {

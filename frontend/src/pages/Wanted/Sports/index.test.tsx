@@ -445,12 +445,10 @@ it("maps audio track names to code2 through the language catalogue", () => {
 });
 
 it("preserves Sportarr league tags on wanted event rows", () => {
-  const row = toSportsWantedRow(
-    {
-      ...event,
-      tags: ["Playoffs"],
-    } as SportsEvent,
-  );
+  const row = toSportsWantedRow({
+    ...event,
+    tags: ["Playoffs"],
+  } as SportsEvent);
   expect(row.tags).toEqual(["Playoffs"]);
 });
 
@@ -502,9 +500,7 @@ it("keeps the Wanted sports tag filter visible when there are no tags", async ()
     await screen.findByRole("button", { name: "Toggle filters" }),
   );
 
-  expect(
-    screen.getByPlaceholderText("No tags available"),
-  ).toBeInTheDocument();
+  expect(screen.getByPlaceholderText("No tags available")).toBeInTheDocument();
 });
 
 it("re-fetches wanted rows when the audio catalogue lands after them", async () => {

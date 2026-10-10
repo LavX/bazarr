@@ -215,6 +215,8 @@ describe("Wanted Series", () => {
     await screen.findByText(/No missing Series subtitles/i);
     await user.click(screen.getByRole("button", { name: "Toggle filters" }));
 
-    expect(screen.getByPlaceholderText("No tags available")).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText("No tags available"),
+    ).toBeInTheDocument();
   });
 });

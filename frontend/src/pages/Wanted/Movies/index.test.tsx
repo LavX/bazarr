@@ -145,6 +145,8 @@ describe("Wanted Movies", () => {
     await screen.findByRole("table");
     await user.click(screen.getByRole("button", { name: "Toggle filters" }));
 
-    expect(screen.getByPlaceholderText("No tags available")).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText("No tags available"),
+    ).toBeInTheDocument();
   });
 });
