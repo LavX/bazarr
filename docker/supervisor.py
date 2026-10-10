@@ -781,7 +781,11 @@ class _RefusalReporter:
     console's suppressed window, so the summary the window owes is paid
     once by whichever layer holds it: the hour's line budget and its one
     summary are the two processes' shared allowance, even though they
-    share no memory.
+    share no memory. A pending notice keeps the time of the refusal it
+    reports on as well, carried with the report when it finally lands:
+    the newest names are bounded and the line the console spent is kept
+    for its hour alone, so the notice's own stamp is the one record of
+    the refusal's time that survives to the delivery.
 
     The allowance flows back the other way as well: every acknowledgement
     carries the backend's own hour with it, and this console folds the
@@ -835,11 +839,13 @@ class _RefusalReporter:
         self._lines = host_policy.BoundedRefusalRecorder(now=now)
         self._last_report = OrderedDict()  # host -> time of its last acknowledged report
         self._pending = OrderedDict()  # host -> time of its last attempt (None until tried)
+        self._pending_at = OrderedDict()  # host -> when this console last refused a waiting host
         self._accounted = OrderedDict()  # host -> time this console last spent its line
         self._recent = OrderedDict()  # host -> time this console last refused it
         self._report_times = []  # times of this hour's acknowledged report deliveries
         self._last_failure = None  # when the last delivery failed, until an ack or readiness
         self._mirrored = None  # the window the last acknowledgement carried back
+        self._mirrored_at = None  # when the last answer carried the mirror back
         self._carried = None  # the window a report has carried, held in flight here
         self._carried_at = None  # when the carry began
         self._carried_sent = False  # whether a delivery for it ever reached the backend
@@ -955,8 +961,11 @@ class _RefusalReporter:
         self._lines.merge_hour_lines(hour_lines)
         if held is not None and held[2] is not None and held[2] in completed:
             held = None
+        now = self._now()
+        if held is not None:
+            self._mirrored_at = now
         self._mirrored = held
-        self._last_ack = self._now()
+        self._last_ack = now
         if carried is None:
             return
         if carried[2] is not None and carried[2] in completed:
@@ -988,16 +997,40 @@ class _RefusalReporter:
         one folded into it, so the one mirror is what re-delivers them
         all to a backend that lost them to a restart, and the console
         keeps no copy of a folded window beside it. The copy is kept
-        until an answer reconciles its payment and not dropped by the
-        hour the window had left to run: an aggregate whose hour ends
-        while it is still unpaid, and whose backend restarts before it
-        pays, has this copy for its only remaining record, so the next
-        report tells the restarted backend again however late it arrives,
-        and the answer that names the window completed clears the mirror
-        here.
+        until an answer reconciles its payment and not dropped by the hour
+        the window had left to run: an aggregate whose hour ends while it
+        is still unpaid, and whose backend restarts before it pays, has
+        this copy for its only remaining record, so the next report tells
+        the restarted backend again within the retention span both sides
+        share, and the answer that names the window completed clears the
+        mirror here. The hold is bounded by that same span all the same:
+        past the whole of it since the last answer carried the window,
+        the copy is dropped before any report can carry it again, because
+        a backend that no longer remembers the window's ID would fold the
+        paid window in as one it has never seen and log a second line for
+        a summary the first one already paid. The pair keeps the one
+        summary the backend logged, or loses the one the backend never
+        took, rather than risk the second line, on the one constant both
+        sides share so this hold cannot outlast what any backend
+        remembers of the window.
         """
         held = self._mirrored
         if held is None:
+            return None
+        now = self._now()
+        if now - self._mirrored_at >= host_policy.CARRY_RETENTION_SECONDS:
+            # Held past the whole span the backend remembers the window's
+            # ID: a report carrying the copy again would hand it to a
+            # backend that has pruned the ID, which would fold the paid
+            # window in as a window it has never seen and log a second
+            # line for a summary the first one already paid, so the copy
+            # is dropped before any report can carry it, on the one
+            # retention span both sides share. The age runs from the last
+            # answer that carried the window, and the payment that retires
+            # it lands after that answer, so the backend's completion
+            # record outlives this hold and a copy this console can still
+            # re-carry always meets a backend that still remembers it.
+            self._mirrored = None
             return None
         return held
 
@@ -1162,7 +1195,13 @@ class _RefusalReporter:
         set holds the REFUSED_HOSTS_LIMIT newest of them, the same number the
         backend's record keeps, so a longer roll of hostnames cannot grow a
         longer queue: the ones the eviction drops are the oldest waiting,
-        the ones the backend's record has dropped too.
+        the ones the backend's record has dropped too. The notice keeps the
+        time of the refusal it reports on as well, refreshed by every
+        refusal while it waits: the newest-refused set is bounded and a
+        roll of newer names rolls a waiting hostname out of it, and the
+        line the console spent for it is kept for its hour alone, so the
+        notice's own stamp is what its report carries when neither of the
+        others survives to the delivery.
 
         Every refusal refreshes the newest-refused set first, whatever the
         queue decides, because the skipped and the waiting names are still
@@ -1176,10 +1215,13 @@ class _RefusalReporter:
             return False
         if host in self._pending:
             self._pending.move_to_end(host)
+            self._pending_at[host] = now
             return False
         self._pending[host] = None
+        self._pending_at[host] = now
         while len(self._pending) > host_policy.REFUSED_HOSTS_LIMIT:
-            self._pending.popitem(last=False)
+            dropped, _attempt = self._pending.popitem(last=False)
+            self._pending_at.pop(dropped, None)
         self._wake.set()
         return True
 
@@ -1242,6 +1284,7 @@ class _RefusalReporter:
         now = self._now()
         self._last_report[host] = now
         self._pending.pop(host, None)
+        self._pending_at.pop(host, None)
         self._report_times.append(now)
         self._last_failure = None
 
@@ -1263,6 +1306,20 @@ class _RefusalReporter:
     def pending_reports(self):
         """The hostnames the backend has not been told about, oldest first."""
         return list(self._pending)
+
+    def pending_refusal_time(self, host):
+        """When this console last refused the waiting hostname, or None.
+
+        The pending notice keeps the refusal's own time beside its retry
+        bookkeeping, because every other record of the refusal can expire
+        before the notice lands: the newest-refused set is bounded and a
+        roll of newer names rolls a waiting hostname out of it, and the
+        line the console spent for it is kept for its hour alone. The
+        report carries this time when neither of the others survives to
+        the delivery, so the backend's record holds when the refusal
+        happened and not when its notice was delivered.
+        """
+        return self._pending_at.get(host)
 
     def ready_to_deliver(self):
         """The backend answers again: everything it was not told is due now.
@@ -1349,9 +1406,16 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
     held by the one layer that will report it. Every report carries the
     newest bounded refused names with this console's recency stamps as
     well, so the backend's record reflects the newest refusals without a
-    report of each name's own, and the acknowledgement names the windows
-    the backend has logged and cleared, so this console discards the
-    copies it holds of a window whose summary has been paid. A carried
+    report of each name's own. The report of a hostname no backend has
+    acknowledged also carries the time of the refusal it waits on, kept
+    beside the retry bookkeeping and independently of the newest names
+    and the line history, because the newest names are bounded and a roll
+    of newer ones rolls a waiting hostname out of the set while the line
+    the console spent for it is kept for its hour alone: a notice that
+    outlives them all still tells the backend when the refusal happened
+    and not when its delivery landed. The acknowledgement names the
+    windows the backend has logged and cleared, so this console discards
+    the copies it holds of a window whose summary has been paid. A carried
     window the answer did not resolve waits in flight for the next report
     and never folds back into this console's recorder, so one window is
     owed one summary by the pair, whichever layer holds it. The restore
@@ -1367,6 +1431,9 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
     logged = reporter.line_time(host)
     if logged is not None:
         data["logged"] = str(logged)
+    refused_at = reporter.pending_refusal_time(host)
+    if refused_at is not None:
+        data["refused_at"] = str(refused_at)
     hour_lines = reporter.hour_line_times()
     if hour_lines:
         data["hour_lines"] = ",".join(str(stamp) for stamp in hour_lines)

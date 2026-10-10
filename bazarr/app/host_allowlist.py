@@ -282,7 +282,7 @@ def verify_approval_code(supplied):
 
 def record_refusal(host, config=settings, line_at=None, hour_lines=None, suppressed=0,
                    suppressed_since=None, suppressed_id=None, mirrored=0, mirrored_since=None,
-                   mirrored_id=None, recent=None):
+                   mirrored_id=None, recent=None, refused_at=None):
     """Record a refused hostname and keep a code on the console.
 
     The backend's own refusals call this, and so does the report the front
@@ -312,7 +312,13 @@ def record_refusal(host, config=settings, line_at=None, hour_lines=None, suppres
     per host: a hostname whose report the console skips, because it was told
     within the hour, or holds back past the reporting bound would otherwise
     age out of the record while refusals of it stay the newest news about it,
-    so the record keeps reflecting the most recently refused names.
+    so the record keeps reflecting the most recently refused names. The
+    notice of a hostname no backend has acknowledged carries the refusal's
+    own time as well, kept beside its retry bookkeeping: the newest names
+    are bounded and a roll of newer ones rolls a waiting hostname out of
+    the set, and the line the console spent for it is kept for its hour
+    alone, so that retained time is what the record holds when neither of
+    the others survives to the delivery.
     """
     shown = effective_host(host)
     if not shown or not check_active(config):
@@ -321,7 +327,6 @@ def record_refusal(host, config=settings, line_at=None, hour_lines=None, suppres
         _refusals.merge_hour_lines(hour_lines)
     _refusals.merge_summary(suppressed, suppressed_since, suppressed_id)
     _refusals.merge_summary(mirrored, mirrored_since, mirrored_id)
-    refused_at = None
     if recent:
         named = []
         for name, stamp in recent:
@@ -333,9 +338,13 @@ def record_refusal(host, config=settings, line_at=None, hour_lines=None, suppres
         if named:
             _refusals.merge_recent(named)
     # A report that lands late still carries the refusal's own time, in the
-    # set of the newest names or in the line the console spent for it: the
-    # record keeps that time and not the delivery's, so a delayed notice
-    # displaces no genuinely newer refusal.
+    # set of the newest names, in the pending notice's own stamp, or in the
+    # line the console spent for it: the record keeps that time and not the
+    # delivery's, so a delayed notice displaces no genuinely newer refusal.
+    # The pending stamp is the one that survives the others: the newest
+    # names roll a waiting hostname out of their bound and the line the
+    # console spent expires with its hour, while the notice holds the
+    # refusal's time until its report is acknowledged.
     if refused_at is None:
         refused_at = line_at
     if _refusals.note(shown, line_at, refused_at):
@@ -358,7 +367,11 @@ def front_refusal_notice(config=settings):
     under that window's stable ID, and the newest bounded set of refused
     names with the times it saw those refusals, so the hour's line budget,
     its one summary and the record of the newest names are the two
-    processes' shared allowance.
+    processes' shared allowance. The notice of a hostname no backend has
+    acknowledged carries the refusal's own time as well, beside the retry
+    bookkeeping and independently of the newest names and the line history,
+    so the record holds the refusal's own time however late the notice is
+    delivered.
 
     The answer carries this backend's own accounting back on the response
     headers: the times of the lines its hour has spent, the suppressed
@@ -419,10 +432,15 @@ def front_refusal_notice(config=settings):
             recent_times.append(None)
     recent = [(name, stamp) for name, stamp in zip(recent_names, recent_times)
               if stamp is not None]
+    pending = request.form.get('refused_at', '')
+    try:
+        pending_at = float(pending) if pending else None
+    except ValueError:
+        pending_at = None
     record_refusal(request.form.get('host', ''), config=config, line_at=line_at,
                    hour_lines=spent, suppressed=held_back, suppressed_since=window_opens,
                    suppressed_id=window_id, mirrored=mirrored_back, mirrored_since=mirrored_opens,
-                   mirrored_id=mirrored_id, recent=recent)
+                   mirrored_id=mirrored_id, recent=recent, refused_at=pending_at)
     headers = {}
     times = _refusals.hour_line_times()
     if times:

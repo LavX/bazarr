@@ -625,7 +625,12 @@ class BoundedRefusalRecorder:
         nowhere, so a report whose acknowledgement was lost and whose
         retry carries the window again does not count it twice, and the
         window the other layer hands back while this one still holds it
-        costs nothing either. The IDs are held for the whole span the
+        costs nothing either. A window whose summary this layer has
+        already paid folds nowhere as well: its ID on the completed list
+        refuses the fold, and the arrival renews the record's lease, so
+        the completion is kept exactly until the sender stops re-carrying
+        its copy and the pair never risks a second summary of a window
+        the first one paid. The IDs are held for the whole span the
         other layer may keep re-carrying the window, on the one constant
         both sides share, so the set of them stays bounded and a copy the
         other layer can still re-carry always meets a layer that still
@@ -644,6 +649,19 @@ class BoundedRefusalRecorder:
             return
         with self._lock:
             if window_id is not None and window_id in self._counted_windows:
+                return
+            if window_id is not None and window_id in self._completed_windows:
+                # A window whose summary this layer has already paid,
+                # carried again by a sender whose reconciliation no answer
+                # has reached: the fold refuses, and the arrival renews
+                # the completion record's lease, so the record is retained
+                # exactly until the sender stops re-carrying the window,
+                # on the one retention span both sides share. Once the
+                # sender has reconciled, the record ages out with the same
+                # span, so the list stays bounded and a copy the sender
+                # can still re-carry always meets a layer that still
+                # remembers paying it.
+                self._completed_windows[window_id] = self._now()
                 return
             if window_id is not None:
                 self._counted_windows[window_id] = self._now()
