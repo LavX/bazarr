@@ -9,6 +9,7 @@ import {
   Indicator,
   MultiSelect,
   Paper,
+  Select,
   Stack,
   Text,
   TextInput,
@@ -18,6 +19,7 @@ import {
 } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
 import {
+  faClosedCaptioning,
   faEraser,
   faFilter,
   faSearch,
@@ -33,6 +35,23 @@ import { UsePaginationQueryResult } from "@/apis/queries/hooks";
 import { QueryPageTable, Toolbox } from "@/components";
 import styles from "./ItemView.module.scss";
 
+// Subtitle-completeness filter. "any" does not filter; "complete" keeps rows
+// with nothing missing; "missing" keeps rows still missing something. What
+// counts as complete differs by kind, so the page supplies `subtitlesStatus`
+// to classify a row.
+export type SubtitlesFilter = "any" | "complete" | "missing";
+
+// How a row sits against the completeness filter. "untracked" rows have no
+// subtitles to complete (no language profile, or nothing that can be missing),
+// so they belong to neither group and drop out whenever the filter narrows.
+export type SubtitlesStatus = "complete" | "missing" | "untracked";
+
+const SUBTITLES_FILTER_OPTIONS: { value: SubtitlesFilter; label: string }[] = [
+  { value: "any", label: "Any" },
+  { value: "complete", label: "Complete" },
+  { value: "missing", label: "Missing some" },
+];
+
 interface Props<T extends Item.Base = Item.Base> {
   query: UsePaginationQueryResult<T>;
   columns: ColumnDef<T>[];
@@ -42,6 +61,11 @@ interface Props<T extends Item.Base = Item.Base> {
   onAudioLanguagesChange?: (values: string[]) => void;
   excludeLanguages?: string[];
   onExcludeLanguagesChange?: (values: string[]) => void;
+  // Subtitle-completeness filter: only wired when the page supplies both the
+  // change handler and `subtitlesStatus`.
+  subtitlesFilter?: SubtitlesFilter;
+  onSubtitlesFilterChange?: (value: SubtitlesFilter) => void;
+  subtitlesStatus?: (item: T) => SubtitlesStatus;
   // Instance filter (#156): options are this kind's instances; values are the
   // selected arr_instance_ids (as strings). Only wired when >1 instance exists.
   instanceOptions?: { value: string; label: string }[];
@@ -66,6 +90,9 @@ function ItemView<T extends Item.Base>({
   onAudioLanguagesChange,
   excludeLanguages = [],
   onExcludeLanguagesChange,
+  subtitlesFilter = "any",
+  onSubtitlesFilterChange,
+  subtitlesStatus,
   instanceOptions,
   instanceValues = [],
   onInstanceValuesChange,
@@ -79,6 +106,8 @@ function ItemView<T extends Item.Base>({
     onInstanceValuesChange !== undefined &&
     instanceOptions !== undefined &&
     instanceOptions.length > 1;
+  const showSubtitlesFilter =
+    onSubtitlesFilterChange !== undefined && subtitlesStatus !== undefined;
   const { data: audioLangs = [] } = useAudioLanguages();
   const [filtersOpen, setFiltersOpen] = useState(false);
 
@@ -119,16 +148,31 @@ function ItemView<T extends Item.Base>({
           return false;
         }
       }
+      if (subtitlesFilter !== "any" && subtitlesStatus) {
+        // "untracked" matches neither group, so it is dropped whenever the
+        // filter narrows to "complete" or "missing".
+        if (subtitlesStatus(item) !== subtitlesFilter) {
+          return false;
+        }
+      }
       return true;
     },
-    [searchValue, audioLanguages, excludeLanguages, instanceValues],
+    [
+      searchValue,
+      audioLanguages,
+      excludeLanguages,
+      instanceValues,
+      subtitlesFilter,
+      subtitlesStatus,
+    ],
   );
 
   const hasActiveFilter =
     searchValue.length > 0 ||
     audioLanguages.length > 0 ||
     excludeLanguages.length > 0 ||
-    instanceValues.length > 0;
+    instanceValues.length > 0 ||
+    subtitlesFilter !== "any";
 
   // Compute active filter count (excluding search which is always visible)
   const activeFilterCount = useMemo(() => {
@@ -137,8 +181,15 @@ function ItemView<T extends Item.Base>({
     if (excludeLanguages.length > 0) count++;
     if (searchValue.length > 0) count++;
     if (instanceValues.length > 0) count++;
+    if (subtitlesFilter !== "any") count++;
     return count;
-  }, [audioLanguages, excludeLanguages, searchValue, instanceValues]);
+  }, [
+    audioLanguages,
+    excludeLanguages,
+    searchValue,
+    instanceValues,
+    subtitlesFilter,
+  ]);
 
   const activeFilterChips = useMemo(() => {
     const chips: {
@@ -193,18 +244,32 @@ function ItemView<T extends Item.Base>({
       });
     }
 
+    if (subtitlesFilter !== "any" && onSubtitlesFilterChange) {
+      const name =
+        SUBTITLES_FILTER_OPTIONS.find((o) => o.value === subtitlesFilter)
+          ?.label ?? subtitlesFilter;
+      chips.push({
+        key: "subtitles",
+        label: `Subtitles: ${name}`,
+        color: "cyan",
+        onRemove: () => onSubtitlesFilterChange("any"),
+      });
+    }
+
     return chips;
   }, [
     searchValue,
     audioLanguages,
     excludeLanguages,
     instanceValues,
+    subtitlesFilter,
     instanceOptions,
     langOptions,
     onSearchChange,
     onAudioLanguagesChange,
     onExcludeLanguagesChange,
     onInstanceValuesChange,
+    onSubtitlesFilterChange,
   ]);
 
   const clearAllFilters = useCallback(() => {
@@ -212,17 +277,20 @@ function ItemView<T extends Item.Base>({
     onAudioLanguagesChange?.([]);
     onExcludeLanguagesChange?.([]);
     onInstanceValuesChange?.([]);
+    onSubtitlesFilterChange?.("any");
   }, [
     onSearchChange,
     onAudioLanguagesChange,
     onExcludeLanguagesChange,
     onInstanceValuesChange,
+    onSubtitlesFilterChange,
   ]);
 
   const hasAnyFilterControl =
     onAudioLanguagesChange !== undefined ||
     onExcludeLanguagesChange !== undefined ||
-    showInstanceFilter;
+    showInstanceFilter ||
+    showSubtitlesFilter;
 
   // The band's left side is never empty. While rows are selected it holds the
   // batch tools; otherwise it says how many rows there are and which filters
@@ -502,6 +570,38 @@ function ItemView<T extends Item.Base>({
                   value={instanceValues}
                   onChange={onInstanceValuesChange}
                   clearable
+                  size="sm"
+                  maxDropdownHeight={250}
+                  styles={{
+                    input: {
+                      minHeight: 36,
+                    },
+                  }}
+                />
+              </Box>
+            )}
+            {showSubtitlesFilter && (
+              <Box style={{ flex: "1 1 200px", maxWidth: 280 }}>
+                <Group gap={6} mb={4}>
+                  <FontAwesomeIcon
+                    icon={faClosedCaptioning}
+                    size="xs"
+                    opacity={0.6}
+                  />
+                  <Text size="xs" fw={500} c="var(--bz-text-tertiary)">
+                    Subtitles
+                  </Text>
+                </Group>
+                <Select
+                  aria-label="Subtitles"
+                  data={SUBTITLES_FILTER_OPTIONS}
+                  value={subtitlesFilter}
+                  onChange={(value) =>
+                    onSubtitlesFilterChange?.(
+                      (value as SubtitlesFilter | null) ?? "any",
+                    )
+                  }
+                  allowDeselect={false}
                   size="sm"
                   maxDropdownHeight={250}
                   styles={{

@@ -51,7 +51,10 @@ import {
 } from "@/components/forms/MassTranslateForm";
 import { SUBTITLE_TOOL_ACTIONS } from "@/constants/batch";
 import { useModals } from "@/modules/modals";
-import ItemView from "@/pages/views/ItemView";
+import ItemView, {
+  SubtitlesFilter,
+  SubtitlesStatus,
+} from "@/pages/views/ItemView";
 import { GetItemId } from "@/utilities";
 
 function upgradableKey(upstreamId: number, arrInstanceId?: number | null) {
@@ -65,6 +68,8 @@ const SeriesView: FunctionComponent = () => {
   const [search, setSearch] = useState("");
   const [audioLanguages, setAudioLanguages] = useState<string[]>([]);
   const [excludeLanguages, setExcludeLanguages] = useState<string[]>([]);
+  const [subtitlesFilter, setSubtitlesFilter] =
+    useState<SubtitlesFilter>("any");
   const [instanceFilter, setInstanceFilter] = useState<string[]>([]);
   const {
     multiInstance,
@@ -72,6 +77,18 @@ const SeriesView: FunctionComponent = () => {
     defaultId: instanceDefaultId,
     options: instanceOptions,
   } = useArrInstanceLabels("sonarr");
+
+  // A series with no language profile, or with no episode files, has nothing to
+  // complete, so it is untracked and belongs to neither group. Otherwise it is
+  // complete when no episode is missing.
+  const subtitlesStatus = useCallback(
+    (series: Item.Series): SubtitlesStatus => {
+      if (series.profileId == null || series.episodeFileCount === 0)
+        return "untracked";
+      return series.episodeMissingCount === 0 ? "complete" : "missing";
+    },
+    [],
+  );
 
   const query = useSeriesPagination(true);
   const { data: upgradableData } = useUpgradableItems();
@@ -591,6 +608,9 @@ const SeriesView: FunctionComponent = () => {
         onAudioLanguagesChange={setAudioLanguages}
         excludeLanguages={excludeLanguages}
         onExcludeLanguagesChange={setExcludeLanguages}
+        subtitlesFilter={subtitlesFilter}
+        onSubtitlesFilterChange={setSubtitlesFilter}
+        subtitlesStatus={subtitlesStatus}
         instanceOptions={multiInstance ? instanceOptions : undefined}
         instanceValues={instanceFilter}
         onInstanceValuesChange={setInstanceFilter}
