@@ -671,9 +671,36 @@ def _host_refusal_html(host: str, base: str, also: str | None = None) -> str:
     """The static refusal page, which doubles as the approval form."""
     shown = html.escape(host or "")
     named = shown if shown else "a request that carried no hostname"
+    forwarded = html.escape(also) if also else ""
     if also:
-        named += f" (and its forwarded hostname {html.escape(also)})"
+        named += f" (and its forwarded hostname {forwarded})"
     action = html.escape(f"{base}/{host_policy.APPROVAL_SEGMENT}")
+    code_note = ("The code is printed to this container's logs (<code>docker logs</code>) "
+                 "and nowhere else; it is replaced after each use and by every restart: "
+                 "use the most recent line.")
+    if also:
+        # Two refused hostnames are two entries, and the composite display
+        # string that names the arrival is never one of them: an entry that
+        # reads "first (and its forwarded hostname second)" matches neither
+        # hostname. Each entry is named on its own, the environment gets
+        # the one comma-separated value that carries both, and the approval
+        # code approves one hostname per submission, so the form below
+        # carries the first and a request for the second answers with its
+        # own refusal page and code.
+        instruction = (
+            f'To answer it, add <code>{shown}</code> and <code>{forwarded}</code> to '
+            '<code>general.allowed_hosts</code> in config.yaml, or set '
+            f'<code>{host_policy.ALLOWED_HOSTS_ENV}={shown},{forwarded}</code> in the '
+            'environment, or enter the one-time approval code below. The code approves one '
+            f'hostname per submission: the form below carries <code>{shown}</code>, and a '
+            f'request for <code>{forwarded}</code> answers with its own refusal page and '
+            f'code. {code_note}')
+    else:
+        instruction = (
+            f'To answer it, add <code>{named}</code> to <code>general.allowed_hosts</code> '
+            'in config.yaml, or set '
+            f'<code>{host_policy.ALLOWED_HOSTS_ENV}</code> in the '
+            f'environment, or enter the one-time approval code below. {code_note}')
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -689,11 +716,7 @@ code {{ background: #f0f0f0; padding: 0 0.2rem; }}
 <h1>Bazarr+ does not recognize this address</h1>
 <p>While no login is configured, Bazarr+ only answers requests for hostnames it
 recognizes. This one arrived for <code>{named}</code>.</p>
-<p>To answer it, add <code>{named}</code> to <code>general.allowed_hosts</code>
-in config.yaml, or set <code>{host_policy.ALLOWED_HOSTS_ENV}</code> in the
-environment, or enter the one-time approval code below. The code is printed to
-this container's logs (<code>docker logs</code>) and nowhere else; it is
-replaced after each use and by every restart: use the most recent line.</p>
+<p>{instruction}</p>
 <form method="post" action="{action}">
 <input type="hidden" name="host" value="{shown}">
 <p><label for="host-approval-code">Approval code</label>
@@ -907,22 +930,31 @@ class _RefusalReporter:
         hour: the two processes share the hour's line budget even though
         they share no memory. The line a failed delivery named is spent
         for the notice it was named for, and is remembered under the
-        notice's own identity: a fresh notice of the same hostname starts
-        its accounting clean, because the refusal it carries is its own
-        news and the pair owes it a naming of its own, while the retries
-        of the failed notice still carry the time, so the backend folds
-        the line the failure wrote and writes none of its own. A line this
-        console wrote itself, at a refusal the backend could not be told
-        about, is remembered under the hostname, because the notice of
-        that refusal is minted after the line is spent and its report
-        carries the time either way. The bookkeeping is bounded and rolled
-        past its hour like every other roll here.
+        notice's own identity: the retries of the failed notice still carry
+        the time, so the backend folds the line the failure wrote and
+        writes none of its own. The hostname is remembered beside the
+        notice, because the hour's line budget the line bought belongs to
+        the hostname and not to the notice whose delivery failed: a fresh
+        notice of the same hostname carries the pace in its report, the
+        backend folds the fresh refusal's line, and the hostname draws no
+        second line within the hour, whichever notice its refusal arrived
+        on. A line this console wrote itself, at a refusal the backend
+        could not be told about, is remembered under the hostname alone,
+        because the notice of that refusal is minted after the line is
+        spent and its report carries the time either way. The bookkeeping
+        is bounded and rolled past its hour like every other roll here.
         """
         now = self._now()
         self._accounted = OrderedDict(
             (name, stamp) for name, stamp in self._accounted.items()
             if now - stamp < host_policy.HOUR_SECONDS)
-        self._accounted[notice_id if notice_id is not None else host] = now
+        if notice_id is not None:
+            self._accounted[notice_id] = now
+        # The hostname is written after the notice, so the bound the map
+        # keeps holds a resolved notice's identity before the hostname's
+        # own pace: the pace serves every later notice of the hostname,
+        # while the identity it was named for is one delivery's fact.
+        self._accounted[host] = now
         while len(self._accounted) > host_policy.REFUSED_HOSTS_LIMIT:
             self._accounted.popitem(last=False)
 
@@ -932,10 +964,16 @@ class _RefusalReporter:
 
         The notice the report carries is asked first, because the line a
         failed delivery named belongs to the notice it failed for, and the
-        hostname is asked for the lines this console wrote itself: a fresh
-        notice of a hostname an old failure named inherits nothing, while
-        the report of a refusal this console named itself carries the time
-        whichever notice delivers it.
+        hostname is asked for the lines this console named itself: the
+        hour's line budget a line bought belongs to the hostname, so a
+        fresh notice of a hostname whose line this console spent carries
+        that pace in its report and inherits nothing else, while the
+        report of a refusal whose line nobody here spent names its
+        refusal afresh. A line a backend logged is not a pace this
+        console hands a fresh notice, because the backend that holds the
+        hostname's pace counts what its own pace holds back, and a
+        backend that restarts knows nothing and names the refusal in its
+        own right.
         """
         now = self._now()
         keys = (notice_id, host) if notice_id is not None else (host,)
@@ -1373,15 +1411,22 @@ class _RefusalReporter:
         joins nothing, because the backend that holds it could not be
         told the combined payment.
 
-        A mirror the shared record proves paid is dropped rather than
-        added: the backend's own timer or its own arrivals paid the window
-        while this console held the copy, and the one summary the pair
-        owes it is logged there already, so this side pays its own window
-        alone and resolves the paid copy, which no handoff can ever be
-        owed again. Whichever side pays first completes the identity on
-        the record, and the other side's payment reads the proof, so the
-        aggregate has the one payment owner whichever timer reached the
-        window first.
+        The one payment the pair owes the hour is claimed before any line
+        is logged, on the record both processes share and under the lock
+        the record's own updates hold, so the console's aggregate and the
+        backend's timer cannot both pay the same window however closely
+        their turns overlap: the claim on the mirror's identity is what
+        the console's combined payment takes, and a backend whose flush
+        claimed it first leaves the console holding nothing it may pay,
+        its own window dropped with the copy. A mirror the record proves
+        paid is dropped as well, and an own window that counts lines of
+        that paid hour is dropped with it rather than paid as the second
+        line the hour's one-summary ceiling forbids: the pair keeps the
+        lose-not-double trade, whatever this console's own hour says.
+        An own window whose hour the paid mirror's does not reach owes
+        its own hour's summary, so it is paid alone, and a mirror with no
+        ID joins nothing either, because the backend that holds it could
+        not be told the combined payment.
         """
         own = self._lines.hour_suppressed_window()
         if own is None or now - own[1] < host_policy.HOUR_SECONDS:
@@ -1404,10 +1449,28 @@ class _RefusalReporter:
             # The shared record proves the backend paid this window while
             # this console held the copy, and the one summary it owes is
             # logged there already: the copy is resolved here rather than
-            # carried again, and this console pays its own window alone.
+            # carried again. This console's own window is paid only where
+            # its counts fall outside the hour the paid line reported: an
+            # own window that counts lines of that hour is dropped with
+            # the copy, because the hour's one summary is paid, and one
+            # whose hour the paid window's never reached owes its own
+            # hour's summary still.
             self._mirrored = None
             self._mirrored_paid = False
+            if summary[1] < mirror[1] + host_policy.HOUR_SECONDS:
+                return None
             return summary
+        if not host_policy.claim_summary_payment(mirror[2], summary[2]):
+            # The backend's own timer claimed the payment of the mirrored
+            # window inside this very decision, so the one summary the two
+            # windows' hour owes is logged there, and this console's own
+            # window, counting lines of that same hour, is dropped with
+            # the copy rather than paid as a second line: the claim is the
+            # pair's one payment decision, whichever timer reached the
+            # window first.
+            self._mirrored = None
+            self._mirrored_paid = False
+            return None
         count, opened, closed, window_id = summary
         self._lines.complete_window(mirror[2])
         self._mirrored = None
@@ -1515,6 +1578,22 @@ class _RefusalReporter:
             # lines count into: the notice owes no count of its own, and an
             # eviction after the recovery counts nothing for it.
             self._pending_accounted.add(host)
+        elif self.line_time(host) is not None:
+            # The hour's line budget for this hostname is spent, by the
+            # line a failed delivery of an earlier notice named, by a line
+            # this console wrote itself or by the line the backend logged:
+            # the report this fresh notice carries tells the backend to
+            # fold, so no layer will ever write the fresh refusal a line,
+            # and this console is the pair's only count for it. It counts
+            # the refusal into its own window at the queueing, exactly
+            # once, the way the repeats and the evictions of held-back
+            # notices are counted, and the mark that holds the count is
+            # the notice's first-failure mark: a retry of the notice that
+            # later fails counts nothing beside it, and an eviction after
+            # it counts nothing either. A fresh refusal that arrives once
+            # the pace has run carries no spent line and gets its own.
+            self._pending_accounted.add(host)
+            self._lines.note_held_back(host)
         while len(self._pending) > host_policy.REFUSED_HOSTS_LIMIT:
             dropped, _attempt = self._pending.popitem(last=False)
             self._pending_at.pop(dropped, None)
@@ -1687,7 +1766,12 @@ class _RefusalReporter:
         The notice keeps its place in both cases, because the backend that
         took it in owes the acknowledgement the loss ate, and the retry
         reaches it and its own accounting holds the hostname from a
-        second line.
+        second line. A notice this console named in the line of its first
+        failure holds its retries to that one naming wherever the hour has
+        rolled to, because the notice is unchanged and its own lifetime,
+        the acknowledgement or the eviction that resolves it, is the
+        boundary the pair keeps, past the hour the hostname's pace rolls
+        on.
 
         The failure resolves the notice it was taken for, the one whose
         delivery has just come back, rather than whatever the queue holds
@@ -1726,7 +1810,7 @@ class _RefusalReporter:
                 self._pending_accounted.add(host)
             return
         self._account_line(host, notice_id)
-        counted = self._lines.note_retry(host)
+        counted = self._lines.note_retry(host, notice_id)
         if counted:
             _print_refusal_line(_refusal_line_text(host))
         if (not evicted and host in self._pending

@@ -207,6 +207,68 @@ def completed_windows_record_has(window_id, path=None):
     return window_id in _read_completed_windows_record(path)
 
 
+def claim_summary_payment(window_id, paid_at, path=None):
+    """Take the one payment decision for a window, across both processes.
+
+    The backend's paced flush and the console's aggregate can both be one
+    step from paying the same window, each having read the record before
+    the other wrote it, and a payment each of them decides alone would log
+    the window's lines twice. The claim is the decision, taken under the
+    same lock the record's own updates hold and before any line is logged,
+    so two payments cannot both pass it however closely they overlap: the
+    side that claims first owns the one summary the window owes, and the
+    side that finds the identity already on the record pays nothing, its
+    copy of the window dropped rather than logged a second time. The
+    claim's stamp is the payment's own time, so the proof it writes
+    outlives the answer the payer would have built, the way a payment
+    written after the log does.
+
+    The write is best effort, exactly as the record's own updates are: a
+    record nothing can read or write proves no payment, so the payer
+    proceeds rather than fail a payment, and the pair keeps the
+    lose-not-double trade on whatever the record could not decide. A
+    window with no identity to claim costs nothing to grant, because no
+    copy of it anywhere can be proven paid.
+    """
+    if not window_id:
+        return True
+    path = completed_windows_record_path() if path is None else path
+    record_path = Path(path)
+    lock_handle = None
+    try:
+        record_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_handle = open(str(record_path) + COMPLETED_WINDOWS_RECORD_LOCK_SUFFIX, 'a+')
+        import fcntl
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        if lock_handle is not None:
+            lock_handle.close()
+            lock_handle = None
+    try:
+        record = _read_completed_windows_record(path)
+        claimed = window_id not in record
+        if claimed:
+            record = {known_id: stamp for known_id, stamp in record.items()
+                      if isinstance(stamp, (int, float))
+                      and paid_at - stamp < CARRY_RETENTION_SECONDS}
+            record[window_id] = paid_at
+            fd, tmp = tempfile.mkstemp(dir=str(record_path.parent),
+                                       prefix=f".{record_path.name}.")
+            try:
+                with os.fdopen(fd, 'w') as record_file:
+                    json.dump(record, record_file)
+                os.replace(tmp, path)
+            except BaseException:
+                os.unlink(tmp)
+                raise
+    except Exception:
+        claimed = True
+    finally:
+        if lock_handle is not None:
+            lock_handle.close()
+    return claimed
+
+
 # The record of the notices the backend has taken in, in the configuration
 # directory the two processes of one install share. Each entry holds two
 # facts the pair must not confuse: the receipt, written before the notice
@@ -263,16 +325,22 @@ def _notice_record_entry(record, notice_id):
 
 
 def _prune_notice_record(record, now):
-    """Keep the entries whose newest fact is still within the retention
-    span, so the record stays bounded by the same span both sides keep for
-    a delivery no answer resolved."""
+    """Keep the entries whose facts are still within their retention
+    spans, so the record stays bounded: a receipt is a fact about one
+    delivery, held on the span both sides keep for a delivery no answer
+    resolved, and an outcome is the pair's proof a notice is accounted,
+    held the bounded day the backend's own accounting of the identity
+    lives on, because the notice it names can be retried that long and a
+    console reading past the carry span still has to find the outcome the
+    retries reconcile on."""
     pruned = {}
     for notice_id, entry in record.items():
         if not isinstance(entry, dict):
             continue
-        stamps = [stamp for stamp in (entry.get('received'), entry.get('accounted'))
-                  if isinstance(stamp, (int, float))]
-        if any(now - stamp < CARRY_RETENTION_SECONDS for stamp in stamps):
+        received = entry.get('received')
+        accounted = entry.get('accounted')
+        if ((isinstance(received, (int, float)) and now - received < CARRY_RETENTION_SECONDS)
+                or (isinstance(accounted, (int, float)) and now - accounted < DAY_SECONDS)):
             pruned[notice_id] = entry
     return pruned
 
@@ -617,6 +685,7 @@ class BoundedRefusalRecorder:
         self._counted_windows = OrderedDict()  # window ID -> when it was counted here
         self._completed_windows = OrderedDict()  # window ID -> when it was paid here
         self._first_failures = OrderedDict()  # host -> when its first failed notice counted
+        self._named_notices = OrderedDict()  # host -> the notice whose line was written here
         self._notice_accounted = OrderedDict()  # notice identity -> when its refusal was named here
 
     def _count_suppressed(self, now):
@@ -812,7 +881,7 @@ class BoundedRefusalRecorder:
                 self._hosts[host] = stamp
             self._keep_newest_hosts()
 
-    def note_retry(self, host):
+    def note_retry(self, host, notice_id=None):
         """Record a retry's line; True when a per-host line may be written now.
 
         The pace and the cap are consulted as ``note`` consults them and an
@@ -822,6 +891,17 @@ class BoundedRefusalRecorder:
         that says a stream of refusals was held back when one hostname's
         line was. The refusal record itself is left alone, because a
         report's retry is not a new refusal.
+
+        The retries are held to one naming by the notice they carry: the
+        line a first failure wrote is remembered under the notice's own
+        identity, and the hour's pace that held the retries back within
+        the hour is not the boundary the pair keeps across one, because
+        the notice is unchanged however far the hour has rolled. The
+        notice's own lifetime is: a retry of a notice whose line was
+        written here writes no second line past the hour either, until
+        the acknowledgement resolves the notice or the pending queue
+        evicts it, and no count joins a window for a refusal a line here
+        named already.
 
         The first failure is different: a report whose delivery fails leaves
         its hostname named nowhere else, so the first failed notice of a
@@ -843,28 +923,62 @@ class BoundedRefusalRecorder:
             self._prune(now)
             if host in self._last_lines:
                 return False
+            if (notice_id is not None
+                    and self._named_notices.get(host) == notice_id):
+                # The line this hour's pace has forgotten was written for
+                # this very notice, and the notice is unchanged: its
+                # refusal is named here once already, and a rolled hour
+                # grants its retry neither a second line nor a count.
+                return False
             if len(self._line_times) >= REFUSAL_LOG_LINES_PER_HOUR:
                 if host not in self._first_failures:
                     self._first_failures[host] = now
                     self._count_suppressed(now)
                 return False
             self._last_lines[host] = now
+            if notice_id is not None:
+                self._named_notices[host] = notice_id
             self._line_times.append(now)
             self._line_ids.append(_mint_line_id())
             return True
 
-    def first_failure_resolved(self, host):
-        """Clear the first-failure mark of a notice that resolved.
+    def note_held_back(self, host):
+        """Count one refusal whose line the hour's pace holds back, and mark
+        the host the way a first failure's count is marked.
 
-        The mark lives exactly as long as the pending notice it was
-        counted for: the console clears it when the backend acknowledges
-        the notice's report and when the pending queue evicts the notice,
-        the two ways a notice leaves, so a fresh notice of the same host
-        counts its own first failure anew however soon it follows one
-        that resolved.
+        A fresh notice of a hostname whose line the hour's budget has spent
+        carries that spent line's time in its report, so the backend that
+        answers folds the fresh refusal's line and no layer will ever write
+        it: this layer is the pair's only count for the refusal, and it
+        counts the refusal into its own window here, exactly once, the way
+        the lines the hour's cap holds back are counted. The mark joins the
+        first failures', because this count is the notice's first failure:
+        a retry of the notice that later fails counts nothing beside it,
+        and an eviction after it counts nothing either, while a fresh
+        notice that arrives once the pace has run counts its own refusal
+        anew.
+        """
+        now = self._now()
+        with self._lock:
+            self._prune(now)
+            if host not in self._first_failures:
+                self._first_failures[host] = now
+                self._count_suppressed(now)
+
+    def first_failure_resolved(self, host):
+        """Clear the first-failure marks of a notice that resolved.
+
+        The marks live exactly as long as the pending notice they were
+        counted or named for: the console clears them when the backend
+        acknowledges the notice's report and when the pending queue evicts
+        the notice, the two ways a notice leaves, so a fresh notice of the
+        same host counts its own first failure anew however soon it
+        follows one that resolved, and names its refusal in a line of its
+        own once the pace has stopped holding the hostname back.
         """
         with self._lock:
             self._first_failures.pop(host, None)
+            self._named_notices.pop(host, None)
 
     def first_failure_is_counted(self, host):
         """Whether a failed notice of this host already counted its line.
@@ -888,14 +1002,19 @@ class BoundedRefusalRecorder:
         retry would otherwise account the refusal again, a second line
         within the hour or a fresh one past it, or a count beside the line
         that already named it. The first accounting marks the identity, and
-        the mark lives past the hour, on the same span both sides keep for
-        a delivery no answer resolved, because a notice whose answer was
-        lost can be retried across one. A notice with no identity, the
-        refusal this layer saw itself, accounts every time it is refused:
-        the pace of its hostname is what holds its repeats, exactly as it
-        always did. The caller that skips the accounting on a retry still
-        reports the hour's current budget, so a retry's answer carries
-        everything the hour holds now and not the arrival's own news.
+        the mark lives past the hour and past the carry span both sides
+        keep for a delivery no answer resolved, a full day, because a
+        pending notice can be retried far longer than that span: the
+        console holds its notices until an acknowledgement resolves them
+        or the pending queue evicts them, and neither boundary is a span of
+        time, so the day is the bounded reconciliation the pair keeps
+        while a notice can still be on its way. A notice with no identity,
+        the refusal this layer saw itself, accounts every time it is
+        refused: the pace of its hostname is what holds its repeats,
+        exactly as it always did. The caller that skips the accounting on a
+        retry still reports the hour's current budget, so a retry's answer
+        carries everything the hour holds now and not the arrival's own
+        news.
         """
         if not notice_id:
             return True
@@ -903,7 +1022,7 @@ class BoundedRefusalRecorder:
         with self._lock:
             self._prune(now)
             stamp = self._notice_accounted.get(notice_id)
-            if stamp is not None and now - stamp < CARRY_RETENTION_SECONDS:
+            if stamp is not None and now - stamp < DAY_SECONDS:
                 return False
             self._notice_accounted[notice_id] = now
             while len(self._notice_accounted) > REFUSED_HOSTS_LIMIT:
@@ -941,13 +1060,17 @@ class BoundedRefusalRecorder:
             if now - stamp < CARRY_RETENTION_SECONDS)
         # The accounted notices are not on the hourly roll either: a
         # delivery whose answer was lost is retried under the notice's own
-        # identity, and the retry can cross an hour, so the mark that holds
-        # one notice to one accounting lives on the same span both sides
-        # keep for a delivery no answer resolved, and the bound matches the
-        # pending queue's, because a notice is what the queue holds.
+        # identity, and the retry can cross an hour and the carry span both
+        # sides keep for a delivery no answer resolved, because the notice
+        # stays pending until an acknowledgement resolves it or the
+        # pending queue evicts it and neither is a span of time. The mark
+        # that holds one notice to one accounting therefore lives the
+        # bounded day the newest-refused record keeps, and the bound
+        # matches the pending queue's in spirit, because a notice is what
+        # the queue holds however long it holds it.
         self._notice_accounted = OrderedDict(
             (notice_id, stamp) for notice_id, stamp in self._notice_accounted.items()
-            if now - stamp < CARRY_RETENTION_SECONDS)
+            if now - stamp < DAY_SECONDS)
 
     def take_summary(self):
         """The suppressed window when a summary line is due, else ``None``.
@@ -971,7 +1094,12 @@ class BoundedRefusalRecorder:
         took its overlapping counts into the one summary line it wrote, and
         the record is the proof that outlives the answer which layer paid,
         so the pair keeps the one summary per window the hour's budget
-        rules name, whichever layer's own hour ran first.
+        rules name, whichever layer's own hour ran first. The drop is
+        decided by one claim on the record, taken under the lock the
+        record's own updates hold, so two layers one step from paying the
+        same window cannot both pass it: the claim that wins pays the one
+        summary, and the take that loses drops the window it took without
+        logging anything, however closely the two payments overlap.
         """
         now = self._now()
         with self._lock:
@@ -983,16 +1111,17 @@ class BoundedRefusalRecorder:
             if now - self._window_opens < HOUR_SECONDS:
                 return None
             if (self._window_id is not None
-                    and completed_windows_record_has(self._window_id)):
-                # The record of completed windows the two processes share
-                # proves the one summary this window owes was paid by the
-                # other layer: it took the window's overlapping counts into
-                # the one summary line it wrote and named this window among
-                # the IDs it completed, so this layer holds counts that are
-                # already paid. The window is dropped rather than paid a
-                # second time, whatever this layer's own hour says: the pair
-                # keeps the one summary per window the hour's budget rules
-                # name, paid once by whichever layer reached it first.
+                    and not claim_summary_payment(self._window_id, now)):
+                # The one payment decision on the record the two processes
+                # share went to the other layer: it took the window's
+                # overlapping counts into the one summary line it wrote and
+                # named this window among the IDs it completed, whether
+                # before this take ran or inside the same moment of it,
+                # so this layer holds counts that are already paid. The
+                # window is dropped rather than paid a second time,
+                # whatever this layer's own hour says: the pair keeps the
+                # one summary per window the hour's budget rules name,
+                # paid once by whichever layer claimed it first.
                 self._suppressed = 0
                 self._window_opens = None
                 self._window_id = None

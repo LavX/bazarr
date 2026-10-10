@@ -117,10 +117,38 @@ def host_page(host, *, also=None, message=None, config=settings):
     """
     shown = html.escape(host or '')
     named = shown if shown else 'a request that carried no hostname'
+    forwarded = html.escape(also) if also else ''
     if also:
-        named += f' (and its forwarded hostname {html.escape(also)})'
+        named += f' (and its forwarded hostname {forwarded})'
     action = html.escape(approval_path(config))
     message_html = f'<p class="error">{html.escape(message)}</p>' if message else ''
+    code_note = ('The code is printed to the console Bazarr+ runs in: the terminal, '
+                 '<code>docker logs</code> for a container, or <code>journalctl</code> for a '
+                 'service. It never appears in bazarr.log, and it is replaced after each use '
+                 'and by every restart: use the most recent line.')
+    if also:
+        # Two refused hostnames are two entries, and the composite display
+        # string that names the arrival is never one of them: an entry that
+        # reads "first (and its forwarded hostname second)" matches neither
+        # hostname. Each entry is named on its own, the environment gets
+        # the one comma-separated value that carries both, and the approval
+        # code approves one hostname per submission, so the form below
+        # carries the first and a request for the second answers with its
+        # own refusal page and code.
+        instruction = (
+            f'To answer it, add <code>{shown}</code> and <code>{forwarded}</code> to '
+            '<code>general.allowed_hosts</code> in config.yaml (a file edited by hand applies '
+            f'after a restart), or set <code>{ALLOWED_HOSTS_ENV}={shown},{forwarded}</code> in '
+            'the environment, or enter the one-time approval code below. The code approves one '
+            f'hostname per submission: the form below carries <code>{shown}</code>, and a '
+            f'request for <code>{forwarded}</code> answers with its own refusal page and code. '
+            f'{code_note}')
+    else:
+        instruction = (
+            f'To answer it, add <code>{named}</code> to <code>general.allowed_hosts</code> '
+            'in config.yaml (a file edited by hand applies after a restart), or set '
+            f'<code>{ALLOWED_HOSTS_ENV}</code> in the environment, or enter the one-time '
+            f'approval code below. {code_note}')
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -137,13 +165,7 @@ code {{ background: #f0f0f0; padding: 0 0.2rem; }}
 <h1>Bazarr+ does not recognize this address</h1>
 <p>While no login is configured, Bazarr+ only answers requests for hostnames it
 recognizes. This one arrived for <code>{named}</code>.</p>
-<p>To answer it, add <code>{named}</code> to <code>general.allowed_hosts</code>
-in config.yaml (a file edited by hand applies after a restart), or set
-<code>{ALLOWED_HOSTS_ENV}</code> in the environment, or enter the one-time
-approval code below. The code is printed to the console Bazarr+ runs in:
-the terminal, <code>docker logs</code> for a container, or
-<code>journalctl</code> for a service. It never appears in bazarr.log, and it
-is replaced after each use and by every restart: use the most recent line.</p>
+<p>{instruction}</p>
 {message_html}
 <form method="post" action="{action}">
 <input type="hidden" name="host" value="{shown}">
@@ -421,10 +443,12 @@ def record_refusal(host, config=settings, line_at=None, hour_lines=None, hour_li
     holds no mark: the retry tells it the notice afresh and it records the
     refusal in its own right, the way every backend that receives the
     notice does. The outcome the record of notices keeps is the console's
-    fact and not this backend's brake: a notice this backend accounted
-    before it died keeps the console's fallback silent, and one whose
-    accounting never completed, because this backend died between its
-    receipt and its record, leaves the refusal to the console that saw it.
+    fact and not this backend's brake, and it is written before the line:
+    a notice this backend assigned its naming to and died before the
+    line names keeps the console's fallback silent, so the refusal is
+    named nowhere rather than twice, and one whose accounting never
+    completed, because this backend died between its receipt and its
+    record, leaves the refusal to the console that saw it.
     """
     shown = effective_host(host)
     if not shown or not check_active(config):
@@ -461,15 +485,19 @@ def record_refusal(host, config=settings, line_at=None, hour_lines=None, hour_li
         refused_at = line_at
     accounted = _refusals.account_notice(notice)
     if accounted:
+        if notice:
+            # The outcome is retained before the line is written, so the
+            # naming of the refusal is assigned to this backend before it
+            # is delivered: a process that dies between the two leaves the
+            # refusal unnamed, and the console whose delivery failed reads
+            # the outcome and names the refusal nowhere itself, because the
+            # pair prefers one refusal named nowhere on a crash to one
+            # named twice, and a backend that restarts holds its own
+            # retries to the one accounting.
+            record_notice_accounted(notice, time.time())
         if _refusals.note(shown, line_at, refused_at):
             logging.warning('BAZARR refused a request for an unrecognized host: %s. Allow it under '
                             'Settings > General > Allowed Hosts, or set %s.', shown, ALLOWED_HOSTS_ENV)
-        if notice:
-            # The outcome is retained once the accounting completed, so the
-            # console whose delivery failed reads back a fact about the
-            # refusal and not only about the taking in, and a backend that
-            # restarts holds its own retries to the one accounting.
-            record_notice_accounted(notice, time.time())
     _flush_suppressed_summary()
     # Announce the code so a refused hostname has one in the console to
     # use; the announcement itself repeats at most once an hour.
