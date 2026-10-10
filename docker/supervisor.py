@@ -873,6 +873,7 @@ class _RefusalReporter:
         self._last_report = OrderedDict()  # host -> time of its last acknowledged report
         self._pending = OrderedDict()  # host -> time of its last attempt (None until tried)
         self._pending_at = OrderedDict()  # host -> when this console last refused a waiting host
+        self._pending_ids = OrderedDict()  # host -> the stable identity of its waiting notice
         self._pending_accounted = set()  # waiting hosts whose refusal this console already counted
         self._accounted = OrderedDict()  # host -> time this console last spent its line
         self._recent = OrderedDict()  # host -> time this console last refused it
@@ -886,6 +887,7 @@ class _RefusalReporter:
         self._last_ack = None  # when the last acknowledgement of any kind arrived
         self._in_flight = None  # the hostname whose delivery the worker took, until it resolves
         self._in_flight_evicted = False  # whether the queue evicted that notice mid-delivery
+        self._in_flight_id = None  # the identity of the notice the in-flight delivery carries
         self._ready_generation = 0  # how many fresh backends readiness has sworn in
         self._delivery_generation = None  # the generation the in-flight delivery was taken in
         self._wake = asyncio.Event()  # refusals and readiness wake the worker
@@ -1145,11 +1147,17 @@ class _RefusalReporter:
 
         A copy waiting in the slot ages with it: a sent copy no answer
         resolved is dropped once the carry has run past the span the
-        backend remembers the window's ID, before any report carries it,
-        on the same bounded lose-not-double trade the local emission
-        below makes, because a backend that no longer remembers the ID
-        would fold the copy in as a window it has never seen and log a
-        second line for lines a first summary may already have paid. An
+        backend remembers the window's ID and the record of completed
+        windows the two processes share proves the one summary the window
+        owes was paid, before any report carries it. An unpaid copy keeps
+        its place past that span as well: no layer ever logged its summary,
+        because the backend that took the delivery in processed nothing
+        and wrote no payment, so the copy is the only record of the lines
+        the window counts, and the report that next carries it meets a
+        backend that never counted its ID, folds it in once and pays the
+        one summary it owes. A copy with no ID to prove its payment keeps
+        the old bounded trade: nothing can tell it paid from unpaid, so it
+        is dropped rather than carried to a backend that forgot it. An
         unsent copy is never dropped by age: no request byte of it ever
         left for any backend, nothing could have counted it, and the
         sustained-outage emission below may still read it. The age runs
@@ -1164,22 +1172,22 @@ class _RefusalReporter:
         now = self._now()
         if self._carried is not None:
             if (self._carried_sent
-                    and now - self._carried_at >= host_policy.CARRY_RETENTION_SECONDS):
+                    and now - self._carried_at >= host_policy.CARRY_RETENTION_SECONDS
+                    and (self._carried[2] is None
+                         or host_policy.completed_windows_record_has(self._carried[2]))):
                 # Sent, never resolved, and held past the whole span the
-                # backend remembers the window's ID: a report carrying the
-                # copy again would hand it to a backend that has pruned the
-                # ID and would fold it in as a window it has never seen,
-                # logging a second line for lines a first summary may
-                # already have paid, so the slot drops the copy before any
-                # report can carry it, on the one retention span both
-                # sides share. The age runs from the take and not from a
-                # restore, because a restore keeps the same carry going,
-                # so this hold ends within the same span the backend's
-                # memory of the ID does and a copy this console can still
-                # re-carry always meets a backend that still remembers it.
-                # The pair keeps the one summary the backend logged, or
-                # loses the one the backend never took, rather than risk
-                # the second line.
+                # backend remembers the window's ID, with the record of
+                # completed windows proving the one summary it owes was
+                # paid, or no ID that could prove anything: a report
+                # carrying the paid copy would hand it to a backend that
+                # has pruned the ID and would fold it in as a window it
+                # has never seen, logging a second line for lines a first
+                # summary already paid, so the slot drops the copy before
+                # any report can carry it, on the one retention span both
+                # sides share. An unpaid copy never reaches this drop: it
+                # keeps its place below, whatever its age, because no
+                # summary of it was ever logged anywhere and the backend
+                # that receives it next counts its lines exactly once.
                 self._carried = None
             else:
                 carried, self._carried = self._carried, None
@@ -1259,48 +1267,113 @@ class _RefusalReporter:
         its ID completed and folded by a backend that still counts it,
         and a backend that never answers loses the one summary rather
         than the pair logging a second line for a window the backend may
-        already have summarized. The wait is bounded all the same: once the
-        carry has run past the span the backend remembers the window's ID,
-        held for exactly that purpose on the one constant both sides share
-        so the retention and this hold cannot drift apart, the copy is
+        already have summarized. The wait is bounded all the same: once
+        the carry has run past the span the backend remembers the
+        window's ID and the record of completed windows the two processes
+        share proves the one summary the copy owes was paid, the copy is
         dropped outright, emitted nowhere and carried by no later report,
-        because a backend that no longer remembers the ID would fold it in
-        again and log a second line, so the pair keeps the one summary the
-        backend logged, or loses the one the backend never took, rather
-        than risk logging the window twice. Any acknowledgement since the
+        on the one retention span both sides share so this hold cannot
+        outlast what any backend remembers of the window. An unpaid copy
+        is kept past that span as well, because no layer ever logged its
+        summary and the backend that receives it next counts its lines
+        exactly once, so the pair loses nothing a reconciliation could
+        still deliver. Any acknowledgement since the
         carry began bars the emission as well and drops the copy once its
         hour has run, because the backend has taken the window in and
         holds it or has paid it, and the mirrored copy or the completed
         IDs carry its accounting, so the pair stays on the one summary
         whichever layer pays it.
+
+        The recorder's own due window is paid with the backend's beside
+        it: the window the last acknowledgement mirrored back overlaps the
+        hour this console's window counts, the two windows' counts one
+        summary owes under the hour's budget rules, and no report needs to
+        go out for the two to meet, because the mirror is already here.
+        Once both windows' hours have run, the one line pays the
+        combined count, opened at whichever window opened first, and the
+        payment completes both windows' IDs on the record the two
+        processes share, so the backend's own payment drops the copy it
+        holds instead of logging a second line for counts the one line
+        already paid. A mirror whose hour has not run holds the line back
+        until it has, and a paid mirror joins nothing, because its
+        counts are logged already; a mirror with no ID joins nothing
+        either, because the backend that holds it could not be told the
+        combined payment and would log its own second line. A console
+        that holds no mirror pays its own window alone, and one that holds
+        no window of its own emits nothing here: the mirror is the
+        backend's window to pay, on its own arrivals and its own timer.
         """
         now = self._now()
         carried = self._carried
         if carried is not None and now - self._carried_at >= host_policy.HOUR_SECONDS:
             if self._carried_sent and (self._last_ack is None or self._last_ack < self._carried_at):
-                if now - self._carried_at >= host_policy.CARRY_RETENTION_SECONDS:
+                if (now - self._carried_at >= host_policy.CARRY_RETENTION_SECONDS
+                        and (carried[2] is None
+                             or host_policy.completed_windows_record_has(carried[2]))):
                     # Sent, never answered, and carried past the whole span
-                    # the backend remembers the window's ID: a later report
-                    # would re-carry the copy to a backend that folds it in
-                    # as a window it has never seen and logs a second line,
-                    # so the copy is dropped outright, emitted nowhere and
-                    # carried by no later report, on the one retention span
-                    # both sides share so this hold cannot outlast what any
-                    # backend remembers of the window. The pair keeps the
-                    # one summary the backend logged, or loses the one the
-                    # backend never took, rather than risk a second line for
-                    # a window whose ID no backend remembers.
+                    # the backend remembers the window's ID, with the record
+                    # of completed windows proving the one summary it owes
+                    # was paid or no ID that could prove anything: a later
+                    # report would re-carry the paid copy to a backend that
+                    # folds it in as a window it has never seen and logs a
+                    # second line, so the copy is dropped outright, emitted
+                    # nowhere and carried by no later report, on the one
+                    # retention span both sides share so this hold cannot
+                    # outlast what any backend remembers of the window. An
+                    # unpaid copy never reaches this drop: it keeps its
+                    # place for the acknowledgement protocol, whatever its
+                    # age, because no summary of it was ever logged
+                    # anywhere and no backend ever paid it.
                     self._carried = None
-                    return self._lines.take_summary()
+                    return self._combined_summary(now)
                 # Sent but never answered: the backend may have logged the
                 # summary before its answer was lost, so the window stays in
                 # the slot for the acknowledgement protocol and is never
                 # emitted here, however long the outage runs.
-                return self._lines.take_summary()
+                return self._combined_summary(now)
             self._carried = None
             if self._last_ack is None or self._last_ack < self._carried_at:
                 return carried[0], carried[1], now, carried[2]
-        return self._lines.take_summary()
+        return self._combined_summary(now)
+
+    def _combined_summary(self, now):
+        """The recorder's own due window, paid with the mirrored one beside
+        it, or alone.
+
+        The two windows overlap in the hour they count, and the hour's
+        budget rules name one summary for them, so the layer that holds
+        both pays both as one line: the counts add, the earlier opening
+        keeps its place, and the payment completes the mirrored window's
+        ID on the record the two processes share, so the backend's own
+        payment reads the proof and drops the copy it holds rather than
+        log a second line for counts the one line already paid. The
+        mirror's hour must have run for the counts to join, so no line
+        reports a window held back for its hour, and a mirror with no ID
+        joins nothing, because the backend that holds it could not be
+        told the combined payment.
+        """
+        own = self._lines.hour_suppressed_window()
+        if own is None or now - own[1] < host_policy.HOUR_SECONDS:
+            # Nothing this console's own recorder holds is due, so nothing
+            # combines here: the window the acknowledgement mirrored is the
+            # backend's to pay, on its own arrivals and its own timer, and
+            # this console never reports a mirror alone.
+            return self._lines.take_summary()
+        mirror = self.mirrored_summary()
+        if mirror is not None and now - mirror[1] < host_policy.HOUR_SECONDS:
+            # The console's own window is due and the backend's mirrored
+            # one is not: the two pay as one line, so the line waits for
+            # the mirror's hour, and the worker's next paced look pays
+            # what has come due by then.
+            return None
+        summary = self._lines.take_summary()
+        if summary is None or mirror is None or mirror[2] is None:
+            return summary
+        count, opened, closed, window_id = summary
+        self._lines.complete_window(mirror[2])
+        self._mirrored = None
+        self._mirrored_paid = False
+        return count + mirror[0], min(opened, mirror[1]), closed, window_id
 
     def report_due(self, host):
         """Queue the hostname for the delivery worker, or leave it alone.
@@ -1349,7 +1422,14 @@ class _RefusalReporter:
         Every refusal refreshes the newest-refused set first, whatever the
         queue decides, because the skipped and the waiting names are still
         the newest news about the refusals this console saw, and the
-        reports carry the set to the backend's record.
+        reports carry the set to the backend's record. A notice is an
+        identity as well, minted at its queue entry and resolved only by
+        the acknowledgement of the delivery that carried it: the queue can
+        evict a notice while its delivery waits, and a fresh refusal of the
+        same hostname queues a new notice with a new identity, so the
+        acknowledgement of the old delivery resolves the notice it
+        answered alone and never the fresh one whose refusal the live
+        backend was never told about.
         """
         now = self._now()
         self._prune_reports(now)
@@ -1389,6 +1469,7 @@ class _RefusalReporter:
             return False
         self._pending[host] = None
         self._pending_at[host] = now
+        self._pending_ids[host] = host_policy.mint_notice_id()
         if BACKEND_PORT is None:
             # The backend cannot be told, so the refusal path counted this
             # refusal already, in a line or in the window its held-back
@@ -1398,6 +1479,7 @@ class _RefusalReporter:
         while len(self._pending) > host_policy.REFUSED_HOSTS_LIMIT:
             dropped, _attempt = self._pending.popitem(last=False)
             self._pending_at.pop(dropped, None)
+            self._pending_ids.pop(dropped, None)
             if dropped == self._in_flight:
                 # The notice whose delivery is in flight is among the ones
                 # this eviction drops: its resolution has to reach the
@@ -1447,7 +1529,11 @@ class _RefusalReporter:
         unresolved leaves it speaking for the old one, and the payment
         its reach could report is left with that backend rather than
         carried to the fresh generation on the mirror it could vouch
-        for.
+        for. The take remembers the identity of the notice it delivers:
+        the queue can evict the notice and a fresh refusal can queue a
+        new one while the answer is unresolved, so the acknowledgement
+        that eventually arrives is matched against the notice that was
+        really sent and resolves no notice it did not answer.
         """
         now = self._now()
         self._prune_reports(now)
@@ -1460,6 +1546,7 @@ class _RefusalReporter:
                 self._pending[host] = now
                 self._in_flight = host
                 self._in_flight_evicted = False
+                self._in_flight_id = self._pending_ids.get(host)
                 self._delivery_generation = self._ready_generation
                 return host
         return None
@@ -1488,7 +1575,7 @@ class _RefusalReporter:
             wait = max(wait, RETRY_PACE_SECONDS - (now - self._last_failure))
         return max(MIN_RETRY_WAIT_SECONDS, min(wait, RETRY_PACE_SECONDS))
 
-    def report_sent(self, host):
+    def report_sent(self, host, notice_id=None):
         """The backend acknowledged the report; it is not pending any more.
 
         The cooldown is kept by time alone, never by a count: however many
@@ -1502,20 +1589,45 @@ class _RefusalReporter:
         The delivery that carried the notice is resolved with it too, so
         an eviction that happened while it waited in flight is forgotten
         rather than held against a later notice of the same host.
+
+        The acknowledgement resolves the notice it answers and nothing
+        else: the queue can evict the notice whose delivery waited and a
+        fresh refusal of the same hostname can queue a new one, and the
+        identity the delivery carried tells the two apart. A mismatched
+        answer resolves the delivery alone, spending the bound a real
+        acknowledged delivery spent and leaving the fresh notice its own
+        place, its own first failure and its own delivery, because the
+        live backend was never told about the fresh refusal and no
+        cooldown of the old one may hold its report back for an hour. With
+        no notice waiting under the hostname, the acknowledgement is the
+        hostname's own: the notice it answered is gone and nothing it
+        could resolve is left, so the hostname is told for its hour.
         """
         now = self._now()
-        self._last_report[host] = now
-        self._pending.pop(host, None)
-        self._pending_at.pop(host, None)
-        self._pending_accounted.discard(host)
         self._report_times.append(now)
         self._last_failure = None
-        self._lines.first_failure_resolved(host)
         if self._in_flight == host:
             self._in_flight = None
             self._in_flight_evicted = False
+            self._in_flight_id = None
+        if (notice_id is not None and host in self._pending
+                and self._pending_ids.get(host) != notice_id):
+            # The queue holds a fresh notice of this hostname, one the
+            # answer never named, because it answered the delivery of a
+            # notice the queue evicted while it waited: the fresh notice
+            # keeps its place and is due at once, and the hostname's
+            # cooldown is not started by an acknowledgement of a refusal
+            # the backend heard an hour's worth of news before.
+            self._wake.set()
+            return
+        self._last_report[host] = now
+        self._pending.pop(host, None)
+        self._pending_at.pop(host, None)
+        self._pending_ids.pop(host, None)
+        self._pending_accounted.discard(host)
+        self._lines.first_failure_resolved(host)
 
-    def report_failed(self, host):
+    def report_failed(self, host, notice_id=None):
         """The backend did not take the report: it stays pending, pace
         permitting, and this console names the hostname, because from this
         moment this console is the only place that does until it lands. The
@@ -1523,6 +1635,16 @@ class _RefusalReporter:
         line below asks its pace without counting a held-back line as
         suppressed, so an hour of failing retries does not add up to a
         summary that says a stream of refusals was held back.
+
+        A failure whose notice the record of receipts proves the backend
+        took in is not that: the backend wrote the receipt before it
+        processed the notice, so the refusal it carried was named or
+        merged there, whichever its own pace and cap decided, and this
+        console does not name the hostname again from a failure whose
+        answer was merely lost. The notice keeps its place, because the
+        backend that took it in owes the acknowledgement the loss ate,
+        and the retry reaches it and its own pace holds the hostname from
+        a second line.
 
         The failure resolves the notice it was taken for, the one whose
         delivery has just come back, rather than whatever the queue holds
@@ -1543,6 +1665,20 @@ class _RefusalReporter:
         if self._in_flight == host:
             self._in_flight = None
             self._in_flight_evicted = False
+            self._in_flight_id = None
+        if (notice_id is not None
+                and host_policy.notice_receipt_has(notice_id)):
+            # The backend took this notice in before the exchange failed,
+            # and the refusal the notice carries is named or merged there
+            # already, so the failure counts nothing here: no line is
+            # written, no slot of the hour is spent and no count joins a
+            # window, because the pair names the refusal once, whichever
+            # channel it reached first. The notice is owed no eviction
+            # count either, and a fresh notice the queue holds under the
+            # hostname is owed everything of its own.
+            if not evicted and host in self._pending:
+                self._pending_accounted.add(host)
+            return
         self._account_line(host)
         counted = self._lines.note_retry(host)
         if counted:
@@ -1593,7 +1729,12 @@ class _RefusalReporter:
         if self._in_flight == host:
             self._in_flight = None
             self._in_flight_evicted = False
+            self._in_flight_id = None
         self._wake.set()
+
+    def in_flight_notice_id(self):
+        """The identity of the notice the in-flight delivery carries."""
+        return self._in_flight_id
 
     def pending_reports(self):
         """The hostnames the backend has not been told about, oldest first."""
@@ -1763,9 +1904,28 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
     pays at the arrival, and the moment this request went out is not the
     arrival, so the payment is read from the record of completed windows
     the two processes share, which the backend wrote before its answer
-    was built, whenever this console next needs to know it.
+    was built, whenever this console next needs to know it. The notice
+    this delivery carries has an identity of its own, minted at its queue
+    entry and travelling in the report's form: the backend writes the
+    receipt of it to the record the two processes share before it
+    processes the notice, so a delivery whose answer was lost is
+    reconciled from the receipt and the failure path names no refusal a
+    backend already took in, and the acknowledgement that arrives is
+    matched against the identity the delivery carried, so it resolves the
+    notice it answered and never a fresh notice of the same hostname the
+    queue holds, whose refusal the backend it answers was never told
+    about.
     """
     data = {"host": host}
+    notice_id = reporter.in_flight_notice_id()
+    if notice_id is not None:
+        # The notice's stable identity travels with the report, so the
+        # backend writes its receipt under it before it processes the
+        # notice: a delivery whose answer was lost is reconciled from the
+        # receipt, and the acknowledgement is matched against the notice
+        # that was really sent, never whatever fresh notice of the same
+        # hostname the queue holds by then.
+        data["notice"] = notice_id
     logged = reporter.line_time(host)
     if logged is not None:
         data["logged"] = str(logged)
@@ -1811,7 +1971,7 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
             if response.status == 204 and response.headers.get(TOKEN_HEADER) == token:
                 delivered = True
                 if reporter.delivery_spoke_for_the_live_backend():
-                    reporter.report_sent(host)
+                    reporter.report_sent(host, notice_id)
                 else:
                     # The answer comes from the generation readiness swapped
                     # out while this delivery waited, so the backend that
@@ -1851,7 +2011,7 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
         # generation that holds no record of the fold its arrival made.
         if not delivered and carried is not None:
             reporter.restore_carried_summary(carried, reached)
-    reporter.report_failed(host)
+    reporter.report_failed(host, notice_id)
 
 
 def _acknowledged_accounting(response):
@@ -1960,7 +2120,7 @@ async def _drain_refusal_notices(reporter: _RefusalReporter) -> None:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                reporter.report_failed(host)
+                reporter.report_failed(host, reporter.in_flight_notice_id())
     finally:
         if session is not None:
             await session.close()

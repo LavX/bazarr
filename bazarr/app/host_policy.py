@@ -82,6 +82,20 @@ def _mint_line_id():
     return secrets.token_hex(WINDOW_ID_BYTES)
 
 
+def mint_notice_id():
+    """A fresh notice identity: 64 random bits, unique across restarts.
+
+    A pending notice of a hostname carries the identity from the moment it
+    is queued to the moment the acknowledgement of its delivery resolves
+    it, so a delivery that outlives its own notice is told apart from
+    whatever fresh notice of the same hostname the queue holds by then, and
+    the receipt the backend writes names the notice the console sent. The
+    bits are random, so a console that restarts mints identities no
+    previous incarnation minted and no stale receipt can match.
+    """
+    return secrets.token_hex(WINDOW_ID_BYTES)
+
+
 # The record of the windows whose summaries have been paid, in the
 # configuration directory the two processes of one install share. A payment
 # that reaches a layer is written here before its answer is built, and the
@@ -191,6 +205,95 @@ def completed_windows_record_has(window_id, path=None):
         return False
     path = completed_windows_record_path() if path is None else path
     return window_id in _read_completed_windows_record(path)
+
+
+# The record of the notices the backend has taken in, in the configuration
+# directory the two processes of one install share. The backend writes a
+# notice's receipt before it processes the notice, and the console whose
+# delivery failed reads it back before it names the refusal the notice
+# carried: a backend that took the notice in named the refusal or merged
+# the line that names it into its own hour, so the pair writes one line for
+# it, while a delivery no backend ever took in leaves no receipt and the
+# console names the refusal itself, the only layer that saw it. The
+# backend is the record's one writer and the console only reads, and the
+# write replaces the file in one step, so a read always meets one whole
+# record.
+NOTICE_RECEIPTS_RECORD = 'host-refusal-notice-receipts.json'
+NOTICE_RECEIPTS_RECORD_FILE_ENV = 'BAZARR_REFUSAL_NOTICE_RECEIPTS_FILE'
+
+
+def notice_receipts_record_path(environ=None):
+    """Where the pair's notice-receipt record lives, resolved the way both
+    processes resolve their configuration: the explicit file the
+    environment names, then the configuration directory BAZARR_CONFIG_DIR
+    names, then the data directory beside the code, exactly as the record
+    of completed windows resolves, so the two processes of one install
+    always meet the same file, restarts and all.
+    """
+    environ = os.environ if environ is None else environ
+    override = environ.get(NOTICE_RECEIPTS_RECORD_FILE_ENV, '').strip()
+    if override:
+        return override
+    config_dir = environ.get('BAZARR_CONFIG_DIR', '').strip()
+    if not config_dir:
+        config_dir = str(Path(__file__).resolve().parents[2] / 'data')
+    return str(Path(config_dir) / 'config' / NOTICE_RECEIPTS_RECORD)
+
+
+def _read_notice_receipts_record(path):
+    """The record's contents, or nothing: the record is best effort, and a
+    missing or unreadable one proves no notice was taken in."""
+    try:
+        with open(path) as record_file:
+            record = json.load(record_file)
+        return record if isinstance(record, dict) else {}
+    except Exception:
+        return {}
+
+
+def record_notice_receipt(notice_id, received_at, path=None):
+    """Write the receipt of one notice the backend has taken in.
+
+    The entry lives as long as the delivery's outcome can still be
+    unresolved, held on the same retention span both sides share, so the
+    console that holds the notice can read the receipt back however long
+    the answer that would have told it stayed lost, and past the whole span
+    no notice of the delivery is still held to be reconciled, so the record
+    stays bounded. The write is best effort, exactly as the record of
+    completed windows is: a record nothing can write proves no receipt, and
+    the console names the refusal the notice carried rather than trust a
+    proof that never reached the file.
+    """
+    if not notice_id:
+        return
+    path = notice_receipts_record_path() if path is None else path
+    record_path = Path(path)
+    try:
+        record_path.parent.mkdir(parents=True, exist_ok=True)
+        record = _read_notice_receipts_record(path)
+        record = {notice: stamp for notice, stamp in record.items()
+                  if isinstance(stamp, (int, float))
+                  and received_at - stamp < CARRY_RETENTION_SECONDS}
+        record[notice_id] = received_at
+        fd, tmp = tempfile.mkstemp(dir=str(record_path.parent),
+                                   prefix=f".{record_path.name}.")
+        try:
+            with os.fdopen(fd, 'w') as record_file:
+                json.dump(record, record_file)
+            os.replace(tmp, path)
+        except BaseException:
+            os.unlink(tmp)
+            raise
+    except Exception:
+        pass
+
+
+def notice_receipt_has(notice_id, path=None):
+    """Whether the shared record shows the backend took this notice in."""
+    if not notice_id:
+        return False
+    path = notice_receipts_record_path() if path is None else path
+    return notice_id in _read_notice_receipts_record(path)
 
 
 def effective_host(host):
@@ -753,6 +856,13 @@ class BoundedRefusalRecorder:
         windows needs to be told its summary has been paid, so it drops
         the copy it holds instead of carrying a window that is owed
         nothing anymore.
+
+        A window the record of completed windows the two processes share
+        names paid is dropped here rather than paid again: the other layer
+        took its overlapping counts into the one summary line it wrote, and
+        the record is the proof that outlives the answer which layer paid,
+        so the pair keeps the one summary per window the hour's budget
+        rules name, whichever layer's own hour ran first.
         """
         now = self._now()
         with self._lock:
@@ -762,6 +872,22 @@ class BoundedRefusalRecorder:
                 self._window_opens = now
                 return None
             if now - self._window_opens < HOUR_SECONDS:
+                return None
+            if (self._window_id is not None
+                    and completed_windows_record_has(self._window_id)):
+                # The record of completed windows the two processes share
+                # proves the one summary this window owes was paid by the
+                # other layer: it took the window's overlapping counts into
+                # the one summary line it wrote and named this window among
+                # the IDs it completed, so this layer holds counts that are
+                # already paid. The window is dropped rather than paid a
+                # second time, whatever this layer's own hour says: the pair
+                # keeps the one summary per window the hour's budget rules
+                # name, paid once by whichever layer reached it first.
+                self._suppressed = 0
+                self._window_opens = None
+                self._window_id = None
+                self._window_ids = []
                 return None
             suppressed = self._suppressed
             opened = self._window_opens
@@ -811,6 +937,28 @@ class BoundedRefusalRecorder:
         with self._lock:
             self._prune(now)
             return list(self._completed_windows)
+
+    def complete_window(self, window_id):
+        """Stamp a window this layer's summary paid beside the ones it took.
+
+        The summary that pays overlapping counts can carry the window the
+        other layer's last acknowledgement mirrored back, the two windows'
+        counts paid as one line by the one owner that holds both, so the
+        payment completes the mirrored window as well: the record of
+        completed windows the two processes share then proves the copy the
+        other layer still holds is paid, and its own payment drops the
+        window rather than log a second line for counts the one line
+        already paid. The stamp lives on the same retention span the pair's
+        completed records share, so the proof outlives the answer that
+        would have carried it and expires once no layer can still be
+        holding a copy to be told.
+        """
+        if not window_id:
+            return
+        now = self._now()
+        with self._lock:
+            self._prune(now)
+            self._completed_windows[window_id] = now
 
     def take_carried_summary(self):
         """Take the suppressed window out, for the report that carries it.

@@ -25,7 +25,7 @@ from .config import settings
 from .host_policy import (ALLOWED_HOSTS_ENV, APPROVAL_SEGMENT, DAY_SECONDS, HOUR_SECONDS,
                           REFUSED_REASON, BoundedRefusalRecorder, effective_host, entries_from_environ,
                           normalize_entries, allows_all_hosts, record_completed_windows,
-                          refused_hostnames)
+                          record_notice_receipt, refused_hostnames)
 
 # The refusal status: the frontend never renders it as the app.
 REFUSED_STATUS = 421
@@ -264,7 +264,7 @@ def _log_suppressed_summary(summary):
                  count, opened_at, closed_at)
 
 
-def _flush_suppressed_summary():
+def _flush_suppressed_summary(recorder=None):
     """Log the due summary, so it is not lost when refusals stop arriving.
 
     The count is held for a full hour before it is reported; once it is due,
@@ -272,18 +272,91 @@ def _flush_suppressed_summary():
     The payment is also written to the record the two processes share,
     before any answer is built, so a console that holds a copy of the
     window can verify the payment however its own answer turned out and
-    however many backends have restarted since.
+    however many backends have restarted since. The recorder defaults to
+    the module's own; the summary timer below passes the one it armed with,
+    so a timer left running flushes the record it holds and nothing a
+    later swap put in its place.
     """
-    summary = _refusals.take_summary()
+    recorder = _refusals if recorder is None else recorder
+    summary = recorder.take_summary()
     if summary:
         _log_suppressed_summary(summary)
-        record_completed_windows(_refusals.completed_windows(), summary[2])
+        record_completed_windows(recorder.completed_windows(), summary[2])
+
+
+# The pace of the backend's own summary timer. The flush it runs is a take
+# that logs only when a window has come due, so the pace is what bounds the
+# timer's work: once a minute against windows an hour holds.
+SUMMARY_FLUSH_PACE_SECONDS = 60.0
+
+# The one summary timer this process runs, with the stop event that ends it
+# and the recorder it armed with.
+_summary_flushes = None
+_summary_flushes_lock = threading.Lock()
+
+
+def _summary_flush_loop(recorder, stop):
+    """The backend's own timer, on the paced wait the console's worker uses.
+
+    Each turn pays the summaries the recorder holds that have come due, so a
+    stream of refusals that stops does not take its summary with it even
+    though no request arrives and no report is delivered: the refusal path
+    and the health list still pay what they reach, and this timer is what
+    reaches everything else, once per pace and never in a spin. The recorder
+    is the one the timer armed with, the module's own for the process's
+    lifetime, and the loop is a daemon that dies with the process.
+    """
+    while True:
+        _flush_suppressed_summary(recorder)
+        if stop.wait(SUMMARY_FLUSH_PACE_SECONDS):
+            return
+
+
+def start_summary_flushes():
+    """Arm the backend's summary timer, once, beside the check it serves.
+
+    Arming is idempotent, so the boot surface that announces the approval
+    code arms the timer with it exactly once, and a process that never
+    arms the check never runs the timer. The timer holds the recorder it
+    armed with, so whatever later replaces the module's record, the timer
+    flushes the one the process keeps for its own lifetime.
+    """
+    global _summary_flushes
+    with _summary_flushes_lock:
+        if _summary_flushes is not None:
+            return False
+        recorder, stop = _refusals, threading.Event()
+        thread = threading.Thread(target=_summary_flush_loop, args=(recorder, stop),
+                                   daemon=True)
+        _summary_flushes = (thread, stop, recorder)
+        thread.start()
+    return True
+
+
+def stop_summary_flushes():
+    """End the backend's summary timer, and wait for its turn to finish."""
+    global _summary_flushes
+    with _summary_flushes_lock:
+        flushes = _summary_flushes
+        _summary_flushes = None
+    if flushes is None:
+        return
+    thread, stop, _recorder = flushes
+    stop.set()
+    thread.join(timeout=SUMMARY_FLUSH_PACE_SECONDS + 5)
 
 
 def announce_code(config=settings):
-    """Announce the approval code at boot, when the check is armed."""
+    """Announce the approval code at boot, when the check is armed.
+
+    The same boot arms the backend's summary timer beside the announcement:
+    the check that refuses hostnames holds their summary owed for an hour
+    after the refusals stop, and the timer is what pays it when no request
+    arrives to.
+    """
     if not check_active(config):
         return False
+    start_summary_flushes()
     return _approval_code.announce()
 
 
@@ -398,6 +471,14 @@ def front_refusal_notice(config=settings):
     backend holding what it held, and the console keeps the copy beside
     its own window rather than inside it, so the one summary a window owes
     is logged once, by whichever layer holds the window when its hour runs.
+
+    The notice also carries its own stable identity, and the receipt of it
+    is written to the record the two processes share before this backend
+    processes anything: a delivery whose answer was lost is reconciled
+    from there, so the console that holds the notice does not name the
+    refusal a second time from its failure path when this backend already
+    took the notice in, and the pair writes one line for the refusal,
+    whichever layer's channel it reached first.
     """
     from flask import request
 
@@ -406,6 +487,16 @@ def front_refusal_notice(config=settings):
     supplied = request.headers.get(SUPERVISOR_TOKEN_HEADER, '')
     if not expected or not secrets.compare_digest(supplied.encode('utf-8'), expected.encode('utf-8')):
         return '', 403
+    notice_id = request.form.get('notice', '').strip()
+    if notice_id:
+        # The receipt is written before the notice is processed, on the
+        # token that matched: the console whose delivery failed reads it
+        # back before it names the refusal the notice carried, so a backend
+        # that took the notice in holds the console from naming the
+        # hostname a second time, while a delivery no backend ever took in
+        # leaves no receipt and the console names the refusal itself, the
+        # only layer that saw it.
+        record_notice_receipt(notice_id, time.time())
     logged = request.form.get('logged', '')
     try:
         line_at = float(logged) if logged else None
