@@ -41,6 +41,29 @@ def lock_data(version="2.7.0", digest=BASE_DIGEST):
     }
 
 
+def checked_in_lock_versions():
+    """The lock versions checked into the real packaging tree, sorted ascending.
+
+    package_repository copies that tree into every fixture repository, so tests can derive
+    what a fixture's development branch carries straight from the real tree.
+    """
+    return sorted(tuple(int(part) for part in lock.stem.split("."))
+                  for lock in (PACKAGE_ROOT / "releases").glob("*.json"))
+
+
+def next_release_version():
+    """One patch past the highest lock checked into the real packaging tree.
+
+    package_repository copies that tree into every fixture repository, so the lane tests
+    must simulate the next release as a version whose lock is not checked in: the fixture's
+    own copy of a checked-in lock collides with the simulation, refusing the proposal on
+    differing bytes, short-circuiting the resolver or drifting the recorded base. Deriving
+    the version keeps the tests correct at every future cut.
+    """
+    highest = checked_in_lock_versions()[-1]
+    return f"{highest[0]}.{highest[1]}.{highest[2] + 1}"
+
+
 def git(repository, *args):
     return subprocess.run(["git", "-c", "user.name=Package Test", "-c", "user.email=package-test@example.invalid",
                            "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", *args],
@@ -670,12 +693,19 @@ class PullRequestWorkflowTests(unittest.TestCase):
                               cwd=self.repository, env=env, capture_output=True, text=True, check=False)
 
     def test_every_checked_in_lock_is_rendered_and_validated(self):
+        # The renderer emits --all-locks candidates in ascending numeric version order, and
+        # package_repository copies the real packaging tree, so the expectation is derived
+        # from the locks checked into that tree. The next cut adds a lock and the derived
+        # list grows with it, like next_release_version does for the lane tests.
+        checked_in = [".".join(str(part) for part in version)
+                      for version in sorted(tuple(int(part) for part in lock.stem.split("."))
+                                            for lock in (PACKAGE_ROOT / "releases").glob("*.json"))]
         for name in self.STEPS:
             result = self.run_step(name)
             self.assertEqual(result.returncode, 0, f"{name}: {result.stderr}")
         docker = self.docker_log.read_text().splitlines()
         rendered_versions = []
-        for version in ("2.7.0", "2.7.1"):
+        for version in checked_in:
             candidate = self.runner_temp / f"platform-packages/v{version}"
             for compose in ("stack/compose.yaml", "casaos/Apps/BazarrPlus/docker-compose.yml",
                             "casaos/Apps/BazarrPlusStack/docker-compose.yml", "runtipi/bazarr-plus/docker-compose.yml"):
@@ -685,7 +715,8 @@ class PullRequestWorkflowTests(unittest.TestCase):
                 workspace = line.split(" -v ", 1)[1].split(":/workspace", 1)[0]
                 app = yaml.safe_load(Path(workspace, "ix-dev/community/bazarr-plus/app.yaml").read_text())
                 rendered_versions.append(str(app["app_version"]))
-        self.assertEqual(sorted(rendered_versions), ["2.7.0", "2.7.0", "2.7.1", "2.7.1"])
+        # Every candidate is rendered once per TrueNAS test values file.
+        self.assertEqual(sorted(rendered_versions), sorted(v for v in checked_in for _ in range(2)))
 
     def test_tampered_candidate_fails_checksum_validation(self):
         self.assertEqual(self.run_step(self.STEPS[0]).returncode, 0)
@@ -792,6 +823,19 @@ class WorkflowRunLaneTests(unittest.TestCase):
     """Run the workflow_run lane steps against a disposable repository."""
 
     RECORDING_GH = '#!/bin/sh\nprintf "%s\\n" "$*" >> "$GH_LOG"\nexit 0\n'
+    NEXT_RELEASE = next_release_version()
+
+    def lower_lock_versions(self):
+        """The checked-in lock versions below the simulated next release, closest first.
+
+        A lower lock that merged onto development is the closest previous lock below the
+        next release, and the base a resolution recorded beforehand is the one below it.
+        Reading both from the checked-in tree keeps the tests correct at every future cut.
+        """
+        following = tuple(int(part) for part in self.NEXT_RELEASE.split("."))
+        return [f"{major}.{minor}.{patch}"
+                for major, minor, patch in reversed(checked_in_lock_versions())
+                if (major, minor, patch) < following]
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -875,7 +919,9 @@ class WorkflowRunLaneTests(unittest.TestCase):
         }
 
     def test_only_final_tags_pass_the_lane_validation(self):
-        cases = {"final tag": ("v2.7.1", 0), "release candidate": ("v2.7.1-rc1", 1), "branch build": ("master", 1)}
+        cases = {"final tag": (f"v{self.NEXT_RELEASE}", 0),
+                 "release candidate": (f"v{self.NEXT_RELEASE}-rc1", 1),
+                 "branch build": ("master", 1)}
         for case, (tag, code) in cases.items():
             with self.subTest(case):
                 result = self.run_step(self.steps["Validate final stable tag"]["run"], RELEASE_TAG=tag)
@@ -897,8 +943,8 @@ class WorkflowRunLaneTests(unittest.TestCase):
                          f"resolved=false\nversion=2.7.1\nsha256={hashlib.sha256(lock.read_bytes()).hexdigest()}\n")
 
     def test_a_reviewed_development_lock_is_copied_without_resolving(self):
-        reviewed = (json.dumps(lock_data("2.7.1", NEXT_DIGEST), indent=2) + "\n").encode()
-        self.development_origin("2.7.1.json", reviewed)
+        reviewed = (json.dumps(lock_data(self.NEXT_RELEASE, NEXT_DIGEST), indent=2) + "\n").encode()
+        self.development_origin(f"{self.NEXT_RELEASE}.json", reviewed)
         tools = self.root / "bin"
         tools.mkdir()
         python3_log = self.root / "python3.log"
@@ -910,12 +956,12 @@ class WorkflowRunLaneTests(unittest.TestCase):
         result = self.run_step(self.steps["Resolve release lock"]["run"],
                                PATH=f"{tools}{os.pathsep}{os.environ['PATH']}",
                                PYTHON3_LOG=str(python3_log), RUNNER_TEMP=str(runner),
-                               RELEASE_TAG="v2.7.1", GITHUB_OUTPUT=str(self.outputs))
+                               RELEASE_TAG=f"v{self.NEXT_RELEASE}", GITHUB_OUTPUT=str(self.outputs))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(python3_log.exists())
-        self.assertEqual((self.repository / "packaging/releases/2.7.1.json").read_bytes(), reviewed)
+        self.assertEqual((self.repository / f"packaging/releases/{self.NEXT_RELEASE}.json").read_bytes(), reviewed)
         self.assertEqual(self.outputs.read_text(),
-                         f"resolved=false\nversion=2.7.1\nsha256={hashlib.sha256(reviewed).hexdigest()}\n")
+                         f"resolved=false\nversion={self.NEXT_RELEASE}\nsha256={hashlib.sha256(reviewed).hexdigest()}\n")
 
     def test_resolution_reads_the_exported_development_locks(self):
         reviewed = (json.dumps(lock_data("2.7.1", NEXT_DIGEST), indent=2) + "\n").encode()
@@ -928,7 +974,7 @@ class WorkflowRunLaneTests(unittest.TestCase):
                            'printf "%s\\n" "$*" >> "$PYTHON3_LOG"\n'
                            'case " $* " in\n'
                            '  *" --lock-base "*) printf "2.7.0.json base-digest\\n" ;;\n'
-                           '  *) printf "stub resolved lock\\n" > "packaging/releases/2.7.2.json" ;;\n'
+                           f'  *) printf "stub resolved lock\\n" > "packaging/releases/{self.NEXT_RELEASE}.json" ;;\n'
                            'esac\n')
         python3.chmod(0o755)
         runner = self.root / "runner"
@@ -936,24 +982,24 @@ class WorkflowRunLaneTests(unittest.TestCase):
         result = self.run_step(self.steps["Resolve release lock"]["run"],
                                PATH=f"{tools}{os.pathsep}{os.environ['PATH']}",
                                PYTHON3_LOG=str(python3_log), RUNNER_TEMP=str(runner),
-                               RELEASE_TAG="v2.7.2", GITHUB_OUTPUT=str(self.outputs))
+                               RELEASE_TAG=f"v{self.NEXT_RELEASE}", GITHUB_OUTPUT=str(self.outputs))
         self.assertEqual(result.returncode, 0, result.stderr)
         exported = f"{runner}/dev-releases/packaging/releases"
         self.assertEqual(python3_log.read_text().splitlines(),
-                         [f"packaging/release.py --resolve-lock --tag v2.7.2 --releases-dir {exported}",
-                          f"packaging/release.py --lock-base --tag v2.7.2 --releases-dir {exported}"])
+                         [f"packaging/release.py --resolve-lock --tag v{self.NEXT_RELEASE} --releases-dir {exported}",
+                          f"packaging/release.py --lock-base --tag v{self.NEXT_RELEASE} --releases-dir {exported}"])
         stub = b"stub resolved lock\n"
         self.assertEqual(self.outputs.read_text(),
                          f"resolved=true\nbase=2.7.0.json\nbase_sha256=base-digest\n"
-                         f"version=2.7.2\nsha256={hashlib.sha256(stub).hexdigest()}\n")
+                         f"version={self.NEXT_RELEASE}\nsha256={hashlib.sha256(stub).hexdigest()}\n")
 
     def test_the_proposal_commits_only_the_resolved_lock(self):
         remote = self.root / "remote.git"
         git(self.repository, "init", "-q", "--bare", str(remote))
         git(self.repository, "remote", "add", "origin", str(remote))
-        lock = self.repository / "resolved-lock/2.7.1.json"
+        lock = self.repository / f"resolved-lock/{self.NEXT_RELEASE}.json"
         lock.parent.mkdir()
-        lock.write_text(json.dumps(lock_data("2.7.1", NEXT_DIGEST)))
+        lock.write_text(json.dumps(lock_data(self.NEXT_RELEASE, NEXT_DIGEST)))
         tools = self.root / "bin"
         tools.mkdir()
         gh_log = self.root / "gh.log"
@@ -962,16 +1008,16 @@ class WorkflowRunLaneTests(unittest.TestCase):
         gh.chmod(0o755)
         result = self.run_step(self.proposal,
                                PATH=f"{tools}{os.pathsep}{os.environ['PATH']}", GH_LOG=str(gh_log),
-                               GH_TOKEN="fake-token", GH_REPO="LavX/bazarr", VERSION="2.7.1",
+                               GH_TOKEN="fake-token", GH_REPO="LavX/bazarr", VERSION=self.NEXT_RELEASE,
                                EXPECTED_SHA256=hashlib.sha256(lock.read_bytes()).hexdigest(),
                                RESOLVED="", LOCK_BASE="", LOCK_BASE_SHA256="",
                                PRODUCING_RUN="https://github.com/LavX/bazarr/actions/runs/2",
                                IMAGE_BUILD_RUN="https://github.com/LavX/bazarr/actions/runs/1")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(git(self.repository, "diff", "--name-only", "HEAD~1", "HEAD").split(),
-                         ["packaging/releases/2.7.1.json"])
-        self.assertEqual(git(self.repository, "branch", "--show-current").strip(), "packaging/lock-v2.7.1")
-        self.assertIn("refs/heads/packaging/lock-v2.7.1", git(self.repository, "ls-remote", "--heads", "origin"))
+                         [f"packaging/releases/{self.NEXT_RELEASE}.json"])
+        self.assertEqual(git(self.repository, "branch", "--show-current").strip(), f"packaging/lock-v{self.NEXT_RELEASE}")
+        self.assertIn(f"refs/heads/packaging/lock-v{self.NEXT_RELEASE}", git(self.repository, "ls-remote", "--heads", "origin"))
         calls = gh_log.read_text().splitlines()
         self.assertTrue(any("pr create --base development" in call for call in calls))
         body = (self.repository / "proposal-body.md").read_text()
@@ -983,8 +1029,8 @@ class WorkflowRunLaneTests(unittest.TestCase):
         self.assertIn("truenas: 1.0.0", body)
 
     def test_an_open_lower_patch_proposal_refuses_before_the_push(self):
-        downloaded = json.dumps(lock_data("2.7.2", NEXT_DIGEST)).encode()
-        gh_log, environment = self.proposal_environment("2.7.2", downloaded,
+        downloaded = json.dumps(lock_data(self.NEXT_RELEASE, NEXT_DIGEST)).encode()
+        gh_log, environment = self.proposal_environment(self.NEXT_RELEASE, downloaded,
                                                         open_heads=["packaging/lock-v2.7.1"])
         head = git(self.repository, "rev-parse", "HEAD")
         result = self.run_step(self.proposal, **environment)
@@ -994,14 +1040,14 @@ class WorkflowRunLaneTests(unittest.TestCase):
         self.assertEqual(git(self.repository, "rev-parse", "HEAD"), head)
         self.assertEqual(git(self.repository, "branch", "--list", "packaging/lock-v*"), "")
         self.assertEqual(git(self.repository, "ls-remote", "--heads", "origin"), "")
-        self.assertFalse((self.repository / "packaging/releases/2.7.2.json").exists())
+        self.assertFalse((self.repository / f"packaging/releases/{self.NEXT_RELEASE}.json").exists())
         self.assertEqual(gh_log.read_text().splitlines(),
                          ["pr list --state open --base development --limit 200 --json headRefName --jq .[].headRefName"])
 
     def test_an_open_lower_patch_proposal_beyond_the_first_page_still_refuses(self):
         heads = [f"unrelated/pr-{index}" for index in range(30)] + ["packaging/lock-v2.7.1"]
-        downloaded = json.dumps(lock_data("2.7.2", NEXT_DIGEST)).encode()
-        gh_log, environment = self.proposal_environment("2.7.2", downloaded, open_heads=heads)
+        downloaded = json.dumps(lock_data(self.NEXT_RELEASE, NEXT_DIGEST)).encode()
+        gh_log, environment = self.proposal_environment(self.NEXT_RELEASE, downloaded, open_heads=heads)
         head = git(self.repository, "rev-parse", "HEAD")
         result = self.run_step(self.proposal, **environment)
         self.assertNotEqual(result.returncode, 0)
@@ -1010,14 +1056,14 @@ class WorkflowRunLaneTests(unittest.TestCase):
         self.assertEqual(git(self.repository, "rev-parse", "HEAD"), head)
         self.assertEqual(git(self.repository, "branch", "--list", "packaging/lock-v*"), "")
         self.assertEqual(git(self.repository, "ls-remote", "--heads", "origin"), "")
-        self.assertFalse((self.repository / "packaging/releases/2.7.2.json").exists())
+        self.assertFalse((self.repository / f"packaging/releases/{self.NEXT_RELEASE}.json").exists())
         self.assertEqual(gh_log.read_text().splitlines(),
                          ["pr list --state open --base development --limit 200 --json headRefName --jq .[].headRefName"])
 
     def test_a_page_limit_reached_fails_closed(self):
         heads = [f"unrelated/pr-{index}" for index in range(200)]
-        downloaded = json.dumps(lock_data("2.7.2", NEXT_DIGEST)).encode()
-        gh_log, environment = self.proposal_environment("2.7.2", downloaded, open_heads=heads)
+        downloaded = json.dumps(lock_data(self.NEXT_RELEASE, NEXT_DIGEST)).encode()
+        gh_log, environment = self.proposal_environment(self.NEXT_RELEASE, downloaded, open_heads=heads)
         head = git(self.repository, "rev-parse", "HEAD")
         result = self.run_step(self.proposal, **environment)
         self.assertNotEqual(result.returncode, 0)
@@ -1029,54 +1075,60 @@ class WorkflowRunLaneTests(unittest.TestCase):
                          ["pr list --state open --base development --limit 200 --json headRefName --jq .[].headRefName"])
 
     def test_a_malformed_head_with_a_wildcard_separator_does_not_refuse(self):
-        downloaded = json.dumps(lock_data("2.7.2", NEXT_DIGEST)).encode()
-        gh_log, environment = self.proposal_environment("2.7.2", downloaded,
+        downloaded = json.dumps(lock_data(self.NEXT_RELEASE, NEXT_DIGEST)).encode()
+        gh_log, environment = self.proposal_environment(self.NEXT_RELEASE, downloaded,
                                                         open_heads=["packaging/lock-v2x7.1"])
         result = self.run_step(self.proposal, **environment)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("refs/heads/packaging/lock-v2.7.2", git(self.repository, "ls-remote", "--heads", "origin"))
+        self.assertIn(f"refs/heads/packaging/lock-v{self.NEXT_RELEASE}", git(self.repository, "ls-remote", "--heads", "origin"))
         self.assertTrue(any("pr create --base development" in call for call in gh_log.read_text().splitlines()))
         self.assertNotIn("v2.7.1", result.stdout + result.stderr)
 
     def test_a_merged_lower_lock_after_resolution_refuses_before_the_push(self):
-        reviewed = (json.dumps(lock_data("2.7.1", NEXT_DIGEST), indent=2) + "\n").encode()
-        self.development_origin("2.7.1.json", reviewed)
-        base_bytes = (self.repository / "packaging/releases/2.7.0.json").read_bytes()
-        downloaded = json.dumps(lock_data("2.7.2", NEXT_DIGEST)).encode()
+        merged, recorded = self.lower_lock_versions()[:2]
+        reviewed = (json.dumps(lock_data(merged, NEXT_DIGEST), indent=2) + "\n").encode()
+        self.development_origin(f"{merged}.json", reviewed)
+        base_bytes = (self.repository / "packaging/releases" / f"{recorded}.json").read_bytes()
+        downloaded = json.dumps(lock_data(self.NEXT_RELEASE, NEXT_DIGEST)).encode()
         gh_log, environment = self.proposal_environment(
-            "2.7.2", downloaded, resolved="true", lock_base="2.7.0.json",
+            self.NEXT_RELEASE, downloaded, resolved="true", lock_base=f"{recorded}.json",
             lock_base_sha256=hashlib.sha256(base_bytes).hexdigest())
         head = git(self.repository, "rev-parse", "HEAD")
         result = self.run_step(self.proposal, **environment)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("The lock base moved to 2.7.1.json on development, not the recorded 2.7.0.json",
+        self.assertIn(f"The lock base moved to {merged}.json on development, not the recorded {recorded}.json",
                       result.stdout + result.stderr)
         self.assertIn("Re-run all jobs so the lock resolves from the current base", result.stdout + result.stderr)
         self.assertEqual(git(self.repository, "rev-parse", "HEAD"), head)
         self.assertEqual(git(self.repository, "branch", "--list", "packaging/lock-v*"), "")
-        self.assertNotIn("packaging/lock-v2.7.2", git(self.repository, "ls-remote", "--heads", "origin"))
-        self.assertFalse((self.repository / "packaging/releases/2.7.2.json").exists())
+        self.assertNotIn(f"packaging/lock-v{self.NEXT_RELEASE}", git(self.repository, "ls-remote", "--heads", "origin"))
+        self.assertFalse((self.repository / f"packaging/releases/{self.NEXT_RELEASE}.json").exists())
         self.assertEqual(gh_log.read_text().splitlines(),
                          ["pr list --state open --base development --limit 200 --json headRefName --jq .[].headRefName"])
 
     def test_the_same_base_after_resolution_still_pushes(self):
         self.development_origin()
-        base_bytes = (self.repository / "packaging/releases/2.7.0.json").read_bytes()
-        downloaded = json.dumps(lock_data("2.7.2", NEXT_DIGEST)).encode()
+        # Development carries the fixture's checked-in locks, so the recorded base is the
+        # closest previous one: the patch immediately below the simulated next release.
+        major, minor, patch = (int(part) for part in self.NEXT_RELEASE.split("."))
+        base = f"{major}.{minor}.{patch - 1}.json"
+        base_bytes = (self.repository / "packaging/releases" / base).read_bytes()
+        downloaded = json.dumps(lock_data(self.NEXT_RELEASE, NEXT_DIGEST)).encode()
         gh_log, environment = self.proposal_environment(
-            "2.7.2", downloaded, resolved="true", lock_base="2.7.0.json",
+            self.NEXT_RELEASE, downloaded, resolved="true", lock_base=base,
             lock_base_sha256=hashlib.sha256(base_bytes).hexdigest())
         result = self.run_step(self.proposal, **environment)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("refs/heads/packaging/lock-v2.7.2", git(self.repository, "ls-remote", "--heads", "origin"))
+        self.assertIn(f"refs/heads/packaging/lock-v{self.NEXT_RELEASE}", git(self.repository, "ls-remote", "--heads", "origin"))
         self.assertTrue(any("pr create --base development" in call for call in gh_log.read_text().splitlines()))
 
     def test_a_replay_after_a_lower_lock_merges_resolves_and_pushes_from_the_new_base(self):
-        merged = lock_data("2.7.1", NEXT_DIGEST)
-        merged["platform_revisions"]["runtipi"] = 2
-        merged["platform_revisions"]["truenas"] = "1.0.1"
-        reviewed = (json.dumps(merged, sort_keys=True, indent=2) + "\n").encode()
-        self.development_origin("2.7.1.json", reviewed)
+        merged = self.lower_lock_versions()[0]
+        merged_lock = lock_data(merged, NEXT_DIGEST)
+        merged_lock["platform_revisions"]["runtipi"] = 2
+        merged_lock["platform_revisions"]["truenas"] = "1.0.1"
+        reviewed = (json.dumps(merged_lock, sort_keys=True, indent=2) + "\n").encode()
+        self.development_origin(f"{merged}.json", reviewed)
         tools = self.root / "resolver-bin"
         tools.mkdir()
         python3 = tools / "python3"
@@ -1112,43 +1164,46 @@ class WorkflowRunLaneTests(unittest.TestCase):
         runner.mkdir()
         result = self.run_step(self.steps["Resolve release lock"]["run"],
                                PATH=f"{tools}{os.pathsep}{os.environ['PATH']}",
-                               RUNNER_TEMP=str(runner), RELEASE_TAG="v2.7.2", GITHUB_OUTPUT=str(self.outputs))
+                               RUNNER_TEMP=str(runner), RELEASE_TAG=f"v{self.NEXT_RELEASE}", GITHUB_OUTPUT=str(self.outputs))
         self.assertEqual(result.returncode, 0, result.stderr)
         # The propose job checks out development, whose tree does not carry the resolved lock yet.
-        resolved_path = self.repository / "packaging/releases/2.7.2.json"
+        resolved_path = self.repository / f"packaging/releases/{self.NEXT_RELEASE}.json"
         resolved = resolved_path.read_bytes()
         resolved_path.unlink()
         recorded = dict(line.split("=", 1) for line in self.outputs.read_text().splitlines())
         self.assertEqual(recorded, {
             "resolved": "true",
-            "base": "2.7.1.json",
+            "base": f"{merged}.json",
             "base_sha256": hashlib.sha256(reviewed).hexdigest(),
-            "version": "2.7.2",
+            "version": self.NEXT_RELEASE,
             "sha256": hashlib.sha256(resolved).hexdigest(),
         })
-        gh_log, environment = self.proposal_environment("2.7.2", resolved, resolved="true",
+        gh_log, environment = self.proposal_environment(self.NEXT_RELEASE, resolved, resolved="true",
                                                         lock_base=recorded["base"],
                                                         lock_base_sha256=recorded["base_sha256"])
         result = self.run_step(self.proposal, **environment)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("refs/heads/packaging/lock-v2.7.2", git(self.repository, "ls-remote", "--heads", "origin"))
+        self.assertIn(f"refs/heads/packaging/lock-v{self.NEXT_RELEASE}", git(self.repository, "ls-remote", "--heads", "origin"))
         self.assertTrue(any("pr create --base development" in call for call in gh_log.read_text().splitlines()))
-        pushed = json.loads(git(self.repository, "show", "origin/packaging/lock-v2.7.2:packaging/releases/2.7.2.json"))
+        pushed = json.loads(git(self.repository, "show", f"origin/packaging/lock-v{self.NEXT_RELEASE}:packaging/releases/{self.NEXT_RELEASE}.json"))
         self.assertEqual(pushed["platform_revisions"]["runtipi"], 3)
         self.assertEqual(pushed["platform_revisions"]["truenas"], "1.0.2")
 
     def test_open_proposals_outside_the_lower_patches_still_push(self):
+        major, minor, patch = (int(part) for part in self.NEXT_RELEASE.split("."))
+        higher = f"packaging/lock-v{major}.{minor}.{patch + 1}"
         stub = ('#!/bin/sh\n'
                 'printf "%s\\n" "$*" >> "$GH_LOG"\n'
                 'case " $* " in\n'
-                '  *" headRefName "*) printf "%s\\n" "packaging/lock-v2.8.0" "packaging/lock-v2.7.2" ;;\n'
+                f'  *" headRefName "*) printf "%s\\n" "packaging/lock-v2.8.0" "{higher}" '
+                f'"packaging/lock-v{self.NEXT_RELEASE}" ;;\n'
                 'esac\n'
                 'exit 0\n')
-        downloaded = json.dumps(lock_data("2.7.1", NEXT_DIGEST)).encode()
-        gh_log, environment = self.proposal_environment("2.7.1", downloaded, stub)
+        downloaded = json.dumps(lock_data(self.NEXT_RELEASE, NEXT_DIGEST)).encode()
+        gh_log, environment = self.proposal_environment(self.NEXT_RELEASE, downloaded, stub)
         result = self.run_step(self.proposal, **environment)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("refs/heads/packaging/lock-v2.7.1", git(self.repository, "ls-remote", "--heads", "origin"))
+        self.assertIn(f"refs/heads/packaging/lock-v{self.NEXT_RELEASE}", git(self.repository, "ls-remote", "--heads", "origin"))
         self.assertTrue(any("pr create --base development" in call for call in gh_log.read_text().splitlines()))
 
     def test_matching_development_lock_bytes_leave_nothing_to_propose(self):
@@ -1176,18 +1231,18 @@ class WorkflowRunLaneTests(unittest.TestCase):
         stub = ('#!/bin/sh\n'
                 'printf "%s\\n" "$*" >> "$GH_LOG"\n'
                 'case " $* " in\n'
-                '  *" headRefName "*) printf "%s\\n" "packaging/lock-v2.7.1" ;;\n'
+                f'  *" headRefName "*) printf "%s\\n" "packaging/lock-v{self.NEXT_RELEASE}" ;;\n'
                 '  *" --head "*) printf "%s\\n" 17 ;;\n'
                 'esac\n'
                 'exit 0\n')
-        downloaded = json.dumps(lock_data("2.7.1", NEXT_DIGEST)).encode()
-        gh_log, environment = self.proposal_environment("2.7.1", downloaded, stub)
+        downloaded = json.dumps(lock_data(self.NEXT_RELEASE, NEXT_DIGEST)).encode()
+        gh_log, environment = self.proposal_environment(self.NEXT_RELEASE, downloaded, stub)
         result = self.run_step(self.proposal, **environment)
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = gh_log.read_text().splitlines()
         self.assertIn("pr edit 17 --body-file proposal-body.md", calls)
         self.assertFalse(any("pr create" in call for call in calls))
-        self.assertIn("refs/heads/packaging/lock-v2.7.1", git(self.repository, "ls-remote", "--heads", "origin"))
+        self.assertIn(f"refs/heads/packaging/lock-v{self.NEXT_RELEASE}", git(self.repository, "ls-remote", "--heads", "origin"))
         self.assertIn(NEXT_DIGEST, (self.repository / "proposal-body.md").read_text())
 
 
