@@ -208,16 +208,20 @@ def completed_windows_record_has(window_id, path=None):
 
 
 # The record of the notices the backend has taken in, in the configuration
-# directory the two processes of one install share. The backend writes a
-# notice's receipt before it processes the notice, and the console whose
-# delivery failed reads it back before it names the refusal the notice
-# carried: a backend that took the notice in named the refusal or merged
-# the line that names it into its own hour, so the pair writes one line for
-# it, while a delivery no backend ever took in leaves no receipt and the
-# console names the refusal itself, the only layer that saw it. The
-# backend is the record's one writer and the console only reads, and the
-# write replaces the file in one step, so a read always meets one whole
-# record.
+# directory the two processes of one install share. Each entry holds two
+# facts the pair must not confuse: the receipt, written before the notice
+# is processed, proves the notice reached a backend that took it in, and
+# the outcome, retained once the accounting completes, proves the refusal
+# the notice carried was named or merged there. The console whose delivery
+# failed reads the outcome back before it names the refusal: a notice whose
+# accounting completed is named at the backend and the console names it
+# nowhere else, while a backend that took a notice in and died before its
+# accounting completed leaves the refusal named nowhere, and the console
+# accounts it itself, the only other layer that saw it. A delivery no
+# backend ever took in leaves no entry at all, and the console accounts it
+# the same way. The backend is the record's one writer and the console only
+# reads, and the write replaces the file in one step, so a read always
+# meets one whole record.
 NOTICE_RECEIPTS_RECORD = 'host-refusal-notice-receipts.json'
 NOTICE_RECEIPTS_RECORD_FILE_ENV = 'BAZARR_REFUSAL_NOTICE_RECEIPTS_FILE'
 
@@ -251,30 +255,35 @@ def _read_notice_receipts_record(path):
         return {}
 
 
-def record_notice_receipt(notice_id, received_at, path=None):
-    """Write the receipt of one notice the backend has taken in.
+def _notice_record_entry(record, notice_id):
+    """The notice's entry in the record, or a fresh one: an entry an older
+    write left as a bare stamp carries no outcome, so it starts over."""
+    entry = record.get(notice_id)
+    return entry if isinstance(entry, dict) else {}
 
-    The entry lives as long as the delivery's outcome can still be
-    unresolved, held on the same retention span both sides share, so the
-    console that holds the notice can read the receipt back however long
-    the answer that would have told it stayed lost, and past the whole span
-    no notice of the delivery is still held to be reconciled, so the record
-    stays bounded. The write is best effort, exactly as the record of
-    completed windows is: a record nothing can write proves no receipt, and
-    the console names the refusal the notice carried rather than trust a
-    proof that never reached the file.
-    """
-    if not notice_id:
-        return
-    path = notice_receipts_record_path() if path is None else path
+
+def _prune_notice_record(record, now):
+    """Keep the entries whose newest fact is still within the retention
+    span, so the record stays bounded by the same span both sides keep for
+    a delivery no answer resolved."""
+    pruned = {}
+    for notice_id, entry in record.items():
+        if not isinstance(entry, dict):
+            continue
+        stamps = [stamp for stamp in (entry.get('received'), entry.get('accounted'))
+                  if isinstance(stamp, (int, float))]
+        if any(now - stamp < CARRY_RETENTION_SECONDS for stamp in stamps):
+            pruned[notice_id] = entry
+    return pruned
+
+
+def _store_notice_record(path, record):
+    """Replace the record in one step, best effort: a record nothing can
+    write proves nothing, and the console accounts the refusal rather than
+    trust a proof that never reached the file."""
     record_path = Path(path)
     try:
         record_path.parent.mkdir(parents=True, exist_ok=True)
-        record = _read_notice_receipts_record(path)
-        record = {notice: stamp for notice, stamp in record.items()
-                  if isinstance(stamp, (int, float))
-                  and received_at - stamp < CARRY_RETENTION_SECONDS}
-        record[notice_id] = received_at
         fd, tmp = tempfile.mkstemp(dir=str(record_path.parent),
                                    prefix=f".{record_path.name}.")
         try:
@@ -288,12 +297,72 @@ def record_notice_receipt(notice_id, received_at, path=None):
         pass
 
 
+def record_notice_receipt(notice_id, received_at, path=None):
+    """Write the receipt of one notice the backend has taken in.
+
+    The entry lives as long as the delivery's outcome can still be
+    unresolved, held on the same retention span both sides share, so the
+    console that holds the notice can read the facts back however long
+    the answer that would have told it stayed lost, and past the whole span
+    no notice of the delivery is still held to be reconciled, so the record
+    stays bounded. The receipt is a fact about the taking in alone: it
+    proves the notice reached a backend that accepted it, not that the
+    refusal it carried was ever recorded, and the console whose delivery
+    failed reads the outcome the accounting retained, never the receipt
+    alone. The write is best effort, exactly as the record of completed
+    windows is.
+    """
+    if not notice_id:
+        return
+    path = notice_receipts_record_path() if path is None else path
+    record = _read_notice_receipts_record(path)
+    entry = _notice_record_entry(record, notice_id)
+    entry['received'] = received_at
+    record[notice_id] = entry
+    _store_notice_record(path, _prune_notice_record(record, received_at))
+
+
+def record_notice_accounted(notice_id, accounted_at, path=None):
+    """Retain the outcome of one notice's accounting: its refusal was named.
+
+    The backend writes this once the notice's accounting completed, in the
+    line the hour's budget spent on the refusal or in the fold of a line a
+    console elsewhere already spent, and a backend that restarts reads it
+    back before it accounts a retried notice again, because the refusal was
+    named here before the restart and the pair owes it no second
+    accounting. The entry is kept even when the receipt never reached the
+    file, so the outcome outlives whatever the taking in did: a write that
+    fails proves no outcome, and the console accounts the refusal rather
+    than trust a proof that never reached the file.
+    """
+    if not notice_id:
+        return
+    path = notice_receipts_record_path() if path is None else path
+    record = _read_notice_receipts_record(path)
+    entry = _notice_record_entry(record, notice_id)
+    entry['accounted'] = accounted_at
+    record[notice_id] = entry
+    _store_notice_record(path, _prune_notice_record(record, accounted_at))
+
+
 def notice_receipt_has(notice_id, path=None):
     """Whether the shared record shows the backend took this notice in."""
     if not notice_id:
         return False
     path = notice_receipts_record_path() if path is None else path
     return notice_id in _read_notice_receipts_record(path)
+
+
+def notice_accounted_has(notice_id, path=None):
+    """Whether the shared record shows the backend completed this notice's
+    accounting: the refusal it carried was named or merged there, and the
+    console whose delivery failed names it nowhere else."""
+    if not notice_id:
+        return False
+    path = notice_receipts_record_path() if path is None else path
+    entry = _read_notice_receipts_record(path).get(notice_id)
+    return (isinstance(entry, dict)
+            and isinstance(entry.get('accounted'), (int, float)))
 
 
 def effective_host(host):
@@ -548,6 +617,7 @@ class BoundedRefusalRecorder:
         self._counted_windows = OrderedDict()  # window ID -> when it was counted here
         self._completed_windows = OrderedDict()  # window ID -> when it was paid here
         self._first_failures = OrderedDict()  # host -> when its first failed notice counted
+        self._notice_accounted = OrderedDict()  # notice identity -> when its refusal was named here
 
     def _count_suppressed(self, now):
         """Count one held-back line into the window, minting its stable ID.
@@ -810,6 +880,36 @@ class BoundedRefusalRecorder:
         with self._lock:
             return host in self._first_failures
 
+    def account_notice(self, notice_id):
+        """Whether this arrival is the first accounting of its notice.
+
+        The reports of one notice are one refusal: a delivery whose answer
+        was lost is retried under the notice's own identity, and every
+        retry would otherwise account the refusal again, a second line
+        within the hour or a fresh one past it, or a count beside the line
+        that already named it. The first accounting marks the identity, and
+        the mark lives past the hour, on the same span both sides keep for
+        a delivery no answer resolved, because a notice whose answer was
+        lost can be retried across one. A notice with no identity, the
+        refusal this layer saw itself, accounts every time it is refused:
+        the pace of its hostname is what holds its repeats, exactly as it
+        always did. The caller that skips the accounting on a retry still
+        reports the hour's current budget, so a retry's answer carries
+        everything the hour holds now and not the arrival's own news.
+        """
+        if not notice_id:
+            return True
+        now = self._now()
+        with self._lock:
+            self._prune(now)
+            stamp = self._notice_accounted.get(notice_id)
+            if stamp is not None and now - stamp < CARRY_RETENTION_SECONDS:
+                return False
+            self._notice_accounted[notice_id] = now
+            while len(self._notice_accounted) > REFUSED_HOSTS_LIMIT:
+                self._notice_accounted.popitem(last=False)
+            return True
+
     def _prune(self, now):
         spent = [(stamp, line_id) for stamp, line_id in zip(self._line_times, self._line_ids)
                  if now - stamp < HOUR_SECONDS]
@@ -838,6 +938,15 @@ class BoundedRefusalRecorder:
             if now - stamp < CARRY_RETENTION_SECONDS)
         self._completed_windows = OrderedDict(
             (window_id, stamp) for window_id, stamp in self._completed_windows.items()
+            if now - stamp < CARRY_RETENTION_SECONDS)
+        # The accounted notices are not on the hourly roll either: a
+        # delivery whose answer was lost is retried under the notice's own
+        # identity, and the retry can cross an hour, so the mark that holds
+        # one notice to one accounting lives on the same span both sides
+        # keep for a delivery no answer resolved, and the bound matches the
+        # pending queue's, because a notice is what the queue holds.
+        self._notice_accounted = OrderedDict(
+            (notice_id, stamp) for notice_id, stamp in self._notice_accounted.items()
             if now - stamp < CARRY_RETENTION_SECONDS)
 
     def take_summary(self):

@@ -24,8 +24,9 @@ import time
 from .config import settings
 from .host_policy import (ALLOWED_HOSTS_ENV, APPROVAL_SEGMENT, DAY_SECONDS, HOUR_SECONDS,
                           REFUSED_REASON, BoundedRefusalRecorder, effective_host, entries_from_environ,
-                          normalize_entries, allows_all_hosts, record_completed_windows,
-                          record_notice_receipt, refused_hostnames)
+                          normalize_entries, allows_all_hosts,
+                          record_completed_windows, record_notice_accounted, record_notice_receipt,
+                          refused_hostnames)
 
 # The refusal status: the frontend never renders it as the app.
 REFUSED_STATUS = 421
@@ -316,9 +317,12 @@ def start_summary_flushes():
     """Arm the backend's summary timer, once, beside the check it serves.
 
     Arming is idempotent, so the boot surface that announces the approval
-    code arms the timer with it exactly once, and a process that never
-    arms the check never runs the timer. The timer holds the recorder it
-    armed with, so whatever later replaces the module's record, the timer
+    code arms the timer with it exactly once, and so does the first refusal
+    the check takes once it is active, because the check can be switched on
+    with the process live and the refusals that follow are owed the same
+    timer the boot would have armed. A process that never runs the check
+    active never runs the timer. The timer holds the recorder it armed
+    with, so whatever later replaces the module's record, the timer
     flushes the one the process keeps for its own lifetime.
     """
     global _summary_flushes
@@ -367,7 +371,8 @@ def verify_approval_code(supplied):
 
 def record_refusal(host, config=settings, line_at=None, hour_lines=None, hour_line_ids=None,
                    suppressed=0, suppressed_since=None, suppressed_id=None, mirrored=0,
-                   mirrored_since=None, mirrored_id=None, recent=None, refused_at=None):
+                   mirrored_since=None, mirrored_id=None, recent=None, refused_at=None,
+                   notice=None):
     """Record a refused hostname and keep a code on the console.
 
     The backend's own refusals call this, and so does the report the front
@@ -404,10 +409,32 @@ def record_refusal(host, config=settings, line_at=None, hour_lines=None, hour_li
     the set, and the line the console spent for it is kept for its hour
     alone, so that retained time is what the record holds when neither of
     the others survives to the delivery.
+
+    The report of a pending notice carries the notice's own identity as
+    well, and the reports of one notice are one refusal: the first delivery
+    that reaches here accounts it, in the line the hour spends on it or in
+    the fold of a line a console elsewhere already spent, and the retries
+    a lost answer leaves behind account it nowhere again, within the hour
+    or across one, while every retry's answer still reports the budget
+    the hour holds now. The mark that holds them lives in this process's
+    own memory and nowhere else, so a backend that restarts or is replaced
+    holds no mark: the retry tells it the notice afresh and it records the
+    refusal in its own right, the way every backend that receives the
+    notice does. The outcome the record of notices keeps is the console's
+    fact and not this backend's brake: a notice this backend accounted
+    before it died keeps the console's fallback silent, and one whose
+    accounting never completed, because this backend died between its
+    receipt and its record, leaves the refusal to the console that saw it.
     """
     shown = effective_host(host)
     if not shown or not check_active(config):
         return
+    # The check is active, so refusals are being named and their suppressed
+    # window is owed its summary: the flush is armed here and not at the
+    # boot alone, because the check can be switched on with the process
+    # live, and the refusals the switch lets through are owed the same
+    # timer the boot would have armed.
+    start_summary_flushes()
     if hour_lines:
         _refusals.merge_hour_lines(hour_lines, hour_line_ids)
     _refusals.merge_summary(suppressed, suppressed_since, suppressed_id)
@@ -432,9 +459,17 @@ def record_refusal(host, config=settings, line_at=None, hour_lines=None, hour_li
     # refusal's time until its report is acknowledged.
     if refused_at is None:
         refused_at = line_at
-    if _refusals.note(shown, line_at, refused_at):
-        logging.warning('BAZARR refused a request for an unrecognized host: %s. Allow it under '
-                        'Settings > General > Allowed Hosts, or set %s.', shown, ALLOWED_HOSTS_ENV)
+    accounted = _refusals.account_notice(notice)
+    if accounted:
+        if _refusals.note(shown, line_at, refused_at):
+            logging.warning('BAZARR refused a request for an unrecognized host: %s. Allow it under '
+                            'Settings > General > Allowed Hosts, or set %s.', shown, ALLOWED_HOSTS_ENV)
+        if notice:
+            # The outcome is retained once the accounting completed, so the
+            # console whose delivery failed reads back a fact about the
+            # refusal and not only about the taking in, and a backend that
+            # restarts holds its own retries to the one accounting.
+            record_notice_accounted(notice, time.time())
     _flush_suppressed_summary()
     # Announce the code so a refused hostname has one in the console to
     # use; the announcement itself repeats at most once an hour.
@@ -472,13 +507,17 @@ def front_refusal_notice(config=settings):
     its own window rather than inside it, so the one summary a window owes
     is logged once, by whichever layer holds the window when its hour runs.
 
-    The notice also carries its own stable identity, and the receipt of it
-    is written to the record the two processes share before this backend
-    processes anything: a delivery whose answer was lost is reconciled
-    from there, so the console that holds the notice does not name the
-    refusal a second time from its failure path when this backend already
-    took the notice in, and the pair writes one line for the refusal,
-    whichever layer's channel it reached first.
+    The notice also carries its own stable identity, and two facts about
+    it are written to the record the two processes share: the receipt, on
+    the token that matched and before this backend processes anything, and
+    the outcome, once the notice's accounting completed. A delivery whose
+    answer was lost is reconciled from the outcome, so the console that
+    holds the notice does not name the refusal a second time from its
+    failure path when this backend accounted it, and the pair writes one
+    line for the refusal, whichever layer's channel it reached first. A
+    backend that dies between the receipt and the record leaves the
+    refusal named nowhere, and the console accounts it itself, the only
+    other layer that saw it.
     """
     from flask import request
 
@@ -490,12 +529,14 @@ def front_refusal_notice(config=settings):
     notice_id = request.form.get('notice', '').strip()
     if notice_id:
         # The receipt is written before the notice is processed, on the
-        # token that matched: the console whose delivery failed reads it
-        # back before it names the refusal the notice carried, so a backend
-        # that took the notice in holds the console from naming the
-        # hostname a second time, while a delivery no backend ever took in
-        # leaves no receipt and the console names the refusal itself, the
-        # only layer that saw it.
+        # token that matched: it proves the notice reached a backend that
+        # took it in, and the outcome that follows the accounting is what
+        # the console whose delivery failed reads back before it names the
+        # refusal the notice carried, so a backend that accounted the
+        # notice holds the console from naming the hostname a second time,
+        # while a backend that took it in and died before the record leaves
+        # the refusal to the console, and a delivery no backend ever took
+        # in leaves no entry at all.
         record_notice_receipt(notice_id, time.time())
     logged = request.form.get('logged', '')
     try:
@@ -550,7 +591,8 @@ def front_refusal_notice(config=settings):
                    hour_lines=spent, hour_line_ids=spent_ids, suppressed=held_back,
                    suppressed_since=window_opens,
                    suppressed_id=window_id, mirrored=mirrored_back, mirrored_since=mirrored_opens,
-                   mirrored_id=mirrored_id, recent=recent, refused_at=pending_at)
+                   mirrored_id=mirrored_id, recent=recent, refused_at=pending_at,
+                   notice=notice_id or None)
     headers = {}
     times = _refusals.hour_line_times()
     if times:

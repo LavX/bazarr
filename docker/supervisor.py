@@ -899,29 +899,50 @@ class _RefusalReporter:
         self._account_line(host)
         return accounted
 
-    def _account_line(self, host):
-        """Remember that this console spent this hostname's line for the hour.
+    def _account_line(self, host, notice_id=None):
+        """Remember that this console spent a line naming this refusal.
 
         The report the backend eventually takes carries the time, so the
-        backend writes no second line for the same hostname in the same
+        backend writes no second line for the same refusal in the same
         hour: the two processes share the hour's line budget even though
-        they share no memory. The bookkeeping is bounded and rolled past
-        its hour like every other roll here.
+        they share no memory. The line a failed delivery named is spent
+        for the notice it was named for, and is remembered under the
+        notice's own identity: a fresh notice of the same hostname starts
+        its accounting clean, because the refusal it carries is its own
+        news and the pair owes it a naming of its own, while the retries
+        of the failed notice still carry the time, so the backend folds
+        the line the failure wrote and writes none of its own. A line this
+        console wrote itself, at a refusal the backend could not be told
+        about, is remembered under the hostname, because the notice of
+        that refusal is minted after the line is spent and its report
+        carries the time either way. The bookkeeping is bounded and rolled
+        past its hour like every other roll here.
         """
         now = self._now()
         self._accounted = OrderedDict(
             (name, stamp) for name, stamp in self._accounted.items()
             if now - stamp < host_policy.HOUR_SECONDS)
-        self._accounted[host] = now
+        self._accounted[notice_id if notice_id is not None else host] = now
         while len(self._accounted) > host_policy.REFUSED_HOSTS_LIMIT:
             self._accounted.popitem(last=False)
 
-    def line_time(self, host):
-        """When this console last spent this hostname's line, within the hour."""
+    def line_time(self, host, notice_id=None):
+        """When this console last spent a line naming this hostname's
+        refusal, within the hour, or None.
+
+        The notice the report carries is asked first, because the line a
+        failed delivery named belongs to the notice it failed for, and the
+        hostname is asked for the lines this console wrote itself: a fresh
+        notice of a hostname an old failure named inherits nothing, while
+        the report of a refusal this console named itself carries the time
+        whichever notice delivers it.
+        """
         now = self._now()
-        stamp = self._accounted.get(host)
-        if stamp is not None and now - stamp < host_policy.HOUR_SECONDS:
-            return stamp
+        keys = (notice_id, host) if notice_id is not None else (host,)
+        for key in keys:
+            stamp = self._accounted.get(key)
+            if stamp is not None and now - stamp < host_policy.HOUR_SECONDS:
+                return stamp
         return None
 
     def hour_line_times(self):
@@ -1351,6 +1372,16 @@ class _RefusalReporter:
         reports a window held back for its hour, and a mirror with no ID
         joins nothing, because the backend that holds it could not be
         told the combined payment.
+
+        A mirror the shared record proves paid is dropped rather than
+        added: the backend's own timer or its own arrivals paid the window
+        while this console held the copy, and the one summary the pair
+        owes it is logged there already, so this side pays its own window
+        alone and resolves the paid copy, which no handoff can ever be
+        owed again. Whichever side pays first completes the identity on
+        the record, and the other side's payment reads the proof, so the
+        aggregate has the one payment owner whichever timer reached the
+        window first.
         """
         own = self._lines.hour_suppressed_window()
         if own is None or now - own[1] < host_policy.HOUR_SECONDS:
@@ -1368,6 +1399,14 @@ class _RefusalReporter:
             return None
         summary = self._lines.take_summary()
         if summary is None or mirror is None or mirror[2] is None:
+            return summary
+        if self._mirrored_paid:
+            # The shared record proves the backend paid this window while
+            # this console held the copy, and the one summary it owes is
+            # logged there already: the copy is resolved here rather than
+            # carried again, and this console pays its own window alone.
+            self._mirrored = None
+            self._mirrored_paid = False
             return summary
         count, opened, closed, window_id = summary
         self._lines.complete_window(mirror[2])
@@ -1636,15 +1675,19 @@ class _RefusalReporter:
         suppressed, so an hour of failing retries does not add up to a
         summary that says a stream of refusals was held back.
 
-        A failure whose notice the record of receipts proves the backend
-        took in is not that: the backend wrote the receipt before it
-        processed the notice, so the refusal it carried was named or
+        A failure whose notice the record of notices proves the backend
+        accounted is not that: the refusal the notice carried was named or
         merged there, whichever its own pace and cap decided, and this
         console does not name the hostname again from a failure whose
-        answer was merely lost. The notice keeps its place, because the
-        backend that took it in owes the acknowledgement the loss ate,
-        and the retry reaches it and its own pace holds the hostname from
-        a second line.
+        answer was merely lost. The receipt alone proves only that the
+        backend took the notice in, before it processed anything, and a
+        backend that died between its receipt and its record leaves the
+        refusal named nowhere: a notice the record shows taken in but
+        never accounted is named here, the only other layer that saw it.
+        The notice keeps its place in both cases, because the backend that
+        took it in owes the acknowledgement the loss ate, and the retry
+        reaches it and its own accounting holds the hostname from a
+        second line.
 
         The failure resolves the notice it was taken for, the one whose
         delivery has just come back, rather than whatever the queue holds
@@ -1667,19 +1710,22 @@ class _RefusalReporter:
             self._in_flight_evicted = False
             self._in_flight_id = None
         if (notice_id is not None
-                and host_policy.notice_receipt_has(notice_id)):
-            # The backend took this notice in before the exchange failed,
-            # and the refusal the notice carries is named or merged there
-            # already, so the failure counts nothing here: no line is
-            # written, no slot of the hour is spent and no count joins a
-            # window, because the pair names the refusal once, whichever
-            # channel it reached first. The notice is owed no eviction
-            # count either, and a fresh notice the queue holds under the
-            # hostname is owed everything of its own.
+                and host_policy.notice_accounted_has(notice_id)):
+            # The backend completed this notice's accounting before the
+            # exchange failed, and the refusal the notice carries is named
+            # or merged there already, so the failure counts nothing here:
+            # no line is written, no slot of the hour is spent and no
+            # count joins a window, because the pair names the refusal
+            # once, whichever channel it reached first. The notice is owed
+            # no eviction count either, and a fresh notice the queue holds
+            # under the hostname is owed everything of its own. The receipt
+            # alone would say less: a backend that took the notice in and
+            # died before it recorded the refusal named it nowhere, so the
+            # fallback below accounts it here.
             if not evicted and host in self._pending:
                 self._pending_accounted.add(host)
             return
-        self._account_line(host)
+        self._account_line(host, notice_id)
         counted = self._lines.note_retry(host)
         if counted:
             _print_refusal_line(_refusal_line_text(host))
@@ -1926,7 +1972,7 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
         # that was really sent, never whatever fresh notice of the same
         # hostname the queue holds by then.
         data["notice"] = notice_id
-    logged = reporter.line_time(host)
+    logged = reporter.line_time(host, notice_id)
     if logged is not None:
         data["logged"] = str(logged)
     refused_at = reporter.pending_refusal_time(host)
