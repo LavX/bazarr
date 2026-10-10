@@ -12,6 +12,7 @@ import {
 import Sports from "@/pages/Sports";
 import { act, customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
+import { openSelect } from "@/tests/select";
 
 describe("sports library", () => {
   beforeEach(() => {
@@ -356,8 +357,10 @@ describe("sports library", () => {
     );
 
     await user.click(screen.getByRole("button", { name: "Toggle filters" }));
-    await user.click(screen.getByPlaceholderText("Filter by tags..."));
-    await user.click(await screen.findByRole("option", { name: "Football" }));
+    const listbox = await openSelect(user, "Filter by tags...");
+    await user.click(
+      within(listbox).getByRole("option", { name: "Football", hidden: true }),
+    );
 
     expect(
       screen.getByRole("link", { name: "Premier League" }),

@@ -4,6 +4,7 @@ import { HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
+import { openSelect } from "@/tests/select";
 import MovieView from ".";
 
 describe("Movies page", () => {
@@ -73,9 +74,10 @@ describe("Movies page", () => {
     await screen.findByRole("link", { name: "Northern Light" });
 
     await user.click(screen.getByRole("button", { name: "Toggle filters" }));
-    const tags = screen.getByPlaceholderText("Filter by tags...");
-    await user.click(tags);
-    await user.click(await screen.findByRole("option", { name: "Drama" }));
+    const listbox = await openSelect(user, "Filter by tags...");
+    await user.click(
+      within(listbox).getByRole("option", { name: "Drama", hidden: true }),
+    );
 
     expect(
       screen.getByRole("link", { name: "Northern Light" }),

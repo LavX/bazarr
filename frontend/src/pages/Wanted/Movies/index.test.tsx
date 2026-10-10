@@ -3,8 +3,9 @@
 import userEvent from "@testing-library/user-event";
 import { http } from "msw";
 import { HttpResponse } from "msw";
-import { customRender, screen } from "@/tests";
+import { customRender, screen, within } from "@/tests";
 import server from "@/tests/mocks/node";
+import { openSelect } from "@/tests/select";
 import WantedMoviesView from ".";
 
 describe("Wanted Movies", () => {
@@ -121,8 +122,10 @@ describe("Wanted Movies", () => {
     customRender(<WantedMoviesView />);
     await screen.findByRole("link", { name: "The Godfather" });
     await user.click(screen.getByRole("button", { name: "Toggle filters" }));
-    await user.click(screen.getByPlaceholderText("Filter by tags..."));
-    await user.click(await screen.findByRole("option", { name: "Drama" }));
+    const listbox = await openSelect(user, "Filter by tags...");
+    await user.click(
+      within(listbox).getByRole("option", { name: "Drama", hidden: true }),
+    );
 
     expect(
       screen.getByRole("link", { name: "The Shawshank Redemption" }),

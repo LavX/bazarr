@@ -11,30 +11,7 @@ import {
 import WantedSportsView from "@/pages/Wanted/Sports";
 import { customRender, screen, waitFor, within } from "@/tests";
 import server from "@/tests/mocks/node";
-
-/** Open a themed select by its input's placeholder and return its listbox,
- *  like the shared Discover helper: a click focuses without opening in jsdom,
- *  so the opener falls back to ArrowDown, and the dropdown is queried hidden
- *  because its transition never settles here. The WantedView filter labels are
- *  plain text siblings, not Mantine `label` props, so the placeholder is what
- *  identifies the control, and every select on the page renders its options
- *  eagerly, so the opened dropdown is the one the input's aria-controls
- *  points at. */
-async function openSelect(
-  actor: ReturnType<typeof userEvent.setup>,
-  placeholder: string,
-) {
-  const input = await screen.findByPlaceholderText(placeholder);
-  await actor.click(input);
-  if (input.getAttribute("aria-expanded") !== "true")
-    await actor.keyboard("{ArrowDown}");
-  const controlled = input.getAttribute("aria-controls");
-  const listboxes = await screen.findAllByRole("listbox", { hidden: true });
-  return (
-    listboxes.find((box) => box.getAttribute("id") === controlled) ??
-    listboxes[0]
-  );
-}
+import { openSelect } from "@/tests/select";
 
 function owners(enabled = true) {
   server.use(
