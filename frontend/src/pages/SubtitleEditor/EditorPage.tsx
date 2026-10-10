@@ -1370,8 +1370,12 @@ export default function EditorPage() {
         : cue?.text || "";
     if (!sourceText.trim()) return;
 
-    // Create cue at reference timing if no selected cue overlaps the reference
+    // Work out where the translated line lands: the selected cue when it
+    // overlaps the reference, otherwise a new cue at the reference timing.
+    // The new cue is only added once a job is actually queued, so a refused
+    // or failed attempt leaves the subtitle unchanged.
     let targetIdx = selectedIndex;
+    let insertion: { idx: number; cue: Cue } | null = null;
     if (refMatches.length > 0) {
       const refStartMs = Math.min(...refMatches.map((r) => r.startMs));
       const refEndMs = Math.max(...refMatches.map((r) => r.endMs));
@@ -1385,13 +1389,16 @@ export default function EditorPage() {
         };
         let insertIdx = docState.cues.findIndex((c) => c.startMs > refStartMs);
         if (insertIdx === -1) insertIdx = docState.cues.length;
-        dispatch({ type: "APPLY_OP", op: createAddCue(insertIdx - 1, newCue) });
-        setSelectedIndex(insertIdx);
+        insertion = { idx: insertIdx, cue: newCue };
         targetIdx = insertIdx;
       }
     }
 
-    setTranslatingLineIdx(targetIdx);
+    // The hold sits on the initiating cue while the queue decides: the
+    // insertion index belongs to a cue that does not exist yet, and a hold
+    // parked there leaves the initiating cue's button free for a second
+    // click to queue a second job.
+    setTranslatingLineIdx(selectedIndex);
     try {
       const queuedJobId = await queueEditorTranslation({
         lines: [{ position: 0, line: sourceText }],
@@ -1401,6 +1408,16 @@ export default function EditorPage() {
         mediaType: mediaType || "",
       });
       if (queuedJobId) {
+        if (insertion) {
+          dispatch({
+            type: "APPLY_OP",
+            op: createAddCue(insertion.idx - 1, insertion.cue),
+          });
+          // The selection and the hold move to the inserted cue together,
+          // where the queued result lands.
+          setSelectedIndex(insertion.idx);
+          setTranslatingLineIdx(insertion.idx);
+        }
         setLineTranslationJob({ jobId: queuedJobId, targetIdx });
       } else {
         setTranslatingLineIdx(null);

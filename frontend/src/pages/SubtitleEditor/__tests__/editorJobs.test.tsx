@@ -954,4 +954,313 @@ describe("EditorPage single-line translate", () => {
     );
     expect(queueRequests).toBe(1);
   });
+
+  it("leaves the subtitle unchanged when the queue refuses the line translate", async () => {
+    // The line translate adds a cue at the reference timing when the
+    // selected cue does not overlap it. A refusal has to leave the
+    // subtitle as it was, with no empty cue left to delete by hand.
+    const srt =
+      "1\n00:00:01,000 --> 00:00:02,000\nHello\n\n2\n00:00:03,000 --> 00:00:04,000\nWorld\n";
+    // The reference sits at the playback position and away from the first
+    // cue, so the line targets a new cue instead of the selected one.
+    const reference = "1\n00:00:00,000 --> 00:00:00,500\nSzervusz\n";
+    let queueRequests = 0;
+    server.use(
+      http.get("/api/movies/50/subtitles/en/content", () =>
+        HttpResponse.json({
+          content: srt,
+          encoding: "utf-8",
+          format: "srt",
+          language: "en",
+          size: 100,
+          lastModified: 0,
+          mediaTitle: "Example",
+        }),
+      ),
+      http.get("/api/movies/50/subtitles/hu/content", () =>
+        HttpResponse.json({
+          content: reference,
+          encoding: "utf-8",
+          format: "srt",
+          language: "hu",
+          size: 100,
+          lastModified: 0,
+        }),
+      ),
+      http.get("/api/editor/subtitles", () =>
+        HttpResponse.json({ subtitles: [] }),
+      ),
+      http.get("/api/editor/info", () =>
+        HttpResponse.json({
+          duration: 2,
+          videoCodec: "h264",
+          audioCodec: "aac",
+          resolution: "1920x1080",
+          container: "mkv",
+          audioTracks: [],
+        }),
+      ),
+      http.get("/api/editor/peaks", () =>
+        HttpResponse.json({ peaks: [0.5, -1], duration: 0.2, sampleRate: 10 }),
+      ),
+      // The endpoint refuses the line with a 409 and its reason, which is
+      // the body the refusal toast reads.
+      http.post("/api/translator/editor", () => {
+        queueRequests += 1;
+        return HttpResponse.json(
+          { error: "Translation was switched off" },
+          { status: 409 },
+        );
+      }),
+    );
+    renderEditor(srt);
+    const user = userEvent.setup();
+
+    // A reference is what the line translates from. The first cue is
+    // selected on load, so opening the reference panel and picking a
+    // language is all the setup the AI button needs.
+    await user.click(
+      await screen.findByRole("button", { name: "Reference Subtitle" }),
+    );
+    const referenceOption = await screen.findByText("Select language...");
+    // A native select has no Testing Library query of its own.
+    // eslint-disable-next-line testing-library/no-node-access
+    const referenceSelect = referenceOption.closest("select");
+    expect(referenceSelect).not.toBeNull();
+    await user.selectOptions(referenceSelect!, "hu");
+
+    // Two cues before the attempt, and the same two after it.
+    const grid = screen.getByRole("grid", { name: "Subtitle cues" });
+    expect(grid).toHaveAttribute("aria-rowcount", "2");
+
+    const aiBtn = await screen.findByTitle("Translate this cue");
+    await waitFor(() => expect(aiBtn).toBeEnabled());
+    await user.click(aiBtn);
+
+    // The refusal speaks for itself, and the subtitle keeps its two cues:
+    // the cue at the reference timing was never added.
+    expect(
+      await screen.findByText("Translation was switched off"),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(aiBtn).toBeEnabled());
+    expect(grid).toHaveAttribute("aria-rowcount", "2");
+    expect(screen.queryByText("00:00:00.500")).not.toBeInTheDocument();
+    expect(queueRequests).toBe(1);
+  });
+
+  it("leaves the subtitle unchanged when the queue answers without a job id", async () => {
+    // An answer that carries no job id means nothing was queued, so the
+    // subtitle has to stay as it was, with no cue at the reference timing.
+    const srt =
+      "1\n00:00:01,000 --> 00:00:02,000\nHello\n\n2\n00:00:03,000 --> 00:00:04,000\nWorld\n";
+    const reference = "1\n00:00:00,000 --> 00:00:00,500\nSzervusz\n";
+    let queueRequests = 0;
+    server.use(
+      http.get("/api/movies/50/subtitles/en/content", () =>
+        HttpResponse.json({
+          content: srt,
+          encoding: "utf-8",
+          format: "srt",
+          language: "en",
+          size: 100,
+          lastModified: 0,
+          mediaTitle: "Example",
+        }),
+      ),
+      http.get("/api/movies/50/subtitles/hu/content", () =>
+        HttpResponse.json({
+          content: reference,
+          encoding: "utf-8",
+          format: "srt",
+          language: "hu",
+          size: 100,
+          lastModified: 0,
+        }),
+      ),
+      http.get("/api/editor/subtitles", () =>
+        HttpResponse.json({ subtitles: [] }),
+      ),
+      http.get("/api/editor/info", () =>
+        HttpResponse.json({
+          duration: 2,
+          videoCodec: "h264",
+          audioCodec: "aac",
+          resolution: "1920x1080",
+          container: "mkv",
+          audioTracks: [],
+        }),
+      ),
+      http.get("/api/editor/peaks", () =>
+        HttpResponse.json({ peaks: [0.5, -1], duration: 0.2, sampleRate: 10 }),
+      ),
+      // The endpoint takes the request but answers no job id, which is the
+      // queue's way of saying nothing was queued.
+      http.post("/api/translator/editor", () => {
+        queueRequests += 1;
+        return HttpResponse.json({}, { status: 202 });
+      }),
+    );
+    renderEditor(srt);
+    const user = userEvent.setup();
+
+    // A reference away from the first cue is what sends the line to a new
+    // cue instead of the selected one. The first cue is selected on load,
+    // so opening the reference panel and picking a language is all the
+    // setup the AI button needs.
+    await user.click(
+      await screen.findByRole("button", { name: "Reference Subtitle" }),
+    );
+    const referenceOption = await screen.findByText("Select language...");
+    // A native select has no Testing Library query of its own.
+    // eslint-disable-next-line testing-library/no-node-access
+    const referenceSelect = referenceOption.closest("select");
+    expect(referenceSelect).not.toBeNull();
+    await user.selectOptions(referenceSelect!, "hu");
+
+    // Two cues before the attempt, and the same two after it.
+    const grid = screen.getByRole("grid", { name: "Subtitle cues" });
+    expect(grid).toHaveAttribute("aria-rowcount", "2");
+
+    const aiBtn = await screen.findByTitle("Translate this cue");
+    await waitFor(() => expect(aiBtn).toBeEnabled());
+    await user.click(aiBtn);
+
+    // The attempt ran and released the button, and the subtitle keeps its
+    // two cues: the cue at the reference timing was never added.
+    await waitFor(() => expect(queueRequests).toBe(1));
+    await waitFor(() => expect(aiBtn).toBeEnabled());
+    expect(grid).toHaveAttribute("aria-rowcount", "2");
+    expect(screen.queryByText("00:00:00.500")).not.toBeInTheDocument();
+  });
+
+  it("holds the initiating cue while the queue answer is pending, so a second click queues nothing", async () => {
+    // The insertion index the line translate targets belongs to a cue
+    // that does not exist until the queue accepts the line, so while the
+    // answer is pending the hold has to sit on the initiating cue. Held
+    // on the insertion index instead, the button that sent the line
+    // stayed clickable and a second click queued a second job.
+    const srt =
+      "1\n00:00:01,000 --> 00:00:02,000\nHello\n\n2\n00:00:03,000 --> 00:00:04,000\nWorld\n";
+    // The reference sits at the playback position and away from both
+    // cues, so the line targets a new cue whichever cue is selected.
+    const reference = "1\n00:00:00,000 --> 00:00:00,500\nSzervusz\n";
+    let queueRequests = 0;
+    // Held until the test releases it, so the pending window is long
+    // enough to try a second click in.
+    let answerQueue: () => void = () => undefined;
+    const queueGate = new Promise<void>((resolve) => {
+      answerQueue = resolve;
+    });
+    server.use(
+      http.get("/api/movies/50/subtitles/en/content", () =>
+        HttpResponse.json({
+          content: srt,
+          encoding: "utf-8",
+          format: "srt",
+          language: "en",
+          size: 100,
+          lastModified: 0,
+          mediaTitle: "Example",
+        }),
+      ),
+      http.get("/api/movies/50/subtitles/hu/content", () =>
+        HttpResponse.json({
+          content: reference,
+          encoding: "utf-8",
+          format: "srt",
+          language: "hu",
+          size: 100,
+          lastModified: 0,
+        }),
+      ),
+      http.get("/api/editor/subtitles", () =>
+        HttpResponse.json({ subtitles: [] }),
+      ),
+      http.get("/api/editor/info", () =>
+        HttpResponse.json({
+          duration: 2,
+          videoCodec: "h264",
+          audioCodec: "aac",
+          resolution: "1920x1080",
+          container: "mkv",
+          audioTracks: [],
+        }),
+      ),
+      http.get("/api/editor/peaks", () =>
+        HttpResponse.json({ peaks: [0.5, -1], duration: 0.2, sampleRate: 10 }),
+      ),
+      // The socket event is lost, and by the time the queue is re-read the
+      // job has left it, so the only outcome left is the kept result.
+      http.get("/api/system/jobs", () => HttpResponse.json({ data: [] })),
+      // The queue holds its answer, which opens the window a second click
+      // is tried in.
+      http.post("/api/translator/editor", () => {
+        queueRequests += 1;
+        return queueGate.then(() =>
+          HttpResponse.json({ jobId: 7 }, { status: 202 }),
+        );
+      }),
+      http.get("/api/translator/editor", ({ request }) => {
+        expect(new URL(request.url).searchParams.get("jobId")).toBe("7");
+        return HttpResponse.json({
+          jobId: 7,
+          status: "completed",
+          lines: [{ position: 0, line: "Szia" }],
+        });
+      }),
+    );
+    renderEditor(srt);
+    const user = userEvent.setup();
+
+    // A reference is what the line translates from. The first cue is
+    // selected on load, so opening the reference panel and picking a
+    // language is all the setup the AI button needs.
+    await user.click(
+      await screen.findByRole("button", { name: "Reference Subtitle" }),
+    );
+    const referenceOption = await screen.findByText("Select language...");
+    // A native select has no Testing Library query of its own.
+    // eslint-disable-next-line testing-library/no-node-access
+    const referenceSelect = referenceOption.closest("select");
+    expect(referenceSelect).not.toBeNull();
+    await user.selectOptions(referenceSelect!, "hu");
+
+    // The second cue is the initiating one, so its index differs from the
+    // insertion index the pending answer will use. A plain Enter in the
+    // cue text commits the first cue and advances the selection.
+    await user.type(screen.getByDisplayValue("Hello"), "{Enter}");
+    expect(screen.getByDisplayValue("World")).toBeInTheDocument();
+
+    const grid = screen.getByRole("grid", { name: "Subtitle cues" });
+    expect(grid).toHaveAttribute("aria-rowcount", "2");
+
+    const aiBtn = await screen.findByTitle("Translate this cue");
+    await waitFor(() => expect(aiBtn).toBeEnabled());
+    await user.click(aiBtn);
+
+    // The initiating cue's button is held from the first click, while the
+    // queue has not answered yet.
+    await waitFor(() => expect(aiBtn).toBeDisabled());
+    expect(aiBtn).toHaveTextContent("...");
+
+    // The one request the first click sent is still unanswered.
+    await waitFor(() => expect(queueRequests).toBe(1));
+
+    // A second click in the pending window queues nothing: a second job
+    // would answer the same release and be counted with the first.
+    await user.click(aiBtn);
+    act(() => {
+      answerQueue();
+    });
+
+    // The answer inserts the one cue at the reference timing and moves the
+    // selection to it, the tracked job fills it, the hold clears, and no
+    // second job was ever queued.
+    expect(await screen.findByText("Szia")).toBeVisible();
+    expect(grid).toHaveAttribute("aria-rowcount", "3");
+    expect(screen.getByTitle("End time")).toHaveValue("00:00:00.500");
+    await waitFor(() => expect(aiBtn).toBeEnabled());
+    expect(aiBtn).toHaveTextContent("AI");
+    expect(queueRequests).toBe(1);
+  });
 });
