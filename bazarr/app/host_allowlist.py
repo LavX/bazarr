@@ -24,7 +24,8 @@ import time
 from .config import settings
 from .host_policy import (ALLOWED_HOSTS_ENV, APPROVAL_SEGMENT, DAY_SECONDS, HOUR_SECONDS,
                           REFUSED_REASON, BoundedRefusalRecorder, effective_host, entries_from_environ,
-                          normalize_entries, allows_all_hosts, refused_hostnames)
+                          normalize_entries, allows_all_hosts, record_completed_windows,
+                          refused_hostnames)
 
 # The refusal status: the frontend never renders it as the app.
 REFUSED_STATUS = 421
@@ -45,6 +46,7 @@ CODE_LOGGER_NAME = 'bazarr.host_approval'
 # per-host pace travels as two parallel lists, the same shape the report's
 # newest names use, because a hostname itself is not a safe separator.
 HOUR_LINES_HEADER = 'X-Bazarr-Hour-Lines'
+HOUR_LINE_IDS_HEADER = 'X-Bazarr-Hour-Line-Ids'
 HOUR_HOSTS_HEADER = 'X-Bazarr-Hour-Hosts'
 HOUR_HOST_LINES_HEADER = 'X-Bazarr-Hour-Host-Lines'
 SUPPRESSED_HEADER = 'X-Bazarr-Suppressed'
@@ -267,10 +269,15 @@ def _flush_suppressed_summary():
 
     The count is held for a full hour before it is reported; once it is due,
     the next refusal and every visit to System > Status both deliver it.
+    The payment is also written to the record the two processes share,
+    before any answer is built, so a console that holds a copy of the
+    window can verify the payment however its own answer turned out and
+    however many backends have restarted since.
     """
     summary = _refusals.take_summary()
     if summary:
         _log_suppressed_summary(summary)
+        record_completed_windows(_refusals.completed_windows(), summary[2])
 
 
 def announce_code(config=settings):
@@ -285,9 +292,9 @@ def verify_approval_code(supplied):
     return _approval_code.verify(supplied)
 
 
-def record_refusal(host, config=settings, line_at=None, hour_lines=None, suppressed=0,
-                   suppressed_since=None, suppressed_id=None, mirrored=0, mirrored_since=None,
-                   mirrored_id=None, recent=None, refused_at=None):
+def record_refusal(host, config=settings, line_at=None, hour_lines=None, hour_line_ids=None,
+                   suppressed=0, suppressed_since=None, suppressed_id=None, mirrored=0,
+                   mirrored_since=None, mirrored_id=None, recent=None, refused_at=None):
     """Record a refused hostname and keep a code on the console.
 
     The backend's own refusals call this, and so does the report the front
@@ -329,7 +336,7 @@ def record_refusal(host, config=settings, line_at=None, hour_lines=None, suppres
     if not shown or not check_active(config):
         return
     if hour_lines:
-        _refusals.merge_hour_lines(hour_lines)
+        _refusals.merge_hour_lines(hour_lines, hour_line_ids)
     _refusals.merge_summary(suppressed, suppressed_since, suppressed_id)
     _refusals.merge_summary(mirrored, mirrored_since, mirrored_id)
     if recent:
@@ -410,6 +417,8 @@ def front_refusal_notice(config=settings):
             spent.append(float(stamp))
         except ValueError:
             pass
+    spent_ids = [line_id for line_id in request.form.get('hour_lines_ids', '').split(',')
+                 if line_id]
     suppressed = request.form.get('suppressed', '')
     try:
         held_back = int(suppressed) if suppressed else 0
@@ -447,13 +456,17 @@ def front_refusal_notice(config=settings):
     except ValueError:
         pending_at = None
     record_refusal(request.form.get('host', ''), config=config, line_at=line_at,
-                   hour_lines=spent, suppressed=held_back, suppressed_since=window_opens,
+                   hour_lines=spent, hour_line_ids=spent_ids, suppressed=held_back,
+                   suppressed_since=window_opens,
                    suppressed_id=window_id, mirrored=mirrored_back, mirrored_since=mirrored_opens,
                    mirrored_id=mirrored_id, recent=recent, refused_at=pending_at)
     headers = {}
     times = _refusals.hour_line_times()
     if times:
         headers[HOUR_LINES_HEADER] = ','.join(str(stamp) for stamp in times)
+    line_ids = _refusals.hour_line_ids()
+    if line_ids:
+        headers[HOUR_LINE_IDS_HEADER] = ','.join(line_ids)
     hour_hosts = _refusals.hour_line_hosts()
     if hour_hosts:
         headers[HOUR_HOSTS_HEADER] = ','.join(host for host, _stamp in hour_hosts)

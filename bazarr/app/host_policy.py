@@ -11,13 +11,16 @@ decision as the backend. It also holds the bounded refusal bookkeeping both
 layers share, so neither can record or log more than the agreed ceiling.
 """
 
+import json
 import os
 import re
 import secrets
+import tempfile
 import threading
 import time
 from collections import OrderedDict
 from ipaddress import ip_address
+from pathlib import Path
 
 # The environment variable that carries extra allowed hosts, comma-separated,
 # for an operator who cannot reach the UI or edit config.yaml.
@@ -67,6 +70,99 @@ CARRY_RETENTION_SECONDS = 2 * HOUR_SECONDS
 def _mint_window_id():
     """A fresh window ID: 64 random bits, unique across both layers."""
     return secrets.token_hex(WINDOW_ID_BYTES)
+
+
+def _mint_line_id():
+    """A fresh line identity: 64 random bits, unique across both layers.
+
+    Two lines can share one timestamp and are still two lines, so the
+    identity beside the time is what makes each spent line its own slot in
+    the budget the reports merge, wherever the line was spent.
+    """
+    return secrets.token_hex(WINDOW_ID_BYTES)
+
+
+# The record of the windows whose summaries have been paid, in the
+# configuration directory the two processes of one install share. A payment
+# that reaches a layer is written here before its answer is built, and the
+# other layer reads it back before it hands a paid window to a backend that
+# restarted, so a restart that loses every in-memory record loses no proof
+# of payment and the pair never folds paid lines in twice.
+COMPLETED_WINDOWS_RECORD = 'host-refusal-completed-windows.json'
+COMPLETED_WINDOWS_RECORD_FILE_ENV = 'BAZARR_REFUSAL_COMPLETIONS_FILE'
+
+
+def completed_windows_record_path(environ=None):
+    """Where the pair's paid-window record lives, resolved the way both
+    processes resolve their configuration: the explicit file the
+    environment names, then the configuration directory BAZARR_CONFIG_DIR
+    names, then the data directory beside the code. The supervisor exports
+    its own resolved configuration directory under BAZARR_CONFIG_DIR for
+    the backend it spawns, so the two processes of one install always meet
+    the same file, restarts and all.
+    """
+    environ = os.environ if environ is None else environ
+    override = environ.get(COMPLETED_WINDOWS_RECORD_FILE_ENV, '').strip()
+    if override:
+        return override
+    config_dir = environ.get('BAZARR_CONFIG_DIR', '').strip()
+    if not config_dir:
+        config_dir = str(Path(__file__).resolve().parents[2] / 'data')
+    return str(Path(config_dir) / 'config' / COMPLETED_WINDOWS_RECORD)
+
+
+def _read_completed_windows_record(path):
+    """The record's contents, or nothing: the record is best effort, and a
+    missing or unreadable one proves no payment."""
+    try:
+        with open(path) as record_file:
+            record = json.load(record_file)
+        return record if isinstance(record, dict) else {}
+    except Exception:
+        return {}
+
+
+def record_completed_windows(window_ids, paid_at, path=None):
+    """Write the payment of one or more windows into the shared record.
+
+    The entry outlives the in-memory completion record of the layer that
+    paid, held on the same retention span both sides share, so the console
+    that still holds a copy of a paid window can verify the payment from
+    here however long the answer that would have told it stayed lost, and
+    past the whole span no copy is still held to be verified. The write is
+    best effort: a record nothing can write proves no payment, and the
+    pair keeps the lose-not-double trade rather than fail a payment.
+    """
+    if not window_ids:
+        return
+    path = completed_windows_record_path() if path is None else path
+    record = _read_completed_windows_record(path)
+    record = {window_id: stamp for window_id, stamp in record.items()
+              if isinstance(stamp, (int, float)) and paid_at - stamp < CARRY_RETENTION_SECONDS}
+    for window_id in window_ids:
+        record[window_id] = paid_at
+    try:
+        record_path = Path(path)
+        record_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(record_path.parent),
+                                   prefix=f".{record_path.name}.")
+        try:
+            with os.fdopen(fd, 'w') as record_file:
+                json.dump(record, record_file)
+            os.replace(tmp, path)
+        except BaseException:
+            os.unlink(tmp)
+            raise
+    except Exception:
+        pass
+
+
+def completed_windows_record_has(window_id, path=None):
+    """Whether the shared record shows this window's summary was paid."""
+    if not window_id:
+        return False
+    path = completed_windows_record_path() if path is None else path
+    return window_id in _read_completed_windows_record(path)
 
 
 def effective_host(host):
@@ -313,6 +409,7 @@ class BoundedRefusalRecorder:
         self._hosts = OrderedDict()  # host -> time of its last refusal
         self._last_lines = OrderedDict()  # host -> time of its last log line
         self._line_times = []  # times of per-host refusal lines this hour
+        self._line_ids = []  # the identity of each spent line, parallel to its time
         self._suppressed = 0
         self._window_opens = None  # when the current suppressed count started
         self._window_id = None  # the current window's ID, minted at its first line
@@ -392,6 +489,7 @@ class BoundedRefusalRecorder:
                 return False
             self._last_lines[host] = now
             self._line_times.append(now)
+            self._line_ids.append(_mint_line_id())
             return True
 
     def hour_line_times(self):
@@ -400,6 +498,19 @@ class BoundedRefusalRecorder:
         with self._lock:
             self._prune(now)
             return list(self._line_times)
+
+    def hour_line_ids(self):
+        """The identities of the hour's spent lines, parallel to their times.
+
+        The report carries them beside the times, so the layer that folds
+        them in spends one budget slot per line and not one per distinct
+        timestamp: two refusals can share a timestamp and the lines written
+        for them are still two lines.
+        """
+        now = self._now()
+        with self._lock:
+            self._prune(now)
+            return list(self._line_ids)
 
     def hour_line_hosts(self):
         """The hostnames this hour has spent lines for, with each line's time.
@@ -417,7 +528,7 @@ class BoundedRefusalRecorder:
             self._prune(now)
             return list(self._last_lines.items())
 
-    def merge_hour_lines(self, times):
+    def merge_hour_lines(self, times, ids=None):
         """Fold a console elsewhere's spent line times into this hour's cap.
 
         The reports a front listener sends once it can be told carry the
@@ -428,13 +539,51 @@ class BoundedRefusalRecorder:
         holds are folded in, so the answer stays bounded by the same cap the
         times came from, and the merged budget rolls over exactly when the
         console's lines do.
+
+        The lines also carry their stable identities, parallel to their
+        times, and an identity is what makes one spent line its own slot:
+        two lines can share one timestamp and are still two lines, so the
+        fold spends one slot per identity it has not folded in before and
+        not one per distinct timestamp. An answer that carries no
+        identities, from a console this pair has not caught up with, folds
+        its unpaired times by the timestamp alone, exactly as it always
+        did, and an identity already folded in spends nothing again however
+        often the report that carries it is retried.
         """
         now = self._now()
         with self._lock:
             self._prune(now)
-            for stamp in times:
-                if now - stamp < HOUR_SECONDS and stamp not in self._line_times:
+            known_ids = set(self._line_ids)
+            for index, stamp in enumerate(times):
+                line_id = ids[index] if ids is not None and index < len(ids) else None
+                if line_id is None:
+                    if now - stamp < HOUR_SECONDS and stamp not in self._line_times:
+                        self._line_times.append(stamp)
+                        line_id = _mint_line_id()
+                        self._line_ids.append(line_id)
+                        known_ids.add(line_id)
+                    continue
+                if line_id not in known_ids and now - stamp < HOUR_SECONDS:
                     self._line_times.append(stamp)
+                    self._line_ids.append(line_id)
+                    known_ids.add(line_id)
+
+    def note_unreported(self):
+        """Count one refusal no notice will ever report, as one suppressed
+        line.
+
+        A refusal whose notice the pending queue evicted, and a repeat that
+        coalesced into a notice still waiting, reach no recorder through
+        their delivery: the console that saw them is the pair's only
+        recorder for them, so it counts each one into its own window here,
+        one suppressed line each, exactly once. Each refusal event calls
+        this once, and the window the counts open is the idempotent
+        aggregate the pair already shares.
+        """
+        now = self._now()
+        with self._lock:
+            self._prune(now)
+            self._count_suppressed(now)
 
     def merge_recent(self, pairs):
         """Fold the newest refused names another layer carried into the record.
@@ -500,6 +649,7 @@ class BoundedRefusalRecorder:
                 return False
             self._last_lines[host] = now
             self._line_times.append(now)
+            self._line_ids.append(_mint_line_id())
             return True
 
     def first_failure_resolved(self, host):
@@ -516,7 +666,10 @@ class BoundedRefusalRecorder:
             self._first_failures.pop(host, None)
 
     def _prune(self, now):
-        self._line_times = [stamp for stamp in self._line_times if now - stamp < HOUR_SECONDS]
+        spent = [(stamp, line_id) for stamp, line_id in zip(self._line_times, self._line_ids)
+                 if now - stamp < HOUR_SECONDS]
+        self._line_times = [stamp for stamp, _line_id in spent]
+        self._line_ids = [line_id for _stamp, line_id in spent]
         self._last_lines = OrderedDict(
             (name, stamp) for name, stamp in self._last_lines.items() if now - stamp < HOUR_SECONDS)
         # The first failures are not on the hourly roll: a mark lives

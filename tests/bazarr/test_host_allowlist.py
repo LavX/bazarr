@@ -6461,3 +6461,801 @@ async def test_an_outage_names_no_second_line_from_the_pace_the_route_s_answer_c
     finally:
         await client.close()
         await answering_backend.close()
+
+
+@pytest.mark.asyncio
+async def test_a_carry_restored_after_a_readiness_swap_is_dropped_not_recarried(
+        tmp_path, monkeypatch, root_log, caplog):
+    """The report that first reaches an answering backend carries this
+    console's suppressed window, and the backend folds it into its own
+    before it builds the answer. A delivery whose answer is still unresolved
+    when readiness swears in a fresh backend belongs to the one its request
+    went to: the fresh generation holds no record of the fold, so a copy
+    restored after the swap would be carried to a backend that counts the
+    lines a second time. The stale carry is dropped instead, exactly the
+    way a mirror whose payment the old backend made is, and the pair keeps
+    the one summary whichever backend logged it."""
+    from app import host_allowlist
+
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
+    monkeypatch.setenv("BAZARR_SUPERVISOR_TOKEN", "the-supervisor-token")
+    monkeypatch.setenv("BAZARR_CONFIG_DIR", str(tmp_path))
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    caplog.set_level(logging.INFO)
+
+    clock = [0]
+    recorder = host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0])
+    monkeypatch.setattr(host_allowlist, "_refusals", recorder)
+    config = _config()
+    delivered = []
+    backend_app = Flask(__name__)
+    holding = [False]
+    release = asyncio.Event()
+
+    def deliver(form):
+        """The backend's own notice route, over the form the report carried."""
+        with backend_app.test_request_context(
+                "/_supervisor/host_refusal", method="POST",
+                headers={supervisor.TOKEN_HEADER: "the-supervisor-token"}, data=form):
+            return host_allowlist.front_refusal_notice(config=config)
+
+    async def notice(request):
+        form = dict(await request.post())
+        delivered.append((clock[0], form))
+        _body, _status, headers = deliver(form)
+        if holding[0]:
+            # The answer this delivery waits on stays unresolved while the
+            # backend it reached is swapped for a fresh one.
+            holding[0] = False
+            await release.wait()
+            return web.Response(status=503)
+        if _status != 204:
+            return web.Response(status=503)
+        return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                "the-supervisor-token", **headers})
+
+    backend = web.Application()
+    backend.router.add_route("POST", "/_supervisor/host_refusal", notice)
+    answering_backend = TestClient(TestServer(backend))
+    await answering_backend.start_server()
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    try:
+        reporter = supervisor._active_reporter
+        monkeypatch.setattr(reporter, "_now", lambda: clock[0])
+        monkeypatch.setattr(reporter._lines, "_now", lambda: clock[0])
+
+        async def settle():
+            for _ in range(6000):
+                if not reporter.pending_reports():
+                    return
+                clock[0] += 0.06
+                await asyncio.sleep(0.01)
+            raise AssertionError("the reports never drained")
+
+        # The backend cannot be told, so this console names the hour's cap of
+        # lines itself and holds six more refusals back into its own window.
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", None)
+        for index in range(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR):
+            clock[0] = index
+            response = await client.get("/", headers={"Host": f"down{index}.example.com"})
+            assert response.status == 421
+        for index in range(6):
+            clock[0] = 20 + index
+            response = await client.get("/", headers={"Host": f"held{index}.example.com"})
+            assert response.status == 421
+        held = reporter._lines.hour_suppressed_window()
+        assert held is not None
+        assert held[0] == 6
+        window_id = held[2]
+
+        # The backend answers again, and the first report reaches it carrying
+        # the console's window, which the backend folds into its own before
+        # the answer is built. The answer is held unresolved.
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", answering_backend.server.port)
+        monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+        reporter.ready_to_deliver()
+        clock[0] = 100
+        holding[0] = True
+        response = await client.get("/", headers={"Host": "carrier.example.com"})
+        assert response.status == 421
+        for _ in range(2000):
+            if delivered:
+                break
+            await asyncio.sleep(0.01)
+        assert delivered
+        assert "suppressed" in delivered[0][1]
+        assert int(delivered[0][1]["suppressed"]) == 6
+        assert delivered[0][1]["suppressed_id"] == window_id
+
+        # The window's hour runs while the answer is unresolved, and the
+        # backend that folded the window pays the one summary it owes, the
+        # way any notice arrival or health visit would.
+        clock[0] = 3625
+        host_allowlist._flush_suppressed_summary()
+        summaries = [message for message in root_log.messages
+                     if "host-refusal log lines" in message]
+        assert len(summaries) == 1
+
+        # The backend restarts, and the readiness swears the fresh one in
+        # while the delivery's answer is still unresolved, so the carry
+        # belongs to a generation that is gone.
+        restarted = host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0])
+        monkeypatch.setattr(host_allowlist, "_refusals", restarted)
+        reporter.ready_to_deliver()
+        delivered.clear()
+
+        # The held answer fails. The delivery reached the old backend, so
+        # the stale carry is dropped rather than restored: the fresh
+        # backend never hears of the six lines.
+        release.set()
+        await settle()
+        replays = [form for _at, form in delivered
+                   if "suppressed" in form or "suppressed_id" in form]
+        assert replays == []
+
+        # The six refusals are summarized once, by the line the old backend
+        # paid, and nowhere again: the fresh backend folds nothing in and
+        # this console emits nothing of its own.
+        summaries = [message for message in root_log.messages
+                     if "host-refusal log lines" in message]
+        assert len(summaries) == 1
+        console_summaries = [line for line in lines if line.startswith("Suppressed")]
+        assert console_summaries == []
+    finally:
+        await client.close()
+        await answering_backend.close()
+
+
+@pytest.mark.asyncio
+async def test_a_payment_processed_past_the_deadline_is_proved_by_the_shared_record(
+        tmp_path, monkeypatch, root_log, caplog):
+    """The backend pays a due window at the arrival, and the moment the
+    request went out is not the arrival: a report sent before the window's
+    hour had run can be processed after it, and its answer can be lost, so
+    the send time says nothing about the payment. The payment is written to
+    the record the two processes share before the answer is built, so the
+    readiness that finds a fresh backend after the restart reads it there,
+    drops the paid copy, and the six lines are summarized once, by the
+    backend that paid them."""
+    from app import host_allowlist
+
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
+    monkeypatch.setenv("BAZARR_SUPERVISOR_TOKEN", "the-supervisor-token")
+    monkeypatch.setenv("BAZARR_CONFIG_DIR", str(tmp_path))
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    caplog.set_level(logging.INFO)
+
+    clock = [0]
+    recorder = host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0])
+    monkeypatch.setattr(host_allowlist, "_refusals", recorder)
+    config = _config()
+    delivered = []
+    backend_app = Flask(__name__)
+    slow_clock = [None]
+
+    def deliver(form):
+        """The backend's own notice route, over the form the report carried."""
+        with backend_app.test_request_context(
+                "/_supervisor/host_refusal", method="POST",
+                headers={supervisor.TOKEN_HEADER: "the-supervisor-token"}, data=form):
+            return host_allowlist.front_refusal_notice(config=config)
+
+    async def notice(request):
+        form = dict(await request.post())
+        delivered.append((clock[0], form))
+        if slow_clock[0] is not None:
+            # The backend processes this report past the deadline its send
+            # time fell short of, and only its answer is lost.
+            clock[0] = slow_clock[0]
+            slow_clock[0] = None
+            _body, _status, headers = deliver(form)
+            return web.Response(status=503)
+        _body, _status, headers = deliver(form)
+        if _status != 204:
+            return web.Response(status=503)
+        return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                "the-supervisor-token", **headers})
+
+    backend = web.Application()
+    backend.router.add_route("POST", "/_supervisor/host_refusal", notice)
+    answering_backend = TestClient(TestServer(backend))
+    await answering_backend.start_server()
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    try:
+        reporter = supervisor._active_reporter
+        monkeypatch.setattr(reporter, "_now", lambda: clock[0])
+        monkeypatch.setattr(reporter._lines, "_now", lambda: clock[0])
+
+        async def settle():
+            for _ in range(6000):
+                if not reporter.pending_reports():
+                    return
+                clock[0] += 0.06
+                await asyncio.sleep(0.01)
+            raise AssertionError("the reports never drained")
+
+        # The backend spends its hour's cap of lines while it answers, and
+        # six more refusals are held back into its own window, which every
+        # acknowledgement carries back: the console holds its mirror of it.
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", answering_backend.server.port)
+        monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+        for index in range(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR):
+            clock[0] = index
+            response = await client.get("/", headers={"Host": f"up{index}.example.com"})
+            assert response.status == 421
+        await settle()
+        for index in range(6):
+            clock[0] = 20 + index
+            response = await client.get("/", headers={"Host": f"held{index}.example.com"})
+            assert response.status == 421
+        await settle()
+        held = recorder.hour_suppressed_window()
+        assert held is not None
+        assert held[0] == 6
+        backend_window = held[2]
+        mirrored = reporter.mirrored_summary()
+        assert mirrored is not None
+        assert mirrored[0] == 6
+        assert mirrored[2] == backend_window
+
+        # The report that could pay the window went out at 3619, before the
+        # window's hour runs at 3620, and the backend processed it at 3621,
+        # past the hour: the flush paid the one summary the window owes, and
+        # only the answer was lost.
+        clock[0] = 3619
+        slow_clock[0] = 3621
+        response = await client.get("/", headers={"Host": "boundary.example.com"})
+        assert response.status == 421
+        for _ in range(2000):
+            if any(line.startswith("Refused") and "boundary.example.com" in line
+                   for line in lines):
+                break
+            await asyncio.sleep(0.01)
+        assert any(line.startswith("Refused") and "boundary.example.com" in line
+                   for line in lines)
+        summaries = [message for message in root_log.messages
+                     if "host-refusal log lines" in message]
+        assert len(summaries) == 1
+        assert "suppressed 6 host-refusal log lines" in summaries[0]
+
+        # The backend restarts, and the readiness that finds the fresh one
+        # reads the shared record: the payment is there, so the paid copy is
+        # dropped and the fresh backend never hears of the six lines.
+        restarted = host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0])
+        monkeypatch.setattr(host_allowlist, "_refusals", restarted)
+        reporter.ready_to_deliver()
+        delivered.clear()
+        await settle()
+        replays = [form for _at, form in delivered
+                   if form.get("host") == "boundary.example.com"]
+        assert replays
+        assert "mirrored" not in replays[0]
+        assert "mirrored_id" not in replays[0]
+        assert reporter.mirrored_summary() is None
+
+        # The six refusals are summarized once, by the line the lost backend
+        # paid, and nowhere again.
+        summaries = [message for message in root_log.messages
+                     if "host-refusal log lines" in message]
+        assert len(summaries) == 1
+        console_summaries = [line for line in lines if line.startswith("Suppressed")]
+        assert console_summaries == []
+    finally:
+        await client.close()
+        await answering_backend.close()
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_failing_before_processing_keeps_the_unpaid_mirror(
+        tmp_path, monkeypatch, root_log, caplog):
+    """A failure that lands before the backend processed the report paid
+    nothing, whatever the send time said: the flush that pays a window runs
+    at the arrival, and an answer that failed without one arrived nowhere.
+    The readiness that finds a fresh backend reads the shared record, names
+    no payment for the window, and keeps the unacknowledged copy for the
+    fresh one, which folds it in and pays the one summary the six lines
+    owe."""
+    from app import host_allowlist
+
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
+    monkeypatch.setenv("BAZARR_SUPERVISOR_TOKEN", "the-supervisor-token")
+    monkeypatch.setenv("BAZARR_CONFIG_DIR", str(tmp_path))
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    caplog.set_level(logging.INFO)
+
+    clock = [0]
+    recorder = host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0])
+    monkeypatch.setattr(host_allowlist, "_refusals", recorder)
+    config = _config()
+    delivered = []
+    backend_app = Flask(__name__)
+    unprocessed = [False]
+
+    def deliver(form):
+        """The backend's own notice route, over the form the report carried."""
+        with backend_app.test_request_context(
+                "/_supervisor/host_refusal", method="POST",
+                headers={supervisor.TOKEN_HEADER: "the-supervisor-token"}, data=form):
+            return host_allowlist.front_refusal_notice(config=config)
+
+    async def notice(request):
+        form = dict(await request.post())
+        delivered.append((clock[0], form))
+        if unprocessed[0]:
+            # The answer fails before the backend processed anything: no
+            # arrival, no flush, no payment.
+            unprocessed[0] = False
+            return web.Response(status=503)
+        _body, _status, headers = deliver(form)
+        if _status != 204:
+            return web.Response(status=503)
+        return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                "the-supervisor-token", **headers})
+
+    backend = web.Application()
+    backend.router.add_route("POST", "/_supervisor/host_refusal", notice)
+    answering_backend = TestClient(TestServer(backend))
+    await answering_backend.start_server()
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    try:
+        reporter = supervisor._active_reporter
+        monkeypatch.setattr(reporter, "_now", lambda: clock[0])
+        monkeypatch.setattr(reporter._lines, "_now", lambda: clock[0])
+
+        async def settle():
+            for _ in range(6000):
+                if not reporter.pending_reports():
+                    return
+                clock[0] += 0.06
+                await asyncio.sleep(0.01)
+            raise AssertionError("the reports never drained")
+
+        # The backend spends its hour's cap of lines while it answers, and
+        # six more refusals are held back into its own window, which every
+        # acknowledgement carries back: the console holds its mirror of it.
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", answering_backend.server.port)
+        monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+        for index in range(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR):
+            clock[0] = index
+            response = await client.get("/", headers={"Host": f"up{index}.example.com"})
+            assert response.status == 421
+        await settle()
+        for index in range(6):
+            clock[0] = 20 + index
+            response = await client.get("/", headers={"Host": f"held{index}.example.com"})
+            assert response.status == 421
+        await settle()
+        held = recorder.hour_suppressed_window()
+        assert held is not None
+        assert held[0] == 6
+        backend_window = held[2]
+        mirrored = reporter.mirrored_summary()
+        assert mirrored is not None
+        assert mirrored[0] == 6
+        assert mirrored[2] == backend_window
+
+        # The report went out past the window's hour at 3625, and the answer
+        # failed before the backend processed anything: no flush paid the
+        # window, and no send time can claim it did.
+        clock[0] = 3625
+        unprocessed[0] = True
+        response = await client.get("/", headers={"Host": "payer.example.com"})
+        assert response.status == 421
+        for _ in range(2000):
+            if any(line.startswith("Refused") and "payer.example.com" in line
+                   for line in lines):
+                break
+            await asyncio.sleep(0.01)
+        assert any(line.startswith("Refused") and "payer.example.com" in line
+                   for line in lines)
+
+        # The backend restarts, and the readiness that finds the fresh one
+        # reads the shared record: no payment is named for the window, so
+        # the unpaid copy keeps its place for the fresh backend.
+        restarted = host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0])
+        monkeypatch.setattr(host_allowlist, "_refusals", restarted)
+        reporter.ready_to_deliver()
+        delivered.clear()
+        await settle()
+        replays = [form for _at, form in delivered
+                   if form.get("host") == "payer.example.com"]
+        assert replays
+        assert int(replays[0]["mirrored"]) == 6
+        assert replays[0]["mirrored_id"] == backend_window
+        assert reporter.mirrored_summary() is None
+
+        # The fresh backend folded the unpaid window in and paid the one
+        # summary the six lines owe, exactly once, and this console emitted
+        # nothing of its own.
+        summaries = [message for message in root_log.messages
+                     if "host-refusal log lines" in message]
+        assert len(summaries) == 1
+        assert "suppressed 6 host-refusal log lines" in summaries[0]
+        console_summaries = [line for line in lines if line.startswith("Suppressed")]
+        assert console_summaries == []
+    finally:
+        await client.close()
+        await answering_backend.close()
+
+
+@pytest.mark.asyncio
+async def test_acknowledged_repeats_flush_their_summary_when_the_traffic_stops(
+        tmp_path, monkeypatch, root_log, caplog):
+    """A hostname the backend was told about within the hour is skipped by
+    its reports, so the console counts every repeat of it into its own
+    window, and the pair owes the repeats one summary. The summary falls
+    due after the last refusal, when no request is arriving to pay it and
+    no report is going out, so the delivery worker's own bounded timer is
+    what pays it: the summary of a stream of refusals that stopped is not
+    taken with it by the stopping."""
+    from app import host_allowlist
+
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
+    monkeypatch.setenv("BAZARR_SUPERVISOR_TOKEN", "the-supervisor-token")
+    monkeypatch.setenv("BAZARR_CONFIG_DIR", str(tmp_path))
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    caplog.set_level(logging.INFO)
+
+    clock = [0]
+    recorder = host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0])
+    monkeypatch.setattr(host_allowlist, "_refusals", recorder)
+    config = _config()
+    backend_app = Flask(__name__)
+
+    def deliver(form):
+        """The backend's own notice route, over the form the report carried."""
+        with backend_app.test_request_context(
+                "/_supervisor/host_refusal", method="POST",
+                headers={supervisor.TOKEN_HEADER: "the-supervisor-token"}, data=form):
+            return host_allowlist.front_refusal_notice(config=config)
+
+    async def notice(request):
+        form = dict(await request.post())
+        _body, _status, headers = deliver(form)
+        if _status != 204:
+            return web.Response(status=503)
+        return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                "the-supervisor-token", **headers})
+
+    backend = web.Application()
+    backend.router.add_route("POST", "/_supervisor/host_refusal", notice)
+    answering_backend = TestClient(TestServer(backend))
+    await answering_backend.start_server()
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    try:
+        reporter = supervisor._active_reporter
+        monkeypatch.setattr(reporter, "_now", lambda: clock[0])
+        monkeypatch.setattr(reporter._lines, "_now", lambda: clock[0])
+
+        async def settle():
+            for _ in range(6000):
+                if not reporter.pending_reports():
+                    return
+                clock[0] += 0.06
+                await asyncio.sleep(0.01)
+            raise AssertionError("the reports never drained")
+
+        # The backend answers, and the first refusal of a hostname is
+        # reported, acknowledged and logged by it.
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", answering_backend.server.port)
+        monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+        clock[0] = 0
+        response = await client.get("/", headers={"Host": "often.example.com"})
+        assert response.status == 421
+        await settle()
+
+        # The same hostname is refused twenty-nine more times while the
+        # backend answers: no report goes out for a repeat, so the console
+        # counts each one into its own window.
+        for index in range(29):
+            clock[0] = 1 + index
+            response = await client.get("/", headers={"Host": "often.example.com"})
+            assert response.status == 421
+        assert reporter.pending_reports() == []
+        assert [line for line in lines if line.startswith("Refused")] == []
+
+        # The repeats' hour runs and the traffic stops: no request arrives
+        # and no report goes out, so the worker's own timer is what pays
+        # the one summary the twenty-nine repeats owe.
+        clock[0] = 3700
+        for _ in range(200):
+            if any(line.startswith("Suppressed") for line in lines):
+                break
+            await asyncio.sleep(0.01)
+        summaries = [line for line in lines if line.startswith("Suppressed")]
+        assert len(summaries) == 1
+        assert summaries[0].startswith("Suppressed 29 host-refusal lines")
+        backend_summaries = [message for message in root_log.messages
+                             if "host-refusal log lines" in message]
+        assert backend_summaries == []
+    finally:
+        await client.close()
+        await answering_backend.close()
+
+
+@pytest.mark.asyncio
+async def test_repeats_of_a_pending_hostname_count_into_the_one_summary(
+        tmp_path, monkeypatch, root_log, caplog):
+    """A hostname whose notice is still waiting is refused again and again:
+    every repeat coalesces into the one waiting notice, so no delivery will
+    ever tell any recorder about them, and the console that saw them counts
+    each one into its own window, exactly once, at the refusal itself. The
+    delivery of the one notice names the hostname once, and the repeats'
+    hour pays the one summary the repeats owe, so thirty refusals of one
+    hostname are one named line and one summary of twenty-nine."""
+    from app import host_allowlist
+
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
+    monkeypatch.setenv("BAZARR_SUPERVISOR_TOKEN", "the-supervisor-token")
+    monkeypatch.setenv("BAZARR_CONFIG_DIR", str(tmp_path))
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    caplog.set_level(logging.INFO)
+
+    clock = [0]
+    recorder = host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0])
+    monkeypatch.setattr(host_allowlist, "_refusals", recorder)
+    config = _config()
+    delivered = []
+    backend_app = Flask(__name__)
+    release = asyncio.Event()
+
+    def deliver(form):
+        """The backend's own notice route, over the form the report carried."""
+        with backend_app.test_request_context(
+                "/_supervisor/host_refusal", method="POST",
+                headers={supervisor.TOKEN_HEADER: "the-supervisor-token"}, data=form):
+            return host_allowlist.front_refusal_notice(config=config)
+
+    async def notice(request):
+        form = dict(await request.post())
+        delivered.append(form)
+        _body, _status, headers = deliver(form)
+        if _status != 204:
+            return web.Response(status=503)
+        await release.wait()
+        return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                "the-supervisor-token", **headers})
+
+    backend = web.Application()
+    backend.router.add_route("POST", "/_supervisor/host_refusal", notice)
+    answering_backend = TestClient(TestServer(backend))
+    await answering_backend.start_server()
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    try:
+        reporter = supervisor._active_reporter
+        monkeypatch.setattr(reporter, "_now", lambda: clock[0])
+        monkeypatch.setattr(reporter._lines, "_now", lambda: clock[0])
+
+        async def settle():
+            for _ in range(6000):
+                if not reporter.pending_reports():
+                    return
+                clock[0] += 0.06
+                await asyncio.sleep(0.01)
+            raise AssertionError("the reports never drained")
+
+        # The backend answers, and the first refusal of a hostname is
+        # reported to it; its answer is held, so the notice stays pending.
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", answering_backend.server.port)
+        monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+        clock[0] = 0
+        response = await client.get("/", headers={"Host": "often.example.com"})
+        assert response.status == 421
+        for _ in range(2000):
+            if delivered:
+                break
+            await asyncio.sleep(0.01)
+        assert delivered
+
+        # The same hostname is refused twenty-nine more times while its
+        # notice still waits: every repeat coalesces into it, and each one
+        # is counted into the console's own window at the refusal itself.
+        for index in range(29):
+            clock[0] = 1 + index
+            response = await client.get("/", headers={"Host": "often.example.com"})
+            assert response.status == 421
+        assert reporter.pending_reports() == ["often.example.com"]
+
+        # The held answer lands, and the backend names the hostname exactly
+        # once, the one line the pair owes for its first refusal.
+        release.set()
+        await settle()
+        backend_lines = [message for message in root_log.messages
+                         if "refused a request" in message]
+        assert len(backend_lines) == 1
+        assert [line for line in lines if line.startswith("Refused")] == []
+
+        # The repeats' hour runs and the traffic stops: the worker's own
+        # timer pays the one summary the twenty-nine repeats owe, which no
+        # delivery ever told any recorder about.
+        clock[0] = 3700
+        for _ in range(200):
+            if any(line.startswith("Suppressed") for line in lines):
+                break
+            await asyncio.sleep(0.01)
+        summaries = [line for line in lines if line.startswith("Suppressed")]
+        assert len(summaries) == 1
+        assert summaries[0].startswith("Suppressed 29 host-refusal lines")
+        backend_summaries = [message for message in root_log.messages
+                             if "host-refusal log lines" in message]
+        assert backend_summaries == []
+    finally:
+        await client.close()
+        await answering_backend.close()
+
+
+@pytest.mark.asyncio
+async def test_a_burst_that_evicts_notices_still_counts_every_refusal(
+        tmp_path, monkeypatch, root_log, caplog):
+    """A roll of hostnames longer than the pending queue's bound evicts the
+    oldest notices before any delivery can tell the backend about them, and
+    no coalesced repeat of a waiting hostname reaches a recorder through
+    its notice either: while the backend answers, this console is the only
+    recorder for those refusals, so it counts each one into its own window
+    at the refusal itself, and the window is carried to the backend with
+    the first report that lands. A thousand hostnames through the real
+    notice route are therefore accounted once each, as a named line or as
+    one count of the pair's one summary, and none is lost to the queue."""
+    from app import host_allowlist
+
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
+    monkeypatch.setenv("BAZARR_SUPERVISOR_TOKEN", "the-supervisor-token")
+    monkeypatch.setenv("BAZARR_CONFIG_DIR", str(tmp_path))
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    caplog.set_level(logging.INFO)
+
+    clock = [0]
+    recorder = host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0])
+    monkeypatch.setattr(host_allowlist, "_refusals", recorder)
+    config = _config()
+    delivered = []
+    backend_app = Flask(__name__)
+    holding = [True]
+    release = asyncio.Event()
+
+    def deliver(form):
+        """The backend's own notice route, over the form the report carried."""
+        with backend_app.test_request_context(
+                "/_supervisor/host_refusal", method="POST",
+                headers={supervisor.TOKEN_HEADER: "the-supervisor-token"}, data=form):
+            return host_allowlist.front_refusal_notice(config=config)
+
+    async def notice(request):
+        form = dict(await request.post())
+        delivered.append((clock[0], form))
+        if holding[0]:
+            # The first delivery's answer stays unresolved while the whole
+            # burst is refused, so nothing is acknowledged and the pending
+            # queue overflows.
+            holding[0] = False
+            await release.wait()
+            return web.Response(status=503)
+        _body, _status, headers = deliver(form)
+        if _status != 204:
+            return web.Response(status=503)
+        return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                "the-supervisor-token", **headers})
+
+    backend = web.Application()
+    backend.router.add_route("POST", "/_supervisor/host_refusal", notice)
+    answering_backend = TestClient(TestServer(backend))
+    await answering_backend.start_server()
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    try:
+        reporter = supervisor._active_reporter
+        monkeypatch.setattr(reporter, "_now", lambda: clock[0])
+        monkeypatch.setattr(reporter._lines, "_now", lambda: clock[0])
+
+        async def settle():
+            for _ in range(6000):
+                if not reporter.pending_reports():
+                    return
+                clock[0] += 0.06
+                await asyncio.sleep(0.01)
+            raise AssertionError("the reports never drained")
+
+        # A thousand hostnames are refused while the backend answers, with
+        # the first delivery's answer held: the pending queue holds the
+        # newest fifty of them and evicts the rest before any delivery can
+        # tell the backend about them.
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", answering_backend.server.port)
+        monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+        for index in range(1000):
+            clock[0] = index
+            response = await client.get("/", headers={"Host": f"h{index}.example.com"})
+            assert response.status == 421
+        assert len(reporter.pending_reports()) == supervisor.host_policy.REFUSED_HOSTS_LIMIT
+        delivered.clear()
+
+        # The held answer fails, and the reports that follow carry the
+        # window of every evicted refusal to the backend, which folds the
+        # counts into its own.
+        release.set()
+        for _ in range(2000):
+            if not reporter.pending_reports():
+                break
+            clock[0] += 0.06
+            await asyncio.sleep(0.01)
+        assert reporter.pending_reports() == []
+        carried = [form for _at, form in delivered if "suppressed" in form]
+        assert carried
+        evicted = 1000 - 1 - supervisor.host_policy.REFUSED_HOSTS_LIMIT
+        assert int(carried[0]["suppressed"]) == evicted
+
+        # One more refusal, past the hour the counts opened in, makes the
+        # backend's own flush pay the one summary the combined window owes.
+        # Its notice waits out the hour's reporting bound the burst's fifty
+        # acknowledgements spent, so the clock runs past that too.
+        clock[0] = 3700
+        response = await client.get("/", headers={"Host": "witness.example.com"})
+        assert response.status == 421
+        clock[0] += int(supervisor.host_policy.HOUR_SECONDS) + 10
+        for _ in range(2000):
+            if reporter.pending_reports() == []:
+                break
+            # The worker waits out the bound on its own clock, so it is
+            # woken once the test's clock has run past it.
+            reporter.wake_event().set()
+            clock[0] += 0.06
+            await asyncio.sleep(0.01)
+        assert reporter.pending_reports() == []
+
+        # Every refusal of the burst is accounted exactly once: a named
+        # line, on either console, or one count of the one summary the
+        # pair paid. Nothing is lost to the queue's bound.
+        named = len([message for message in root_log.messages
+                    if "refused a request" in message])
+        named += len([line for line in lines if line.startswith("Refused")])
+        summarized = sum(int(count) for count in re.findall(
+            r"suppressed (\d+) host-refusal log lines", "\n".join(root_log.messages)))
+        summarized += sum(int(count) for count in re.findall(
+            r"Suppressed (\d+) host-refusal lines", "\n".join(lines)))
+        assert named + summarized == 1001
+        backend_summaries = [message for message in root_log.messages
+                             if "host-refusal log lines" in message]
+        assert len(backend_summaries) == 1
+        console_summaries = [line for line in lines if line.startswith("Suppressed")]
+        assert console_summaries == []
+    finally:
+        await client.close()
+        await answering_backend.close()
+
+
+def test_distinct_lines_sharing_one_timestamp_spend_a_slot_each():
+    """Two refusals can share one timestamp, and the lines written for them
+    are still two lines: the report carries each line's stable identity
+    beside its time, and the budget the answer folds into spends one slot
+    per identity rather than one per distinct timestamp, so twenty lines
+    that share one timestamp spend the hour's whole cap and not a single
+    slot of it."""
+    clock = [500.0]
+    front = supervisor.host_policy.BoundedRefusalRecorder(now=lambda: clock[0])
+    for index in range(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR):
+        assert front.note(f"front{index}.example.com") is True
+    times = front.hour_line_times()
+    assert len(times) == supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR
+    assert len(set(times)) == 1
+
+    backend = supervisor.host_policy.BoundedRefusalRecorder(now=lambda: clock[0])
+    backend.merge_hour_lines(times, front.hour_line_ids())
+
+    # The twenty lines spent the merged budget whole: a fresh refusal is
+    # held back into the backend's own window, and a replay of the same
+    # lines, identities and all, folds nothing further in.
+    assert backend.note("fresh.example.com") is False
+    assert backend.hour_suppressed_window()[0] == 1
+    backend.merge_hour_lines(times, front.hour_line_ids())
+    assert backend.note("later.example.com") is False
+    assert backend.hour_suppressed_window()[0] == 2
