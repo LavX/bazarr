@@ -789,6 +789,17 @@ export async function externalBazarr(url: string): Promise<BazarrInstance> {
       signal: AbortSignal.timeout(REQUEST_MS),
     }).then((r) => r.text());
     apiKey = /"apiKey":\s*"([^"]+)"/.exec(html)?.[1] ?? "";
+    if (!apiKey && /window\.Bazarr\s*=\s*JSON\.parse/.test(html)) {
+      // The shell Bazarr serves boots from window.Bazarr, which carries the
+      // API key only for a session the instance lets in. A shell without
+      // the key opens on the login form.
+      throw new Error(
+        `The instance at ${baseURL} asks for a login, so its page hands out no API key. ` +
+          "Set BAZARR_E2E_API_KEY: without it the specs that use the api fixture send an " +
+          "empty key and answer 401, while the browser specs still pass on the session " +
+          "cookie, so the failure reads like a suite regression when it is a missing variable.",
+      );
+    }
   }
   return { baseURL, apiKey, name: null, stop: async () => undefined };
 }

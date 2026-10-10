@@ -307,17 +307,21 @@ const http: {
   route: (url: string, init?: RequestInit) => Response | null;
   /** How long a request takes, on the same clock as the stubbed docker's. */
   delay: ((url: string, init?: RequestInit) => number) | null;
+  /** The body a request is answered with. */
+  body: (url: string, init?: RequestInit) => string;
 } = {
   calls: [],
   status: () => 200,
   route: () => null,
   delay: null,
+  body: () => "",
 };
 
 function stubFetch() {
   http.calls = [];
   http.status = (_url, init) => (init?.method === "POST" ? 204 : 200);
   http.delay = null;
+  http.body = () => "";
   // The settings API echoes the base the URL is under, as an instance
   // configured with that base does: what the start checks to prove the
   // base took effect.
@@ -346,7 +350,9 @@ function stubFetch() {
       const routed = http.route(url, init);
       if (routed) return routed;
       const status = http.status(url, init);
-      return new Response(status === 204 ? null : "", { status });
+      return new Response(status === 204 ? null : http.body(url, init), {
+        status,
+      });
     }),
   );
 }
@@ -873,6 +879,23 @@ describe("external instances", () => {
   it("refuses a URL that is not a URL, before any request is made", async () => {
     await expect(externalBazarr("bazarr.example.lan")).rejects.toThrow();
     expect(http.calls).toHaveLength(0);
+  });
+
+  it("refuses an instance that asks for a login but hands over no key", async () => {
+    // The shell Bazarr serves a session it does not let in: window.Bazarr
+    // carries no API key, and the app opens on its login form.
+    const shell =
+      "<script>window.Bazarr = JSON.parse(" +
+      '`{"baseUrl": "/", "canUpdate": false, "hasUpdate": false, "isConfigured": true}`' +
+      ");</script>";
+    http.body = () => shell;
+
+    await expect(externalBazarr("https://bazarr.example.lan")).rejects.toThrow(
+      /BAZARR_E2E_API_KEY[\s\S]*401/,
+    );
+    expect(http.calls.map((call) => call.url)).toEqual([
+      "https://bazarr.example.lan/",
+    ]);
   });
 });
 

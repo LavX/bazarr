@@ -383,7 +383,12 @@ npm run e2e -- --grep @status --grep-invert "@stateful|@live"
 ```
 
 Without `BAZARR_E2E_API_KEY` the key is read from the instance's page, which
-only works when authentication is off.
+only works when authentication is off. The api fixture sends that key on
+every call, while the browser specs carry the session cookie instead, so with
+form authentication on and the variable unset the specs that use the api
+fixture answer 401 while the browser specs still pass, and a missing variable
+looks like a suite regression. The suite refuses such an instance with a
+message naming the variable.
 
 `BAZARR_E2E_URL` may be the root of a host or port, such as
 `https://bazarr.example.lan`, or an instance served under a path, such as
