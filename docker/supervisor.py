@@ -925,6 +925,14 @@ class _RefusalReporter:
         self._wake = asyncio.Event()  # refusals and readiness wake the worker
         self._drain_task: "asyncio.Task | None" = None
         self._recovered = self._recover_unpaid_ownership()
+        if self._recovered is not None:
+            # The debt a lost console left on the shared record is this
+            # console's from the start, and it owes the pair no refusal to
+            # carry it: the worker starts here, so its own paced look pays
+            # the one summary the ownership counts once its hour has run,
+            # and a console that serves quietly after its restart still
+            # pays what the console before it claimed.
+            self.start_drain()
 
     def _recover_unpaid_ownership(self):
         """The unpaid window ownership the shared record still holds.
@@ -940,7 +948,10 @@ class _RefusalReporter:
         timer of the pair pays the counts while the ownership holds
         them, and the debt a restart would have orphaned is read back
         here instead, to be paid the way the window it stands for was
-        owed. Every unpaid ownership folds into the one debt the way the
+        owed: the worker the recovery starts pays it on its own paced
+        look, once the hour it counts has run, with no refusal needed to
+        carry the debt to it. Every unpaid ownership folds into the one
+        debt the way the
         windows they stand for fold: the counts add, the earliest
         opening keeps its place, and the one line the hour's budget rules
         name pays them together.
@@ -2232,7 +2243,8 @@ class _RefusalReporter:
         else: the queue can evict the notice whose delivery waited and a
         fresh refusal of the same hostname can queue a new one, and the
         identity the delivery carried tells the two apart. A mismatched
-        answer resolves the delivery alone, spending the bound a real
+        answer resolves the delivery and the notice it answered alone,
+        spending the bound a real
         acknowledged delivery spent and leaving the fresh notice its own
         place, its own first failure and its own delivery, because the
         live backend was never told about the fresh refusal and no
@@ -2267,7 +2279,13 @@ class _RefusalReporter:
             # notice the queue evicted while it waited: the fresh notice
             # keeps its place and is due at once, and the hostname's
             # cooldown is not started by an acknowledgement of a refusal
-            # the backend heard an hour's worth of news before.
+            # the backend heard an hour's worth of news before. The
+            # answered notice resolves with its delivery all the same,
+            # its counted identity leaving with it the way the attempt
+            # above did, so no mark of a notice nothing will ever answer
+            # again holds a fresh notice of the same hostname to a count
+            # it never made.
+            self._accounted_notices.discard(notice_id)
             self._wake.set()
             return
         self._last_report[host] = now
@@ -2314,16 +2332,25 @@ class _RefusalReporter:
         The notice keeps its place in both cases, because the backend that
         took it in owes the acknowledgement the loss ate, and the retry
         reaches it and its own accounting holds the hostname from a
-        second line. The naming the failure delivers is claimed on the
-        record the pair shares as well, under the same lock the
-        backend's own accounting claims its naming: a backend that took
-        the report in before the client gave up on its answer can still
-        be holding its processing, and the late accounting that follows
-        the timeout meets the console's claim and names the refusal
-        nowhere a second time, so the one naming the failure wrote is the
-        one the pair keeps, whichever channel reached the refusal first.
-        A notice this console named in the line of its first
-        failure holds its retries to that one naming wherever the hour has
+        second line. The naming a failure would deliver is claimed before
+        any of it is delivered, on the record the pair shares, under the
+        same lock the backend's own accounting claims its naming: a
+        backend that took the report in before the client gave up on its
+        answer can still be holding its processing, and a failure whose
+        claim that late accounting beat names nothing here at all, no
+        line and no held-back count beside the one the backend delivered,
+        because the one naming the pair keeps is whichever channel
+        reached the refusal first and the console's own accounting is
+        owed nothing beside it. A claim the record refuses with no live
+        accounting standing behind it holds nothing either, because the
+        resolution a notice's own eviction wrote is the claim's cause and
+        not an assignment: the console is the only layer that saw the
+        refusal, and the failure names it in its own right with the
+        notice's marks resolving beside it. The claim that wins carries
+        the naming, and the late accounting that follows it meets the
+        claim and names the refusal nowhere a second time. A notice this
+        console named in the line of its first failure holds its retries
+        to that one naming wherever the hour has
         rolled to, because the notice is unchanged and its own lifetime,
         the acknowledgement or the eviction that resolves it, is the
         boundary the pair keeps, past the hour the hostname's pace rolls
@@ -2354,7 +2381,10 @@ class _RefusalReporter:
         deliver again reaches the record, no late accounting of one names
         its refusal a second time, and the failure holds the
         console to the one count it made rather than reconciling an
-        outcome the record refused.
+        outcome the record refused. Every exit the failure can take
+        resolves the marks, the one that counts its own line, the one
+        that finds the refusal counted already and the one whose claim
+        the backend's late accounting beat alike.
         """
         self._last_failure = self._now()
         if host in self._pending:
@@ -2402,6 +2432,33 @@ class _RefusalReporter:
                 self._accounted_notices.discard(notice_id)
                 self._attempted_notices.discard(notice_id)
             return
+        if (notice_id is not None
+                and not host_policy.record_notice_accounted(
+                    notice_id, self._now(),
+                    claimant=host_policy.NOTICE_ACCOUNTED_BY_CONSOLE)
+                and host_policy.notice_accounted_has(notice_id)):
+            # The backend's own accounting won the naming while this
+            # failure was deciding its line: the late processing of a
+            # report the client gave up on has landed on the record under
+            # the lock, and the refusal keeps the one naming it owes, the
+            # naming the backend delivered. The failure owes nothing
+            # beside it: no line is written, no slot of the hour is spent
+            # and no held-back count joins a window, and the notice
+            # carries no account of its own. The marks of an evicted
+            # notice resolve together with it, the same resolution the
+            # counted exits take, so the fresh notice of the same hostname
+            # that follows counts its own first failure anew. A claim the
+            # record refuses with no live accounting standing behind it,
+            # the resolution a resolution of the notice already wrote,
+            # holds nothing: the queue's own eviction ended the notice's
+            # life before this failure, and the console is the only layer
+            # that saw the refusal, so the failure names it below the way
+            # its own eviction resolves its marks with it.
+            if evicted:
+                self._lines.first_failure_resolved(host)
+                self._accounted_notices.discard(notice_id)
+                self._attempted_notices.discard(notice_id)
+            return
         counted = self._lines.note_retry(host, notice_id)
         if counted:
             # The hour named this refusal in a line of this console's
@@ -2419,19 +2476,13 @@ class _RefusalReporter:
             # wrote or in the first failure the hour's cap held back, or an
             # earlier failure of the same notice already did, so the
             # refusal is counted and an eviction after the failure counts
-            # nothing for it a second time.
+            # nothing for it a second time. The claim above already holds
+            # the naming on the record the pair shares, so the late
+            # processing of a backend that took the report in before the
+            # client gave up on its answer meets the claim and writes no
+            # line and no count of its own, and the refusal keeps the one
+            # naming it owes, whichever channel reached it first.
             self._accounted_notices.add(notice_id)
-            # The naming is claimed on the record of notices the pair
-            # shares as well, under the same lock the backend's own
-            # accounting claims its naming: the console that names a
-            # refusal at a failure holds the assignment for the pair, so
-            # the late processing of a backend that took the report in
-            # before the client gave up on its answer meets the claim and
-            # writes no line and no count of its own, and the refusal
-            # keeps the one naming it owes, whichever layer reached it
-            # first.
-            host_policy.record_notice_accounted(
-                notice_id, self._now(), claimant=host_policy.NOTICE_ACCOUNTED_BY_CONSOLE)
         if evicted:
             # The notice this failure was taken for has already left the
             # queue, so nothing will ever resolve the marks it holds: the
@@ -2455,7 +2506,7 @@ class _RefusalReporter:
         """
         return self._delivery_generation == self._ready_generation
 
-    def report_requeued_for_the_fresh_backend(self, host):
+    def report_requeued_for_the_fresh_backend(self, host, notice_id=None):
         """Resolve a delivery the swapped-out backend acknowledged, without
         telling the fresh one anything.
 
@@ -2465,8 +2516,15 @@ class _RefusalReporter:
         due at once, the way readiness makes everything due, and neither the
         hour's bound nor the cooldown is spent, because the fresh backend
         spends them when its own acknowledgement lands. The notice's
-        first-failure mark is left as it is: the notice is still the same
-        notice, waiting for the backend that never received it.
+        first-failure mark is left as it is in that case, and so are the
+        identities the delivery carried: the notice is still the same
+        notice, waiting for the backend that never received it. A delivery
+        whose notice the queue no longer holds, evicted while it waited or
+        replaced under its hostname by a fresh one, resolves the notice here
+        the way the failure and the acknowledgement of a gone notice do:
+        the identities leave with it, so no mark of a notice nothing will
+        ever answer again holds a fresh notice of the same hostname to a
+        count it never made.
         """
         if host in self._pending:
             self._pending[host] = None
@@ -2474,6 +2532,10 @@ class _RefusalReporter:
             self._in_flight = None
             self._in_flight_evicted = False
             self._in_flight_id = None
+        if notice_id is not None and self._pending_ids.get(host) != notice_id:
+            self._lines.first_failure_resolved(host)
+            self._accounted_notices.discard(notice_id)
+            self._attempted_notices.discard(notice_id)
         self._wake.set()
 
     def in_flight_notice_id(self):
@@ -2583,7 +2645,13 @@ class _RefusalReporter:
         return self._wake
 
     def start_drain(self):
-        """Start the one delivery worker if it is not running."""
+        """Start the one delivery worker if it is not running.
+
+        A refusal is not the only thing that owes the worker: a console
+        that recovers a debt at its start starts the worker here as
+        well, so the debt pays on the worker's paced look without a
+        refusal to wake it.
+        """
         if self._drain_task is None or self._drain_task.done():
             self._drain_task = asyncio.create_task(_drain_refusal_notices(self))
 
@@ -2769,7 +2837,7 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
                     # place for the fresh backend, and neither the hour's
                     # bound nor the cooldown is spent by an answer the live
                     # backend never gave.
-                    reporter.report_requeued_for_the_fresh_backend(host)
+                    reporter.report_requeued_for_the_fresh_backend(host, notice_id)
                 reporter.merge_acknowledged(carried, *_acknowledged_accounting(response))
                 return
     except (ClientConnectorError, ConnectionTimeoutError):

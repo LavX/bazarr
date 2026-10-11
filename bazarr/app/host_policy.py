@@ -139,6 +139,45 @@ def _read_completed_windows_record(path):
         return {}
 
 
+def _prune_completed_windows_record(record, now):
+    """Keep the pair's record of windows bounded, each entry on the rule
+    its own life keeps.
+
+    A completed payment is a proof, held on the retention span both sides
+    share because no layer re-carries a copy past it and the answer that
+    would carry the proof cannot lag behind by more. An unpaid ownership
+    is a promise rather than a proof, and a promise no passage of time
+    pays: the console that claimed it owes the one summary its counts
+    stand for until the payment completes the identities or a release
+    returns them, and the moment the claim was taken says nothing about
+    when a payer comes back to it, so the entry is held past every span
+    and no update of the record ages it out. The ownerships are bounded
+    in number instead, on the pair's own bound of refused hosts, and the
+    bound retires whole claims oldest first, because one claim writes
+    its facts under every identity it covers and a bound that dropped
+    half of one would hand another layer a constituent the promise still
+    owns: the newest claims are the ones a payer can still come back to,
+    and a claim that fell out of that many newer ones has outlasted
+    every bounded memory the pair keeps of anything else.
+    """
+    pruned = {}
+    claims = {}
+    for window_id, entry in record.items():
+        if isinstance(entry, (int, float)):
+            if now - entry < CARRY_RETENTION_SECONDS:
+                pruned[window_id] = entry
+        elif isinstance(entry, dict):
+            ids = entry.get('ids')
+            key = tuple(ids) if isinstance(ids, list) else (window_id,)
+            claims.setdefault(key, []).append(window_id)
+    ordered = sorted(claims.items(), key=lambda claim: min(
+        record[window_id].get('claimed', 0.0) for window_id in claim[1]))
+    for _ids, window_ids in ordered[-REFUSED_HOSTS_LIMIT:]:
+        for window_id in window_ids:
+            pruned[window_id] = record[window_id]
+    return pruned
+
+
 def record_completed_windows(window_ids, paid_at, path=None):
     """Write the payment of one or more windows into the shared record.
 
@@ -160,7 +199,9 @@ def record_completed_windows(window_ids, paid_at, path=None):
     their own shape, and a payment that lands on one completes it, the
     entry taking the payment's stamp the way every completed window's
     does, while the ownerships no payment touched keep their places
-    through the merge, held on the same span their claim was.
+    through the merge, held past every span until the payment completes
+    them or a release returns them, and bounded on the pair's own count
+    of claims rather than the span.
     """
     if not window_ids:
         return
@@ -183,12 +224,8 @@ def record_completed_windows(window_ids, paid_at, path=None):
             lock_handle.close()
             lock_handle = None
     try:
-        record = _read_completed_windows_record(path)
-        record = {window_id: stamp for window_id, stamp in record.items()
-                  if (isinstance(stamp, (int, float))
-                      and paid_at - stamp < CARRY_RETENTION_SECONDS)
-                  or (isinstance(stamp, dict)
-                      and paid_at - stamp.get('claimed', paid_at) < CARRY_RETENTION_SECONDS)}
+        record = _prune_completed_windows_record(
+            _read_completed_windows_record(path), paid_at)
         for window_id in window_ids:
             record[window_id] = paid_at
         fd, tmp = tempfile.mkstemp(dir=str(record_path.parent),
@@ -315,11 +352,7 @@ def claim_summary_payment(window_ids, paid_at, path=None, ownership=None):
         record = _read_completed_windows_record(path)
         claimed = all(window_id not in record for window_id in window_ids)
         if claimed:
-            record = {known_id: stamp for known_id, stamp in record.items()
-                      if (isinstance(stamp, (int, float))
-                          and paid_at - stamp < CARRY_RETENTION_SECONDS)
-                      or (isinstance(stamp, dict)
-                          and paid_at - stamp.get('claimed', paid_at) < CARRY_RETENTION_SECONDS)}
+            record = _prune_completed_windows_record(record, paid_at)
             for window_id in window_ids:
                 if ownership is None:
                     record[window_id] = paid_at
@@ -550,14 +583,22 @@ def reserve_summary_emission(now, path=None):
     settlement by identity alike, because a settlement pays counts into a
     line the same way a whole window does, and the write the caller's own
     line follows re-stamps the moment the reservation already took. The
-    newest moment decides exactly as the ceiling's own read does: a line
-    within the hour means the hour's one summary is spent, whichever
-    layer paid it, and a moment that reads as newer than the asking clock
-    holds nothing, because a clock that has not reached the recorded
-    moment does not share it. The write is best effort with the same
-    trade the record's other updates keep: a record nothing can read or
-    write proves no line the pair can wait for, and the payment proceeds
-    rather than hold a summary on a proof that never reached the file.
+    newest moment decides, whichever side of the caller's captured one it
+    landed on: a line within the hour means the hour's one summary is
+    spent, whichever layer paid it, and a moment newer than the capture
+    is a reservation another timer of the pair took while this one held
+    an older moment, so the hour the newest line opened is the hour this
+    payment asks inside however far behind its capture runs, and the
+    reservation holds the line back with every count it keeps rather
+    than let a stale capture read the pair's newest hour as open. A
+    moment further ahead than the hour reads as no proof all the same,
+    because a clock that far from the recorded moment is a clock the
+    caller is not on, and the pair pays the summary it owes rather than
+    hold it on a ceiling no shared clock ever opens. The write is best
+    effort with the same trade the record's other updates keep: a record
+    nothing can read or write proves no line the pair can wait for, and
+    the payment proceeds rather than hold a summary on a proof that never
+    reached the file.
     """
     if not isinstance(now, (int, float)):
         return True
@@ -576,7 +617,8 @@ def reserve_summary_emission(now, path=None):
     try:
         record = _read_summary_emissions_record(path)
         newest = max(record) if record else None
-        if newest is not None and 0 <= now - newest < HOUR_SECONDS:
+        if (newest is not None
+                and -HOUR_SECONDS <= now - newest < HOUR_SECONDS):
             return False
         record.append(now)
         record = [stamp for stamp in record if now - stamp < CARRY_RETENTION_SECONDS]
