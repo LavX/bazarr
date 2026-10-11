@@ -93,10 +93,8 @@ def _run_successful_translation_job(monkeypatch, media_type, forced=False, hi=Fa
     monkeypatch.setattr(translate_main, "validate_translation_params", lambda *args, **kwargs: None)
     monkeypatch.setattr(translate_main, "convert_language_codes",
                         lambda to_lang, _forced, _hi: (Language("hun"), to_lang))
-    monkeypatch.setattr(translate_main, "get_subtitle_path",
-                        lambda *args, **kwargs: f"/movies/fixture-{media_type}.hu.srt")
-    monkeypatch.setattr(translate_main, "get_subtitle_destination_path",
-                        lambda file, subtitle: f"/movies/{subtitle}")
+    monkeypatch.setattr(translate_main, "translated_destination_path",
+                        lambda video_path, to_lang, forced, hi: f"/movies/fixture-{media_type}.hu.srt")
     monkeypatch.setattr(translate_main, "alpha3_from_alpha2", lambda code: "hun")
     translator = Mock()
     translator.translate.return_value = True
