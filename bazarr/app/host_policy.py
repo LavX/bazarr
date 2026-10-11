@@ -408,6 +408,23 @@ def _notice_record_entry(record, notice_id):
     return entry if isinstance(entry, dict) else {}
 
 
+def _notice_record_resolved(record, notice_id):
+    """Whether the record shows this notice resolved, an answer or the
+    queue's bound having ended its life.
+
+    An entry the record no longer holds is a resolved notice whose
+    resolution aged out of the retention span, and an entry holding its
+    resolution is one the console wrote on the acknowledgement or the
+    eviction: both read the same here, because the resolution is the
+    last word on the notice's life whichever shape it meets the reader
+    in, and the facts of its delivery mean nothing after it.
+    """
+    entry = record.get(notice_id)
+    if not isinstance(entry, dict):
+        return True
+    return isinstance(entry.get('resolved'), (int, float))
+
+
 def _prune_notice_record(record, now):
     """Keep the entries whose facts are still within their retention
     spans, so the record stays bounded: a receipt is a fact about one
@@ -421,10 +438,20 @@ def _prune_notice_record(record, now):
     refusal nowhere again, and the entry leaves the record only at the
     acknowledgement that resolves the notice, in the trim the console
     makes, so a record that keeps an unresolved notice's outcome cannot
-    outgrow the notices the pair still holds."""
+    outgrow the notices the pair still holds. A resolution is held on the
+    retention span both sides share, because it exists to refuse the
+    writes a lost answer can let lag behind it, and no write lags behind
+    its notice by more than the span a delivery no answer resolved is
+    worth, so the resolutions age out on their own and the record stays
+    bounded whatever the pair's deliveries do."""
     pruned = {}
     for notice_id, entry in record.items():
         if not isinstance(entry, dict):
+            continue
+        resolved = entry.get('resolved')
+        if isinstance(resolved, (int, float)):
+            if now - resolved < CARRY_RETENTION_SECONDS:
+                pruned[notice_id] = entry
             continue
         received = entry.get('received')
         accounted = entry.get('accounted')
@@ -467,6 +494,23 @@ def _record_notice_fact(notice_id, key, stamp, path):
     write it guards, exactly as the write is: a platform or a directory
     it cannot be taken in proceeds as one unlocked update rather than
     proving the fact never happened.
+
+    The lifecycle state of the notice decides before either fact lands:
+    a notice the record shows resolved, by the acknowledgement that
+    answered it or the eviction that dropped it from the pending queue,
+    holds its resolution on the record under this same lock, and a fact
+    that arrives after the resolution writes nothing. The client of a
+    delivery can give up on its answer before the backend ever took the
+    report in, and the backend's writes follow that timeout by however
+    long the handler waited, so the receipt and the outcome can both
+    land for a notice nothing will ever deliver again: an outcome like
+    that stays on the record with nothing to remove it, because the
+    notice's own lifetime ended at the eviction and no answer will trim
+    it, and the accounting bound that reconciles its marks against the
+    record reads the orphan as a notice still waiting, however often
+    the pair resolves notices the backend never answered. The resolution
+    on the record is the last word on the notice's life, and the writes
+    that follow it find it here, under the lock, and write nothing.
     """
     record_path = Path(path)
     lock_handle = None
@@ -482,6 +526,12 @@ def _record_notice_fact(notice_id, key, stamp, path):
     try:
         record = _read_notice_receipts_record(path)
         entry = _notice_record_entry(record, notice_id)
+        if isinstance(entry.get('resolved'), (int, float)):
+            # The notice is resolved and its resolution is on the record:
+            # no fact of its delivery can land for it any more, because
+            # nothing will ever carry the notice again and nothing will
+            # ever trim what a write would leave.
+            return
         entry[key] = stamp
         record[notice_id] = entry
         _store_notice_record(path, _prune_notice_record(record, stamp))
@@ -536,19 +586,31 @@ def record_notice_accounted(notice_id, accounted_at, path=None):
 
 
 def trim_notice_record(notice_id, path=None):
-    """Drop the record's entry for a notice an answer has resolved.
+    """Resolve the notice on the record, and drop the facts of its
+    delivery with the resolution.
 
-    The console trims the entry when the acknowledgement it answers
-    resolves the notice, so the identity leaves the record the moment no
-    delivery is waiting under it, and the backend's bounded accounting of
-    notices reads it as resolved and drops its mark before the mark of any
-    notice still waiting, however many acknowledged notices arrive around
-    one that is. The trim is held on the lock the record's own updates
-    hold, best effort with them: a record nothing can write keeps the
-    entry, and a resolved identity kept past its trim only holds a place
-    the backend's own retention ages out. A trim of an identity the
-    record never held writes nothing, because there is nothing the answer
-    resolved to drop.
+    The console resolves a notice here, at the acknowledgement that
+    answered it and at the eviction that dropped it from the pending
+    queue, and the resolution is written as the notice's lifecycle state
+    under the lock the record's own updates hold: the facts of the
+    delivery leave with it, and a write that follows the resolution finds
+    the state here and lands nothing, because the client of a delivery
+    can give up on its answer before the backend ever took the report
+    in, and the backend's writes follow that timeout by however long its
+    handler waited. An outcome that landed for a resolved notice would
+    stay on the record with nothing to remove it, because no delivery
+    will ever carry the notice again, and the accounting bound that
+    reconciles its marks against the record reads the stale outcome as a
+    notice still waiting, so the resolution is the last word on the
+    notice's life and the writes coordinate on it, under the one lock
+    they share. The backend's bounded accounting of notices reads the
+    state the same way and drops the notice's mark before the mark of
+    any notice still waiting, however many acknowledged notices arrive
+    around one that is. The state is kept on the retention span both
+    sides share, so it outlives any write the timeout let lag and leaves
+    the record on its own. The trim is best effort with the record's
+    other updates: a record nothing can write keeps the facts it held,
+    and the retention ages them out.
     """
     if not notice_id:
         return
@@ -565,10 +627,10 @@ def trim_notice_record(notice_id, path=None):
             lock_handle.close()
             lock_handle = None
     try:
+        stamp = time.time()
         record = _read_notice_receipts_record(path)
-        if notice_id in record:
-            record.pop(notice_id, None)
-            _store_notice_record(path, _prune_notice_record(record, time.time()))
+        record[notice_id] = {'resolved': stamp}
+        _store_notice_record(path, _prune_notice_record(record, stamp))
     except Exception:
         pass
     finally:
@@ -577,23 +639,40 @@ def trim_notice_record(notice_id, path=None):
 
 
 def notice_receipt_has(notice_id, path=None):
-    """Whether the shared record shows the backend took this notice in."""
+    """Whether the shared record shows the backend took this notice in.
+
+    A resolved notice reads false: its resolution is the last word on
+    its life, and a receipt that lags behind one means nothing, because
+    nothing will ever carry the notice again.
+    """
     if not notice_id:
         return False
     path = notice_receipts_record_path() if path is None else path
-    return notice_id in _read_notice_receipts_record(path)
+    record = _read_notice_receipts_record(path)
+    if _notice_record_resolved(record, notice_id):
+        return False
+    entry = _notice_record_entry(record, notice_id)
+    return isinstance(entry.get('received'), (int, float))
 
 
 def notice_accounted_has(notice_id, path=None):
     """Whether the shared record shows the backend completed this notice's
     accounting: the refusal it carried was named or merged there, and the
-    console whose delivery failed names it nowhere else."""
+    console whose delivery failed names it nowhere else.
+
+    A resolved notice reads false: the resolution dropped the facts of
+    its delivery, because the acknowledgement or the eviction that
+    resolved it already told the pair everything the notice owed, and
+    the writes that lag behind the resolution land nothing.
+    """
     if not notice_id:
         return False
     path = notice_receipts_record_path() if path is None else path
-    entry = _read_notice_receipts_record(path).get(notice_id)
-    return (isinstance(entry, dict)
-            and isinstance(entry.get('accounted'), (int, float)))
+    record = _read_notice_receipts_record(path)
+    if _notice_record_resolved(record, notice_id):
+        return False
+    entry = _notice_record_entry(record, notice_id)
+    return isinstance(entry.get('accounted'), (int, float))
 
 
 def effective_host(host):
@@ -851,6 +930,7 @@ class BoundedRefusalRecorder:
         self._completed_windows = OrderedDict()  # window ID -> when it was paid here
         self._first_failures = OrderedDict()  # host -> when its first failed notice counted
         self._named_notices = OrderedDict()  # host -> the notice whose line was written here
+        self._folded_paces = OrderedDict()  # host -> the backend line whose fold holds its pace
         self._notice_accounted = OrderedDict()  # notice identity -> when its refusal was named here
 
     def _count_suppressed(self, now):
@@ -908,7 +988,14 @@ class BoundedRefusalRecorder:
         for it and this hour's cap here is not spent on the one already
         spent there. A line held back this way is not counted as
         suppressed either, because the console that spent it keeps its own
-        count of what it held back.
+        count of what it held back. The fold is remembered as the
+        hostname's pace apart from the lines this layer spent on its own,
+        because the two spend their one line on different refusals: the
+        fold named the hour's earlier refusal at the backend that logged
+        it, while a fresh refusal of the hostname, once a backend has
+        restarted or a console's hour has rolled, is named nowhere yet,
+        and the failure of its first notice asks the pace and counts
+        that one refusal here, the only layer left that can.
 
         ``refused_at`` carries the refusal's own time for a report that
         lands late, so the record holds when the refusal happened and not
@@ -942,6 +1029,13 @@ class BoundedRefusalRecorder:
                     self._last_lines[host] = max(self._last_lines[host], line_at)
                 else:
                     self._last_lines[host] = line_at
+                # The fold is remembered as the hostname's pace, because
+                # it is a line a backend wrote and not one this layer
+                # spent: the refusal the fold arrived on was named there,
+                # while a fresh refusal of the hostname within the hour is
+                # named nowhere yet, and the failure of its first notice
+                # is the first layer that can be told so.
+                self._folded_paces[host] = self._last_lines[host]
                 return False
             if counted_elsewhere:
                 # The console that saw the refusal counted it into the
@@ -1104,10 +1198,20 @@ class BoundedRefusalRecorder:
         its hostname named nowhere else, so the first failed notice of a
         host whose line the hour's cap holds back counts toward the window
         the way its own held-back line would, and the host's later retries
-        of that notice do not. The host is marked when it is counted, and
-        the mark lives exactly as long as the notice: the log pace cannot
-        tell the retries of one notice from a fresh notice of the same
-        host, because no line was ever written for the host and
+        of that notice do not. The hour's pace holds a fresh notice the
+        same way the cap does when the pace was a backend's to spend: a
+        line a backend logged and the acknowledgement folded into this
+        recorder named the hour's earlier refusal, and a fresh refusal of
+        the hostname once a backend has restarted is still owed its
+        naming, whichever notice carries it, so the failure counts that
+        notice once as suppressed and no line is stamped for it, because
+        no layer ever wrote one. A pace this console spent itself names
+        the refusal the report carries, at the refusal that queued the
+        notice or at a failed delivery of this very notice, and the
+        failure counts nothing beside it. The host is marked when it is
+        counted, and the mark lives exactly as long as the notice: the log
+        pace cannot tell the retries of one notice from a fresh notice of
+        the same host, because no line was ever written for the host and
         ``_last_lines`` holds nothing for it, so the notice's own
         lifetime is the only boundary. The console clears the mark when
         the notice resolves, at the acknowledgement of its report and at
@@ -1118,14 +1222,33 @@ class BoundedRefusalRecorder:
         now = self._now()
         with self._lock:
             self._prune(now)
-            if host in self._last_lines:
-                return False
             if (notice_id is not None
                     and self._named_notices.get(host) == notice_id):
                 # The line this hour's pace has forgotten was written for
                 # this very notice, and the notice is unchanged: its
                 # refusal is named here once already, and a rolled hour
                 # grants its retry neither a second line nor a count.
+                return False
+            if host in self._last_lines:
+                # The hostname's one line for the hour is spent, and the
+                # spender decides what the failure owes. A line this
+                # console wrote named the refusal the report carries, or
+                # a line a failed delivery of this very notice named,
+                # and the failure counts nothing beside it. A backend's
+                # line the acknowledgement folded in spent the pace on a
+                # refusal the hour before this one, and a fresh notice
+                # of the hostname, the first after a restart or the
+                # first behind a lost hour, is still owed its naming:
+                # no layer writes the fresh refusal a line within the
+                # hour, so the failure counts it once as suppressed, the
+                # way a line the hour's cap holds back is counted, and
+                # the mark holds the notice's retries to the one count.
+                # A retry of a notice that already counted reads the
+                # mark and counts nothing.
+                if (host not in self._first_failures
+                        and host in self._folded_paces):
+                    self._first_failures[host] = now
+                    self._count_suppressed(now)
                 return False
             if len(self._line_times) >= REFUSAL_LOG_LINES_PER_HOUR:
                 if host not in self._first_failures:
@@ -1219,13 +1342,16 @@ class BoundedRefusalRecorder:
         hour holds now and not the arrival's own news.
 
         The bound the marks live in is reconciled with the record of
-        notices the pair shares: the console trims an identity's entry as
-        the answer that resolves it lands, so an identity the record no
-        longer holds belongs to a notice that is resolved, and its mark
-        leaves the bound before the mark of any notice still waiting,
-        however many acknowledged notices arrive around one that is. Only
-        when the record holds every identity the bound holds, and the
-        bound must still give a place, does the oldest mark leave.
+        notices the pair shares: the console resolves an identity's entry
+        as the answer that resolves it lands and at the eviction that
+        drops it from the pending queue, on the acknowledgement and the
+        eviction alike, so an identity the record shows resolved, its
+        entry holding the resolution or aged out past it, belongs to a
+        notice that is over, and its mark leaves the bound before the
+        mark of any notice still waiting, however many acknowledged
+        notices arrive around one that is. Only when the record holds
+        every identity the bound holds unresolved, and the bound must
+        still give a place, does the oldest mark leave.
         """
         if not notice_id:
             return True
@@ -1246,7 +1372,7 @@ class BoundedRefusalRecorder:
             while len(self._notice_accounted) > REFUSED_HOSTS_LIMIT:
                 recorded = _read_notice_receipts_record(notice_receipts_record_path())
                 resolved = [known_id for known_id in self._notice_accounted
-                            if known_id not in recorded]
+                            if _notice_record_resolved(recorded, known_id)]
                 if not resolved:
                     self._notice_accounted.popitem(last=False)
                     break
@@ -1260,6 +1386,9 @@ class BoundedRefusalRecorder:
         self._line_ids = [line_id for _stamp, line_id in spent]
         self._last_lines = OrderedDict(
             (name, stamp) for name, stamp in self._last_lines.items() if now - stamp < HOUR_SECONDS)
+        self._folded_paces = OrderedDict(
+            (name, stamp) for name, stamp in self._folded_paces.items()
+            if now - stamp < HOUR_SECONDS)
         # The first failures are not on the hourly roll: a mark lives
         # exactly as long as the pending notice it was counted for, and
         # the console clears it when the notice resolves, at the

@@ -1780,19 +1780,25 @@ class _RefusalReporter:
         remembered for the failure that delivery will eventually report,
         so the mark the failure counts resolves with the notice it was
         counted for, and not with whatever fresh notice of the same
-        hostname the queue may hold by then. The notice
+        hostname the queue may hold by then. The eviction resolves the
+        notice's place in the queue and not the delivery itself, so the
+        accounting the delivery still carries keeps its place too: the
+        failure or the acknowledgement that ends the delivery resolves
+        it, and a retry the backend never processed reads it and counts
+        the refusal nowhere again, one refusal owing the one count the
+        first failure made wherever its report carried it. The notice
         keeps the time of the refusal it reports on as well, refreshed by
         every refusal while it waits: the newest-refused set is bounded and
         a roll of newer names rolls a waiting hostname out of it, and the
         line the console spent for it is kept for its hour alone, so the
         notice's own stamp is what its report carries when neither of the
-        others survives to the delivery. The record entry an eviction
-        drops is trimmed with it: the outcome it holds is the console's
-        fact and its notice is resolved here, so an outcome that arrives
-        after its notice was evicted is a fact about a notice nothing
-        will deliver again, and the failure that eventually reports it
-        reconciles against no entry rather than leaving one nothing will
-        ever resolve.
+        others survives to the delivery. The eviction resolves the notice
+        on the record of notices the pair shares instead, its lifecycle
+        state written under the lock the record's updates hold: an outcome
+        that arrives after its notice was evicted is a fact about a notice
+        nothing will deliver again, and the state refuses it, so no
+        orphaned outcome of a resolved notice stays on the record and the
+        accounting bound reads no resolved notice as one still waiting.
 
         Every refusal refreshes the newest-refused set first, whatever the
         queue decides, because the skipped and the waiting names are still
@@ -1872,12 +1878,21 @@ class _RefusalReporter:
             dropped, _attempt = self._pending.popitem(last=False)
             self._pending_at.pop(dropped, None)
             dropped_id = self._pending_ids.pop(dropped, None)
-            if dropped == self._in_flight:
+            in_flight_drop = dropped == self._in_flight
+            if in_flight_drop:
                 # The notice whose delivery is in flight is among the ones
                 # this eviction drops: its resolution has to reach the
                 # failure that delivery will eventually report, so the
                 # failure clears the mark it counts instead of leaving it
-                # for a notice nothing will ever resolve.
+                # for a notice nothing will ever resolve. The delivery
+                # still owns the accounting of the refusal it carries,
+                # whichever way this console counted it: the eviction
+                # resolves the notice's place in the queue and not the
+                # delivery itself, and the failure or the acknowledgement
+                # that ends the delivery resolves the count with it, so
+                # the marks the notice holds keep their places here and a
+                # retry the backend never processed reads them and counts
+                # the refusal nowhere again.
                 self._in_flight_evicted = True
             elif (BACKEND_PORT is not None
                     and dropped_id not in self._accounted_notices
@@ -1900,26 +1915,43 @@ class _RefusalReporter:
                 # the failure names it here when it does not.
                 self._lines.note_unreported()
             if dropped_id is not None:
-                # The record entry of the identity this eviction drops is
-                # trimmed with it: the outcome it holds is this console's
-                # fact and the notice it belongs to is resolved here, so
-                # the entry keeps no outcome for a notice whose queue
-                # entry is gone, and a failure that eventually reports a
-                # delivery that outlived its queue entry finds no
-                # late outcome to keep either. The identity's own mark
-                # resolves with it, so a fresh notice of the same hostname
-                # starts with a mark of its own.
+                # The notice is resolved on the record of notices the pair
+                # shares, its lifecycle state written under the lock the
+                # record's updates hold: the facts of its delivery leave
+                # with the resolution, and a write that lags behind the
+                # eviction, the receipt or the outcome of a backend whose
+                # answer a timeout already ended, finds the state and
+                # lands nothing, so no orphaned outcome of a notice
+                # nothing will ever deliver again stays on the record.
                 host_policy.trim_notice_record(dropped_id)
-                self._accounted_notices.discard(dropped_id)
-            self._lines.first_failure_resolved(dropped)
+                if not in_flight_drop:
+                    # The identity's own mark resolves with it, so a
+                    # fresh notice of the same hostname starts with a mark
+                    # of its own. A notice still in delivery keeps its
+                    # mark: the delivery owns it and resolves it.
+                    self._accounted_notices.discard(dropped_id)
+            if not in_flight_drop:
+                self._lines.first_failure_resolved(dropped)
         self._wake.set()
         return True
 
     def take_due_report(self):
         """The next hostname the worker may tell the backend about, or None.
 
-        Oldest waiting first, once its retry pace has run; a hostname never
-        attempted is due at once. Taking one only marks the attempt: the
+        A hostname never attempted is taken before any retry, the oldest
+        waiting among them, and the retries that remain are taken least
+        recently attempted first, once their pace has run: a failed
+        delivery leaves its notice pending, and a take that always
+        reached for the oldest waiting entry would ask the same failing
+        notice again and again while a later one nobody has attempted
+        waits behind every retry of it, for as long as the backend keeps
+        refusing, so the take prefers work nobody has tried and falls
+        back to the attempt that has waited longest, and one
+        persistently failing notice holds no later notice behind its own
+        retry pace. The queue's own order is untouched by the preference,
+        so the eviction still drops the oldest waiting refusal first and
+        the refusals keep their recency for the bound the queue keeps.
+        Taking one only marks the attempt: the
         hour's global reporting bound is spent by acknowledged deliveries
         alone, and a delivery that failed holds every later attempt back
         for one pace, so a failing backend is asked once per pace and not
@@ -1947,14 +1979,28 @@ class _RefusalReporter:
         if self._last_failure is not None and now - self._last_failure < RETRY_PACE_SECONDS:
             return None
         for host, last_try in self._pending.items():
-            if last_try is None or now - last_try >= RETRY_PACE_SECONDS:
+            if last_try is None:
                 self._pending[host] = now
                 self._in_flight = host
                 self._in_flight_evicted = False
                 self._in_flight_id = self._pending_ids.get(host)
                 self._delivery_generation = self._ready_generation
                 return host
-        return None
+        chosen = None
+        chosen_try = None
+        for host, last_try in self._pending.items():
+            if last_try is None or now - last_try < RETRY_PACE_SECONDS:
+                continue
+            if chosen_try is None or last_try < chosen_try:
+                chosen, chosen_try = host, last_try
+        if chosen is None:
+            return None
+        self._pending[chosen] = now
+        self._in_flight = chosen
+        self._in_flight_evicted = False
+        self._in_flight_id = self._pending_ids.get(chosen)
+        self._delivery_generation = self._ready_generation
+        return chosen
 
     def retry_delay(self):
         """How long the worker may wait before another look, nothing due.
@@ -2095,13 +2141,14 @@ class _RefusalReporter:
         mark it counts resolves together with it: the mark lives exactly
         as long as the notice, and the notice is already gone, so the mark
         a later notice of the same hostname counts is its own and a
-        genuine first failure still reads as one. A late outcome the
-        record of notices still holds for an evicted notice is a fact
-        about a notice nothing will deliver again, and the failure
-        reconciles it: the trim the eviction made is the notice's
-        resolution, and the failure that eventually reports the delivery
-        holds the record to it rather than leaving an outcome behind that
-        no delivery will ever claim.
+        genuine first failure still reads as one. The eviction resolved
+        the notice on the record the pair shares, under the lock its
+        updates hold, so the writes a backend whose answer a timeout ended
+        would land behind the eviction find the resolution there and
+        write nothing: no late outcome of a notice nothing will ever
+        deliver again reaches the record, and the failure holds the
+        console to the one count it made rather than reconciling an
+        outcome the record refused.
         """
         self._last_failure = self._now()
         if host in self._pending:
@@ -2130,21 +2177,19 @@ class _RefusalReporter:
             # alone would say less: a backend that took the notice in and
             # died before it recorded the refusal named it nowhere, so the
             # fallback below accounts it here.
-            if evicted and host_policy.notice_accounted_has(notice_id):
-                # The delivery outlived its queue entry, and its answer was
-                # lost with a backend that had completed the notice's
-                # accounting: the eviction trimmed the record with the
-                # notice, and a late outcome may have landed in it after
-                # the trim, so the failure reconciles it rather than
-                # leaving an entry behind that no delivery will ever
-                # claim.
-                host_policy.trim_notice_record(notice_id)
             if not evicted and host in self._pending:
                 self._accounted_notices.add(notice_id)
             return
-        self._account_line(host, notice_id)
         counted = self._lines.note_retry(host, notice_id)
         if counted:
+            # The hour named this refusal in a line of this console's
+            # own, so the line is stamped for the reports the retries
+            # carry and the backend folds it: a line no layer wrote is
+            # stamped nowhere, so a notice whose line the hour's pace or
+            # cap held back carries no time it never spent, and the
+            # recovery names its refusal in its own right instead of
+            # folding a line that exists nowhere.
+            self._account_line(host, notice_id)
             _print_refusal_line(_refusal_line_text(host))
         if (not evicted and host in self._pending and notice_id is not None
                 and (counted or self._lines.first_failure_is_counted(host))):
@@ -2156,12 +2201,14 @@ class _RefusalReporter:
             self._accounted_notices.add(notice_id)
         if evicted:
             # The notice this failure was taken for has already left the
-            # queue, so nothing will ever resolve the mark it counts: the
+            # queue, so nothing will ever resolve the marks it holds: the
             # failure still counts the notice's own line, the news it
-            # carried, and the mark resolves here together with the notice,
-            # leaving the next notice of the same hostname to count its own
-            # first failure anew.
+            # carried, and the marks resolve here together with the
+            # notice, leaving the next notice of the same hostname to
+            # count its own first failure anew.
             self._lines.first_failure_resolved(host)
+            if notice_id is not None:
+                self._accounted_notices.discard(notice_id)
 
     def delivery_spoke_for_the_live_backend(self):
         """Whether the delivery the worker took still speaks for the backend

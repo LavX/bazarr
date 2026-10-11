@@ -10935,6 +10935,468 @@ async def test_a_notice_recovered_past_its_line_bookkeepings_eviction_counts_now
 
 
 @pytest.mark.asyncio
+async def test_a_client_timeout_before_the_backend_accounting_writes_no_outcome_for_the_evicted_notice(
+        tmp_path, monkeypatch, root_log, caplog):
+    """A delivery can give up on its answer before the backend ever took
+    the report in: the client's own timeout ends the exchange while the
+    backend's handler has not written a byte of the notice's facts, and
+    the queue's bound can evict the notice in that same window, because
+    a roll of newer refusals waits for nothing. The eviction resolved the
+    notice, so the trim it made is the last word on the notice's life,
+    and the backend's writes land after it: the receipt and the outcome
+    that follow a timeout the console already reported once must find
+    the notice's resolution in the record and write nothing, because an
+    outcome that lands for an identity no delivery will ever carry again
+    stays on the record with nothing to remove it, and the accounting
+    bound that reconciles its marks against the record then reads the
+    orphan as a notice still waiting, however many times the pair
+    resolves notices the backend never answered."""
+    from app import host_allowlist
+
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor.host_policy, "REFUSED_HOSTS_LIMIT", 3)
+    monkeypatch.setenv("BAZARR_SUPERVISOR_TOKEN", "the-supervisor-token")
+    monkeypatch.setenv("BAZARR_CONFIG_DIR", str(tmp_path))
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    caplog.set_level(logging.INFO)
+
+    clock = [0]
+    recorder = host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0])
+    monkeypatch.setattr(host_allowlist, "_refusals", recorder)
+    config = _config()
+    delivered = []
+    backend_app = Flask(__name__)
+
+    def deliver(form):
+        """The backend's own notice route, over the form the report carried."""
+        with backend_app.test_request_context(
+                "/_supervisor/host_refusal", method="POST",
+                headers={supervisor.TOKEN_HEADER: "the-supervisor-token"}, data=form):
+            return host_allowlist.front_refusal_notice(config=config)
+
+    async def notice(request):
+        form = dict(await request.post())
+        delivered.append(form)
+        # The backend holds the report without processing it, and its
+        # answer with it: the writes of the notice's facts happen only
+        # once this row lets them, after the console's delivery has given
+        # up on the answer, under the lock the record's updates hold,
+        # beside whatever the eviction decided about the notice's life.
+        await gate["hold"].wait()
+        return web.Response(status=503)
+
+    gate = {"hold": asyncio.Event()}
+    backend = web.Application()
+    backend.router.add_route("POST", "/_supervisor/host_refusal", notice)
+    losing_backend = TestClient(TestServer(backend))
+    await losing_backend.start_server()
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    try:
+        reporter = supervisor._active_reporter
+        monkeypatch.setattr(reporter, "_now", lambda: clock[0])
+        monkeypatch.setattr(reporter._lines, "_now", lambda: clock[0])
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", losing_backend.server.port)
+        monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+
+        # The delivery is taken while the backend holds the report without
+        # processing it, and the queue's rollover evicts the notice while
+        # the delivery waits for an answer the backend has not begun to
+        # build.
+        clock[0] = 0
+        response = await client.get("/", headers={"Host": "inflight.example.com"})
+        assert response.status == 421
+        for _ in range(600):
+            if delivered and reporter._in_flight == "inflight.example.com":
+                break
+            await asyncio.sleep(0.01)
+        assert reporter._in_flight == "inflight.example.com"
+        inflight_id = delivered[0]["notice"]
+        for index in range(3):
+            clock[0] = 1 + index
+            response = await client.get("/", headers={"Host": f"late{index}.example.com"})
+            assert response.status == 421
+        assert reporter._in_flight_evicted
+        assert "inflight.example.com" not in reporter._pending
+        assert len(reporter._pending) == 3
+
+        # The client's own timeout ends the exchange with the backend
+        # still holding the report: the failure reports a delivery whose
+        # notice the queue already evicted, and the console names the
+        # refusal in its own line, the only layer that saw it.
+        for _ in range(1200):
+            if reporter._in_flight is None:
+                break
+            await asyncio.sleep(0.01)
+        assert reporter._in_flight is None
+        assert any("inflight.example.com" in line for line in lines)
+        assert not supervisor.host_policy.notice_accounted_has(inflight_id)
+
+        # The backend takes the report in once the row lets it, after the
+        # failure: the notice's resolution is already on the record the
+        # pair shares, so the writes the backend would land find it and
+        # write nothing, and no outcome of a notice nothing will ever
+        # deliver again stays on the record.
+        inflight_form = delivered[0]
+        deliver(inflight_form)
+        assert not supervisor.host_policy.notice_accounted_has(inflight_id)
+        assert not supervisor.host_policy.notice_receipt_has(inflight_id)
+        gate["hold"].set()
+    finally:
+        await client.close()
+        await losing_backend.close()
+
+
+@pytest.mark.asyncio
+async def test_a_retry_of_a_counted_notice_evicted_mid_delivery_counts_nowhere_again(
+        tmp_path, monkeypatch, root_log, caplog):
+    """A notice whose first failed delivery counted its refusal into the
+    console's own window holds that count for the whole of its life, the
+    retry in flight included: the queue's bound can evict the notice
+    while its next delivery waits for an answer, and the eviction once
+    dropped the count the failure made with it, so the retry's own
+    failure read the notice as one nothing had counted and counted the
+    refusal again, one carried count beside one fresh count for a single
+    refusal. The eviction leaves the delivery's accounting in place
+    now, because the delivery the notice is still in resolves it: the
+    failure or the acknowledgement that ends the delivery resolves the
+    count with it, and one refusal keeps the one count the first
+    failure made, carried wherever its report goes."""
+    from app import host_allowlist
+
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor.host_policy, "REFUSED_HOSTS_LIMIT", 3)
+    monkeypatch.setenv("BAZARR_SUPERVISOR_TOKEN", "the-supervisor-token")
+    monkeypatch.setenv("BAZARR_CONFIG_DIR", str(tmp_path))
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    caplog.set_level(logging.INFO)
+
+    clock = [0]
+    recorder = host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0])
+    monkeypatch.setattr(host_allowlist, "_refusals", recorder)
+    config = _config()
+    delivered = []
+    mode = {"paced": "refuse"}
+    gate = {"hold": None}
+    backend_app = Flask(__name__)
+
+    def deliver(form):
+        """The backend's own notice route, over the form the report carried."""
+        with backend_app.test_request_context(
+                "/_supervisor/host_refusal", method="POST",
+                headers={supervisor.TOKEN_HEADER: "the-supervisor-token"}, data=form):
+            return host_allowlist.front_refusal_notice(config=config)
+
+    async def paced_answer(form):
+        _body, _status, headers = deliver(form)
+        if _status != 204:
+            return web.Response(status=503)
+        return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                "the-supervisor-token", **headers})
+
+    async def notice(request):
+        form = dict(await request.post())
+        delivered.append(form)
+        if form.get("host") != "paced.example.com":
+            return await paced_answer(form)
+        if mode["paced"] == "hold":
+            await gate["hold"].wait()
+            return web.Response(status=503)
+        if mode["paced"] == "refuse":
+            return web.Response(status=503)
+        return await paced_answer(form)
+
+    backend = web.Application()
+    backend.router.add_route("POST", "/_supervisor/host_refusal", notice)
+    answering_backend = TestClient(TestServer(backend))
+    await answering_backend.start_server()
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    try:
+        reporter = supervisor._active_reporter
+        monkeypatch.setattr(reporter, "_now", lambda: clock[0])
+        monkeypatch.setattr(reporter._lines, "_now", lambda: clock[0])
+
+        async def settle():
+            for _ in range(6000):
+                if not reporter.pending_reports():
+                    return
+                clock[0] += 0.06
+                await asyncio.sleep(0.01)
+            raise AssertionError("the reports never drained")
+
+        # An outage spends the console's hour of lines and queues a roll of
+        # notices the bound trims as the burst grows, so the recovery
+        # starts from a console whose line budget is spent.
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", None)
+        for index in range(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR):
+            clock[0] = index
+            response = await client.get("/", headers={"Host": f"down{index}.example.com"})
+            assert response.status == 421
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", answering_backend.server.port)
+        monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+        await settle()
+
+        # The first failed delivery of the paced hostname's notice counts
+        # its refusal into the console's own window, the hour's lines being
+        # spent, and the count holds the notice's retries to it.
+        clock[0] = 30
+        response = await client.get("/", headers={"Host": "paced.example.com"})
+        assert response.status == 421
+        for _ in range(600):
+            if reporter._last_failure is not None:
+                break
+            clock[0] += 0.06
+            await asyncio.sleep(0.01)
+        assert reporter._last_failure is not None
+        window = reporter._lines.hour_suppressed_window()
+        assert window is not None
+        assert window[0] == 1
+        paced_id = [form for form in delivered
+                    if form.get("host") == "paced.example.com"][0]["notice"]
+
+        # The retry is taken while the backend holds its answer, and the
+        # roll of three fresh refusals evicts the notice mid-delivery: the
+        # delivery still owns the count the first failure made.
+        mode["paced"] = "hold"
+        gate["hold"] = asyncio.Event()
+        for _ in range(600):
+            if reporter._in_flight == "paced.example.com":
+                break
+            clock[0] += 0.06
+            await asyncio.sleep(0.01)
+        assert reporter._in_flight == "paced.example.com"
+        for index in range(3):
+            clock[0] = 31 + index
+            response = await client.get("/", headers={"Host": f"roll{index}.example.com"})
+            assert response.status == 421
+        assert reporter._in_flight_evicted
+        assert "paced.example.com" not in reporter._pending
+
+        # The held answer comes back a failure the backend never
+        # processed, and the failure of the retry counts the refusal
+        # nowhere again: the count the first failure made traveled with
+        # the retry's report and stays the one count the refusal owes,
+        # held for the answer the exchange lost, and the console's own
+        # recorder holds nothing beside it.
+        gate["hold"].set()
+        for _ in range(600):
+            if reporter._in_flight is None:
+                break
+            await asyncio.sleep(0.01)
+        assert reporter._in_flight is None
+        assert reporter._carried is not None
+        assert reporter._carried[0] == 1
+        assert reporter._lines.hour_suppressed_window() is None
+        assert not any("paced.example.com" in line for line in lines)
+        assert not supervisor.host_policy.notice_accounted_has(paced_id)
+    finally:
+        await client.close()
+        await answering_backend.close()
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_refusal_after_a_backend_restart_keeps_its_one_count_through_the_failed_first_delivery(
+        tmp_path, monkeypatch, root_log, caplog):
+    """A hostname the backend named in a line of its own keeps that
+    line's pace for the hour, and a fresh refusal of the hostname once
+    the backend has restarted queues a notice that carries nothing of
+    it: the line a backend logged is not a pace the console hands a
+    fresh notice. The restarted backend can still refuse the first
+    delivery, and the failure once stamped the console's line bookkeeping
+    with a line no layer ever wrote, while the pace the old backend's
+    line still held kept the retry accounting from counting anything,
+    so the fresh refusal was named nowhere and counted nowhere, and the
+    stamp the failure left kept the recovery's report folding a line
+    that never existed, so the backend held the fresh refusal back from
+    a line of its own as well. The failure counts the notice once as
+    suppressed now, the way a held-back line is counted, and the
+    bookkeeping remembers a line only when one was written, so the
+    recovery records the hostname and the pair keeps the one count the
+    console's window holds."""
+    from app import host_allowlist
+
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
+    monkeypatch.setenv("BAZARR_SUPERVISOR_TOKEN", "the-supervisor-token")
+    monkeypatch.setenv("BAZARR_CONFIG_DIR", str(tmp_path))
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    caplog.set_level(logging.INFO)
+
+    clock = [0]
+    recorder = host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0])
+    monkeypatch.setattr(host_allowlist, "_refusals", recorder)
+    config = _config()
+    delivered = []
+    refusing = {"first": False}
+    backend_app = Flask(__name__)
+
+    def deliver(form):
+        """The backend's own notice route, over the form the report carried."""
+        with backend_app.test_request_context(
+                "/_supervisor/host_refusal", method="POST",
+                headers={supervisor.TOKEN_HEADER: "the-supervisor-token"}, data=form):
+            return host_allowlist.front_refusal_notice(config=config)
+
+    async def notice(request):
+        form = dict(await request.post())
+        delivered.append(form)
+        if refusing["first"] and form.get("host") == "paced.example.com":
+            # The restarted backend refuses the first delivery of the fresh
+            # notice without taking it in.
+            return web.Response(status=503)
+        _body, _status, headers = deliver(form)
+        if _status != 204:
+            return web.Response(status=503)
+        return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                "the-supervisor-token", **headers})
+
+    backend = web.Application()
+    backend.router.add_route("POST", "/_supervisor/host_refusal", notice)
+    old_backend = TestClient(TestServer(backend))
+    await old_backend.start_server()
+    fresh_backend = TestClient(TestServer(backend))
+    await fresh_backend.start_server()
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    try:
+        reporter = supervisor._active_reporter
+        monkeypatch.setattr(reporter, "_now", lambda: clock[0])
+        monkeypatch.setattr(reporter._lines, "_now", lambda: clock[0])
+
+        async def settle():
+            for _ in range(6000):
+                if not reporter.pending_reports():
+                    return
+                clock[0] += 0.06
+                await asyncio.sleep(0.01)
+            raise AssertionError("the reports never drained")
+
+        # The backend names the first refusal in a line of its own and
+        # acknowledges the report, so the line's pace holds the hostname
+        # for the hour on both sides of the pair.
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", old_backend.server.port)
+        monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+        clock[0] = 10
+        response = await client.get("/", headers={"Host": "paced.example.com"})
+        assert response.status == 421
+        await settle()
+        assert reporter.pending_reports() == []
+
+        # The backend restarts, the cooldown stamps lift with it, and the
+        # fresh refusal queues a notice of its own: the restarted backend
+        # refuses the first delivery without taking it in, and the failure
+        # counts the fresh refusal once into the console's own window, the
+        # hour's pace being spent on the line the old backend logged.
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", fresh_backend.server.port)
+        reporter.ready_to_deliver()
+        refusing["first"] = True
+        clock[0] = 20
+        response = await client.get("/", headers={"Host": "paced.example.com"})
+        assert response.status == 421
+        assert reporter.pending_reports() == ["paced.example.com"]
+        for _ in range(600):
+            if reporter._last_failure is not None:
+                break
+            clock[0] += 0.06
+            await asyncio.sleep(0.01)
+        assert reporter._last_failure is not None
+        window = reporter._lines.hour_suppressed_window()
+        assert window is not None
+        assert window[0] == 1
+        assert not any("paced.example.com" in line for line in lines)
+
+        # The recovery delivers the notice, and the report it carries holds
+        # no line time the console never spent, beside the notice's own
+        # accounting state: the backend records the hostname and counts
+        # nothing for a refusal the console's window already counts, and
+        # the pair keeps the one count the one refusal owes.
+        refusing["first"] = False
+        delivered.clear()
+        await settle()
+        paced_forms = [form for form in delivered
+                       if form.get("host") == "paced.example.com"]
+        assert len(paced_forms) == 1
+        assert "logged" not in paced_forms[0]
+        assert paced_forms[0].get("notice_counted") == "1"
+        window = recorder.hour_suppressed_window()
+        assert window is not None
+        assert window[0] == 1
+        assert reporter._lines.hour_suppressed_window() is None
+        backend_named = [message for message in root_log.messages
+                         if "refused a request" in message
+                         and "paced.example.com" in message]
+        assert len(backend_named) == 1
+    finally:
+        await client.close()
+        await old_backend.close()
+        await fresh_backend.close()
+
+
+def test_a_persistently_failing_notice_does_not_hold_a_later_notice_back(monkeypatch):
+    """A delivery worker that takes the oldest waiting notice on every
+    paced look asks the same failing one again and again, because a
+    failed delivery leaves its notice pending and the oldest waiting
+    entry is the one the failure just gave back: a later notice nobody
+    has attempted waits behind every retry of the first, however long
+    the backend refuses it, and a recovery can leave hostnames
+    unattempted for hours behind one refused name. The take prefers
+    work nobody has tried yet, and among the retries that remain the
+    attempt that has waited longest, so one persistently failing notice
+    holds no later notice behind its own retry pace. The queue's own
+    order is untouched by the preference, so the eviction still drops
+    the oldest waiting refusal first and the refusals keep their
+    recency for the bound the queue keeps."""
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    clock = [0]
+    reporter = supervisor._RefusalReporter("/_supervisor/host_refusal", now=lambda: clock[0])
+    monkeypatch.setattr(supervisor, "BACKEND_PORT", 6767)
+    monkeypatch.setattr(supervisor.host_policy, "REFUSED_HOSTS_LIMIT", 3)
+
+    # Two fresh hostnames wait, and the worker takes the oldest one: the
+    # backend refuses its report without taking it in, and the failure
+    # leaves the notice pending behind its own pace.
+    assert reporter.report_due("first.example.com") is True
+    assert reporter.report_due("later.example.com") is True
+    assert reporter.take_due_report() == "first.example.com"
+    first_id = reporter.in_flight_notice_id()
+    reporter.report_failed("first.example.com", first_id)
+    assert reporter.pending_reports() == ["first.example.com", "later.example.com"]
+
+    # The pace runs, and the next take looks for work nobody has tried:
+    # the later notice is due at once, and the failing one has had its
+    # attempt, so the later one goes out before any retry of the first.
+    clock[0] += supervisor.RETRY_PACE_SECONDS + 1
+    assert reporter.take_due_report() == "later.example.com"
+    later_id = reporter.in_flight_notice_id()
+    reporter.report_sent("later.example.com", later_id)
+    assert reporter.pending_reports() == ["first.example.com"]
+
+    # The first notice keeps its attempts to itself: a backend that
+    # acknowledges everything but it still sees it tried again and again,
+    # once per pace, and nothing else waits behind it now.
+    for _ in range(3):
+        clock[0] += supervisor.RETRY_PACE_SECONDS + 1
+        assert reporter.take_due_report() == "first.example.com"
+        assert reporter.in_flight_notice_id() == first_id
+        reporter.report_failed("first.example.com", first_id)
+
+    # The queue's own order keeps the refusals' recency for the eviction:
+    # the roll past the bound drops the oldest waiting refusal first,
+    # whichever attempt went out last.
+    assert reporter.report_due("newer0.example.com") is True
+    assert reporter.report_due("newer1.example.com") is True
+    assert reporter.pending_reports() == ["first.example.com", "newer0.example.com",
+                                          "newer1.example.com"]
+    assert reporter.report_due("newer2.example.com") is True
+    assert reporter.pending_reports() == ["newer0.example.com", "newer1.example.com",
+                                          "newer2.example.com"]
+
+
+@pytest.mark.asyncio
 async def test_a_backend_dying_between_its_line_and_its_record_write_claims_the_windows_it_folds_in(
         tmp_path, monkeypatch, root_log, caplog):
     """The backend folds the window a console's report carried into its
