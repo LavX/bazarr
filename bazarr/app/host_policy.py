@@ -1269,6 +1269,80 @@ def notice_accounted_has(notice_id, path=None):
     return isinstance(entry.get('accounted'), (int, float))
 
 
+def resolve_abandoned_notices(live_ids, path=None):
+    """Resolve the notices no live holder can still answer for, and
+    bound the outcomes a lost console left unresolved.
+
+    The record keeps an unresolved notice's outcome past every span,
+    because the console holds its notice until an acknowledgement
+    resolves it or the pending queue evicts it and neither boundary is
+    a span of time: the one trim that removes an outcome is the console
+    that still holds the notice, and a console that is lost takes its
+    queue with it, so the notices it held are owed no answer and no
+    eviction ever, and their outcomes stand on the record forever, one
+    per refusal the lost console ever reported, while every update the
+    pair writes rewrites the file that holds them all. The console that
+    replaces a lost one can answer for the notices it can see alone, so
+    the caller passes the identities it can still speak for, the ones
+    its pending queue holds and the one an in-flight delivery carries,
+    and the reconciliation resolves every other unresolved entry under
+    the lock the record's own updates hold: the resolutions are the
+    bounded tombstones the record already keeps, the newest of them
+    within the retention span and no more of them than the pair's own
+    bound of refused hosts, so the record a restart found is bounded
+    again whatever the lost console piled on it. A late write for an
+    abandoned notice meets its resolution and lands nothing, whichever
+    fact it carries, exactly as it does behind the console's own trim,
+    and the naming an abandoned outcome assigned survives its
+    resolution the same way, so the refusal keeps the one naming it
+    was assigned whichever channel reached it first. A notice the
+    caller can still see is untouched: its facts are a live
+    delivery's own, and the reconciliation writes nothing for it. The
+    write is best effort exactly as the record's other updates are:
+    a record nothing can read or write keeps the facts it held, and
+    the retention bounds them on its own.
+    """
+    path = notice_receipts_record_path() if path is None else path
+    live = {notice_id for notice_id in live_ids if notice_id}
+    record_path = Path(path)
+    lock_handle = None
+    try:
+        record_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_handle = open(str(record_path) + NOTICE_RECEIPTS_RECORD_LOCK_SUFFIX, 'a+')
+        import fcntl
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        if lock_handle is not None:
+            lock_handle.close()
+        lock_handle = None
+    try:
+        stamp = time.time()
+        record = _read_notice_receipts_record(path)
+        for notice_id, entry in list(record.items()):
+            if (notice_id in live or not isinstance(entry, dict)
+                    or isinstance(entry.get('resolved'), (int, float))):
+                # The notice is a live holder's own, or its life ended
+                # on a resolution already: the reconciliation decides
+                # neither, and the prune bounds the resolutions the
+                # same way it bounds the console's own.
+                continue
+            resolution = {'resolved': stamp}
+            if isinstance(entry.get('accounted'), (int, float)):
+                # The naming of the refusal stands with the notice's
+                # end, the one exception the console's own trim keeps:
+                # a late write for the abandoned notice meets the
+                # assignment beside the resolution and names the
+                # refusal nowhere a second time.
+                resolution['accounted'] = entry['accounted']
+            record[notice_id] = resolution
+        _store_notice_record(path, _prune_notice_record(record, stamp))
+    except Exception:
+        pass
+    finally:
+        if lock_handle is not None:
+            lock_handle.close()
+
+
 def effective_host(host):
     """The comparable form of a request's host.
 

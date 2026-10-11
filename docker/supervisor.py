@@ -924,6 +924,12 @@ class _RefusalReporter:
         self._delivery_generation = None  # the generation the in-flight delivery was taken in
         self._wake = asyncio.Event()  # refusals and readiness wake the worker
         self._drain_task: "asyncio.Task | None" = None
+        # The notices the console before this one left unresolved are
+        # owed no answer and no eviction now: the startup resolves them
+        # on the record the pair shares, so the record a lost console
+        # grew is bounded again before this console queues anything of
+        # its own.
+        self._resolve_abandoned_notices()
         self._recovered = self._recover_unpaid_ownership()
         if self._recovered is not None:
             # The debt a lost console left on the shared record is this
@@ -985,6 +991,32 @@ class _RefusalReporter:
         if not ids:
             return None
         return count, (opened if opened is not None else self._now()), ids[0], ids
+
+    def _resolve_abandoned_notices(self):
+        """Resolve the notice outcomes no live holder can answer for.
+
+        The record keeps an unresolved notice's outcome for as long as
+        its notice can still be waiting, because the console that holds
+        the notice is the one that will resolve it, and a console that
+        is lost takes the pending queue with it: the notices it held
+        are owed no acknowledgement and no eviction ever, and their
+        outcomes would stand on the record across restarts while every
+        update the pair writes rewrites the file that holds them all.
+        This console can answer for the notices it can see alone, the
+        ones its pending queue holds and the one an in-flight delivery
+        carries, and it reconciles the rest on the record the pair
+        shares, under the lock the record's own updates hold: every
+        outcome whose notice no live holder keeps is resolved into the
+        bounded tombstones the record already keeps, so a late write
+        for an abandoned notice meets its resolution and lands
+        nothing, the record this console found is bounded again, and
+        the notices this console queues keep their facts for their own
+        deliveries to resolve.
+        """
+        live = set(self._pending_ids.values())
+        if self._in_flight_id is not None:
+            live.add(self._in_flight_id)
+        host_policy.resolve_abandoned_notices(live)
 
     def note_line(self, host):
         """Record a refusal; True when a console line may be written now."""

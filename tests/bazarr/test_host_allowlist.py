@@ -13454,3 +13454,78 @@ def test_a_stalled_line_reservation_resumes_inside_the_newer_budgets_hour(
     assert recorder.hour_line_times() == [7400.0]
     assert recorder.hour_line_hosts() == [("granted.example.com", 7400.0)]
 
+
+def test_a_supervisor_restart_resolves_the_notices_a_lost_one_left_unresolved(
+        tmp_path, monkeypatch):
+    """A console that is lost takes its pending queue with it, and the
+    notices it held are owed no acknowledgement and no eviction ever:
+    their outcomes stand unresolved on the record the pair shares
+    across restarts, one per refusal the lost console ever reported,
+    and every later update rewrites the file that holds them all, so
+    the record grows without bound however long the pair runs. The
+    console that replaces a lost one can answer for the notices it can
+    see alone, the ones its own queue holds and the one an in-flight
+    delivery carries, and its startup reconciles the rest under the
+    lock: the abandoned outcomes are resolved into the bounded
+    tombstones the record already keeps, a late write for an abandoned
+    notice meets its resolution and lands nothing, and a notice the
+    new queue holds keeps its facts for its own delivery to
+    resolve."""
+    monkeypatch.setenv("BAZARR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(supervisor.host_policy, "REFUSED_HOSTS_LIMIT", 3)
+    monkeypatch.setattr(supervisor, "BACKEND_PORT", 6767)
+
+    def read_the_notice_record():
+        path = Path(supervisor.host_policy.notice_receipts_record_path())
+        if not path.exists():
+            return {}
+        return json.loads(path.read_text())
+
+    # The lost console's notices: outcomes their deliveries never
+    # resolved, standing on the record a year past their refusals with
+    # no queue left to hold them.
+    lost_ids = []
+    for index in range(5):
+        notice_id = supervisor.host_policy.mint_notice_id()
+        assert supervisor.host_policy.record_notice_accounted(
+            notice_id, time.time() - 365 * 86400)
+        lost_ids.append(notice_id)
+    record = read_the_notice_record()
+    assert len(record) == 5
+    assert all("resolved" not in entry for entry in record.values())
+
+    # The console that replaces the lost one starts with an empty
+    # queue, and its startup reconciles the abandoned outcomes under
+    # the lock: the entries no live holder keeps are resolved into the
+    # bounded tombstones, and the record is bounded again.
+    restarted = supervisor._RefusalReporter("/_supervisor/host_refusal")
+    record = read_the_notice_record()
+    assert len(record) <= supervisor.host_policy.REFUSED_HOSTS_LIMIT
+    assert all(isinstance(entry.get("resolved"), (int, float))
+               for entry in record.values())
+
+    # A late write for an abandoned notice meets its tombstone and
+    # lands nothing, whichever fact it carries, and the naming the
+    # outcome assigned survives the resolution the way the console's
+    # own trim keeps it.
+    late_id = lost_ids[-1]
+    assert late_id in record
+    assert supervisor.host_policy.record_notice_accounted(
+        late_id, time.time()) is False
+    supervisor.host_policy.record_notice_receipt(late_id, time.time())
+    entry = read_the_notice_record()[late_id]
+    assert isinstance(entry.get("resolved"), (int, float))
+    assert "received" not in entry
+    assert isinstance(entry.get("accounted"), (int, float))
+
+    # A notice the new queue holds is untouched: its facts are its own
+    # delivery's, and the same reconciliation reads the record again
+    # without resolving what a live holder still carries.
+    assert restarted.report_due("live.example.com") is True
+    live_id = restarted._pending_ids["live.example.com"]
+    assert supervisor.host_policy.record_notice_accounted(live_id, time.time())
+    restarted._resolve_abandoned_notices()
+    entry = read_the_notice_record()[live_id]
+    assert "resolved" not in entry
+    assert isinstance(entry.get("accounted"), (int, float))
+
