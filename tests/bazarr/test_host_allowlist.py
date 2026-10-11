@@ -1241,7 +1241,7 @@ def test_the_front_listener_report_records_the_host_and_announces(real_factory, 
 
 
 def test_a_report_of_a_refusal_the_console_already_named_writes_no_second_line(
-        real_factory, root_log, monkeypatch):
+        tmp_path, real_factory, root_log, monkeypatch):
     """The report of a refusal the front listener named on its own console
     while the backend could not be told carries the time of that line: the
     hostname is recorded and the code is announced all the same, but no
@@ -1251,6 +1251,7 @@ def test_a_report_of_a_refusal_the_console_already_named_writes_no_second_line(
     from app.config import settings
 
     monkeypatch.setenv("BAZARR_SUPERVISOR_TOKEN", "supervisor-token")
+    monkeypatch.setenv("BAZARR_CONFIG_DIR", str(tmp_path))
     client = real_factory.test_client()
     headers = {"Host": "127.0.0.1:6767", "X-Bazarr-Supervisor-Token": "supervisor-token"}
 
@@ -6879,7 +6880,8 @@ async def test_a_mirror_whose_completion_acknowledgement_was_lost_produces_no_se
         await answering_backend.close()
 
 
-def test_a_notice_evicted_while_its_delivery_waited_leaves_no_orphan_mark(monkeypatch):
+def test_a_notice_evicted_while_its_delivery_waited_leaves_no_orphan_mark(
+        tmp_path, monkeypatch):
     """The pending queue can evict a waiting hostname while the delivery of
     its own notice is still awaiting its response, and the failure that
     eventually arrives then belongs to a notice the queue has already
@@ -6890,6 +6892,7 @@ def test_a_notice_evicted_while_its_delivery_waited_leaves_no_orphan_mark(monkey
     genuinely fresh notice of the same host. Two distinct failed notices
     count two suppressed lines, one each, however closely the second follows
     the first."""
+    monkeypatch.setenv("BAZARR_CONFIG_DIR", str(tmp_path))
     lines = []
     monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
     clock = [0]
@@ -7374,6 +7377,7 @@ async def test_a_stale_acknowledgement_after_readiness_leaves_the_notice_for_the
     monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
     monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
     monkeypatch.setenv("BAZARR_SUPERVISOR_TOKEN", "the-supervisor-token")
+    monkeypatch.setenv("BAZARR_CONFIG_DIR", str(tmp_path))
     lines = []
     monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
     caplog.set_level(logging.INFO)
@@ -7460,12 +7464,17 @@ async def test_a_stale_acknowledgement_after_readiness_leaves_the_notice_for_the
         assert "swapped.example.com" in restarted.recent(supervisor.host_policy.DAY_SECONDS)
         assert reporter.pending_reports() == []
 
-        # Each backend that received the report named the hostname once, in
-        # its own record, and the console wrote no line of its own for it
-        # and counted nothing into a window.
+        # The pair's shared line budget names the hostname once for the
+        # hour: the gone generation's line wrote it, and the fresh
+        # backend's own record names it again with no second line, its
+        # held-back line counted into the window of its own record, while
+        # the console wrote no line of its own and counted nothing.
         backend_lines = [message for message in root_log.messages
                          if "refused a request" in message]
-        assert len(backend_lines) == 2
+        assert len(backend_lines) == 1
+        held = restarted.hour_suppressed_window()
+        assert held is not None
+        assert held[0] == 1
         assert [line for line in lines if line.startswith("Refused")] == []
         assert reporter._lines.hour_suppressed_window() is None
 
@@ -11574,27 +11583,25 @@ def test_unmirrored_windows_keep_the_pairs_one_summary_an_hour(
     monkeypatch.setattr(host_allowlist, "_refusals", recorder)
     config = _config()
 
-    # The console spends its hour of lines on the outage's refusals and
-    # counts the rest into a window of its own, one no report ever carried
-    # to the backend.
+    # The pair's hour of lines is one shared budget: the console and the
+    # backend draw from it turn by turn, the console on the outage's
+    # refusals and the backend on its own, and once its lines are spent
+    # the rest of each layer's refusals is held back and counted into a
+    # window of its own, one no acknowledgement ever carried between the
+    # two.
     reporter = supervisor._RefusalReporter("/_supervisor/host_refusal",
                                            now=lambda: clock[0])
-    for index in range(25):
+    for index in range(15):
         clock[0] = index
         name = f"down{index}.example.com"
         reporter.note_line(name)
         reporter.report_due(name)
+        clock[0] = 3400 + index
+        host_allowlist.record_refusal(f"held{index}.example.com", config=config)
     window = reporter._lines.hour_suppressed_window()
     assert window is not None
     assert window[0] == 5
     console_opened = window[1]
-
-    # The backend spends its own hour of lines on its own refusals and
-    # counts the rest into a window of its own, one whose identity no
-    # acknowledgement ever carried back to the console.
-    for index in range(25):
-        clock[0] = 3400 + index
-        host_allowlist.record_refusal(f"held{index}.example.com", config=config)
     held = recorder.hour_suppressed_window()
     assert held is not None
     assert held[0] == 5
@@ -12060,13 +12067,14 @@ async def test_a_burst_that_evicts_notices_still_counts_every_refusal(
         await answering_backend.close()
 
 
-def test_distinct_lines_sharing_one_timestamp_spend_a_slot_each():
+def test_distinct_lines_sharing_one_timestamp_spend_a_slot_each(tmp_path, monkeypatch):
     """Two refusals can share one timestamp, and the lines written for them
     are still two lines: the report carries each line's stable identity
     beside its time, and the budget the answer folds into spends one slot
     per identity rather than one per distinct timestamp, so twenty lines
     that share one timestamp spend the hour's whole cap and not a single
     slot of it."""
+    monkeypatch.setenv("BAZARR_CONFIG_DIR", str(tmp_path))
     clock = [500.0]
     front = supervisor.host_policy.BoundedRefusalRecorder(now=lambda: clock[0])
     for index in range(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR):
@@ -12241,13 +12249,14 @@ def test_two_timers_deciding_in_one_moment_reserve_the_one_emission_slot(
     reporter = supervisor._RefusalReporter("/_supervisor/host_refusal",
                                            now=lambda: clock[0])
 
-    # Each layer spends its own hour of lines on its own refusals and
-    # counts the rest into a window of its own, and no acknowledgement
-    # ever carried either window between the two.
-    for index in range(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR + 2):
+    # The pair's hour of lines is one shared budget: the two layers draw
+    # from it turn by turn, the console's refusals and the backend's own,
+    # and once its lines are spent the rest of each layer's refusals is
+    # held back and counted into a window of its own, and no
+    # acknowledgement ever carried either window between the two.
+    for index in range(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR // 2 + 2):
         clock[0] = float(index)
         reporter.note_line(f"front{index}.example.com")
-    for index in range(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR + 2):
         recorder.note(f"held{index}.example.com")
     clock[0] = float(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR)
     console_window = reporter._lines.hour_suppressed_window()
@@ -12304,11 +12313,13 @@ def test_a_partial_settlement_waits_for_the_pairs_ceiling_with_it(
     # Another layer's window pays the hour's first line, and its moment
     # lands on the record of emission moments the pair shares.
     other = host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0])
-    for index in range(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR):
+    for index in range(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR // 2):
         clock[0] = 300.0 + index
         assert other.note(f"first{index}.example.com") is True
     clock[0] = 320.0
-    assert other.note("held-back.example.com") is False
+    # The hostname's own line for the hour is spent, so the budget holds
+    # this one back and the window opens on it.
+    assert other.note("first0.example.com") is False
     assert other.hour_suppressed_window() is not None
     monkeypatch.setattr(host_allowlist, "_refusals", other)
     clock[0] = 320.0 + supervisor.host_policy.HOUR_SECONDS
@@ -12322,7 +12333,7 @@ def test_a_partial_settlement_waits_for_the_pairs_ceiling_with_it(
     # run when the take comes: the whole claim fails on the folded
     # identity, and the payment would settle the local counts by identity.
     recorder = host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0])
-    for index in range(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR):
+    for index in range(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR // 2):
         clock[0] = float(index)
         assert recorder.note(f"cap{index}.example.com") is True
     clock[0] = 21.0
@@ -12664,13 +12675,14 @@ def test_two_timers_capturing_different_moments_hold_the_one_summary_an_hour(
     reporter = supervisor._RefusalReporter("/_supervisor/host_refusal",
                                            now=lambda: clock[0])
 
-    # Each layer spends its own hour of lines on its own refusals and
-    # counts the rest into a window of its own, and no acknowledgement
-    # ever carried either window between the two.
-    for index in range(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR + 2):
+    # The pair's hour of lines is one shared budget: the two layers draw
+    # from it turn by turn, the console's refusals and the backend's own,
+    # and once its lines are spent the rest of each layer's refusals is
+    # held back and counted into a window of its own, and no
+    # acknowledgement ever carried either window between the two.
+    for index in range(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR // 2 + 2):
         clock[0] = float(index)
         reporter.note_line(f"front{index}.example.com")
-    for index in range(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR + 2):
         recorder.note(f"held{index}.example.com")
     clock[0] = float(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR)
     console_window = reporter._lines.hour_suppressed_window()
@@ -13270,4 +13282,108 @@ async def test_an_unrelated_payment_leaves_a_waiting_ownership_its_debt_to_pay(
     finally:
         await client.close()
         await answering_backend.close()
+
+
+def test_a_stalled_capture_resumes_inside_the_newer_reservations_hour(tmp_path, monkeypatch):
+    """A payment timer captures its moment before it waits on the
+    record's lock, and a pause that holds the lock past an hour lets the
+    other process pay a summary in the meantime: the stalled timer's
+    stale capture then read the newer reservation as further ahead than
+    the hour and the hour as open, so the pair named two adjacent lines
+    the one summary an hour does not allow. The reservation captures its
+    moment under the lock now, after the waits, from the clock the caller
+    passes, and the same locked capture is the moment the reservation
+    records and the stamp the payment carries: a timer that resumed past
+    another line asks inside the hour that line opened, holds its counts
+    and pays once the hour has run, so the two lines stay an hour apart
+    however long the lock held the first one behind it."""
+    monkeypatch.setenv("BAZARR_CONFIG_DIR", str(tmp_path))
+
+    # The stalled timer's own window opened an hour and more before the
+    # capture it is about to take: the cap is spent and one held-back
+    # refusal counts into the window, due at the moment the timer wakes.
+    moments = {"now": -3520.0}
+    recorder = supervisor.host_policy.BoundedRefusalRecorder(
+        now=lambda: moments["now"])
+    for index in range(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR):
+        assert recorder.note(f"early{index}.example.com") is True
+    assert recorder.note("held.example.com") is False
+    window = recorder.hour_suppressed_window()
+    assert window is not None
+    assert window[0] == 1
+
+    # The other layer's timer pays while this one is stalled behind the
+    # record's lock: its line lands an hour and one moment past the
+    # stalled timer's capture, and the reservation records it.
+    assert supervisor.host_policy.reserve_summary_emission(3701.0)
+
+    # The stalled timer wakes with the capture it took before the wait,
+    # and the lock's wait has run past the hour: the reservation captures
+    # its own moment under the lock, inside the hour the newer line
+    # opened, and the payment meets the reservation and holds its counts.
+    stall = [100.0, 3735.0]
+
+    def stalled_clock():
+        if stall:
+            return stall.pop(0)
+        return moments["now"]
+
+    monkeypatch.setattr(recorder, "_now", stalled_clock)
+    assert recorder.take_summary() is None
+    assert recorder.hour_suppressed_window() is not None
+
+    # The stalled timer pays once the hour since the pair's last line has
+    # run, and the payment carries the moment the reservation captured
+    # under the lock, the second line an hour after the first.
+    moments["now"] = 7302.0
+    summary = recorder.take_summary()
+    assert summary is not None
+    assert summary[2] == 7302.0
+    assert recorder.hour_suppressed_window() is None
+
+
+def test_lost_acknowledgements_hold_the_pairs_line_cap_to_one_budget(tmp_path, monkeypatch):
+    """The pair's line cap is one budget the two processes share, and the
+    layers' own in-memory allowances used to consult it separately: a
+    backend that named twenty refusals in lines of its own and lost every
+    answer to them left the console's budget as empty as it began, and
+    twenty more failures no backend ever processed drew twenty more lines
+    from the fallback, forty in the hour the cap holds at twenty. The
+    per-host and the total line allowances are reserved in the shared
+    state under the record's lock before either process logs now, so the
+    one budget bounds both layers' lines together: a refused reservation
+    suppresses the line the way the hour's own cap does, and the
+    fallback's refusals count into the console's window as held-back
+    lines while the backend's lines stand for the rest of the hour."""
+    monkeypatch.setenv("BAZARR_CONFIG_DIR", str(tmp_path))
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    clock = [0]
+    backend = supervisor.host_policy.BoundedRefusalRecorder(now=lambda: clock[0])
+    reporter = supervisor._RefusalReporter("/_supervisor/host_refusal",
+                                           now=lambda: clock[0])
+    cap = supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR
+
+    # Twenty backend-accounted notices whose acknowledgements were lost:
+    # the backend names each refusal in a line of its own, and the console
+    # never hears an answer that would fold the lines into its budget.
+    for index in range(cap):
+        assert backend.note(f"lost{index}.example.com") is True
+
+    # Twenty distinct failures before any backend processing: the reports
+    # reached no backend, so the console's fallback is the only layer
+    # that can name the refusals, and the pair's one shared cap bounds the
+    # lines the two layers write together.
+    for index in range(cap):
+        host = f"unreached{index}.example.com"
+        assert reporter.report_due(host) is True
+        reporter.report_failed(host)
+
+    # The pair's hour holds the backend's cap of lines and no more: the
+    # fallback's refusals count into the console's window as held-back
+    # lines, the way every other refusal the shared cap holds back does.
+    assert len(lines) == 0
+    window = reporter._lines.hour_suppressed_window()
+    assert window is not None
+    assert window[0] == cap
 

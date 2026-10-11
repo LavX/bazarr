@@ -1571,7 +1571,8 @@ class _RefusalReporter:
                 # emitted here, however long the outage runs.
                 return self._combined_summary(now)
             if self._last_ack is None or self._last_ack < self._carried_at:
-                if not host_policy.reserve_summary_emission(now):
+                stamp = host_policy.reserve_summary_emission(self._now)
+                if stamp is None:
                     # The pair logged a summary line within the hour,
                     # whichever layer paid it, so the ceiling the two
                     # processes share holds this emission back with the
@@ -1583,7 +1584,7 @@ class _RefusalReporter:
                     # the hour since the pair's last line has run.
                     return self._combined_summary(now)
                 self._carried = None
-                return carried[0], carried[1], now, carried[2]
+                return carried[0], carried[1], stamp, carried[2]
             self._carried = None
         return self._combined_summary(now)
 
@@ -1724,22 +1725,28 @@ class _RefusalReporter:
             # decision on the window, so the payment completes the
             # identities on the record rather than claiming them again.
             if (self._recovered is not None
-                    and now - self._recovered[1] >= host_policy.HOUR_SECONDS
-                    and host_policy.reserve_summary_emission(now)):
-                # The unpaid ownership the shared record held for this
-                # console has come due with the restart behind it: the
-                # claim the lost console took on the mirror's identities
-                # reads as paid to the backend that still holds the
-                # window, so the pair's one summary for the counts is
-                # this console's debt to pay, and the payment completes
-                # the identities on the record, taking the payment's
-                # stamp the way every completed window's does, so the
-                # backend's own flush reads the proof on the copy it
-                # holds and drops it rather than logging a second line.
-                debt = self._recovered
-                self._recovered = None
-                host_policy.record_completed_windows(debt[3], now)
-                return debt[0], debt[1], now, debt[2]
+                    and now - self._recovered[1] >= host_policy.HOUR_SECONDS):
+                stamp = host_policy.reserve_summary_emission(self._now)
+                if stamp is not None:
+                    # The unpaid ownership the shared record held for this
+                    # console has come due with the restart behind it: the
+                    # claim the lost console took on the mirror's identities
+                    # reads as paid to the backend that still holds the
+                    # window, so the pair's one summary for the counts is
+                    # this console's debt to pay, and the payment completes
+                    # the identities on the record, taking the payment's
+                    # stamp the way every completed window's does, so the
+                    # backend's own flush reads the proof on the copy it
+                    # holds and drops it rather than logging a second line.
+                    # The stamp the reservation captured under the lock is
+                    # the moment the payment records and the line carries,
+                    # so a debt that waited behind another process's
+                    # update pays inside the hour the pair's newest line
+                    # opened.
+                    debt = self._recovered
+                    self._recovered = None
+                    host_policy.record_completed_windows(debt[3], stamp)
+                    return debt[0], debt[1], stamp, debt[2]
             if orphan is not None and self._mirrored_owner and mirror is not None:
                 if (now - mirror[1] < host_policy.HOUR_SECONDS
                         or now - orphan[1] < host_policy.HOUR_SECONDS):
@@ -1748,7 +1755,8 @@ class _RefusalReporter:
                     # next paced look pays what has come due by then.
                     return None
                 paid = host_policy.claim_summary_payment(orphan[3], now)
-                if not host_policy.reserve_summary_emission(now):
+                stamp = host_policy.reserve_summary_emission(self._now)
+                if stamp is None:
                     # The pair logged a summary line within the hour, so
                     # the ceiling the two processes share holds the line
                     # back: the hour's one emission slot is reserved in
@@ -1781,11 +1789,11 @@ class _RefusalReporter:
                 self._mirrored_released = False
                 if paid:
                     return (mirror[0] + orphan[0],
-                            min(mirror[1], orphan[1]), now, mirror[2])
+                            min(mirror[1], orphan[1]), stamp, mirror[2])
                 # The claim on the debt met another payment's proof: the
                 # debt's counts are paid elsewhere, and the line pays the
                 # claimed mirror's alone.
-                return mirror[0], mirror[1], now, mirror[2]
+                return mirror[0], mirror[1], stamp, mirror[2]
             if (orphan is not None
                     and now - orphan[1] >= host_policy.HOUR_SECONDS):
                 # The debt's hour has run, so the one summary the debt's
@@ -1796,7 +1804,8 @@ class _RefusalReporter:
                 # pays them.
                 self._orphaned = None
                 if host_policy.claim_summary_payment(orphan[3], now):
-                    if not host_policy.reserve_summary_emission(now):
+                    stamp = host_policy.reserve_summary_emission(self._now)
+                    if stamp is None:
                         # The pair logged a summary line within the hour,
                         # so the ceiling the two processes share holds the
                         # debt's payment back: the hour's one emission
@@ -1811,7 +1820,7 @@ class _RefusalReporter:
                         return None
                     for window_id in orphan[3]:
                         self._lines.complete_window(window_id)
-                    return orphan[0], orphan[1], now, orphan[2]
+                    return orphan[0], orphan[1], stamp, orphan[2]
                 # The claim met another payment's proof: the counts are
                 # paid elsewhere, and nothing is owed here.
             return self._lines.take_summary()

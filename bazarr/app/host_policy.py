@@ -583,24 +583,33 @@ def reserve_summary_emission(now, path=None):
     settlement by identity alike, because a settlement pays counts into a
     line the same way a whole window does, and the write the caller's own
     line follows re-stamps the moment the reservation already took. The
-    newest moment decides, whichever side of the caller's captured one it
-    landed on: a line within the hour means the hour's one summary is
-    spent, whichever layer paid it, and a moment newer than the capture
-    is a reservation another timer of the pair took while this one held
-    an older moment, so the hour the newest line opened is the hour this
-    payment asks inside however far behind its capture runs, and the
-    reservation holds the line back with every count it keeps rather
-    than let a stale capture read the pair's newest hour as open. A
-    moment further ahead than the hour reads as no proof all the same,
-    because a clock that far from the recorded moment is a clock the
-    caller is not on, and the pair pays the summary it owes rather than
-    hold it on a ceiling no shared clock ever opens. The write is best
+    moment the reservation decides on is captured under the lock itself,
+    from the clock the caller passes, because a timer's own capture
+    precedes the lock's wait: another process can pay a summary while a
+    stalled timer waits for the lock, and the capture the timer took
+    before the wait would read the pair's newer reservation from an hour
+    it has long left, finding no proof where the pair's newest line
+    stands and paying a second line beside it. The locked capture asks
+    inside whichever hour the pair's newest line opened, however long the
+    wait that led to it ran, and the same capture is the moment the
+    reservation records and the stamp the payment carries, so the line
+    the caller logs and the record the pair shares name one moment and
+    the ceiling reads the hour the line opened. A recorded moment still
+    ahead of the capture can only be the pair's own clocks disagreeing,
+    and the hour holds it back within that hour, while a moment further
+    ahead than the hour is a clock the pair does not share, and the pair
+    pays the summary it owes rather than hold it on a ceiling no shared
+    clock ever opens. The reservation answers with the captured stamp
+    when it takes the slot and with nothing when the ceiling holds the
+    payment back, so a caller asks whether the answer is nothing and
+    carries the stamp otherwise, and a stamp of zero still proves a slot
+    the caller took. The write is best
     effort with the same trade the record's other updates keep: a record
     nothing can read or write proves no line the pair can wait for, and
     the payment proceeds rather than hold a summary on a proof that never
     reached the file.
     """
-    if not isinstance(now, (int, float)):
+    if not (isinstance(now, (int, float)) or callable(now)):
         return True
     path = summary_emissions_record_path() if path is None else path
     record_path = Path(path)
@@ -614,19 +623,140 @@ def reserve_summary_emission(now, path=None):
         if lock_handle is not None:
             lock_handle.close()
         lock_handle = None
+    stamp = now() if callable(now) else now
     try:
         record = _read_summary_emissions_record(path)
         newest = max(record) if record else None
         if (newest is not None
-                and -HOUR_SECONDS <= now - newest < HOUR_SECONDS):
-            return False
-        record.append(now)
-        record = [stamp for stamp in record if now - stamp < CARRY_RETENTION_SECONDS]
+                and -HOUR_SECONDS <= stamp - newest < HOUR_SECONDS):
+            return None
+        record.append(stamp)
+        record = [moment for moment in record if stamp - moment < CARRY_RETENTION_SECONDS]
         fd, tmp = tempfile.mkstemp(dir=str(record_path.parent),
                                    prefix=f".{record_path.name}.")
         try:
             with os.fdopen(fd, 'w') as record_file:
                 json.dump(record, record_file)
+            os.replace(tmp, path)
+        except BaseException:
+            os.unlink(tmp)
+            raise
+        return stamp
+    except Exception:
+        return stamp
+    finally:
+        if lock_handle is not None:
+            lock_handle.close()
+
+
+# The record of the hour's spent refusal lines, in the configuration
+# directory the two processes of one install share. The pair's line cap
+# is one budget whichever layer writes the line, and each layer's own
+# in-memory allowance only knows the lines it spent and the ones its
+# answers folded in: an acknowledgement whose answer was lost and a
+# report no backend ever processed leave the two budgets strangers to
+# each other, so the pair could draw twice the cap from one hour. Every
+# layer reserves the per-host and the total allowance here, under the
+# lock, before it logs, and a refused reservation holds the line back
+# the way the hour's own cap does.
+SPENT_REFUSAL_LINES_RECORD = 'host-refusal-spent-lines.json'
+SPENT_REFUSAL_LINES_RECORD_FILE_ENV = 'BAZARR_REFUSAL_SPENT_LINES_FILE'
+SPENT_REFUSAL_LINES_RECORD_LOCK_SUFFIX = '.lock'
+
+
+def spent_refusal_lines_record_path(environ=None):
+    """Where the pair's spent-line record lives, resolved the way both
+    processes resolve their configuration: the explicit file the
+    environment names, then the configuration directory BAZARR_CONFIG_DIR
+    names, then the data directory beside the code, exactly as the record
+    of completed windows resolves, so the two processes of one install
+    always meet the same file, restarts and all.
+    """
+    environ = os.environ if environ is None else environ
+    override = environ.get(SPENT_REFUSAL_LINES_RECORD_FILE_ENV, '').strip()
+    if override:
+        return override
+    config_dir = environ.get('BAZARR_CONFIG_DIR', '').strip()
+    if not config_dir:
+        config_dir = str(Path(__file__).resolve().parents[2] / 'data')
+    return str(Path(config_dir) / 'config' / SPENT_REFUSAL_LINES_RECORD)
+
+
+def _read_spent_refusal_lines_record(path):
+    """The record's spent lines, or nothing: the record is best effort,
+    and a missing or unreadable one proves no line the pair has spent."""
+    try:
+        with open(path) as record_file:
+            record = json.load(record_file)
+        if not isinstance(record, dict):
+            return {}, []
+        hosts = record.get('hosts')
+        times = record.get('times')
+        hosts = ({name: stamp for name, stamp in hosts.items()
+                  if isinstance(name, str) and isinstance(stamp, (int, float))}
+                 if isinstance(hosts, dict) else {})
+        times = ([stamp for stamp in times if isinstance(stamp, (int, float))]
+                 if isinstance(times, list) else [])
+        return hosts, times
+    except Exception:
+        return {}, []
+
+
+def reserve_refusal_line(host, now, path=None):
+    """Take the pair's one line slot for the hostname in the hour, or
+    answer that the shared budget has spent it.
+
+    The hour's cap of refusal lines and the hostname's one line an hour
+    are the pair's budget and not one layer's: the backend writes lines
+    for the notices it accounts and the console writes them for the
+    failures no backend answered, and the two processes share the one
+    budget the cap names. Each layer's own in-memory allowance knows
+    only the lines it spent itself and the ones the answers folded in,
+    so a burst of notices whose acknowledgements were lost and a burst
+    of failures no backend processed can each draw a whole cap beside
+    the other's: the reservation is taken here instead, in the shared
+    state under the record's lock, before either process logs, so the
+    pair's one budget bounds both layers' lines together. The per-host
+    allowance is the hostname's own fact and the total is the hour's,
+    and both are held on the hour the caller's clock names: an entry
+    outside the hour on either side of it is a clock the pair does not
+    share, and it binds nothing here. A refused reservation holds the
+    line back the way the hour's own cap does, and the caller counts
+    the refusal into its window as a held-back line. The write is best
+    effort exactly as the record's other updates are: a record nothing
+    can read or write reserves nothing, and the pair writes the line
+    rather than hold it on a proof that never reached the file.
+    """
+    if not host or not isinstance(now, (int, float)):
+        return True
+    path = spent_refusal_lines_record_path() if path is None else path
+    record_path = Path(path)
+    lock_handle = None
+    try:
+        record_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_handle = open(str(record_path) + SPENT_REFUSAL_LINES_RECORD_LOCK_SUFFIX, 'a+')
+        import fcntl
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        if lock_handle is not None:
+            lock_handle.close()
+        lock_handle = None
+    try:
+        hosts, times = _read_spent_refusal_lines_record(path)
+        hosts = {name: stamp for name, stamp in hosts.items()
+                 if -HOUR_SECONDS <= now - stamp < HOUR_SECONDS}
+        times = [stamp for stamp in times
+                if -HOUR_SECONDS <= now - stamp < HOUR_SECONDS]
+        if (hosts.get(host) is not None
+                or len(times) >= REFUSAL_LOG_LINES_PER_HOUR):
+            return False
+        hosts[host] = now
+        times.append(now)
+        fd, tmp = tempfile.mkstemp(dir=str(record_path.parent),
+                                   prefix=f".{record_path.name}.")
+        try:
+            with os.fdopen(fd, 'w') as record_file:
+                json.dump({'hosts': hosts, 'times': times}, record_file)
             os.replace(tmp, path)
         except BaseException:
             os.unlink(tmp)
@@ -1462,6 +1592,16 @@ class BoundedRefusalRecorder:
         the line times the hour can roll away while the notice still
         waits for its answer, so a recovery that lands past them records
         the hostname without counting the refusal again.
+
+        The line this layer would write is reserved in the shared budget
+        before it is logged: the pair's cap of lines an hour and a
+        hostname's one line an hour are the pair's facts and not one
+        layer's, held in the shared state under the record's lock, so a
+        backend whose answers were lost and a console whose reports
+        reached nothing cannot each draw a whole cap beside the other's
+        lines. A reservation the shared budget refuses holds the line
+        back here exactly as the hour's own cap does, and the refusal
+        counts into the window as a held-back line.
         """
         now = self._now()
         with self._lock:
@@ -1494,6 +1634,16 @@ class BoundedRefusalRecorder:
                 # made.
                 return False
             if host in self._last_lines or len(self._line_times) >= REFUSAL_LOG_LINES_PER_HOUR:
+                self._count_suppressed(now)
+                return False
+            if not reserve_refusal_line(host, now):
+                # The pair's shared budget spent this hour's line already,
+                # in the other process: the console drew the cap with
+                # lines whose answers never folded back, or the hostname's
+                # own line stands there for the hour, and no line of this
+                # layer's joins it. The refusal counts into the window
+                # here the way every other held-back line does, so the
+                # pair's one budget loses no refusal it holds back.
                 self._count_suppressed(now)
                 return False
             self._last_lines[host] = now
@@ -1666,6 +1816,17 @@ class BoundedRefusalRecorder:
         the pending queue's eviction alike, and no hour horizon clears
         it in between, so a retry of an unchanged notice counts its
         first failure once, in whichever hour it fails.
+
+        The line the failure would write is reserved in the shared
+        budget before it is logged, exactly as the backend's own line
+        is: the pair's cap of lines an hour and a hostname's one line an
+        hour are the pair's facts, held in the shared state under the
+        record's lock, so a console whose failures reached no backend
+        cannot draw a second cap beside the lines a backend already
+        spent, however lost the answers that would have folded them in
+        were. A refused reservation holds the line back the way the
+        hour's own cap does, and the first failure it holds back counts
+        once into the window.
         """
         now = self._now()
         with self._lock:
@@ -1699,6 +1860,19 @@ class BoundedRefusalRecorder:
                     self._count_suppressed(now)
                 return False
             if len(self._line_times) >= REFUSAL_LOG_LINES_PER_HOUR:
+                if host not in self._first_failures:
+                    self._first_failures[host] = now
+                    self._count_suppressed(now)
+                return False
+            if not reserve_refusal_line(host, now):
+                # The pair's shared budget spent this hour's line already,
+                # in the other process: the backend drew the cap with lines
+                # whose answers never folded back, or the hostname's own
+                # line stands there for the hour, and this console's
+                # fallback writes no second line beside them. The first
+                # failure counts once into the window here, the way a line
+                # the hour's own cap holds back is counted, and no layer
+                # writes the refusal a line within the hour.
                 if host not in self._first_failures:
                     self._first_failures[host] = now
                     self._count_suppressed(now)
@@ -1927,10 +2101,14 @@ class BoundedRefusalRecorder:
         cannot decide between them, and the moments decide instead. The
         decision and the spend of the hour's one slot are a single
         reserved step, taken under the lock the record's own updates
-        hold, so two payments deciding inside the same moment cannot
-        both pass it, and every payment path asks it, the whole claim
-        and the settlement by identity alike, because a settlement pays
-        counts into a line the same way a whole window does. A payment
+        hold, and the moment it decides on is captured under that lock
+        itself, so a timer that waited behind another process's update
+        asks inside the hour the pair's newest line opened however long
+        the wait ran, and two payments deciding inside the same moment
+        cannot both pass it, and every payment path asks it, the whole
+        claim and the settlement by identity alike, because a settlement
+        pays counts into a line the same way a whole window does. A
+        payment
         the ceiling holds returns its claims and waits with every count
         it keeps, and the next paced look pays it once the hour since
         the pair's last line has run, so the summaries the pair logs
@@ -1995,7 +2173,8 @@ class BoundedRefusalRecorder:
                 suppressed = self._suppressed
                 window_id = self._window_id
                 window_ids = self._window_ids
-            if not reserve_summary_emission(now):
+            stamp = reserve_summary_emission(self._now)
+            if stamp is None:
                 # The pair logged a summary line within the hour, whichever
                 # layer paid it and whichever windows the line counted, so
                 # the ceiling the two processes share holds this payment
@@ -2004,8 +2183,12 @@ class BoundedRefusalRecorder:
                 # settlement pays counts into a line the same way a whole
                 # window does, and the pair's one summary an hour bounds
                 # whichever path a payment takes. The reservation is one
-                # locked step with the decision, so two payments deciding
-                # inside the same moment cannot both pass it however
+                # locked step with the decision, and the moment it decides
+                # on is captured under that lock itself, so a payment that
+                # waited behind another process's update asks inside the
+                # hour the pair's newest line opened, however long the
+                # wait ran, and two payments deciding inside the same
+                # moment cannot both pass it however
                 # closely their turns overlap. The claims the held payment
                 # made are returned with it, because the decision the
                 # record keeps is the payment and not the hold: a layer
@@ -2024,8 +2207,8 @@ class BoundedRefusalRecorder:
             self._window_ids = []
             self._window_counts = OrderedDict()
             for paid_id in window_ids:
-                self._completed_windows[paid_id] = now
-            return suppressed, opened, now, window_id
+                self._completed_windows[paid_id] = stamp
+            return suppressed, opened, stamp, window_id
 
     def hour_suppressed_window(self):
         """The suppressed window this hour holds, taken by no one.
