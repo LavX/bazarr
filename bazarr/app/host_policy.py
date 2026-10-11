@@ -289,23 +289,29 @@ def claim_summary_payment(window_ids, paid_at, path=None):
     return claimed
 
 
-def release_summary_claim(window_id, path=None):
+def release_summary_claim(window_ids, path=None):
     """Return the one payment decision on a window to whichever layer
     holds it.
 
-    The console takes the claim on a mirrored window's identity when it
-    holds both windows, because the one summary they owe is its to pay. Its
-    own window can leave in a report instead, folded into the window the
-    mirror stands for, and the merged window is the backend's from then
-    on: whichever layer holds a window when its hour runs is the one that
-    reports it, so the console returns the decision before the claim can
-    block the merged window's payment. The removal is held on the lock the
-    record's own updates hold, best effort with them: a record nothing can
-    write keeps the claim, and the payment that cannot take the merged
-    window whole settles by identity instead, the folded remainder paying
-    and the claimed counts still owed by the layer that claimed them.
+    The console takes the claim on a mirrored window's identities when it
+    holds both that window and one of its own, because the one summary
+    they owe is its to pay, and the claim covers every constituent the
+    mirror counts. Its own window can leave in a report instead, folded
+    into the window the mirror stands for, and the merged window is the
+    backend's from then on: whichever layer holds a window when its hour
+    runs is the one that reports it, so the console returns the decision
+    before the claim can block the merged window's payment, and every
+    identity the claim took comes back with it. The removal is held on
+    the lock the record's own updates hold, best effort with them: a
+    record nothing can write keeps the claim, and the payment that cannot
+    take the merged window whole settles by identity instead, the folded
+    remainder paying and the claimed counts still owed by the layer that
+    claimed them.
     """
-    if not window_id:
+    if isinstance(window_ids, str):
+        window_ids = [window_ids]
+    window_ids = [window_id for window_id in window_ids if window_id]
+    if not window_ids:
         return
     path = completed_windows_record_path() if path is None else path
     record_path = Path(path)
@@ -321,8 +327,10 @@ def release_summary_claim(window_id, path=None):
             lock_handle = None
     try:
         record = _read_completed_windows_record(path)
-        if window_id in record:
-            record.pop(window_id, None)
+        held = [window_id for window_id in window_ids if window_id in record]
+        if held:
+            for window_id in held:
+                record.pop(window_id, None)
             fd, tmp = tempfile.mkstemp(dir=str(record_path.parent),
                                        prefix=f".{record_path.name}.")
             try:
@@ -404,11 +412,16 @@ def _prune_notice_record(record, now):
     """Keep the entries whose facts are still within their retention
     spans, so the record stays bounded: a receipt is a fact about one
     delivery, held on the span both sides keep for a delivery no answer
-    resolved, and an outcome is the pair's proof a notice is accounted,
-    held the bounded day the backend's own accounting of the identity
-    lives on, because the notice it names can be retried that long and a
-    console reading past the carry span still has to find the outcome the
-    retries reconcile on."""
+    resolved, while an outcome is the pair's proof a notice is accounted,
+    held for as long as the notice it names can still be waiting, because
+    the console holds a notice until an acknowledgement resolves it or
+    the pending queue evicts it and neither boundary is a span of time.
+    The outcome is therefore kept past every span: the retry of a notice
+    that failed a day or more ago still reads it back and names the
+    refusal nowhere again, and the entry leaves the record only at the
+    acknowledgement that resolves the notice, in the trim the console
+    makes, so a record that keeps an unresolved notice's outcome cannot
+    outgrow the notices the pair still holds."""
     pruned = {}
     for notice_id, entry in record.items():
         if not isinstance(entry, dict):
@@ -416,7 +429,7 @@ def _prune_notice_record(record, now):
         received = entry.get('received')
         accounted = entry.get('accounted')
         if ((isinstance(received, (int, float)) and now - received < CARRY_RETENTION_SECONDS)
-                or (isinstance(accounted, (int, float)) and now - accounted < DAY_SECONDS)):
+                or isinstance(accounted, (int, float))):
             pruned[notice_id] = entry
     return pruned
 
@@ -830,7 +843,8 @@ class BoundedRefusalRecorder:
         self._line_ids = []  # the identity of each spent line, parallel to its time
         self._suppressed = 0
         self._window_opens = None  # when the current suppressed count started
-        self._window_id = None  # the current window's ID, minted at its first line
+        self._window_id = None  # the current window's travelling ID, the earliest window it counts
+        self._local_window_id = None  # the stable identity of the counts this layer's own refusals add
         self._window_ids = []  # every ID the current window counts, its own and each folded-in one
         self._window_counts = OrderedDict()  # window ID -> the counts it contributed to the current window
         self._counted_windows = OrderedDict()  # window ID -> when it was counted here
@@ -842,7 +856,7 @@ class BoundedRefusalRecorder:
     def _count_suppressed(self, now):
         """Count one held-back line into the window, minting its stable ID.
 
-        The ID is minted when the window opens, at its first held-back line,
+        The ID is minted when the window's own first held-back line counts,
         and never regenerated: every later handoff of the window, in a
         report, an acknowledgement or the console's fold back, carries the
         same one, so whichever layer receives the window can tell whether
@@ -851,14 +865,23 @@ class BoundedRefusalRecorder:
         window completes on the list the acknowledgement carries, and the
         count joins its own place in the map the window keeps per ID, so a
         payment that finds some of the IDs claimed elsewhere can settle
-        the rest by identity.
+        the rest by identity. The mint is the identity of this layer's own
+        contribution and nothing else: a fold that carries an older
+        window's ID in moves the ID the aggregate travels under, the
+        earliest window's, and every count this layer's own refusals add
+        keeps joining the mint instead, however many windows fold in
+        around it, so a payment that finds the folded identity claimed
+        elsewhere still pays these counts under their own.
         """
-        if not self._suppressed:
-            self._window_id = _mint_window_id()
-            self._window_ids = [self._window_id]
-            self._counted_windows[self._window_id] = now
+        if self._local_window_id is None:
+            self._local_window_id = _mint_window_id()
+            self._counted_windows[self._local_window_id] = now
+            if self._local_window_id not in self._window_ids:
+                self._window_ids.append(self._local_window_id)
+            if self._window_id is None:
+                self._window_id = self._local_window_id
         self._suppressed += 1
-        self._window_counts[self._window_id] = self._window_counts.get(self._window_id, 0) + 1
+        self._window_counts[self._local_window_id] = self._window_counts.get(self._local_window_id, 0) + 1
 
     def _keep_newest_hosts(self):
         """Order the record by the refusal stamps and keep the newest bound.
@@ -1343,6 +1366,7 @@ class BoundedRefusalRecorder:
                     self._suppressed = 0
                     self._window_opens = None
                     self._window_id = None
+                    self._local_window_id = None
                     self._window_ids = []
                     self._window_counts = OrderedDict()
                     return None
@@ -1361,6 +1385,7 @@ class BoundedRefusalRecorder:
             self._suppressed = 0
             self._window_opens = None
             self._window_id = None
+            self._local_window_id = None
             self._window_ids = []
             self._window_counts = OrderedDict()
             for paid_id in window_ids:
@@ -1376,7 +1401,14 @@ class BoundedRefusalRecorder:
         answer arrives, so an acknowledgement that is lost or mis-delivered
         never takes accounting with it. The ID travels with the copy, so
         the layer that holds the original recognizes the window when the
-        copy is handed back and folds it nowhere.
+        copy is handed back and folds it nowhere. The copy carries every
+        identity the window counts as well, the earliest window's first
+        and each folded-in one beside it, with the counts each
+        contributed, so the layer that holds the copy can claim the whole
+        aggregate under the one decision its payment takes and tell a
+        backend that lost the window what every constituent is owed,
+        without the aggregate's total standing in for the parts it was
+        built from.
         """
         now = self._now()
         with self._lock:
@@ -1385,7 +1417,13 @@ class BoundedRefusalRecorder:
                 return None
             if self._window_opens is None:
                 self._window_opens = now
-            return self._suppressed, self._window_opens, self._window_id
+            window_ids = list(self._window_ids)
+            if self._window_id is not None:
+                window_ids = ([self._window_id]
+                              + [known_id for known_id in window_ids
+                                 if known_id != self._window_id])
+            counts = [self._window_counts.get(window_id, 0) for window_id in window_ids]
+            return self._suppressed, self._window_opens, self._window_id, window_ids, counts
 
     def completed_windows(self):
         """The IDs of the windows this layer has logged and cleared.
@@ -1440,9 +1478,10 @@ class BoundedRefusalRecorder:
         as the window is in flight this layer has not counted it, so the
         fold back below lands and is not refused as a window this layer has
         already counted. The IDs folded into the window from elsewhere stay
-        counted here: only the window's own travelling ID leaves with the
-        take, and a re-carry of a folded-in ID still folds nowhere while
-        this layer remembers it.
+        counted here: only the window's own identities leave with the take,
+        the travelling one and the local contribution mint beside it when a
+        fold moved the travelling one, and a re-carry of a folded-in ID
+        still folds nowhere while this layer remembers it.
         """
         now = self._now()
         with self._lock:
@@ -1451,16 +1490,25 @@ class BoundedRefusalRecorder:
             count = self._suppressed
             opened = self._window_opens if self._window_opens is not None else now
             window_id = self._window_id
+            local_window_id = self._local_window_id
             self._suppressed = 0
             self._window_opens = None
             self._window_id = None
+            self._local_window_id = None
             self._window_ids = []
             self._window_counts = OrderedDict()
             if window_id is not None:
                 self._counted_windows.pop(window_id, None)
+            if local_window_id is not None and local_window_id != window_id:
+                # The travelling ID the carry hands out is the earliest
+                # window's, and the local contribution identity is this
+                # layer's own beside it: both counted here leave with the
+                # window, so a re-carry of either folds nowhere while this
+                # layer remembers counting it.
+                self._counted_windows.pop(local_window_id, None)
             return count, opened, window_id
 
-    def merge_summary(self, count, opened, window_id=None):
+    def merge_summary(self, count, opened, window_id=None, folded_ids=None, folded_counts=None):
         """Fold a suppressed window another layer carried into this one.
 
         The window that opened first keeps its place, so the lines one layer
@@ -1490,55 +1538,85 @@ class BoundedRefusalRecorder:
         other layer can still re-carry always meets a layer that still
         remembers counting it.
 
-        The folded-in ID joins the window's list of the IDs it counts as
-        well, so the summary that pays the combined window completes it
-        too and the acknowledgement names it: the layer holding a copy of
-        the folded window drops it on the answer, instead of carrying it
-        to a backend that no longer remembers counting it. The folded
-        counts join their own place in the map the window keeps per ID,
-        beside the window's own, so a payment that finds some of the IDs
-        claimed elsewhere can settle the rest by identity and no folded
-        counts die beside a claim they never joined. The wire keeps
-        the one shape it always had, with the window's own travelling ID
-        alone on the report and the hour copy; only the completed list
-        grows to cover the aggregate.
+        The carried window can itself be an aggregate of several windows,
+        and its constituents travel with their identities and their counts
+        beside the total, the window's own travelling ID first among
+        them: the fold judges every constituent by its own identity, and
+        each one this layer has not counted joins the window's list of
+        the IDs it counts with the counts it contributed, so the summary
+        that pays the combined window completes it too, a payment that
+        finds some of the identities claimed elsewhere settles the rest
+        by identity with the counts each one brought, and no folded
+        counts die beside a claim they never joined. A constituent that
+        has already counted here folds nowhere on its own, leaving the
+        rest of the aggregate to fold, and one already paid here renews
+        its completion the same way an identity alone always has, so the
+        aggregate never counts a constituent a second time either. The
+        earliest window's ID is the one the merged aggregate travels
+        under, and the travelling ID moves to a folded constituent only
+        when the fold took the identity it arrived with.
         """
         if not count or opened is None:
             return
+        if folded_ids and folded_counts and len(folded_ids) == len(folded_counts):
+            constituents = [(known_id, known_count)
+                            for known_id, known_count in zip(folded_ids, folded_counts)
+                            if known_id]
+        elif window_id is not None:
+            constituents = [(window_id, count)]
+        else:
+            constituents = [(None, count)]
         with self._lock:
-            if window_id is not None and (window_id == self._window_id
-                                          or window_id in self._window_ids):
-                # The ID belongs to the window this layer is still
-                # holding: the window already counts the lines the
-                # carried copy stands for, and a live window outlives
-                # the counted record's lease, so a replay of its own
-                # mirror arriving once that lease has aged out must not
-                # fold the lines in a second time.
+            fresh_counts = 0
+            primary_fresh = False
+            for known_id, known_count in constituents:
+                if known_id is None:
+                    # The counts arrive with no identity to their name,
+                    # the one shape a window with no stable ID keeps: the
+                    # fold takes them in under no identity at all, so no
+                    # handoff of theirs can ever tell whether it has
+                    # counted them, and the wire carries nothing that
+                    # could.
+                    fresh_counts += known_count
+                    continue
+                if known_id == self._window_id or known_id in self._window_ids:
+                    # The ID belongs to the window this layer is still
+                    # holding: the window already counts the lines the
+                    # carried copy stands for, and a live window outlives
+                    # the counted record's lease, so a replay of its own
+                    # mirror arriving once that lease has aged out must not
+                    # fold the lines in a second time.
+                    continue
+                if known_id in self._counted_windows:
+                    continue
+                if known_id in self._completed_windows:
+                    # A window whose summary this layer has already paid,
+                    # carried again by a sender whose reconciliation no
+                    # answer has reached: the fold refuses, and the
+                    # arrival renews the completion record's lease, so the
+                    # record is retained exactly until the sender stops
+                    # re-carrying the window, on the one retention span
+                    # both sides share. Once the sender has reconciled,
+                    # the record ages out with the same span, so the list
+                    # stays bounded and a copy the sender can still
+                    # re-carry always meets a layer that still remembers
+                    # paying it.
+                    self._completed_windows[known_id] = self._now()
+                    continue
+                self._counted_windows[known_id] = self._now()
+                self._window_counts[known_id] = self._window_counts.get(known_id, 0) + known_count
+                if known_id not in self._window_ids:
+                    self._window_ids.append(known_id)
+                fresh_counts += known_count
+                if known_id == window_id:
+                    primary_fresh = True
+            if not fresh_counts:
                 return
-            if window_id is not None and window_id in self._counted_windows:
-                return
-            if window_id is not None and window_id in self._completed_windows:
-                # A window whose summary this layer has already paid,
-                # carried again by a sender whose reconciliation no answer
-                # has reached: the fold refuses, and the arrival renews
-                # the completion record's lease, so the record is retained
-                # exactly until the sender stops re-carrying the window,
-                # on the one retention span both sides share. Once the
-                # sender has reconciled, the record ages out with the same
-                # span, so the list stays bounded and a copy the sender
-                # can still re-carry always meets a layer that still
-                # remembers paying it.
-                self._completed_windows[window_id] = self._now()
-                return
-            if window_id is not None:
-                self._counted_windows[window_id] = self._now()
-            self._suppressed += count
-            self._window_counts[window_id] = self._window_counts.get(window_id, 0) + count
-            if window_id is not None and window_id not in self._window_ids:
-                self._window_ids.append(window_id)
+            self._suppressed += fresh_counts
             if self._window_opens is None or opened < self._window_opens:
                 self._window_opens = opened
-                self._window_id = window_id
+                if window_id is None or primary_fresh:
+                    self._window_id = window_id
 
     def recent(self, within_seconds):
         """The refused hosts of the window, newest first."""

@@ -3982,11 +3982,15 @@ async def test_a_pending_notice_recovered_past_a_day_of_failed_delivery_keeps_it
     the backend past the day accounts the refusal nowhere again, no
     second line names it in the later hour, and the console whose
     deliveries keep failing names it nowhere either, because the record
-    of notices kept the outcome the first arrival wrote. The boundary the
+    of notices kept the outcome the first arrival wrote. The record is
+    written for an unrelated notice across that day as well, and the
+    update it makes must prune nothing of the outcome: the patient notice
+    is still waiting, so a retry that fails past the update reads the
+    outcome back and names the refusal nowhere still. The boundary the
     pair keeps is the notice's own lifetime, ended by the acknowledgement
     that resolves it or the eviction that replaces it, and no span of
     time without an arrival expires it."""
-    from app import host_allowlist
+    from app import host_allowlist, host_policy
 
     monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
     monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
@@ -4066,6 +4070,29 @@ async def test_a_pending_notice_recovered_past_a_day_of_failed_delivery_keeps_it
         await asyncio.sleep(0.3)
         assert delivered == []
         assert reporter.pending_reports() == ["patient.example.com"]
+        assert [line for line in lines if "patient.example.com" in line] == []
+        assert recorder.hour_suppressed_window() is None
+        assert reporter._lines.hour_suppressed_window() is None
+
+        # The whole day of the first accounting has passed with no arrival
+        # at all, and the record the pair shares is written for an
+        # unrelated notice beside the patient one: the outcome the first
+        # arrival wrote must survive the update's prune, because the
+        # notice it names is still waiting for the acknowledgement no
+        # answer gave, and a retry of it that fails again reads the outcome
+        # back and names the refusal nowhere. The patient notice's facts
+        # are stamped at the row's first accounting and the unrelated
+        # one's at the day's far side, so the span between them is the
+        # whole day.
+        patient_id = reporter._pending_ids["patient.example.com"]
+        host_policy.record_notice_receipt(patient_id, 100)
+        host_policy.record_notice_accounted(patient_id, 100)
+        host_policy.record_notice_receipt("an-unrelated-notice", 86599)
+        host_policy.record_notice_accounted("an-unrelated-notice", 86599)
+        assert host_policy.notice_accounted_has(patient_id)
+        reporter.wake_event().set()
+        await asyncio.sleep(0.3)
+        assert delivered == []
         assert [line for line in lines if "patient.example.com" in line] == []
         assert recorder.hour_suppressed_window() is None
         assert reporter._lines.hour_suppressed_window() is None
@@ -10075,6 +10102,354 @@ async def test_a_partly_claimed_merged_window_settles_its_unpaid_constituent_cou
 
 
 @pytest.mark.asyncio
+async def test_a_merged_mirror_claims_its_folded_constituents_with_it_under_the_one_owner(
+        tmp_path, monkeypatch, root_log, caplog):
+    """The backend's merged window can count windows of its own beside one
+    folded in from the console, and the acknowledgement that carries the
+    merged window back names every constituent it counts, with the counts
+    each contributed: the mirror the console holds stands for the whole
+    aggregate, and the one claim the console takes on it covers every
+    constituent, so the backend's own flush meets the proof on each of
+    them, drops the copy it holds and logs nothing. The console then pays
+    the aggregate and its own window as the one summary the pair owes,
+    and every window's counts are summarized exactly once, in the one
+    line: a claim that took only the merged window's own identity would
+    leave the folded constituent's counts to the backend's flush, and the
+    pair would log its line beside the console's, reporting the folded
+    refusals twice over."""
+    from app import host_allowlist
+
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
+    monkeypatch.setenv("BAZARR_SUPERVISOR_TOKEN", "the-supervisor-token")
+    monkeypatch.setenv("BAZARR_CONFIG_DIR", str(tmp_path))
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    caplog.set_level(logging.INFO)
+
+    clock = [0]
+    recorder = host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0])
+    monkeypatch.setattr(host_allowlist, "_refusals", recorder)
+    config = _config()
+    delivered = []
+    backend_app = Flask(__name__)
+
+    def deliver(form):
+        """The backend's own notice route, over the form the report carried."""
+        with backend_app.test_request_context(
+                "/_supervisor/host_refusal", method="POST",
+                headers={supervisor.TOKEN_HEADER: "the-supervisor-token"}, data=form):
+            return host_allowlist.front_refusal_notice(config=config)
+
+    async def notice(request):
+        form = dict(await request.post())
+        delivered.append(form)
+        _body, _status, headers = deliver(form)
+        if _status != 204:
+            return web.Response(status=503)
+        return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                "the-supervisor-token", **headers})
+
+    backend = web.Application()
+    backend.router.add_route("POST", "/_supervisor/host_refusal", notice)
+    answering_backend = TestClient(TestServer(backend))
+    await answering_backend.start_server()
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    try:
+        reporter = supervisor._active_reporter
+        monkeypatch.setattr(reporter, "_now", lambda: clock[0])
+        monkeypatch.setattr(reporter._lines, "_now", lambda: clock[0])
+
+        async def settle():
+            for _ in range(6000):
+                if not reporter.pending_reports():
+                    return
+                clock[0] += 0.06
+                await asyncio.sleep(0.01)
+            raise AssertionError("the reports never drained")
+
+        # The backend spends its hour's cap while it answers, the one past
+        # the cap is held back into a window of the backend's own, and the
+        # acknowledgement carries that window back: the console mirrors it.
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", answering_backend.server.port)
+        monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+        for index in range(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR + 1):
+            clock[0] = index
+            response = await client.get("/", headers={"Host": f"up{index}.example.com"})
+            assert response.status == 421
+        await settle()
+        held = recorder.hour_suppressed_window()
+        assert held is not None
+        assert held[0] == 1
+        mirrored = reporter.mirrored_summary()
+        assert mirrored is not None
+        assert mirrored[2] == held[2]
+
+        # The backend becomes unreachable, and three repeats of hostnames
+        # it already acknowledged are counted into a window of the
+        # console's own: no report is due for them, so the window waits at
+        # the console with the mirror beside it, holding counts no line
+        # anywhere has named.
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", None)
+        for index in range(3):
+            clock[0] = 25 + index
+            response = await client.get("/", headers={"Host": f"up{index}.example.com"})
+            assert response.status == 421
+        folded = reporter._lines.hour_suppressed_window()
+        assert folded is not None
+        assert folded[0] == 3
+        assert folded[2] is not None
+        assert folded[2] != held[2]
+        assert reporter.pending_reports() == []
+
+        # The backend answers again, and a fresh hostname's report reaches
+        # it carrying the console's window, which folds into the backend's
+        # earlier one: the merged window counts two constituents then, the
+        # backend's own and the folded one, and the acknowledgement that
+        # answers the report carries the merged window back with every
+        # constituent it counts, so the console's mirror stands for the
+        # whole aggregate. The fresh hostname's own refusal is held back
+        # beside them, the backend's cap still spent within the hour.
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", answering_backend.server.port)
+        monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+        clock[0] = 28
+        response = await client.get("/", headers={"Host": "later.example.com"})
+        assert response.status == 421
+        await settle()
+        merged = recorder.hour_suppressed_window()
+        assert merged is not None
+        assert merged[0] == 5
+        mirrored = reporter.mirrored_summary()
+        assert mirrored is not None
+        assert mirrored[0] == 5
+        assert mirrored[2] == held[2]
+
+        # A repeat of a hostname the backend acknowledged is skipped by
+        # its reports, so the console counts it into a window of its own,
+        # and the console holds the merged mirror beside it: the claim the
+        # console takes on the one summary the pair owes covers every
+        # constituent the mirror counts, the merged window's own identity
+        # and the folded one's alike, before either hour runs.
+        clock[0] = 31
+        response = await client.get("/", headers={"Host": "up0.example.com"})
+        assert response.status == 421
+        own = reporter._lines.hour_suppressed_window()
+        assert own is not None
+        assert own[0] == 1
+        assert own[2] != held[2]
+        assert own[2] != folded[2]
+        for _ in range(200):
+            if supervisor.host_policy.completed_windows_record_has(folded[2]):
+                break
+            await asyncio.sleep(0.01)
+        assert supervisor.host_policy.completed_windows_record_has(held[2])
+        assert supervisor.host_policy.completed_windows_record_has(folded[2])
+        assert reporter.mirrored_summary() is not None
+
+        # Both windows' hours have run, and a refusal arrives: the console
+        # pays its own window and the merged mirror as the one summary the
+        # pair owes, the counts of every constituent added under the one
+        # claim, and the payment completes each constituent on the record
+        # the pair shares.
+        clock[0] = 3640
+        response = await client.get("/", headers={"Host": "witness.example.com"})
+        assert response.status == 421
+        console_summaries = [line for line in lines if line.startswith("Suppressed")]
+        assert len(console_summaries) == 1
+        assert console_summaries[0].startswith("Suppressed 6 host-refusal lines between ")
+        await settle()
+
+        # The backend's merged window is due with the arrival's flush, and
+        # the flush meets the console's claim on every constituent: the
+        # copy the backend holds drops whole and nothing is logged beside
+        # the console's one line, whichever timer reached the aggregate.
+        backend_summaries = [message for message in root_log.messages
+                             if "host-refusal log lines" in message]
+        assert backend_summaries == []
+        assert recorder.hour_suppressed_window() is None
+        assert reporter.mirrored_summary() is None
+        assert reporter._lines.hour_suppressed_window() is None
+        assert supervisor.host_policy.completed_windows_record_has(held[2])
+        assert supervisor.host_policy.completed_windows_record_has(folded[2])
+        assert supervisor.host_policy.completed_windows_record_has(own[2])
+    finally:
+        await client.close()
+        await answering_backend.close()
+
+
+@pytest.mark.asyncio
+async def test_a_backend_flush_between_the_claim_and_the_carry_keeps_the_mirrors_counts(
+        tmp_path, monkeypatch, root_log, caplog):
+    """The console takes the claim on a mirrored window the moment it holds
+    that window and one of its own, and its own window can leave in a
+    report before the console pays: the backend's flush can land between
+    the claim and the carry, and it meets the claim, drops the copy it
+    holds and logs nothing, because the console owes the mirror's counts
+    the one line it claimed them for. The carry hands the window the
+    console still holds to the backend, and the answer that comes back
+    carries no window the mirror ever stood for: the ownership the
+    release returned has nowhere to land, so the mirror's counts stay
+    the console's to pay, and the console pays them as the summary it
+    owes beside the one the backend pays for the window the report
+    carried over, so every window's counts are summarized exactly once,
+    whichever layer's timer reached them."""
+    from app import host_allowlist
+
+    monkeypatch.setattr(supervisor, "RETRY_PACE_SECONDS", 0.05)
+    monkeypatch.setattr(supervisor, "MIN_RETRY_WAIT_SECONDS", 0.05)
+    monkeypatch.setenv("BAZARR_SUPERVISOR_TOKEN", "the-supervisor-token")
+    monkeypatch.setenv("BAZARR_CONFIG_DIR", str(tmp_path))
+    lines = []
+    monkeypatch.setattr(supervisor, "_print_refusal_line", lines.append)
+    caplog.set_level(logging.INFO)
+
+    clock = [0]
+    recorder = host_allowlist.BoundedRefusalRecorder(now=lambda: clock[0])
+    monkeypatch.setattr(host_allowlist, "_refusals", recorder)
+    config = _config()
+    delivered = []
+    backend_app = Flask(__name__)
+
+    def deliver(form):
+        """The backend's own notice route, over the form the report carried."""
+        with backend_app.test_request_context(
+                "/_supervisor/host_refusal", method="POST",
+                headers={supervisor.TOKEN_HEADER: "the-supervisor-token"}, data=form):
+            return host_allowlist.front_refusal_notice(config=config)
+
+    async def notice(request):
+        form = dict(await request.post())
+        delivered.append(form)
+        _body, _status, headers = deliver(form)
+        if _status != 204:
+            return web.Response(status=503)
+        return web.Response(status=204, headers={supervisor.TOKEN_HEADER:
+                                                "the-supervisor-token", **headers})
+
+    backend = web.Application()
+    backend.router.add_route("POST", "/_supervisor/host_refusal", notice)
+    answering_backend = TestClient(TestServer(backend))
+    await answering_backend.start_server()
+    client = await _supervisor_client(tmp_path, monkeypatch)
+    try:
+        reporter = supervisor._active_reporter
+        monkeypatch.setattr(reporter, "_now", lambda: clock[0])
+        monkeypatch.setattr(reporter._lines, "_now", lambda: clock[0])
+
+        async def settle():
+            for _ in range(6000):
+                if not reporter.pending_reports():
+                    return
+                clock[0] += 0.06
+                await asyncio.sleep(0.01)
+            raise AssertionError("the reports never drained")
+
+        # The backend spends its hour's cap while it answers, the one past
+        # the cap is held back into a window of the backend's own, and the
+        # acknowledgement carries that window back: the console mirrors it.
+        monkeypatch.setattr(supervisor, "BACKEND_PORT", answering_backend.server.port)
+        monkeypatch.setattr(supervisor, "BACKEND_TOKEN", "the-supervisor-token")
+        for index in range(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR + 1):
+            clock[0] = index
+            response = await client.get("/", headers={"Host": f"up{index}.example.com"})
+            assert response.status == 421
+        await settle()
+        held = recorder.hour_suppressed_window()
+        assert held is not None
+        assert held[0] == 1
+        mirrored = reporter.mirrored_summary()
+        assert mirrored is not None
+        assert mirrored[2] == held[2]
+
+        # A repeat of a hostname the backend acknowledged is skipped by its
+        # reports, so the console counts it into a window of its own, one
+        # that overlaps the mirrored hour and opens late in it, with its
+        # own hour still to run when the mirrored one has run out: the
+        # claim on the one summary the pair owes the two windows is taken
+        # before either hour runs.
+        clock[0] = 3550
+        response = await client.get("/", headers={"Host": "up0.example.com"})
+        assert response.status == 421
+        own = reporter._lines.hour_suppressed_window()
+        assert own is not None
+        assert own[0] == 1
+        assert own[2] != held[2]
+        for _ in range(200):
+            if supervisor.host_policy.completed_windows_record_has(held[2]):
+                break
+            await asyncio.sleep(0.01)
+        assert supervisor.host_policy.completed_windows_record_has(held[2])
+        assert reporter.mirrored_summary() is not None
+
+        # The backend's flush lands between the claim and the carry: the
+        # mirrored window's hour has run, and the flush meets the console's
+        # claim, drops the copy it holds and logs nothing, because the one
+        # summary the mirror owes is the claimer's to pay.
+        clock[0] = 3630
+        host_allowlist._flush_suppressed_summary()
+        assert recorder.hour_suppressed_window() is None
+        backend_summaries = [message for message in root_log.messages
+                             if "host-refusal log lines" in message]
+        assert backend_summaries == []
+        assert reporter.mirrored_summary() is not None
+
+        # A new hostname's refusal sends a report that carries the console's
+        # own window over, its hour still to run: the claim is returned with
+        # the window, and the backend, holding nothing since the flush, folds
+        # the carried window into a fresh one of its own and holds it. The
+        # answer that comes back carries that window, a window the mirror
+        # never stood for, so the ownership the release returned has nowhere
+        # to land: the mirror's counts keep their owner, and the console
+        # owes them their one line.
+        clock[0] = 3631
+        response = await client.get("/", headers={"Host": "later.example.com"})
+        assert response.status == 421
+        await settle()
+        carried_forms = [form for form in delivered if "suppressed" in form]
+        assert len(carried_forms) == 1
+        assert carried_forms[0].get("suppressed") == "1"
+        assert carried_forms[0].get("suppressed_id") == own[2]
+        fresh = recorder.hour_suppressed_window()
+        assert fresh is not None
+        assert fresh[0] == 1
+        assert fresh[2] == own[2]
+        backend_summaries = [message for message in root_log.messages
+                             if "host-refusal log lines" in message]
+        assert backend_summaries == []
+        assert reporter._lines.hour_suppressed_window() is None
+
+        # The console's own recorder holds nothing now, and the worker's
+        # paced look pays the mirror's counts as the summary the console
+        # owes them: the release preserved them through the handoff, so
+        # two refusals keep their two summaries, whichever layer's timer
+        # reached them.
+        for _ in range(200):
+            if any(line.startswith("Suppressed") for line in lines):
+                break
+            await asyncio.sleep(0.01)
+        console_summaries = [line for line in lines if line.startswith("Suppressed")]
+        assert len(console_summaries) == 1
+        assert console_summaries[0].startswith("Suppressed 1 host-refusal lines between ")
+        assert supervisor.host_policy.completed_windows_record_has(held[2])
+        assert reporter._lines.hour_suppressed_window() is None
+
+        # The window the report carried over pays at its own hour, on the
+        # backend's timer: the one summary it owes is logged there, and
+        # neither layer's line counts the other's window.
+        clock[0] = 7300
+        host_allowlist._flush_suppressed_summary()
+        backend_summaries = [message for message in root_log.messages
+                             if "host-refusal log lines" in message]
+        assert len(backend_summaries) == 1
+        assert "suppressed 1 host-refusal log lines" in backend_summaries[0]
+        assert recorder.hour_suppressed_window() is None
+        assert supervisor.host_policy.completed_windows_record_has(own[2])
+    finally:
+        await client.close()
+        await answering_backend.close()
+
+
+@pytest.mark.asyncio
 async def test_a_backend_dying_between_its_line_and_its_record_write_claims_the_windows_it_folds_in(
         tmp_path, monkeypatch, root_log, caplog):
     """The backend folds the window a console's report carried into its
@@ -10530,3 +10905,61 @@ def test_distinct_lines_sharing_one_timestamp_spend_a_slot_each():
     backend.merge_hour_lines(times, front.hour_line_ids())
     assert backend.note("later.example.com") is False
     assert backend.hour_suppressed_window()[0] == 2
+
+
+def test_local_counts_keep_their_own_identity_beside_an_older_folded_window(
+        tmp_path, monkeypatch):
+    """The window an hour holds can count refusals of the layer's own beside
+    a window another layer carried in, and the earliest window's identity
+    is the one the aggregate travels under, opened first as it was: the
+    counts the layer's own refusals contribute keep an identity of their
+    own beside it, minted at the window's first local count and kept
+    through every fold, so a payment that finds the folded identity
+    claimed elsewhere settles by identity and pays the local counts,
+    however many of them arrived after the fold. A local count that rode
+    the folded identity would drop with its claim and die unnamed, and
+    the layer's own refusals would lose their summary beside a claim
+    they never joined."""
+    monkeypatch.setenv("BAZARR_CONFIG_DIR", str(tmp_path))
+    clock = [0.0]
+    recorder = supervisor.host_policy.BoundedRefusalRecorder(now=lambda: clock[0])
+    for index in range(supervisor.host_policy.REFUSAL_LOG_LINES_PER_HOUR):
+        clock[0] = index
+        assert recorder.note(f"cap{index}.example.com") is True
+    clock[0] = 21.0
+    assert recorder.note("local0.example.com") is False
+    local = recorder.hour_suppressed_window()
+    assert local is not None
+    assert local[0] == 1
+    assert local[2] is not None
+    local_id = local[2]
+
+    # A window that opened earlier folds in: the aggregate travels under
+    # the folded window's identity, the earliest of the two, and the local
+    # counts keep their own contribution identity beside it.
+    recorder.merge_summary(3, 10.0, "folded-window-id")
+    merged = recorder.hour_suppressed_window()
+    assert merged is not None
+    assert merged[0] == 4
+    assert merged[2] == "folded-window-id"
+
+    # Another local refusal arrives after the fold, and the count it adds
+    # joins the local contribution identity, not the identity of the
+    # window that folded in.
+    clock[0] = 22.0
+    assert recorder.note("local1.example.com") is False
+    assert recorder.hour_suppressed_window()[0] == 5
+
+    # The folded identity is claimed elsewhere, by a payment another layer
+    # made of the window it stands for: the window's hour runs, and the
+    # take settles the two by identity, paying the local counts their one
+    # summary and dropping only the counts the other layer's line paid.
+    clock[0] = 4000.0
+    assert supervisor.host_policy.claim_summary_payment("folded-window-id", 4000.0)
+    summary = recorder.take_summary()
+    assert summary is not None
+    assert summary[0] == 2
+    assert summary[1] == 10.0
+    assert summary[3] == local_id
+    assert recorder.completed_windows() == [local_id]
+    assert recorder.hour_suppressed_window() is None

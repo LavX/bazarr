@@ -87,12 +87,14 @@ TOKEN_HEADER = "X-Bazarr-Supervisor-Token"
 # The backend's acknowledgement of a refused-host report carries its own
 # accounting on these headers: the times of the lines its hour has spent,
 # with the hostname each of them was logged for, the suppressed window it
-# holds with its stable ID, and the IDs of the windows it has logged and
-# cleared, so this console can drop every copy it holds of a window whose
-# summary has been paid. The backend defines the same names on its side,
-# because the two processes share no imports. The per-host pace travels as
-# two parallel lists, the same shape the report's newest names use, because
-# a hostname itself is not a safe separator.
+# holds with its stable ID and with the identities of every window that
+# window counts and the counts each contributed, and the IDs of the
+# windows it has logged and cleared, so this console can claim the whole
+# aggregate its mirror stands for and drop every copy it holds of a
+# window whose summary has been paid. The backend defines the same names
+# on its side, because the two processes share no imports. The per-host
+# pace travels as two parallel lists, the same shape the report's newest
+# names use, because a hostname itself is not a safe separator.
 ACCOUNTING_HOUR_LINES_HEADER = "X-Bazarr-Hour-Lines"
 ACCOUNTING_HOUR_LINES_IDS_HEADER = "X-Bazarr-Hour-Line-Ids"
 ACCOUNTING_HOUR_HOSTS_HEADER = "X-Bazarr-Hour-Hosts"
@@ -100,6 +102,8 @@ ACCOUNTING_HOUR_HOST_LINES_HEADER = "X-Bazarr-Hour-Host-Lines"
 ACCOUNTING_SUPPRESSED_HEADER = "X-Bazarr-Suppressed"
 ACCOUNTING_SUPPRESSED_SINCE_HEADER = "X-Bazarr-Suppressed-Since"
 ACCOUNTING_SUPPRESSED_ID_HEADER = "X-Bazarr-Suppressed-Id"
+ACCOUNTING_SUPPRESSED_IDS_HEADER = "X-Bazarr-Suppressed-Ids"
+ACCOUNTING_SUPPRESSED_COUNTS_HEADER = "X-Bazarr-Suppressed-Counts"
 ACCOUNTING_COMPLETED_WINDOWS_HEADER = "X-Bazarr-Completed-Windows"
 
 # Paths that get proxied to the backend
@@ -905,6 +909,8 @@ class _RefusalReporter:
         self._mirrored = None  # the window the last acknowledgement carried back
         self._mirrored_paid = False  # whether a delivery reached the backend past its hour
         self._mirrored_owner = False  # whether this console claimed the mirrored window's payment
+        self._mirrored_released = False  # whether a carry returned the mirrored window's claim to the backend
+        self._orphaned = None  # a released mirror whose counts this console owes, its only remaining record
         self._carried = None  # the window a report has carried, held in flight here
         self._carried_at = None  # when the carry began
         self._carried_sent = False  # whether a delivery for it ever reached the backend
@@ -1068,7 +1074,17 @@ class _RefusalReporter:
         mirrored window's payment belongs to the window it was taken
         for, so an answer that carries a different window back leaves the
         claim behind with the one it replaced, and the same window
-        carried back keeps it, whatever else the answer changed.
+        carried back keeps it, whatever else the answer changed. The
+        answer decides a release the same way: a mirror whose claim left
+        with this console's own window in a report keeps its counts
+        wherever the answer proves they live. A window carried back under
+        the same identity proves the backend still holds them, and the
+        copy starts over as the fresh mirror of the window that now
+        counts them; a different window, or none, with no payment the
+        record names, proves the backend holds nothing of them, and the
+        counts become this console's own debt, held apart to be paid here
+        and never handed back, because the backend that deferred them
+        under the claim no longer remembers counting their identity.
 
         The acknowledgement also resolves the window this report carried:
         its ID named among the windows the backend has logged and cleared
@@ -1104,6 +1120,37 @@ class _RefusalReporter:
                 self._lines.note(host, line_at=stamp)
         if held is not None and held[2] is not None and held[2] in completed:
             held = None
+        if (self._mirrored is not None and self._mirrored_released
+                and (held is None or held[2] != self._mirrored[2])
+                and not host_policy.completed_windows_record_has(self._mirrored[2])):
+            # The answer resolves the release: the mirror's claim left with
+            # this console's own window in a report, and the window the
+            # answer carries back is one the mirror never stood for, or no
+            # window at all, while no payment anywhere names the counts the
+            # mirror counts. They are this console's debt alone now: the
+            # backend met the claim by deferring them to the line this
+            # console owes, and it holds no copy of its own, so the copy
+            # stays here as the only remaining record of the counts, never
+            # handed back to a backend that would fold it in beside nothing
+            # that remembers counting it.
+            released = self._mirrored
+            if self._orphaned is None:
+                self._orphaned = released
+            else:
+                # A second debt joins the first: the two mirrors stood for
+                # windows no backend holds any more, and the one payment
+                # this console owes can claim every identity both carried,
+                # opened at whichever window opened first, so no count
+                # waits behind another for a place in the line.
+                first = self._orphaned
+                fresh = [(known, released[4][place] if place < len(released[4]) else 0)
+                         for place, known in enumerate(released[3])
+                         if known not in first[3]]
+                self._orphaned = (first[0] + released[0],
+                                  min(first[1], released[1]),
+                                  first[2],
+                                  first[3] + [known for known, _count in fresh],
+                                  first[4] + [count for _known, count in fresh])
         if (self._mirrored is None or held is None
                 or held[2] != self._mirrored[2]):
             # The acknowledgement replaces the mirror, and a claim taken
@@ -1111,6 +1158,12 @@ class _RefusalReporter:
             # nothing here: a fresh copy starts unclaimed, while the same
             # window carried back keeps the claim this console took on it.
             self._mirrored_owner = False
+        # The release is decided by the answer alone: a window carried back
+        # under the same identity puts the counts back with the backend that
+        # holds them, and a different one or none leaves them with the debt
+        # above or with a payment the record already named, so no later
+        # answer decides what this one already has.
+        self._mirrored_released = False
         self._mirrored = held
         self._mirrored_paid = False
         self._last_ack = now
@@ -1201,6 +1254,7 @@ class _RefusalReporter:
             # risk the second line.
             self._mirrored = None
             self._mirrored_paid = False
+            self._mirrored_released = False
         return self._mirrored
 
     def take_carried_summary(self):
@@ -1222,7 +1276,12 @@ class _RefusalReporter:
         that takes this console's own window out returns the claim it
         holds on the mirrored window's payment: the fold the backend
         makes of the carried window is the merged one's to report from
-        then on, and the claim would hold its payment back.
+        then on, and the claim would hold its payment back. The answer
+        that follows decides where the mirror's counts live: the backend
+        keeps them if it answers with the same window, and this console
+        owes them their one line if it answers with another or none, so
+        the release preserves them instead of abandoning them with the
+        claim.
 
         A copy waiting in the slot ages with it: a sent copy no answer
         resolved is dropped once the carry has run past the span the
@@ -1277,12 +1336,18 @@ class _RefusalReporter:
                 # This console's own window is leaving in the report, to be
                 # folded into the window the mirror stands for, and the
                 # merged window is the backend's to report from here on:
-                # the claim this console took on the mirror's identity is
-                # returned with the window, so the backend's own payment
-                # takes the merged one whole instead of settling around a
-                # claim no window here can pay anymore.
-                host_policy.release_summary_claim(self._mirrored[2])
+                # the claim this console took on the mirror's identities,
+                # every constituent the mirror counts, is returned with the
+                # window, so the backend's own payment takes the merged one
+                # whole instead of settling around a claim no window here
+                # can pay anymore. The release is marked, because the
+                # answer that comes back decides where the mirror's counts
+                # live now: the backend holds them if it answers with the
+                # same window, and this console owes them their one line if
+                # it answers with another or none.
+                host_policy.release_summary_claim(self._mirrored[3])
                 self._mirrored_owner = False
+                self._mirrored_released = True
             self._carried_at = self._now()
             self._carried_sent = False
         return carried
@@ -1400,8 +1465,12 @@ class _RefusalReporter:
         never folded into the mirror's payment, or the claim on their ID
         would have dropped the window, so the pair owes them their one
         summary from this console. One that holds no window of its own
-        emits nothing here: the mirror is the backend's window to pay,
-        on its own arrivals and its own timer.
+        emits nothing here for a mirror: the mirror is the backend's
+        window to pay, on its own arrivals and its own timer. A released
+        mirror whose answer proved the backend holds nothing of it is a
+        different hold, this console's own debt and the only remaining
+        record of its counts, and that pays here alone once its hour has
+        run, whatever the recorder holds.
         """
         now = self._now()
         carried = self._carried
@@ -1443,16 +1512,18 @@ class _RefusalReporter:
         The two windows overlap in the hour they count, and the hour's
         budget rules name one summary for them, so the layer that holds
         both pays both as one line: the counts add, the earlier opening
-        keeps its place, and the payment completes the mirrored window's
-        ID on the record the two processes share, so the backend's own
-        payment reads the proof and drops the copy it holds rather than
-        log a second line for counts the one line already paid. The claim
-        on the mirror's identity is taken the moment this console comes
-        to hold both windows, before either hour runs: whichever timer of
-        the pair reaches the mirror first, the decision is already this
-        console's, so the backend's flush meets the proof, drops the copy
-        and logs nothing, and the console pays the one line the two
-        windows owe at whichever of their hours runs last. The mirror's
+        keeps its place, and the payment completes every identity the
+        mirrored window counts on the record the two processes share, so
+        the backend's own payment reads the proof on each of them and
+        drops the copy it holds rather than log a second line for counts
+        the one line already paid. The claim on the mirror's identities,
+        every constituent the mirror counts, is taken the moment this
+        console comes to hold both windows, before either hour runs:
+        whichever timer of the pair reaches the mirror first, the
+        decision is already this console's on every constituent alike,
+        so the backend's flush meets the proof, drops the copy and logs
+        nothing, and the console pays the one line the two windows owe at
+        whichever of their hours runs last. The mirror's
         hour must still have run for the counts to join, so no line
         reports a window held back for its hour, and a mirror with no ID
         joins nothing, because the backend that holds it could not be
@@ -1481,7 +1552,15 @@ class _RefusalReporter:
         backend logged. A claim is returned when this console's own
         window leaves in a report and folds into the window the mirror
         stands for: the merged window is the backend's to report then,
-        and its own payment takes the merged one whole.
+        and its own payment takes the merged one whole. The release
+        preserves the mirror's counts as well: the answer that follows
+        either carries the same window back, and the backend keeps them,
+        or leaves them this console's, and a released mirror whose
+        answer proved the backend holds nothing of it waits here as this
+        console's own debt, the only remaining record of the counts, and
+        pays alone once its hour has run, beside whatever else the hour
+        holds. A second debt joins the first, and the one line pays every
+        identity both carried.
         The pair keeps the one summary a window owes, and the
         lose-not-double trade with it: a window the record names paid is
         dropped here rather than logged a second time, whatever this
@@ -1489,20 +1568,42 @@ class _RefusalReporter:
         either, because the backend that holds it could not be told the
         combined payment.
         """
+        orphan = self._orphaned
+        if orphan is not None:
+            # A released mirror whose answer proved the backend holds
+            # nothing of it is this console's debt, and nothing anywhere
+            # else records its counts: the debt pays here alone once its
+            # window's hour has run, claiming every identity the mirror
+            # carried, and the payment completes them so whichever layer
+            # meets the proof drops its copy.
+            if host_policy.completed_windows_record_has(orphan[2]):
+                # A payment reached the record under the debt's identity:
+                # the counts are paid, wherever the line came from, and
+                # the debt leaves with the proof.
+                self._orphaned = None
+            elif now - orphan[1] >= host_policy.HOUR_SECONDS:
+                self._orphaned = None
+                if host_policy.claim_summary_payment(orphan[3], now):
+                    for window_id in orphan[3]:
+                        self._lines.complete_window(window_id)
+                    return orphan[0], orphan[1], now, orphan[2]
+                # The claim met another payment's proof: the counts are
+                # paid elsewhere, and nothing is owed here.
         own = self._lines.hour_suppressed_window()
         mirror = (self.mirrored_summary()
                   if own is not None or self._mirrored_owner else None)
         if (own is not None and mirror is not None and mirror[2] is not None
                 and not self._mirrored_owner
-                and host_policy.claim_summary_payment(mirror[2], now)):
+                and host_policy.claim_summary_payment(mirror[3], now)):
             # The two windows overlap in the hour they count and the one
             # summary the pair owes them is this console's, because this
-            # console holds both: the claim on the mirror's identity is
-            # taken here, before either hour runs and before any line is
-            # logged, so whichever timer of the pair reaches the mirror
-            # first, the backend's own flush meets the proof and drops the
-            # copy it holds instead of logging a second line beside the
-            # one this console owes.
+            # console holds both: the claim on the mirror's identities,
+            # every constituent the mirror counts, is taken here, before
+            # either hour runs and before any line is logged, so whichever
+            # timer of the pair reaches the mirror first, the backend's
+            # own flush meets the proof on every constituent alike and
+            # drops the copy it holds instead of logging a second line
+            # beside the one this console owes.
             self._mirrored_owner = True
         if own is None:
             # Nothing this console's own recorder holds is due, so nothing
@@ -1542,9 +1643,10 @@ class _RefusalReporter:
             # payment settles the mirror's alone.
             self._mirrored = None
             self._mirrored_paid = False
+            self._mirrored_released = False
             return summary
         if (not self._mirrored_owner
-                and not host_policy.claim_summary_payment(mirror[2], summary[2])):
+                and not host_policy.claim_summary_payment(mirror[3], summary[2])):
             # The backend's own timer claimed the payment of the mirrored
             # window inside this very decision, so the one summary the
             # mirror owes is logged there. This console's own window is
@@ -1558,12 +1660,20 @@ class _RefusalReporter:
             # payment it stands for.
             self._mirrored = None
             self._mirrored_paid = False
+            self._mirrored_released = False
             return summary
         count, opened, closed, window_id = summary
-        self._lines.complete_window(mirror[2])
+        for mirror_id in mirror[3]:
+            # The one line pays every constituent the mirror counts, and
+            # the payment completes each of them: the backend's own flush
+            # reads the proof on any copy it still holds, and a backend
+            # that lost the window is told nothing owed, on any of the
+            # identities the answer carried.
+            self._lines.complete_window(mirror_id)
         self._mirrored = None
         self._mirrored_paid = False
         self._mirrored_owner = False
+        self._mirrored_released = False
         return count + mirror[0], min(opened, mirror[1]), closed, window_id
 
     def report_due(self, host):
@@ -2042,6 +2152,7 @@ class _RefusalReporter:
             # whichever generation the backend holds.
             self._mirrored = None
             self._mirrored_paid = False
+            self._mirrored_released = False
         self._wake.set()
 
     def _prune_reports(self, now):
@@ -2191,6 +2302,15 @@ async def _send_refusal_notice(session: ClientSession, port, token: str, host: s
         data["mirrored_since"] = str(mirrored[1])
         if mirrored[2] is not None:
             data["mirrored_id"] = mirrored[2]
+        if mirrored[3] and mirrored[4] and len(mirrored[4]) == len(mirrored[3]):
+            # The copy stands for every window the aggregate counts, and
+            # the backend that receives it back needs each constituent's
+            # identity with the counts it contributed, so its own window
+            # keeps the parts the aggregate was built from and a payment
+            # that finds some of the identities claimed elsewhere can
+            # settle the rest by identity.
+            data["mirrored_ids"] = ",".join(mirrored[3])
+            data["mirrored_counts"] = ",".join(str(value) for value in mirrored[4])
     recent = reporter.recent_refusals()
     if recent:
         data["recent"] = ",".join(name for name, _stamp in recent)
@@ -2260,11 +2380,17 @@ def _acknowledged_accounting(response):
 
     The headers hold the times of the lines the backend's hour has spent
     with the identity of each, the hostnames those lines were logged for
-    with the time of each, the suppressed window it holds, and the IDs of
-    the windows it has logged and cleared, and an answer that carries
-    none of them folds nothing. Every value is parsed the defensive way
-    the backend's own notice route parses what arrives, because the two
-    processes only ever share words on the wire.
+    with the time of each, the suppressed window it holds with the
+    identity of every window that window counts and the counts each
+    contributed, and the IDs of the windows it has logged and cleared,
+    and an answer that carries none of them folds nothing. Every value is
+    parsed the defensive way the backend's own notice route parses what
+    arrives, because the two processes only ever share words on the wire.
+    A window whose identities arrive without a set of counts that answers
+    them one for one keeps the one identity the wire could vouch for: the
+    claim the console takes covers what the answer actually named, and the
+    fold a backend makes of the copy handed back to it takes the whole
+    aggregate under the travelling ID alone.
     """
     times = []
     for stamp in response.headers.get(ACCOUNTING_HOUR_LINES_HEADER, "").split(","):
@@ -2294,7 +2420,22 @@ def _acknowledged_accounting(response):
     except ValueError:
         opened = None
     window_id = response.headers.get(ACCOUNTING_SUPPRESSED_ID_HEADER) or None
-    held = (suppressed, opened, window_id) if suppressed and opened is not None else None
+    window_ids = [known_id for known_id in
+                  response.headers.get(ACCOUNTING_SUPPRESSED_IDS_HEADER, "").split(",")
+                  if known_id]
+    window_counts = []
+    for value in response.headers.get(ACCOUNTING_SUPPRESSED_COUNTS_HEADER, "").split(","):
+        try:
+            window_counts.append(int(value))
+        except ValueError:
+            window_counts = []
+            break
+    if not window_id:
+        window_ids, window_counts = [], []
+    elif not window_ids or len(window_counts) != len(window_ids):
+        window_ids, window_counts = [window_id], []
+    held = ((suppressed, opened, window_id, window_ids, window_counts)
+            if suppressed and opened is not None else None)
     completed = [window_id for window_id in
                  response.headers.get(ACCOUNTING_COMPLETED_WINDOWS_HEADER, "").split(",")
                  if window_id]

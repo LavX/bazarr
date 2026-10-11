@@ -40,7 +40,10 @@ CODE_LOGGER_NAME = 'bazarr.host_approval'
 # The acknowledgement of a front listener's report carries this backend's own
 # accounting on these headers: the times of the refusal lines its hour has
 # spent, the hostnames those lines were logged for with the time of each, the
-# suppressed window it holds with its stable ID, and the IDs of the windows
+# suppressed window it holds with its stable ID, the identities of every
+# window that window counts with the counts each contributed, so a console
+# that holds the copy can claim the whole aggregate and tell a backend that
+# lost it what every constituent is owed, and the IDs of the windows
 # it has logged and cleared, so the console can drop every copy it holds of
 # a window whose summary has been paid. The supervisor defines the same
 # names on its side, because the two processes share no imports. The
@@ -53,6 +56,8 @@ HOUR_HOST_LINES_HEADER = 'X-Bazarr-Hour-Host-Lines'
 SUPPRESSED_HEADER = 'X-Bazarr-Suppressed'
 SUPPRESSED_SINCE_HEADER = 'X-Bazarr-Suppressed-Since'
 SUPPRESSED_ID_HEADER = 'X-Bazarr-Suppressed-Id'
+SUPPRESSED_IDS_HEADER = 'X-Bazarr-Suppressed-Ids'
+SUPPRESSED_COUNTS_HEADER = 'X-Bazarr-Suppressed-Counts'
 COMPLETED_WINDOWS_HEADER = 'X-Bazarr-Completed-Windows'
 
 # Where the shim in app.py keeps the Host header the request arrived with,
@@ -397,7 +402,8 @@ def verify_approval_code(supplied):
 
 def record_refusal(host, config=settings, line_at=None, hour_lines=None, hour_line_ids=None,
                    suppressed=0, suppressed_since=None, suppressed_id=None, mirrored=0,
-                   mirrored_since=None, mirrored_id=None, recent=None, refused_at=None,
+                   mirrored_since=None, mirrored_id=None, mirrored_ids=None,
+                   mirrored_counts=None, recent=None, refused_at=None,
                    notice=None):
     """Record a refused hostname and keep a code on the console.
 
@@ -421,7 +427,12 @@ def record_refusal(host, config=settings, line_at=None, hour_lines=None, hour_li
     acknowledgement folds nowhere while this backend still holds it: the
     mirrored window is this backend's own, carried back to it so that a
     restart that lost it can be told it again, not a second window owed a
-    second summary.
+    second summary. The mirrored window arrives with every identity it
+    counts and the counts each contributed beside its total, so a backend
+    that lost the window is told what every constituent is owed and a
+    payment that finds some of the identities claimed elsewhere can settle
+    the rest by identity, without the aggregate's total standing in for
+    the parts it was built from.
 
     The report also carries the newest bounded set of refused names with the
     times that console saw the refusals, and the record takes the newer stamp
@@ -466,7 +477,7 @@ def record_refusal(host, config=settings, line_at=None, hour_lines=None, hour_li
     if hour_lines:
         _refusals.merge_hour_lines(hour_lines, hour_line_ids)
     _refusals.merge_summary(suppressed, suppressed_since, suppressed_id)
-    _refusals.merge_summary(mirrored, mirrored_since, mirrored_id)
+    _refusals.merge_summary(mirrored, mirrored_since, mirrored_id, mirrored_ids, mirrored_counts)
     if recent:
         named = []
         for name, stamp in recent:
@@ -528,7 +539,10 @@ def front_refusal_notice(config=settings):
     The answer carries this backend's own accounting back on the response
     headers: the times of the lines its hour has spent, the hostnames those
     lines were logged for with the time of each, the suppressed window it
-    holds, again with the ID, and the IDs of the windows it has logged and
+    holds, again with the ID and with the identities of every window that
+    window counts and the counts each contributed, so the console that
+    holds the copy can claim the whole aggregate under the one decision
+    its payment takes, and the IDs of the windows it has logged and
     cleared, so the console discards every copy it holds of a window whose
     summary has been paid. The hostnames travel as the per-host pace of the
     hour's line budget, so the console that folds them holds a hostname
@@ -605,6 +619,24 @@ def front_refusal_notice(config=settings):
     except ValueError:
         mirrored_opens = None
     mirrored_id = request.form.get('mirrored_id', '') or None
+    mirrored_ids = [window_id for window_id
+                    in request.form.get('mirrored_ids', '').split(',') if window_id]
+    mirrored_counts = []
+    for value in request.form.get('mirrored_counts', '').split(','):
+        try:
+            mirrored_counts.append(int(value))
+        except ValueError:
+            mirrored_counts = []
+            break
+    if not mirrored_id:
+        mirrored_ids, mirrored_counts = [], []
+    elif not mirrored_ids or len(mirrored_counts) != len(mirrored_ids):
+        # The handoff arrived with no identities beside the travelling one,
+        # or with a set of counts that cannot answer them one for one, so
+        # the fold below takes the aggregate in under the travelling ID
+        # alone: the counts stay whole and no constituent of the window
+        # goes unnamed beyond the one the wire could vouch for.
+        mirrored_ids, mirrored_counts = [mirrored_id], []
     recent_names = [name for name in request.form.get('recent', '').split(',') if name]
     recent_times = []
     for stamp in request.form.get('recent_at', '').split(','):
@@ -623,7 +655,8 @@ def front_refusal_notice(config=settings):
                    hour_lines=spent, hour_line_ids=spent_ids, suppressed=held_back,
                    suppressed_since=window_opens,
                    suppressed_id=window_id, mirrored=mirrored_back, mirrored_since=mirrored_opens,
-                   mirrored_id=mirrored_id, recent=recent, refused_at=pending_at,
+                   mirrored_id=mirrored_id, mirrored_ids=mirrored_ids,
+                   mirrored_counts=mirrored_counts, recent=recent, refused_at=pending_at,
                    notice=notice_id or None)
     headers = {}
     times = _refusals.hour_line_times()
@@ -642,6 +675,10 @@ def front_refusal_notice(config=settings):
         headers[SUPPRESSED_SINCE_HEADER] = str(held[1])
         if held[2] is not None:
             headers[SUPPRESSED_ID_HEADER] = held[2]
+        if held[3]:
+            headers[SUPPRESSED_IDS_HEADER] = ','.join(held[3])
+            if held[4]:
+                headers[SUPPRESSED_COUNTS_HEADER] = ','.join(str(value) for value in held[4])
     completed = _refusals.completed_windows()
     if completed:
         headers[COMPLETED_WINDOWS_HEADER] = ','.join(completed)
