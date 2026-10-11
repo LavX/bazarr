@@ -904,6 +904,7 @@ class _RefusalReporter:
         self._last_failure = None  # when the last delivery failed, until an ack or readiness
         self._mirrored = None  # the window the last acknowledgement carried back
         self._mirrored_paid = False  # whether a delivery reached the backend past its hour
+        self._mirrored_owner = False  # whether this console claimed the mirrored window's payment
         self._carried = None  # the window a report has carried, held in flight here
         self._carried_at = None  # when the carry began
         self._carried_sent = False  # whether a delivery for it ever reached the backend
@@ -1063,7 +1064,11 @@ class _RefusalReporter:
         summary has been paid is read from the record of completed
         windows the two processes share, and the window an answer names
         is the one the backend holds now, whose payment no record has
-        shown yet.
+        shown yet. A fresh copy starts unclaimed as well: the claim on a
+        mirrored window's payment belongs to the window it was taken
+        for, so an answer that carries a different window back leaves the
+        claim behind with the one it replaced, and the same window
+        carried back keeps it, whatever else the answer changed.
 
         The acknowledgement also resolves the window this report carried:
         its ID named among the windows the backend has logged and cleared
@@ -1099,6 +1104,13 @@ class _RefusalReporter:
                 self._lines.note(host, line_at=stamp)
         if held is not None and held[2] is not None and held[2] in completed:
             held = None
+        if (self._mirrored is None or held is None
+                or held[2] != self._mirrored[2]):
+            # The acknowledgement replaces the mirror, and a claim taken
+            # on the payment of the window the last one carried belongs to
+            # nothing here: a fresh copy starts unclaimed, while the same
+            # window carried back keeps the claim this console took on it.
+            self._mirrored_owner = False
         self._mirrored = held
         self._mirrored_paid = False
         self._last_ack = now
@@ -1163,13 +1175,17 @@ class _RefusalReporter:
         is never logged a second time.
         """
         if (self._mirrored is not None and not self._mirrored_paid
+                and not self._mirrored_owner
                 and host_policy.completed_windows_record_has(self._mirrored[2])):
             # The payment of the window this copy stands for is on the
             # shared record, written by the backend that paid it before
             # its answer was built: the copy is marked paid here however
             # that answer turned out, because the pair keeps one summary
             # per window and no send time of this console's own could
-            # prove the arrival that paid it.
+            # prove the arrival that paid it. An entry this console's own
+            # claim wrote is not that proof, and the owner flag holds it
+            # apart: the claim is the payment this console owes the
+            # window, so the copy is never marked paid from it.
             self._mirrored_paid = True
         if (self._mirrored is not None and self._mirrored_paid
                 and self._now() - self._mirrored[1]
@@ -1202,7 +1218,11 @@ class _RefusalReporter:
         A window taken fresh from this console's recorder begins its carry
         unsent, and the delivery attempt marks it once its request reaches
         the backend at the transport level, which ``take_summary`` below
-        reads when it decides what this console may still emit.
+        reads when it decides what this console may still emit. A carry
+        that takes this console's own window out returns the claim it
+        holds on the mirrored window's payment: the fold the backend
+        makes of the carried window is the merged one's to report from
+        then on, and the claim would hold its payment back.
 
         A copy waiting in the slot ages with it: a sent copy no answer
         resolved is dropped once the carry has run past the span the
@@ -1253,6 +1273,16 @@ class _RefusalReporter:
                 return carried
         carried = self._lines.take_carried_summary()
         if carried is not None:
+            if self._mirrored_owner and self._mirrored is not None:
+                # This console's own window is leaving in the report, to be
+                # folded into the window the mirror stands for, and the
+                # merged window is the backend's to report from here on:
+                # the claim this console took on the mirror's identity is
+                # returned with the window, so the backend's own payment
+                # takes the merged one whole instead of settling around a
+                # claim no window here can pay anymore.
+                host_policy.release_summary_claim(self._mirrored[2])
+                self._mirrored_owner = False
             self._carried_at = self._now()
             self._carried_sent = False
         return carried
@@ -1348,7 +1378,13 @@ class _RefusalReporter:
         hour this console's window counts, the two windows' counts one
         summary owes under the hour's budget rules, and no report needs to
         go out for the two to meet, because the mirror is already here.
-        Once both windows' hours have run, the one line pays the
+        The claim on the mirror's identity is taken as soon as the console
+        holds the two, before either hour runs, and returned when its own
+        window leaves in a report: the merged window the report builds is
+        the backend's to report, so the backend's own timer meets the
+        proof while this console holds the two, drops the copy it holds
+        and logs nothing, and takes the merged one whole once it holds it
+        alone. Once both windows' hours have run, the one line pays the
         combined count, opened at whichever window opened first, and the
         payment completes both windows' IDs on the record the two
         processes share, so the backend's own payment drops the copy it
@@ -1410,8 +1446,14 @@ class _RefusalReporter:
         keeps its place, and the payment completes the mirrored window's
         ID on the record the two processes share, so the backend's own
         payment reads the proof and drops the copy it holds rather than
-        log a second line for counts the one line already paid. The
-        mirror's hour must have run for the counts to join, so no line
+        log a second line for counts the one line already paid. The claim
+        on the mirror's identity is taken the moment this console comes
+        to hold both windows, before either hour runs: whichever timer of
+        the pair reaches the mirror first, the decision is already this
+        console's, so the backend's flush meets the proof, drops the copy
+        and logs nothing, and the console pays the one line the two
+        windows owe at whichever of their hours runs last. The mirror's
+        hour must still have run for the counts to join, so no line
         reports a window held back for its hour, and a mirror with no ID
         joins nothing, because the backend that holds it could not be
         told the combined payment.
@@ -1420,32 +1462,61 @@ class _RefusalReporter:
         logged, on the record both processes share and under the lock
         the record's own updates hold, so the console's aggregate and the
         backend's timer cannot both pay the same window however closely
-        their turns overlap: the claim on the mirror's identity is what
-        the console's combined payment takes, and a backend whose flush
-        claimed it first settles the mirror alone, the copy dropped with
-        the payment it stands for. The console's own window is never part
-        of the mirror's payment, whichever timer wins: a fold that
-        carried the window's counts into the backend's line would have
-        claimed the window's ID on the record, and the take above claims
-        that ID unopposed or drops the window it holds as already paid,
-        so a window that survives its own take holds counts no line
-        anywhere has named, refusals no report carried between the
-        layers, and they owe this console their own summary beside the
-        one the backend logged. The pair keeps the one summary a window
-        owes, and the lose-not-double trade with it: a window the record
-        names paid is dropped here rather than logged a second time,
-        whatever this console's own hour says. A mirror with no ID joins
-        nothing either, because the backend that holds it could not be
-        told the combined payment.
+        their turns overlap. The claim this console takes is its own:
+        the record's entry for it proves a payment this console owes, not
+        one the backend logged, so the read-back above leaves the copy
+        unmarked, a readiness keeps it, and the combined payment takes
+        the decision as already made rather than claiming again. A
+        backend whose flush claimed the identity before this console
+        came to hold both windows settles the mirror alone, the copy
+        dropped with the payment it stands for, and this console's own
+        window pays beside it. The console's own window is never part of
+        the mirror's payment, whichever timer wins: a fold that carried
+        the window's counts into the backend's line would have claimed
+        the window's ID on the record, and the take above claims that ID
+        unopposed or drops the window it holds as already paid, so a
+        window that survives its own take holds counts no line anywhere
+        has named, refusals no report carried between the layers, and
+        they owe this console their own summary beside the one the
+        backend logged. A claim is returned when this console's own
+        window leaves in a report and folds into the window the mirror
+        stands for: the merged window is the backend's to report then,
+        and its own payment takes the merged one whole.
+        The pair keeps the one summary a window owes, and the
+        lose-not-double trade with it: a window the record names paid is
+        dropped here rather than logged a second time, whatever this
+        console's own hour says. A mirror with no ID joins nothing
+        either, because the backend that holds it could not be told the
+        combined payment.
         """
         own = self._lines.hour_suppressed_window()
-        if own is None or now - own[1] < host_policy.HOUR_SECONDS:
+        mirror = (self.mirrored_summary()
+                  if own is not None or self._mirrored_owner else None)
+        if (own is not None and mirror is not None and mirror[2] is not None
+                and not self._mirrored_owner
+                and host_policy.claim_summary_payment(mirror[2], now)):
+            # The two windows overlap in the hour they count and the one
+            # summary the pair owes them is this console's, because this
+            # console holds both: the claim on the mirror's identity is
+            # taken here, before either hour runs and before any line is
+            # logged, so whichever timer of the pair reaches the mirror
+            # first, the backend's own flush meets the proof and drops the
+            # copy it holds instead of logging a second line beside the
+            # one this console owes.
+            self._mirrored_owner = True
+        if own is None:
             # Nothing this console's own recorder holds is due, so nothing
             # combines here: the window the acknowledgement mirrored is the
             # backend's to pay, on its own arrivals and its own timer, and
-            # this console never reports a mirror alone.
+            # a claim this console returned with its own window's carry
+            # leaves the merged window the backend's to pay whole.
             return self._lines.take_summary()
-        mirror = self.mirrored_summary()
+        if now - own[1] < host_policy.HOUR_SECONDS:
+            # Nothing this console's own recorder holds is due, so nothing
+            # combines here yet: the two windows pay as one line once the
+            # own window's hour has run, and the worker's next paced look
+            # pays what has come due by then.
+            return self._lines.take_summary()
         if mirror is not None and now - mirror[1] < host_policy.HOUR_SECONDS:
             # The console's own window is due and the backend's mirrored
             # one is not: the two pay as one line, so the line waits for
@@ -1472,7 +1543,8 @@ class _RefusalReporter:
             self._mirrored = None
             self._mirrored_paid = False
             return summary
-        if not host_policy.claim_summary_payment(mirror[2], summary[2]):
+        if (not self._mirrored_owner
+                and not host_policy.claim_summary_payment(mirror[2], summary[2])):
             # The backend's own timer claimed the payment of the mirrored
             # window inside this very decision, so the one summary the
             # mirror owes is logged there. This console's own window is
@@ -1491,6 +1563,7 @@ class _RefusalReporter:
         self._lines.complete_window(mirror[2])
         self._mirrored = None
         self._mirrored_paid = False
+        self._mirrored_owner = False
         return count + mirror[0], min(opened, mirror[1]), closed, window_id
 
     def report_due(self, host):
@@ -1928,7 +2001,12 @@ class _RefusalReporter:
         would be folded in as a window it has never seen and its paid
         lines would be counted a second time, while an unmarked copy is
         a backend's only remaining record of a window it holds unpaid
-        and keeps its place for the next report. The record the payment
+        and keeps its place for the next report. A claimed mirror is
+        kept the same way: the record's entry for its claim is this
+        console's own promise to pay, not a payment the old backend
+        logged, so the claim survives the swap with the copy, and the
+        one line it owes the window's counts is still this console's to
+        pay. The record the payment
         was written to is the one the two processes share, so it says
         the same after the restart as it did before, and the send time
         of no delivery of this console is consulted at all.
@@ -1947,7 +2025,7 @@ class _RefusalReporter:
             self._pending[host] = None
         self._last_failure = None
         self._last_report.clear()
-        if (self._mirrored is not None
+        if (self._mirrored is not None and not self._mirrored_owner
                 and (self._mirrored_paid
                      or host_policy.completed_windows_record_has(self._mirrored[2]))):
             # The record of completed windows the two processes share shows
@@ -1957,7 +2035,11 @@ class _RefusalReporter:
             # handing the copy to the fresh backend would re-deliver lines
             # its payment already covered. The old backend kept the summary
             # logged, and the pair keeps one summary per window, paid where
-            # it reached.
+            # it reached. An entry this console's own claim wrote is not a
+            # payment's proof, and the owner flag holds it apart: the claim
+            # is the payment this console owes the window, so the copy keeps
+            # its place for the combined line this console still owes it,
+            # whichever generation the backend holds.
             self._mirrored = None
             self._mirrored_paid = False
         self._wake.set()

@@ -228,13 +228,18 @@ def claim_summary_payment(window_ids, paid_at, path=None):
     layer minted and each one folded in from another layer's window, and
     the claim takes them as a whole in the one locked step: an ID another
     payment already claimed means that payment took some of these counts
-    into its own line, so this layer pays none of them and drops the
-    window it took, however many of its IDs were still free, and the
-    payment that wins claims the whole set, so every layer holding a copy
-    of any window in it reads the proof the same moment the line is owed.
-    One identity is the shape the console's own claim arrives in, and a
-    summary with no identity to claim costs nothing to grant, because no
-    copy of it anywhere can be proven paid.
+    into its own line, so the whole set is refused and the layer that
+    finds it pays none of them this way, however many of its IDs were
+    still free. A window refused whole is settled by its caller identity
+    by identity, one claim at a time on this same lock, so the counts of
+    the IDs another payment never claimed still find their payer: only a
+    window whose every ID is claimed drops whole, and the payment that
+    wins claims the whole set, so every layer holding a copy of any
+    window in it reads the proof the same moment the line is owed. One
+    identity is the shape the console's own claim arrives in, the shape
+    a settlement takes as well, and a summary with no identity to claim
+    costs nothing to grant, because no copy of it anywhere can be proven
+    paid.
 
     The write is best effort, exactly as the record's own updates are: a
     record nothing can read or write proves no payment, so the payer
@@ -282,6 +287,56 @@ def claim_summary_payment(window_ids, paid_at, path=None):
         if lock_handle is not None:
             lock_handle.close()
     return claimed
+
+
+def release_summary_claim(window_id, path=None):
+    """Return the one payment decision on a window to whichever layer
+    holds it.
+
+    The console takes the claim on a mirrored window's identity when it
+    holds both windows, because the one summary they owe is its to pay. Its
+    own window can leave in a report instead, folded into the window the
+    mirror stands for, and the merged window is the backend's from then
+    on: whichever layer holds a window when its hour runs is the one that
+    reports it, so the console returns the decision before the claim can
+    block the merged window's payment. The removal is held on the lock the
+    record's own updates hold, best effort with them: a record nothing can
+    write keeps the claim, and the payment that cannot take the merged
+    window whole settles by identity instead, the folded remainder paying
+    and the claimed counts still owed by the layer that claimed them.
+    """
+    if not window_id:
+        return
+    path = completed_windows_record_path() if path is None else path
+    record_path = Path(path)
+    lock_handle = None
+    try:
+        record_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_handle = open(str(record_path) + COMPLETED_WINDOWS_RECORD_LOCK_SUFFIX, 'a+')
+        import fcntl
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        if lock_handle is not None:
+            lock_handle.close()
+            lock_handle = None
+    try:
+        record = _read_completed_windows_record(path)
+        if window_id in record:
+            record.pop(window_id, None)
+            fd, tmp = tempfile.mkstemp(dir=str(record_path.parent),
+                                       prefix=f".{record_path.name}.")
+            try:
+                with os.fdopen(fd, 'w') as record_file:
+                    json.dump(record, record_file)
+                os.replace(tmp, path)
+            except BaseException:
+                os.unlink(tmp)
+                raise
+    except Exception:
+        pass
+    finally:
+        if lock_handle is not None:
+            lock_handle.close()
 
 
 # The record of the notices the backend has taken in, in the configuration
@@ -777,6 +832,7 @@ class BoundedRefusalRecorder:
         self._window_opens = None  # when the current suppressed count started
         self._window_id = None  # the current window's ID, minted at its first line
         self._window_ids = []  # every ID the current window counts, its own and each folded-in one
+        self._window_counts = OrderedDict()  # window ID -> the counts it contributed to the current window
         self._counted_windows = OrderedDict()  # window ID -> when it was counted here
         self._completed_windows = OrderedDict()  # window ID -> when it was paid here
         self._first_failures = OrderedDict()  # host -> when its first failed notice counted
@@ -792,13 +848,17 @@ class BoundedRefusalRecorder:
         same one, so whichever layer receives the window can tell whether
         it has already counted it. The minted ID also opens the window's
         list of the IDs it counts, the ones the summary that pays the
-        window completes on the list the acknowledgement carries.
+        window completes on the list the acknowledgement carries, and the
+        count joins its own place in the map the window keeps per ID, so a
+        payment that finds some of the IDs claimed elsewhere can settle
+        the rest by identity.
         """
         if not self._suppressed:
             self._window_id = _mint_window_id()
             self._window_ids = [self._window_id]
             self._counted_windows[self._window_id] = now
         self._suppressed += 1
+        self._window_counts[self._window_id] = self._window_counts.get(self._window_id, 0) + 1
 
     def _keep_newest_hosts(self):
         """Order the record by the refusal stamps and keep the newest bound.
@@ -1100,22 +1160,21 @@ class BoundedRefusalRecorder:
         and an arrival of a marked identity renews the mark, its stamp and
         its place both: an arrival is the notice still on its way, and a
         mark that kept the stamp and the place of its first accounting
-        would age out of the day under a notice still arriving, and the
-        oldest place would let newer identities evict it from the bound
-        below, so the retry itself keeps the mark current and newest. The
-        mark still lives past the hour and past the carry span both sides
-        keep for a delivery no answer resolved, a full day measured from
-        the newest arrival, because a pending notice can be retried far
-        longer than that span: the console holds its notices until an
-        acknowledgement resolves them or the pending queue evicts them,
-        and neither boundary is a span of time, so the day is the bounded
-        reconciliation the pair keeps while a notice can still be on its
-        way. A notice with no identity, the refusal this layer saw itself,
-        accounts every time it is refused: the pace of its hostname is
-        what holds its repeats, exactly as it always did. The caller that
-        skips the accounting on a retry still reports the hour's current
-        budget, so a retry's answer carries everything the hour holds now
-        and not the arrival's own news.
+        would let the bound below evict it under a notice still arriving,
+        so the retry itself keeps the mark current and newest. The mark
+        still lives past the hour and past the carry span both sides keep
+        for a delivery no answer resolved, however long the notices wait:
+        the console holds its notices until an acknowledgement resolves
+        them or the pending queue evicts them, and neither boundary is a
+        span of time, so the mark is kept the whole time the notice can
+        still be on its way, and only the record's reconciliation and the
+        bound's own eviction ever end it, never a day that ran out with no
+        arrival to renew it. A notice with no identity, the refusal this
+        layer saw itself, accounts every time it is refused: the pace of
+        its hostname is what holds its repeats, exactly as it always did.
+        The caller that skips the accounting on a retry still reports the
+        hour's current budget, so a retry's answer carries everything the
+        hour holds now and not the arrival's own news.
 
         The bound the marks live in is reconciled with the record of
         notices the pair shares: the console trims an identity's entry as
@@ -1132,7 +1191,12 @@ class BoundedRefusalRecorder:
         with self._lock:
             self._prune(now)
             stamp = self._notice_accounted.get(notice_id)
-            if stamp is not None and now - stamp < DAY_SECONDS:
+            if stamp is not None:
+                # The identity is marked, so its refusal was accounted
+                # here already and the notice is still on its way: the
+                # mark lives until the notice resolves, however many
+                # hours or days have passed without an arrival to renew
+                # it, so the retry accounts the refusal nowhere again.
                 self._notice_accounted[notice_id] = now
                 self._notice_accounted.move_to_end(notice_id)
                 return False
@@ -1176,19 +1240,19 @@ class BoundedRefusalRecorder:
         self._completed_windows = OrderedDict(
             (window_id, stamp) for window_id, stamp in self._completed_windows.items()
             if now - stamp < CARRY_RETENTION_SECONDS)
-        # The accounted notices are not on the hourly roll either: a
+        # The accounted notices are not on the hourly roll at all: a
         # delivery whose answer was lost is retried under the notice's own
-        # identity, and the retry can cross an hour and the carry span both
-        # sides keep for a delivery no answer resolved, because the notice
-        # stays pending until an acknowledgement resolves it or the
-        # pending queue evicts it and neither is a span of time. The mark
-        # that holds one notice to one accounting therefore lives the
-        # bounded day the newest-refused record keeps, and the bound
-        # matches the pending queue's in spirit, because a notice is what
-        # the queue holds however long it holds it.
-        self._notice_accounted = OrderedDict(
-            (notice_id, stamp) for notice_id, stamp in self._notice_accounted.items()
-            if now - stamp < DAY_SECONDS)
+        # identity, and the retry can cross an hour, the carry span both
+        # sides keep for a delivery no answer resolved and any span of
+        # outage besides, because the notice stays pending until an
+        # acknowledgement resolves it or the pending queue evicts it and
+        # neither is a span of time. The mark that holds one notice to one
+        # accounting therefore lives exactly as long as the notice does:
+        # the record's reconciliation and the bound's own eviction end it,
+        # at the acknowledgement and at the place the bound gives a newer
+        # identity, and no passage of time without an arrival expires it,
+        # so a notice recovered past a sustained outage still finds its
+        # one accounting held.
 
     def take_summary(self):
         """The suppressed window when a summary line is due, else ``None``.
@@ -1229,7 +1293,13 @@ class BoundedRefusalRecorder:
         whatever the write the death ate was for. The write the line's
         caller makes afterwards is a re-stamp of the same payment, and it
         is kept for the answer that would carry the proof, not for the
-        decision itself.
+        decision itself. A claim that meets some of the IDs already
+        claimed settles the window by identity instead: the claimed
+        constituents' counts drop with the payment the other layer
+        logged, and each unpaid one claims its own identity here and pays
+        its counts as the one summary the window still owes, so no count
+        dies beside a claim it never joined and none is paid a second
+        time.
         """
         now = self._now()
         with self._lock:
@@ -1243,28 +1313,56 @@ class BoundedRefusalRecorder:
             if (self._window_ids
                     and not claim_summary_payment(self._window_ids, now)):
                 # The one payment decision on the record the two processes
-                # share went to the other layer: it took some of these
-                # counts into the one summary line it wrote and named one
-                # of this window's IDs among the ones it completed,
-                # whether before this take ran or inside the same moment
-                # of it, so this layer holds counts that are already paid.
-                # The window is dropped rather than paid a second time,
-                # whatever this layer's own hour says: the pair keeps the
-                # one summary per window the hour's budget rules name,
-                # paid once by whichever layer claimed it first.
-                self._suppressed = 0
-                self._window_opens = None
-                self._window_id = None
-                self._window_ids = []
-                return None
-            suppressed = self._suppressed
+                # share went partly to the other layer: it took some of
+                # these counts into the one summary line it wrote and
+                # named one of this window's IDs among the ones it
+                # completed, whether before this take ran or inside the
+                # same moment of it. The payment settles the window by
+                # identity rather than refusing it whole: each ID the
+                # other layer has not claimed is claimed here, one by one
+                # under the same lock, and the counts those IDs
+                # contributed are the ones this summary pays, while the
+                # claimed ones' counts drop with the payment the other
+                # layer logged, so no unpaid counts die beside a claim
+                # they never joined and no claimed ones are paid twice.
+                unpaid_ids = []
+                paid_counts = 0
+                for known_id in self._window_ids:
+                    if claim_summary_payment(known_id, now):
+                        unpaid_ids.append(known_id)
+                    else:
+                        paid_counts += self._window_counts.get(known_id, 0)
+                unpaid_counts = self._suppressed - paid_counts
+                if not unpaid_ids and not unpaid_counts:
+                    # Every constituent's counts are paid by the other
+                    # layer's line already: the window is dropped rather
+                    # than paid a second time, whatever this layer's own
+                    # hour says, and the pair keeps the one summary per
+                    # window the hour's budget rules name, paid once by
+                    # whichever layer claimed it first.
+                    self._suppressed = 0
+                    self._window_opens = None
+                    self._window_id = None
+                    self._window_ids = []
+                    self._window_counts = OrderedDict()
+                    return None
+                # The counts that survive are owed their one line here,
+                # under the identity of the first constituent this
+                # payment claimed, so the answer that follows names it
+                # and the layer holding a copy of it drops the copy.
+                suppressed = unpaid_counts
+                window_id = unpaid_ids[0] if unpaid_ids else None
+                window_ids = unpaid_ids
+            else:
+                suppressed = self._suppressed
+                window_id = self._window_id
+                window_ids = self._window_ids
             opened = self._window_opens
-            window_id = self._window_id
-            window_ids = self._window_ids
             self._suppressed = 0
             self._window_opens = None
             self._window_id = None
             self._window_ids = []
+            self._window_counts = OrderedDict()
             for paid_id in window_ids:
                 self._completed_windows[paid_id] = now
             return suppressed, opened, now, window_id
@@ -1357,6 +1455,7 @@ class BoundedRefusalRecorder:
             self._window_opens = None
             self._window_id = None
             self._window_ids = []
+            self._window_counts = OrderedDict()
             if window_id is not None:
                 self._counted_windows.pop(window_id, None)
             return count, opened, window_id
@@ -1395,7 +1494,11 @@ class BoundedRefusalRecorder:
         well, so the summary that pays the combined window completes it
         too and the acknowledgement names it: the layer holding a copy of
         the folded window drops it on the answer, instead of carrying it
-        to a backend that no longer remembers counting it. The wire keeps
+        to a backend that no longer remembers counting it. The folded
+        counts join their own place in the map the window keeps per ID,
+        beside the window's own, so a payment that finds some of the IDs
+        claimed elsewhere can settle the rest by identity and no folded
+        counts die beside a claim they never joined. The wire keeps
         the one shape it always had, with the window's own travelling ID
         alone on the report and the hour copy; only the completed list
         grows to cover the aggregate.
@@ -1430,6 +1533,7 @@ class BoundedRefusalRecorder:
             if window_id is not None:
                 self._counted_windows[window_id] = self._now()
             self._suppressed += count
+            self._window_counts[window_id] = self._window_counts.get(window_id, 0) + count
             if window_id is not None and window_id not in self._window_ids:
                 self._window_ids.append(window_id)
             if self._window_opens is None or opened < self._window_opens:
