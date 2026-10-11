@@ -9,6 +9,7 @@
  */
 import type { APIRequestContext } from "@playwright/test";
 import { expect } from "@playwright/test";
+import { appPath } from "./base";
 
 /** A subtitle as the movies API reports it. */
 export interface LibrarySubtitle {
@@ -42,7 +43,7 @@ export interface LibraryMovie {
 export async function enabledArrKinds(
   api: APIRequestContext,
 ): Promise<string[]> {
-  const response = await api.get("/api/system/arr-instances");
+  const response = await api.get(appPath("/api/system/arr-instances"));
   expect(response.ok()).toBe(true);
   const instances = (await response.json()) as {
     kind: string;
@@ -59,7 +60,7 @@ export async function movies(
   api: APIRequestContext,
   id?: number,
 ): Promise<LibraryMovie[]> {
-  const response = await api.get("/api/movies", {
+  const response = await api.get(appPath("/api/movies"), {
     params: id === undefined ? undefined : { "id[]": id },
   });
   expect(response.ok()).toBe(true);

@@ -5,6 +5,7 @@
  * it is safe against a real install.
  */
 import { expect, test } from "@e2e/fixtures";
+import { appPath } from "@e2e/lib/base";
 import { skipWhatsNew } from "@e2e/lib/whatsNew";
 
 test.beforeEach(async ({ page }) => {
@@ -20,7 +21,7 @@ test.describe("announcements", { tag: ["@status"] }, () => {
     api,
   }) => {
     // What the instance has, straight from the API the page reads.
-    const response = await api.get("/api/system/announcements");
+    const response = await api.get(appPath("/api/system/announcements"));
     expect(response.ok()).toBe(true);
     const { data } = (await response.json()) as {
       data: { text: string }[];
@@ -28,7 +29,7 @@ test.describe("announcements", { tag: ["@status"] }, () => {
     expect(Array.isArray(data)).toBe(true);
     const announcements = data as { text: string }[];
 
-    await page.goto("/system/announcements");
+    await page.goto(appPath("/system/announcements"));
     await expect(page).toHaveTitle(/Announcements - .+ \(System\)/);
 
     // The cards are one article per announcement, in the feed's own order:

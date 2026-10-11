@@ -12,6 +12,7 @@
  * test.
  */
 import { expect, test } from "@e2e/fixtures";
+import { appPath } from "@e2e/lib/base";
 import { enabledArrKinds, movies } from "@e2e/lib/library";
 import { completeOnboarding } from "@e2e/lib/shared";
 import { skipWhatsNew } from "@e2e/lib/whatsNew";
@@ -63,7 +64,7 @@ test.describe("subtitle upload", { tag: ["@library", "@stateful"] }, () => {
       );
       return;
     }
-    const profiles = await api.get("/api/system/languages/profiles");
+    const profiles = await api.get(appPath("/api/system/languages/profiles"));
     expect(profiles.ok()).toBe(true);
     const profileList = (await profiles.json()) as {
       profileId: number;
@@ -73,7 +74,7 @@ test.describe("subtitle upload", { tag: ["@library", "@stateful"] }, () => {
     // modal's own options spell it.
     const languageName = new Map(
       (
-        (await (await api.get("/api/system/languages")).json()) as {
+        (await (await api.get(appPath("/api/system/languages"))).json()) as {
           code2: string;
           name: string;
         }[]
@@ -110,7 +111,7 @@ test.describe("subtitle upload", { tag: ["@library", "@stateful"] }, () => {
         .filter((path): path is string => typeof path === "string"),
     );
 
-    await page.goto(`/movies/${movie.id}`);
+    await page.goto(appPath(`/movies/${movie.id}`));
     await expect(page.getByText(movie.title).first()).toBeVisible();
 
     // The toolbar's Upload opens the browser's file chooser; the page's own

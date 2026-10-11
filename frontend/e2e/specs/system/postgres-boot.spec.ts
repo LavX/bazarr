@@ -9,6 +9,7 @@
  */
 /* eslint-disable camelcase -- API bodies keep their transport field names. */
 import { expect, test } from "@e2e/fixtures";
+import { appPath } from "@e2e/lib/base";
 import { postgresVariant } from "@e2e/lib/container";
 import { completeOnboarding } from "@e2e/lib/shared";
 import { skipWhatsNew } from "@e2e/lib/whatsNew";
@@ -29,7 +30,7 @@ test.describe("PostgreSQL boot", { tag: ["@postgres", "@stateful"] }, () => {
     page,
     api,
   }) => {
-    const response = await api.get("/api/system/status");
+    const response = await api.get(appPath("/api/system/status"));
     expect(response.ok()).toBe(true);
     const { data } = (await response.json()) as {
       data: { database_engine: string };
@@ -41,7 +42,7 @@ test.describe("PostgreSQL boot", { tag: ["@postgres", "@stateful"] }, () => {
 
     // A database write, not a configuration file: language profiles live in
     // the database, so saving one and reading it back goes through Postgres.
-    const saved = await api.post("/api/system/settings", {
+    const saved = await api.post(appPath("/api/system/settings"), {
       multipart: {
         "languages-profiles": JSON.stringify([
           {
@@ -66,14 +67,14 @@ test.describe("PostgreSQL boot", { tag: ["@postgres", "@stateful"] }, () => {
       },
     });
     expect(saved.status()).toBe(204);
-    const profiles = await api.get("/api/system/languages/profiles");
+    const profiles = await api.get(appPath("/api/system/languages/profiles"));
     expect(profiles.ok()).toBe(true);
     const list = (await profiles.json()) as { name: string }[];
     expect(Array.isArray(list)).toBe(true);
     expect(list.map((profile) => profile.name)).toContain("E2E Postgres Write");
 
     // The page names the engine it runs on, from the same answer.
-    await page.goto("/system/status");
+    await page.goto(appPath("/system/status"));
     await expect(page.getByText("Database Engine")).toBeVisible();
     await expect(page.getByText(data.database_engine).first()).toBeVisible();
   });

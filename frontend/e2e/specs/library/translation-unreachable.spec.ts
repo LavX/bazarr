@@ -13,6 +13,7 @@
  */
 /* eslint-disable camelcase -- API bodies keep their transport field names. */
 import { expect, test } from "@e2e/fixtures";
+import { appPath } from "@e2e/lib/base";
 import { liveChannel } from "@e2e/lib/jobs";
 import { enabledArrKinds, movieWithSubtitle } from "@e2e/lib/library";
 import { completeOnboarding } from "@e2e/lib/shared";
@@ -35,7 +36,7 @@ interface Job {
 }
 
 async function failedJobs(api: APIRequestContext): Promise<Job[]> {
-  const response = await api.get("/api/system/jobs?status=failed");
+  const response = await api.get(appPath("/api/system/jobs?status=failed"));
   expect(response.ok()).toBe(true);
   const { data } = (await response.json()) as { data: Job[] };
   return data ?? [];
@@ -44,7 +45,7 @@ async function failedJobs(api: APIRequestContext): Promise<Job[]> {
 /** Opens the app and waits until finished jobs will be announced to it. */
 async function openApp(page: Page) {
   const channel = liveChannel(page);
-  await page.goto("/");
+  await page.goto(appPath("/"));
   await channel;
 }
 
@@ -63,7 +64,7 @@ test.describe(
       await skipWhatsNew(page);
       await completeOnboarding(bazarr);
       // A translator that cannot be reached, so the job dies at the call.
-      const saved = await api.post("/api/system/settings", {
+      const saved = await api.post(appPath("/api/system/settings"), {
         multipart: {
           "settings-translator-translator_type": "openrouter",
           "settings-translator-openrouter_url": UNREACHABLE_URL,
@@ -123,17 +124,20 @@ test.describe(
 
       // The endpoint resolves movies by their upstream radarrId, scoped by the
       // owning instance, so both travel with the request.
-      const queued = await api.patch("/api/subtitles?action=translate", {
-        data: {
-          id: movie.radarrId,
-          arr_instance_id: movie.arr_instance_id,
-          type: "movie",
-          language: target,
-          path: source.path,
-          hi: "False",
-          forced: "False",
+      const queued = await api.patch(
+        appPath("/api/subtitles?action=translate"),
+        {
+          data: {
+            id: movie.radarrId,
+            arr_instance_id: movie.arr_instance_id,
+            type: "movie",
+            language: target,
+            path: source.path,
+            hi: "False",
+            forced: "False",
+          },
         },
-      });
+      );
       expect(queued.ok()).toBe(true);
 
       // The queue records the failure, and the job's name says what died.

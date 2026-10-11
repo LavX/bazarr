@@ -5,6 +5,7 @@
  * is safe against a real install.
  */
 import { expect, test } from "@e2e/fixtures";
+import { appPath } from "@e2e/lib/base";
 import { skipWhatsNew } from "@e2e/lib/whatsNew";
 
 test.beforeEach(async ({ page }) => {
@@ -20,13 +21,13 @@ test.describe("statistics", { tag: ["@status"] }, () => {
     // the page and this spec read the same setting. The endpoint answers
     // with the flag at the top of its body; anything else is a contract
     // change this spec must hear about, not silently count zero tabs.
-    const response = await api.get("/api/distribution-hub/settings");
+    const response = await api.get(appPath("/api/distribution-hub/settings"));
     expect(response.ok()).toBe(true);
     const settings = (await response.json()) as { enabled?: unknown };
     expect(typeof settings.enabled).toBe("boolean");
     const distribution = settings.enabled as boolean;
 
-    await page.goto("/system/statistics");
+    await page.goto(appPath("/system/statistics"));
     await expect(page).toHaveTitle(/Statistics - .+ \(System\)/);
 
     const tabs = page.getByRole("tab");

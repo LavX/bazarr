@@ -9,6 +9,7 @@
  * only run of the suite that has a library today.
  */
 import { expect, test } from "@e2e/fixtures";
+import { appPath } from "@e2e/lib/base";
 import { enabledArrKinds, movieWithSubtitle } from "@e2e/lib/library";
 import { skipWhatsNew } from "@e2e/lib/whatsNew";
 import { basename } from "node:path";
@@ -42,7 +43,7 @@ test.describe("subtitle tools", { tag: ["@library"] }, () => {
       (subtitle) => typeof subtitle.path === "string" && subtitle.path !== "",
     ) as { path: string };
 
-    await page.goto(`/movies/${movie.id}`);
+    await page.goto(appPath(`/movies/${movie.id}`));
     await expect(page.getByText(movie.title).first()).toBeVisible();
 
     // The subtitle tools modal, over every subtitle the movie has.

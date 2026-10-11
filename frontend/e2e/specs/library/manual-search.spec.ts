@@ -10,6 +10,7 @@
  * suite grows a seeded-library run; the body below is that run's test.
  */
 import { expect, test } from "@e2e/fixtures";
+import { appPath } from "@e2e/lib/base";
 import { enabledArrKinds, movies } from "@e2e/lib/library";
 import { skipWhatsNew } from "@e2e/lib/whatsNew";
 
@@ -45,7 +46,7 @@ test.describe("manual search", { tag: ["@library", "@live"] }, () => {
     // searchable movie and turn the search into a guaranteed no-result.
     const library = await movies(api);
     const withProfile = library.filter((movie) => movie.profileId !== null);
-    const profiles = await api.get("/api/system/languages/profiles");
+    const profiles = await api.get(appPath("/api/system/languages/profiles"));
     expect(profiles.ok()).toBe(true);
     const profileList = (await profiles.json()) as {
       profileId: number;
@@ -65,7 +66,7 @@ test.describe("manual search", { tag: ["@library", "@live"] }, () => {
       return;
     }
 
-    await page.goto(`/movies/${movie.id}`);
+    await page.goto(appPath(`/movies/${movie.id}`));
     await expect(page.getByText(movie.title).first()).toBeVisible();
 
     await page.getByRole("button", { name: "Manual Search" }).click();

@@ -10,6 +10,7 @@
  * and each one saves the credentials it needs in its own beforeEach.
  */
 import { expect, test } from "@e2e/fixtures";
+import { appPath } from "@e2e/lib/base";
 import { completeOnboarding } from "@e2e/lib/shared";
 import { skipWhatsNew } from "@e2e/lib/whatsNew";
 import type { Page, Request } from "@playwright/test";
@@ -31,7 +32,7 @@ test.describe("form authentication", { tag: ["@auth", "@stateful"] }, () => {
     await completeOnboarding(bazarr);
     // The plaintext password, the way the settings page sends it: the save
     // hashes it itself whenever the value differs from the stored one.
-    const saved = await api.post("/api/system/settings", {
+    const saved = await api.post(appPath("/api/system/settings"), {
       multipart: {
         "settings-auth-type": "form",
         "settings-auth-username": USERNAME,
@@ -57,7 +58,7 @@ test.describe("form authentication", { tag: ["@auth", "@stateful"] }, () => {
     page.on("requestfailed", (request) => outstanding.delete(request));
 
     // No session yet: the app asks for the login instead of its pages.
-    await page.goto("/");
+    await page.goto(appPath("/"));
     const password = passwordField(page);
     await expect(password).toBeVisible();
     await page.getByRole("textbox", { name: "Username" }).fill(USERNAME);
@@ -103,7 +104,7 @@ test.describe("form authentication", { tag: ["@auth", "@stateful"] }, () => {
         ),
       )
       .toEqual([]);
-    await page.goto("/");
+    await page.goto(appPath("/"));
     await expect(passwordField(page)).toBeVisible();
   });
 
@@ -130,7 +131,7 @@ test.describe("form authentication", { tag: ["@auth", "@stateful"] }, () => {
     );
 
     // The page says the same thing to a user trying to sign in.
-    await page.goto("/");
+    await page.goto(appPath("/"));
     const password = passwordField(page);
     await expect(password).toBeVisible();
     await page.getByRole("textbox", { name: "Username" }).fill(USERNAME);

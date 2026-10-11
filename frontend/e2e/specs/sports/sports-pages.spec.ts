@@ -8,6 +8,7 @@
  * pointed at a port nothing answers on, so no library is ever reached.
  */
 import { expect, test } from "@e2e/fixtures";
+import { appPath } from "@e2e/lib/base";
 import { completeOnboarding } from "@e2e/lib/shared";
 import { skipWhatsNew } from "@e2e/lib/whatsNew";
 import type { APIRequestContext } from "@playwright/test";
@@ -18,15 +19,17 @@ const BOGUS_PORT = 9;
 /** One enabled Sportarr instance, as Settings > Connections saves it. */
 async function enableSportarr(api: APIRequestContext) {
   // Remove yesterday's instance first, so every test starts from one.
-  const listed = await api.get("/api/system/arr-instances?kind=sportarr");
+  const listed = await api.get(
+    appPath("/api/system/arr-instances?kind=sportarr"),
+  );
   expect(listed.ok()).toBe(true);
   for (const instance of (await listed.json()) as { id: number }[]) {
     const removed = await api.delete(
-      `/api/system/arr-instances/${instance.id}`,
+      appPath(`/api/system/arr-instances/${instance.id}`),
     );
     expect(removed.ok()).toBe(true);
   }
-  const created = await api.post("/api/system/arr-instances", {
+  const created = await api.post(appPath("/api/system/arr-instances"), {
     data: {
       kind: "sportarr",
       name: "E2E Sportarr",
@@ -37,7 +40,7 @@ async function enableSportarr(api: APIRequestContext) {
     },
   });
   expect(created.ok()).toBe(true);
-  const on = await api.post("/api/system/settings", {
+  const on = await api.post(appPath("/api/system/settings"), {
     multipart: { "settings-general-use_sportarr": "true" },
   });
   expect(on.ok()).toBe(true);
@@ -48,7 +51,7 @@ test.describe("Sports without Sportarr", { tag: ["@sports"] }, () => {
     await skipWhatsNew(page);
     // An install that does have Sportarr shows its library instead, and this
     // spec is about the message a missing one gets.
-    const response = await api.get("/api/system/arr-instances");
+    const response = await api.get(appPath("/api/system/arr-instances"));
     expect(response.ok()).toBe(true);
     const instances = (await response.json()) as {
       kind: string;
@@ -65,7 +68,7 @@ test.describe("Sports without Sportarr", { tag: ["@sports"] }, () => {
   test("the Sports page says what is missing instead of showing a library", async ({
     page,
   }) => {
-    await page.goto("/sports");
+    await page.goto(appPath("/sports"));
     await expect(page).toHaveTitle(/Sports - /);
     await expect(
       page.getByText(
@@ -98,7 +101,7 @@ test.describe(
       // status queries have settled, so that text is also the proof that
       // the sidebar below it is settled: the absence check then reads a
       // live sidebar, not a page whose queries are still pending.
-      await page.goto("/sports");
+      await page.goto(appPath("/sports"));
       await expect(
         page.getByText(
           "Enable a Sportarr instance in Connections to view sports.",
@@ -122,14 +125,14 @@ test.describe(
     }) => {
       await enableSportarr(api);
 
-      await page.goto("/sports");
+      await page.goto(appPath("/sports"));
       await expect(page).toHaveTitle(/Sports - /);
       // The page is enabled now, so its own toolbox shows.
       await expect(
         page.getByRole("button", { name: "Sync Leagues" }),
       ).toBeVisible();
 
-      await page.goto("/wanted/sports");
+      await page.goto(appPath("/wanted/sports"));
       await expect(page).toHaveTitle(/Wanted Sports - /);
       // The wanted page's own toolbox, empty league table or not.
       await expect(
@@ -139,7 +142,7 @@ test.describe(
         page.getByRole("button", { name: "Scan All" }),
       ).toBeVisible();
 
-      await page.goto("/history/sports");
+      await page.goto(appPath("/history/sports"));
       await expect(page).toHaveTitle(/Sports History - /);
       // The history page's own filters and its embedded-records switch.
       await expect(
@@ -149,7 +152,7 @@ test.describe(
         page.getByRole("combobox", { name: "Action" }),
       ).toBeVisible();
 
-      await page.goto("/blacklist/sports");
+      await page.goto(appPath("/blacklist/sports"));
       await expect(page).toHaveTitle(/Sports Excluded - /);
       // The excluded page's own empty state, the leagues table being empty.
       await expect(page.getByText("Nothing Excluded for Sports")).toBeVisible();
