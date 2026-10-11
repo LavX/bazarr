@@ -155,7 +155,12 @@ def record_completed_windows(window_ids, paid_at, path=None):
     flight at once: each update reads the record, merges its payment in
     and replaces the file, and one complete update is held against the
     next on the lock file beside the record, so neither payment can erase
-    the other's proof.
+    the other's proof. The record also holds the ownerships a console
+    claimed before its payment was due, written beside the decision as
+    their own shape, and a payment that lands on one completes it, the
+    entry taking the payment's stamp the way every completed window's
+    does, while the ownerships no payment touched keep their places
+    through the merge, held on the same span their claim was.
     """
     if not window_ids:
         return
@@ -180,7 +185,10 @@ def record_completed_windows(window_ids, paid_at, path=None):
     try:
         record = _read_completed_windows_record(path)
         record = {window_id: stamp for window_id, stamp in record.items()
-                  if isinstance(stamp, (int, float)) and paid_at - stamp < CARRY_RETENTION_SECONDS}
+                  if (isinstance(stamp, (int, float))
+                      and paid_at - stamp < CARRY_RETENTION_SECONDS)
+                  or (isinstance(stamp, dict)
+                      and paid_at - stamp.get('claimed', paid_at) < CARRY_RETENTION_SECONDS)}
         for window_id in window_ids:
             record[window_id] = paid_at
         fd, tmp = tempfile.mkstemp(dir=str(record_path.parent),
@@ -207,7 +215,31 @@ def completed_windows_record_has(window_id, path=None):
     return window_id in _read_completed_windows_record(path)
 
 
-def claim_summary_payment(window_ids, paid_at, path=None):
+def pending_window_ownerships(path=None):
+    """The window ownerships the record still holds as unpaid, with their
+    facts.
+
+    A claim a console takes on a mirrored window's identities before
+    either hour runs is a promise to pay, and the promise travels with
+    the decision: the window's own facts are written beside it on the
+    record the two processes share, so the console that replaces a lost
+    one reads the unpaid ownerships back from here and the debt a
+    restart would have orphaned finds its payer in whichever console
+    follows. The identities a standing ownership covers read as paid to
+    the other layer, so no timer of the pair pays the counts while the
+    ownership holds them, and a payment completes it, the entry taking
+    the payment's stamp the way every completed window's does, so
+    nothing here reads as unpaid after the line it owed was logged. The
+    read is best effort exactly as the record's other reads are: a
+    record nothing can read proves no ownership, and the pair owes no
+    debt it cannot see.
+    """
+    path = completed_windows_record_path() if path is None else path
+    record = _read_completed_windows_record(path)
+    return [entry for entry in record.values() if isinstance(entry, dict)]
+
+
+def claim_summary_payment(window_ids, paid_at, path=None, ownership=None):
     """Take the one payment decision for the windows a summary pays,
     across both processes.
 
@@ -241,6 +273,22 @@ def claim_summary_payment(window_ids, paid_at, path=None):
     costs nothing to grant, because no copy of it anywhere can be proven
     paid.
 
+    A claim taken before its payment is due is a promise rather than a
+    proof, and the caller that makes one names the ownership it holds: the
+    window's own facts travel with the decision, the counts the promise
+    stands for and the moment its window opened, written beside the claim
+    as their own shape no payment wrote, so the claim reads as a promise
+    to pay and not as a payment already made. The identities a standing
+    ownership covers read as paid to the other layer all the same, so no
+    timer of the pair pays the counts while the promise holds them, and
+    the payment that keeps it completes it, the entry taking the
+    payment's stamp the way every completed window's does: a console
+    that dies between the two leaves the promise on the record, and the
+    console that replaces it reads the debt back and pays it, so the
+    pair loses no summary a claim already owns. A claim with no
+    ownership named beside it is the payment's own proof exactly as it
+    always was, the stamp of a line the claim decided to log.
+
     The write is best effort, exactly as the record's own updates are: a
     record nothing can read or write proves no payment, so the payer
     proceeds rather than fail a payment, and the pair keeps the
@@ -268,10 +316,16 @@ def claim_summary_payment(window_ids, paid_at, path=None):
         claimed = all(window_id not in record for window_id in window_ids)
         if claimed:
             record = {known_id: stamp for known_id, stamp in record.items()
-                      if isinstance(stamp, (int, float))
-                      and paid_at - stamp < CARRY_RETENTION_SECONDS}
+                      if (isinstance(stamp, (int, float))
+                          and paid_at - stamp < CARRY_RETENTION_SECONDS)
+                      or (isinstance(stamp, dict)
+                          and paid_at - stamp.get('claimed', paid_at) < CARRY_RETENTION_SECONDS)}
             for window_id in window_ids:
-                record[window_id] = paid_at
+                if ownership is None:
+                    record[window_id] = paid_at
+                else:
+                    record[window_id] = {'count': ownership[0], 'opened': ownership[1],
+                                         'ids': list(window_ids), 'claimed': paid_at}
             fd, tmp = tempfile.mkstemp(dir=str(record_path.parent),
                                        prefix=f".{record_path.name}.")
             try:
@@ -347,6 +401,202 @@ def release_summary_claim(window_ids, path=None):
             lock_handle.close()
 
 
+# The record of the moments the pair logged a summary line, in the
+# configuration directory the two processes of one install share. The
+# windows the pair pays are identities, and the claim on them decides which
+# layer pays a window the two hold copies of, but two windows no
+# acknowledgement ever carried between the layers share no identity: an
+# outage that lets no report out and no answer back leaves each layer
+# holding a window of its own, and the timers of the two processes would
+# pay them side by side, one line for each, within the same hour. The
+# emission times are what those two coordinate on instead: whichever
+# layer pays first writes the moment its line landed here, and the other
+# layer reads the newest moment back before it pays, holding its own
+# line until the hour since the last one has run, so the pair keeps its
+# ceiling of one summary an hour however the traffic split the counts.
+SUMMARY_EMISSIONS_RECORD = 'host-refusal-summary-emissions.json'
+SUMMARY_EMISSIONS_RECORD_FILE_ENV = 'BAZARR_REFUSAL_SUMMARY_EMISSIONS_FILE'
+SUMMARY_EMISSIONS_RECORD_LOCK_SUFFIX = '.lock'
+
+
+def summary_emissions_record_path(environ=None):
+    """Where the pair's summary-emission record lives, resolved the way
+    both processes resolve their configuration: the explicit file the
+    environment names, then the configuration directory BAZARR_CONFIG_DIR
+    names, then the data directory beside the code, exactly as the record
+    of completed windows resolves, so the two processes of one install
+    always meet the same file, restarts and all.
+    """
+    environ = os.environ if environ is None else environ
+    override = environ.get(SUMMARY_EMISSIONS_RECORD_FILE_ENV, '').strip()
+    if override:
+        return override
+    config_dir = environ.get('BAZARR_CONFIG_DIR', '').strip()
+    if not config_dir:
+        config_dir = str(Path(__file__).resolve().parents[2] / 'data')
+    return str(Path(config_dir) / 'config' / SUMMARY_EMISSIONS_RECORD)
+
+
+def _read_summary_emissions_record(path):
+    """The record's emission moments, or nothing: the record is best
+    effort, and a missing or unreadable one proves no line the pair can
+    wait for."""
+    try:
+        with open(path) as record_file:
+            record = json.load(record_file)
+        if not isinstance(record, list):
+            return []
+        return [stamp for stamp in record if isinstance(stamp, (int, float))]
+    except Exception:
+        return []
+
+
+def record_summary_emission(emitted_at, path=None):
+    """Write the moment one summary line landed, for the other process.
+
+    Both processes write here, the backend at the flush that logged its
+    window and the console at the emission that logged its own, and the
+    moments are kept on the retention span both sides share, so the pair
+    keeps the proof of when it last named a window's counts for as long
+    as any layer could still be holding a copy of anything the hour
+    counted. The write is held against the next on the lock file beside
+    the record, exactly as the record of completed windows is, and it is
+    best effort with the same trade: a record nothing can write proves no
+    emission, and the pair pays the summary it owes rather than hold a
+    line on a proof that never reached the file.
+    """
+    if not isinstance(emitted_at, (int, float)):
+        return
+    path = summary_emissions_record_path() if path is None else path
+    record_path = Path(path)
+    lock_handle = None
+    try:
+        record_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_handle = open(str(record_path) + SUMMARY_EMISSIONS_RECORD_LOCK_SUFFIX, 'a+')
+        import fcntl
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        if lock_handle is not None:
+            lock_handle.close()
+        lock_handle = None
+    try:
+        record = _read_summary_emissions_record(path)
+        record.append(emitted_at)
+        record = [stamp for stamp in record if emitted_at - stamp < CARRY_RETENTION_SECONDS]
+        fd, tmp = tempfile.mkstemp(dir=str(record_path.parent),
+                                   prefix=f".{record_path.name}.")
+        try:
+            with os.fdopen(fd, 'w') as record_file:
+                json.dump(record, record_file)
+            os.replace(tmp, path)
+        except BaseException:
+            os.unlink(tmp)
+            raise
+    except Exception:
+        pass
+    finally:
+        if lock_handle is not None:
+            lock_handle.close()
+
+
+def summary_ceiling_blocks(now, path=None):
+    """Whether the pair's ceiling of one summary an hour holds a new one.
+
+    The newest moment the pair logged a summary line decides: a line
+    within the hour means the hour's one summary is spent, whichever
+    layer paid it and whichever windows the line counted, so the payment
+    that asks here waits for the hour to run and the worker's next paced
+    look pays it once the ceiling opens. A moment that reads as newer
+    than the asking clock holds nothing, because a clock that has not
+    reached the recorded moment does not share it: the pair's two
+    processes keep one wall clock, and a stamp from ahead of the asker
+    is a clock the asker is not on, so the pair treats it as no proof
+    rather than a ceiling that never opens. The read is best effort
+    exactly as the record's other proofs are: a record nothing can read
+    proves no emission, and the pair pays the summary it owes rather
+    than hold a line on a proof that never reached the file. The moment
+    the reading layer paid its own line is on the record with the rest,
+    so the ceiling holds a layer to the pair's cadence and not only the
+    other one's. The payment paths take the hour's one slot on the
+    reservation beside this read, one locked step with the decision
+    itself, so the cadence this read names and the ceiling the pair
+    keeps are the same rule.
+    """
+    path = summary_emissions_record_path() if path is None else path
+    emissions = _read_summary_emissions_record(path)
+    newest = max(emissions) if emissions else None
+    return (newest is not None
+            and 0 <= now - newest < HOUR_SECONDS)
+
+
+def reserve_summary_emission(now, path=None):
+    """Take the pair's one emission slot for the hour, or answer that a
+    line within it holds this payment back.
+
+    The ceiling of one summary an hour is a decision the pair's two
+    processes take in one step, because their timers can reach the same
+    moment together, each holding a window no acknowledgement ever
+    carried between the layers, so no identity the pair shares could
+    decide between them: the read that found the hour open and the write
+    that spent it were two steps once, and a payment that read before
+    the other layer's line landed paid beside it anyway, so the pair
+    named two lines the one summary an hour does not allow. The decision
+    and the spend are one locked step here instead: whichever payment
+    asks first takes the slot with it, writing the moment under the same
+    lock the record's own updates hold, and the payment that comes
+    second meets the moment the first wrote and holds its own line back
+    with every count it keeps, until the hour since the pair's last line
+    has run. Every payment path asks here, the whole claim and the
+    settlement by identity alike, because a settlement pays counts into a
+    line the same way a whole window does, and the write the caller's own
+    line follows re-stamps the moment the reservation already took. The
+    newest moment decides exactly as the ceiling's own read does: a line
+    within the hour means the hour's one summary is spent, whichever
+    layer paid it, and a moment that reads as newer than the asking clock
+    holds nothing, because a clock that has not reached the recorded
+    moment does not share it. The write is best effort with the same
+    trade the record's other updates keep: a record nothing can read or
+    write proves no line the pair can wait for, and the payment proceeds
+    rather than hold a summary on a proof that never reached the file.
+    """
+    if not isinstance(now, (int, float)):
+        return True
+    path = summary_emissions_record_path() if path is None else path
+    record_path = Path(path)
+    lock_handle = None
+    try:
+        record_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_handle = open(str(record_path) + SUMMARY_EMISSIONS_RECORD_LOCK_SUFFIX, 'a+')
+        import fcntl
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        if lock_handle is not None:
+            lock_handle.close()
+        lock_handle = None
+    try:
+        record = _read_summary_emissions_record(path)
+        newest = max(record) if record else None
+        if newest is not None and 0 <= now - newest < HOUR_SECONDS:
+            return False
+        record.append(now)
+        record = [stamp for stamp in record if now - stamp < CARRY_RETENTION_SECONDS]
+        fd, tmp = tempfile.mkstemp(dir=str(record_path.parent),
+                                   prefix=f".{record_path.name}.")
+        try:
+            with os.fdopen(fd, 'w') as record_file:
+                json.dump(record, record_file)
+            os.replace(tmp, path)
+        except BaseException:
+            os.unlink(tmp)
+            raise
+        return True
+    except Exception:
+        return True
+    finally:
+        if lock_handle is not None:
+            lock_handle.close()
+
+
 # The record of the notices the backend has taken in, in the configuration
 # directory the two processes of one install share. Each entry holds two
 # facts the pair must not confuse: the receipt, written before the notice
@@ -370,6 +620,17 @@ def release_summary_claim(window_ids, path=None):
 NOTICE_RECEIPTS_RECORD = 'host-refusal-notice-receipts.json'
 NOTICE_RECEIPTS_RECORD_FILE_ENV = 'BAZARR_REFUSAL_NOTICE_RECEIPTS_FILE'
 NOTICE_RECEIPTS_RECORD_LOCK_SUFFIX = '.lock'
+
+# The two layers that can hold the naming of one refusal: the backend at
+# its own accounting, and the console at the line a failed delivery wrote
+# or the count a held-back first failure joined a window. The outcome each
+# claim writes carries its claimant beside it, so the pair can tell whose
+# naming stands on an entry: a console's naming bars every layer, while a
+# backend's bars the console alone, because a backend that restarts holds
+# none of the one before it and names the refusal in its own record's
+# right.
+NOTICE_ACCOUNTED_BY_BACKEND = 'backend'
+NOTICE_ACCOUNTED_BY_CONSOLE = 'console'
 
 
 def notice_receipts_record_path(environ=None):
@@ -443,21 +704,33 @@ def _prune_notice_record(record, now):
     writes a lost answer can let lag behind it, and no write lags behind
     its notice by more than the span a delivery no answer resolved is
     worth, so the resolutions age out on their own and the record stays
-    bounded whatever the pair's deliveries do."""
+    bounded whatever the pair's deliveries do. The resolutions are
+    bounded in number beside the span, on the pair's own bound of
+    refused hosts: the newest of them are the ones a lagging write can
+    still be racing, and one whose notice fell out of that many newer
+    resolutions has outlasted every bounded memory the pair keeps of it,
+    the pending queue, the newest-refused set and the hour's line
+    bookkeeping all holding the same bound, so the record keeps no more
+    of the retired past than the pair keeps of anything else, and a
+    burst of evictions retires its own history as it goes."""
     pruned = {}
+    resolutions = []
     for notice_id, entry in record.items():
         if not isinstance(entry, dict):
             continue
         resolved = entry.get('resolved')
         if isinstance(resolved, (int, float)):
             if now - resolved < CARRY_RETENTION_SECONDS:
-                pruned[notice_id] = entry
+                resolutions.append((resolved, notice_id, entry))
             continue
         received = entry.get('received')
         accounted = entry.get('accounted')
         if ((isinstance(received, (int, float)) and now - received < CARRY_RETENTION_SECONDS)
                 or isinstance(accounted, (int, float))):
             pruned[notice_id] = entry
+    resolutions.sort(key=lambda resolution: resolution[0])
+    pruned.update({notice_id: entry
+                   for _resolved, notice_id, entry in resolutions[-REFUSED_HOSTS_LIMIT:]})
     return pruned
 
 
@@ -563,26 +836,133 @@ def record_notice_receipt(notice_id, received_at, path=None):
     _record_notice_fact(notice_id, 'received', received_at, path)
 
 
-def record_notice_accounted(notice_id, accounted_at, path=None):
-    """Retain the outcome of one notice's accounting: its refusal was named.
+def record_notice_accounted(notice_id, accounted_at, path=None,
+                             claimant=NOTICE_ACCOUNTED_BY_BACKEND):
+    """Retain the outcome of one notice's accounting, and answer whether
+    the naming of its refusal is this claimant's to deliver.
 
-    The backend writes this once the notice's accounting completed, in the
-    line the hour's budget spent on the refusal or in the fold of a line a
-    console elsewhere already spent, and a backend that restarts reads it
-    back before it accounts a retried notice again, because the refusal was
-    named here before the restart and the pair owes it no second
-    accounting. The entry is kept even when the receipt never reached the
-    file, so the outcome outlives whatever the taking in did: a write that
-    fails proves no outcome, and the console accounts the refusal rather
-    than trust a proof that never reached the file. The write is held on
-    the lock the record's own updates hold, so the outcome survives the
-    receipt a taking in wrote beside it, whichever order the two writes
-    meet in.
+    A layer writes this once its accounting of the notice completed, the
+    backend in the line the hour's budget spent on the refusal or in the
+    fold of a line a console elsewhere already spent, and the console in
+    the line a failed delivery wrote or in the count a held-back first
+    failure joined a window, and the write is the naming's assignment,
+    taken under the lock the record's own updates hold before any line is
+    logged: the assignment is the pair's one decision on who names the
+    refusal, and the answer tells the caller whether the line is its to
+    write. Both layers claim under the same lock, and the outcome each
+    writes carries its claimant beside it: a console's naming bars every
+    claim that follows, because the refusal is named at the console that
+    saw it and the late accounting of a delivery whose answer a client's
+    timeout ended meets the claim and names the refusal nowhere a second
+    time, while a backend's naming bars the console alone, because a
+    backend that restarts holds none of the one before it and names the
+    refusal in its own record's right the way its own bounded accounting
+    does, so the pair keeps one naming per live recorder and the fresh
+    backend's own line is no second one. A notice the record shows
+    resolved answers false and
+    its refusal is named nowhere here: the resolution, the
+    acknowledgement that answered the notice or the eviction that
+    dropped it from the pending queue, is the last word on the notice's
+    life under this same lock, and the backend's late work honors it,
+    because the answer that resolved the notice already told the pair
+    everything it owed and the console named the refusal at the failure
+    that lost the answer, in a line of its own or in the window its
+    held-back lines count into, so the pair keeps the one naming the
+    refusal owes whichever channel reached it first and no line of a
+    notice nothing will ever deliver again joins the one that stands. A
+    backend that restarts renews a standing outcome of its own kind with
+    its claim, because the recorder that named the refusal first is gone
+    and the fresh one names it in its own record's right, the way its own
+    bounded accounting does. The entry is kept
+    even when the receipt never reached the file, so the outcome outlives
+    whatever the taking in did. The refusal is held on the resolution and
+    on the outcome that already stands, and the write is best effort
+    exactly as the record's other updates are: a record nothing can write
+    keeps the facts it held, and the claimant names the refusal rather
+    than hold it on a proof that never reached the file.
     """
     if not notice_id:
-        return
+        return True
     path = notice_receipts_record_path() if path is None else path
-    _record_notice_fact(notice_id, 'accounted', accounted_at, path)
+    record_path = Path(path)
+    lock_handle = None
+    try:
+        record_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_handle = open(str(record_path) + NOTICE_RECEIPTS_RECORD_LOCK_SUFFIX, 'a+')
+        import fcntl
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        if lock_handle is not None:
+            lock_handle.close()
+            lock_handle = None
+    try:
+        record = _read_notice_receipts_record(path)
+        entry = _notice_record_entry(record, notice_id)
+        if isinstance(entry.get('resolved'), (int, float)):
+            # The notice's life ended at the answer that resolved it or at
+            # the eviction that dropped it, and the naming of its refusal
+            # belongs to whoever named it first: the late accounting of a
+            # delivery the queue already gave up on names it nowhere again.
+            return False
+        if (isinstance(entry.get('accounted'), (int, float))
+                and (claimant == NOTICE_ACCOUNTED_BY_CONSOLE
+                     or entry.get('accounted_by', NOTICE_ACCOUNTED_BY_BACKEND)
+                     == NOTICE_ACCOUNTED_BY_CONSOLE)):
+            # The naming of this notice's refusal is assigned already, at
+            # the console whose failed delivery wrote the line or whose
+            # held-back count joined a window, or at another recorder of
+            # this claimant's own kind for a console's claim, which asks
+            # only after its guard read the record: a console's claim
+            # bars every layer, because the refusal was named at the
+            # console that saw it and the late accounting of a delivery
+            # whose answer a client's timeout ended meets the claim and
+            # names the refusal nowhere a second time. A backend's claim
+            # renews a standing outcome of its own kind instead of
+            # failing on it, because the recorder that named the refusal
+            # first is gone with its restart and the fresh one names the
+            # refusal in its own record's right.
+            return False
+        entry['accounted'] = accounted_at
+        entry['accounted_by'] = claimant
+        record[notice_id] = entry
+        _store_notice_record(path, _prune_notice_record(record, accounted_at))
+    except Exception:
+        pass
+    finally:
+        if lock_handle is not None:
+            lock_handle.close()
+    return True
+
+
+def notice_named_elsewhere(notice_id, path=None):
+    """Whether the shared record shows the naming of this notice's refusal
+    is assigned to a layer away from the asker, the notice resolved or
+    not.
+
+    The outcome of a notice's accounting is the decision that assigned
+    the naming of its refusal to the layer that claimed it, the backend
+    at its own accounting or the console at the line a failed delivery
+    wrote, and the assignment is what the pair coordinates its one
+    naming on: the console whose delivery failed asks here before it
+    names the refusal the notice carried, and a notice whose outcome
+    stands on the record, resolved or not, is named there and the
+    console writes no line and counts nothing beside it. The assignment
+    survives the notice's own resolution, because an eviction that ends
+    a notice's life while a naming already stands keeps the assignment
+    on the record, and the refusal keeps the one naming the pair owes
+    it whichever side of the eviction the backend's processing landed
+    on; an outcome a console still waiting on its answer reads means
+    the same thing, so the one reader answers both. The stricter
+    question, whether the record holds a live outcome for a notice
+    still waiting, has its own reader, and the accounting bound and the
+    record's own bookkeeping keep using that one.
+    """
+    if not notice_id:
+        return False
+    path = notice_receipts_record_path() if path is None else path
+    record = _read_notice_receipts_record(path)
+    entry = _notice_record_entry(record, notice_id)
+    return isinstance(entry.get('accounted'), (int, float))
 
 
 def trim_notice_record(notice_id, path=None):
@@ -606,11 +986,26 @@ def trim_notice_record(notice_id, path=None):
     they share. The backend's bounded accounting of notices reads the
     state the same way and drops the notice's mark before the mark of
     any notice still waiting, however many acknowledged notices arrive
-    around one that is. The state is kept on the retention span both
-    sides share, so it outlives any write the timeout let lag and leaves
-    the record on its own. The trim is best effort with the record's
+    around one that is. The trim is best effort with the record's
     other updates: a record nothing can write keeps the facts it held,
     and the retention ages them out.
+
+    The outcome is the one exception the resolution keeps, because it
+    is the naming ownership the pair owes the refusal: the outcome is
+    the decision that assigned the refusal's one naming to the layer
+    that claimed it, the backend at its own accounting or the console at
+    the line a failed delivery wrote, taken under this same lock before
+    the line that delivered it, and an eviction that resolves the notice
+    while a naming already stands keeps the assignment beside the
+    resolution, because the pair owes the refusal one naming whichever
+    channel reached it first and the console whose delivery then fails
+    reads the assignment back and names the refusal nowhere a second
+    time, the same way it does for a notice still waiting. The receipt
+    is a fact about the taking in alone and nothing reads it past the
+    notice's life, so it leaves with the resolution. The state and the
+    assignment it kept are held on the retention span both sides share,
+    so they outlive any write the timeout let lag and leave the record
+    on their own.
     """
     if not notice_id:
         return
@@ -629,7 +1024,18 @@ def trim_notice_record(notice_id, path=None):
     try:
         stamp = time.time()
         record = _read_notice_receipts_record(path)
-        record[notice_id] = {'resolved': stamp}
+        entry = _notice_record_entry(record, notice_id)
+        resolution = {'resolved': stamp}
+        if isinstance(entry.get('accounted'), (int, float)):
+            # The naming of the refusal already stands on the record, the
+            # backend's accounting or the console's own failure naming,
+            # under the lock this trim holds: the assignment survives the
+            # notice's resolution, so the console that reconciles the lost
+            # answer at its failure names the refusal nowhere a second
+            # time, and the pair keeps the one naming whichever side of
+            # the eviction the backend's processing landed on.
+            resolution['accounted'] = entry['accounted']
+        record[notice_id] = resolution
         _store_notice_record(path, _prune_notice_record(record, stamp))
     except Exception:
         pass
@@ -1471,6 +1877,24 @@ class BoundedRefusalRecorder:
         its counts as the one summary the window still owes, so no count
         dies beside a claim it never joined and none is paid a second
         time.
+
+        The pair's ceiling of one summary an hour holds a payment that
+        finds another line within the hour, on the record of emission
+        moments the two processes share: two windows no acknowledgement
+        ever carried between the layers share no identity, so the claim
+        cannot decide between them, and the moments decide instead. The
+        decision and the spend of the hour's one slot are a single
+        reserved step, taken under the lock the record's own updates
+        hold, so two payments deciding inside the same moment cannot
+        both pass it, and every payment path asks it, the whole claim
+        and the settlement by identity alike, because a settlement pays
+        counts into a line the same way a whole window does. A payment
+        the ceiling holds returns its claims and waits with every count
+        it keeps, and the next paced look pays it once the hour since
+        the pair's last line has run, so the summaries the pair logs
+        stay an hour apart however the traffic split the counts. The
+        ceiling holds best effort exactly as the record's other proofs
+        are, and a record nothing can read holds nothing.
         """
         now = self._now()
         with self._lock:
@@ -1529,6 +1953,27 @@ class BoundedRefusalRecorder:
                 suppressed = self._suppressed
                 window_id = self._window_id
                 window_ids = self._window_ids
+            if not reserve_summary_emission(now):
+                # The pair logged a summary line within the hour, whichever
+                # layer paid it and whichever windows the line counted, so
+                # the ceiling the two processes share holds this payment
+                # until the hour has run and the next paced look pays it
+                # then, the whole claim and the settlement alike: the
+                # settlement pays counts into a line the same way a whole
+                # window does, and the pair's one summary an hour bounds
+                # whichever path a payment takes. The reservation is one
+                # locked step with the decision, so two payments deciding
+                # inside the same moment cannot both pass it however
+                # closely their turns overlap. The claims the held payment
+                # made are returned with it, because the decision the
+                # record keeps is the payment and not the hold: a layer
+                # whose payment waits must not leave the other holding a
+                # copy of the same window it reads as paid, and the claim
+                # the payment retakes when the ceiling opens is the one
+                # the pair's decision stands on. The window keeps every
+                # count it holds while it waits.
+                release_summary_claim(window_ids)
+                return None
             opened = self._window_opens
             self._suppressed = 0
             self._window_opens = None

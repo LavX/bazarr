@@ -26,7 +26,7 @@ from .host_policy import (ALLOWED_HOSTS_ENV, APPROVAL_SEGMENT, DAY_SECONDS, HOUR
                           REFUSED_REASON, BoundedRefusalRecorder, effective_host, entries_from_environ,
                           normalize_entries, allows_all_hosts,
                           record_completed_windows, record_notice_accounted, record_notice_receipt,
-                          refused_hostnames)
+                          record_summary_emission, refused_hostnames)
 
 # The refusal status: the frontend never renders it as the app.
 REFUSED_STATUS = 421
@@ -304,7 +304,16 @@ def _flush_suppressed_summary(recorder=None):
     backends have restarted since, even from a payer that died between
     its line and this write. The write below renews the same proof for
     the answer that will carry it, so the record outlives whichever
-    answer was lost. The recorder defaults to the module's own; the
+    answer was lost. The moment the line landed joins the record of
+    emission moments the two processes share as well: the take reserved
+    the pair's one emission slot for the hour in the same locked step as
+    its decision, so whichever payment comes next, in this process or the
+    other one, meets the moment and holds its own line back until the
+    hour has run, and the write below re-stamps the moment the
+    reservation already took. Two windows no acknowledgement ever
+    carried between the layers share no identity the claim could decide
+    on, and the moments name the hour the pair last paid. The
+    recorder defaults to the module's own; the
     summary timer below passes the one it armed with, so a timer left
     running flushes the record it holds and nothing a later swap put in
     its place.
@@ -314,6 +323,7 @@ def _flush_suppressed_summary(recorder=None):
     if summary:
         _log_suppressed_summary(summary)
         record_completed_windows(recorder.completed_windows(), summary[2])
+        record_summary_emission(summary[2])
 
 
 # The pace of the backend's own summary timer. The flush it runs is a take
@@ -476,6 +486,21 @@ def record_refusal(host, config=settings, line_at=None, hour_lines=None, hour_li
     is recorded as a hostname alone: the refusal joins the record with
     its own time, and no line and no count names it again, because the
     count the console holds is the one naming the pair owes it.
+
+    The outcome the record of notices keeps is the pair's one decision
+    on who names the refusal, and both layers claim it under the same
+    lock before any line is logged: this backend claims it at its own
+    accounting, the console at the line a failed delivery wrote or the
+    count a held-back first failure joined a window, and whichever layer
+    claims first owns the one naming the refusal owes, so the late
+    processing of a delivery whose answer a client's timeout ended meets
+    the other side's claim and writes no line and no count for it here.
+    The claim is taken before the line: a notice this backend assigned
+    its naming to and died before the line names keeps the console's
+    fallback silent, so the refusal is named nowhere rather than twice,
+    and one whose accounting never completed, because this backend died
+    between its receipt and its record, leaves the refusal to the console
+    that saw it.
     """
     shown = effective_host(host)
     if not shown or not check_active(config):
@@ -511,17 +536,32 @@ def record_refusal(host, config=settings, line_at=None, hour_lines=None, hour_li
     if refused_at is None:
         refused_at = line_at
     accounted = _refusals.account_notice(notice)
+    if accounted and notice:
+        # The outcome is retained before the line is written, so the
+        # naming of the refusal is assigned to this backend before it is
+        # delivered, under the lock the record's updates hold: a process
+        # that dies between the two leaves the refusal unnamed, and the
+        # console whose delivery failed reads the outcome and names the
+        # refusal nowhere itself, because the pair prefers one refusal
+        # named nowhere on a crash to one named twice, and a backend that
+        # restarts holds its own retries to the one accounting. An
+        # outcome the console's own failure already claimed answers the
+        # same way: the naming stands there, in a line of the console's
+        # own or in the window its held-back lines count into, and the
+        # late accounting of a delivery whose client gave up on its
+        # answer meets the claim and writes no line and no count for it
+        # here either. A notice
+        # the record shows resolved answers that the naming is not this
+        # backend's: the eviction that dropped the notice or the
+        # acknowledgement that answered it already ended its life, and
+        # the refusal was named at the failure that lost the answer, in a
+        # line of the console's own or in the window its held-back lines
+        # count into, so the late accounting of a delivery the queue gave
+        # up on writes no line and no count for it here either, and the
+        # pair keeps the one naming the refusal owes, whichever channel
+        # reached it first.
+        accounted = record_notice_accounted(notice, time.time())
     if accounted:
-        if notice:
-            # The outcome is retained before the line is written, so the
-            # naming of the refusal is assigned to this backend before it
-            # is delivered: a process that dies between the two leaves the
-            # refusal unnamed, and the console whose delivery failed reads
-            # the outcome and names the refusal nowhere itself, because the
-            # pair prefers one refusal named nowhere on a crash to one
-            # named twice, and a backend that restarts holds its own
-            # retries to the one accounting.
-            record_notice_accounted(notice, time.time())
         if _refusals.note(shown, line_at, refused_at,
                           counted_elsewhere=notice_counted):
             logging.warning('BAZARR refused a request for an unrecognized host: %s. Allow it under '
