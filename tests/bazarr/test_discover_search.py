@@ -222,7 +222,16 @@ def test_corrected_hub_credentials_release_the_auth_throttle(authenticated_clien
     state["installations"] = {"discover_auth": {
         "provider_id": "discover_auth", "name": "Discover Auth", "active_version": "1.0.0",
         "state": "active", "pending_restart": False,
-        "manifest": {"secret_fields": ["password"]}, "config": {"password": "typo"},  # pragma: allowlist secret
+        # A manifest the address-change guard can read: it declares the one
+        # config field, so a corrected password is a credential change alone
+        # and not a move the stored key would follow.
+        "manifest": {
+            "config_schema": {"type": "object", "properties": {
+                "password": {"type": "string"},
+            }},
+            "secret_fields": ["password"],
+        },
+        "config": {"password": "typo"},  # pragma: allowlist secret
     }}
     save_state(state)
     # The production gate, rather than a fixed list: a provider leaves and
